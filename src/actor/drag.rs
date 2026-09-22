@@ -118,6 +118,28 @@ impl TargetState {
 }
 
 impl Session {
+    fn new(
+        source: DragSource,
+        button: MouseButton,
+        pointer: CGPoint,
+        scene: DragScene,
+        kind: DragKind,
+        resize_edges: Option<ResizeEdges>,
+    ) -> Self {
+        Self {
+            source,
+            button,
+            pointer,
+            anchor_point: pointer,
+            scene,
+            target: TargetState::None,
+            unavailable: Vec::new(),
+            kind,
+            last_effect_frame: source.last_frame,
+            resize_edges,
+        }
+    }
+
     fn invalidate_drop(&mut self) {
         self.target = TargetState::None;
         self.unavailable.clear();
@@ -147,7 +169,7 @@ pub enum State {
     #[default]
     Idle,
     AwaitingSource(PendingStart),
-    Dragging(Box<Session>),
+    Dragging(Session),
 }
 
 #[derive(Debug, Clone)]
@@ -168,33 +190,20 @@ impl DragActor {
 
     pub fn is_active(&self) -> bool { !matches!(self.state, State::Idle) }
 
-    pub fn source(&self) -> Option<DragSource> {
+    fn session(&self) -> Option<&Session> {
         match &self.state {
-            State::Idle | State::AwaitingSource(_) => None,
-            State::Dragging(session) => Some(session.source),
+            State::Dragging(session) => Some(session),
+            _ => None,
         }
     }
 
-    pub fn target(&self) -> Option<DropTarget> {
-        match &self.state {
-            State::Idle | State::AwaitingSource(_) => None,
-            State::Dragging(session) => session.target.validated(),
-        }
-    }
+    pub fn source(&self) -> Option<DragSource> { self.session().map(|session| session.source) }
 
-    pub fn intent(&self) -> Option<DropIntent> {
-        match &self.state {
-            State::Idle | State::AwaitingSource(_) => None,
-            State::Dragging(session) => session.target.intent(),
-        }
-    }
+    pub fn target(&self) -> Option<DropTarget> { self.session()?.target.validated() }
 
-    pub fn kind(&self) -> Option<DragKind> {
-        match &self.state {
-            State::Dragging(session) => Some(session.kind),
-            State::Idle | State::AwaitingSource(_) => None,
-        }
-    }
+    pub fn intent(&self) -> Option<DropIntent> { self.session()?.target.intent() }
+
+    pub fn kind(&self) -> Option<DragKind> { self.session().map(|session| session.kind) }
 
     /// Update reactor-resolved space membership and invalidate destination state.
     pub fn update_current_space(&mut self, current_space: Option<SpaceId>) -> bool {
@@ -340,18 +349,14 @@ impl DragActor {
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        self.state = State::Dragging(Box::new(Session {
+        self.state = State::Dragging(Session::new(
             source,
-            button: MouseButton::Left,
+            MouseButton::Left,
             pointer,
-            anchor_point: pointer,
             scene,
-            target: TargetState::None,
-            unavailable: Vec::new(),
             kind,
-            last_effect_frame: source.last_frame,
-            resize_edges: None,
-        }));
+            None,
+        ));
     }
 
     /// Updates an existing native drag without rebuilding its immutable scene.
@@ -420,18 +425,8 @@ impl DragActor {
             MouseAction::Resize => DragKind::ModifierResize,
             MouseAction::None => return,
         };
-        self.state = State::Dragging(Box::new(Session {
-            source,
-            button,
-            pointer: point,
-            anchor_point: point,
-            scene,
-            target: TargetState::None,
-            unavailable: Vec::new(),
-            kind,
-            last_effect_frame: source.last_frame,
-            resize_edges,
-        }));
+        self.state =
+            State::Dragging(Session::new(source, button, point, scene, kind, resize_edges));
     }
 
     pub fn motion(&mut self, motion: DragMotion) -> bool {
@@ -439,23 +434,18 @@ impl DragActor {
             return false;
         };
         session.pointer = motion.point;
-        let action = match session.kind {
-            DragKind::ModifierMove => Some(MouseAction::Move),
-            DragKind::ModifierResize => Some(MouseAction::Resize),
-            DragKind::NativeMove | DragKind::NativeResize => None,
-        };
-        if let Some(action) = action {
+        if matches!(session.kind, DragKind::ModifierMove | DragKind::ModifierResize) {
             let dx = motion.point.x - session.anchor_point.x;
             let dy = motion.point.y - session.anchor_point.y;
-            session.source.last_frame = match action {
-                MouseAction::Move => CGRect::new(
+            session.source.last_frame = match session.kind {
+                DragKind::ModifierMove => CGRect::new(
                     CGPoint::new(
                         session.source.origin_frame.origin.x + dx,
                         session.source.origin_frame.origin.y + dy,
                     ),
                     session.source.origin_frame.size,
                 ),
-                MouseAction::Resize => {
+                DragKind::ModifierResize => {
                     let edges = session.resize_edges.expect("resize session has fixed edges");
                     let mut origin = session.source.origin_frame.origin;
                     let mut size = session.source.origin_frame.size;
@@ -487,7 +477,7 @@ impl DragActor {
                     }
                     CGRect::new(origin, size)
                 }
-                MouseAction::None => session.source.origin_frame,
+                DragKind::NativeMove | DragKind::NativeResize => unreachable!(),
             };
         }
         let next = if matches!(session.kind, DragKind::NativeResize | DragKind::ModifierResize)
@@ -585,7 +575,6 @@ impl DragActor {
         let State::Dragging(session) = std::mem::take(&mut self.state) else {
             return None;
         };
-        let session = *session;
         Some(DragCommit {
             source: session.source,
             target: session.target.validated(),

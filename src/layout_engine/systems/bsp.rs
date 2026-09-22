@@ -1166,64 +1166,53 @@ impl LayoutSystem for BspLayoutSystem {
                     fullscreen,
                     fullscreen_within_gaps,
                     preselected,
-                }) if system.stacks.contains_key(&node) => {
-                    let members = &system.stacks[&node];
-                    let active = *window;
+                }) => {
+                    let members = system.stacks.get(&node);
+                    let stacked = members.is_some();
                     rift_protocol::ContainerTreeNode {
                         node_id: node.data().as_ffi(),
-                        node_type: rift_protocol::ContainerNodeType::Container,
+                        node_type: if stacked {
+                            rift_protocol::ContainerNodeType::Container
+                        } else if window.is_some() {
+                            rift_protocol::ContainerNodeType::Window
+                        } else {
+                            rift_protocol::ContainerNodeType::Placeholder
+                        },
                         frame: Default::default(),
-                        layout_kind: Some(rift_protocol::LayoutKind::HorizontalStack),
+                        layout_kind: stacked.then_some(rift_protocol::LayoutKind::HorizontalStack),
                         weight,
-                        window_id: None,
+                        window_id: if stacked {
+                            None
+                        } else {
+                            window.map(Into::into)
+                        },
                         is_selected: node == selected,
                         is_fullscreen: *fullscreen,
                         is_fullscreen_within_gaps: *fullscreen_within_gaps,
                         role: None,
                         pending_split: preselected.map(Into::into),
-                        children: members
-                            .iter()
-                            .map(|member| rift_protocol::ContainerTreeNode {
-                                node_id: (u64::from(member.pid as u32) << 32)
-                                    | u64::from(member.idx.get()),
-                                node_type: rift_protocol::ContainerNodeType::Window,
-                                frame: Default::default(),
-                                layout_kind: None,
-                                weight: None,
-                                window_id: Some((*member).into()),
-                                is_selected: node == selected && active == Some(*member),
-                                is_fullscreen: *fullscreen,
-                                is_fullscreen_within_gaps: *fullscreen_within_gaps,
-                                role: None,
-                                pending_split: None,
-                                children: Vec::new(),
-                            })
-                            .collect(),
+                        children: members.map_or_else(Vec::new, |members| {
+                            members
+                                .iter()
+                                .map(|member| rift_protocol::ContainerTreeNode {
+                                    node_id: (u64::from(member.pid as u32) << 32)
+                                        | u64::from(member.idx.get()),
+                                    node_type: rift_protocol::ContainerNodeType::Window,
+                                    frame: Default::default(),
+                                    layout_kind: None,
+                                    weight: None,
+                                    window_id: Some((*member).into()),
+                                    is_selected: node == selected && *window == Some(*member),
+                                    is_fullscreen: *fullscreen,
+                                    is_fullscreen_within_gaps: *fullscreen_within_gaps,
+                                    role: None,
+                                    pending_split: None,
+                                    children: Vec::new(),
+                                })
+                                .collect()
+                        }),
                     }
                 }
-                Some(NodeKind::Leaf {
-                    window,
-                    fullscreen,
-                    fullscreen_within_gaps,
-                    preselected,
-                }) => rift_protocol::ContainerTreeNode {
-                    node_id: node.data().as_ffi(),
-                    node_type: if window.is_some() {
-                        rift_protocol::ContainerNodeType::Window
-                    } else {
-                        rift_protocol::ContainerNodeType::Placeholder
-                    },
-                    frame: Default::default(),
-                    layout_kind: None,
-                    weight,
-                    window_id: window.map(Into::into),
-                    is_selected: node == selected,
-                    is_fullscreen: *fullscreen,
-                    is_fullscreen_within_gaps: *fullscreen_within_gaps,
-                    role: None,
-                    pending_split: preselected.map(Into::into),
-                    children: Vec::new(),
-                },
                 None => unreachable!("BSP layout contains a node without metadata"),
             }
         }

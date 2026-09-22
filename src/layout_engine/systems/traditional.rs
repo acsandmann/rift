@@ -271,10 +271,11 @@ impl TraditionalLayoutSystem {
             && !self.layout(parent).is_group()
             && self.layout(parent).orientation() == direction.orientation()
         {
+            let source_node = source_node.detach(&mut self.tree);
             if before {
-                source_node.detach(&mut self.tree).insert_before(target_anchor);
+                source_node.insert_before(target_anchor);
             } else {
-                source_node.detach(&mut self.tree).insert_after(target_anchor);
+                source_node.insert_after(target_anchor);
             }
         } else {
             let container = self.tree.mk_node().insert_before(target_anchor);
@@ -283,12 +284,12 @@ impl TraditionalLayoutSystem {
                 Orientation::Horizontal => LayoutKind::Horizontal,
                 Orientation::Vertical => LayoutKind::Vertical,
             });
-            if before {
-                source_node.detach(&mut self.tree).push_back(container);
-                target_anchor.detach(&mut self.tree).push_back(container);
+            for node in if before {
+                [source_node, target_anchor]
             } else {
-                target_anchor.detach(&mut self.tree).push_back(container);
-                source_node.detach(&mut self.tree).push_back(container);
+                [target_anchor, source_node]
+            } {
+                node.detach(&mut self.tree).push_back(container);
             }
         }
         self.select(source_node);

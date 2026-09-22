@@ -262,20 +262,6 @@ impl MasterStackLayoutSystem {
         self.enforce_master_count(layout, master, stack);
     }
 
-    fn apply_window_order(&mut self, layout: LayoutId, desired: &[WindowId]) {
-        let selected = self.inner.selected_window(layout);
-        let current = self.windows_in_layout_by_container(layout);
-        if let Some(index) =
-            current.iter().zip(desired).position(|(current, desired)| current != desired)
-            && let Some(other) = current.iter().position(|window| *window == desired[index])
-        {
-            let _ = self.inner.swap_windows(layout, current[index], current[other]);
-        }
-        if let Some(selected) = selected {
-            let _ = self.inner.select_window(layout, selected);
-        }
-    }
-
     fn enforce_master_count(&mut self, layout: LayoutId, master: NodeId, stack: NodeId) {
         self.enforce_master_count_preserving(layout, master, stack, None);
     }
@@ -755,120 +741,74 @@ impl LayoutSystem for MasterStackLayoutSystem {
             return false;
         };
         let windows = self.windows_in_layout_by_container(layout);
-        let Some(focused_idx) = windows.iter().position(|&w| w == focused_wid) else {
+        let Some(focused_idx) = windows.iter().position(|&window| window == focused_wid) else {
             return false;
         };
-
-        let in_master = focused_idx < self.settings.master_count;
-        let container_axis = if in_master {
+        let master_count = self.settings.master_count;
+        let in_master = focused_idx < master_count;
+        let axis = if in_master {
             self.master_orientation()
         } else {
             self.stack_orientation()
         };
-
         let (towards_master, towards_stack) = match self.settings.master_side {
             MasterStackSide::Left => (direction == Direction::Left, direction == Direction::Right),
             MasterStackSide::Right => (direction == Direction::Right, direction == Direction::Left),
             MasterStackSide::Top => (direction == Direction::Up, direction == Direction::Down),
             MasterStackSide::Bottom => (direction == Direction::Down, direction == Direction::Up),
         };
-
-        let is_master_first = self.master_first();
-        let mut new_windows = windows.clone();
-
-        // Check if movement direction is parallel to container's axis
-        let is_parallel = direction.orientation() == container_axis;
-
-        if towards_master && !in_master {
-            let border_idx = if is_master_first {
-                self.settings.master_count
+        let master_first = self.master_first();
+        let parallel = direction.orientation() == axis;
+        let crossing = if towards_master && !in_master {
+            let border = if master_first {
+                master_count
             } else {
                 windows.len() - 1
             };
-            let at_border = !is_parallel || (focused_idx == border_idx);
-            if at_border {
-                let target_border_idx = if is_master_first {
-                    self.settings.master_count - 1
-                } else {
-                    0
-                };
-                new_windows.swap(focused_idx, target_border_idx);
-                self.apply_window_order(layout, &new_windows);
-                return true;
-            }
-        }
-
-        if towards_stack && in_master {
-            let border_idx = if is_master_first {
-                self.settings.master_count - 1
-            } else {
-                0
-            };
-            let at_border = !is_parallel || (focused_idx == border_idx);
-            if at_border {
-                let has_stack_windows = windows.len() > self.settings.master_count;
-                if has_stack_windows {
-                    let target_border_idx = if is_master_first {
-                        self.settings.master_count
+            (!parallel || focused_idx == border)
+                .then(|| if master_first { master_count - 1 } else { 0 })
+        } else if towards_stack && in_master {
+            let border = if master_first { master_count - 1 } else { 0 };
+            (!parallel || focused_idx == border).then(|| {
+                if windows.len() > master_count {
+                    if master_first {
+                        master_count
                     } else {
                         windows.len() - 1
-                    };
-                    new_windows.swap(focused_idx, target_border_idx);
-                } else {
-                    new_windows.remove(focused_idx);
-                    let target_idx = self.settings.master_count.min(new_windows.len());
-                    new_windows.insert(target_idx, focused_wid);
-                }
-                self.apply_window_order(layout, &new_windows);
-                return true;
-            }
-        }
-
-        if direction.orientation() != container_axis {
-            return false;
-        }
-
-        // Reordering within the same container
-        let neighbor_idx = match direction {
-            Direction::Left | Direction::Up => {
-                if in_master {
-                    if focused_idx > 0 {
-                        Some(focused_idx - 1)
-                    } else {
-                        None
                     }
                 } else {
-                    if focused_idx > self.settings.master_count {
-                        Some(focused_idx - 1)
-                    } else {
-                        None
-                    }
+                    // The old reorder's first mismatch is the next master member.
+                    (focused_idx + 1).min(windows.len() - 1)
                 }
-            }
-            Direction::Right | Direction::Down => {
-                if in_master {
-                    if focused_idx + 1 < self.settings.master_count {
-                        Some(focused_idx + 1)
-                    } else {
-                        None
-                    }
-                } else {
-                    if focused_idx + 1 < windows.len() {
-                        Some(focused_idx + 1)
-                    } else {
-                        None
-                    }
-                }
-            }
-        };
-
-        if let Some(target) = neighbor_idx {
-            new_windows.swap(focused_idx, target);
-            self.apply_window_order(layout, &new_windows);
-            true
+            })
         } else {
-            false
+            None
+        };
+        let target_idx = if let Some(crossing) = crossing {
+            crossing
+        } else if !parallel {
+            return false;
+        } else {
+            let neighbor = match direction {
+                Direction::Left | Direction::Up => (focused_idx
+                    > if in_master { 0 } else { master_count })
+                .then_some(focused_idx.saturating_sub(1)),
+                Direction::Right | Direction::Down => (focused_idx + 1
+                    < if in_master {
+                        master_count
+                    } else {
+                        windows.len()
+                    })
+                .then_some(focused_idx + 1),
+            };
+            let Some(neighbor) = neighbor else { return false };
+            neighbor
+        };
+        if target_idx != focused_idx {
+            let _ = self.inner.swap_windows(layout, focused_wid, windows[target_idx]);
         }
+        let _ = self.inner.select_window(layout, focused_wid);
+        true
     }
 
     fn apply_window_drop(
@@ -1110,6 +1050,23 @@ mod tests {
         assert!(system.move_selection(layout, Direction::Right));
         let windows = system.windows_in_layout_by_container(layout);
         assert_eq!(windows, vec![w(3), w(2), w(1)]);
+    }
+
+    #[test]
+    fn moving_towards_empty_stack_swaps_with_next_master_member() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_count = 3;
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        let before = system.windows_in_layout_by_container(layout);
+        assert!(system.select_window(layout, before[0]));
+        assert!(system.move_selection(layout, Direction::Right));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            before[1], before[0], before[2]
+        ]);
     }
 
     #[test]

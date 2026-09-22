@@ -72,7 +72,14 @@ impl WindowSurface {
             return Err(CgsWindowError::Surface(CGError(1000)));
         }
 
-        let result = (|| {
+        let surface = Self {
+            connection,
+            window_id,
+            surface_id,
+            context,
+        };
+
+        (|| {
             unsafe {
                 cg_ok(SLSBindSurface(
                     connection,
@@ -80,7 +87,7 @@ impl WindowSurface {
                     surface_id,
                     0x4,
                     0,
-                    context.context_id(),
+                    surface.context.context_id(),
                 ))
             }
             .map_err(CgsWindowError::Surface)?;
@@ -104,21 +111,9 @@ impl WindowSurface {
 
             unsafe { cg_ok(SLSOrderSurface(connection, window_id, surface_id, 1, 0)) }
                 .map_err(CgsWindowError::Surface)
-        })();
+        })()?;
 
-        if let Err(error) = result {
-            context.set_layer(None);
-            context.invalidate();
-            let _ = unsafe { SLSRemoveSurface(connection, window_id, surface_id) };
-            return Err(error);
-        }
-
-        Ok(Self {
-            connection,
-            window_id,
-            surface_id,
-            context,
-        })
+        Ok(surface)
     }
 
     /// Queue a bounds change in the same WindowServer transaction as its window.

@@ -1786,7 +1786,15 @@ impl Reactor {
             }
             Event::ModifierMouseDown { button, point, action } => {
                 let session_id = self.drag_manager.actor.await_modifier(button, point, action);
-                let Some(window) = self.window_id_under_cursor() else {
+                let source = self.window_id_under_cursor().and_then(|window| {
+                    let state = self.state.windows.window(window)?;
+                    state.is_admitted().then_some((
+                        window,
+                        state.frame_monotonic,
+                        state.info.sys_id,
+                    ))
+                });
+                let Some((window, frame, server_id)) = source else {
                     let _ = self.drag_manager.actor.resolve_start(
                         session_id,
                         None,
@@ -1794,24 +1802,7 @@ impl Reactor {
                     );
                     return Ok(EventOutcome::no_change());
                 };
-                let Some(window_state) = self.state.windows.window(window) else {
-                    let _ = self.drag_manager.actor.resolve_start(
-                        session_id,
-                        None,
-                        crate::actor::drag::DragScene::default(),
-                    );
-                    return Ok(EventOutcome::no_change());
-                };
-                if !window_state.is_admitted() {
-                    let _ = self.drag_manager.actor.resolve_start(
-                        session_id,
-                        None,
-                        crate::actor::drag::DragScene::default(),
-                    );
-                    return Ok(EventOutcome::no_change());
-                }
-                let frame = window_state.frame_monotonic;
-                let space = self.best_space_for_window(&frame, window_state.info.sys_id);
+                let space = self.best_space_for_window(&frame, server_id);
                 let tiled = !self.layout_manager.layout_engine.is_window_floating(window);
                 let scene = if tiled && action == crate::common::config::MouseAction::Move {
                     space.map(|space| self.drag_scene(window, space)).unwrap_or_default()
