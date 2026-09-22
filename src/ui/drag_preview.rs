@@ -7,6 +7,7 @@ use objc2_quartz_core::CALayer;
 
 use crate::actor::drag::{DropTarget, preview_frame};
 use crate::layout_engine::WindowDropAction;
+use crate::sys::backdrop_layer::backdrop_blur;
 use crate::sys::cgs_window::{CgsWindow, CgsWindowError};
 use crate::sys::geometry::SameAs;
 use crate::sys::window_surface::WindowSurface;
@@ -21,6 +22,7 @@ static STACK_FILL: LazyLock<Retained<CGColor>> =
     LazyLock::new(|| CGColor::new_generic_rgb(0.34, 0.64, 1.0, 0.16).into());
 
 const PREVIEW_CORNER_RADIUS: f64 = 12.0;
+const PREVIEW_BLUR_RADIUS: f64 = 6.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewStyle {
@@ -35,6 +37,8 @@ pub struct DragPreview {
     surface: WindowSurface,
     window: CgsWindow,
     root: Retained<CALayer>,
+    backdrop: Option<Retained<CALayer>>,
+    tint: Retained<CALayer>,
     card: Retained<CALayer>,
     frame: CGRect,
     style: PreviewStyle,
@@ -57,6 +61,8 @@ impl DragPreview {
         window.set_tags(1 << 3)?;
 
         let root = CALayer::layer();
+        let backdrop = backdrop_blur(PREVIEW_BLUR_RADIUS);
+        let tint = CALayer::layer();
         let card = CALayer::layer();
         with_disabled_actions(|| {
             root.setBounds(bounds);
@@ -67,9 +73,17 @@ impl DragPreview {
             root.setGeometryFlipped(false);
             root.setMasksToBounds(true);
             root.setCornerRadius(PREVIEW_CORNER_RADIUS);
-            root.setBackgroundColor(Some(&FILL));
             root.setBorderColor(Some(&BORDER));
             root.setBorderWidth(2.0);
+
+            if let Some(backdrop) = &backdrop {
+                backdrop.setFrame(bounds);
+                root.addSublayer(backdrop);
+            }
+
+            tint.setFrame(bounds);
+            tint.setBackgroundColor(Some(&FILL));
+            root.addSublayer(&tint);
 
             card.setHidden(style != PreviewStyle::Stack);
             card.setFrame(Self::card_frame(frame.size));
@@ -87,6 +101,8 @@ impl DragPreview {
             surface,
             window,
             root,
+            backdrop,
+            tint,
             card,
             frame,
             style,
@@ -113,6 +129,10 @@ impl DragPreview {
             with_disabled_actions(|| {
                 if size_changed {
                     self.root.setBounds(Self::bounds(frame.size));
+                    if let Some(backdrop) = &self.backdrop {
+                        backdrop.setFrame(Self::bounds(frame.size));
+                    }
+                    self.tint.setFrame(Self::bounds(frame.size));
                     self.card.setFrame(Self::card_frame(frame.size));
                 }
                 if style_changed {

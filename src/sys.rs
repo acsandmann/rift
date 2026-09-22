@@ -5,6 +5,7 @@ use objc2_core_graphics::CGError;
 pub mod accessibility;
 pub mod app;
 pub mod axuielement;
+pub mod backdrop_layer;
 pub mod carbon;
 #[cfg(feature = "custom-event-loop")]
 mod cocoa;
