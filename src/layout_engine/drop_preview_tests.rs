@@ -218,6 +218,27 @@ fn stack_previews_match_committed_frames_for_every_action() {
     let layout = populate(&mut system);
     verify_actions(&system, layout, w(4), w(2), StackLayoutSystem::preview_clone);
 
-    assert!(system.apply_window_drop(layout, w(4), w(2), WindowDropAction::Swap));
-    assert_eq!(system.selected_window(layout), Some(w(4)));
+    let before = system.all_windows_in_layout(layout);
+    let source = before[0];
+    let target = *before.last().unwrap();
+    assert!(system.select_window(layout, source));
+    assert!(system.apply_window_drop(layout, source, target, WindowDropAction::Stack));
+    let mut expected = before;
+    let last = expected.len() - 1;
+    expected.swap(0, last);
+    assert_eq!(system.all_windows_in_layout(layout), expected);
+    assert_eq!(system.selected_window(layout), Some(source));
+
+    let source = expected[1];
+    let target = expected[2];
+    assert!(system.apply_window_drop(
+        layout,
+        source,
+        target,
+        WindowDropAction::Insert(Direction::Left),
+    ));
+    expected.swap(1, 2);
+    assert_eq!(system.all_windows_in_layout(layout), expected);
+    assert_eq!(system.selected_window(layout), Some(source));
+    assert!(!system.apply_window_drop(layout, source, source, WindowDropAction::Swap));
 }

@@ -21,6 +21,8 @@ pub struct DragSceneTarget {
 
 #[derive(Debug, Clone, Default)]
 pub struct DragScene {
+    /// Layout-wide semantic override. Stack layouts use Swap for every zone.
+    pub action_override: Option<WindowDropAction>,
     pub targets: Vec<DragSceneTarget>,
 }
 

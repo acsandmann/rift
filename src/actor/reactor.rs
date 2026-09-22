@@ -1726,7 +1726,22 @@ impl Reactor {
                 return Ok(EventOutcome::default());
             }
             Event::DragMotion(motion) => {
-                let intent_changed = self.drag_manager.actor.motion(motion);
+                let mut intent_changed = self.drag_manager.actor.motion(motion);
+                if self.drag_manager.actor.kind()
+                    == Some(crate::actor::drag::DragKind::ModifierMove)
+                {
+                    let current_space =
+                        self.screen_for_point(motion.point)
+                            .and_then(|screen| screen.space)
+                            .or_else(|| {
+                                self.drag_manager.actor.source().and_then(|source| {
+                                    self.best_space_for_frame(&source.last_frame)
+                                })
+                            });
+                    if self.drag_manager.actor.update_current_space(current_space) {
+                        intent_changed |= self.drag_manager.actor.motion(motion);
+                    }
+                }
                 if let Some(source) = self.drag_manager.actor.source()
                     && let Some(window) = self.state.windows.window(source.window)
                 {
@@ -1840,10 +1855,19 @@ impl Reactor {
             }
             Event::MouseUp => {
                 let final_space = self.drag_manager.actor.source().and_then(|source| {
-                    source
-                        .current_space
-                        .or_else(|| self.best_space_for_frame(&source.last_frame))
-                        .or_else(|| self.best_space_for_window_id(source.window))
+                    let frame_space = || self.best_space_for_frame(&source.last_frame);
+                    if self.drag_manager.actor.kind()
+                        == Some(crate::actor::drag::DragKind::ModifierMove)
+                    {
+                        frame_space()
+                            .or(source.current_space)
+                            .or_else(|| self.best_space_for_window_id(source.window))
+                    } else {
+                        source
+                            .current_space
+                            .or_else(frame_space)
+                            .or_else(|| self.best_space_for_window_id(source.window))
+                    }
                 });
                 let focused = self.window_id_under_cursor().and_then(|window| {
                     self.best_space_for_window_id(window).map(|space| (space, window))

@@ -352,7 +352,7 @@ pub use scrolling::ScrollingLayoutSystem;
 mod tests {
     use super::{
         BspLayoutSystem, LayoutSystem, MasterStackLayoutSystem, ScrollingLayoutSystem,
-        StackLayoutSystem, TraditionalLayoutSystem, WindowLayoutConstraints,
+        TraditionalLayoutSystem, WindowLayoutConstraints,
     };
     use crate::actor::app::WindowId;
     use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
@@ -596,20 +596,6 @@ mod tests {
 
     #[test]
     fn ordered_layout_drops_place_source_around_target() {
-        let mut stack = StackLayoutSystem::default();
-        let layout = stack.create_layout();
-        for window in [w(1), w(2), w(3)] {
-            stack.add_window_after_selection(layout, window);
-        }
-        assert!(stack.apply_window_drop(
-            layout,
-            w(3),
-            w(1),
-            crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Left),
-        ));
-        assert_eq!(stack.all_windows_in_layout(layout), vec![w(3), w(1), w(2)]);
-        assert_eq!(stack.selected_window(layout), Some(w(3)));
-
         let mut master = MasterStackLayoutSystem::default();
         let layout = master.create_layout();
         for window in [w(1), w(2), w(3)] {

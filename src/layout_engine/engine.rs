@@ -225,6 +225,15 @@ impl LayoutEngine {
         windows
     }
 
+    pub(crate) fn drop_action_override(
+        &self,
+        space: SpaceId,
+    ) -> Option<crate::layout_engine::WindowDropAction> {
+        let workspace = self.active_workspace(space)?;
+        matches!(self.workspace_tree(workspace), LayoutSystemKind::Stack(_))
+            .then_some(crate::layout_engine::WindowDropAction::Swap)
+    }
+
     pub(crate) fn drop_preview_frame(
         &self,
         space: SpaceId,

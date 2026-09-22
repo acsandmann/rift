@@ -268,7 +268,7 @@ impl LayoutSystem for StackLayoutSystem {
         layout: LayoutId,
         source: WindowId,
         target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
+        _action: crate::layout_engine::WindowDropAction,
     ) -> bool {
         let Some(source_node) = self.inner.window_node(layout, source) else {
             return false;
@@ -279,23 +279,8 @@ impl LayoutSystem for StackLayoutSystem {
         if source_node == target_node {
             return false;
         }
-        if action == crate::layout_engine::WindowDropAction::Swap {
-            if !self.inner.swap_windows(layout, source, target) {
-                return false;
-            }
-        } else {
-            let after = matches!(
-                action,
-                crate::layout_engine::WindowDropAction::Stack
-                    | crate::layout_engine::WindowDropAction::Insert(
-                        Direction::Right | Direction::Down
-                    )
-            );
-            if after {
-                source_node.detach(&mut self.inner.tree).insert_after(target_node);
-            } else {
-                source_node.detach(&mut self.inner.tree).insert_before(target_node);
-            }
+        if !self.inner.swap_windows(layout, source, target) {
+            return false;
         }
         self.inner.select_window(layout, source)
     }

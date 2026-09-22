@@ -13,6 +13,7 @@ pub fn build_drag_scene(
     space: SpaceId,
 ) -> crate::actor::drag::DragScene {
     crate::actor::drag::DragScene {
+        action_override: layout.layout_engine.drop_action_override(space),
         targets: layout
             .layout_engine
             .drop_scene_windows(space, source)
