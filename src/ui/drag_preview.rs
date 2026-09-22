@@ -142,12 +142,15 @@ impl DragPreview {
             self.style = style;
         }
 
-        if frame_changed {
+        if size_changed {
             let transaction = WindowTransaction::new()?;
             transaction.set_rounded_frame(&self.window, frame, PREVIEW_CORNER_RADIUS)?;
-            if size_changed {
-                self.surface.set_bounds_in(&transaction, Self::bounds(frame.size));
-            }
+            self.surface.set_bounds_in(&transaction, Self::bounds(frame.size));
+            transaction.commit();
+            self.frame = frame;
+        } else if origin_changed {
+            let transaction = WindowTransaction::new()?;
+            transaction.move_window(&self.window, frame.origin);
             transaction.commit();
             self.frame = frame;
         }

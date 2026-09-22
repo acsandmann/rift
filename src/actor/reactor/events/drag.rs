@@ -38,7 +38,7 @@ pub struct MouseUpPayload {
 
 pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
     let cancelled = drag.actor.cancel();
-    drag.hide_preview();
+    drag.release_preview();
     drag.externally_controlled_window = None;
     let Some(cancelled) = cancelled else {
         return EventOutcome::no_change();
@@ -76,7 +76,7 @@ pub fn handle_mouse_up(
     let Some(commit) = drag.actor.finish(payload.button) else {
         return Ok(outcome);
     };
-    drag.hide_preview();
+    drag.release_preview();
     let window = commit.source.window;
     drag.externally_controlled_window = None;
     let mut needs_layout = commit.source.tiled;

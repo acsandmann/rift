@@ -51,7 +51,7 @@ pub struct DragManager {
 impl DragManager {
     pub fn reset(&mut self) {
         self.actor.cancel();
-        self.hide_preview();
+        self.release_preview();
         self.externally_controlled_window = None;
         self.resize_screens = Arc::from([]);
     }
@@ -60,7 +60,7 @@ impl DragManager {
         self.actor.update_config(config);
         self.preview_enabled = config.enabled && config.preview;
         if !config.enabled || !config.preview {
-            self.hide_preview();
+            self.release_preview();
         }
         if !config.enabled {
             self.externally_controlled_window = None;
@@ -89,7 +89,7 @@ impl DragManager {
         };
         if let Err(error) = result {
             tracing::warn!(?error, "failed to update drag preview");
-            self.hide_preview();
+            self.release_preview();
         }
     }
 
@@ -98,6 +98,8 @@ impl DragManager {
             preview.hide();
         }
     }
+
+    pub fn release_preview(&mut self) { drop(self.preview.take()); }
 
     pub fn suppress_preview(&mut self, suppressed: bool) {
         self.preview_suppressed = suppressed;
