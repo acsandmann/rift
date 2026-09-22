@@ -52,7 +52,13 @@ pub struct DragManager {
 impl DragManager {
     pub fn sync_motion_gate(&self) {
         let active = self.actor.is_active()
-            && matches!(self.actor.kind(), Some(crate::actor::drag::DragKind::NativeMove));
+            && matches!(
+                self.actor.kind(),
+                Some(
+                    crate::actor::drag::DragKind::NativeMove
+                        | crate::actor::drag::DragKind::NativeResize
+                )
+            );
         self.native_motion_active.store(active, Ordering::Release);
     }
 

@@ -7,6 +7,7 @@ use crate::sys::screen::SpaceId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragKind {
     NativeMove,
+    NativeResize,
     ModifierMove,
 }
 

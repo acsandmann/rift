@@ -15,7 +15,7 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
-use crate::sys::geometry::CGRectExt;
+use crate::sys::geometry::{CGRectExt, SameAs};
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
@@ -318,17 +318,16 @@ impl DragActor {
     }
 
     fn start_native_session(&mut self, source: DragSource, scene: DragScene) {
+        let kind = if source.origin_frame.size.same_as(source.last_frame.size) {
+            DragKind::NativeMove
+        } else {
+            DragKind::NativeResize
+        };
         let pointer = CGPoint::new(
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        self.state = State::Dragging(Session::new(
-            source,
-            MouseButton::Left,
-            pointer,
-            scene,
-            DragKind::NativeMove,
-        ));
+        self.state = State::Dragging(Session::new(source, MouseButton::Left, pointer, scene, kind));
     }
 
     /// Updates an existing native drag without rebuilding its immutable scene.
@@ -343,10 +342,17 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return false;
         };
-        if session.source.window != window || session.kind != DragKind::NativeMove {
+        if session.source.window != window
+            || !matches!(session.kind, DragKind::NativeMove | DragKind::NativeResize)
+        {
             return false;
         }
         session.source.last_frame = frame;
+        session.kind = if session.source.origin_frame.size.same_as(frame.size) {
+            DragKind::NativeMove
+        } else {
+            DragKind::NativeResize
+        };
         if session.source.current_space != current_space {
             session.source.current_space = current_space;
             session.invalidate_drop();
@@ -397,10 +403,11 @@ impl DragActor {
                     ),
                     session.source.origin_frame.size,
                 ),
-                DragKind::NativeMove => unreachable!(),
+                DragKind::NativeMove | DragKind::NativeResize => unreachable!(),
             };
         }
-        let next = if !session.source.tiled
+        let next = if session.kind == DragKind::NativeResize
+            || !session.source.tiled
             || session.source.origin_space != session.source.current_space
         {
             None
