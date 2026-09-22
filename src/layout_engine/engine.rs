@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
@@ -111,7 +112,7 @@ pub enum LayoutEvent {
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
-        screens: Vec<(SpaceId, CGRect, Option<String>)>,
+        screens: Arc<[(SpaceId, CGRect, Option<String>)]>,
     },
     SpaceExposed(SpaceId, CGSize),
 }
@@ -179,6 +180,97 @@ pub(crate) struct WorkspaceLayoutQuerySnapshot {
 
 impl LayoutEngine {
     pub fn focused_window(&self) -> Option<WindowId> { self.focused_window }
+
+    pub(crate) fn apply_window_drop(
+        &mut self,
+        request: crate::layout_engine::WindowDropRequest,
+    ) -> bool {
+        if self.active_layout_mode_at(request.space) == LayoutMode::Floating {
+            return false;
+        }
+        let Some(workspace) = self.active_workspace(request.space) else {
+            return false;
+        };
+        let Some(layout) = self.workspace_layouts.active(request.space, workspace) else {
+            return false;
+        };
+        self.workspace_layouts.mark_last_saved(request.space, workspace, layout);
+        self.workspace_tree_mut(workspace).apply_window_drop(
+            layout,
+            request.source,
+            request.target,
+            request.action,
+        )
+    }
+
+    /// Return the visible logical tiles eligible for drag targeting.
+    /// Hidden members of stacked/grouped containers are excluded.
+    pub(crate) fn drop_scene_windows(&self, space: SpaceId, source: WindowId) -> Vec<WindowId> {
+        if self.active_layout_mode_at(space) == LayoutMode::Floating {
+            return Vec::new();
+        }
+        let Some(workspace) = self.active_workspace(space) else {
+            return Vec::new();
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace) else {
+            return Vec::new();
+        };
+        let system = self.workspace_tree(workspace);
+        let mut windows = system.visible_windows_in_layout(layout);
+        for window in system.stack_members(layout, source) {
+            if !windows.contains(&window) {
+                windows.push(window);
+            }
+        }
+        windows
+    }
+
+    pub(crate) fn drop_action_override(
+        &self,
+        space: SpaceId,
+    ) -> Option<crate::layout_engine::WindowDropAction> {
+        let workspace = self.active_workspace(space)?;
+        matches!(self.workspace_tree(workspace), LayoutSystemKind::Stack(_))
+            .then_some(crate::layout_engine::WindowDropAction::Swap)
+    }
+
+    pub(crate) fn drop_preview_frame(
+        &self,
+        space: SpaceId,
+        source: WindowId,
+        target: WindowId,
+        target_frame: CGRect,
+        action: crate::layout_engine::WindowDropAction,
+        screen: CGRect,
+        display_uuid: Option<&str>,
+        stack_line: &crate::common::config::StackLineSettings,
+    ) -> Option<CGRect> {
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return (source != target).then_some(target_frame);
+        }
+        let Some(workspace) = self.active_workspace(space) else {
+            return None;
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace) else {
+            return None;
+        };
+        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
+        let mut system = self.workspace_tree(workspace).preview_clone()?;
+        system.apply_window_drop(layout, source, target, action).then_some(())?;
+        system
+            .calculate_layout(
+                layout,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                &self.window_layout_constraints,
+                &gaps,
+                stack_line.thickness(),
+                stack_line.horiz_placement,
+                stack_line.vert_placement,
+            )
+            .into_iter()
+            .find_map(|(window, frame)| (window == source).then_some(frame))
+    }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
     pub(crate) fn query_workspace_layout(
@@ -1680,8 +1772,8 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
-                for (space, screen_frame, display_uuid) in screens {
-                    let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+                for (space, screen_frame, display_uuid) in screens.iter() {
+                    let Some((ws_id, layout)) = self.workspace_and_layout(*space) else {
                         debug!(
                             "No active workspace/layout for resized window {:?} on space {:?}; skipping",
                             wid, space
@@ -1695,11 +1787,11 @@ impl LayoutEngine {
                         wid,
                         old_frame,
                         new_frame,
-                        screen_frame,
+                        *screen_frame,
                         &gaps,
                     );
 
-                    self.workspace_layouts.mark_last_saved(space, ws_id, layout);
+                    self.workspace_layouts.mark_last_saved(*space, ws_id, layout);
                 }
             }
         }
@@ -3721,7 +3813,7 @@ mod tests {
             wid: window,
             old_frame: new_frame,
             new_frame: user_frame,
-            screens: vec![(space, screen, None)],
+            screens: vec![(space, screen, None)].into(),
         });
         let frames = engine.calculate_layout(
             space,

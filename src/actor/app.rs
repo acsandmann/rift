@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -298,6 +298,72 @@ fn decode_notification_data(
 #[derive(Clone)]
 pub struct AppThreadHandle {
     requests_tx: actor::Sender<Request>,
+    interactive_frames: InteractiveFrameQueue,
+}
+
+#[derive(Default)]
+struct InteractiveFrames {
+    wake_pending: bool,
+    latest: HashMap<WindowId, (CGRect, bool, TransactionId)>,
+}
+
+#[derive(Clone, Default)]
+#[doc(hidden)]
+/// Actor-local latest-value transport used by [`AppThreadHandle`].
+///
+/// This is public only because it is carried by the public [`Request`] enum;
+/// it is not domain state or a general-purpose queue.
+pub struct InteractiveFrameQueue(Arc<Mutex<InteractiveFrames>>);
+
+impl Debug for InteractiveFrameQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InteractiveFrameQueue(...)")
+    }
+}
+
+impl InteractiveFrameQueue {
+    pub(crate) fn drain_with(
+        &self,
+        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId),
+    ) {
+        let mut frames = self.0.lock().unwrap();
+        frames.wake_pending = false;
+        for (wid, (frame, set_size, txid)) in frames.latest.drain() {
+            consume(wid, frame, set_size, txid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_frame_tests {
+    use super::*;
+
+    #[test]
+    fn drain_keeps_capacity_and_rearms_one_wake_for_latest_frames() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let window = WindowId::new(1, 1);
+        let first = CGRect::new(CGPoint::new(1.0, 0.0), Default::default());
+        let latest = CGRect::new(CGPoint::new(2.0, 0.0), Default::default());
+        handle.interactive_frames.0.lock().unwrap().latest.reserve(8);
+        let capacity = handle.interactive_frames.0.lock().unwrap().latest.capacity();
+
+        handle.send_interactive_frame(window, first, false, TransactionId::default());
+        handle.send_interactive_frame(window, latest, true, TransactionId::default());
+        let (_, Request::InteractiveFramesPending(queue)) = rx.try_recv().unwrap() else {
+            panic!("expected one interactive frame wake");
+        };
+        assert!(rx.try_recv().is_err());
+        let mut received = Vec::new();
+        queue.drain_with(|wid, frame, set_size, _| received.push((wid, frame, set_size)));
+        assert_eq!(received, vec![(window, latest, true)]);
+        assert_eq!(queue.0.lock().unwrap().latest.capacity(), capacity);
+
+        handle.send_interactive_frame(window, first, false, TransactionId::default());
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Request::InteractiveFramesPending(_)
+        ));
+    }
 }
 
 /// Identifies the world snapshot for which an AX window inventory was requested.
@@ -313,20 +379,59 @@ pub struct WindowInventoryToken {
 
 impl AppThreadHandle {
     pub(crate) fn new_for_test(requests_tx: actor::Sender<Request>) -> Self {
-        let this = AppThreadHandle { requests_tx };
-        this
+        AppThreadHandle {
+            requests_tx,
+            interactive_frames: Default::default(),
+        }
     }
 
     pub fn channel() -> (Self, actor::Receiver<Request>) {
         let (requests_tx, rx) = actor::channel();
-        (Self { requests_tx }, rx)
+        (
+            Self {
+                requests_tx,
+                interactive_frames: Default::default(),
+            },
+            rx,
+        )
     }
 
     pub(crate) fn same_actor(&self, other: &Self) -> bool {
         self.requests_tx.same_channel(&other.requests_tx)
     }
 
-    pub fn send(&self, req: Request) -> anyhow::Result<()> { Ok(self.requests_tx.send(req)) }
+    pub fn send(&self, req: Request) -> anyhow::Result<()> {
+        self.requests_tx.send(req);
+        Ok(())
+    }
+
+    /// Publish a high-frequency interactive frame without growing the actor queue.
+    /// Only the newest frame for each window is retained until the app actor drains it.
+    pub(crate) fn send_interactive_frame(
+        &self,
+        wid: WindowId,
+        frame: CGRect,
+        set_size: bool,
+        txid: TransactionId,
+    ) {
+        let should_wake = {
+            let mut pending = self.interactive_frames.0.lock().unwrap();
+            pending.latest.insert(wid, (frame, set_size, txid));
+            !std::mem::replace(&mut pending.wake_pending, true)
+        };
+        if should_wake
+            && self
+                .requests_tx
+                .try_send(Request::InteractiveFramesPending(
+                    self.interactive_frames.clone(),
+                ))
+                .is_err()
+        {
+            let mut pending = self.interactive_frames.0.lock().unwrap();
+            pending.wake_pending = false;
+            pending.latest.clear();
+        }
+    }
 }
 
 impl Debug for AppThreadHandle {
@@ -358,6 +463,8 @@ pub enum Request {
         set_size: bool,
         txid: TransactionId,
     },
+    #[doc(hidden)]
+    InteractiveFramesPending(InteractiveFrameQueue),
 
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
@@ -412,7 +519,7 @@ pub fn spawn_app_thread(
         .name(format!("{}({pid})", info.bundle_id.as_deref().unwrap_or("")))
         .spawn(move || {
             let _guard = guard; // Also reports early initialization failures and panics.
-            app_thread_main(pid, info, events_tx, tx_store, handle.requests_tx, requests_rx);
+            app_thread_main(pid, info, events_tx, tx_store, handle, requests_rx);
         })
     {
         warn!(pid, ?err, "Failed to spawn app thread");
@@ -449,6 +556,7 @@ struct AppWindowState {
     title: String,
     is_animating: bool,
     last_animation_frame: Option<CGRect>,
+    interactive_frame_write: bool,
 }
 
 struct PendingFrame {
@@ -456,6 +564,7 @@ struct PendingFrame {
     frame: CGRect,
     set_size: bool,
     txid: TransactionId,
+    interactive: bool,
 }
 
 impl State {
@@ -562,13 +671,12 @@ impl State {
     async fn run(
         mut self,
         info: AppInfo,
-        requests_tx: actor::Sender<Request>,
+        handle: AppThreadHandle,
         requests_rx: actor::Receiver<Request>,
         notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
         raises_rx: actor::Receiver<RaiseRequest>,
     ) {
-        let handle = AppThreadHandle { requests_tx };
-        if !self.init(handle, info) {
+        if !self.init(handle.clone(), info) {
             return;
         }
 
@@ -659,13 +767,20 @@ impl State {
     }
 
     fn flush_frames(&mut self, wid: WindowId) -> Result<(), AxError> {
-        let Some(PendingFrame { span, frame, set_size, txid }) = self.pending_frames.remove(&wid)
+        let Some(PendingFrame {
+            span,
+            frame,
+            set_size,
+            txid,
+            interactive,
+        }) = self.pending_frames.remove(&wid)
         else {
             return Ok(());
         };
         let _guard = span.enter();
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
+        window.interactive_frame_write = interactive;
         if set_size {
             window.last_animation_frame = Some(frame);
             let _ = window.elem.set_size(frame.size);
@@ -678,8 +793,7 @@ impl State {
     }
 
     fn flush_all_frames(&mut self) {
-        let wids: Vec<WindowId> = self.pending_frames.keys().copied().collect();
-        for wid in wids {
+        while let Some(wid) = self.pending_frames.keys().next().copied() {
             if let Err(err) = self.flush_frames(wid) {
                 warn!(?wid, ?err, "Failed to apply animation frame");
             }
@@ -852,6 +966,7 @@ impl State {
                 let elem = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
+                        window.interactive_frame_write = false;
                         window.elem.clone()
                     }
                     Err(err) => match err {
@@ -898,12 +1013,25 @@ impl State {
                     frame,
                     set_size,
                     txid,
+                    interactive: false,
+                });
+            }
+            Request::InteractiveFramesPending(frames) => {
+                frames.drain_with(|wid, frame, set_size, txid| {
+                    self.pending_frames.insert(wid, PendingFrame {
+                        span: Span::current(),
+                        frame,
+                        set_size,
+                        txid,
+                        interactive: true,
+                    });
                 });
             }
             Request::SetWindowFrame(wid, desired, txid, _) => {
                 let elem = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
+                        window.interactive_frame_write = false;
                         window.elem.clone()
                     }
                     Err(err) => match err {
@@ -940,6 +1068,7 @@ impl State {
                     let elem = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
+                            window.interactive_frame_write = false;
                             window.elem.clone()
                         }
                         Err(err) => match err {
@@ -977,6 +1106,7 @@ impl State {
                     let elem = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
+                            window.interactive_frame_write = false;
                             window.elem.clone()
                         }
                         Err(err) => match err {
@@ -1159,10 +1289,17 @@ impl State {
                     return;
                 }
 
+                let mouse_state = event::get_mouse_state();
                 let txid = match self.window(wid) {
                     Ok(window) => {
                         if window.is_animating {
                             trace!(?wid, ?notif, "Ignoring notification during animation");
+                            return;
+                        }
+                        if window.interactive_frame_write
+                            && mouse_state == Some(event::MouseState::Down)
+                        {
+                            trace!(?wid, ?notif, "Ignoring interactive frame notification");
                             return;
                         }
                         self.txid_for_window_state(window)
@@ -1179,6 +1316,9 @@ impl State {
                         return;
                     }
                 };
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.interactive_frame_write = false;
+                }
                 let frame = match elem.frame() {
                     Ok(frame) => frame,
                     // During display teardown, macOS can send AXWindowMoved after
@@ -1206,7 +1346,7 @@ impl State {
                     frame,
                     txid,
                     Requested(false),
-                    event::get_mouse_state(),
+                    mouse_state,
                 ));
             }
             AxNotificationKind::WindowMiniaturized => {
@@ -1727,6 +1867,7 @@ impl State {
             title: info.title.clone(),
             is_animating: false,
             last_animation_frame: None,
+            interactive_frame_write: false,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);
@@ -2045,7 +2186,7 @@ fn app_thread_main(
     info: AppInfo,
     events_tx: reactor::Sender,
     tx_store: Option<WindowTxStore>,
-    requests_tx: actor::Sender<Request>,
+    handle: AppThreadHandle,
     requests_rx: actor::Receiver<Request>,
 ) {
     let app = AXUIElement::application(pid);
@@ -2110,7 +2251,7 @@ fn app_thread_main(
         pending_frames: HashMap::default(),
     };
 
-    Executor::run(state.run(info, requests_tx, requests_rx, notifications_rx, raises_rx));
+    Executor::run(state.run(info, handle, requests_rx, notifications_rx, raises_rx));
 }
 
 fn trace<T>(

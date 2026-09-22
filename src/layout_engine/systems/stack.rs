@@ -12,7 +12,7 @@ use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem,
 };
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct StackLayoutSystem {
     inner: TraditionalLayoutSystem,
     #[serde(default = "default_stack_orientation")]
@@ -254,6 +254,28 @@ impl LayoutSystem for StackLayoutSystem {
             self.normalize_layout(layout);
         }
         moved
+    }
+
+    fn apply_target_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        _action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        let Some(source_node) = self.inner.window_node(layout, source) else {
+            return false;
+        };
+        let Some(target_node) = self.inner.window_node(layout, target) else {
+            return false;
+        };
+        if source_node == target_node {
+            return false;
+        }
+        if !self.inner.swap_windows(layout, source, target) {
+            return false;
+        }
+        self.inner.select_window(layout, source)
     }
 
     fn move_selection_to_layout_after_selection(

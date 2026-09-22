@@ -160,6 +160,8 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     /// unmatchable hidden member can survive forever as a ghost.
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
+    /// Members sharing the stack/group that directly contains `window`.
+    fn stack_members(&self, _layout: LayoutId, _window: WindowId) -> Vec<WindowId> { Vec::new() }
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
     fn descend_selection(&mut self, layout: LayoutId) -> bool;
@@ -198,6 +200,30 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     );
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
+
+    /// Route source-slot drags through the same operation as keyboard MoveNode.
+    fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
+            return self.select_window(layout, source) && self.move_selection(layout, direction);
+        }
+        self.apply_target_drop(layout, source, target, action)
+    }
+
+    fn apply_target_drop(
+        &mut self,
+        _layout: LayoutId,
+        _source: WindowId,
+        _target: WindowId,
+        _action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        false
+    }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
     fn move_selection_to_layout_after_selection(
@@ -251,6 +277,9 @@ macro_rules! delegate_traditional_layout_system {
         }
         fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_in_layout(layout)
+        }
+        fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+            self.inner.stack_members(layout, window)
         }
         fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_under_selection(layout)
@@ -550,4 +579,17 @@ pub enum LayoutSystemKind {
     Scrolling(ScrollingLayoutSystem),
     Stack(StackLayoutSystem),
     Floating(FloatingLayoutSystem),
+}
+
+impl LayoutSystemKind {
+    pub(crate) fn preview_clone(&self) -> Option<Self> {
+        match self {
+            Self::Traditional(system) => Some(Self::Traditional(system.clone())),
+            Self::Bsp(system) => Some(Self::Bsp(system.clone())),
+            Self::MasterStack(system) => Some(Self::MasterStack(system.clone())),
+            Self::Scrolling(system) => Some(Self::Scrolling(system.clone())),
+            Self::Stack(system) => Some(Self::Stack(system.clone())),
+            Self::Floating(_) => None,
+        }
+    }
 }

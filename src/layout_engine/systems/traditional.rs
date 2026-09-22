@@ -16,7 +16,7 @@ use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
 use crate::sys::geometry::Round;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TraditionalLayoutSystem {
     pub(crate) tree: Tree<Components>,
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
@@ -206,6 +206,106 @@ impl TraditionalLayoutSystem {
 
     pub(crate) fn set_layout(&mut self, node: NodeId, kind: LayoutKind) {
         self.tree.data.layout.set_kind(node, kind);
+    }
+
+    /// Apply a source/target drop without using the current selection as an input.
+    pub(crate) fn apply_explicit_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if source == target {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return self.swap_windows(layout, source, target);
+        }
+        let Some(source_node) = self.window_node(layout, source) else {
+            return false;
+        };
+        let Some(target_node) = self.window_node(layout, target) else {
+            return false;
+        };
+
+        if action == crate::layout_engine::WindowDropAction::Stack {
+            if let Some(parent) = target_node.parent(self.map())
+                && self.layout(parent).is_group()
+            {
+                source_node.detach(&mut self.tree).insert_after(target_node);
+                self.select(source_node);
+                return true;
+            }
+            let parent_kind = target_node
+                .parent(self.map())
+                .map(|parent| self.layout(parent))
+                .unwrap_or(LayoutKind::Horizontal);
+            let stack_kind = match parent_kind.orientation() {
+                Orientation::Horizontal => LayoutKind::HorizontalStack,
+                Orientation::Vertical => LayoutKind::VerticalStack,
+            };
+            let container = self.tree.mk_node().insert_before(target_node);
+            self.tree.data.layout.assume_size_of(container, target_node, &self.tree.map);
+            target_node.detach(&mut self.tree).push_back(container);
+            source_node.detach(&mut self.tree).push_back(container);
+            self.set_layout(container, stack_kind);
+            self.select(source_node);
+            return true;
+        }
+
+        let crate::layout_engine::WindowDropAction::Insert(direction) = action else {
+            unreachable!()
+        };
+        let target_anchor = target_node
+            .parent(self.map())
+            .filter(|parent| self.layout(*parent).is_group())
+            .unwrap_or(target_node);
+        if target_anchor == source_node
+            || target_anchor.ancestors(self.map()).any(|node| node == source_node)
+        {
+            return false;
+        }
+        let before = matches!(direction, Direction::Left | Direction::Up);
+        if let Some(parent) = target_anchor.parent(self.map())
+            && !self.layout(parent).is_group()
+            && self.layout(parent).orientation() == direction.orientation()
+        {
+            let sizes = (source_node.parent(self.map()) == Some(parent)).then(|| {
+                parent
+                    .children(self.map())
+                    .map(|node| (node, self.tree.data.layout.info[node].size))
+                    .collect::<Vec<_>>()
+            });
+            let source_node = source_node.detach(&mut self.tree);
+            if before {
+                source_node.insert_before(target_anchor);
+            } else {
+                source_node.insert_after(target_anchor);
+            }
+            if let Some(sizes) = sizes {
+                for (node, size) in sizes {
+                    self.tree.data.layout.info[node].size = size;
+                }
+                self.tree.data.layout.recompute_total(&self.tree.map, parent);
+            }
+        } else {
+            let container = self.tree.mk_node().insert_before(target_anchor);
+            self.tree.data.layout.assume_size_of(container, target_anchor, &self.tree.map);
+            self.set_layout(container, match direction.orientation() {
+                Orientation::Horizontal => LayoutKind::Horizontal,
+                Orientation::Vertical => LayoutKind::Vertical,
+            });
+            for node in if before {
+                [source_node, target_anchor]
+            } else {
+                [target_anchor, source_node]
+            } {
+                node.detach(&mut self.tree).push_back(container);
+            }
+        }
+        self.select(source_node);
+        true
     }
 
     pub(crate) fn calculate_layout_for_node(
@@ -585,6 +685,18 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let root = self.root(layout);
         self.visible_windows_under_internal(root)
+    }
+
+    fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+        let Some(parent) =
+            self.window_node(layout, window).and_then(|node| node.parent(self.map()))
+        else {
+            return Vec::new();
+        };
+        if !self.layout(parent).is_group() {
+            return Vec::new();
+        }
+        parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -1216,6 +1328,16 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
 
         true
+    }
+
+    fn apply_target_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        self.apply_explicit_window_drop(layout, source, target, action)
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
@@ -2229,7 +2351,7 @@ impl TraditionalLayoutSystem {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct Components {
     selection: Selection,
     pub(crate) layout: Layout,
@@ -2270,19 +2392,19 @@ impl tree::Observer for Components {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct WindowIndex {
     windows: slotmap::SecondaryMap<NodeId, WindowId>,
     window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct WindowNodeInfo {
     layout: LayoutId,
     node: NodeId,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
 struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
 
 impl WindowIndex {
@@ -2443,7 +2565,7 @@ impl StackLayoutResult {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct Layout {
     pub(crate) info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
 }
@@ -3838,6 +3960,63 @@ mod tests {
         assert!((system.tree.data.layout.info[n2].size - 2.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[n3].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[root].total - 8.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn dragging_siblings_both_directions_preserves_resize_ratios() {
+        for (source, target, direction, expected) in [
+            (w(179), w(180), Direction::Right, [w(178), w(180), w(179)]),
+            (w(180), w(179), Direction::Left, [w(178), w(180), w(179)]),
+        ] {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            let root = system.root(layout);
+            for window in [w(178), w(179), w(180)] {
+                system.add_window_after_selection(layout, window);
+            }
+            let nodes: Vec<_> = root.children(system.map()).collect();
+            for (&node, size) in nodes.iter().zip([5.0, 2.0, 1.0]) {
+                system.tree.data.layout.info[node].size = size;
+            }
+            system.tree.data.layout.info[root].total = 8.0;
+
+            assert!(system.apply_explicit_window_drop(
+                layout,
+                source,
+                target,
+                crate::layout_engine::WindowDropAction::Insert(direction),
+            ));
+            assert_eq!(system.all_windows_in_layout(layout), expected);
+            for (&node, size) in nodes.iter().zip([5.0, 2.0, 1.0]) {
+                assert_eq!(system.tree.data.layout.info[node].size, size);
+            }
+            assert_eq!(system.tree.data.layout.info[root].total, 8.0);
+        }
+    }
+
+    #[test]
+    fn source_slot_move_can_leave_a_nested_split() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        assert!(system.apply_explicit_window_drop(
+            layout,
+            w(3),
+            w(2),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
+        ));
+        let source = system.window_node(layout, w(3)).unwrap();
+        let root = system.root(layout);
+        assert_ne!(source.parent(system.map()), Some(root));
+        assert!(system.apply_window_drop(
+            layout,
+            w(3),
+            w(3),
+            crate::layout_engine::WindowDropAction::Move(Direction::Right),
+        ));
+        assert_eq!(source.parent(system.map()), Some(root));
     }
 
     #[test]

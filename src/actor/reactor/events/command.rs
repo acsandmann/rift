@@ -218,6 +218,11 @@ pub fn handle_config_updated(
     drag: &mut DragManager,
     new_config: Config,
 ) -> anyhow::Result<EventOutcome> {
+    let mut outcome = if config.settings.mouse != new_config.settings.mouse {
+        super::drag::handle_cancel(drag)
+    } else {
+        EventOutcome::no_change()
+    };
     *config = new_config;
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
@@ -225,12 +230,13 @@ pub fn handle_config_updated(
         .layout_engine
         .update_virtual_workspace_settings(&state.windows, &config.virtual_workspaces);
 
-    drag.update_config(config.settings.window_snapping);
+    drag.update_config(config.settings.mouse);
 
-    Ok(EventOutcome {
+    outcome.absorb(EventOutcome {
         service_config_update: Some(config.clone()),
         ..EventOutcome::layout_changed(false)
-    })
+    });
+    Ok(outcome)
 }
 
 pub fn handle_command_reactor_debug(

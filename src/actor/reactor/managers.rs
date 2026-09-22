@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use objc2_core_foundation::{CGPoint, CGRect};
 use rift_protocol::StackInfo;
 use tracing::trace;
@@ -6,13 +9,12 @@ use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
-use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, WindowSnappingSettings};
+use crate::common::config::{LayoutMode, MouseSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::screen::SpaceId;
@@ -39,22 +41,84 @@ impl AppManager {
 
 /// Manages drag operations and window swapping
 pub struct DragManager {
-    pub drag_state: super::DragState,
-    pub drag_swap_manager: DragSwapManager,
-    pub skip_layout_for_window: Option<WindowId>,
+    pub actor: crate::actor::drag::DragActor,
+    pub native_motion_active: Arc<AtomicBool>,
+    pub externally_controlled_window: Option<WindowId>,
+    pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
+    pub(super) preview_enabled: bool,
+    pub(super) preview_suppressed: bool,
 }
 
 impl DragManager {
-    pub fn reset(&mut self) { self.drag_swap_manager.reset(); }
+    pub fn sync_motion_gate(&self) {
+        let active = self.actor.is_active()
+            && matches!(
+                self.actor.kind(),
+                Some(
+                    crate::actor::drag::DragKind::NativeMove
+                        | crate::actor::drag::DragKind::NativeResize
+                )
+            );
+        self.native_motion_active.store(active, Ordering::Release);
+    }
 
-    pub fn last_target(&self) -> Option<WindowId> { self.drag_swap_manager.last_target() }
+    pub fn reset(&mut self) {
+        self.actor.cancel();
+        self.sync_motion_gate();
+        self.release_preview();
+        self.externally_controlled_window = None;
+    }
 
-    pub fn dragged(&self) -> Option<WindowId> { self.drag_swap_manager.dragged() }
+    pub fn update_config(&mut self, config: MouseSettings) {
+        self.actor.update_config(config);
+        self.preview_enabled = config.enabled && config.preview;
+        if !config.enabled || !config.preview {
+            self.release_preview();
+        }
+        if !config.enabled {
+            self.externally_controlled_window = None;
+        }
+        self.sync_preview();
+    }
 
-    pub fn origin_frame(&self) -> Option<CGRect> { self.drag_swap_manager.origin_frame() }
+    pub fn sync_preview(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(target) =
+            self.actor.target().filter(|_| self.preview_enabled && !self.preview_suppressed)
+        else {
+            self.hide_preview();
+            return;
+        };
+        let result = if let Some(preview) = &mut self.preview {
+            preview.show(target)
+        } else {
+            crate::ui::drag_preview::DragPreview::new(target).and_then(|mut preview| {
+                preview.show(target)?;
+                self.preview = Some(preview);
+                Ok(())
+            })
+        };
+        if let Err(error) = result {
+            tracing::warn!(?error, "failed to update drag preview");
+            self.release_preview();
+        }
+    }
 
-    pub fn update_config(&mut self, config: WindowSnappingSettings) {
-        self.drag_swap_manager.update_config(config);
+    pub fn hide_preview(&mut self) {
+        if let Some(preview) = &mut self.preview {
+            preview.hide();
+        }
+    }
+
+    pub fn release_preview(&mut self) { drop(self.preview.take()); }
+
+    pub fn suppress_preview(&mut self, suppressed: bool) {
+        self.preview_suppressed = suppressed;
+        if suppressed {
+            self.hide_preview();
+        }
     }
 }
 
@@ -304,11 +368,7 @@ impl LayoutManager {
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
-        let skip_wid = reactor
-            .drag_manager
-            .skip_layout_for_window
-            .take()
-            .or(reactor.drag_manager.drag_swap_manager.dragged());
+        let skip_wid = reactor.drag_manager.externally_controlled_window;
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();
