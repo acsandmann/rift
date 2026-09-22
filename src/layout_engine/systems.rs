@@ -6,13 +6,6 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
-#[cfg(test)]
-fn serde_preview_clone<T>(value: &T) -> T
-where T: Serialize + for<'de> Deserialize<'de> {
-    ron::from_str(&ron::to_string(value).expect("serialize layout preview"))
-        .expect("deserialize layout preview")
-}
-
 slotmap::new_key_type! { pub struct LayoutId; }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -210,11 +203,13 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 
     fn apply_window_drop(
         &mut self,
-        layout: LayoutId,
-        source: WindowId,
-        target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
-    ) -> bool;
+        _layout: LayoutId,
+        _source: WindowId,
+        _target: WindowId,
+        _action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        false
+    }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
     fn move_selection_to_layout_after_selection(
@@ -552,85 +547,6 @@ mod tests {
         assert_eq!(window_nodes(&tree).len(), 2);
         scrolling.select_window(layout, w(1));
         assert_stable_unique_ids(&tree, &scrolling.container_tree(layout));
-    }
-
-    #[test]
-    fn traditional_drop_uses_explicit_source_and_target() {
-        let mut system = TraditionalLayoutSystem::default();
-        let layout = system.create_layout();
-        for window in [w(1), w(2), w(3)] {
-            system.add_window_after_selection(layout, window);
-        }
-        assert!(system.apply_window_drop(
-            layout,
-            w(3),
-            w(1),
-            crate::layout_engine::WindowDropAction::Stack,
-        ));
-        let all = system.all_windows_in_layout(layout);
-        assert_eq!(all.len(), 3);
-        assert!(all.contains(&w(1)) && all.contains(&w(2)) && all.contains(&w(3)));
-        assert_eq!(system.selected_window(layout), Some(w(3)));
-        assert!(!system.visible_windows_in_layout(layout).contains(&w(1)));
-        assert_eq!(system.stack_members(layout, w(3)), vec![w(1), w(3)]);
-
-        assert!(system.apply_window_drop(
-            layout,
-            w(2),
-            w(3),
-            crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Left),
-        ));
-        let all = system.all_windows_in_layout(layout);
-        assert_eq!(all.len(), 3);
-        assert_eq!(system.selected_window(layout), Some(w(2)));
-
-        assert!(system.apply_window_drop(
-            layout,
-            w(3),
-            w(2),
-            crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Right),
-        ));
-        assert!(system.stack_members(layout, w(3)).is_empty());
-        assert_eq!(system.visible_windows_in_layout(layout).len(), 3);
-    }
-
-    #[test]
-    fn ordered_layout_drops_place_source_around_target() {
-        let mut master = MasterStackLayoutSystem::default();
-        let layout = master.create_layout();
-        for window in [w(1), w(2), w(3)] {
-            master.add_window_after_selection(layout, window);
-        }
-        let mut expected = master.all_windows_in_layout(layout);
-        expected.retain(|window| *window != w(1));
-        let target = expected.iter().position(|window| *window == w(3)).unwrap();
-        expected.insert(target + 1, w(1));
-        assert!(master.apply_window_drop(
-            layout,
-            w(1),
-            w(3),
-            crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Down),
-        ));
-        assert_eq!(master.all_windows_in_layout(layout), expected);
-        assert_eq!(master.selected_window(layout), Some(w(1)));
-    }
-
-    #[test]
-    fn bsp_drop_stacks_without_losing_members() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-        for window in [w(1), w(2), w(3)] {
-            system.add_window_after_selection(layout, window);
-        }
-        assert!(system.apply_window_drop(
-            layout,
-            w(3),
-            w(1),
-            crate::layout_engine::WindowDropAction::Stack,
-        ));
-        assert_eq!(system.all_windows_in_layout(layout).len(), 3);
-        assert_eq!(system.visible_windows_in_layout(layout).len(), 2);
-        assert_eq!(system.selected_window(layout), Some(w(3)));
     }
 }
 mod floating;

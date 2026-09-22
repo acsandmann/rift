@@ -57,7 +57,7 @@ impl DragPreview {
     pub fn show(&mut self, target: DropTarget) -> Result<(), CgsWindowError> {
         let frame = preview_frame(target);
         let style = Self::style(target);
-        let relative_window = target.window.idx.get();
+        let relative_window = target.intent.window.idx.get();
         let frame_changed = !self.frame.same_as(frame);
         let style_changed = self.style != style;
         if self.visible
@@ -89,7 +89,7 @@ impl DragPreview {
     }
 
     fn style(target: DropTarget) -> PreviewStyle {
-        if target.action == WindowDropAction::Stack {
+        if target.intent.action == WindowDropAction::Stack {
             PreviewStyle::Stack
         } else {
             PreviewStyle::Tile

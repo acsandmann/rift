@@ -82,16 +82,16 @@ pub fn handle_mouse_up(
     let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target
-        && commit.source.current_space == Some(target.space)
+        && commit.source.current_space == Some(target.intent.space)
         && state.windows.contains_window(window)
-        && state.windows.contains_window(target.window)
+        && state.windows.contains_window(target.intent.window)
     {
-        trace!(source=?window, target=?target.window, action=?target.action, "performing window drop");
+        trace!(source=?window, target=?target.intent.window, action=?target.intent.action, "performing window drop");
         if layout.layout_engine.apply_window_drop(crate::layout_engine::WindowDropRequest {
             source: window,
-            target: target.window,
-            space: target.space,
-            action: target.action,
+            target: target.intent.window,
+            space: target.intent.space,
+            action: target.intent.action,
         }) {
             needs_layout = true;
         }

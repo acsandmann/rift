@@ -38,9 +38,6 @@ impl Default for TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
-    #[cfg(test)]
-    pub(crate) fn preview_clone(&self) -> Self { super::serde_preview_clone(self) }
-
     pub fn new(window_insertion_point: WindowInsertionPoint, equalize_nodes: bool) -> Self {
         Self {
             tree: Tree::with_observer(Components::default()),

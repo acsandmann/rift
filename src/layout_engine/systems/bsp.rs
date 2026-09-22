@@ -47,13 +47,6 @@ pub struct BspLayoutSystem {
 }
 
 impl BspLayoutSystem {
-    #[cfg(test)]
-    pub(crate) fn preview_clone(&self) -> Self {
-        let mut cloned: Self = super::serde_preview_clone(self);
-        cloned.window_insertion_point = self.window_insertion_point;
-        cloned
-    }
-
     fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
         let mut current = from_leaf;
 

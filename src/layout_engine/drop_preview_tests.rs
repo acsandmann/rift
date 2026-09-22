@@ -2,7 +2,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 use super::*;
 use crate::actor::app::WindowId;
-use crate::actor::drag::{DropTarget, DropZone, preview_frame};
+use crate::actor::drag::{DropIntent, DropTarget, DropZone, preview_frame};
 use crate::common::collections::HashMap;
 use crate::common::config::GapSettings;
 use crate::layout_engine::systems::WindowLayoutConstraints;
@@ -48,16 +48,15 @@ fn inset(frame: CGRect) -> CGRect {
     )
 }
 
-fn verify_actions<S: LayoutSystem>(
-    baseline: &S,
+fn verify_actions(
+    baseline: &LayoutSystemKind,
     layout: LayoutId,
     source: WindowId,
     target: WindowId,
-    clone_system: impl Fn(&S) -> S,
 ) {
     for (action, zone) in ACTIONS {
-        let mut preview_copy = clone_system(baseline);
-        let mut committed = clone_system(baseline);
+        let mut preview_copy = baseline.preview_clone().unwrap();
+        let mut committed = baseline.preview_clone().unwrap();
         let preview_available = preview_copy.apply_window_drop(layout, source, target, action);
         let committed_available = committed.apply_window_drop(layout, source, target, action);
         assert_eq!(
@@ -72,18 +71,20 @@ fn verify_actions<S: LayoutSystem>(
         assert_eq!(advertised, actual, "preview differs for {action:?}");
 
         let visual = preview_frame(DropTarget {
-            window: target,
-            space: SpaceId::new(1),
-            frame: actual,
+            intent: DropIntent {
+                window: target,
+                space: SpaceId::new(1),
+                frame: actual,
+                zone,
+                action,
+            },
             preview_area: advertised,
-            zone,
-            action,
         });
         assert_eq!(visual, inset(actual), "overlay differs for {action:?}");
     }
 }
 
-fn populate<S: LayoutSystem>(system: &mut S) -> LayoutId {
+fn populate(system: &mut LayoutSystemKind) -> LayoutId {
     let layout = system.create_layout();
     for window in [w(1), w(2), w(3), w(4)] {
         system.add_window_after_selection(layout, window);
@@ -93,26 +94,14 @@ fn populate<S: LayoutSystem>(system: &mut S) -> LayoutId {
 
 #[test]
 fn traditional_previews_match_committed_frames_for_every_action() {
-    let mut system = TraditionalLayoutSystem::default();
+    let mut system = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(
-        &system,
-        layout,
-        w(4),
-        w(2),
-        TraditionalLayoutSystem::preview_clone,
-    );
+    verify_actions(&system, layout, w(4), w(2));
 
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
-    verify_actions(
-        &system,
-        layout,
-        w(3),
-        w(1),
-        TraditionalLayoutSystem::preview_clone,
-    );
+    verify_actions(&system, layout, w(3), w(1));
 
-    let mut nested = TraditionalLayoutSystem::default();
+    let mut nested = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
     let nested_layout = populate(&mut nested);
     assert!(nested.apply_window_drop(
         nested_layout,
@@ -120,18 +109,12 @@ fn traditional_previews_match_committed_frames_for_every_action() {
         w(3),
         WindowDropAction::Insert(Direction::Down),
     ));
-    verify_actions(
-        &nested,
-        nested_layout,
-        w(4),
-        w(3),
-        TraditionalLayoutSystem::preview_clone,
-    );
+    verify_actions(&nested, nested_layout, w(4), w(3));
 }
 
 #[test]
 fn traditional_target_relative_down_stays_in_the_target_container() {
-    let mut system = TraditionalLayoutSystem::default();
+    let mut system = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
     let layout = system.create_layout();
     for window in [w(1), w(2), w(3)] {
         system.add_window_after_selection(layout, window);
@@ -165,17 +148,17 @@ fn traditional_target_relative_down_stays_in_the_target_container() {
 
 #[test]
 fn bsp_previews_match_committed_frames_for_every_action() {
-    let mut system = BspLayoutSystem::default();
+    let mut system = LayoutSystemKind::Bsp(BspLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2), BspLayoutSystem::preview_clone);
+    verify_actions(&system, layout, w(4), w(2));
 
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
-    verify_actions(&system, layout, w(3), w(1), BspLayoutSystem::preview_clone);
+    verify_actions(&system, layout, w(3), w(1));
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Swap));
     assert_eq!(system.stack_members(layout, w(3)), vec![w(2), w(3)]);
     let _ = calculated_source(&system, layout, w(3));
 
-    let mut nested = BspLayoutSystem::default();
+    let mut nested = LayoutSystemKind::Bsp(BspLayoutSystem::default());
     let nested_layout = populate(&mut nested);
     assert!(nested.apply_window_drop(
         nested_layout,
@@ -183,40 +166,28 @@ fn bsp_previews_match_committed_frames_for_every_action() {
         w(3),
         WindowDropAction::Insert(Direction::Down),
     ));
-    verify_actions(
-        &nested,
-        nested_layout,
-        w(4),
-        w(3),
-        BspLayoutSystem::preview_clone,
-    );
+    verify_actions(&nested, nested_layout, w(4), w(3));
 }
 
 #[test]
 fn master_stack_previews_match_committed_frames_for_every_action() {
-    let mut system = MasterStackLayoutSystem::default();
+    let mut system = LayoutSystemKind::MasterStack(MasterStackLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(
-        &system,
-        layout,
-        w(4),
-        w(2),
-        MasterStackLayoutSystem::preview_clone,
-    );
+    verify_actions(&system, layout, w(4), w(2));
 }
 
 #[test]
 fn scrolling_previews_match_committed_frames_for_every_action() {
-    let mut system = ScrollingLayoutSystem::default();
+    let mut system = LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2), ScrollingLayoutSystem::preview_clone);
+    verify_actions(&system, layout, w(4), w(2));
 }
 
 #[test]
 fn stack_previews_match_committed_frames_for_every_action() {
-    let mut system = StackLayoutSystem::default();
+    let mut system = LayoutSystemKind::Stack(StackLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2), StackLayoutSystem::preview_clone);
+    verify_actions(&system, layout, w(4), w(2));
 
     let before = system.all_windows_in_layout(layout);
     let source = before[0];

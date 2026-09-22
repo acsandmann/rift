@@ -46,12 +46,8 @@ pub struct DropIntent {
 
 #[derive(Debug, Clone, Copy)]
 pub struct DropTarget {
-    pub window: WindowId,
-    pub space: SpaceId,
-    pub frame: CGRect,
+    pub intent: DropIntent,
     pub preview_area: CGRect,
-    pub zone: DropZone,
-    pub action: WindowDropAction,
 }
 
 #[derive(Debug, Clone, Copy)]
