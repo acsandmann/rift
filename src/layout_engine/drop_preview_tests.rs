@@ -139,6 +139,28 @@ fn traditional_target_relative_down_stays_in_the_target_container() {
 }
 
 #[test]
+fn move_drop_matches_keyboard_move_without_mutating_preview_source() {
+    for mut system in [
+        LayoutSystemKind::Traditional(TraditionalLayoutSystem::default()),
+        LayoutSystemKind::Bsp(BspLayoutSystem::default()),
+        LayoutSystemKind::MasterStack(MasterStackLayoutSystem::default()),
+        LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default()),
+        LayoutSystemKind::Stack(StackLayoutSystem::default()),
+    ] {
+        let layout = populate(&mut system);
+        let before = format!("{system:?}");
+        let mut preview = system.preview_clone().unwrap();
+        let mut keyboard = system.preview_clone().unwrap();
+        let moved =
+            preview.apply_window_drop(layout, w(2), w(2), WindowDropAction::Move(Direction::Right));
+        assert!(keyboard.select_window(layout, w(2)));
+        assert_eq!(moved, keyboard.move_selection(layout, Direction::Right));
+        assert_eq!(format!("{preview:?}"), format!("{keyboard:?}"));
+        assert_eq!(format!("{system:?}"), before);
+    }
+}
+
+#[test]
 fn bsp_previews_preserve_stacked_and_nested_layouts() {
     let mut system = LayoutSystemKind::Bsp(BspLayoutSystem::default());
     let layout = populate(&mut system);

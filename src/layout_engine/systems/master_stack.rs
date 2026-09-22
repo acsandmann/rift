@@ -818,6 +818,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
+        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
+            return self.select_window(layout, source) && self.move_selection(layout, direction);
+        }
         let _ = self.ensure_structure(layout);
         self.inner.apply_explicit_window_drop(layout, source, target, action)
     }

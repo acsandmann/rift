@@ -15,7 +15,7 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
-use crate::sys::geometry::SameAs;
+use crate::sys::geometry::{CGRectExt, SameAs};
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
@@ -236,6 +236,7 @@ impl DragActor {
                 self.settings.drop_action,
                 previous,
                 &session.unavailable,
+                Some(session.source),
             )
             .map_or(TargetState::None, TargetState::Candidate);
         }
@@ -260,6 +261,7 @@ impl DragActor {
             self.settings.drop_action,
             None,
             &session.unavailable,
+            Some(session.source),
         )
         .map_or(TargetState::None, TargetState::Candidate);
         !matches!(session.target, TargetState::None)
@@ -493,6 +495,7 @@ impl DragActor {
                 self.settings.drop_action,
                 session.target.intent(),
                 &session.unavailable,
+                Some(session.source),
             )
         };
         let changed = next != session.target.intent();
@@ -699,7 +702,7 @@ pub fn hit_test(
     center: MouseDropAction,
     previous: Option<DropIntent>,
 ) -> Option<DropIntent> {
-    hit_test_available(scene, point, fraction, center, previous, &[])
+    hit_test_available(scene, point, fraction, center, previous, &[], None)
 }
 
 fn hit_test_available(
@@ -709,6 +712,7 @@ fn hit_test_available(
     center: MouseDropAction,
     previous: Option<DropIntent>,
     unavailable: &[(WindowId, DropZone, WindowDropAction)],
+    source: Option<DragSource>,
 ) -> Option<DropIntent> {
     if let Some(previous) = previous
         && let Some(target) = scene.targets.iter().find(|target| target.window == previous.window)
@@ -743,6 +747,28 @@ fn hit_test_available(
             && let Some(intent) = intent_for(target, point)
             && !unavailable.contains(&(intent.window, intent.zone, intent.action))
         {
+            return Some(intent);
+        }
+    }
+
+    if scene.action_override.is_none()
+        && let Some(source) = source
+        && let Some(space) = source.current_space
+        && let Some(zone) = classify_zone(source.origin_frame, point, fraction)
+        && let WindowDropAction::Insert(direction) = resolve_action(zone, center)
+        && !scene
+            .targets
+            .iter()
+            .any(|target| source.origin_frame.intersection(&target.frame).area() > 0.0)
+    {
+        let intent = DropIntent {
+            window: source.window,
+            space,
+            frame: source.origin_frame,
+            zone,
+            action: WindowDropAction::Move(direction),
+        };
+        if !unavailable.contains(&(intent.window, intent.zone, intent.action)) {
             return Some(intent);
         }
     }
@@ -962,6 +988,28 @@ mod tests {
         assert_eq!(commit.source.window, w(1));
         assert_eq!(commit.target.unwrap().intent.window, w(2));
         assert!(actor.finish(MouseButton::Left).is_none());
+    }
+
+    #[test]
+    fn original_tile_edges_offer_keyboard_equivalent_moves() {
+        let scene = scene(frame(220.0, 0.0, 200.0, 100.0));
+        for ((x, y), direction) in [
+            ((1.0, 50.0), Direction::Left),
+            ((199.0, 50.0), Direction::Right),
+            ((100.0, 1.0), Direction::Up),
+            ((100.0, 99.0), Direction::Down),
+        ] {
+            let mut actor = native(true, rect(), scene.clone());
+            motion(&mut actor, x, y);
+            let intent = actor.intent().unwrap();
+            assert_eq!(intent.window, w(1));
+            assert_eq!(intent.action, WindowDropAction::Move(direction));
+            actor.set_preview(intent, Some(rect()));
+            assert_eq!(
+                actor.finish(MouseButton::Left).unwrap().target.unwrap().intent.action,
+                WindowDropAction::Move(direction)
+            );
+        }
     }
 
     #[test]

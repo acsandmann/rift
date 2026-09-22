@@ -216,6 +216,9 @@ impl TraditionalLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
+        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
+            return self.select_window(layout, source) && self.move_selection(layout, direction);
+        }
         if source == target {
             return false;
         }
@@ -271,11 +274,23 @@ impl TraditionalLayoutSystem {
             && !self.layout(parent).is_group()
             && self.layout(parent).orientation() == direction.orientation()
         {
+            let sizes = (source_node.parent(self.map()) == Some(parent)).then(|| {
+                parent
+                    .children(self.map())
+                    .map(|node| (node, self.tree.data.layout.info[node].size))
+                    .collect::<Vec<_>>()
+            });
             let source_node = source_node.detach(&mut self.tree);
             if before {
                 source_node.insert_before(target_anchor);
             } else {
                 source_node.insert_after(target_anchor);
+            }
+            if let Some(sizes) = sizes {
+                for (node, size) in sizes {
+                    self.tree.data.layout.info[node].size = size;
+                }
+                self.tree.data.layout.recompute_total(&self.tree.map, parent);
             }
         } else {
             let container = self.tree.mk_node().insert_before(target_anchor);
@@ -3948,6 +3963,63 @@ mod tests {
         assert!((system.tree.data.layout.info[n2].size - 2.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[n3].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[root].total - 8.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn dragging_siblings_both_directions_preserves_resize_ratios() {
+        for (source, target, direction, expected) in [
+            (w(179), w(180), Direction::Right, [w(178), w(180), w(179)]),
+            (w(180), w(179), Direction::Left, [w(178), w(180), w(179)]),
+        ] {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            let root = system.root(layout);
+            for window in [w(178), w(179), w(180)] {
+                system.add_window_after_selection(layout, window);
+            }
+            let nodes: Vec<_> = root.children(system.map()).collect();
+            for (&node, size) in nodes.iter().zip([5.0, 2.0, 1.0]) {
+                system.tree.data.layout.info[node].size = size;
+            }
+            system.tree.data.layout.info[root].total = 8.0;
+
+            assert!(system.apply_explicit_window_drop(
+                layout,
+                source,
+                target,
+                crate::layout_engine::WindowDropAction::Insert(direction),
+            ));
+            assert_eq!(system.all_windows_in_layout(layout), expected);
+            for (&node, size) in nodes.iter().zip([5.0, 2.0, 1.0]) {
+                assert_eq!(system.tree.data.layout.info[node].size, size);
+            }
+            assert_eq!(system.tree.data.layout.info[root].total, 8.0);
+        }
+    }
+
+    #[test]
+    fn source_slot_move_can_leave_a_nested_split() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        assert!(system.apply_explicit_window_drop(
+            layout,
+            w(3),
+            w(2),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
+        ));
+        let source = system.window_node(layout, w(3)).unwrap();
+        let root = system.root(layout);
+        assert_ne!(source.parent(system.map()), Some(root));
+        assert!(system.apply_explicit_window_drop(
+            layout,
+            w(3),
+            w(3),
+            crate::layout_engine::WindowDropAction::Move(Direction::Right),
+        ));
+        assert_eq!(source.parent(system.map()), Some(root));
     }
 
     #[test]

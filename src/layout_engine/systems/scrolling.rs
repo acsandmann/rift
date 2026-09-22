@@ -1418,6 +1418,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
+        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
+            return self.select_window(layout, source) && self.move_selection(layout, direction);
+        }
         if source == target {
             return false;
         }
@@ -1446,6 +1449,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
         match action {
             crate::layout_engine::WindowDropAction::Swap => unreachable!(),
+            crate::layout_engine::WindowDropAction::Move(_) => unreachable!(),
             crate::layout_engine::WindowDropAction::Stack
             | crate::layout_engine::WindowDropAction::Insert(Direction::Up)
             | crate::layout_engine::WindowDropAction::Insert(Direction::Down) => {
