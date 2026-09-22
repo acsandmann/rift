@@ -256,16 +256,13 @@ impl LayoutSystem for StackLayoutSystem {
         moved
     }
 
-    fn apply_window_drop(
+    fn apply_target_drop(
         &mut self,
         layout: LayoutId,
         source: WindowId,
         target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
+        _action: crate::layout_engine::WindowDropAction,
     ) -> bool {
-        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
-            return self.select_window(layout, source) && self.move_selection(layout, direction);
-        }
         let Some(source_node) = self.inner.window_node(layout, source) else {
             return false;
         };

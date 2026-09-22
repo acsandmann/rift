@@ -201,7 +201,21 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
 
+    /// Route source-slot drags through the same operation as keyboard MoveNode.
     fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
+            return self.select_window(layout, source) && self.move_selection(layout, direction);
+        }
+        self.apply_target_drop(layout, source, target, action)
+    }
+
+    fn apply_target_drop(
         &mut self,
         _layout: LayoutId,
         _source: WindowId,

@@ -216,9 +216,6 @@ impl TraditionalLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
-        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
-            return self.select_window(layout, source) && self.move_selection(layout, direction);
-        }
         if source == target {
             return false;
         }
@@ -1333,7 +1330,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         true
     }
 
-    fn apply_window_drop(
+    fn apply_target_drop(
         &mut self,
         layout: LayoutId,
         source: WindowId,
@@ -4013,7 +4010,7 @@ mod tests {
         let source = system.window_node(layout, w(3)).unwrap();
         let root = system.root(layout);
         assert_ne!(source.parent(system.map()), Some(root));
-        assert!(system.apply_explicit_window_drop(
+        assert!(system.apply_window_drop(
             layout,
             w(3),
             w(3),

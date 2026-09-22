@@ -1698,16 +1698,13 @@ impl LayoutSystem for BspLayoutSystem {
         true
     }
 
-    fn apply_window_drop(
+    fn apply_target_drop(
         &mut self,
         layout: LayoutId,
         source: WindowId,
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
-        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
-            return self.select_window(layout, source) && self.move_selection(layout, direction);
-        }
         if source == target
             || !self.contains_window(layout, source)
             || !self.contains_window(layout, target)
@@ -1738,8 +1735,8 @@ impl LayoutSystem for BspLayoutSystem {
                 self.split_leaf_in_direction(target_node, direction, source);
                 true
             }
-            crate::layout_engine::WindowDropAction::Swap => unreachable!(),
-            crate::layout_engine::WindowDropAction::Move(_) => unreachable!(),
+            crate::layout_engine::WindowDropAction::Swap
+            | crate::layout_engine::WindowDropAction::Move(_) => unreachable!(),
         }
     }
 
