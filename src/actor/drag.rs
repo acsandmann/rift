@@ -15,7 +15,7 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
-use crate::sys::geometry::{CGRectExt, SameAs};
+use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
