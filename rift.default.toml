@@ -112,6 +112,9 @@ new_window_placement = "master"
 [settings.layout.scrolling]
 # width of the active column (0..1 of screen width)
 column_width_ratio = 0.7
+# Keep each window's current width when it enters scrolling layout (default: true).
+# Widths outside the min/max column bounds are clamped.
+preserve_window_sizes = true
 # min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
 min_column_width_ratio = 0.3
 max_column_width_ratio = 0.9

@@ -402,6 +402,17 @@ impl LayoutEngine {
         }
         window_order.retain(|wid| !self.floating.is_floating(*wid));
 
+        if mode == LayoutMode::Scrolling && self.layout_settings.scrolling.preserve_window_sizes {
+            for &wid in &window_order {
+                if let (Some(frame), Some(constraints)) = (
+                    window_store.window(wid).map(|window| window.frame_monotonic),
+                    self.window_layout_constraints.get_mut(&wid),
+                ) {
+                    constraints.locked_width = frame.size.width;
+                }
+            }
+        }
+
         let Some(workspace) = self.virtual_workspace_manager.workspaces.get_mut(workspace_id)
         else {
             return false;
@@ -1269,6 +1280,18 @@ impl LayoutEngine {
             self.floating.add_active(space, wid.pid, wid);
         } else if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
             if !self.workspace_tree(assigned_workspace).contains_window(layout, wid) {
+                if matches!(
+                    self.workspace_tree(assigned_workspace),
+                    LayoutSystemKind::Scrolling(_)
+                ) && self.layout_settings.scrolling.preserve_window_sizes
+                {
+                    if let (Some(window), Some(constraints)) = (
+                        window_store.window(wid),
+                        self.window_layout_constraints.get_mut(&wid),
+                    ) {
+                        constraints.locked_width = window.frame_monotonic.size.width;
+                    }
+                }
                 self.workspace_tree_mut(assigned_workspace)
                     .add_window_after_selection(layout, wid);
             }
@@ -1467,6 +1490,9 @@ impl LayoutEngine {
         screen_frame: CGRect,
         display_uuid: Option<&str>,
     ) {
+        if let Some(constraints) = self.window_layout_constraints.get_mut(&resize.window) {
+            constraints.locked_width = new_frame.size.width;
+        }
         let Some(layout) = self.workspace_layouts.active(resize.space, resize.workspace_id) else {
             return;
         };
@@ -1772,6 +1798,9 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
+                if let Some(constraints) = self.window_layout_constraints.get_mut(&wid) {
+                    constraints.locked_width = new_frame.size.width;
+                }
                 for (space, screen_frame, display_uuid) in screens.iter() {
                     let Some((ws_id, layout)) = self.workspace_and_layout(*space) else {
                         debug!(

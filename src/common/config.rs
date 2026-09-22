@@ -750,6 +750,7 @@ fn default_master_stack_ratio() -> f64 { 0.6 }
 fn default_master_stack_count() -> usize { 1 }
 
 fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
+fn default_true() -> bool { true }
 
 fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 
@@ -864,6 +865,9 @@ pub struct ScrollingLayoutSettings {
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
     pub column_width_ratio: f64,
+    /// Keep a window's existing column width when it enters scrolling layout.
+    #[serde(default = "default_true")]
+    pub preserve_window_sizes: bool,
     /// Minimum column width ratio allowed by resize commands.
     #[serde(default = "default_scrolling_min_column_width_ratio")]
     pub min_column_width_ratio: f64,
@@ -889,6 +893,7 @@ impl Default for ScrollingLayoutSettings {
             base: BaseLayoutSettings::default(),
             animate: None,
             column_width_ratio: default_scrolling_column_width_ratio(),
+            preserve_window_sizes: true,
             min_column_width_ratio: default_scrolling_min_column_width_ratio(),
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
             alignment: ScrollingAlignment::default(),
