@@ -307,8 +307,10 @@ pub fn handle_window_frame_changed(
         let tiled = !layout.layout_engine.is_window_floating(wid);
         if !drag.actor.update_native(wid, new_frame, new_space) {
             let session_id = drag.actor.await_native(wid);
-            drag.resize_screens = screens.clone().into();
             let native_resize = !old_frame.size.same_as(new_frame.size);
+            if tiled && native_resize {
+                drag.resize_screens = screens.clone().into();
+            }
             let scene = if tiled && !native_resize {
                 new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
                     crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)

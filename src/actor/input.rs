@@ -3,6 +3,8 @@
 use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -65,6 +67,7 @@ pub struct Input {
     mouse_location: Cell<CGPoint>,
     mouse_focus_publisher: reactor::MouseFocusPublisher,
     drag_motion_publisher: crate::actor::drag::DragMotionPublisher,
+    native_motion_active: Arc<AtomicBool>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     tap_generation: Cell<u64>,
     disable_hotkey: RefCell<Option<Hotkey>>,
@@ -281,6 +284,7 @@ impl Input {
         stack_line_tx: stack_line::Sender,
         mission_control_tx: super::mission_control::Sender,
         stack_line_hit_rects: stack_line::SharedHitRects,
+        native_motion_active: Arc<AtomicBool>,
     ) -> Self {
         let disable_hotkey = config
             .settings
@@ -312,6 +316,7 @@ impl Input {
             mouse_location: Cell::new(CGPoint::new(0.0, 0.0)),
             mouse_focus_publisher: reactor::MouseFocusPublisher::default(),
             drag_motion_publisher: crate::actor::drag::DragMotionPublisher::default(),
+            native_motion_active,
             tap: RefCell::new(None),
             tap_generation: Cell::new(0),
             disable_hotkey: RefCell::new(disable_hotkey),
@@ -594,13 +599,16 @@ impl Input {
                 } else {
                     crate::actor::drag::MouseButton::Right
                 };
-                let publisher = &self.drag_motion_publisher;
-                if publisher.publish(crate::actor::drag::DragMotion {
-                    point: CGEvent::location(Some(event)),
-                }) {
-                    self.events_tx.send(Event::DragMotionPending(publisher.clone()));
+                let captured = self.state.borrow().captured_button == Some(button);
+                if captured || self.native_motion_active.load(Ordering::Acquire) {
+                    let publisher = &self.drag_motion_publisher;
+                    if publisher.publish(crate::actor::drag::DragMotion {
+                        point: CGEvent::location(Some(event)),
+                    }) {
+                        self.events_tx.send(Event::DragMotionPending(publisher.clone()));
+                    }
                 }
-                self.state.borrow().captured_button != Some(button)
+                !captured
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let mut state = self.state.borrow_mut();
@@ -1193,6 +1201,7 @@ mod tests {
                 stack_tx,
                 mc_tx,
                 stack_line::new_shared_hit_rects(),
+                Arc::default(),
             ),
             wm_rx,
             events_rx,
@@ -1314,6 +1323,36 @@ mod tests {
         assert!(matches!(
             events_rx.try_recv().unwrap().1,
             Event::MouseUp(crate::actor::drag::MouseButton::Right)
+        ));
+    }
+
+    #[test]
+    fn drag_motion_publishes_only_for_captured_or_native_drags() {
+        let (input, _, mut events_rx) = input();
+        let event = CGEvent::new_mouse_event(
+            None,
+            CGEventType::LeftMouseDragged,
+            CGPoint::new(20.0, 30.0),
+            objc2_core_graphics::CGMouseButton::Left,
+        )
+        .unwrap();
+        assert!(input.on_event(CGEventType::LeftMouseDragged, &event));
+        assert!(events_rx.try_recv().is_err());
+
+        input.state.borrow_mut().captured_button = Some(crate::actor::drag::MouseButton::Left);
+        assert!(!input.on_event(CGEventType::LeftMouseDragged, &event));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::DragMotionPending(_)
+        ));
+        input.drag_motion_publisher.take_latest();
+
+        input.state.borrow_mut().captured_button = None;
+        input.native_motion_active.store(true, Ordering::Release);
+        assert!(input.on_event(CGEventType::LeftMouseDragged, &event));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::DragMotionPending(_)
         ));
     }
 

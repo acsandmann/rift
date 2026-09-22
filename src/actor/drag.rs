@@ -762,10 +762,50 @@ fn hit_test_available(
             }
         }
     }
-    scene
+    let intent_for = |target: &DragSceneTarget, point: CGPoint| {
+        let zone = classify_zone(target.frame, point, fraction)?;
+        Some(DropIntent {
+            window: target.window,
+            space: target.space,
+            frame: target.frame,
+            zone,
+            action: scene.action_override.unwrap_or_else(|| resolve_action(zone, center)),
+        })
+    };
+
+    for target in &scene.targets {
+        if contains(target.frame, point, 0.0)
+            && let Some(intent) = intent_for(target, point)
+            && !unavailable.contains(&(intent.window, intent.zone, intent.action))
+        {
+            return Some(intent);
+        }
+    }
+
+    let nearest = scene
         .targets
         .iter()
         .enumerate()
+        .filter(|(_, target)| target.frame.size.width > 0.0 && target.frame.size.height > 0.0);
+    if unavailable.is_empty() {
+        let (_, target) = nearest.min_by(|(a_order, a), (b_order, b)| {
+            distance_to_rect_squared(a.frame, point)
+                .total_cmp(&distance_to_rect_squared(b.frame, point))
+                .then_with(|| a_order.cmp(b_order))
+        })?;
+        let clamped = CGPoint::new(
+            point.x.clamp(
+                target.frame.origin.x,
+                target.frame.origin.x + target.frame.size.width,
+            ),
+            point.y.clamp(
+                target.frame.origin.y,
+                target.frame.origin.y + target.frame.size.height,
+            ),
+        );
+        return intent_for(target, clamped);
+    }
+    nearest
         .filter_map(|(order, target)| {
             let clamped = CGPoint::new(
                 point.x.clamp(
@@ -777,14 +817,7 @@ fn hit_test_available(
                     target.frame.origin.y + target.frame.size.height,
                 ),
             );
-            let zone = classify_zone(target.frame, clamped, fraction)?;
-            let intent = DropIntent {
-                window: target.window,
-                space: target.space,
-                frame: target.frame,
-                zone,
-                action: scene.action_override.unwrap_or_else(|| resolve_action(zone, center)),
-            };
+            let intent = intent_for(target, clamped)?;
             (!unavailable.contains(&(intent.window, intent.zone, intent.action))).then_some((
                 distance_to_rect_squared(target.frame, point),
                 order,
@@ -963,6 +996,30 @@ mod tests {
         assert_eq!(intent.window, nearest);
         assert!(actor.set_preview(intent, None));
         assert_eq!(actor.intent().unwrap().window, fallback);
+    }
+
+    #[test]
+    fn equidistant_outside_targets_keep_scene_order() {
+        let scene = DragScene {
+            action_override: None,
+            targets: vec![
+                DragSceneTarget {
+                    window: w(2),
+                    space: space(),
+                    frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0)),
+                },
+                DragSceneTarget {
+                    window: w(3),
+                    space: space(),
+                    frame: CGRect::new(CGPoint::new(200.0, 0.0), CGSize::new(100.0, 100.0)),
+                },
+            ],
+        };
+        let point = CGPoint::new(150.0, 50.0);
+        assert_eq!(
+            hit_test(&scene, point, 0.25, MouseDropAction::Swap, None).unwrap().window,
+            w(2)
+        );
     }
 
     #[test]

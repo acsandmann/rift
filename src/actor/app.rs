@@ -322,13 +322,47 @@ impl Debug for InteractiveFrameQueue {
 }
 
 impl InteractiveFrameQueue {
-    pub(crate) fn drain(&self) -> Vec<(WindowId, CGRect, bool, TransactionId)> {
+    pub(crate) fn drain_with(
+        &self,
+        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId),
+    ) {
         let mut frames = self.0.lock().unwrap();
         frames.wake_pending = false;
-        std::mem::take(&mut frames.latest)
-            .into_iter()
-            .map(|(wid, (frame, set_size, txid))| (wid, frame, set_size, txid))
-            .collect()
+        for (wid, (frame, set_size, txid)) in frames.latest.drain() {
+            consume(wid, frame, set_size, txid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_frame_tests {
+    use super::*;
+
+    #[test]
+    fn drain_keeps_capacity_and_rearms_one_wake_for_latest_frames() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let window = WindowId::new(1, 1);
+        let first = CGRect::new(CGPoint::new(1.0, 0.0), Default::default());
+        let latest = CGRect::new(CGPoint::new(2.0, 0.0), Default::default());
+        handle.interactive_frames.0.lock().unwrap().latest.reserve(8);
+        let capacity = handle.interactive_frames.0.lock().unwrap().latest.capacity();
+
+        handle.send_interactive_frame(window, first, false, TransactionId::default());
+        handle.send_interactive_frame(window, latest, true, TransactionId::default());
+        let (_, Request::InteractiveFramesPending(queue)) = rx.try_recv().unwrap() else {
+            panic!("expected one interactive frame wake");
+        };
+        assert!(rx.try_recv().is_err());
+        let mut received = Vec::new();
+        queue.drain_with(|wid, frame, set_size, _| received.push((wid, frame, set_size)));
+        assert_eq!(received, vec![(window, latest, true)]);
+        assert_eq!(queue.0.lock().unwrap().latest.capacity(), capacity);
+
+        handle.send_interactive_frame(window, first, false, TransactionId::default());
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Request::InteractiveFramesPending(_)
+        ));
     }
 }
 
@@ -759,8 +793,7 @@ impl State {
     }
 
     fn flush_all_frames(&mut self) {
-        let wids: Vec<WindowId> = self.pending_frames.keys().copied().collect();
-        for wid in wids {
+        while let Some(wid) = self.pending_frames.keys().next().copied() {
             if let Err(err) = self.flush_frames(wid) {
                 warn!(?wid, ?err, "Failed to apply animation frame");
             }
@@ -984,17 +1017,15 @@ impl State {
                 });
             }
             Request::InteractiveFramesPending(frames) => {
-                self.pending_frames.extend(frames.drain().into_iter().map(
-                    |(wid, frame, set_size, txid)| {
-                        (wid, PendingFrame {
-                            span: Span::current(),
-                            frame,
-                            set_size,
-                            txid,
-                            interactive: true,
-                        })
-                    },
-                ));
+                frames.drain_with(|wid, frame, set_size, txid| {
+                    self.pending_frames.insert(wid, PendingFrame {
+                        span: Span::current(),
+                        frame,
+                        set_size,
+                        txid,
+                        interactive: true,
+                    });
+                });
             }
             Request::SetWindowFrame(wid, desired, txid, _) => {
                 let elem = match self.window_mut(wid) {

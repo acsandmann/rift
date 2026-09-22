@@ -437,6 +437,7 @@ impl Reactor {
         stack_line_tx: stack_line::Sender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
+        native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> ReactorHandle {
         let (events_tx, events) = actor::channel();
         let events_tx_clone = events_tx.clone();
@@ -448,6 +449,7 @@ impl Reactor {
             window_notify,
             one_space,
         );
+        reactor.drag_manager.native_motion_active = native_motion_active;
         reactor.communication_manager.input_tx = Some(input_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
         reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
@@ -489,6 +491,7 @@ impl Reactor {
             pending_mouse_focus: None,
             drag_manager: managers::DragManager {
                 actor: crate::actor::drag::DragActor::new(config.settings.mouse),
+                native_motion_active: std::sync::Arc::default(),
                 externally_controlled_window: None,
                 resize_screens: std::sync::Arc::from([]),
                 preview: None,
@@ -1217,6 +1220,7 @@ impl Reactor {
             }
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
+        self.drag_manager.sync_motion_gate();
     }
 
     fn dispatch_workflow(&mut self, mut event: Event) -> anyhow::Result<EventOutcome> {
@@ -1827,15 +1831,17 @@ impl Reactor {
                     scene,
                 );
                 self.drag_manager.sync_preview();
-                self.drag_manager.resize_screens = self
-                    .space_state
-                    .screens
-                    .iter()
-                    .filter_map(|screen| {
-                        Some((screen.space?, screen.frame, screen.display_uuid_owned()))
-                    })
-                    .collect::<Vec<_>>()
-                    .into();
+                if tiled && action == crate::common::config::MouseAction::Resize {
+                    self.drag_manager.resize_screens = self
+                        .space_state
+                        .screens
+                        .iter()
+                        .filter_map(|screen| {
+                            Some((screen.space?, screen.frame, screen.display_uuid_owned()))
+                        })
+                        .collect::<Vec<_>>()
+                        .into();
+                }
                 if tiled && action == crate::common::config::MouseAction::Move {
                     self.drag_manager.externally_controlled_window = Some(window);
                 }
@@ -2438,7 +2444,11 @@ impl Reactor {
         // Some transitions need to place a window on its destination display
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
-        for write in outcome.pre_layout_window_frame_writes {
+        for write in outcome
+            .pre_layout_window_frame_writes
+            .into_iter()
+            .chain(outcome.interactive_window_frame_write)
+        {
             if write.coalesced && !self.drag_manager.actor.is_active() {
                 continue;
             }

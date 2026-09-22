@@ -40,6 +40,7 @@ pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
     let cancelled = drag.actor.cancel();
     drag.release_preview();
     drag.externally_controlled_window = None;
+    let resize_screens = std::mem::replace(&mut drag.resize_screens, std::sync::Arc::from([]));
     let Some(cancelled) = cancelled else {
         return EventOutcome::no_change();
     };
@@ -53,7 +54,7 @@ pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
                 wid: source.window,
                 old_frame: source.last_frame,
                 new_frame: source.origin_frame,
-                screens: drag.resize_screens.clone(),
+                screens: resize_screens,
             })
         }
         (
@@ -79,6 +80,7 @@ pub fn handle_mouse_up(
     drag.release_preview();
     let window = commit.source.window;
     drag.externally_controlled_window = None;
+    drag.resize_screens = std::sync::Arc::from([]);
     let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target

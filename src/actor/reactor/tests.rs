@@ -2257,12 +2257,25 @@ fn mission_control_enter_clears_active_drag_state() {
     reactor.ensure_active_drag(wid, &frame);
 
     assert!(reactor.drag_manager.actor.is_active());
+    reactor.drag_manager.sync_motion_gate();
+    assert!(
+        reactor
+            .drag_manager
+            .native_motion_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
 
     let (input_tx, _input_rx) = actor::channel();
     reactor.communication_manager.input_tx = Some(input_tx);
     reactor.handle_event(Event::MissionControlNativeEntered);
 
     assert!(!reactor.drag_manager.actor.is_active());
+    assert!(
+        !reactor
+            .drag_manager
+            .native_motion_active
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
     assert!(reactor.drag_manager.externally_controlled_window.is_none());
     assert!(reactor.drag_manager.preview_suppressed);
 
