@@ -44,7 +44,6 @@ pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
     pub native_motion_active: Arc<AtomicBool>,
     pub externally_controlled_window: Option<WindowId>,
-    pub resize_screens: Arc<[(crate::sys::screen::SpaceId, CGRect, Option<String>)]>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
     pub(super) preview_suppressed: bool,
@@ -55,10 +54,7 @@ impl DragManager {
         let active = self.actor.is_active()
             && matches!(
                 self.actor.kind(),
-                Some(
-                    crate::actor::drag::DragKind::NativeMove
-                        | crate::actor::drag::DragKind::NativeResize
-                )
+                Some(crate::actor::drag::DragKind::NativeMove)
             );
         self.native_motion_active.store(active, Ordering::Release);
     }
@@ -68,7 +64,6 @@ impl DragManager {
         self.sync_motion_gate();
         self.release_preview();
         self.externally_controlled_window = None;
-        self.resize_screens = Arc::from([]);
     }
 
     pub fn update_config(&mut self, config: MouseSettings) {

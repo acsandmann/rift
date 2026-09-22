@@ -170,11 +170,9 @@ pub struct WindowFrameChangedPayload {
     pub new_space: Option<SpaceId>,
     pub old_space_active: bool,
     pub new_space_active: bool,
-    pub active_resize_space: Option<SpaceId>,
     pub pending_target_space: Option<SpaceId>,
     pub assigned_space: Option<SpaceId>,
     pub keep_assigned_for_scrolling: bool,
-    pub screens: Vec<(SpaceId, CGRect, Option<String>)>,
 }
 
 pub enum FrameChangeDisposition {
@@ -264,11 +262,9 @@ pub fn handle_window_frame_changed(
         new_space,
         old_space_active,
         new_space_active,
-        active_resize_space,
         pending_target_space,
         assigned_space,
         keep_assigned_for_scrolling,
-        screens,
     } = payload;
     let mut outcome = EventOutcome::default();
     let Some(window) = state.windows.window(wid) else {
@@ -311,15 +307,20 @@ pub fn handle_window_frame_changed(
     }
 
     let dragging = mouse_state == Some(MouseState::Down) || drag.actor.is_active();
-    if dragging {
+    let resizing = !old_frame.size.same_as(new_frame.size);
+    if resizing {
+        if drag.actor.kind() == Some(crate::actor::drag::DragKind::NativeMove)
+            && drag.actor.source().is_some_and(|source| source.window == wid)
+        {
+            drag.reset();
+        }
+        // Native resize-to-layout behavior is intentionally deferred.
+        outcome = EventOutcome::no_change();
+    } else if dragging {
         let tiled = !layout.layout_engine.is_window_floating(wid);
         if !drag.actor.update_native(wid, new_frame, new_space) {
             let session_id = drag.actor.await_native(wid);
-            let native_resize = !old_frame.size.same_as(new_frame.size);
-            if tiled && native_resize {
-                drag.resize_screens = screens.clone().into();
-            }
-            let scene = if tiled && !native_resize {
+            let scene = if tiled {
                 new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
                     crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
                 })
@@ -340,19 +341,8 @@ pub fn handle_window_frame_changed(
             );
         }
         drag.sync_preview();
-        let native_resize = drag.actor.kind() == Some(crate::actor::drag::DragKind::NativeResize);
-        if tiled && !native_resize {
+        if tiled {
             drag.externally_controlled_window = Some(wid);
-        }
-        if native_resize {
-            if active_resize_space.is_some() {
-                outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
-                    wid,
-                    old_frame,
-                    new_frame,
-                    screens: drag.resize_screens.clone(),
-                });
-            }
         }
     } else {
         if old_space != new_space {
@@ -385,14 +375,6 @@ pub fn handle_window_frame_changed(
             } else if let Some(server) = server_id {
                 state.windows.set_window_server_space(server, None);
             }
-        } else if !old_frame.size.same_as(new_frame.size) && old_space_active {
-            outcome.arrange.is_resize = true;
-            outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
-                wid,
-                old_frame,
-                new_frame,
-                screens: screens.into(),
-            });
         }
     }
 

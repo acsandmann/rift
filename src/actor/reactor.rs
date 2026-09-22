@@ -493,7 +493,6 @@ impl Reactor {
                 actor: crate::actor::drag::DragActor::new(config.settings.mouse),
                 native_motion_active: std::sync::Arc::default(),
                 externally_controlled_window: None,
-                resize_screens: std::sync::Arc::from([]),
                 preview: None,
                 preview_enabled: config.settings.mouse.enabled && config.settings.mouse.preview,
                 preview_suppressed: false,
@@ -1628,11 +1627,6 @@ impl Reactor {
                 let new_space = self.geometry_space_for_window(&new_frame, server_id);
                 let old_space_active = old_space.is_some_and(|space| self.is_space_active(space));
                 let new_space_active = new_space.is_some_and(|space| self.is_space_active(space));
-                let best_resize_space = self.best_space_for_window(&new_frame, server_id);
-                let active_resize_space =
-                    best_resize_space.filter(|space| self.is_space_active(*space)).or_else(|| {
-                        server_id.is_none().then(|| self.workspace_command_space()).flatten()
-                    });
                 let pending_target_space = server_id
                     .and_then(|server| self.pending_target_space_for_window_server_id(server));
                 let assigned_space = self.assigned_space_for_window_id(wid);
@@ -1647,14 +1641,6 @@ impl Reactor {
                             .workspace_for_window(&self.state.windows, space, wid)
                             .is_some()
                 });
-                let screens = self
-                    .space_state
-                    .screens
-                    .iter()
-                    .filter_map(|screen| {
-                        Some((screen.space?, screen.frame, screen.display_uuid_owned()))
-                    })
-                    .collect();
                 let mut outcome = window_workflow::handle_window_frame_changed(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -1667,11 +1653,9 @@ impl Reactor {
                         new_space,
                         old_space_active,
                         new_space_active,
-                        active_resize_space,
                         pending_target_space,
                         assigned_space,
                         keep_assigned_for_scrolling,
-                        screens,
                     },
                 )?;
                 // Frame acknowledgements and no-op geometry changes can return

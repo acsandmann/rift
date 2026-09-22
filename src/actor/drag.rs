@@ -318,17 +318,17 @@ impl DragActor {
     }
 
     fn start_native_session(&mut self, source: DragSource, scene: DragScene) {
-        let resized = !source.origin_frame.size.same_as(source.last_frame.size);
-        let kind = if resized {
-            DragKind::NativeResize
-        } else {
-            DragKind::NativeMove
-        };
         let pointer = CGPoint::new(
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        self.state = State::Dragging(Session::new(source, MouseButton::Left, pointer, scene, kind));
+        self.state = State::Dragging(Session::new(
+            source,
+            MouseButton::Left,
+            pointer,
+            scene,
+            DragKind::NativeMove,
+        ));
     }
 
     /// Updates an existing native drag without rebuilding its immutable scene.
@@ -343,9 +343,7 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return false;
         };
-        if session.source.window != window
-            || !matches!(session.kind, DragKind::NativeMove | DragKind::NativeResize)
-        {
+        if session.source.window != window || session.kind != DragKind::NativeMove {
             return false;
         }
         session.source.last_frame = frame;
@@ -399,11 +397,10 @@ impl DragActor {
                     ),
                     session.source.origin_frame.size,
                 ),
-                DragKind::NativeMove | DragKind::NativeResize => unreachable!(),
+                DragKind::NativeMove => unreachable!(),
             };
         }
-        let next = if session.kind == DragKind::NativeResize
-            || !session.source.tiled
+        let next = if !session.source.tiled
             || session.source.origin_space != session.source.current_space
         {
             None
@@ -948,17 +945,6 @@ mod tests {
         let moved = frame(10.0, 0.0, 200.0, 100.0);
         let mut actor = native(false, moved, scene(rect()));
         motion(&mut actor, 100.0, 50.0);
-        assert!(actor.target().is_none());
-    }
-
-    #[test]
-    fn native_resize_never_uses_drop_targets() {
-        let mut resized = rect();
-        resized.size.width += 10.0;
-        let mut actor = native(true, resized, scene(rect()));
-        motion(&mut actor, 100.0, 50.0);
-        assert_eq!(actor.kind(), Some(DragKind::NativeResize));
-        assert!(actor.intent().is_none());
         assert!(actor.target().is_none());
     }
 

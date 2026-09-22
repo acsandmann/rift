@@ -72,7 +72,6 @@ pub fn handle_mouse_up(
     drag.release_preview();
     let window = commit.source.window;
     drag.externally_controlled_window = None;
-    drag.resize_screens = std::sync::Arc::from([]);
     let mut needs_layout = commit.source.tiled;
 
     if let Some(target) = commit.target
