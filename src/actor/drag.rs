@@ -47,7 +47,6 @@ struct ResizeEdges {
 #[derive(Debug, Clone, Copy)]
 pub struct DragMotion {
     pub point: CGPoint,
-    pub button: MouseButton,
 }
 
 /// Latest-value transport with at most one outstanding actor wake.
@@ -81,7 +80,6 @@ impl DragMotionPublisher {
 
 #[derive(Debug, Clone)]
 pub struct Session {
-    pub id: u64,
     pub source: DragSource,
     pub pointer: CGPoint,
     pub anchor_point: CGPoint,
@@ -94,13 +92,20 @@ pub struct Session {
     resize_edges: Option<ResizeEdges>,
 }
 
+impl Session {
+    fn invalidate_drop(&mut self) {
+        self.intent = None;
+        self.target = None;
+        self.unavailable.clear();
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum StartKind {
     Native {
         window: WindowId,
     },
     Modifier {
-        button: MouseButton,
         point: CGPoint,
         action: crate::common::config::MouseAction,
     },
@@ -175,9 +180,7 @@ impl DragActor {
             return false;
         }
         session.source.current_space = current_space;
-        session.intent = None;
-        session.target = None;
-        session.unavailable.clear();
+        session.invalidate_drop();
         true
     }
 
@@ -185,8 +188,9 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return;
         };
+        let previous = session.intent;
         session.scene = scene;
-        session.unavailable.clear();
+        session.invalidate_drop();
         if session.source.tiled
             && matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove)
             && session.source.origin_space == session.source.current_space
@@ -196,13 +200,9 @@ impl DragActor {
                 session.pointer,
                 self.settings.drop_zone_fraction,
                 self.settings.drop_action,
-                session.intent,
+                previous,
                 &session.unavailable,
             );
-            session.target = None;
-        } else {
-            session.intent = None;
-            session.target = None;
         }
     }
 
@@ -244,9 +244,7 @@ impl DragActor {
         if !settings.enabled {
             self.cancel();
         } else if semantics_changed && let State::Dragging(session) = &mut self.state {
-            session.intent = None;
-            session.target = None;
-            session.unavailable.clear();
+            session.invalidate_drop();
         }
     }
 
@@ -263,11 +261,10 @@ impl DragActor {
 
     pub fn await_modifier(
         &mut self,
-        button: MouseButton,
         point: CGPoint,
         action: crate::common::config::MouseAction,
     ) -> u64 {
-        self.await_start(StartKind::Modifier { button, point, action })
+        self.await_start(StartKind::Modifier { point, action })
     }
 
     /// Complete source resolution. Stale results are ignored by session id.
@@ -289,11 +286,11 @@ impl DragActor {
         };
         match pending.kind {
             StartKind::Native { window } if window == source.window => {
-                self.start_native_session(session_id, source, scene);
+                self.start_native_session(source, scene);
                 true
             }
             StartKind::Modifier { point, action, .. } => {
-                self.start_modifier_session(session_id, source, point, action, scene);
+                self.start_modifier_session(source, point, action, scene);
                 true
             }
             StartKind::Native { .. } => {
@@ -312,7 +309,7 @@ impl DragActor {
         let _ = self.resolve_start(id, Some(source), scene);
     }
 
-    fn start_native_session(&mut self, id: u64, source: DragSource, scene: DragScene) {
+    fn start_native_session(&mut self, source: DragSource, scene: DragScene) {
         let resized = !source.origin_frame.size.same_as(source.last_frame.size);
         let kind = if resized {
             DragKind::NativeResize
@@ -324,7 +321,6 @@ impl DragActor {
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
         self.state = State::Dragging(Box::new(Session {
-            id,
             source,
             pointer,
             anchor_point: pointer,
@@ -358,9 +354,7 @@ impl DragActor {
         session.source.last_frame = frame;
         if session.source.current_space != current_space {
             session.source.current_space = current_space;
-            session.intent = None;
-            session.target = None;
-            session.unavailable.clear();
+            session.invalidate_drop();
         }
         true
     }
@@ -373,13 +367,12 @@ impl DragActor {
         action: crate::common::config::MouseAction,
         scene: DragScene,
     ) {
-        let id = self.await_modifier(MouseButton::Left, point, action);
+        let id = self.await_modifier(point, action);
         let _ = self.resolve_start(id, Some(source), scene);
     }
 
     fn start_modifier_session(
         &mut self,
-        id: u64,
         source: DragSource,
         point: CGPoint,
         action: crate::common::config::MouseAction,
@@ -408,7 +401,6 @@ impl DragActor {
             crate::common::config::MouseAction::None => return,
         };
         self.state = State::Dragging(Box::new(Session {
-            id,
             source,
             pointer: point,
             anchor_point: point,
@@ -863,7 +855,6 @@ mod tests {
             assert_eq!(
                 publisher.publish(DragMotion {
                     point: CGPoint::new(x as f64, 0.0),
-                    button: MouseButton::Left
                 }),
                 x == 0
             );
@@ -873,7 +864,6 @@ mod tests {
         assert!(!publisher.wake_queued());
         assert!(publisher.publish(DragMotion {
             point: CGPoint::new(1_000.0, 0.0),
-            button: MouseButton::Left
         }));
     }
 
@@ -902,10 +892,7 @@ mod tests {
                 }],
             },
         );
-        assert!(actor.motion(DragMotion {
-            point: CGPoint::new(1.0, 50.0),
-            button: MouseButton::Left,
-        }));
+        assert!(actor.motion(DragMotion { point: CGPoint::new(1.0, 50.0) }));
         let intent = actor.intent().unwrap();
         assert_eq!(intent.action, WindowDropAction::Insert(Direction::Left));
         actor.set_preview(intent, Some(target_frame));
@@ -948,10 +935,7 @@ mod tests {
             },
             scene,
         );
-        actor.motion(DragMotion {
-            point: CGPoint::new(1.0, 50.0),
-            button: MouseButton::Left,
-        });
+        actor.motion(DragMotion { point: CGPoint::new(1.0, 50.0) });
         actor.set_preview(intent, None);
         assert!(actor.target().is_none());
         assert!(actor.finish().unwrap().target.is_none());
@@ -991,7 +975,6 @@ mod tests {
         );
         actor.motion(DragMotion {
             point: CGPoint::new(100.0, 50.0),
-            button: MouseButton::Left,
         });
         let intent = actor.intent().unwrap();
         assert_eq!(intent.window, nearest);
@@ -1056,7 +1039,6 @@ mod tests {
         );
         actor.motion(DragMotion {
             point: CGPoint::new(100.0, 50.0),
-            button: MouseButton::Left,
         });
         let intent = actor.intent().unwrap();
         actor.set_preview(intent, Some(rect()));
@@ -1108,7 +1090,6 @@ mod tests {
         );
         actor.motion(DragMotion {
             point: CGPoint::new(100.0, 50.0),
-            button: MouseButton::Left,
         });
         assert!(actor.target().is_none());
     }
@@ -1141,7 +1122,6 @@ mod tests {
         );
         actor.motion(DragMotion {
             point: CGPoint::new(30.0, 20.0),
-            button: MouseButton::Right,
         });
         let (_, _, resized, _, _) = actor.interactive_update().unwrap();
         assert_eq!(resized.origin, CGPoint::new(20.0, 10.0));
@@ -1178,7 +1158,6 @@ mod tests {
         );
         actor.motion(DragMotion {
             point: CGPoint::new(100.0, 50.0),
-            button: MouseButton::Left,
         });
         assert_eq!(actor.kind(), Some(DragKind::NativeResize));
         assert!(actor.intent().is_none());
@@ -1214,7 +1193,6 @@ mod tests {
         );
         actor.motion(DragMotion {
             point: CGPoint::new(100.0, 50.0),
-            button: MouseButton::Left,
         });
         let intent = actor.intent().unwrap();
         actor.set_preview(intent, Some(rect()));
@@ -1226,7 +1204,6 @@ mod tests {
         assert!(actor.target().is_none());
         actor.motion(DragMotion {
             point: CGPoint::new(100.0, 50.0),
-            button: MouseButton::Left,
         });
         assert!(actor.intent().is_none());
         assert!(actor.finish().unwrap().target.is_none());
@@ -1270,12 +1247,10 @@ mod tests {
         );
         actor.motion(DragMotion {
             point: CGPoint::new(190.5, 90.5),
-            button: MouseButton::Right,
         });
         assert!(actor.interactive_update().is_none());
         actor.motion(DragMotion {
             point: CGPoint::new(191.0, 90.5),
-            button: MouseButton::Right,
         });
         assert!(actor.interactive_update().is_some());
         assert!(actor.interactive_update().is_none());

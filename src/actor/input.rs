@@ -591,7 +591,6 @@ impl Input {
                 let publisher = &self.drag_motion_publisher;
                 if publisher.publish(crate::actor::drag::DragMotion {
                     point: CGEvent::location(Some(event)),
-                    button,
                 }) {
                     self.events_tx.send(Event::DragMotionPending(publisher.clone()));
                 }

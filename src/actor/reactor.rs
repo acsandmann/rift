@@ -1792,8 +1792,8 @@ impl Reactor {
                 }
                 return Ok(outcome);
             }
-            Event::ModifierMouseDown { button, point, action } => {
-                let session_id = self.drag_manager.actor.await_modifier(button, point, action);
+            Event::ModifierMouseDown { button: _, point, action } => {
+                let session_id = self.drag_manager.actor.await_modifier(point, action);
                 let Some(window) = self.window_id_under_cursor() else {
                     let _ = self.drag_manager.actor.resolve_start(
                         session_id,
