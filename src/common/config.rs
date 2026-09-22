@@ -602,7 +602,7 @@ pub struct MouseSettings {
     #[serde(default)]
     pub action1: MouseAction,
     /// Right-button action while the configured modifier is held.
-    #[serde(default)]
+    #[serde(default = "default_mouse_action_none")]
     pub action2: MouseAction,
     /// Center-zone action for tiled move drops.
     #[serde(default)]
@@ -737,6 +737,8 @@ pub struct MissionControlSettings {
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
 
 fn default_drop_zone_fraction() -> f64 { 0.25 }
+
+fn default_mouse_action_none() -> MouseAction { MouseAction::None }
 
 fn default_master_stack_ratio() -> f64 { 0.6 }
 

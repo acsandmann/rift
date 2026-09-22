@@ -1641,6 +1641,14 @@ impl Reactor {
                             .workspace_for_window(&self.state.windows, space, wid)
                             .is_some()
                 });
+                let screens = self
+                    .space_state
+                    .screens
+                    .iter()
+                    .filter_map(|screen| {
+                        Some((screen.space?, screen.frame, screen.display_uuid_owned()))
+                    })
+                    .collect();
                 let mut outcome = window_workflow::handle_window_frame_changed(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -1656,6 +1664,7 @@ impl Reactor {
                         pending_target_space,
                         assigned_space,
                         keep_assigned_for_scrolling,
+                        screens,
                     },
                 )?;
                 // Frame acknowledgements and no-op geometry changes can return
