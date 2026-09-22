@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
 /// N-ary tree.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tree<O> {
     pub map: NodeMap,
     pub data: O,
@@ -28,7 +28,7 @@ impl<O: Observer> Tree<O> {
 ///
 /// Multiple trees can be contained within a map. This also makes it easier
 /// to move branches between trees.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeMap {
     map: SlotMap<NodeId, Node>,
 }
@@ -61,7 +61,7 @@ impl IndexMut<NodeId> for NodeMap {
 ///
 /// Every `OwnedNode` has a name which will be used in the panic message.
 #[must_use]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnedNode(Option<NodeId>, String);
 
 impl OwnedNode {
@@ -407,7 +407,7 @@ impl<'a, O: Observer> Drop for ReattachedNode<'a, O> {
     }
 }
 
-#[derive(Default, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Node {
     parent: Option<NodeId>,
     prev_sibling: Option<NodeId>,

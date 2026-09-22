@@ -239,11 +239,15 @@ impl LayoutEngine {
         space: SpaceId,
         source: WindowId,
         target: WindowId,
+        target_frame: CGRect,
         action: crate::layout_engine::WindowDropAction,
         screen: CGRect,
         display_uuid: Option<&str>,
         stack_line: &crate::common::config::StackLineSettings,
     ) -> Option<CGRect> {
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return (source != target).then_some(target_frame);
+        }
         let Some(workspace) = self.active_workspace(space) else {
             return None;
         };

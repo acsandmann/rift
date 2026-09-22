@@ -55,6 +55,7 @@ fn verify_actions(
     target: WindowId,
 ) {
     for (action, zone) in ACTIONS {
+        let baseline_before = format!("{baseline:?}");
         let mut preview_copy = baseline.preview_clone().unwrap();
         let mut committed = baseline.preview_clone().unwrap();
         let preview_available = preview_copy.apply_window_drop(layout, source, target, action);
@@ -63,10 +64,20 @@ fn verify_actions(
             preview_available, committed_available,
             "availability differs for {action:?}"
         );
+        assert_eq!(
+            format!("{baseline:?}"),
+            baseline_before,
+            "preview mutated live layout"
+        );
         if !preview_available {
             continue;
         }
         let advertised = calculated_source(&preview_copy, layout, source);
+        assert_eq!(
+            format!("{baseline:?}"),
+            baseline_before,
+            "preview mutated live layout"
+        );
         let actual = calculated_source(&committed, layout, source);
         assert_eq!(advertised, actual, "preview differs for {action:?}");
 

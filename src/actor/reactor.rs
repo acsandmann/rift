@@ -3324,6 +3324,7 @@ impl Reactor {
                     intent.space,
                     source.window,
                     intent.window,
+                    intent.frame,
                     intent.action,
                     screen.frame,
                     screen.display_uuid_opt(),

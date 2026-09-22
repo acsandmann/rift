@@ -33,7 +33,7 @@ struct LayoutState {
     root: NodeId,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct BspLayoutSystem {
     layouts: slotmap::SlotMap<crate::layout_engine::LayoutId, LayoutState>,
     tree: Tree<Components>,
@@ -772,7 +772,7 @@ impl BspLayoutSystem {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 struct Components {
     selection: Selection,
 }

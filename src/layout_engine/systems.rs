@@ -569,16 +569,13 @@ pub enum LayoutSystemKind {
 
 impl LayoutSystemKind {
     pub(crate) fn preview_clone(&self) -> Option<Self> {
-        let mut cloned: Self = ron::from_str(&ron::to_string(self).ok()?).ok()?;
-        match (self, &mut cloned) {
-            (Self::MasterStack(source), Self::MasterStack(target)) => {
-                target.settings = source.settings.clone();
-            }
-            (Self::Scrolling(source), Self::Scrolling(target)) => {
-                target.settings = source.settings.clone();
-            }
-            _ => {}
+        match self {
+            Self::Traditional(system) => Some(Self::Traditional(system.clone())),
+            Self::Bsp(system) => Some(Self::Bsp(system.clone())),
+            Self::MasterStack(system) => Some(Self::MasterStack(system.clone())),
+            Self::Scrolling(system) => Some(Self::Scrolling(system.clone())),
+            Self::Stack(system) => Some(Self::Stack(system.clone())),
+            Self::Floating(_) => None,
         }
-        Some(cloned)
     }
 }

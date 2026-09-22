@@ -12,7 +12,7 @@ use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem,
 };
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct StackLayoutSystem {
     inner: TraditionalLayoutSystem,
     #[serde(default = "default_stack_orientation")]
