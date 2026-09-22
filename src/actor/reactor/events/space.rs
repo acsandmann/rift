@@ -388,6 +388,7 @@ pub fn handle_mission_control_native_entered(
     mission_control: &mut MissionControlManager,
     drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
+    drag.suppress_preview(true);
     drag.reset();
     let changed = !matches!(
         mission_control.mission_control_state,
@@ -404,7 +405,9 @@ pub fn handle_mission_control_native_entered(
 
 pub fn handle_mission_control_native_exited(
     mission_control: &mut MissionControlManager,
+    drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
+    drag.suppress_preview(false);
     let changed = matches!(
         mission_control.mission_control_state,
         MissionControlState::Active

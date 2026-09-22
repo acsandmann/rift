@@ -45,6 +45,7 @@ pub struct DragManager {
     pub resize_screens: Arc<[(crate::sys::screen::SpaceId, CGRect, Option<String>)]>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
     pub(super) preview_enabled: bool,
+    pub(super) preview_suppressed: bool,
 }
 
 impl DragManager {
@@ -71,7 +72,9 @@ impl DragManager {
         if cfg!(test) {
             return;
         }
-        let Some(target) = self.actor.target().filter(|_| self.preview_enabled) else {
+        let Some(target) =
+            self.actor.target().filter(|_| self.preview_enabled && !self.preview_suppressed)
+        else {
             self.hide_preview();
             return;
         };
@@ -93,6 +96,13 @@ impl DragManager {
     pub fn hide_preview(&mut self) {
         if let Some(preview) = &mut self.preview {
             preview.hide();
+        }
+    }
+
+    pub fn suppress_preview(&mut self, suppressed: bool) {
+        self.preview_suppressed = suppressed;
+        if suppressed {
+            self.hide_preview();
         }
     }
 }

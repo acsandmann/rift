@@ -15,9 +15,9 @@ use crate::sys::window_transaction::WindowTransaction;
 use crate::ui::common::with_disabled_actions;
 
 static FILL: LazyLock<Retained<CGColor>> =
-    LazyLock::new(|| CGColor::new_generic_rgb(0.12, 0.48, 1.0, 0.20).into());
+    LazyLock::new(|| CGColor::new_generic_rgb(0.13, 0.62, 1.0, 0.18).into());
 static BORDER: LazyLock<Retained<CGColor>> =
-    LazyLock::new(|| CGColor::new_generic_rgb(0.38, 0.72, 1.0, 0.92).into());
+    LazyLock::new(|| CGColor::new_generic_rgb(0.13, 0.62, 1.0, 0.95).into());
 static STACK_FILL: LazyLock<Retained<CGColor>> =
     LazyLock::new(|| CGColor::new_generic_rgb(0.34, 0.64, 1.0, 0.16).into());
 
@@ -157,6 +157,9 @@ impl DragPreview {
         }
 
         if ordering_changed {
+            if !self.visible {
+                self.window.set_alpha(1.0)?;
+            }
             self.window.order_above(Some(relative_window))?;
             self.relative_window = Some(relative_window);
         }
@@ -166,6 +169,7 @@ impl DragPreview {
 
     pub fn hide(&mut self) {
         if self.visible {
+            let _ = self.window.set_alpha(0.0);
             let _ = self.window.order_out();
             self.visible = false;
         }

@@ -493,6 +493,7 @@ impl Reactor {
                 resize_screens: std::sync::Arc::from([]),
                 preview: None,
                 preview_enabled: config.settings.mouse.enabled && config.settings.mouse.preview,
+                preview_suppressed: false,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
@@ -1942,6 +1943,7 @@ impl Reactor {
             Event::MissionControlNativeExited => {
                 return topology_workflow::handle_mission_control_native_exited(
                     &mut self.mission_control_manager,
+                    &mut self.drag_manager,
                 );
             }
             Event::RaiseCompleted { window_id, sequence_id } => {

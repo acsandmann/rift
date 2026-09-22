@@ -2264,6 +2264,10 @@ fn mission_control_enter_clears_active_drag_state() {
 
     assert!(!reactor.drag_manager.actor.is_active());
     assert!(reactor.drag_manager.externally_controlled_window.is_none());
+    assert!(reactor.drag_manager.preview_suppressed);
+
+    reactor.handle_event(Event::MissionControlNativeExited);
+    assert!(!reactor.drag_manager.preview_suppressed);
 }
 
 #[test]
