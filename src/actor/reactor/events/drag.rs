@@ -32,7 +32,38 @@ pub fn build_drag_scene(
 
 #[derive(Debug, Clone)]
 pub struct MouseUpPayload {
+    pub button: crate::actor::drag::MouseButton,
     pub final_space: Option<SpaceId>,
+}
+
+pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
+    let cancelled = drag.actor.cancel();
+    drag.hide_preview();
+    drag.externally_controlled_window = None;
+    let Some(cancelled) = cancelled else {
+        return EventOutcome::no_change();
+    };
+    let source = cancelled.source;
+    match (cancelled.kind, source.tiled) {
+        (crate::actor::drag::DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
+        (crate::actor::drag::DragKind::ModifierResize, true)
+            if source.last_frame != source.origin_frame =>
+        {
+            EventOutcome::layout_changed(false).with_layout_event(LayoutEvent::WindowResized {
+                wid: source.window,
+                old_frame: source.last_frame,
+                new_frame: source.origin_frame,
+                screens: drag.resize_screens.clone(),
+            })
+        }
+        (
+            crate::actor::drag::DragKind::ModifierMove
+            | crate::actor::drag::DragKind::ModifierResize,
+            false,
+        ) if source.last_frame != source.origin_frame => EventOutcome::no_change()
+            .with_pre_layout_window_frame_write(source.window, source.origin_frame, true),
+        _ => EventOutcome::no_change(),
+    }
 }
 
 pub fn handle_mouse_up(
@@ -42,10 +73,10 @@ pub fn handle_mouse_up(
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
-    drag.hide_preview();
-    let Some(commit) = drag.actor.finish() else {
+    let Some(commit) = drag.actor.finish(payload.button) else {
         return Ok(outcome);
     };
+    drag.hide_preview();
     let window = commit.source.window;
     drag.externally_controlled_window = None;
     let mut needs_layout = commit.source.tiled;
@@ -70,28 +101,26 @@ pub fn handle_mouse_up(
         if commit.source.origin_space.is_some() {
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
         }
-        if let Some(space) = payload.final_space {
-            if state.windows.window(window).is_some_and(WindowState::is_admitted) {
-                if let Some(server_id) =
-                    state.windows.window(window).and_then(|window| window.info.sys_id)
-                {
-                    state.windows.set_window_server_space(server_id, Some(space));
-                    state.windows.mark_window_visible(server_id);
-                }
-                if let Some(workspace) = layout.layout_engine.active_workspace(space)
-                    && !layout
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .assign_window_to_workspace(&mut state.windows, space, window, workspace)
-                {
-                    warn!(?window, ?workspace, "failed to assign dragged window");
-                }
-                outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
-            } else if commit.source.origin_space == payload.final_space {
-                // A transient child window may enter drag tracking before its AX admission is
-                // settled. Never let drag completion promote it into a tiled workspace.
-                outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
+        if let Some(space) = payload.final_space
+            && state.windows.window(window).is_some_and(WindowState::is_admitted)
+        {
+            if let Some(server_id) =
+                state.windows.window(window).and_then(|window| window.info.sys_id)
+            {
+                state.windows.set_window_server_space(server_id, Some(space));
+                state.windows.mark_window_visible(server_id);
             }
+            if let Some(workspace) = layout.layout_engine.active_workspace(space)
+                && !layout.layout_engine.virtual_workspace_manager_mut().assign_window_to_workspace(
+                    &mut state.windows,
+                    space,
+                    window,
+                    workspace,
+                )
+            {
+                warn!(?window, ?workspace, "failed to assign dragged window");
+            }
+            outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
         }
         needs_layout = true;
     }

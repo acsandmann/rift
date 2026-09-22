@@ -20,7 +20,7 @@ use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
     Left,
     Right,
@@ -81,6 +81,7 @@ impl DragMotionPublisher {
 #[derive(Debug, Clone)]
 pub struct Session {
     pub source: DragSource,
+    button: MouseButton,
     pub pointer: CGPoint,
     pub anchor_point: CGPoint,
     pub scene: DragScene,
@@ -106,6 +107,7 @@ pub enum StartKind {
         window: WindowId,
     },
     Modifier {
+        button: MouseButton,
         point: CGPoint,
         action: crate::common::config::MouseAction,
     },
@@ -261,10 +263,11 @@ impl DragActor {
 
     pub fn await_modifier(
         &mut self,
+        button: MouseButton,
         point: CGPoint,
         action: crate::common::config::MouseAction,
     ) -> u64 {
-        self.await_start(StartKind::Modifier { point, action })
+        self.await_start(StartKind::Modifier { button, point, action })
     }
 
     /// Complete source resolution. Stale results are ignored by session id.
@@ -289,8 +292,8 @@ impl DragActor {
                 self.start_native_session(source, scene);
                 true
             }
-            StartKind::Modifier { point, action, .. } => {
-                self.start_modifier_session(source, point, action, scene);
+            StartKind::Modifier { button, point, action } => {
+                self.start_modifier_session(source, button, point, action, scene);
                 true
             }
             StartKind::Native { .. } => {
@@ -322,6 +325,7 @@ impl DragActor {
         );
         self.state = State::Dragging(Box::new(Session {
             source,
+            button: MouseButton::Left,
             pointer,
             anchor_point: pointer,
             scene,
@@ -367,13 +371,14 @@ impl DragActor {
         action: crate::common::config::MouseAction,
         scene: DragScene,
     ) {
-        let id = self.await_modifier(point, action);
+        let id = self.await_modifier(MouseButton::Left, point, action);
         let _ = self.resolve_start(id, Some(source), scene);
     }
 
     fn start_modifier_session(
         &mut self,
         source: DragSource,
+        button: MouseButton,
         point: CGPoint,
         action: crate::common::config::MouseAction,
         scene: DragScene,
@@ -402,6 +407,7 @@ impl DragActor {
         };
         self.state = State::Dragging(Box::new(Session {
             source,
+            button,
             pointer: point,
             anchor_point: point,
             scene,
@@ -567,7 +573,10 @@ impl DragActor {
         session.source.last_frame = CGRect::new(origin, size);
     }
 
-    pub fn finish(&mut self) -> Option<DragCommit> {
+    pub fn finish(&mut self, button: MouseButton) -> Option<DragCommit> {
+        if !matches!(&self.state, State::Dragging(session) if session.button == button) {
+            return None;
+        }
         let State::Dragging(session) = std::mem::take(&mut self.state) else {
             return None;
         };
@@ -586,10 +595,7 @@ impl DragActor {
         };
         Some(DragCancel {
             source: session.source,
-            restore_origin: matches!(
-                session.kind,
-                DragKind::ModifierMove | DragKind::ModifierResize
-            ),
+            kind: session.kind,
         })
     }
 
@@ -899,10 +905,10 @@ mod tests {
         let preview = preview_frame(actor.target().unwrap());
         assert_eq!(preview.origin, CGPoint::new(104.0, 4.0));
         assert_eq!(preview.size, CGSize::new(92.0, 92.0));
-        let commit = actor.finish().unwrap();
+        let commit = actor.finish(MouseButton::Left).unwrap();
         assert_eq!(commit.source.window, source);
         assert_eq!(commit.target.unwrap().window, target);
-        assert!(actor.finish().is_none());
+        assert!(actor.finish(MouseButton::Left).is_none());
     }
 
     #[test]
@@ -938,7 +944,7 @@ mod tests {
         actor.motion(DragMotion { point: CGPoint::new(1.0, 50.0) });
         actor.set_preview(intent, None);
         assert!(actor.target().is_none());
-        assert!(actor.finish().unwrap().target.is_none());
+        assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
     }
 
     #[test]
@@ -1206,7 +1212,7 @@ mod tests {
             point: CGPoint::new(100.0, 50.0),
         });
         assert!(actor.intent().is_none());
-        assert!(actor.finish().unwrap().target.is_none());
+        assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
     }
 
     #[test]
@@ -1268,7 +1274,7 @@ mod tests {
         };
         let mut actor = DragActor::new(MouseSettings::default());
         actor.begin_native(source, DragScene::default());
-        assert!(!actor.cancel().unwrap().restore_origin);
+        assert_eq!(actor.cancel().unwrap().kind, DragKind::NativeMove);
 
         actor.begin_modifier(
             source,
@@ -1276,7 +1282,31 @@ mod tests {
             crate::common::config::MouseAction::Move,
             DragScene::default(),
         );
-        assert!(actor.cancel().unwrap().restore_origin);
+        assert_eq!(actor.cancel().unwrap().kind, DragKind::ModifierMove);
+    }
+
+    #[test]
+    fn only_the_owning_button_finishes_a_modifier_drag() {
+        let source = DragSource {
+            window: WindowId::new(1, 1),
+            origin_frame: rect(),
+            last_frame: rect(),
+            origin_space: Some(SpaceId::new(1)),
+            current_space: Some(SpaceId::new(1)),
+            tiled: true,
+        };
+        let mut actor = DragActor::new(MouseSettings::default());
+        let id = actor.await_modifier(
+            MouseButton::Left,
+            CGPoint::new(10.0, 10.0),
+            crate::common::config::MouseAction::Move,
+        );
+        assert!(actor.resolve_start(id, Some(source), DragScene::default()));
+
+        assert!(actor.finish(MouseButton::Right).is_none());
+        assert!(actor.is_active());
+        assert!(actor.finish(MouseButton::Left).is_some());
+        assert!(!actor.is_active());
     }
 
     #[test]

@@ -75,6 +75,5 @@ pub struct DragCommit {
 #[derive(Debug, Clone, Copy)]
 pub struct DragCancel {
     pub source: DragSource,
-    /// Rift must restore only frames that it moved itself.
-    pub restore_origin: bool,
+    pub kind: DragKind,
 }

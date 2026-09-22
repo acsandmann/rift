@@ -184,8 +184,14 @@ impl Input {
             mask |= (1u64 << CGEventType::LeftMouseDown.0) | (1u64 << CGEventType::LeftMouseUp.0);
         }
         if state.event_processing_enabled && state.mouse_features_enabled {
-            mask |= (1u64 << CGEventType::LeftMouseDragged.0)
-                | (1u64 << CGEventType::RightMouseDragged.0);
+            if state.mouse_settings.action1 != MouseAction::None {
+                mask |= (1u64 << CGEventType::LeftMouseDown.0)
+                    | (1u64 << CGEventType::LeftMouseDragged.0);
+            }
+            if state.mouse_settings.action2 != MouseAction::None {
+                mask |= (1u64 << CGEventType::RightMouseDown.0)
+                    | (1u64 << CGEventType::RightMouseDragged.0);
+            }
         }
         if state.swipe.is_some() || state.scroll.is_some() {
             mask |= gesture::EVENT_MASK;
@@ -656,7 +662,7 @@ impl Input {
                 };
                 let captured = self.state.borrow().captured_button == Some(button);
                 if self.state.borrow().mouse_features_enabled {
-                    self.events_tx.send(Event::MouseUp);
+                    self.events_tx.send(Event::MouseUp(button));
                 }
                 if captured {
                     self.state.borrow_mut().captured_button = None;
@@ -1209,8 +1215,15 @@ mod tests {
         );
         input.state.borrow_mut().mouse_features_enabled = true;
         let mouse_mask = input.desired_event_mask();
+        assert_ne!(mouse_mask & (1u64 << CGEventType::LeftMouseDown.0), 0);
+        assert_ne!(mouse_mask & (1u64 << CGEventType::RightMouseDown.0), 0);
         assert_ne!(mouse_mask & (1u64 << CGEventType::LeftMouseDragged.0), 0);
         assert_ne!(mouse_mask & (1u64 << CGEventType::RightMouseDragged.0), 0);
+        input.state.borrow_mut().mouse_settings.action2 = MouseAction::None;
+        let left_only_mask = input.desired_event_mask();
+        assert_ne!(left_only_mask & (1u64 << CGEventType::LeftMouseDown.0), 0);
+        assert_eq!(left_only_mask & (1u64 << CGEventType::RightMouseDown.0), 0);
+        assert_eq!(left_only_mask & (1u64 << CGEventType::RightMouseDragged.0), 0);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = false;
         input.state.borrow_mut().mouse_features_enabled = false;
         input.mission_control_active.set(true);
@@ -1267,9 +1280,41 @@ mod tests {
         assert!(events_rx.try_recv().is_err());
         input.state.borrow_mut().mouse_features_enabled = true;
         assert!(input.on_event(CGEventType::LeftMouseUp, &event));
-        assert!(matches!(events_rx.try_recv().unwrap().1, Event::MouseUp));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::MouseUp(crate::actor::drag::MouseButton::Left)
+        ));
         assert!(input.on_event(CGEventType::LeftMouseUp, &event));
-        assert!(matches!(events_rx.try_recv().unwrap().1, Event::MouseUp));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::MouseUp(crate::actor::drag::MouseButton::Left)
+        ));
+    }
+
+    #[test]
+    fn non_owning_release_does_not_clear_the_captured_button() {
+        let (input, _, mut events_rx) = input();
+        {
+            let mut state = input.state.borrow_mut();
+            state.mouse_features_enabled = true;
+            state.captured_button = Some(crate::actor::drag::MouseButton::Left);
+        }
+        let right_up = CGEvent::new_mouse_event(
+            None,
+            CGEventType::RightMouseUp,
+            CGPoint::new(20.0, 30.0),
+            objc2_core_graphics::CGMouseButton::Right,
+        )
+        .unwrap();
+        assert!(input.on_event(CGEventType::RightMouseUp, &right_up));
+        assert_eq!(
+            input.state.borrow().captured_button,
+            Some(crate::actor::drag::MouseButton::Left)
+        );
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::MouseUp(crate::actor::drag::MouseButton::Right)
+        ));
     }
 
     #[test]

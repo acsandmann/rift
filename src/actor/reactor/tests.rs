@@ -1438,7 +1438,10 @@ fn cross_display_drag_clears_source_floating_position() {
         &mut reactor.state,
         &mut reactor.layout_manager,
         &mut reactor.drag_manager,
-        crate::actor::reactor::events::drag::MouseUpPayload { final_space: Some(space2) },
+        crate::actor::reactor::events::drag::MouseUpPayload {
+            button: crate::actor::drag::MouseButton::Left,
+            final_space: Some(space2),
+        },
     )
     .unwrap();
     assert!(outcome.arrange.passes > 0);
@@ -1508,7 +1511,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
     ));
     assert!(reactor.drag_manager.actor.is_active());
     assert!(reactor.drag_manager.actor.target().is_none());
-    reactor.handle_event(Event::MouseUp);
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
 
     assert!(!reactor.drag_manager.actor.is_active());
     assert!(reactor.layout_manager.layout_engine.is_window_floating(floating_wid));
@@ -1521,6 +1524,67 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         stored.same_as(released_frame),
         "mouse-up must store where the window was released, not where the swap latched: {stored:?}"
     );
+}
+
+#[test]
+fn cancelling_tiled_modifier_drags_reconciles_move_and_rolls_back_resize() {
+    let (mut reactor, wid, _wsid, space, _space2, frame, _) =
+        reactor_with_window_on_space1_two_displays();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    let source = crate::actor::drag::DragSource {
+        window: wid,
+        origin_frame: frame,
+        last_frame: frame,
+        origin_space: Some(space),
+        current_space: Some(space),
+        tiled: true,
+    };
+
+    reactor.drag_manager.actor.begin_modifier(
+        source,
+        frame.mid(),
+        crate::common::config::MouseAction::Move,
+        crate::actor::drag::DragScene::default(),
+    );
+    reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
+    });
+    reactor.drag_manager.externally_controlled_window = Some(wid);
+    let move_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
+    assert!(move_cancel.arrange.passes > 0);
+    assert_eq!(reactor.drag_manager.externally_controlled_window, None);
+
+    reactor.drag_manager.actor.begin_modifier(
+        source,
+        frame.mid(),
+        crate::common::config::MouseAction::Resize,
+        crate::actor::drag::DragScene::default(),
+    );
+    reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y + 20.0),
+    });
+    let resized = reactor.drag_manager.actor.source().unwrap().last_frame;
+    let resize_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
+    assert!(matches!(
+        resize_cancel.layout_events.as_slice(),
+        [LayoutEvent::WindowResized { wid: event_wid, old_frame, new_frame, .. }]
+            if *event_wid == wid && old_frame.same_as(resized) && new_frame.same_as(frame)
+    ));
+
+    reactor.drag_manager.actor.begin_modifier(
+        source,
+        frame.mid(),
+        crate::common::config::MouseAction::Move,
+        crate::actor::drag::DragScene::default(),
+    );
+    reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
+        point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
+    });
+    let mut config = reactor.config.clone();
+    config.settings.mouse.enabled = false;
+    let config_cancel = reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
+    assert!(config_cancel.arrange.passes > 0);
+    assert!(!reactor.drag_manager.actor.is_active());
 }
 
 #[test]
@@ -2664,7 +2728,7 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
 
     // A real input event ends lifecycle suppression, so normal click/Dock
     // activation semantics continue to work after recovery.
-    reactor.handle_event(Event::MouseUp);
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
     reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
     assert_eq!(
         reactor.layout_manager.layout_engine.active_workspace_idx(space),

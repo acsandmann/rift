@@ -310,7 +310,7 @@ pub enum Event {
     MenuOpened(pid_t),
     MenuClosed(pid_t),
 
-    /// Left mouse button was released.
+    /// A mouse button was released.
     ///
     /// Layout changes are suppressed while the button is down so that they
     /// don't interfere with drags. This event is used to update the layout in
@@ -318,7 +318,7 @@ pub enum Event {
     ///
     /// FIXME: This can be interleaved incorrectly with the MouseState in app
     /// actor events.
-    MouseUp,
+    MouseUp(crate::actor::drag::MouseButton),
     /// A hover resolved by the reactor from the latest input position.
     MouseMoved(WindowServerId),
     /// Coalesced wake for the latest pointer position from the input thread.
@@ -1096,7 +1096,7 @@ impl Reactor {
     fn log_event(&self, event: &Event) {
         match event {
             Event::DragMotion(..) => {}
-            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(..) => {
+            Event::WindowFrameChanged(..) | Event::MouseUp(_) | Event::MouseMoved(..) => {
                 trace!(?event, "Event")
             }
             _ => debug!(?event, "Event"),
@@ -1232,7 +1232,10 @@ impl Reactor {
         // yields focus back to the pre-sleep application. Only real input makes
         // a subsequent activation a trustworthy request to follow an app to a
         // different virtual workspace.
-        if matches!(event, Event::MouseUp | Event::MouseMoved(_) | Event::Command(_)) {
+        if matches!(
+            event,
+            Event::MouseUp(_) | Event::MouseMoved(_) | Event::Command(_)
+        ) {
             self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = false;
         }
 
@@ -1774,26 +1777,10 @@ impl Reactor {
                 ));
             }
             Event::DragCancel => {
-                let cancelled = self.drag_manager.actor.cancel();
-                self.drag_manager.hide_preview();
-                self.drag_manager.externally_controlled_window = None;
-                let mut outcome = EventOutcome::no_change();
-                if let Some(cancelled) = cancelled
-                    && cancelled.restore_origin
-                    && let source = cancelled.source
-                    && !source.tiled
-                    && source.last_frame != source.origin_frame
-                {
-                    outcome = outcome.with_pre_layout_window_frame_write(
-                        source.window,
-                        source.origin_frame,
-                        true,
-                    );
-                }
-                return Ok(outcome);
+                return Ok(interaction_workflow::handle_cancel(&mut self.drag_manager));
             }
-            Event::ModifierMouseDown { button: _, point, action } => {
-                let session_id = self.drag_manager.actor.await_modifier(point, action);
+            Event::ModifierMouseDown { button, point, action } => {
+                let session_id = self.drag_manager.actor.await_modifier(button, point, action);
                 let Some(window) = self.window_id_under_cursor() else {
                     let _ = self.drag_manager.actor.resolve_start(
                         session_id,
@@ -1853,7 +1840,7 @@ impl Reactor {
                 }
                 return Ok(EventOutcome::no_change());
             }
-            Event::MouseUp => {
+            Event::MouseUp(button) => {
                 let final_space = self.drag_manager.actor.source().and_then(|source| {
                     let frame_space = || self.best_space_for_frame(&source.last_frame);
                     if self.drag_manager.actor.kind()
@@ -1876,7 +1863,7 @@ impl Reactor {
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.drag_manager,
-                    interaction_workflow::MouseUpPayload { final_space },
+                    interaction_workflow::MouseUpPayload { button, final_space },
                 )?;
                 if let Some((space, window)) = focused {
                     outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
@@ -2490,7 +2477,7 @@ impl Reactor {
             self.handle_layout_response(response, workspace_switch_space);
         }
         if outcome.dispatch_mouse_up {
-            self.handle_event(Event::MouseUp);
+            self.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
         }
 
         let mut layout_changed = false;
