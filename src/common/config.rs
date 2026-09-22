@@ -554,8 +554,6 @@ pub enum MouseAction {
     /// Move a window from anywhere inside it.
     #[default]
     Move,
-    /// Resize a window from the corner nearest the initial pointer position.
-    Resize,
 }
 
 /// Action used when a tiled window is released in another tile's center zone.
@@ -569,11 +567,11 @@ pub enum MouseDropAction {
     Stack,
 }
 
-/// Mouse-driven window movement, resizing, and tiled-window drop settings.
+/// Mouse-driven window movement and tiled-window drop settings.
 ///
 /// Native title-bar dragging continues to work normally. Holding [`Self::modifier`]
 /// reserves `action1` for the left button and `action2` for the right button, so
-/// a window can be moved or resized from anywhere inside it. Floating windows
+/// a window can be moved from anywhere inside it. Floating windows
 /// remain floating. A tiled destination is divided into five local zones: its center
 /// performs [`Self::drop_action`], while its edges insert the source on that side.
 /// Dragging to an edge of the source's vacated tile performs the matching MoveNode command.
@@ -586,7 +584,7 @@ pub enum MouseDropAction {
 /// enabled = true
 /// modifier = "fn"
 /// action1 = "move"
-/// action2 = "resize"
+/// action2 = "none"
 /// drop_action = "swap"
 /// drop_zone_fraction = 0.25
 /// preview = true
@@ -604,7 +602,7 @@ pub struct MouseSettings {
     #[serde(default)]
     pub action1: MouseAction,
     /// Right-button action while the configured modifier is held.
-    #[serde(default = "default_mouse_action2")]
+    #[serde(default)]
     pub action2: MouseAction,
     /// Center-zone action for tiled move drops.
     #[serde(default)]
@@ -625,7 +623,7 @@ impl Default for MouseSettings {
             enabled: true,
             modifier: MouseModifier::Fn,
             action1: MouseAction::Move,
-            action2: MouseAction::Resize,
+            action2: MouseAction::None,
             drop_action: MouseDropAction::Swap,
             drop_zone_fraction: default_drop_zone_fraction(),
             preview: true,
@@ -737,8 +735,6 @@ pub struct MissionControlSettings {
 }
 
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
-
-fn default_mouse_action2() -> MouseAction { MouseAction::Resize }
 
 fn default_drop_zone_fraction() -> f64 { 0.25 }
 

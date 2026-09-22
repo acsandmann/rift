@@ -27,24 +27,6 @@ pub enum MouseButton {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum HorizontalEdge {
-    West,
-    East,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum VerticalEdge {
-    North,
-    South,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ResizeEdges {
-    horizontal: HorizontalEdge,
-    vertical: VerticalEdge,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct DragMotion {
     pub point: CGPoint,
 }
@@ -88,8 +70,6 @@ pub struct Session {
     target: TargetState,
     unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
     pub kind: DragKind,
-    last_effect_frame: CGRect,
-    resize_edges: Option<ResizeEdges>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -124,7 +104,6 @@ impl Session {
         pointer: CGPoint,
         scene: DragScene,
         kind: DragKind,
-        resize_edges: Option<ResizeEdges>,
     ) -> Self {
         Self {
             source,
@@ -135,8 +114,6 @@ impl Session {
             target: TargetState::None,
             unavailable: Vec::new(),
             kind,
-            last_effect_frame: source.last_frame,
-            resize_edges,
         }
     }
 
@@ -351,14 +328,7 @@ impl DragActor {
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
             source.last_frame.origin.y + source.last_frame.size.height / 2.0,
         );
-        self.state = State::Dragging(Session::new(
-            source,
-            MouseButton::Left,
-            pointer,
-            scene,
-            kind,
-            None,
-        ));
+        self.state = State::Dragging(Session::new(source, MouseButton::Left, pointer, scene, kind));
     }
 
     /// Updates an existing native drag without rebuilding its immutable scene.
@@ -406,29 +376,11 @@ impl DragActor {
         action: MouseAction,
         scene: DragScene,
     ) {
-        let resize_edges = (action == MouseAction::Resize).then(|| ResizeEdges {
-            horizontal: if point.x
-                < source.origin_frame.origin.x + source.origin_frame.size.width / 2.0
-            {
-                HorizontalEdge::West
-            } else {
-                HorizontalEdge::East
-            },
-            vertical: if point.y
-                < source.origin_frame.origin.y + source.origin_frame.size.height / 2.0
-            {
-                VerticalEdge::North
-            } else {
-                VerticalEdge::South
-            },
-        });
         let kind = match action {
             MouseAction::Move => DragKind::ModifierMove,
-            MouseAction::Resize => DragKind::ModifierResize,
             MouseAction::None => return,
         };
-        self.state =
-            State::Dragging(Session::new(source, button, point, scene, kind, resize_edges));
+        self.state = State::Dragging(Session::new(source, button, point, scene, kind));
     }
 
     pub fn motion(&mut self, motion: DragMotion) -> bool {
@@ -436,7 +388,7 @@ impl DragActor {
             return false;
         };
         session.pointer = motion.point;
-        if matches!(session.kind, DragKind::ModifierMove | DragKind::ModifierResize) {
+        if session.kind == DragKind::ModifierMove {
             let dx = motion.point.x - session.anchor_point.x;
             let dy = motion.point.y - session.anchor_point.y;
             session.source.last_frame = match session.kind {
@@ -447,42 +399,10 @@ impl DragActor {
                     ),
                     session.source.origin_frame.size,
                 ),
-                DragKind::ModifierResize => {
-                    let edges = session.resize_edges.expect("resize session has fixed edges");
-                    let mut origin = session.source.origin_frame.origin;
-                    let mut size = session.source.origin_frame.size;
-                    match edges.horizontal {
-                        HorizontalEdge::West => {
-                            origin.x += dx;
-                            size.width -= dx;
-                        }
-                        HorizontalEdge::East => size.width += dx,
-                    }
-                    match edges.vertical {
-                        VerticalEdge::North => {
-                            origin.y += dy;
-                            size.height -= dy;
-                        }
-                        VerticalEdge::South => size.height += dy,
-                    }
-                    if size.width < 1.0 {
-                        if matches!(edges.horizontal, HorizontalEdge::West) {
-                            origin.x -= 1.0 - size.width;
-                        }
-                        size.width = 1.0;
-                    }
-                    if size.height < 1.0 {
-                        if matches!(edges.vertical, VerticalEdge::North) {
-                            origin.y -= 1.0 - size.height;
-                        }
-                        size.height = 1.0;
-                    }
-                    CGRect::new(origin, size)
-                }
                 DragKind::NativeMove | DragKind::NativeResize => unreachable!(),
             };
         }
-        let next = if matches!(session.kind, DragKind::NativeResize | DragKind::ModifierResize)
+        let next = if session.kind == DragKind::NativeResize
             || !session.source.tiled
             || session.source.origin_space != session.source.current_space
         {
@@ -505,70 +425,12 @@ impl DragActor {
         changed
     }
 
-    pub fn interactive_update(&mut self) -> Option<(WindowId, CGRect, CGRect, MouseAction, bool)> {
+    pub fn interactive_update(&mut self) -> Option<(WindowId, CGRect)> {
         let State::Dragging(session) = &mut self.state else {
             return None;
         };
-        let action = match session.kind {
-            DragKind::ModifierMove => MouseAction::Move,
-            DragKind::ModifierResize => MouseAction::Resize,
-            DragKind::NativeMove | DragKind::NativeResize => return None,
-        };
-        if action == MouseAction::Resize && session.source.tiled {
-            let previous = session.last_effect_frame;
-            let next = session.source.last_frame;
-            let materially_changed = (previous.origin.x - next.origin.x).abs() >= 1.0
-                || (previous.origin.y - next.origin.y).abs() >= 1.0
-                || (previous.size.width - next.size.width).abs() >= 1.0
-                || (previous.size.height - next.size.height).abs() >= 1.0;
-            if !materially_changed {
-                return None;
-            }
-            session.last_effect_frame = next;
-        }
-        Some((
-            session.source.window,
-            session.source.origin_frame,
-            session.source.last_frame,
-            action,
-            session.source.tiled,
-        ))
-    }
-
-    pub fn constrain_resize(
-        &mut self,
-        min_size: Option<objc2_core_foundation::CGSize>,
-        max_size: Option<objc2_core_foundation::CGSize>,
-    ) {
-        let State::Dragging(session) = &mut self.state else {
-            return;
-        };
-        if session.kind != DragKind::ModifierResize {
-            return;
-        }
-        let Some(edges) = session.resize_edges else { return };
-        let old = session.source.last_frame;
-        let mut size = old.size;
-        if let Some(min) = min_size {
-            size.width = size.width.max(min.width);
-            size.height = size.height.max(min.height);
-        }
-        if let Some(max) = max_size {
-            if max.width > 0.0 {
-                size.width = size.width.min(max.width);
-            }
-            if max.height > 0.0 {
-                size.height = size.height.min(max.height);
-            }
-        }
-        let mut origin = old.origin;
-        if matches!(edges.horizontal, HorizontalEdge::West) {
-            origin.x = old.origin.x + old.size.width - size.width;
-        }
-        if matches!(edges.vertical, VerticalEdge::North) {
-            origin.y = old.origin.y + old.size.height - size.height;
-        }
-        session.source.last_frame = CGRect::new(origin, size);
+        (session.kind == DragKind::ModifierMove)
+            .then_some((session.source.window, session.source.last_frame))
     }
 
     pub fn finish(&mut self, button: MouseButton) -> Option<DragCommit> {
@@ -1090,24 +952,6 @@ mod tests {
     }
 
     #[test]
-    fn modifier_resize_keeps_the_opposite_corner_fixed() {
-        let mut actor = DragActor::new(MouseSettings::default());
-        actor.begin_modifier(
-            source(true),
-            point(10.0, 10.0),
-            MouseAction::Resize,
-            scene(rect()),
-        );
-        motion(&mut actor, 30.0, 20.0);
-        let (_, _, resized, _, _) = actor.interactive_update().unwrap();
-        assert_eq!(resized.origin, CGPoint::new(20.0, 10.0));
-        assert_eq!(resized.size, CGSize::new(180.0, 90.0));
-        assert_eq!(resized.origin.x + resized.size.width, 200.0);
-        assert_eq!(resized.origin.y + resized.size.height, 100.0);
-        assert!(actor.intent().is_none());
-    }
-
-    #[test]
     fn native_resize_never_uses_drop_targets() {
         let mut resized = rect();
         resized.size.width += 10.0;
@@ -1144,22 +988,6 @@ mod tests {
             let intent = hit_test(&scene, point, 0.25, MouseDropAction::Stack, None).unwrap();
             assert_eq!(intent.action, WindowDropAction::Swap);
         }
-    }
-
-    #[test]
-    fn tiled_resize_ignores_sub_point_motion() {
-        let mut actor = DragActor::new(MouseSettings::default());
-        actor.begin_modifier(
-            source(true),
-            point(190.0, 90.0),
-            MouseAction::Resize,
-            DragScene::default(),
-        );
-        for (point, updates) in [((190.5, 90.5), false), ((191.0, 90.5), true)] {
-            motion(&mut actor, point.0, point.1);
-            assert_eq!(actor.interactive_update().is_some(), updates);
-        }
-        assert!(actor.interactive_update().is_none());
     }
 
     #[test]

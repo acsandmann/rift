@@ -1222,6 +1222,7 @@ mod tests {
             input.desired_event_mask(),
             stable_release_mask | (1u64 << CGEventType::MouseMoved.0)
         );
+        input.state.borrow_mut().mouse_settings.action2 = MouseAction::Move;
         input.state.borrow_mut().mouse_features_enabled = true;
         let mouse_mask = input.desired_event_mask();
         assert_ne!(mouse_mask & (1u64 << CGEventType::LeftMouseDown.0), 0);

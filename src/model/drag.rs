@@ -9,7 +9,6 @@ pub enum DragKind {
     NativeMove,
     NativeResize,
     ModifierMove,
-    ModifierResize,
 }
 
 #[derive(Debug, Clone, Copy)]

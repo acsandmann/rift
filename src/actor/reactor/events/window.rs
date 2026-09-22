@@ -286,6 +286,14 @@ pub fn handle_window_frame_changed(
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
     }
+    // An adjusted acknowledgement of our own frame write is not a new native drag.
+    if matches!(
+        drag.actor.kind(),
+        Some(crate::actor::drag::DragKind::ModifierMove)
+    ) && drag.actor.source().is_some_and(|source| source.window == wid)
+    {
+        return Ok(EventOutcome::no_change());
+    }
     outcome = EventOutcome::layout_changed(false);
 
     // External moves as well as resizes are authoritative for floating layouts.

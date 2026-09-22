@@ -1527,7 +1527,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
 }
 
 #[test]
-fn cancelling_tiled_modifier_drags_reconciles_move_and_rolls_back_resize() {
+fn cancelling_tiled_modifier_move_reconciles_layout() {
     let (mut reactor, wid, _wsid, space, _space2, frame, _) =
         reactor_with_window_on_space1_two_displays();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
@@ -1553,23 +1553,6 @@ fn cancelling_tiled_modifier_drags_reconciles_move_and_rolls_back_resize() {
     let move_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
     assert!(move_cancel.arrange.passes > 0);
     assert_eq!(reactor.drag_manager.externally_controlled_window, None);
-
-    reactor.drag_manager.actor.begin_modifier(
-        source,
-        frame.mid(),
-        crate::common::config::MouseAction::Resize,
-        crate::actor::drag::DragScene::default(),
-    );
-    reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
-        point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y + 20.0),
-    });
-    let resized = reactor.drag_manager.actor.source().unwrap().last_frame;
-    let resize_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
-    assert!(matches!(
-        resize_cancel.layout_events.as_slice(),
-        [LayoutEvent::WindowResized { wid: event_wid, old_frame, new_frame, .. }]
-            if *event_wid == wid && old_frame.same_as(resized) && new_frame.same_as(frame)
-    ));
 
     reactor.drag_manager.actor.begin_modifier(
         source,

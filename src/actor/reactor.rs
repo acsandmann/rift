@@ -1750,36 +1750,14 @@ impl Reactor {
                         intent_changed |= self.drag_manager.actor.motion(motion);
                     }
                 }
-                if let Some(source) = self.drag_manager.actor.source()
-                    && let Some(window) = self.state.windows.window(source.window)
-                {
-                    self.drag_manager
-                        .actor
-                        .constrain_resize(window.info.min_size, window.info.max_size);
-                }
                 if intent_changed {
                     self.resolve_drag_preview();
                 }
-                let Some((window, old_frame, new_frame, action, tiled)) =
-                    self.drag_manager.actor.interactive_update()
-                else {
+                let Some((window, new_frame)) = self.drag_manager.actor.interactive_update() else {
                     return Ok(EventOutcome::no_change());
                 };
-                if action == crate::common::config::MouseAction::Resize && tiled {
-                    return Ok(EventOutcome::layout_changed(false).with_layout_event(
-                        LayoutEvent::WindowResized {
-                            wid: window,
-                            old_frame,
-                            new_frame,
-                            screens: self.drag_manager.resize_screens.clone(),
-                        },
-                    ));
-                }
-                return Ok(EventOutcome::no_change().with_interactive_window_frame_write(
-                    window,
-                    new_frame,
-                    action == crate::common::config::MouseAction::Resize,
-                ));
+                return Ok(EventOutcome::no_change()
+                    .with_interactive_window_frame_write(window, new_frame, false));
             }
             Event::DragCancel => {
                 return Ok(interaction_workflow::handle_cancel(&mut self.drag_manager));
@@ -1822,17 +1800,6 @@ impl Reactor {
                     scene,
                 );
                 self.drag_manager.sync_preview();
-                if tiled && action == crate::common::config::MouseAction::Resize {
-                    self.drag_manager.resize_screens = self
-                        .space_state
-                        .screens
-                        .iter()
-                        .filter_map(|screen| {
-                            Some((screen.space?, screen.frame, screen.display_uuid_owned()))
-                        })
-                        .collect::<Vec<_>>()
-                        .into();
-                }
                 if tiled && action == crate::common::config::MouseAction::Move {
                     self.drag_manager.externally_controlled_window = Some(window);
                 }
