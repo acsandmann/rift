@@ -227,8 +227,12 @@ impl BspLayoutSystem {
 
     fn unindex_window(&mut self, wid: WindowId) { self.window_to_node.remove(&wid); }
 
-    fn node_for_window(&self, wid: WindowId) -> Option<NodeId> {
-        self.window_to_node.get(&wid).copied()
+    fn node_for_window_in_layout(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
+        let root = self.layouts.get(layout)?.root;
+        root.traverse_preorder(&self.tree.map).find(|&node| {
+            matches!(self.kind.get(node), Some(NodeKind::Leaf { window: Some(w), .. }) if *w == wid)
+                || self.stacks.get(&node).is_some_and(|stack| stack.contains(&wid))
+        })
     }
 
     fn node_for_window_mut(&mut self, wid: WindowId) -> Option<NodeId> {
@@ -474,7 +478,7 @@ impl BspLayoutSystem {
     }
 
     fn remove_window_internal(&mut self, layout: crate::layout_engine::LayoutId, wid: WindowId) {
-        if let Some(node_id) = self.node_for_window_mut(wid) {
+        if let Some(node_id) = self.node_for_window_in_layout(layout, wid) {
             if let Some(state) = self.layouts.get(layout).copied() {
                 if !self.belongs_to_layout(state, node_id) {
                     return;
@@ -812,6 +816,21 @@ mod tests {
 
         assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Left), Some(w(2)));
+    }
+
+    #[test]
+    fn shared_window_remains_present_in_each_layout() {
+        let mut system = BspLayoutSystem::default();
+        let first = system.create_layout();
+        let second = system.create_layout();
+        system.add_window_after_selection(first, w(1));
+        system.add_window_after_selection(second, w(1));
+
+        assert!(system.contains_window(first, w(1)));
+        assert!(system.contains_window(second, w(1)));
+        system.set_windows_for_app(first, w(1).pid, vec![w(1)]);
+        assert_eq!(system.all_windows_in_layout(first), vec![w(1)]);
+        assert_eq!(system.all_windows_in_layout(second), vec![w(1)]);
     }
 
     #[test]
@@ -1265,7 +1284,7 @@ impl LayoutSystem for BspLayoutSystem {
         if !self.contains_window(layout, window) {
             return Vec::new();
         }
-        self.node_for_window(window)
+        self.node_for_window_in_layout(layout, window)
             .and_then(|node| self.stacks.get(&node))
             .cloned()
             .unwrap_or_default()
@@ -1424,7 +1443,7 @@ impl LayoutSystem for BspLayoutSystem {
         };
         let delta = reconcile_app_membership(pid, current, desired);
         for wid in delta.removals {
-            if let Some(node) = self.node_for_window(wid)
+            if let Some(node) = self.node_for_window_in_layout(layout, wid)
                 && let Some(NodeKind::Leaf {
                     fullscreen,
                     fullscreen_within_gaps,
@@ -1442,16 +1461,11 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        if let Some(node) = self.node_for_window(wid) {
-            if let Some(state) = self.layouts.get(layout).copied() {
-                return self.belongs_to_layout(state, node);
-            }
-        }
-        false
+        self.node_for_window_in_layout(layout, wid).is_some()
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-        if let Some(node) = self.node_for_window_mut(wid) {
+        if let Some(node) = self.node_for_window_in_layout(layout, wid) {
             if let Some(state) = self.layouts.get(layout).copied() {
                 let belongs = self.belongs_to_layout(state, node);
                 if belongs {
@@ -1481,7 +1495,7 @@ impl LayoutSystem for BspLayoutSystem {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     ) {
-        if let Some(node) = self.node_for_window_mut(wid) {
+        if let Some(node) = self.node_for_window_in_layout(layout, wid) {
             if let Some(state) = self.layouts.get(layout).copied() {
                 if !self.belongs_to_layout(state, node) {
                     return;
