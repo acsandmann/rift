@@ -755,90 +755,120 @@ impl LayoutSystem for MasterStackLayoutSystem {
             return false;
         };
         let windows = self.windows_in_layout_by_container(layout);
-        let Some(focused_idx) = windows.iter().position(|&window| window == focused_wid) else {
+        let Some(focused_idx) = windows.iter().position(|&w| w == focused_wid) else {
             return false;
         };
+
         let in_master = focused_idx < self.settings.master_count;
-        let axis = if in_master {
+        let container_axis = if in_master {
             self.master_orientation()
         } else {
             self.stack_orientation()
         };
+
         let (towards_master, towards_stack) = match self.settings.master_side {
             MasterStackSide::Left => (direction == Direction::Left, direction == Direction::Right),
             MasterStackSide::Right => (direction == Direction::Right, direction == Direction::Left),
             MasterStackSide::Top => (direction == Direction::Up, direction == Direction::Down),
             MasterStackSide::Bottom => (direction == Direction::Down, direction == Direction::Up),
         };
-        let master_first = self.master_first();
-        let parallel = direction.orientation() == axis;
-        let mut reordered = windows.clone();
+
+        let is_master_first = self.master_first();
+        let mut new_windows = windows.clone();
+
+        // Check if movement direction is parallel to container's axis
+        let is_parallel = direction.orientation() == container_axis;
 
         if towards_master && !in_master {
-            let border = if master_first {
+            let border_idx = if is_master_first {
                 self.settings.master_count
             } else {
                 windows.len() - 1
             };
-            if !parallel || focused_idx == border {
-                let target = if master_first {
+            let at_border = !is_parallel || (focused_idx == border_idx);
+            if at_border {
+                let target_border_idx = if is_master_first {
                     self.settings.master_count - 1
                 } else {
                     0
                 };
-                reordered.swap(focused_idx, target);
-                self.apply_window_order(layout, &reordered);
+                new_windows.swap(focused_idx, target_border_idx);
+                self.apply_window_order(layout, &new_windows);
                 return true;
             }
         }
+
         if towards_stack && in_master {
-            let border = if master_first {
+            let border_idx = if is_master_first {
                 self.settings.master_count - 1
             } else {
                 0
             };
-            if !parallel || focused_idx == border {
-                if windows.len() > self.settings.master_count {
-                    let target = if master_first {
+            let at_border = !is_parallel || (focused_idx == border_idx);
+            if at_border {
+                let has_stack_windows = windows.len() > self.settings.master_count;
+                if has_stack_windows {
+                    let target_border_idx = if is_master_first {
                         self.settings.master_count
                     } else {
                         windows.len() - 1
                     };
-                    reordered.swap(focused_idx, target);
+                    new_windows.swap(focused_idx, target_border_idx);
                 } else {
-                    reordered.remove(focused_idx);
-                    let target = self.settings.master_count.min(reordered.len());
-                    reordered.insert(target, focused_wid);
+                    new_windows.remove(focused_idx);
+                    let target_idx = self.settings.master_count.min(new_windows.len());
+                    new_windows.insert(target_idx, focused_wid);
                 }
-                self.apply_window_order(layout, &reordered);
+                self.apply_window_order(layout, &new_windows);
                 return true;
             }
         }
-        if !parallel {
+
+        if direction.orientation() != container_axis {
             return false;
         }
-        let neighbor = match direction {
-            Direction::Left | Direction::Up
-                if focused_idx > usize::from(!in_master) * self.settings.master_count =>
-            {
-                Some(focused_idx - 1)
-            }
-            Direction::Right | Direction::Down
-                if focused_idx + 1
-                    < if in_master {
-                        self.settings.master_count
+
+        // Reordering within the same container
+        let neighbor_idx = match direction {
+            Direction::Left | Direction::Up => {
+                if in_master {
+                    if focused_idx > 0 {
+                        Some(focused_idx - 1)
                     } else {
-                        windows.len()
-                    } =>
-            {
-                Some(focused_idx + 1)
+                        None
+                    }
+                } else {
+                    if focused_idx > self.settings.master_count {
+                        Some(focused_idx - 1)
+                    } else {
+                        None
+                    }
+                }
             }
-            _ => None,
+            Direction::Right | Direction::Down => {
+                if in_master {
+                    if focused_idx + 1 < self.settings.master_count {
+                        Some(focused_idx + 1)
+                    } else {
+                        None
+                    }
+                } else {
+                    if focused_idx + 1 < windows.len() {
+                        Some(focused_idx + 1)
+                    } else {
+                        None
+                    }
+                }
+            }
         };
-        let Some(neighbor) = neighbor else { return false };
-        reordered.swap(focused_idx, neighbor);
-        self.apply_window_order(layout, &reordered);
-        true
+
+        if let Some(target) = neighbor_idx {
+            new_windows.swap(focused_idx, target);
+            self.apply_window_order(layout, &new_windows);
+            true
+        } else {
+            false
+        }
     }
 
     fn apply_window_drop(

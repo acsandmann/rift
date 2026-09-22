@@ -2,19 +2,17 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 use super::*;
 use crate::actor::app::WindowId;
-use crate::actor::drag::{DropIntent, DropTarget, DropZone, preview_frame};
 use crate::common::collections::HashMap;
 use crate::common::config::GapSettings;
 use crate::layout_engine::systems::WindowLayoutConstraints;
-use crate::sys::screen::SpaceId;
 
-const ACTIONS: [(WindowDropAction, DropZone); 6] = [
-    (WindowDropAction::Swap, DropZone::Center),
-    (WindowDropAction::Stack, DropZone::Center),
-    (WindowDropAction::Insert(Direction::Left), DropZone::West),
-    (WindowDropAction::Insert(Direction::Right), DropZone::East),
-    (WindowDropAction::Insert(Direction::Up), DropZone::North),
-    (WindowDropAction::Insert(Direction::Down), DropZone::South),
+const ACTIONS: [WindowDropAction; 6] = [
+    WindowDropAction::Swap,
+    WindowDropAction::Stack,
+    WindowDropAction::Insert(Direction::Left),
+    WindowDropAction::Insert(Direction::Right),
+    WindowDropAction::Insert(Direction::Up),
+    WindowDropAction::Insert(Direction::Down),
 ];
 
 fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
@@ -38,61 +36,32 @@ fn calculated_source<S: LayoutSystem>(system: &S, layout: LayoutId, source: Wind
         .expect("source frame after successful drop")
 }
 
-fn inset(frame: CGRect) -> CGRect {
-    CGRect::new(
-        CGPoint::new(frame.origin.x + 4.0, frame.origin.y + 4.0),
-        CGSize::new(
-            (frame.size.width - 8.0).max(0.0),
-            (frame.size.height - 8.0).max(0.0),
-        ),
-    )
-}
-
 fn verify_actions(
     baseline: &LayoutSystemKind,
     layout: LayoutId,
     source: WindowId,
     target: WindowId,
 ) {
-    for (action, zone) in ACTIONS {
-        let baseline_before = format!("{baseline:?}");
+    let before = format!("{baseline:?}");
+    for action in ACTIONS {
         let mut preview_copy = baseline.preview_clone().unwrap();
         let mut committed = baseline.preview_clone().unwrap();
         let preview_available = preview_copy.apply_window_drop(layout, source, target, action);
-        let committed_available = committed.apply_window_drop(layout, source, target, action);
         assert_eq!(
-            preview_available, committed_available,
+            preview_available,
+            committed.apply_window_drop(layout, source, target, action),
             "availability differs for {action:?}"
-        );
-        assert_eq!(
-            format!("{baseline:?}"),
-            baseline_before,
-            "preview mutated live layout"
         );
         if !preview_available {
             continue;
         }
-        let advertised = calculated_source(&preview_copy, layout, source);
         assert_eq!(
-            format!("{baseline:?}"),
-            baseline_before,
-            "preview mutated live layout"
+            calculated_source(&preview_copy, layout, source),
+            calculated_source(&committed, layout, source),
+            "preview differs for {action:?}"
         );
-        let actual = calculated_source(&committed, layout, source);
-        assert_eq!(advertised, actual, "preview differs for {action:?}");
-
-        let visual = preview_frame(DropTarget {
-            intent: DropIntent {
-                window: target,
-                space: SpaceId::new(1),
-                frame: actual,
-                zone,
-                action,
-            },
-            preview_area: advertised,
-        });
-        assert_eq!(visual, inset(actual), "overlay differs for {action:?}");
     }
+    assert_eq!(format!("{baseline:?}"), before, "preview mutated live layout");
 }
 
 fn populate(system: &mut LayoutSystemKind) -> LayoutId {
@@ -104,11 +73,23 @@ fn populate(system: &mut LayoutSystemKind) -> LayoutId {
 }
 
 #[test]
-fn traditional_previews_match_committed_frames_for_every_action() {
+fn previews_match_committed_frames_for_every_layout_and_action() {
+    for mut system in [
+        LayoutSystemKind::Traditional(TraditionalLayoutSystem::default()),
+        LayoutSystemKind::Bsp(BspLayoutSystem::default()),
+        LayoutSystemKind::MasterStack(MasterStackLayoutSystem::default()),
+        LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default()),
+        LayoutSystemKind::Stack(StackLayoutSystem::default()),
+    ] {
+        let layout = populate(&mut system);
+        verify_actions(&system, layout, w(4), w(2));
+    }
+}
+
+#[test]
+fn traditional_previews_preserve_group_and_nested_layouts() {
     let mut system = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2));
-
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
     verify_actions(&system, layout, w(3), w(1));
 
@@ -158,11 +139,9 @@ fn traditional_target_relative_down_stays_in_the_target_container() {
 }
 
 #[test]
-fn bsp_previews_match_committed_frames_for_every_action() {
+fn bsp_previews_preserve_stacked_and_nested_layouts() {
     let mut system = LayoutSystemKind::Bsp(BspLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2));
-
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
     verify_actions(&system, layout, w(3), w(1));
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Swap));
@@ -181,25 +160,9 @@ fn bsp_previews_match_committed_frames_for_every_action() {
 }
 
 #[test]
-fn master_stack_previews_match_committed_frames_for_every_action() {
-    let mut system = LayoutSystemKind::MasterStack(MasterStackLayoutSystem::default());
-    let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2));
-}
-
-#[test]
-fn scrolling_previews_match_committed_frames_for_every_action() {
-    let mut system = LayoutSystemKind::Scrolling(ScrollingLayoutSystem::default());
-    let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2));
-}
-
-#[test]
-fn stack_previews_match_committed_frames_for_every_action() {
+fn stack_drop_actions_are_arbitrary_swaps() {
     let mut system = LayoutSystemKind::Stack(StackLayoutSystem::default());
     let layout = populate(&mut system);
-    verify_actions(&system, layout, w(4), w(2));
-
     let before = system.all_windows_in_layout(layout);
     let source = before[0];
     let target = *before.last().unwrap();

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use objc2_core_foundation::{CGPoint, CGRect};
 
 use crate::actor::app::WindowId;
-use crate::common::config::{MouseDropAction, MouseSettings};
+use crate::common::config::{MouseAction, MouseDropAction, MouseSettings};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
@@ -132,7 +132,7 @@ pub enum StartKind {
     Modifier {
         button: MouseButton,
         point: CGPoint,
-        action: crate::common::config::MouseAction,
+        action: MouseAction,
     },
 }
 
@@ -282,7 +282,7 @@ impl DragActor {
         &mut self,
         button: MouseButton,
         point: CGPoint,
-        action: crate::common::config::MouseAction,
+        action: MouseAction,
     ) -> u64 {
         self.await_start(StartKind::Modifier { button, point, action })
     }
@@ -384,7 +384,7 @@ impl DragActor {
         &mut self,
         source: DragSource,
         point: CGPoint,
-        action: crate::common::config::MouseAction,
+        action: MouseAction,
         scene: DragScene,
     ) {
         let id = self.await_modifier(MouseButton::Left, point, action);
@@ -396,30 +396,29 @@ impl DragActor {
         source: DragSource,
         button: MouseButton,
         point: CGPoint,
-        action: crate::common::config::MouseAction,
+        action: MouseAction,
         scene: DragScene,
     ) {
-        let resize_edges =
-            (action == crate::common::config::MouseAction::Resize).then(|| ResizeEdges {
-                horizontal: if point.x
-                    < source.origin_frame.origin.x + source.origin_frame.size.width / 2.0
-                {
-                    HorizontalEdge::West
-                } else {
-                    HorizontalEdge::East
-                },
-                vertical: if point.y
-                    < source.origin_frame.origin.y + source.origin_frame.size.height / 2.0
-                {
-                    VerticalEdge::North
-                } else {
-                    VerticalEdge::South
-                },
-            });
+        let resize_edges = (action == MouseAction::Resize).then(|| ResizeEdges {
+            horizontal: if point.x
+                < source.origin_frame.origin.x + source.origin_frame.size.width / 2.0
+            {
+                HorizontalEdge::West
+            } else {
+                HorizontalEdge::East
+            },
+            vertical: if point.y
+                < source.origin_frame.origin.y + source.origin_frame.size.height / 2.0
+            {
+                VerticalEdge::North
+            } else {
+                VerticalEdge::South
+            },
+        });
         let kind = match action {
-            crate::common::config::MouseAction::Move => DragKind::ModifierMove,
-            crate::common::config::MouseAction::Resize => DragKind::ModifierResize,
-            crate::common::config::MouseAction::None => return,
+            MouseAction::Move => DragKind::ModifierMove,
+            MouseAction::Resize => DragKind::ModifierResize,
+            MouseAction::None => return,
         };
         self.state = State::Dragging(Box::new(Session {
             source,
@@ -441,22 +440,22 @@ impl DragActor {
         };
         session.pointer = motion.point;
         let action = match session.kind {
-            DragKind::ModifierMove => Some(crate::common::config::MouseAction::Move),
-            DragKind::ModifierResize => Some(crate::common::config::MouseAction::Resize),
+            DragKind::ModifierMove => Some(MouseAction::Move),
+            DragKind::ModifierResize => Some(MouseAction::Resize),
             DragKind::NativeMove | DragKind::NativeResize => None,
         };
         if let Some(action) = action {
             let dx = motion.point.x - session.anchor_point.x;
             let dy = motion.point.y - session.anchor_point.y;
             session.source.last_frame = match action {
-                crate::common::config::MouseAction::Move => CGRect::new(
+                MouseAction::Move => CGRect::new(
                     CGPoint::new(
                         session.source.origin_frame.origin.x + dx,
                         session.source.origin_frame.origin.y + dy,
                     ),
                     session.source.origin_frame.size,
                 ),
-                crate::common::config::MouseAction::Resize => {
+                MouseAction::Resize => {
                     let edges = session.resize_edges.expect("resize session has fixed edges");
                     let mut origin = session.source.origin_frame.origin;
                     let mut size = session.source.origin_frame.size;
@@ -488,7 +487,7 @@ impl DragActor {
                     }
                     CGRect::new(origin, size)
                 }
-                crate::common::config::MouseAction::None => session.source.origin_frame,
+                MouseAction::None => session.source.origin_frame,
             };
         }
         let next = if matches!(session.kind, DragKind::NativeResize | DragKind::ModifierResize)
@@ -513,24 +512,16 @@ impl DragActor {
         changed
     }
 
-    pub fn interactive_update(
-        &mut self,
-    ) -> Option<(
-        WindowId,
-        CGRect,
-        CGRect,
-        crate::common::config::MouseAction,
-        bool,
-    )> {
+    pub fn interactive_update(&mut self) -> Option<(WindowId, CGRect, CGRect, MouseAction, bool)> {
         let State::Dragging(session) = &mut self.state else {
             return None;
         };
         let action = match session.kind {
-            DragKind::ModifierMove => crate::common::config::MouseAction::Move,
-            DragKind::ModifierResize => crate::common::config::MouseAction::Resize,
+            DragKind::ModifierMove => MouseAction::Move,
+            DragKind::ModifierResize => MouseAction::Resize,
             DragKind::NativeMove | DragKind::NativeResize => return None,
         };
-        if action == crate::common::config::MouseAction::Resize && session.source.tiled {
+        if action == MouseAction::Resize && session.source.tiled {
             let previous = session.last_effect_frame;
             let next = session.source.last_frame;
             let materially_changed = (previous.origin.x - next.origin.x).abs() >= 1.0
@@ -685,35 +676,20 @@ pub fn classify_zone(frame: CGRect, point: CGPoint, fraction: f64) -> Option<Dro
 }
 
 fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
-    let x = frame.origin.x;
-    let y = frame.origin.y;
-    let w = frame.size.width;
-    let h = frame.size.height;
-    match zone {
-        DropZone::Center => CGRect::new(
-            CGPoint::new(x + w * fraction, y + h * fraction),
-            objc2_core_foundation::CGSize::new(
-                w * (1.0 - 2.0 * fraction),
-                h * (1.0 - 2.0 * fraction),
-            ),
+    let (x, y, width, height) = match zone {
+        DropZone::Center => (fraction, fraction, 1.0 - 2.0 * fraction, 1.0 - 2.0 * fraction),
+        DropZone::West => (0.0, 0.0, fraction, 1.0),
+        DropZone::East => (1.0 - fraction, 0.0, fraction, 1.0),
+        DropZone::North => (0.0, 0.0, 1.0, fraction),
+        DropZone::South => (0.0, 1.0 - fraction, 1.0, fraction),
+    };
+    CGRect::new(
+        CGPoint::new(
+            frame.origin.x + frame.size.width * x,
+            frame.origin.y + frame.size.height * y,
         ),
-        DropZone::West => CGRect::new(
-            CGPoint::new(x, y),
-            objc2_core_foundation::CGSize::new(w * fraction, h),
-        ),
-        DropZone::East => CGRect::new(
-            CGPoint::new(x + w * (1.0 - fraction), y),
-            objc2_core_foundation::CGSize::new(w * fraction, h),
-        ),
-        DropZone::North => CGRect::new(
-            CGPoint::new(x, y),
-            objc2_core_foundation::CGSize::new(w, h * fraction),
-        ),
-        DropZone::South => CGRect::new(
-            CGPoint::new(x, y + h * (1.0 - fraction)),
-            objc2_core_foundation::CGSize::new(w, h * fraction),
-        ),
-    }
+        objc2_core_foundation::CGSize::new(frame.size.width * width, frame.size.height * height),
+    )
 }
 
 pub fn resolve_action(zone: DropZone, center: MouseDropAction) -> WindowDropAction {
@@ -853,9 +829,20 @@ mod tests {
 
     use super::*;
 
-    fn rect() -> CGRect { CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(200.0, 100.0)) }
+    fn frame(x: f64, y: f64, width: f64, height: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+    }
+    fn point(x: f64, y: f64) -> CGPoint { CGPoint::new(x, y) }
+    fn rect() -> CGRect { frame(0.0, 0.0, 200.0, 100.0) }
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
     fn space() -> SpaceId { SpaceId::new(1) }
+    fn target(idx: u32, frame: CGRect) -> DragSceneTarget {
+        DragSceneTarget {
+            window: w(idx),
+            space: space(),
+            frame,
+        }
+    }
     fn source(tiled: bool) -> DragSource {
         DragSource {
             window: w(1),
@@ -869,12 +856,14 @@ mod tests {
     fn scene(frame: CGRect) -> DragScene {
         DragScene {
             action_override: None,
-            targets: vec![DragSceneTarget {
-                window: w(2),
-                space: space(),
-                frame,
-            }],
+            targets: vec![target(2, frame)],
         }
+    }
+    fn scene_with(targets: Vec<DragSceneTarget>) -> DragScene {
+        DragScene { action_override: None, targets }
+    }
+    fn motion(actor: &mut DragActor, x: f64, y: f64) -> bool {
+        actor.motion(DragMotion { point: point(x, y) })
     }
     fn native(tiled: bool, last_frame: CGRect, scene: DragScene) -> DragActor {
         let mut source = source(tiled);
@@ -883,15 +872,15 @@ mod tests {
         actor.begin_native(source, scene);
         actor
     }
-    fn modifier(action: crate::common::config::MouseAction, tiled: bool) -> DragActor {
+    fn modifier(action: MouseAction, tiled: bool) -> DragActor {
         let mut actor = DragActor::new(MouseSettings::default());
-        actor.begin_modifier(source(tiled), CGPoint::new(100.0, 50.0), action, scene(rect()));
+        actor.begin_modifier(source(tiled), point(100.0, 50.0), action, scene(rect()));
         actor
     }
 
     #[test]
     fn classifies_target_local_center_and_edges() {
-        for (point, zone) in [
+        for (coords, zone) in [
             ((100., 50.), DropZone::Center),
             ((1., 50.), DropZone::West),
             ((199., 50.), DropZone::East),
@@ -903,7 +892,7 @@ mod tests {
             ((200., 100.), DropZone::East),
         ] {
             assert_eq!(
-                classify_zone(rect(), CGPoint::new(point.0, point.1), 0.25),
+                classify_zone(rect(), point(coords.0, coords.1), 0.25),
                 Some(zone)
             );
         }
@@ -911,7 +900,42 @@ mod tests {
             resolve_action(DropZone::South, MouseDropAction::Swap),
             WindowDropAction::Insert(Direction::Down),
         );
-        assert_eq!(classify_zone(rect(), CGPoint::new(-1.0, 50.0), 0.25), None);
+        assert_eq!(classify_zone(rect(), point(-1.0, 50.0), 0.25), None);
+    }
+
+    #[test]
+    fn target_zones_keep_their_local_frames() {
+        let target = frame(10.0, 20.0, 200.0, 100.0);
+        for (zone, expected) in [
+            (DropZone::Center, frame(60.0, 45.0, 100.0, 50.0)),
+            (DropZone::West, frame(10.0, 20.0, 50.0, 100.0)),
+            (DropZone::East, frame(160.0, 20.0, 50.0, 100.0)),
+            (DropZone::North, frame(10.0, 20.0, 200.0, 25.0)),
+            (DropZone::South, frame(10.0, 95.0, 200.0, 25.0)),
+        ] {
+            assert_eq!(zone_frame(target, zone, 0.25), expected);
+        }
+    }
+
+    #[test]
+    fn preview_inset_clamps_small_tiles() {
+        let intent = hit_test(
+            &scene(rect()),
+            point(100.0, 50.0),
+            0.25,
+            MouseDropAction::Swap,
+            None,
+        )
+        .unwrap();
+        for (area, expected) in [
+            (rect(), frame(4.0, 4.0, 192.0, 92.0)),
+            (frame(10.0, 20.0, 6.0, 6.0), frame(14.0, 24.0, 0.0, 0.0)),
+        ] {
+            assert_eq!(
+                preview_frame(DropTarget { intent, preview_area: area }),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -935,10 +959,10 @@ mod tests {
 
     #[test]
     fn native_tiled_move_targets_pointer_zone_and_commits_once() {
-        let target_frame = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(100.0, 100.0));
-        let moved = CGRect::new(CGPoint::new(10.0, 0.0), rect().size);
+        let target_frame = frame(100.0, 0.0, 100.0, 100.0);
+        let moved = frame(10.0, 0.0, 200.0, 100.0);
         let mut actor = native(true, moved, scene(target_frame));
-        assert!(actor.motion(DragMotion { point: CGPoint::new(1.0, 50.0) }));
+        assert!(motion(&mut actor, 1.0, 50.0));
         let intent = actor.intent().unwrap();
         assert_eq!(intent.action, WindowDropAction::Insert(Direction::Left));
         actor.set_preview(intent, Some(target_frame));
@@ -953,17 +977,9 @@ mod tests {
 
     #[test]
     fn unavailable_preview_does_not_expose_a_target() {
-        let scene = scene(rect());
-        let intent = hit_test(
-            &scene,
-            CGPoint::new(1.0, 50.0),
-            0.25,
-            MouseDropAction::Swap,
-            None,
-        )
-        .unwrap();
-        let mut actor = native(true, rect(), scene);
-        actor.motion(DragMotion { point: CGPoint::new(1.0, 50.0) });
+        let mut actor = native(true, rect(), scene(rect()));
+        motion(&mut actor, 1.0, 50.0);
+        let intent = actor.intent().unwrap();
         actor.set_preview(intent, None);
         assert!(actor.target().is_none());
         assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
@@ -973,25 +989,12 @@ mod tests {
     fn unavailable_nearest_target_falls_back_to_the_next_target() {
         let nearest = w(2);
         let fallback = w(3);
-        let scene = DragScene {
-            action_override: None,
-            targets: vec![
-                DragSceneTarget {
-                    window: nearest,
-                    space: space(),
-                    frame: rect(),
-                },
-                DragSceneTarget {
-                    window: fallback,
-                    space: space(),
-                    frame: CGRect::new(CGPoint::new(220.0, 0.0), rect().size),
-                },
-            ],
-        };
+        let scene = scene_with(vec![
+            target(2, rect()),
+            target(3, frame(220.0, 0.0, 200.0, 100.0)),
+        ]);
         let mut actor = native(true, rect(), scene);
-        actor.motion(DragMotion {
-            point: CGPoint::new(100.0, 50.0),
-        });
+        motion(&mut actor, 100.0, 50.0);
         let intent = actor.intent().unwrap();
         assert_eq!(intent.window, nearest);
         assert!(actor.set_preview(intent, None));
@@ -1000,22 +1003,11 @@ mod tests {
 
     #[test]
     fn equidistant_outside_targets_keep_scene_order() {
-        let scene = DragScene {
-            action_override: None,
-            targets: vec![
-                DragSceneTarget {
-                    window: w(2),
-                    space: space(),
-                    frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0)),
-                },
-                DragSceneTarget {
-                    window: w(3),
-                    space: space(),
-                    frame: CGRect::new(CGPoint::new(200.0, 0.0), CGSize::new(100.0, 100.0)),
-                },
-            ],
-        };
-        let point = CGPoint::new(150.0, 50.0);
+        let scene = scene_with(vec![
+            target(2, frame(0.0, 0.0, 100.0, 100.0)),
+            target(3, frame(200.0, 0.0, 100.0, 100.0)),
+        ]);
+        let point = point(150.0, 50.0);
         assert_eq!(
             hit_test(&scene, point, 0.25, MouseDropAction::Swap, None).unwrap().window,
             w(2)
@@ -1025,44 +1017,21 @@ mod tests {
     #[test]
     fn overlapping_targets_prefer_scene_order() {
         let visible = w(2);
-        let overlapping = w(3);
-        let scene = DragScene {
-            action_override: None,
-            targets: vec![
-                DragSceneTarget {
-                    window: visible,
-                    space: space(),
-                    frame: rect(),
-                },
-                DragSceneTarget {
-                    window: overlapping,
-                    space: space(),
-                    frame: rect(),
-                },
-            ],
-        };
-        let intent = hit_test(
-            &scene,
-            CGPoint::new(100.0, 50.0),
-            0.25,
-            MouseDropAction::Swap,
-            None,
-        )
-        .unwrap();
+        let scene = scene_with(vec![target(2, rect()), target(3, rect())]);
+        let intent =
+            hit_test(&scene, point(100.0, 50.0), 0.25, MouseDropAction::Swap, None).unwrap();
         assert_eq!(intent.window, visible);
     }
 
     #[test]
     fn replacing_scene_invalidates_a_validated_preview() {
         let mut actor = native(true, rect(), scene(rect()));
-        actor.motion(DragMotion {
-            point: CGPoint::new(100.0, 50.0),
-        });
+        motion(&mut actor, 100.0, 50.0);
         let intent = actor.intent().unwrap();
         actor.set_preview(intent, Some(rect()));
         assert!(actor.target().is_some());
 
-        let moved = CGRect::new(CGPoint::new(300.0, 0.0), rect().size);
+        let moved = frame(300.0, 0.0, 200.0, 100.0);
         actor.replace_scene(scene(moved));
         assert!(actor.target().is_none());
         let moved_intent = actor.intent().unwrap();
@@ -1077,11 +1046,9 @@ mod tests {
 
     #[test]
     fn floating_move_never_builds_a_drop_target() {
-        let moved = CGRect::new(CGPoint::new(10.0, 0.0), rect().size);
+        let moved = frame(10.0, 0.0, 200.0, 100.0);
         let mut actor = native(false, moved, scene(rect()));
-        actor.motion(DragMotion {
-            point: CGPoint::new(100.0, 50.0),
-        });
+        motion(&mut actor, 100.0, 50.0);
         assert!(actor.target().is_none());
     }
 
@@ -1090,13 +1057,11 @@ mod tests {
         let mut actor = DragActor::new(MouseSettings::default());
         actor.begin_modifier(
             source(true),
-            CGPoint::new(10.0, 10.0),
-            crate::common::config::MouseAction::Resize,
+            point(10.0, 10.0),
+            MouseAction::Resize,
             scene(rect()),
         );
-        actor.motion(DragMotion {
-            point: CGPoint::new(30.0, 20.0),
-        });
+        motion(&mut actor, 30.0, 20.0);
         let (_, _, resized, _, _) = actor.interactive_update().unwrap();
         assert_eq!(resized.origin, CGPoint::new(20.0, 10.0));
         assert_eq!(resized.size, CGSize::new(180.0, 90.0));
@@ -1110,9 +1075,7 @@ mod tests {
         let mut resized = rect();
         resized.size.width += 10.0;
         let mut actor = native(true, resized, scene(rect()));
-        actor.motion(DragMotion {
-            point: CGPoint::new(100.0, 50.0),
-        });
+        motion(&mut actor, 100.0, 50.0);
         assert_eq!(actor.kind(), Some(DragKind::NativeResize));
         assert!(actor.intent().is_none());
         assert!(actor.target().is_none());
@@ -1121,10 +1084,8 @@ mod tests {
     #[test]
     fn modifier_space_change_invalidates_origin_drop_state() {
         let destination = SpaceId::new(2);
-        let mut actor = modifier(crate::common::config::MouseAction::Move, true);
-        actor.motion(DragMotion {
-            point: CGPoint::new(100.0, 50.0),
-        });
+        let mut actor = modifier(MouseAction::Move, true);
+        motion(&mut actor, 100.0, 50.0);
         let intent = actor.intent().unwrap();
         actor.set_preview(intent, Some(rect()));
         assert!(actor.target().is_some());
@@ -1133,9 +1094,7 @@ mod tests {
         assert_eq!(actor.source().unwrap().current_space, Some(destination));
         assert!(actor.intent().is_none());
         assert!(actor.target().is_none());
-        actor.motion(DragMotion {
-            point: CGPoint::new(100.0, 50.0),
-        });
+        motion(&mut actor, 100.0, 50.0);
         assert!(actor.intent().is_none());
         assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
     }
@@ -1144,7 +1103,7 @@ mod tests {
     fn stack_scene_resolves_every_zone_to_swap() {
         let mut scene = scene(rect());
         scene.action_override = Some(WindowDropAction::Swap);
-        for point in [CGPoint::new(1.0, 50.0), CGPoint::new(100.0, 50.0)] {
+        for point in [point(1.0, 50.0), point(100.0, 50.0)] {
             let intent = hit_test(&scene, point, 0.25, MouseDropAction::Stack, None).unwrap();
             assert_eq!(intent.action, WindowDropAction::Swap);
         }
@@ -1155,14 +1114,12 @@ mod tests {
         let mut actor = DragActor::new(MouseSettings::default());
         actor.begin_modifier(
             source(true),
-            CGPoint::new(190.0, 90.0),
-            crate::common::config::MouseAction::Resize,
+            point(190.0, 90.0),
+            MouseAction::Resize,
             DragScene::default(),
         );
         for (point, updates) in [((190.5, 90.5), false), ((191.0, 90.5), true)] {
-            actor.motion(DragMotion {
-                point: CGPoint::new(point.0, point.1),
-            });
+            motion(&mut actor, point.0, point.1);
             assert_eq!(actor.interactive_update().is_some(), updates);
         }
         assert!(actor.interactive_update().is_none());
@@ -1171,27 +1128,18 @@ mod tests {
     #[test]
     fn cancellation_identifies_native_and_modifier_sessions() {
         let mut moved = source(false);
-        moved.last_frame = CGRect::new(CGPoint::new(20.0, 20.0), rect().size);
+        moved.last_frame = frame(20.0, 20.0, 200.0, 100.0);
         let mut actor = native(false, moved.last_frame, DragScene::default());
         assert_eq!(actor.cancel().unwrap().kind, DragKind::NativeMove);
 
-        actor.begin_modifier(
-            moved,
-            CGPoint::new(10.0, 10.0),
-            crate::common::config::MouseAction::Move,
-            DragScene::default(),
-        );
+        actor.begin_modifier(moved, point(10.0, 10.0), MouseAction::Move, DragScene::default());
         assert_eq!(actor.cancel().unwrap().kind, DragKind::ModifierMove);
     }
 
     #[test]
     fn only_the_owning_button_finishes_a_modifier_drag() {
         let mut actor = DragActor::new(MouseSettings::default());
-        let id = actor.await_modifier(
-            MouseButton::Left,
-            CGPoint::new(10.0, 10.0),
-            crate::common::config::MouseAction::Move,
-        );
+        let id = actor.await_modifier(MouseButton::Left, point(10.0, 10.0), MouseAction::Move);
         assert!(actor.resolve_start(id, Some(source(true)), DragScene::default()));
 
         assert!(actor.finish(MouseButton::Right).is_none());
