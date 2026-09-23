@@ -454,9 +454,9 @@ pub struct Settings {
     /// Trackpad gesture settings
     #[serde(default)]
     pub gestures: GestureSettings,
-    /// Mouse settings
+    /// Modifier-assisted dragging and tiled-window drop settings.
     #[serde(default)]
-    pub mouse: MouseSettings,
+    pub drag_drop: DragDropSettings,
 
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
@@ -585,7 +585,7 @@ pub enum MouseDropAction {
 /// Example:
 ///
 /// ```toml
-/// [settings.mouse]
+/// [settings.drag_drop]
 /// enabled = true
 /// modifier = "fn"
 /// action1 = "move"
@@ -596,7 +596,7 @@ pub enum MouseDropAction {
 /// ```
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(deny_unknown_fields)]
-pub struct MouseSettings {
+pub struct DragDropSettings {
     /// Enables native drag targeting and modifier mouse actions.
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -622,7 +622,7 @@ pub struct MouseSettings {
     pub preview: bool,
 }
 
-impl Default for MouseSettings {
+impl Default for DragDropSettings {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -1134,10 +1134,10 @@ impl Settings {
 
         issues.extend(self.layout.validate());
 
-        if !(0.10..=0.45).contains(&self.mouse.drop_zone_fraction) {
+        if !(0.10..=0.45).contains(&self.drag_drop.drop_zone_fraction) {
             issues.push(format!(
-                "mouse.drop_zone_fraction must be between 0.10 and 0.45, got {}",
-                self.mouse.drop_zone_fraction
+                "drag_drop.drop_zone_fraction must be between 0.10 and 0.45, got {}",
+                self.drag_drop.drop_zone_fraction
             ));
         }
 
@@ -1964,10 +1964,10 @@ mod tests {
 
     #[test]
     fn mouse_settings_defaults_and_variants_parse() {
-        let defaults: MouseSettings = toml::from_str("").unwrap();
-        assert_eq!(defaults, MouseSettings::default());
+        let defaults: DragDropSettings = toml::from_str("").unwrap();
+        assert_eq!(defaults, DragDropSettings::default());
 
-        let settings: MouseSettings = toml::from_str(
+        let settings: DragDropSettings = toml::from_str(
             r#"
                 enabled = false
                 modifier = "ctrl"
@@ -1989,7 +1989,8 @@ mod tests {
             ("option", MouseModifier::Alt),
             ("control", MouseModifier::Ctrl),
         ] {
-            let parsed: MouseSettings = toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
+            let parsed: DragDropSettings =
+                toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
             assert_eq!(parsed.modifier, expected);
         }
     }
@@ -2004,33 +2005,41 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.settings.mouse, MouseSettings::default());
+        assert_eq!(cfg.settings.drag_drop, DragDropSettings::default());
     }
 
     #[test]
-    fn new_mouse_settings_win_when_legacy_table_is_also_present() {
+    fn drag_drop_settings_take_precedence_over_legacy_window_snapping() {
         let cfg = Config::parse(
             r#"
                 [settings.window_snapping]
                 drag_swap_fraction = 0.3
-                [settings.mouse]
+                [settings.drag_drop]
                 modifier = "alt"
                 drop_action = "stack"
                 [keys]
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.settings.mouse.modifier, MouseModifier::Alt);
-        assert_eq!(cfg.settings.mouse.drop_action, MouseDropAction::Stack);
+        assert_eq!(cfg.settings.drag_drop.modifier, MouseModifier::Alt);
+        assert_eq!(cfg.settings.drag_drop.drop_action, MouseDropAction::Stack);
     }
 
     #[test]
     fn invalid_drop_zone_fraction_has_clear_validation_error() {
         let mut cfg = Config::default();
-        cfg.settings.mouse.drop_zone_fraction = 0.09;
-        assert!(cfg.validate().iter().any(|issue| issue.contains("mouse.drop_zone_fraction")));
-        cfg.settings.mouse.drop_zone_fraction = 0.46;
-        assert!(cfg.validate().iter().any(|issue| issue.contains("mouse.drop_zone_fraction")));
+        cfg.settings.drag_drop.drop_zone_fraction = 0.09;
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+        );
+        cfg.settings.drag_drop.drop_zone_fraction = 0.46;
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+        );
     }
 
     #[test]

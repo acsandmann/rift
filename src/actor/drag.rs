@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use objc2_core_foundation::{CGPoint, CGRect};
 
 use crate::actor::app::WindowId;
-use crate::common::config::{MouseAction, MouseDropAction, MouseSettings};
+use crate::common::config::{MouseAction, MouseDropAction, DragDropSettings};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
@@ -153,11 +153,11 @@ pub enum State {
 pub struct DragActor {
     state: State,
     next_session_id: u64,
-    settings: MouseSettings,
+    settings: DragDropSettings,
 }
 
 impl DragActor {
-    pub fn new(settings: MouseSettings) -> Self {
+    pub fn new(settings: DragDropSettings) -> Self {
         Self {
             state: State::Idle,
             next_session_id: 1,
@@ -244,7 +244,7 @@ impl DragActor {
         !matches!(session.target, TargetState::None)
     }
 
-    pub fn update_config(&mut self, settings: MouseSettings) {
+    pub fn update_config(&mut self, settings: DragDropSettings) {
         let semantics_changed = self.settings.drop_action != settings.drop_action
             || self.settings.drop_zone_fraction != settings.drop_zone_fraction;
         self.settings = settings;
@@ -749,12 +749,12 @@ mod tests {
     fn native(tiled: bool, last_frame: CGRect, scene: DragScene) -> DragActor {
         let mut source = source(tiled);
         source.last_frame = last_frame;
-        let mut actor = DragActor::new(MouseSettings::default());
+        let mut actor = DragActor::new(DragDropSettings::default());
         actor.begin_native(source, scene);
         actor
     }
     fn modifier(action: MouseAction, tiled: bool) -> DragActor {
-        let mut actor = DragActor::new(MouseSettings::default());
+        let mut actor = DragActor::new(DragDropSettings::default());
         actor.begin_modifier(source(tiled), point(100.0, 50.0), action, scene(rect()));
         actor
     }
@@ -940,7 +940,7 @@ mod tests {
         let moved_intent = actor.intent().unwrap();
         assert_eq!(moved_intent.frame, moved);
         actor.set_preview(moved_intent, Some(moved));
-        let mut settings = MouseSettings::default();
+        let mut settings = DragDropSettings::default();
         settings.drop_action = MouseDropAction::Stack;
         actor.update_config(settings);
         assert!(actor.intent().is_none());
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn only_the_owning_button_finishes_a_modifier_drag() {
-        let mut actor = DragActor::new(MouseSettings::default());
+        let mut actor = DragActor::new(DragDropSettings::default());
         let id = actor.await_modifier(MouseButton::Left, point(10.0, 10.0), MouseAction::Move);
         assert!(actor.resolve_start(id, Some(source(true)), DragScene::default()));
 
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn stale_source_resolution_is_ignored() {
-        let mut actor = DragActor::new(MouseSettings::default());
+        let mut actor = DragActor::new(DragDropSettings::default());
         let stale = actor.await_native(w(1));
         let current = actor.await_native(w(2));
         assert!(!actor.resolve_start(stale, None, DragScene::default()));

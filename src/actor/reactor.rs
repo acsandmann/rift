@@ -490,11 +490,12 @@ impl Reactor {
             main_window_tracker: MainWindowTracker::default(),
             pending_mouse_focus: None,
             drag_manager: managers::DragManager {
-                actor: crate::actor::drag::DragActor::new(config.settings.mouse),
+                actor: crate::actor::drag::DragActor::new(config.settings.drag_drop),
                 native_motion_active: std::sync::Arc::default(),
                 externally_controlled_window: None,
                 preview: None,
-                preview_enabled: config.settings.mouse.enabled && config.settings.mouse.preview,
+                preview_enabled: config.settings.drag_drop.enabled
+                    && config.settings.drag_drop.preview,
                 preview_suppressed: false,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {

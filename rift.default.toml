@@ -215,14 +215,6 @@ thickness = 20.0
 # spacing between the stack line and window edges (in px)
 spacing = 1.0
 
-# experimental mission control
-[settings.ui.mission_control]
-enabled = false
-# enable fade animation when entering/exiting mission control
-fade_enabled = false
-# native macos mission control fade is about 180ms
-fade_duration_ms = 180.0
-
 # Trackpad gestures
 [settings.gestures]
 # Enable horizontal swipes to switch virtual workspaces
@@ -246,7 +238,7 @@ haptics_enabled = true
 haptic_pattern = "level_change"
 
 # Mouse move and tiled-window drop behavior
-[settings.mouse]
+[settings.drag_drop]
 # Disable to leave all mouse gestures entirely to macOS and applications.
 enabled = true
 # Modifier used with action1/action2: cmd | alt | shift | ctrl | fn.

@@ -21,7 +21,7 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    Config, HapticPattern, LayoutMode, MouseAction, MouseModifier, MouseSettings,
+    Config, DragDropSettings, HapticPattern, LayoutMode, MouseAction, MouseModifier,
     StackLineHoverMode,
 };
 use crate::layout_engine::LayoutCommand as LC;
@@ -105,7 +105,7 @@ struct State {
     layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
     last_stack_line_hit: Option<bool>,
     mouse_features_enabled: bool,
-    mouse_settings: MouseSettings,
+    mouse_settings: DragDropSettings,
     captured_button: Option<crate::actor::drag::MouseButton>,
     swipe: Option<SwipeHandler>,
     scroll: Option<ScrollHandler>,
@@ -132,7 +132,7 @@ impl Default for State {
             layout_mode_by_space: HashMap::default(),
             last_stack_line_hit: None,
             mouse_features_enabled: false,
-            mouse_settings: MouseSettings::default(),
+            mouse_settings: DragDropSettings::default(),
             captured_button: None,
             swipe: None,
             scroll: None,
@@ -297,8 +297,8 @@ impl Input {
         state.stack_line_enabled = config.settings.ui.stack_line.enabled;
         state.stack_line_hover_mode = config.settings.ui.stack_line.hover;
         state.default_layout_mode = config.settings.layout.mode;
-        state.mouse_features_enabled = config.settings.mouse.enabled;
-        state.mouse_settings = config.settings.mouse;
+        state.mouse_features_enabled = config.settings.drag_drop.enabled;
+        state.mouse_settings = config.settings.drag_drop;
         state.disable_hotkey_active = disable_hotkey
             .as_ref()
             .map(|target| state.compute_disable_hotkey_active(target))
@@ -448,8 +448,8 @@ impl Input {
             Request::ConfigUpdated(new_config) => {
                 self.reset_gesture_state(&mut state);
                 let cancel_captured_drag = state.captured_button.is_some()
-                    && (!new_config.settings.mouse.enabled
-                        || new_config.settings.mouse != state.mouse_settings);
+                    && (!new_config.settings.drag_drop.enabled
+                        || new_config.settings.drag_drop != state.mouse_settings);
                 if cancel_captured_drag {
                     state.captured_button = None;
                     self.events_tx.send(Event::DragCancel);
@@ -462,7 +462,7 @@ impl Input {
                 let stack_line_enabled = new_config.settings.ui.stack_line.enabled;
                 let stack_line_hover_mode = new_config.settings.ui.stack_line.hover;
                 let default_layout_mode = new_config.settings.layout.mode;
-                let mouse_features_enabled = new_config.settings.mouse.enabled;
+                let mouse_features_enabled = new_config.settings.drag_drop.enabled;
                 let disable_hotkey = new_config
                     .settings
                     .focus_follows_mouse_disable_hotkey
@@ -481,7 +481,7 @@ impl Input {
                     state.stack_line_hover_mode = stack_line_hover_mode;
                     state.default_layout_mode = default_layout_mode;
                     state.mouse_features_enabled = mouse_features_enabled;
-                    state.mouse_settings = new_config.settings.mouse;
+                    state.mouse_settings = new_config.settings.drag_drop;
                     let prev_active = state.disable_hotkey_active;
                     state.disable_hotkey_active = self
                         .disable_hotkey

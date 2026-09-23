@@ -1564,7 +1564,7 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
         point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
     });
     let mut config = reactor.config.clone();
-    config.settings.mouse.enabled = false;
+    config.settings.drag_drop.enabled = false;
     let config_cancel = reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
     assert!(config_cancel.arrange.passes > 0);
     assert!(!reactor.drag_manager.actor.is_active());
