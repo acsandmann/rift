@@ -2093,6 +2093,11 @@ impl Reactor {
                     .as_ref()
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
+                if focus_window.is_none()
+                    && let Some(space) = screen.as_ref().and_then(|screen| screen.space)
+                {
+                    self.focus_desktop_if_active_workspace_empty(space);
+                }
                 let focus_window_center = focus_window
                     .and_then(|wid| self.state.windows.window(wid))
                     .map(|window| window.frame_monotonic.mid());
