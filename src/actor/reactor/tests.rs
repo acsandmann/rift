@@ -2738,7 +2738,7 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
 }
 
 #[test]
-fn dock_activation_reveals_window_in_active_scrolling_workspace() {
+fn dock_activation_does_not_reposition_visible_scrolling_window() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(600., 600.));
     let space = SpaceId::new(1);
@@ -2777,8 +2777,8 @@ fn dock_activation_reveals_window_in_active_scrolling_workspace() {
         Some(activated)
     );
     assert!(
-        !apps.requests().is_empty(),
-        "revealing the activated scrolling window should write the adjusted strip layout"
+        apps.requests().is_empty(),
+        "activating a visible scrolling window should not reposition the strip"
     );
 }
 
