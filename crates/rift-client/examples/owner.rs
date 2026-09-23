@@ -45,5 +45,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     stop_rx.recv()?;
     // Dropping the receive right lets Rift release the claim on Mach dead-name notification.
     drop(session);
+    release_result?;
     Ok(())
 }

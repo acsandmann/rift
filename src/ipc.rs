@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Sender as ConfigJobSender, TrySendError, bounded};
 use serde::Serialize;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 
 pub mod cli_exec;
 pub mod protocol;
@@ -504,6 +504,10 @@ unsafe extern "C" fn handle_mach_client_disconnect_c(
         return;
     }
 
+    debug!(
+        client_port,
+        "Mach client port closed; releasing its claims and subscriptions"
+    );
     let handler = unsafe { &*(context as *const IpcRequestHandler) };
     if let Ok(mut reactor) = handler.reactor.try_borrow_mut() {
         reactor.release_manager(crate::model::window_store::ExternalManagerId(client_port));
