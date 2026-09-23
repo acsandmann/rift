@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use objc2_core_foundation::{CGPoint, CGRect};
 
 use crate::actor::app::WindowId;
-use crate::common::config::{MouseAction, MouseDropAction, DragDropSettings};
+use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,

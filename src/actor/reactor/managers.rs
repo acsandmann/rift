@@ -14,7 +14,7 @@ use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, DragDropSettings};
+use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::screen::SpaceId;
