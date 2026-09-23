@@ -22,3 +22,6 @@ pub use systems::{
 pub(crate) use workspaces::WorkspaceLayouts;
 
 pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStats, WorkspaceStore};
+
+#[cfg(test)]
+mod drop_preview_tests;

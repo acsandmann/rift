@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: rift-release-publish
+  cancel-in-progress: false
+
 jobs:
   build-and-publish:
     runs-on: macos-14
@@ -15,11 +19,25 @@ jobs:
       ASSET_BASENAME: rift-universal-macos
       TAP_REPO: acsandmann/homebrew-tap
       TAP_FILE_PATH: Formula/rift.rb
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_REPOSITORY: ${{ github.repository }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Verify tag matches root package version
+        run: |
+          set -euo pipefail
+          version=$(awk '/^\[package\]/{package=1; next} /^\[/{package=0}
+            package && /^version[[:space:]]*=/{split($0, value, "\""); print value[2]; exit}' Cargo.toml)
+          test -n "$version"
+          if [[ "${RELEASE_TAG#v}" != "$version" ]]; then
+            echo "Release tag does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
 
       - name: Install Rust + targets
         uses: dtolnay/rust-toolchain@stable
@@ -37,9 +55,9 @@ jobs:
         run: |
           set -euxo pipefail
           # Build arm64
-          RUSTFLAGS="-C target-cpu=native" cargo build --release --locked --bins --target aarch64-apple-darwin
+          cargo build --release --locked --package rift-wm --bin rift --bin rift-cli --target aarch64-apple-darwin
           # Build x86_64
-          RUSTFLAGS="-C target-cpu=native" cargo build --release --locked --bins --target x86_64-apple-darwin
+          cargo build --release --locked --package rift-wm --bin rift --bin rift-cli --target x86_64-apple-darwin
 
       - name: Create universal binaries with lipo
         run: |
@@ -65,21 +83,33 @@ jobs:
         id: pkg
         run: |
           set -euxo pipefail
-          TAG="${GITHUB_REF_NAME}"      # e.g. v1.2.3 or 1.2.3
+          TAG="${RELEASE_TAG}"
           VERSION="${TAG#v}"            # strip leading 'v' if present
           ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
 
-          tar -C dist -czf "${ASSET}" rift rift-cli
+          test -s rift.default.toml
+          cp rift.default.toml dist/rift.default.toml
+          tar -C dist -czf "${ASSET}" rift rift-cli rift.default.toml
           sha256=$(shasum -a 256 "${ASSET}" | awk '{print $1}')
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
+      - name: Check packaged binary versions
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          test "$(dist/rift --version)" = "rift ${VERSION}"
+          test "$(dist/rift-cli --version)" = "rift-cli ${VERSION}"
+          test -s dist/rift.default.toml
+
       - name: Upload asset to the release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name }}
           files: ${{ steps.pkg.outputs.asset }}
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -90,26 +120,33 @@ jobs:
           path: tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }} # PAT with repo:push to the tap
 
-      - name: Update formula version & sha256
+      - name: Update formula URL, version & sha256
+        env:
+          VERSION: ${{ steps.pkg.outputs.version }}
+          SHA256: ${{ steps.pkg.outputs.sha256 }}
+          ASSET: ${{ steps.pkg.outputs.asset }}
         run: |
-          set -euxo pipefail
-          VERSION="${{ steps.pkg.outputs.version }}"
-          SHA256="${{ steps.pkg.outputs.sha256 }}"
+          set -euo pipefail
           FORMULA="tap/${TAP_FILE_PATH}"
-
-          # Update version "..."
-          /usr/bin/sed -i '' -E \
-            "s/^[[:space:]]*version[[:space:]]+\"[^\"]*\"/  version \"${VERSION}\"/" \
-            "${FORMULA}" || true
-
-          # Update sha256 "..."
-          /usr/bin/sed -i '' -E \
-            "s/^[[:space:]]*sha256[[:space:]]+\"[^\"]*\"/  sha256 \"${SHA256}\"/" \
-            "${FORMULA}"
-
-          echo "Updated ${FORMULA}: version=${VERSION}, sha256=${SHA256}"
-          echo "---- Formula preview ----"
-          sed -n '1,120p' "${FORMULA}"
+          export ASSET_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/${ASSET}"
+          # Only replace stable fields; preserve any development head block.
+          awk '
+            /^[[:space:]]*head[[:space:]]+do/ { head=1 }
+            !head && /^  url[[:space:]]+"/ {
+              print "  url \"" ENVIRON["ASSET_URL"] "\""
+              print "  version \"" ENVIRON["VERSION"] "\""
+              urls++; next
+            }
+            !head && /^  version[[:space:]]+"/ { next }
+            !head && /^  sha256[[:space:]]+"/ {
+              print "  sha256 \"" ENVIRON["SHA256"] "\""
+              hashes++; next
+            }
+            { print }
+            END { if (urls != 1 || hashes != 1) exit 1 }
+          ' "$FORMULA" > "${FORMULA}.tmp"
+          mv "${FORMULA}.tmp" "$FORMULA"
+          ruby -c "$FORMULA"
 
       - name: Commit & push formula update
         run: |
@@ -117,6 +154,10 @@ jobs:
           git -C tap config user.name "github-actions[bot]"
           git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
           git -C tap add "${TAP_FILE_PATH}"
+          if git -C tap diff --cached --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
           git -C tap commit -m "chore(formula): rift ${{ steps.pkg.outputs.version }} (universal) - sha256 ${{ steps.pkg.outputs.sha256 }}"
           git -C tap push origin HEAD
 

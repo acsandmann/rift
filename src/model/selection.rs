@@ -16,12 +16,12 @@ pub enum TreeEvent {
     RemovedFromForest(NodeId),
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Selection {
     nodes: slotmap::SecondaryMap<NodeId, SelectionInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct SelectionInfo {
     selected_child: NodeId,
     stop_here: bool,

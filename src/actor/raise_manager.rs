@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
-use crate::actor::{self, event_tap, reactor};
+use crate::actor::{self, input, reactor};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::pid_t;
 use crate::sys::timer::Timer;
@@ -42,7 +42,7 @@ pub struct RaiseManager {
     /// Queued sequences waiting to be processed
     queued_sequences: VecDeque<RaiseRequest>,
     next_sequence_id: u64,
-    event_tap_tx: Option<event_tap::Sender>,
+    input_tx: Option<input::Sender>,
 }
 
 /// Tracks an executing sequence of raises.
@@ -67,10 +67,10 @@ impl RaiseManager {
     pub async fn run(
         mut rx: Receiver,
         events_tx: reactor::Sender,
-        event_tap_tx: Option<event_tap::Sender>,
+        input_tx: Option<input::Sender>,
     ) {
         let mut raise_manager = RaiseManager::new();
-        raise_manager.event_tap_tx = event_tap_tx;
+        raise_manager.input_tx = input_tx;
         let mut timeout_timer = Timer::manual();
 
         let sequence_timeout = |sequence: &ActiveSequence| {
@@ -120,7 +120,7 @@ impl RaiseManager {
             active_sequence: None,
             queued_sequences: VecDeque::new(),
             next_sequence_id: 1,
-            event_tap_tx: None,
+            input_tx: None,
         }
     }
 
@@ -304,11 +304,11 @@ impl RaiseManager {
                 }
 
                 if let Some(warp) = warp
-                    && let Some(event_tap_tx) = &self.event_tap_tx
+                    && let Some(input_tx) = &self.input_tx
                 {
                     // For now we don't wait for the last window to be raised;
                     // send the warp as soon as we send the raise request.
-                    _ = event_tap_tx.send(event_tap::Request::Warp(warp));
+                    _ = input_tx.send(input::Request::Warp(warp));
                 }
             }
         }
@@ -484,8 +484,8 @@ mod tests {
     fn test_all_raises_complete_triggers_focus() {
         Executor::run(async {
             let mut raise_manager = RaiseManager::new();
-            let (event_tap_tx, mut event_tap_rx) = actor::channel();
-            raise_manager.event_tap_tx = Some(event_tap_tx);
+            let (input_tx, mut input_rx) = actor::channel();
+            raise_manager.input_tx = Some(input_tx);
 
             let (app_handles, mut app_rx) = create_test_app_handles();
 
@@ -524,8 +524,8 @@ mod tests {
             );
 
             // Check that warp request was sent
-            let warp_request = event_tap_rx.try_recv().expect("Warp request should have been sent");
-            let event_tap::Request::Warp(warp) = warp_request.1 else {
+            let warp_request = input_rx.try_recv().expect("Warp request should have been sent");
+            let input::Request::Warp(warp) = warp_request.1 else {
                 panic!("Unexpected mouse request sent: {:?}", warp_request.1)
             };
             assert_eq!(warp, CGPoint::new(100.0, 200.0));

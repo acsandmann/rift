@@ -6,27 +6,28 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::AXError;
-use objc2_core_foundation::{CFRunLoop, CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
+use tokio::select;
 use tokio::sync::oneshot;
-use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
+use crate::actor::wm_controller::{self, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
-use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
+use crate::sys::app::{NSRunningApplicationExt, NativeWindowIdentity};
 use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AXUIElement, Error as AxError};
 use crate::sys::enhanced_ui::EnhancedUi;
 use crate::sys::event;
@@ -297,6 +298,72 @@ fn decode_notification_data(
 #[derive(Clone)]
 pub struct AppThreadHandle {
     requests_tx: actor::Sender<Request>,
+    interactive_frames: InteractiveFrameQueue,
+}
+
+#[derive(Default)]
+struct InteractiveFrames {
+    wake_pending: bool,
+    latest: HashMap<WindowId, (CGRect, bool, TransactionId)>,
+}
+
+#[derive(Clone, Default)]
+#[doc(hidden)]
+/// Actor-local latest-value transport used by [`AppThreadHandle`].
+///
+/// This is public only because it is carried by the public [`Request`] enum;
+/// it is not domain state or a general-purpose queue.
+pub struct InteractiveFrameQueue(Arc<Mutex<InteractiveFrames>>);
+
+impl Debug for InteractiveFrameQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InteractiveFrameQueue(...)")
+    }
+}
+
+impl InteractiveFrameQueue {
+    pub(crate) fn drain_with(
+        &self,
+        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId),
+    ) {
+        let mut frames = self.0.lock().unwrap();
+        frames.wake_pending = false;
+        for (wid, (frame, set_size, txid)) in frames.latest.drain() {
+            consume(wid, frame, set_size, txid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_frame_tests {
+    use super::*;
+
+    #[test]
+    fn drain_keeps_capacity_and_rearms_one_wake_for_latest_frames() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let window = WindowId::new(1, 1);
+        let first = CGRect::new(CGPoint::new(1.0, 0.0), Default::default());
+        let latest = CGRect::new(CGPoint::new(2.0, 0.0), Default::default());
+        handle.interactive_frames.0.lock().unwrap().latest.reserve(8);
+        let capacity = handle.interactive_frames.0.lock().unwrap().latest.capacity();
+
+        handle.send_interactive_frame(window, first, false, TransactionId::default());
+        handle.send_interactive_frame(window, latest, true, TransactionId::default());
+        let (_, Request::InteractiveFramesPending(queue)) = rx.try_recv().unwrap() else {
+            panic!("expected one interactive frame wake");
+        };
+        assert!(rx.try_recv().is_err());
+        let mut received = Vec::new();
+        queue.drain_with(|wid, frame, set_size, _| received.push((wid, frame, set_size)));
+        assert_eq!(received, vec![(window, latest, true)]);
+        assert_eq!(queue.0.lock().unwrap().latest.capacity(), capacity);
+
+        handle.send_interactive_frame(window, first, false, TransactionId::default());
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Request::InteractiveFramesPending(_)
+        ));
+    }
 }
 
 /// Identifies the world snapshot for which an AX window inventory was requested.
@@ -312,11 +379,59 @@ pub struct WindowInventoryToken {
 
 impl AppThreadHandle {
     pub(crate) fn new_for_test(requests_tx: actor::Sender<Request>) -> Self {
-        let this = AppThreadHandle { requests_tx };
-        this
+        AppThreadHandle {
+            requests_tx,
+            interactive_frames: Default::default(),
+        }
     }
 
-    pub fn send(&self, req: Request) -> anyhow::Result<()> { Ok(self.requests_tx.send(req)) }
+    pub fn channel() -> (Self, actor::Receiver<Request>) {
+        let (requests_tx, rx) = actor::channel();
+        (
+            Self {
+                requests_tx,
+                interactive_frames: Default::default(),
+            },
+            rx,
+        )
+    }
+
+    pub(crate) fn same_actor(&self, other: &Self) -> bool {
+        self.requests_tx.same_channel(&other.requests_tx)
+    }
+
+    pub fn send(&self, req: Request) -> anyhow::Result<()> {
+        self.requests_tx.send(req);
+        Ok(())
+    }
+
+    /// Publish a high-frequency interactive frame without growing the actor queue.
+    /// Only the newest frame for each window is retained until the app actor drains it.
+    pub(crate) fn send_interactive_frame(
+        &self,
+        wid: WindowId,
+        frame: CGRect,
+        set_size: bool,
+        txid: TransactionId,
+    ) {
+        let should_wake = {
+            let mut pending = self.interactive_frames.0.lock().unwrap();
+            pending.latest.insert(wid, (frame, set_size, txid));
+            !std::mem::replace(&mut pending.wake_pending, true)
+        };
+        if should_wake
+            && self
+                .requests_tx
+                .try_send(Request::InteractiveFramesPending(
+                    self.interactive_frames.clone(),
+                ))
+                .is_err()
+        {
+            let mut pending = self.interactive_frames.0.lock().unwrap();
+            pending.wake_pending = false;
+            pending.latest.clear();
+        }
+    }
 }
 
 impl Debug for AppThreadHandle {
@@ -348,6 +463,8 @@ pub enum Request {
         set_size: bool,
         txid: TransactionId,
     },
+    #[doc(hidden)]
+    InteractiveFramesPending(InteractiveFrameQueue),
 
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
@@ -383,16 +500,30 @@ pub enum Quiet {
     No,
 }
 
+struct ExitGuard(wm_controller::Sender, pid_t, AppThreadHandle);
+impl Drop for ExitGuard {
+    fn drop(&mut self) { self.0.send(WmEvent::AppExited(self.1, self.2.clone())); }
+}
+
 pub fn spawn_app_thread(
     pid: pid_t,
     info: AppInfo,
     events_tx: reactor::Sender,
     tx_store: Option<WindowTxStore>,
+    wm_tx: wm_controller::Sender,
+    handle: AppThreadHandle,
+    requests_rx: actor::Receiver<Request>,
 ) {
-    thread::Builder::new()
+    let guard = ExitGuard(wm_tx.clone(), pid, handle.clone());
+    if let Err(err) = thread::Builder::new()
         .name(format!("{}({pid})", info.bundle_id.as_deref().unwrap_or("")))
-        .spawn(move || app_thread_main(pid, info, events_tx, tx_store))
-        .unwrap();
+        .spawn(move || {
+            let _guard = guard; // Also reports early initialization failures and panics.
+            app_thread_main(pid, info, events_tx, tx_store, handle, requests_rx);
+        })
+    {
+        warn!(pid, ?err, "Failed to spawn app thread");
+    }
 }
 
 struct State {
@@ -425,6 +556,7 @@ struct AppWindowState {
     title: String,
     is_animating: bool,
     last_animation_frame: Option<CGRect>,
+    interactive_frame_write: bool,
 }
 
 struct PendingFrame {
@@ -432,6 +564,7 @@ struct PendingFrame {
     frame: CGRect,
     set_size: bool,
     txid: TransactionId,
+    interactive: bool,
 }
 
 impl State {
@@ -449,18 +582,22 @@ impl State {
                 return Err(e);
             }
         };
-        let server_info_by_id = self.visible_window_server_info_map(&window_elems);
+        let mut window_elems: Vec<_> = window_elems
+            .into_iter()
+            .map(|elem| (elem, NativeWindowIdentity::default()))
+            .collect();
+        let server_info_by_id = self.visible_window_server_info_map(&mut window_elems);
         let mut new = Vec::with_capacity(window_elems.len());
         let mut known_visible = Vec::with_capacity(window_elems.len());
         let mut seen_wids = HashSet::default();
 
-        for elem in window_elems {
-            let wsid = WindowServerId::try_from(&elem).ok();
+        for (elem, mut identity) in window_elems {
+            let wsid = identity.resolve(|| WindowServerId::try_from(&elem).ok());
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
-            let info = match WindowInfo::from_ax_element(&elem, hint) {
+            let info = match WindowInfo::from_ax_element_with_identity(&elem, hint, &mut identity) {
                 Ok((info, _)) => info,
                 Err(err) => {
-                    let id = self.id(&elem).ok();
+                    let id = self.id_with_identity(&elem, &mut identity).ok();
                     trace!(?id, ?err, "Failed to refresh window info; will retry later");
                     continue;
                 }
@@ -470,10 +607,14 @@ impl State {
                 continue;
             }
 
-            let Some((wid, info)) = self.id(&elem).ok().map(|wid| (wid, info)).or_else(|| {
-                self.register_window(elem.clone(), hint)
-                    .map(|(registered_info, wid, _)| (wid, registered_info))
-            }) else {
+            let Some((wid, info)) =
+                self.id_with_identity(&elem, &mut identity).ok().map(|wid| (wid, info)).or_else(
+                    || {
+                        self.register_window_with_identity(elem.clone(), hint, &mut identity)
+                            .map(|(registered_info, wid, _)| (wid, registered_info))
+                    },
+                )
+            else {
                 continue;
             };
 
@@ -530,21 +671,22 @@ impl State {
     async fn run(
         mut self,
         info: AppInfo,
-        requests_tx: actor::Sender<Request>,
+        handle: AppThreadHandle,
         requests_rx: actor::Receiver<Request>,
         notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
         raises_rx: actor::Receiver<RaiseRequest>,
     ) {
-        let handle = AppThreadHandle { requests_tx };
-        if !self.init(handle, info) {
+        if !self.init(handle.clone(), info) {
             return;
         }
 
         let this = RefCell::new(self);
-        join!(
-            Self::handle_incoming(&this, requests_rx, notifications_rx),
-            Self::handle_raises(&this, raises_rx),
-        );
+        // The raises channel is owned by State, so joining both tasks would keep
+        // the actor (and its observer) alive after the incoming task terminates.
+        select! {
+            _ = Self::handle_incoming(&this, requests_rx, notifications_rx) => {},
+            _ = Self::handle_raises(&this, raises_rx) => {},
+        }
     }
 
     async fn handle_incoming(
@@ -602,7 +744,6 @@ impl State {
                 #[allow(non_upper_case_globals)]
                 Err(AxError::Ax(AXError::CannotComplete)) if state.running_app.isTerminated() => {
                     warn!(?state.bundle_id, ?state.pid, "Application terminated without notification");
-                    state.send_event(Event::ApplicationThreadTerminated(state.pid));
                     should_terminate = true;
                     break;
                 }
@@ -626,13 +767,20 @@ impl State {
     }
 
     fn flush_frames(&mut self, wid: WindowId) -> Result<(), AxError> {
-        let Some(PendingFrame { span, frame, set_size, txid }) = self.pending_frames.remove(&wid)
+        let Some(PendingFrame {
+            span,
+            frame,
+            set_size,
+            txid,
+            interactive,
+        }) = self.pending_frames.remove(&wid)
         else {
             return Ok(());
         };
         let _guard = span.enter();
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
+        window.interactive_frame_write = interactive;
         if set_size {
             window.last_animation_frame = Some(frame);
             let _ = window.elem.set_size(frame.size);
@@ -645,8 +793,7 @@ impl State {
     }
 
     fn flush_all_frames(&mut self) {
-        let wids: Vec<WindowId> = self.pending_frames.keys().copied().collect();
-        for wid in wids {
+        while let Some(wid) = self.pending_frames.keys().next().copied() {
             if let Err(err) = self.flush_frames(wid) {
                 warn!(?wid, ?err, "Failed to apply animation frame");
             }
@@ -726,8 +873,14 @@ impl State {
             }
         }
 
-        let initial_window_elements = self.app.windows().unwrap_or_default();
-        let server_info_by_id = self.visible_window_server_info_map(&initial_window_elements);
+        let mut initial_window_elements: Vec<_> = self
+            .app
+            .windows()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|elem| (elem, NativeWindowIdentity::default()))
+            .collect();
+        let server_info_by_id = self.visible_window_server_info_map(&mut initial_window_elements);
 
         let window_count = initial_window_elements.len();
         self.windows.reserve(window_count);
@@ -735,8 +888,8 @@ impl State {
         let mut windows = Vec::with_capacity(window_count);
         let mut window_server_info = Vec::with_capacity(window_count);
 
-        for elem in initial_window_elements {
-            let wsid = WindowServerId::try_from(&elem).ok();
+        for (elem, mut identity) in initial_window_elements {
+            let wsid = identity.resolve(|| WindowServerId::try_from(&elem).ok());
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
             if let Some(info) = hint {
                 window_server_info.push(info);
@@ -745,7 +898,9 @@ impl State {
                 trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
                 continue;
             }
-            let Some((info, wid, _)) = self.register_window(elem, hint) else {
+            let Some((info, wid, _)) =
+                self.register_window_with_identity(elem, hint, &mut identity)
+            else {
                 continue;
             };
             windows.push((wid, info));
@@ -771,8 +926,6 @@ impl State {
     fn handle_request(&mut self, request: Request) -> Result<bool, AxError> {
         match request {
             Request::Terminate => {
-                CFRunLoop::current().unwrap().stop();
-                self.send_event(Event::ApplicationThreadTerminated(self.pid));
                 return Ok(true);
             }
             Request::WindowMaybeDestroyed(wid) => {
@@ -813,6 +966,7 @@ impl State {
                 let elem = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
+                        window.interactive_frame_write = false;
                         window.elem.clone()
                     }
                     Err(err) => match err {
@@ -859,12 +1013,25 @@ impl State {
                     frame,
                     set_size,
                     txid,
+                    interactive: false,
+                });
+            }
+            Request::InteractiveFramesPending(frames) => {
+                frames.drain_with(|wid, frame, set_size, txid| {
+                    self.pending_frames.insert(wid, PendingFrame {
+                        span: Span::current(),
+                        frame,
+                        set_size,
+                        txid,
+                        interactive: true,
+                    });
                 });
             }
             Request::SetWindowFrame(wid, desired, txid, _) => {
                 let elem = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
+                        window.interactive_frame_write = false;
                         window.elem.clone()
                     }
                     Err(err) => match err {
@@ -901,6 +1068,7 @@ impl State {
                     let elem = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
+                            window.interactive_frame_write = false;
                             window.elem.clone()
                         }
                         Err(err) => match err {
@@ -938,6 +1106,7 @@ impl State {
                     let elem = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
+                            window.interactive_frame_write = false;
                             window.elem.clone()
                         }
                         Err(err) => match err {
@@ -1085,26 +1254,31 @@ impl State {
             AxNotificationKind::MenuOpened => self.send_event(Event::MenuOpened(self.pid)),
             AxNotificationKind::MenuClosed => self.send_event(Event::MenuClosed(self.pid)),
             AxNotificationKind::WindowDestroyed => {
-                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
-                    return;
-                };
-                // A refreshed AXUIElement can reuse the same stable WindowServer-backed
-                // WindowId. Removing by the callback's encoded wid would then let a late
-                // destroy notification for the superseded element tear down the replacement.
-                // Only the element currently bound to this wid owns its lifetime.
-                if !self.is_current_window_element(wid, &elem) {
-                    trace!(?wid, "Ignoring destroy notification for superseded AX element");
-                    return;
-                }
-                if self.remove_window(wid).is_none() {
-                    return;
-                }
-                self.send_event(Event::WindowInvalidated(
-                    wid,
-                    crate::actor::reactor::WindowInvalidationSource::AxDestroyedNotification,
-                ));
+                #[cfg(feature = "disable-axuielement-destroyed")]
+                return;
+                #[cfg(not(feature = "disable-axuielement-destroyed"))]
+                {
+                    let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
+                        return;
+                    };
+                    // A refreshed AXUIElement can reuse the same stable WindowServer-backed
+                    // WindowId. Removing by the callback's encoded wid would then let a late
+                    // destroy notification for the superseded element tear down the replacement.
+                    // Only the element currently bound to this wid owns its lifetime.
+                    if !self.is_current_window_element(wid, &elem) {
+                        trace!(?wid, "Ignoring destroy notification for superseded AX element");
+                        return;
+                    }
+                    if self.remove_window(wid).is_none() {
+                        return;
+                    }
+                    self.send_event(Event::WindowInvalidated(
+                        wid,
+                        crate::actor::reactor::WindowInvalidationSource::AxDestroyedNotification,
+                    ));
 
-                self.on_main_window_changed(Some(wid), false);
+                    self.on_main_window_changed(Some(wid), false);
+                }
             }
             AxNotificationKind::WindowMoved | AxNotificationKind::WindowResized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
@@ -1115,10 +1289,17 @@ impl State {
                     return;
                 }
 
+                let mouse_state = event::get_mouse_state();
                 let txid = match self.window(wid) {
                     Ok(window) => {
                         if window.is_animating {
                             trace!(?wid, ?notif, "Ignoring notification during animation");
+                            return;
+                        }
+                        if window.interactive_frame_write
+                            && mouse_state == Some(event::MouseState::Down)
+                        {
+                            trace!(?wid, ?notif, "Ignoring interactive frame notification");
                             return;
                         }
                         self.txid_for_window_state(window)
@@ -1135,6 +1316,9 @@ impl State {
                         return;
                     }
                 };
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.interactive_frame_write = false;
+                }
                 let frame = match elem.frame() {
                     Ok(frame) => frame,
                     // During display teardown, macOS can send AXWindowMoved after
@@ -1162,7 +1346,7 @@ impl State {
                     frame,
                     txid,
                     Requested(false),
-                    event::get_mouse_state(),
+                    mouse_state,
                 ));
             }
             AxNotificationKind::WindowMiniaturized => {
@@ -1585,7 +1769,21 @@ impl State {
         elem: AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
     ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
-        let Ok((mut info, server_info)) = WindowInfo::from_ax_element(&elem, server_info_hint)
+        self.register_window_with_identity(
+            elem,
+            server_info_hint,
+            &mut NativeWindowIdentity::default(),
+        )
+    }
+
+    fn register_window_with_identity(
+        &mut self,
+        elem: AXUIElement,
+        server_info_hint: Option<WindowServerInfo>,
+        identity: &mut NativeWindowIdentity,
+    ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
+        let Ok((mut info, server_info)) =
+            WindowInfo::from_ax_element_with_identity(&elem, server_info_hint, identity)
         else {
             return None;
         };
@@ -1635,12 +1833,11 @@ impl State {
         }
 
         let window_server_id = info.sys_id.filter(|sid| sid.as_nonzero().is_some()).or_else(|| {
-            WindowServerId::try_from(&elem)
-                .or_else(|e| {
-                    info!("Could not get window server id for {elem:?}: {e}");
-                    Err(e)
-                })
-                .ok()
+            identity.resolve(|| {
+                WindowServerId::try_from(&elem)
+                    .map_err(|e| info!("Could not get window server id for {elem:?}: {e}"))
+                    .ok()
+            })
         });
 
         let idx = window_server_id.and_then(WindowServerId::as_nonzero).unwrap_or_else(|| {
@@ -1670,6 +1867,7 @@ impl State {
             title: info.title.clone(),
             is_animating: false,
             last_animation_frame: None,
+            interactive_frame_write: false,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);
@@ -1760,11 +1958,13 @@ impl State {
 
     fn visible_window_server_info_map(
         &self,
-        window_elements: &[AXUIElement],
+        window_elements: &mut [(AXUIElement, NativeWindowIdentity)],
     ) -> HashMap<WindowServerId, WindowServerInfo> {
         let wsids: Vec<WindowServerId> = window_elements
-            .iter()
-            .filter_map(|elem| WindowServerId::try_from(elem).ok())
+            .iter_mut()
+            .filter_map(|(elem, identity)| {
+                identity.resolve(|| WindowServerId::try_from(&*elem).ok())
+            })
             .collect();
         collect_visible_window_server_info(
             window_server::get_windows(&wsids),
@@ -1863,7 +2063,15 @@ impl State {
     }
 
     fn id(&self, elem: &AXUIElement) -> Result<WindowId, AxError> {
-        if let Ok(id) = WindowServerId::try_from(elem) {
+        self.id_with_identity(elem, &mut NativeWindowIdentity::default())
+    }
+
+    fn id_with_identity(
+        &self,
+        elem: &AXUIElement,
+        identity: &mut NativeWindowIdentity,
+    ) -> Result<WindowId, AxError> {
+        if let Some(id) = identity.resolve(|| WindowServerId::try_from(elem).ok()) {
             if let Some(idx) = id.as_nonzero() {
                 let wid = WindowId { pid: self.pid, idx };
                 if self.windows.contains_key(&wid) {
@@ -1978,6 +2186,8 @@ fn app_thread_main(
     info: AppInfo,
     events_tx: reactor::Sender,
     tx_store: Option<WindowTxStore>,
+    handle: AppThreadHandle,
+    requests_rx: actor::Receiver<Request>,
 ) {
     let app = AXUIElement::application(pid);
     let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
@@ -2041,8 +2251,7 @@ fn app_thread_main(
         pending_frames: HashMap::default(),
     };
 
-    let (requests_tx, requests_rx) = actor::channel();
-    Executor::run(state.run(info, requests_tx, requests_rx, notifications_rx, raises_rx));
+    Executor::run(state.run(info, handle, requests_rx, notifications_rx, raises_rx));
 }
 
 fn trace<T>(

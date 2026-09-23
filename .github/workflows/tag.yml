@@ -1,0 +1,54 @@
+name: Tag Rift version
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-rift-version
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Verify default config is present
+        run: test -s rift.default.toml
+      - name: Tag changed root package version
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          package_version() {
+            awk '/^\[package\]/{package=1; next} /^\[/{package=0}
+              package && /^version[[:space:]]*=/{split($0, value, "\""); print value[2]; exit}'
+          }
+          version=$(package_version < Cargo.toml)
+          test -n "$version"
+          if [[ "$BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            previous=$(git show "${BEFORE}:Cargo.toml" | package_version)
+            if [[ "$previous" == "$version" ]]; then
+              echo "Root package version unchanged; no tag needed."
+              exit 0
+            fi
+          fi
+          tag="v${version}"
+          if existing=$(git rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null); then
+            if [[ "$existing" != "$(git rev-parse HEAD)" ]]; then
+              echo "${tag} already points to another commit; bump the version again." >&2
+              exit 1
+            fi
+            echo "${tag} already exists at this commit."
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "refs/tags/${tag}"
+          echo "Created ${tag}. Publish a GitHub release for this tag when ready."

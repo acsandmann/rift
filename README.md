@@ -27,21 +27,20 @@
 - Multiple layout styles
   - Tiling (i3/sway-like)
   - Binary Space Partitioning (bspwm-like)
+  - Floating (independent window frames with optional stacks)
   - Master-stack (dwm-like)
-  - Scrolling columns (niri-style) <details> <summary><sup>note</sup></summary>when using multiple displays and the scrolling layout, displays must be arranged in a vertical stack or windows may leak into other displays due to displays all existing in the same coordinate space</details>
+  - Scrolling columns (niri-style)
   - Stack (accordion)
 - Menubar icon that opens a menu for switching workspaces, changing layouts, and accessing quick Rift controls <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menu_menu.png" alt="Rift menu bar icon" /></details>
 - Save and restore layouts from the menu bar or CLI, with reusable layouts listed from a configurable folder <details> <summary><sup>click to see the menu</sup></summary><img src="assets/menu_layouts.png" alt="Rift menu for restoring layouts" /></details>
-- MacOS-style mission control that allows you to visually navigate between workspaces <details><summary><sup>click to see mission control</sup></summary><img src="assets/mission_control.png" alt="Rift Mission Control view" /></details>
+<!-- - MacOS-style mission control that allows you to visually navigate between workspaces <details><summary><sup>click to see mission control</sup></summary><img src="assets/mission_control.png" alt="Rift Mission Control view" /></details> -->
 - Focus follows the mouse with auto raise
-- Drag windows over one another to swap positions
+<!-- - Drag windows over one another to swap positions -->
+- Does **not** require disabling SIP
 - Performant animations <sup>(as seen in the [demo](#rift))</sup>
 - Switch to next/previous workspace with trackpad gestures <sup>(just like native macOS)</sup>
 - Hot reloadable configuration
-- Interop with third-party programs (ie Sketchybar)
-  - Requests can be made to rift via the cli or the mach port exposed [(lua client here)](https://github.com/acsandmann/rift.lua)
-  - Signals can be sent on startup, workspace switches, and when the windows within a workspace change. These signals can be sent via a command(cli) or through a mach connection
-- Does **not** require disabling SIP
+- Mach port based IPC for communicating with rift from <a href="https://acsandmann.github.io/rift-docs/ecosystem/plugins/">third-party programs</a> (sketchybar, etc)
 - Works with “Displays have separate Spaces” enabled (unlike all other major WMs)
 
 ## Quick Start
@@ -53,13 +52,13 @@ Get up and running via the docs:
 [<kbd><br>quick start<br></kbd>][quick_start]
 <br>
 
-## Status
-Rift is a stable, reliable, and performant window manager used by many. It is still in development and thus new features, optimizations, and general improvements are regularly released, but is more than good enough for daily use.
-
-> Issues and PRs are very welcome.
-
 ## Community
-Join the Rift community on Matrix for discussion, support, and announcements: [#rift:matrix.org](https://matrix.to/#/#rift:matrix.org)
+
+Join [#rift:matrix.org](https://matrix.to/#/#rift:matrix.org) for discussion, support, and development.
+
+## Support
+
+If rift is part of your daily workflow, consider [sponsoring its development](https://github.com/sponsors/acsandmann).
 
 ## Motivation
 Aerospace worked well for me, but I missed animations and the ability to use fullscreen on one display while working on the other. I also prefer leveraging private/undocumented APIs as they tend to be more reliable (due to the OS being built on them and all the public APIs) and performant.

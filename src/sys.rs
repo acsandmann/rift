@@ -5,7 +5,10 @@ use objc2_core_graphics::CGError;
 pub mod accessibility;
 pub mod app;
 pub mod axuielement;
+pub mod backdrop_layer;
 pub mod carbon;
+#[cfg(feature = "custom-event-loop")]
+mod cocoa;
 
 pub mod cgs_window;
 pub mod dispatch;
@@ -31,6 +34,8 @@ pub mod space_switch;
 pub mod timer;
 pub mod window_notify;
 pub mod window_server;
+pub mod window_surface;
+pub mod window_transaction;
 
 #[inline(always)]
 pub fn cg_ok(err: CGError) -> Result<(), CGError> {

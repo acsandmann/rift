@@ -4,17 +4,10 @@ use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopMode, CFRunLoopSource, kCFRunLoopCommonModes,
 };
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventMask, CGEventTapLocation as CGTapLoc,
-    CGEventTapOptions as CGTapOpt, CGEventTapPlacement as CGTapPlace, CGEventTapProxy, CGEventType,
+    CGEvent, CGEventMask, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
+    CGEventTapPlacement as CGTapPlace, CGEventTapProxy, CGEventType,
 };
-use tracing::{debug, error, warn};
-
-const K_CGS_EVENT_TYPE_FIELD: CGEventField = CGEventField(55);
-const K_CGS_EVENT_DOCK_CONTROL: i64 = 30;
-const K_GESTURE_HID_TYPE_FIELD: CGEventField = CGEventField(110);
-const K_GESTURE_SWIPE_MOTION_FIELD: CGEventField = CGEventField(123);
-const K_IOHID_EVENT_TYPE_DOCK_SWIPE: i64 = 23;
-const K_CG_GESTURE_MOTION_HORIZONTAL: i64 = 1;
+use tracing::{error, warn};
 
 pub type TapCallback = Option<
     unsafe extern "C-unwind" fn(
@@ -112,7 +105,9 @@ pub struct EventTap {
 }
 
 impl EventTap {
-    unsafe fn create(
+    /// Creates a tap on the current run loop (Rift input uses active HID).
+    /// On failure the caller retains ownership of `user_info`.
+    pub unsafe fn new(
         location: CGTapLoc,
         options: CGTapOpt,
         mask: CGEventMask,
@@ -140,22 +135,26 @@ impl EventTap {
                 mask,
                 Some(trampoline_callback),
                 tramp_ptr,
-            )?
+            )
         };
-
-        let source = CFMachPort::new_run_loop_source(None, Some(&port), 0)?;
+        let Some(port) = port else {
+            unsafe {
+                drop(Box::from_raw(tramp_ptr as *mut TrampolineCtx));
+            }
+            return None;
+        };
+        let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
+            port.invalidate();
+            unsafe {
+                drop(Box::from_raw(tramp_ptr as *mut TrampolineCtx));
+            }
+            return None;
+        };
         if let Some(rl) = CFRunLoop::current() {
-            debug!(
-                "EventTap::new_at_location_with_options: CFRunLoop::current() returned a run loop; adding source to common modes"
-            );
             let mode: &CFRunLoopMode = unsafe {
                 kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS")
             };
             rl.add_source(Some(&source), Some(mode));
-        } else {
-            debug!(
-                "EventTap::new_at_location_with_options: CFRunLoop::current() returned None; run loop not present"
-            );
         }
         CGEvent::tap_enable(&port, true);
 
@@ -174,121 +173,6 @@ impl EventTap {
 
         Some(event_tap)
     }
-
-    pub unsafe fn new_at_location_with_options(
-        location: CGTapLoc,
-        options: CGTapOpt,
-        mask: CGEventMask,
-        callback: TapCallback,
-        user_info: *mut c_void,
-        drop_ctx: Option<unsafe fn(*mut c_void)>,
-    ) -> Option<Self> {
-        unsafe {
-            Self::create(
-                location, options, mask, callback, user_info, drop_ctx, None, None,
-            )
-        }
-    }
-
-    /// Creates an event tap at `location` and reports both successful
-    /// re-enables and failures that require the owner to recreate the tap.
-    pub unsafe fn new_at_location_with_options_and_recovery_callbacks(
-        location: CGTapLoc,
-        options: CGTapOpt,
-        mask: CGEventMask,
-        callback: TapCallback,
-        user_info: *mut c_void,
-        drop_ctx: Option<unsafe fn(*mut c_void)>,
-        reenabled_callback: TapReenabledCallback,
-        invalidated_callback: TapInvalidatedCallback,
-    ) -> Option<Self> {
-        unsafe {
-            Self::create(
-                location,
-                options,
-                mask,
-                callback,
-                user_info,
-                drop_ctx,
-                reenabled_callback,
-                invalidated_callback,
-            )
-        }
-    }
-
-    pub unsafe fn new_with_options(
-        options: CGTapOpt,
-        mask: CGEventMask,
-        callback: TapCallback,
-        user_info: *mut c_void,
-        drop_ctx: Option<unsafe fn(*mut c_void)>,
-    ) -> Option<Self> {
-        unsafe {
-            Self::new_at_location_with_options(
-                CGTapLoc::SessionEventTap,
-                options,
-                mask,
-                callback,
-                user_info,
-                drop_ctx,
-            )
-        }
-    }
-
-    /// Creates a session event tap that invokes `reenabled_callback` immediately
-    /// after Core Graphics reports and the trampoline recovers a disabled tap.
-    pub unsafe fn new_with_options_and_recovery_callbacks(
-        options: CGTapOpt,
-        mask: CGEventMask,
-        callback: TapCallback,
-        user_info: *mut c_void,
-        drop_ctx: Option<unsafe fn(*mut c_void)>,
-        reenabled_callback: TapReenabledCallback,
-        invalidated_callback: TapInvalidatedCallback,
-    ) -> Option<Self> {
-        unsafe {
-            Self::new_at_location_with_options_and_recovery_callbacks(
-                CGTapLoc::SessionEventTap,
-                options,
-                mask,
-                callback,
-                user_info,
-                drop_ctx,
-                reenabled_callback,
-                invalidated_callback,
-            )
-        }
-    }
-
-    pub unsafe fn new_listen_only(
-        mask: CGEventMask,
-        callback: TapCallback,
-        user_info: *mut c_void,
-        drop_ctx: Option<unsafe fn(*mut c_void)>,
-    ) -> Option<Self> {
-        unsafe { Self::new_with_options(CGTapOpt::ListenOnly, mask, callback, user_info, drop_ctx) }
-    }
-
-    pub unsafe fn new_at_location_listen_only(
-        location: CGTapLoc,
-        mask: CGEventMask,
-        callback: TapCallback,
-        user_info: *mut c_void,
-        drop_ctx: Option<unsafe fn(*mut c_void)>,
-    ) -> Option<Self> {
-        unsafe {
-            Self::new_at_location_with_options(
-                location,
-                CGTapOpt::ListenOnly,
-                mask,
-                callback,
-                user_info,
-                drop_ctx,
-            )
-        }
-    }
-
-    pub fn set_enabled(&self, enabled: bool) { CGEvent::tap_enable(&self.port, enabled); }
 }
 
 impl Drop for EventTap {
@@ -302,58 +186,9 @@ impl Drop for EventTap {
         if let Some(rl) = CFRunLoop::current() {
             rl.remove_source(Some(&self.source), unsafe { kCFRunLoopCommonModes });
         }
+        self.port.invalidate();
         if let Some(dropper) = self.drop_ctx {
             unsafe { dropper(self.user_info) };
         }
-    }
-}
-
-/// Consumes only WindowServer's physical horizontal Dock swipe events. Gesture
-/// recognition itself belongs to MultitouchSupport; this tap exists solely to
-/// prevent macOS from acting on a gesture Rift owns.
-pub struct DockSwipeSuppressor {
-    _tap: EventTap,
-}
-
-impl DockSwipeSuppressor {
-    pub unsafe fn new(
-        user_info: *mut c_void,
-        drop_ctx: Option<unsafe fn(*mut c_void)>,
-        invalidated_callback: TapInvalidatedCallback,
-    ) -> Option<Self> {
-        let tap = unsafe {
-            EventTap::new_at_location_with_options_and_recovery_callbacks(
-                CGTapLoc::HIDEventTap,
-                CGTapOpt::Default,
-                1u64 << (K_CGS_EVENT_DOCK_CONTROL as u64),
-                Some(suppress_dock_swipe),
-                user_info,
-                drop_ctx,
-                None,
-                invalidated_callback,
-            )?
-        };
-        Some(Self { _tap: tap })
-    }
-}
-
-unsafe extern "C-unwind" fn suppress_dock_swipe(
-    _proxy: CGEventTapProxy,
-    event_type: CGEventType,
-    event_ref: core::ptr::NonNull<CGEvent>,
-    _user_info: *mut c_void,
-) -> *mut CGEvent {
-    let event = unsafe { event_ref.as_ref() };
-    let cgs_type = CGEvent::integer_value_field(Some(event), K_CGS_EVENT_TYPE_FIELD);
-    let hid_type = CGEvent::integer_value_field(Some(event), K_GESTURE_HID_TYPE_FIELD);
-    let motion = CGEvent::integer_value_field(Some(event), K_GESTURE_SWIPE_MOTION_FIELD);
-
-    if (event_type.0 as i64 == K_CGS_EVENT_DOCK_CONTROL || cgs_type == K_CGS_EVENT_DOCK_CONTROL)
-        && hid_type == K_IOHID_EVENT_TYPE_DOCK_SWIPE
-        && motion == K_CG_GESTURE_MOTION_HORIZONTAL
-    {
-        std::ptr::null_mut()
-    } else {
-        event_ref.as_ptr()
     }
 }

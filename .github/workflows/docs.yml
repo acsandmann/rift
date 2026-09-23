@@ -3,6 +3,13 @@ name: Update latest documentation
 on:
   push:
     branches: [main]
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/rift-protocol/src/**'
+      - 'rift.default.toml'
+      - 'src/bin/rift-cli.rs'
+      - 'src/common/config.rs'
 
 permissions:
   contents: read

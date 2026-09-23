@@ -576,26 +576,6 @@ impl LayoutEngine {
         Ok(report)
     }
 
-    /// Compatibility wrapper for callers that only need the matched-window count.
-    pub fn restore_saved_layout(
-        &mut self,
-        path: PathBuf,
-        scope: RestoreScope,
-        active_space: SpaceId,
-        window_store: &mut WindowStore,
-        virtual_workspace_config: &VirtualWorkspaceSettings,
-        layout_settings: &LayoutSettings,
-    ) -> anyhow::Result<usize> {
-        self.restore_layout(
-            path,
-            RestoreRequest::new(scope, active_space),
-            window_store,
-            virtual_workspace_config,
-            layout_settings,
-        )
-        .map(|report| report.matched)
-    }
-
     /// Install all state participating in workspace ownership as one operation.
     fn install_workspace_restore_state(&mut self, state: WorkspaceRestoreState) {
         for window in state.replaced_windows {

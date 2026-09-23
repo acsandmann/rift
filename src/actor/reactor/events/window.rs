@@ -1,11 +1,11 @@
 use objc2_core_foundation::CGRect;
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::actor::app::WindowId;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::DragManager;
 use crate::actor::reactor::transaction_manager::TransactionManager;
-use crate::actor::reactor::{DragState, Quiet, TransactionId, WindowState, utils};
+use crate::actor::reactor::{Quiet, TransactionId, WindowState, utils};
 use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
 use crate::sys::app::WindowInfo as Window;
@@ -87,27 +87,10 @@ pub fn handle_window_destroyed(
     }
     state.windows.remove_window(wid);
 
-    if let DragState::PendingSwap { session, target } = &drag.drag_state {
-        if session.window == wid || *target == wid {
-            trace!(
-                ?wid,
-                "Clearing pending drag swap because a participant window was destroyed"
-            );
-            drag.drag_state = DragState::Inactive;
-        }
-    }
-
-    let dragged_window = drag.dragged();
-    let last_target = drag.last_target();
-    if dragged_window == Some(wid) || last_target == Some(wid) {
-        drag.reset();
-        if dragged_window == Some(wid) {
-            drag.drag_state = DragState::Inactive;
-        }
-    }
-
-    if drag.skip_layout_for_window == Some(wid) {
-        drag.skip_layout_for_window = None;
+    let drag_changed = drag.actor.window_removed(wid);
+    drag.sync_preview();
+    if drag_changed && drag.externally_controlled_window == Some(wid) {
+        drag.externally_controlled_window = None;
     }
     Ok(EventOutcome::window_membership_changed(true, false)
         .with_layout_event(LayoutEvent::WindowRemoved(wid)))
@@ -218,8 +201,6 @@ pub fn classify_window_frame_change(
 
     if mission_control_active {
         drag.reset();
-        drag.drag_state = DragState::Inactive;
-        drag.skip_layout_for_window = None;
         return FrameChangeDisposition::Handled;
     }
 
@@ -264,12 +245,7 @@ pub fn classify_window_frame_change(
 }
 
 fn query_mouse_for_active_drag(drag: &DragManager, mouse_state: &mut Option<MouseState>) {
-    if mouse_state.is_none()
-        && matches!(
-            drag.drag_state,
-            DragState::Active { .. } | DragState::PendingSwap { .. }
-        )
-    {
+    if mouse_state.is_none() && drag.actor.is_active() {
         *mouse_state = crate::sys::event::get_mouse_state();
     }
 }
@@ -310,58 +286,69 @@ pub fn handle_window_frame_changed(
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
     }
+    // An adjusted acknowledgement of our own frame write is not a new native drag.
+    if matches!(
+        drag.actor.kind(),
+        Some(crate::actor::drag::DragKind::ModifierMove)
+    ) && drag.actor.source().is_some_and(|source| source.window == wid)
+    {
+        return Ok(EventOutcome::no_change());
+    }
     outcome = EventOutcome::layout_changed(false);
 
-    let dragging = mouse_state == Some(MouseState::Down)
-        || matches!(
-            drag.drag_state,
-            DragState::Active { .. } | DragState::PendingSwap { .. }
-        );
+    // External moves as well as resizes are authoritative for floating layouts.
+    // Requested frame acknowledgements have already been filtered by the classifier.
+    if let Some(space) = assigned_space.or(old_space)
+        && Some(space) == new_space
+        && let Some(workspace) = layout
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(&state.windows, space, wid)
+        && layout.layout_engine.virtual_workspace_manager().workspaces[workspace].layout_mode()
+            == crate::common::config::LayoutMode::Floating
+    {
+        layout.layout_engine.store_floating_position(space, workspace, wid, new_frame);
+    }
+
+    let dragging = mouse_state == Some(MouseState::Down) || drag.actor.is_active();
     if dragging {
-        let needs_session = !matches!(
-            &drag.drag_state,
-            DragState::Active { session } | DragState::PendingSwap { session, .. }
-                if session.window == wid
-        );
-        if needs_session {
-            drag.drag_state = DragState::Active {
-                session: crate::actor::reactor::DragSession {
-                    window: wid,
-                    last_frame: old_frame,
-                    origin_space: old_space,
-                    settled_space: old_space,
-                    layout_dirty: false,
-                },
+        let tiled = !layout.layout_engine.is_window_floating(wid);
+        let native_resize = !old_frame.size.same_as(new_frame.size);
+        if !drag.actor.update_native(wid, new_frame, new_space) {
+            let session_id = drag.actor.await_native(wid);
+            let scene = if tiled && !native_resize {
+                new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
+                    crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
+                })
+            } else {
+                Default::default()
             };
+            let _ = drag.actor.resolve_start(
+                session_id,
+                Some(crate::actor::drag::DragSource {
+                    window: wid,
+                    origin_frame: old_frame,
+                    last_frame: new_frame,
+                    origin_space: old_space,
+                    current_space: new_space,
+                    tiled,
+                }),
+                scene,
+            );
         }
-        // A pending swap is still a live drag: `last_frame` and `settled_space` are
-        // what mouse-up uses to place the window and choose its final space, so
-        // freezing them here strands the window at the position where the swap
-        // candidate was first scored instead of where the user released it.
-        if let DragState::Active { session } | DragState::PendingSwap { session, .. } =
-            &mut drag.drag_state
-        {
-            session.last_frame = new_frame;
-            session.layout_dirty = true;
-            if session.settled_space != new_space {
-                session.settled_space = new_space;
-            }
+        drag.sync_preview();
+        if tiled {
+            drag.externally_controlled_window = Some(wid);
         }
-        drag.skip_layout_for_window = Some(wid);
-        if !old_frame.size.same_as(new_frame.size) {
-            if active_resize_space.is_some() {
-                outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
-                    wid,
-                    old_frame,
-                    new_frame,
-                    screens,
-                });
-            }
-        } else {
-            outcome.drag_swap_evaluations.push((wid, new_frame));
+        if native_resize && active_resize_space.is_some() {
+            outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
+                wid,
+                old_frame,
+                new_frame,
+                screens: screens.into(),
+            });
         }
     } else {
-        drag.skip_layout_for_window = Some(wid);
         if old_space != new_space {
             if pending_target_space.is_some()
                 && assigned_space == pending_target_space
@@ -398,7 +385,7 @@ pub fn handle_window_frame_changed(
                 wid,
                 old_frame,
                 new_frame,
-                screens,
+                screens: screens.into(),
             });
         }
     }
@@ -465,7 +452,7 @@ pub fn handle_mouse_moved_over_window(
                 raise_windows: vec![vec![window]],
                 focus_window: Some((window, None)),
                 app_handles,
-                focus_quiet: Quiet::No,
+                focus_quiet: Quiet::Yes,
             },
         ));
     }
@@ -481,17 +468,10 @@ fn handle_mouse_up_if_needed(
 ) -> bool {
     if mission_control_active {
         drag.reset();
-        drag.drag_state = DragState::Inactive;
-        drag.skip_layout_for_window = None;
         return false;
     }
 
-    if mouse_state == Some(MouseState::Up)
-        && matches!(
-            drag.drag_state,
-            DragState::Active { .. } | DragState::PendingSwap { .. }
-        )
-    {
+    if mouse_state == Some(MouseState::Up) && drag.actor.is_active() {
         return true;
     }
     false

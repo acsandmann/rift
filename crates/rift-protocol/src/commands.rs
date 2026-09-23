@@ -118,6 +118,17 @@ pub enum ReactorCommand {
         selector: DisplaySelector,
         window_id: Option<u32>,
     },
+    /// Move the active workspace to another display.
+    ///
+    /// Rift workspaces are display-local, so windows move into the destination
+    /// display's workspace at the same ordinal and that workspace becomes active.
+    MoveWorkspaceToDisplay {
+        selector: DisplaySelector,
+        /// Continue from the opposite edge when a directional selector has no
+        /// display further in that direction.
+        #[serde(default)]
+        wrap_around: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

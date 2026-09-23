@@ -66,7 +66,7 @@ impl Menu {
             .ui
             .menu_bar
             .enabled
-            .then(|| MenuIcon::new(mtm, action_tx.clone(), &layout_folder));
+            .then(|| MenuIcon::new(mtm, action_tx.clone(), reactor_tx.clone(), &layout_folder));
         if let Some(icon) = &mut icon {
             icon.update_config(&config.settings.ui.menu_bar, &config.keys);
         }
@@ -170,7 +170,12 @@ impl Menu {
 
         if should_enable && self.icon.is_none() {
             let layout_folder = self.config.settings.ui.menu_bar.resolved_layout_folder();
-            self.icon = Some(MenuIcon::new(self.mtm, self.action_tx.clone(), &layout_folder));
+            self.icon = Some(MenuIcon::new(
+                self.mtm,
+                self.action_tx.clone(),
+                self.reactor_tx.clone(),
+                &layout_folder,
+            ));
         } else if !should_enable && self.icon.is_some() {
             self.icon = None;
         }
@@ -272,18 +277,12 @@ impl Menu {
     }
 
     fn reload_config(&self) {
-        let (response, _fut) = r#continue::continuation();
+        let (response, _result) = std::sync::mpsc::sync_channel(1);
         let msg = config::Event::ApplyConfig {
             cmd: ConfigCommand::ReloadConfig,
             response,
         };
-        if let Err(e) = self.config_tx.try_send(msg) {
-            let tokio::sync::mpsc::error::SendError((_span, msg)) = e;
-            match msg {
-                config::Event::ApplyConfig { response, .. } => std::mem::forget(response),
-                config::Event::QueryConfig(response) => std::mem::forget(response),
-            }
-        }
+        self.config_tx.send(msg);
     }
 
     fn spawn_debouncer(

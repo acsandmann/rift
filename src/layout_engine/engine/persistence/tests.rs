@@ -1982,10 +1982,9 @@ fn space_restore_rejects_workspace_count_mismatch_before_mutating_layouts() {
         .add_window_after_selection(target_layout, sentinel);
 
     let error = engine
-        .restore_saved_layout(
+        .restore_layout(
             path.clone(),
-            RestoreScope::Space,
-            space,
+            RestoreRequest::new(RestoreScope::Space, space),
             &mut window_store,
             &VirtualWorkspaceSettings::default(),
             &LayoutSettings::default(),
@@ -2071,6 +2070,7 @@ fn every_layout_system_round_trips_through_ron() {
         LayoutMode::Stack,
         LayoutMode::MasterStack,
         LayoutMode::Scrolling,
+        LayoutMode::Floating,
     ] {
         let system = VirtualWorkspace::create_layout_system(mode, &settings);
         let serialized = ron::ser::to_string(&system).unwrap();

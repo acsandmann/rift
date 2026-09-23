@@ -93,7 +93,7 @@ impl ConfigWatcher {
             if !should_reload {
                 match crate::common::config::Config::read(&self.file) {
                     Ok(new_cfg) => {
-                        if let Ok(current_cfg) = self.query_config().await {
+                        if let Ok(current_cfg) = self.query_config() {
                             if new_cfg.keys != current_cfg.keys {
                                 should_reload = true;
                             }
@@ -104,8 +104,8 @@ impl ConfigWatcher {
             }
 
             if should_reload {
-                if self.request_reload().await.is_ok()
-                    && let Ok(new_config) = self.query_config().await
+                if self.request_reload().is_ok()
+                    && let Ok(new_config) = self.query_config()
                 {
                     self.enabled = new_config.settings.hot_reload;
                     debug!("config reloaded successfully");
@@ -144,37 +144,21 @@ impl ConfigWatcher {
         event.path.file_name().is_some_and(|n| Some(n) == self.file.file_name())
     }
 
-    async fn request_reload(&self) -> Result<(), String> {
+    fn request_reload(&self) -> Result<(), String> {
         info!("requesting config reload");
-        let (tx, fut) = r#continue::continuation();
-
-        let msg = ConfigEvent::ApplyConfig {
-            cmd: ConfigCommand::ReloadConfig,
-            response: tx,
-        };
-
-        if let Err(e) = self.config_tx.try_send(msg) {
-            let tokio::sync::mpsc::error::SendError((_span, msg)) = e;
-            match msg {
-                ConfigEvent::ApplyConfig { response, .. } => std::mem::forget(response),
-                ConfigEvent::QueryConfig(response) => std::mem::forget(response),
-            }
-            return Err("Config actor unavailable".to_string());
-        }
-
-        fut.await
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.config_tx
+            .try_send(ConfigEvent::ApplyConfig {
+                cmd: ConfigCommand::ReloadConfig,
+                response,
+            })
+            .map_err(|_| "Config actor unavailable".to_string())?;
+        result.recv().map_err(|_| "Config actor stopped before replying".to_string())?
     }
 
-    async fn query_config(&self) -> Result<config::Config, ()> {
-        let (tx, fut) = r#continue::continuation();
-        let event = ConfigEvent::QueryConfig(tx);
-        if let Err(e) = self.config_tx.try_send(event) {
-            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
-            if let ConfigEvent::QueryConfig(response) = event {
-                std::mem::forget(response);
-            }
-            return Err(());
-        }
-        Ok(fut.await)
+    fn query_config(&self) -> Result<config::Config, ()> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.config_tx.try_send(ConfigEvent::QueryConfig(response)).map_err(|_| ())?;
+        result.recv().map_err(|_| ())
     }
 }

@@ -330,7 +330,8 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
-        releases_display_churn_refresh_quarantine: false,
+        // Set on every coherent snapshot the spaces actor forwards.
+        releases_display_churn_refresh_quarantine: true,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
         active_window_spaces: Default::default(),
@@ -663,6 +664,27 @@ impl Apps {
                             None,
                         ));
                     }
+                }
+                Request::InteractiveFramesPending(frames) => {
+                    frames.drain_with(|wid, frame, set_size, txid| {
+                        let window = self.windows.entry(wid).or_default();
+                        window.last_seen_txid = txid;
+                        let old_frame = window.frame;
+                        if set_size {
+                            window.frame = frame;
+                        } else {
+                            window.frame.origin = frame.origin;
+                        }
+                        if !window.animating && !old_frame.same_as(window.frame) {
+                            events.push(Event::WindowFrameChanged(
+                                wid,
+                                window.frame,
+                                Some(txid),
+                                Requested(true),
+                                None,
+                            ));
+                        }
+                    });
                 }
                 Request::BeginWindowAnimation(wid) => {
                     self.windows.entry(wid).or_default().animating = true;

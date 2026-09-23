@@ -19,6 +19,7 @@ pub use window_store::{
     WindowWorkspaceInfo,
 };
 pub mod broadcast;
+pub mod drag;
 pub mod reactor;
 pub mod space_activation;
 pub use reactor::RiftState;

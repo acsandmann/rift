@@ -261,7 +261,12 @@ impl VirtualWorkspaceSettings {
             }
 
             if let Some(ref app_name) = rule.app_name {
-                if !seen_app_names.insert(app_name) {
+                let has_specific_match = rule.app_id.is_some()
+                    || rule.title_regex.is_some()
+                    || rule.title_substring.is_some()
+                    || rule.ax_role.is_some()
+                    || rule.ax_subrole.is_some();
+                if !has_specific_match && !seen_app_names.insert(app_name) {
                     issues.push(format!("Duplicate app_name '{}' in rule {}", app_name, index));
                 }
             }
@@ -373,16 +378,18 @@ fn migrate_legacy_resize_bindings(document: &mut toml::Value) -> bool {
     migrated
 }
 
+fn migrate_legacy_window_snapping(document: &mut toml::Value) -> bool {
+    let Some(settings) = document.get_mut("settings").and_then(toml::Value::as_table_mut) else {
+        return false;
+    };
+    settings.remove("window_snapping").is_some()
+}
+
 fn parse_config_file(buf: &str) -> Result<ConfigFile, toml::de::Error> {
-    toml::from_str(buf).or_else(|original_error| {
-        let Ok(mut document) = toml::from_str::<toml::Value>(buf) else {
-            return Err(original_error);
-        };
-        if !migrate_legacy_resize_bindings(&mut document) {
-            return Err(original_error);
-        }
-        document.try_into()
-    })
+    let mut document = toml::from_str::<toml::Value>(buf)?;
+    migrate_legacy_resize_bindings(&mut document);
+    migrate_legacy_window_snapping(&mut document);
+    document.try_into()
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -464,9 +471,9 @@ pub struct Settings {
     /// Trackpad gesture settings
     #[serde(default)]
     pub gestures: GestureSettings,
-
+    /// Modifier-assisted dragging and tiled-window drop settings.
     #[serde(default)]
-    pub window_snapping: WindowSnappingSettings,
+    pub drag_drop: DragDropSettings,
 
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
@@ -538,11 +545,112 @@ impl Default for GestureSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]
+/// Keyboard modifier that activates Rift's mouse actions.
+///
+/// Serialized values are `cmd`, `alt`, `shift`, `ctrl`, and `fn`.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseModifier {
+    /// Command (⌘). The alias `command` is also accepted.
+    #[serde(alias = "command")]
+    Cmd,
+    /// Option (⌥). The alias `option` is also accepted.
+    #[serde(alias = "option")]
+    Alt,
+    /// Shift (⇧).
+    Shift,
+    /// Control (⌃). The alias `control` is also accepted.
+    #[serde(alias = "control")]
+    Ctrl,
+    /// Globe/Fn. This is the default because it rarely conflicts with apps.
+    #[default]
+    Fn,
+}
+
+/// Operation reserved for a modifier-plus-mouse-button gesture.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseAction {
+    /// Do not capture this button; the click is delivered normally.
+    None,
+    /// Move a window from anywhere inside it.
+    #[default]
+    Move,
+}
+
+/// Action used when a tiled window is released in another tile's center zone.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseDropAction {
+    /// Exchange the source and target's logical layout positions.
+    #[default]
+    Swap,
+    /// Move the source into the target's stack/group and select the source.
+    Stack,
+}
+
+/// Mouse-driven window movement and tiled-window drop settings.
+///
+/// Native title-bar dragging continues to work normally. Holding [`Self::modifier`]
+/// reserves `action1` for the left button and `action2` for the right button, so
+/// a window can be moved from anywhere inside it. Floating windows
+/// remain floating. A tiled destination is divided into five local zones: its center
+/// performs [`Self::drop_action`], while its edges insert the source on that side.
+/// Dragging to an edge of the source's vacated tile performs the matching MoveNode command.
+/// Preview simulation runs only when the destination or zone changes.
+///
+/// Example:
+///
+/// ```toml
+/// [settings.drag_drop]
+/// enabled = true
+/// modifier = "fn"
+/// action1 = "move"
+/// action2 = "none"
+/// drop_action = "swap"
+/// drop_zone_fraction = 0.25
+/// preview = true
+/// ```
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(deny_unknown_fields)]
-pub struct WindowSnappingSettings {
-    #[serde(default = "default_drag_swap_fraction")]
-    pub drag_swap_fraction: f64,
+pub struct DragDropSettings {
+    /// Enables native drag targeting and modifier mouse actions.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Modifier held with `action1` or `action2`.
+    #[serde(default)]
+    pub modifier: MouseModifier,
+    /// Left-button action while the configured modifier is held.
+    #[serde(default)]
+    pub action1: MouseAction,
+    /// Right-button action while the configured modifier is held.
+    #[serde(default = "default_mouse_action_none")]
+    pub action2: MouseAction,
+    /// Center-zone action for tiled move drops.
+    #[serde(default)]
+    pub drop_action: MouseDropAction,
+    /// Depth of each edge zone as a fraction of the destination window's size.
+    /// Valid values are `0.10..=0.45`; the default is `0.25`.
+    #[serde(default = "default_drop_zone_fraction")]
+    pub drop_zone_fraction: f64,
+    /// Shows a translucent, rounded WindowServer overlay for the pending drop.
+    /// The overlay is updated only when the target tile or drop zone changes.
+    #[serde(default = "yes")]
+    pub preview: bool,
+}
+
+impl Default for DragDropSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            modifier: MouseModifier::Fn,
+            action1: MouseAction::Move,
+            action2: MouseAction::None,
+            drop_action: MouseDropAction::Swap,
+            drop_zone_fraction: default_drop_zone_fraction(),
+            preview: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
@@ -650,13 +758,16 @@ pub struct MissionControlSettings {
 
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
 
-fn default_drag_swap_fraction() -> f64 { 0.3 }
+fn default_drop_zone_fraction() -> f64 { 0.25 }
+
+fn default_mouse_action_none() -> MouseAction { MouseAction::None }
 
 fn default_master_stack_ratio() -> f64 { 0.6 }
 
 fn default_master_stack_count() -> usize { 1 }
 
 fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
+fn default_true() -> bool { true }
 
 fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 
@@ -737,7 +848,7 @@ pub struct LayoutSettings {
     /// Settings inherited by every layout type unless overridden by its table.
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
-    /// Layout mode: "traditional", "bsp", "stack", "master_stack", or "scrolling"
+    /// Layout mode: "traditional", "bsp", "stack", "master_stack", "scrolling", or "floating"
     #[serde(default)]
     pub mode: LayoutMode,
     /// Traditional layout configuration
@@ -771,6 +882,9 @@ pub struct ScrollingLayoutSettings {
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
     pub column_width_ratio: f64,
+    /// Keep a window's existing column width when it enters scrolling layout.
+    #[serde(default = "default_true")]
+    pub preserve_window_sizes: bool,
     /// Minimum column width ratio allowed by resize commands.
     #[serde(default = "default_scrolling_min_column_width_ratio")]
     pub min_column_width_ratio: f64,
@@ -796,6 +910,7 @@ impl Default for ScrollingLayoutSettings {
             base: BaseLayoutSettings::default(),
             animate: None,
             column_width_ratio: default_scrolling_column_width_ratio(),
+            preserve_window_sizes: true,
             min_column_width_ratio: default_scrolling_min_column_width_ratio(),
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
             alignment: ScrollingAlignment::default(),
@@ -1036,6 +1151,13 @@ impl Settings {
 
         issues.extend(self.layout.validate());
 
+        if !(0.10..=0.45).contains(&self.drag_drop.drop_zone_fraction) {
+            issues.push(format!(
+                "drag_drop.drop_zone_fraction must be between 0.10 and 0.45, got {}",
+                self.drag_drop.drop_zone_fraction
+            ));
+        }
+
         if self.gestures.swipe_vertical_tolerance < 0.0 {
             issues.push(format!(
                 "gestures.swipe_vertical_tolerance must be non-negative, got {}",
@@ -1055,6 +1177,7 @@ impl LayoutSettings {
             LayoutMode::Stack => &self.stack.base,
             LayoutMode::MasterStack => &self.master_stack.base,
             LayoutMode::Scrolling => &self.scrolling.base,
+            LayoutMode::Floating => &self.base,
         }
     }
 
@@ -1545,7 +1668,7 @@ impl Config {
             }
         } else {
             // Use dynamically generated builtin candidates.
-            let builtin_candidates = crate::actor::wm_controller::WmCommand::builtin_candidates();
+            let builtin_candidates = crate::actor::wm_controller::WmCmd::snake_case_variants();
             for cand in builtin_candidates.iter() {
                 let dist = Self::levenshtein(&unknown_token, &cand.to_lowercase());
                 if best.is_none() || dist < best.as_ref().unwrap().1 {
@@ -1905,6 +2028,86 @@ mod tests {
         let cfg = Config::parse(toml).unwrap();
         // We expect keys to be parsed into hotkeys
         assert!(!cfg.keys.is_empty());
+    }
+
+    #[test]
+    fn mouse_settings_defaults_and_variants_parse() {
+        let defaults: DragDropSettings = toml::from_str("").unwrap();
+        assert_eq!(defaults, DragDropSettings::default());
+
+        let settings: DragDropSettings = toml::from_str(
+            r#"
+                enabled = false
+                modifier = "ctrl"
+                action1 = "none"
+                action2 = "move"
+                drop_action = "stack"
+                drop_zone_fraction = 0.45
+                preview = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(settings.modifier, MouseModifier::Ctrl);
+        assert_eq!(settings.action1, MouseAction::None);
+        assert_eq!(settings.action2, MouseAction::Move);
+        assert_eq!(settings.drop_action, MouseDropAction::Stack);
+
+        for (alias, expected) in [
+            ("command", MouseModifier::Cmd),
+            ("option", MouseModifier::Alt),
+            ("control", MouseModifier::Ctrl),
+        ] {
+            let parsed: DragDropSettings =
+                toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
+            assert_eq!(parsed.modifier, expected);
+        }
+    }
+
+    #[test]
+    fn legacy_window_snapping_is_removed_before_deserialization() {
+        let cfg = Config::parse(
+            r#"
+                [settings.window_snapping]
+                drag_swap_fraction = 0.3
+                [keys]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.settings.drag_drop, DragDropSettings::default());
+    }
+
+    #[test]
+    fn drag_drop_settings_take_precedence_over_legacy_window_snapping() {
+        let cfg = Config::parse(
+            r#"
+                [settings.window_snapping]
+                drag_swap_fraction = 0.3
+                [settings.drag_drop]
+                modifier = "alt"
+                drop_action = "stack"
+                [keys]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.settings.drag_drop.modifier, MouseModifier::Alt);
+        assert_eq!(cfg.settings.drag_drop.drop_action, MouseDropAction::Stack);
+    }
+
+    #[test]
+    fn invalid_drop_zone_fraction_has_clear_validation_error() {
+        let mut cfg = Config::default();
+        cfg.settings.drag_drop.drop_zone_fraction = 0.09;
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+        );
+        cfg.settings.drag_drop.drop_zone_fraction = 0.46;
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+        );
     }
 
     #[test]

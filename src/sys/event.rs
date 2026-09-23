@@ -1,10 +1,9 @@
 use std::convert::TryFrom;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGEvent, CGEventField, CGEventFlags,
-    CGEventSourceStateID, kCGNullDirectDisplay,
+    CGEventSource, CGEventSourceStateID, CGMouseButton, kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,10 +21,6 @@ pub enum MouseState {
     Up = 1,
     Down = 2,
 }
-
-const MOUSE_STATE_UNKNOWN: u8 = 0;
-
-static MOUSE_STATE: AtomicU8 = AtomicU8::new(MOUSE_STATE_UNKNOWN);
 
 const RIFT_SYNTHETIC_EVENT_MARKER: i64 = 0x5249_4654;
 const KEYCODE_W: u16 = 0x0d;
@@ -46,13 +41,18 @@ impl TryFrom<u8> for MouseState {
     }
 }
 
-pub fn set_mouse_state(state: MouseState) { MOUSE_STATE.store(state.into(), Ordering::Relaxed); }
-
 pub fn get_mouse_state() -> Option<MouseState> {
-    match MouseState::try_from(MOUSE_STATE.load(Ordering::Relaxed)) {
-        Ok(s) => Some(s),
-        Err(_) => None,
-    }
+    let down =
+        CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)
+            || CGEventSource::button_state(
+                CGEventSourceStateID::HIDSystemState,
+                CGMouseButton::Right,
+            );
+    Some(if down {
+        MouseState::Down
+    } else {
+        MouseState::Up
+    })
 }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {

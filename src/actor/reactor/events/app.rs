@@ -28,6 +28,9 @@ pub fn handle_application_launched(
         visible_windows,
         window_server_info,
     } = payload;
+    if apps.reject_duplicate(pid, &handle) {
+        return Ok(EventOutcome::no_change());
+    }
     apps.apps.insert(pid, AppState { info: info.clone(), handle });
     Ok(EventOutcome::window_membership_changed(false, true)
         .with_window_server_updates(window_server_info)
@@ -94,4 +97,36 @@ pub fn handle_windows_discovered(
             },
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actor::reactor::Event;
+    use crate::actor::reactor::testing::test_reactor;
+
+    #[test]
+    fn duplicate_registration_retains_original_and_terminates_duplicate() {
+        let mut reactor = test_reactor();
+        let (original, mut original_rx) = AppThreadHandle::channel();
+        let (duplicate, mut duplicate_rx) = AppThreadHandle::channel();
+        reactor.app_manager.apps.insert(42, AppState {
+            info: AppInfo {
+                bundle_id: None,
+                localized_name: None,
+            },
+            handle: original.clone(),
+        });
+        assert!(reactor.app_manager.reject_duplicate(42, &duplicate));
+        assert!(matches!(
+            duplicate_rx.try_recv().unwrap().1,
+            crate::actor::app::Request::Terminate
+        ));
+        assert!(reactor.app_manager.reject_duplicate(42, &original));
+        assert!(original_rx.try_recv().is_err());
+        reactor.handle_event(Event::AppActorExited(42, duplicate));
+        assert!(reactor.app_manager.apps[&42].handle.same_actor(&original));
+        reactor.handle_event(Event::AppActorExited(42, original));
+        assert!(reactor.app_manager.apps.is_empty());
+    }
 }

@@ -41,7 +41,6 @@ const REFRESH_SPACE_SWITCH_DELAY_NS: i64 = 50_000_000;
 const REFRESH_RETRY_DELAY_NS: i64 = 100_000_000;
 const REFRESH_MAX_RETRIES: u8 = 10;
 
-// OmniWM debounces display changes at 100 ms and then rescans immediately.
 // Rift still requires two identical topology samples plus a quiet WindowServer,
 // but it should converge on the same order of magnitude rather than waiting
 // multiple seconds before even attempting stabilization.
@@ -535,7 +534,8 @@ impl SpacesActor {
     ) {
         self.state.last_converter = converter;
         let forwarded = self.build_forwarded_state(screens);
-        self.state.last_sent_spaces = Some(Self::screen_spaces(&forwarded.screens));
+        self.state.last_sent_spaces =
+            Some(forwarded.screens.iter().map(|screen| screen.space).collect());
         self.state.awaiting_space_switch_confirmation = false;
         self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
             forwarded,
@@ -696,10 +696,6 @@ impl SpacesActor {
             topology_window_delta: self.state.pending_topology_window_delta.take(),
             active_window_spaces: self.state.visible_window_spaces.clone(),
         }
-    }
-
-    fn screen_spaces(screens: &[ScreenInfo]) -> Vec<Option<SpaceId>> {
-        screens.iter().map(|screen| screen.space).collect()
     }
 
     fn preserve_user_spaces_during_fullscreen_transition(

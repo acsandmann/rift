@@ -3,7 +3,7 @@ use tracing::{debug, trace};
 use crate::actor::app::{Request, WindowId};
 use crate::actor::reactor::events::{EventOutcome, window};
 use crate::actor::reactor::managers::{DragManager, MissionControlManager};
-use crate::actor::reactor::{DragState, LayoutEvent, MissionControlState, SpaceEventKind};
+use crate::actor::reactor::{LayoutEvent, MissionControlState, SpaceEventKind};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
@@ -388,9 +388,8 @@ pub fn handle_mission_control_native_entered(
     mission_control: &mut MissionControlManager,
     drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
+    drag.suppress_preview(true);
     drag.reset();
-    drag.drag_state = DragState::Inactive;
-    drag.skip_layout_for_window = None;
     let changed = !matches!(
         mission_control.mission_control_state,
         MissionControlState::Active
@@ -406,7 +405,9 @@ pub fn handle_mission_control_native_entered(
 
 pub fn handle_mission_control_native_exited(
     mission_control: &mut MissionControlManager,
+    drag: &mut DragManager,
 ) -> anyhow::Result<EventOutcome> {
+    drag.suppress_preview(false);
     let changed = matches!(
         mission_control.mission_control_state,
         MissionControlState::Active

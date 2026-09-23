@@ -3,6 +3,7 @@
 //! controls hotkey registration.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use dispatchr::queue;
@@ -14,7 +15,6 @@ use serde_json;
 use strum::VariantNames;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::actor::gesture_tap;
 use crate::common::config::WorkspaceSelector;
 use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
@@ -23,9 +23,9 @@ pub type Sender = actor::Sender<WmEvent>;
 type Receiver = actor::Receiver<WmEvent>;
 
 use self::WmCmd::*;
-use crate::actor::app::AppInfo;
+use crate::actor::app::{AppInfo, AppThreadHandle, Request};
 use crate::actor::spaces::ForwardedSpaceState;
-use crate::actor::{self, config, event_tap, mission_control, reactor};
+use crate::actor::{self, config, input, mission_control, reactor};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::screen::CoordinateConverter;
@@ -39,6 +39,7 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
+    AppExited(pid_t, AppThreadHandle),
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
@@ -113,10 +114,6 @@ impl WmCmd {
     pub fn snake_case_variants() -> &'static [String] { &BUILTIN_WM_CMD_VARIANTS }
 }
 
-impl WmCommand {
-    pub fn builtin_candidates() -> &'static [String] { WmCmd::snake_case_variants() }
-}
-
 pub struct Config {
     pub restore_file: PathBuf,
     pub config: crate::common::config::Config,
@@ -126,14 +123,58 @@ pub struct WmController {
     config: Config,
     config_tx: config::Sender,
     events_tx: reactor::Sender,
-    event_tap_tx: event_tap::Sender,
-    gesture_tap_tx: Option<gesture_tap::Sender>,
+    input_tx: input::Sender,
     stack_line_tx: Option<crate::actor::stack_line::Sender>,
     mission_control_tx: Option<mission_control::Sender>,
     window_tx_store: Option<WindowTxStore>,
     receiver: Receiver,
     sender: Sender,
     hotkeys_installed: bool,
+    apps: AppLifecycle,
+}
+
+// Reserve before spawning; retain the reservation until AX resources are dropped.
+#[derive(Default)]
+struct AppLifecycle(HashMap<pid_t, (AppThreadHandle, AppPhase)>);
+
+enum AppPhase {
+    Active, // Includes initialization.
+    Stopping(Option<AppInfo>),
+}
+
+impl AppLifecycle {
+    fn reserve(
+        &mut self,
+        pid: pid_t,
+        info: AppInfo,
+    ) -> Option<(AppThreadHandle, actor::Receiver<Request>)> {
+        if let Some((_, phase)) = self.0.get_mut(&pid) {
+            if let AppPhase::Stopping(relaunch) = phase {
+                *relaunch = Some(info);
+            }
+            return None;
+        }
+        let (handle, rx) = AppThreadHandle::channel();
+        self.0.insert(pid, (handle.clone(), AppPhase::Active));
+        Some((handle, rx))
+    }
+
+    fn terminate(&mut self, pid: pid_t) {
+        if let Some((handle, phase)) = self.0.get_mut(&pid) {
+            *phase = AppPhase::Stopping(None);
+            _ = handle.send(Request::Terminate);
+        }
+    }
+
+    fn exited(&mut self, pid: pid_t, handle: &AppThreadHandle) -> Option<Option<AppInfo>> {
+        if !self.0.get(&pid)?.0.same_actor(handle) {
+            return None;
+        }
+        Some(match self.0.remove(&pid)?.1 {
+            AppPhase::Stopping(info) => info,
+            _ => None,
+        })
+    }
 }
 
 impl WmController {
@@ -141,10 +182,9 @@ impl WmController {
         config: Config,
         config_tx: config::Sender,
         events_tx: reactor::Sender,
-        event_tap_tx: event_tap::Sender,
+        input_tx: input::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
         mission_control_tx: crate::actor::mission_control::Sender,
-        gesture_tap_tx: Option<gesture_tap::Sender>,
         window_tx_store: Option<WindowTxStore>,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
@@ -156,14 +196,14 @@ impl WmController {
             config,
             config_tx,
             events_tx,
-            event_tap_tx,
-            gesture_tap_tx,
+            input_tx,
             stack_line_tx: Some(stack_line_tx),
             mission_control_tx: Some(mission_control_tx),
             window_tx_store,
             receiver,
             sender: sender.clone(),
             hotkeys_installed: false,
+            apps: AppLifecycle::default(),
         };
         (this, sender)
     }
@@ -198,15 +238,9 @@ impl WmController {
         match event {
             SpaceStateUpdated(space_state, converter) => {
                 self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
-                _ = self.event_tap_tx.send(event_tap::Request::SpaceStateUpdated(
-                    space_state.clone(),
-                    converter,
-                ));
-                if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::SpaceStateUpdated(
-                        space_state.clone(),
-                    ));
-                }
+                _ = self
+                    .input_tx
+                    .send(input::Request::SpaceStateUpdated(space_state.clone(), converter));
                 if let Some(tx) = &self.stack_line_tx {
                     _ = tx.try_send(crate::actor::stack_line::Event::SpaceStateUpdated(
                         converter,
@@ -215,7 +249,7 @@ impl WmController {
                 }
             }
             AppEventsRegistered => {
-                _ = self.event_tap_tx.send(event_tap::Request::SetEventProcessing(false));
+                _ = self.input_tx.send(input::Request::SetEventProcessing(false));
 
                 if !self.hotkeys_installed {
                     self.register_hotkeys();
@@ -223,7 +257,7 @@ impl WmController {
                 }
 
                 let sender = self.sender.clone();
-                let event_tap_tx = self.event_tap_tx.clone();
+                let input_tx = self.input_tx.clone();
                 queue::main().after_f_s(
                     Time::new_after(Time::NOW, 250 * 1000000),
                     (sender, WmEvent::DiscoverRunningApps),
@@ -232,7 +266,7 @@ impl WmController {
 
                 queue::main().after_f_s(
                     Time::new_after(Time::NOW, (250 + 350) * 1000000),
-                    (event_tap_tx, event_tap::Request::SetEventProcessing(true)),
+                    (input_tx, input::Request::SetEventProcessing(true)),
                     |(sender, event)| sender.send(event),
                 );
             }
@@ -245,7 +279,7 @@ impl WmController {
                 self.new_app(pid, info);
             }
             AppGloballyActivated(pid) => {
-                _ = self.event_tap_tx.send(event_tap::Request::EnforceHidden);
+                _ = self.input_tx.send(input::Request::EnforceHidden);
                 self.events_tx.send(Event::ApplicationGloballyActivated(pid));
             }
             AppGloballyDeactivated(pid) => {
@@ -253,21 +287,22 @@ impl WmController {
             }
             AppTerminated(pid) => {
                 sys::app::remove_application_observer(pid);
-                self.events_tx.send(Event::ApplicationTerminated(pid));
+                self.apps.terminate(pid);
+            }
+            AppExited(pid, handle) => {
+                if let Some(relaunch) = self.apps.exited(pid, &handle) {
+                    self.events_tx.send(Event::AppActorExited(pid, handle));
+                    if let Some(info) = relaunch {
+                        self.new_app(pid, info);
+                    }
+                }
             }
             ConfigUpdated(new_cfg) => {
                 let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
 
                 self.config.config = new_cfg;
 
-                _ = self
-                    .event_tap_tx
-                    .send(event_tap::Request::ConfigUpdated(self.config.config.clone()));
-                if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::ConfigUpdated(
-                        self.config.config.clone(),
-                    ));
-                }
+                _ = self.input_tx.send(input::Request::ConfigUpdated(self.config.config.clone()));
 
                 if !self.hotkeys_installed {
                     debug!(
@@ -292,10 +327,10 @@ impl WmController {
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
-                _ = self.event_tap_tx.send(event_tap::Request::SetLowPowerMode(is_low_power_mode));
+                _ = self.input_tx.send(input::Request::SetLowPowerMode(is_low_power_mode));
             }
             KeyboardLayoutChanged => {
-                _ = self.event_tap_tx.send(event_tap::Request::KeyboardLayoutChanged);
+                _ = self.input_tx.send(input::Request::KeyboardLayoutChanged);
             }
             Command(Wm(ReloadConfig)) => self.reload_config(),
             Command(Wm(crate::actor::wm_controller::WmCmd::ToggleSpaceActivated)) => {
@@ -391,14 +426,14 @@ impl WmController {
 
     fn new_app(&mut self, pid: pid_t, info: AppInfo) {
         let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
-            debug!(pid = ?pid, "Failed to resolve NSRunningApplication for new app");
+            debug!(?pid, "Failed to resolve NSRunningApplication for new app");
             return;
         };
 
         if running_app.activationPolicy() != NSApplicationActivationPolicy::Regular
             && info.bundle_id.as_deref() != Some("com.apple.loginwindow")
         {
-            sys::app::ensure_activation_policy_observer(pid, info.clone());
+            sys::app::ensure_activation_policy_observer(pid, running_app.clone(), info.clone());
             debug!(
                 pid = ?pid,
                 bundle = ?info.bundle_id,
@@ -413,7 +448,7 @@ impl WmController {
         }
 
         if !running_app.isFinishedLaunching() {
-            sys::app::ensure_finished_launching_observer(pid, info.clone());
+            sys::app::ensure_finished_launching_observer(pid, running_app.clone(), info.clone());
             debug!(
                 pid = ?pid,
                 bundle = ?info.bundle_id,
@@ -427,34 +462,34 @@ impl WmController {
             }
         }
 
-        actor::app::spawn_app_thread(
-            pid,
-            info,
-            self.events_tx.clone(),
-            self.window_tx_store.clone(),
-        );
+        if let Some((handle, rx)) = self.apps.reserve(pid, info.clone()) {
+            actor::app::spawn_app_thread(
+                pid,
+                info,
+                self.events_tx.clone(),
+                self.window_tx_store.clone(),
+                self.sender.clone(),
+                handle,
+                rx,
+            );
+        }
     }
 
     fn register_hotkeys(&mut self) {
         debug!("register_hotkeys");
         let bindings: Vec<(String, WmCommand)> =
             self.config.config.key_specs.iter().cloned().collect();
-        _ = self.event_tap_tx.send(event_tap::Request::SetHotkeys(bindings));
+        _ = self.input_tx.send(input::Request::SetHotkeys(bindings));
     }
 
     fn reload_config(&self) {
-        let (response, _fut) = r#continue::continuation();
+        let (response, _result) = std::sync::mpsc::sync_channel(1);
         let msg = config::Event::ApplyConfig {
             cmd: crate::common::config::ConfigCommand::ReloadConfig,
             response,
         };
         if let Err(e) = self.config_tx.try_send(msg) {
             let error_message = e.to_string();
-            let tokio::sync::mpsc::error::SendError((_span, msg)) = e;
-            match msg {
-                config::Event::ApplyConfig { response, .. } => std::mem::forget(response),
-                config::Event::QueryConfig(response) => std::mem::forget(response),
-            }
             error!("Failed to request config reload: {error_message}");
         }
     }
@@ -491,6 +526,34 @@ impl ExecCmd {
         match self {
             ExecCmd::Array(vec) => Cow::Borrowed(&*vec),
             ExecCmd::String(s) => s.split(' ').map(|s| s.to_owned()).collect::<Vec<_>>().into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod app_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn dedupe_failure_termination_and_reuse() {
+        for terminated in [false, true] {
+            let mut apps = AppLifecycle::default();
+            let info = || AppInfo {
+                bundle_id: None,
+                localized_name: None,
+            };
+            let (old, mut rx) = apps.reserve(42, info()).unwrap();
+            assert!(apps.reserve(42, info()).is_none());
+            if terminated {
+                apps.terminate(42);
+                assert!(matches!(rx.try_recv().unwrap().1, Request::Terminate));
+                assert!(apps.reserve(42, info()).is_none());
+            }
+            assert!(apps.exited(42, &old).is_some());
+            let (new, _rx) = apps.reserve(42, info()).unwrap();
+            assert!(apps.exited(42, &old).is_none());
+            assert!(!new.same_actor(&old));
+            assert!(apps.reserve(42, info()).is_none());
         }
     }
 }

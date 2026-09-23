@@ -16,7 +16,7 @@ use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
 use crate::sys::geometry::Round;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TraditionalLayoutSystem {
     pub(crate) tree: Tree<Components>,
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
@@ -161,8 +161,151 @@ impl TraditionalLayoutSystem {
         self.tree.data.window.layouts_for(wid)
     }
 
+    pub(crate) fn window_insertion_point(&self) -> WindowInsertionPoint {
+        self.window_insertion_point
+    }
+
+    /// Indexed membership access for policies sharing this tree representation.
+    pub(crate) fn window_node(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
+        self.tree.data.window.node_for(layout, wid)
+    }
+
+    pub(crate) fn contains_any_window(&self, wid: WindowId) -> bool {
+        self.tree.data.window.window_nodes.contains_key(&wid)
+    }
+
+    pub(crate) fn window_is_visible(&self, layout: LayoutId, wid: WindowId) -> bool {
+        let Some(node) = self.window_node(layout, wid) else {
+            return false;
+        };
+        node.ancestors_with_parent(self.map()).all(|(child, parent)| {
+            parent.is_none_or(|parent| {
+                !self.layout(parent).is_stacked()
+                    || self.tree.data.selection.local_selection(self.map(), parent) == Some(child)
+            })
+        })
+    }
+
+    pub(crate) fn fullscreen_frame(
+        &self,
+        node: NodeId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) -> Option<CGRect> {
+        node.ancestors(self.map()).find_map(|node| {
+            let info = &self.tree.data.layout.info[node];
+            if info.is_fullscreen {
+                Some(screen)
+            } else if info.is_fullscreen_within_gaps {
+                Some(compute_tiling_area(screen, gaps))
+            } else {
+                None
+            }
+        })
+    }
+
     pub(crate) fn set_layout(&mut self, node: NodeId, kind: LayoutKind) {
         self.tree.data.layout.set_kind(node, kind);
+    }
+
+    /// Apply a source/target drop without using the current selection as an input.
+    pub(crate) fn apply_explicit_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if source == target {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return self.swap_windows(layout, source, target);
+        }
+        let Some(source_node) = self.window_node(layout, source) else {
+            return false;
+        };
+        let Some(target_node) = self.window_node(layout, target) else {
+            return false;
+        };
+
+        if action == crate::layout_engine::WindowDropAction::Stack {
+            if let Some(parent) = target_node.parent(self.map())
+                && self.layout(parent).is_group()
+            {
+                source_node.detach(&mut self.tree).insert_after(target_node);
+                self.select(source_node);
+                return true;
+            }
+            let parent_kind = target_node
+                .parent(self.map())
+                .map(|parent| self.layout(parent))
+                .unwrap_or(LayoutKind::Horizontal);
+            let stack_kind = match parent_kind.orientation() {
+                Orientation::Horizontal => LayoutKind::HorizontalStack,
+                Orientation::Vertical => LayoutKind::VerticalStack,
+            };
+            let container = self.tree.mk_node().insert_before(target_node);
+            self.tree.data.layout.assume_size_of(container, target_node, &self.tree.map);
+            target_node.detach(&mut self.tree).push_back(container);
+            source_node.detach(&mut self.tree).push_back(container);
+            self.set_layout(container, stack_kind);
+            self.select(source_node);
+            return true;
+        }
+
+        let crate::layout_engine::WindowDropAction::Insert(direction) = action else {
+            unreachable!()
+        };
+        let target_anchor = target_node
+            .parent(self.map())
+            .filter(|parent| self.layout(*parent).is_group())
+            .unwrap_or(target_node);
+        if target_anchor == source_node
+            || target_anchor.ancestors(self.map()).any(|node| node == source_node)
+        {
+            return false;
+        }
+        let before = matches!(direction, Direction::Left | Direction::Up);
+        if let Some(parent) = target_anchor.parent(self.map())
+            && !self.layout(parent).is_group()
+            && self.layout(parent).orientation() == direction.orientation()
+        {
+            let sizes = (source_node.parent(self.map()) == Some(parent)).then(|| {
+                parent
+                    .children(self.map())
+                    .map(|node| (node, self.tree.data.layout.info[node].size))
+                    .collect::<Vec<_>>()
+            });
+            let source_node = source_node.detach(&mut self.tree);
+            if before {
+                source_node.insert_before(target_anchor);
+            } else {
+                source_node.insert_after(target_anchor);
+            }
+            if let Some(sizes) = sizes {
+                for (node, size) in sizes {
+                    self.tree.data.layout.info[node].size = size;
+                }
+                self.tree.data.layout.recompute_total(&self.tree.map, parent);
+            }
+        } else {
+            let container = self.tree.mk_node().insert_before(target_anchor);
+            self.tree.data.layout.assume_size_of(container, target_anchor, &self.tree.map);
+            self.set_layout(container, match direction.orientation() {
+                Orientation::Horizontal => LayoutKind::Horizontal,
+                Orientation::Vertical => LayoutKind::Vertical,
+            });
+            for node in if before {
+                [source_node, target_anchor]
+            } else {
+                [target_anchor, source_node]
+            } {
+                node.detach(&mut self.tree).push_back(container);
+            }
+        }
+        self.select(source_node);
+        true
     }
 
     pub(crate) fn calculate_layout_for_node(
@@ -484,7 +627,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
-        let tree = self.get_ascii_tree(self.root(layout));
+        let tree = self.get_ascii_tree_with_labels(self.root(layout), None);
         let mut out = String::new();
         ascii_tree::write_tree(&mut out, &tree).unwrap();
         out
@@ -542,6 +685,18 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let root = self.root(layout);
         self.visible_windows_under_internal(root)
+    }
+
+    fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+        let Some(parent) =
+            self.window_node(layout, window).and_then(|node| node.parent(self.map()))
+        else {
+            return Vec::new();
+        };
+        if !self.layout(parent).is_group() {
+            return Vec::new();
+        }
+        parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -1175,6 +1330,16 @@ impl LayoutSystem for TraditionalLayoutSystem {
         true
     }
 
+    fn apply_target_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        self.apply_explicit_window_drop(layout, source, target, action)
+    }
+
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
         use crate::layout_engine::LayoutKind;
 
@@ -1240,7 +1405,7 @@ impl TraditionalLayoutSystem {
         self.tree.data.layout.info[parent].total = total;
     }
 
-    fn stack_group_container_info(
+    pub(crate) fn stack_group_container_info(
         &self,
         node: NodeId,
         kind: crate::layout_engine::LayoutKind,
@@ -1331,7 +1496,7 @@ impl TraditionalLayoutSystem {
                     stack_line_horiz,
                     stack_line_vert,
                 );
-                rect = layout_res.get_focused_frame_for_index(selected_index, selected_index);
+                rect = layout_res.get_frame_for_index(selected_index);
 
                 node = local_sel;
                 continue;
@@ -1413,7 +1578,7 @@ impl TraditionalLayoutSystem {
                     if self.tree.data.layout.is_effectively_fullscreen(child) {
                         continue;
                     }
-                    let child_rect = layout_res.get_focused_frame_for_index(i, i);
+                    let child_rect = layout_res.get_frame_for_index(i);
                     stack.push((child, child_rect));
                 }
 
@@ -1524,10 +1689,6 @@ impl TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
-    fn get_ascii_tree(&self, node: NodeId) -> ascii_tree::Tree {
-        self.get_ascii_tree_with_labels(node, None)
-    }
-
     fn get_ascii_tree_with_labels(
         &self,
         node: NodeId,
@@ -2190,7 +2351,7 @@ impl TraditionalLayoutSystem {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct Components {
     selection: Selection,
     pub(crate) layout: Layout,
@@ -2231,19 +2392,19 @@ impl tree::Observer for Components {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct WindowIndex {
     windows: slotmap::SecondaryMap<NodeId, WindowId>,
     window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 struct WindowNodeInfo {
     layout: LayoutId,
     node: NodeId,
 }
 
-#[derive(Serialize, Deserialize, Default, Debug)]
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
 struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
 
 impl WindowIndex {
@@ -2402,13 +2563,9 @@ impl StackLayoutResult {
         }
         .round()
     }
-
-    fn get_focused_frame_for_index(&self, index: usize, _focused_idx: usize) -> CGRect {
-        self.get_frame_for_index(index)
-    }
 }
 
-#[derive(Default, Serialize, Deserialize, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub(crate) struct Layout {
     pub(crate) info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
 }
@@ -2841,7 +2998,7 @@ impl Layout {
                 );
                 for (idx, &child) in children.iter().enumerate() {
                     let frame = if idx == focused_idx {
-                        layout.get_focused_frame_for_index(idx, focused_idx)
+                        layout.get_frame_for_index(idx)
                     } else {
                         layout.get_frame_for_index(idx)
                     };
@@ -3803,6 +3960,63 @@ mod tests {
         assert!((system.tree.data.layout.info[n2].size - 2.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[n3].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[root].total - 8.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn dragging_siblings_both_directions_preserves_resize_ratios() {
+        for (source, target, direction, expected) in [
+            (w(179), w(180), Direction::Right, [w(178), w(180), w(179)]),
+            (w(180), w(179), Direction::Left, [w(178), w(180), w(179)]),
+        ] {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            let root = system.root(layout);
+            for window in [w(178), w(179), w(180)] {
+                system.add_window_after_selection(layout, window);
+            }
+            let nodes: Vec<_> = root.children(system.map()).collect();
+            for (&node, size) in nodes.iter().zip([5.0, 2.0, 1.0]) {
+                system.tree.data.layout.info[node].size = size;
+            }
+            system.tree.data.layout.info[root].total = 8.0;
+
+            assert!(system.apply_explicit_window_drop(
+                layout,
+                source,
+                target,
+                crate::layout_engine::WindowDropAction::Insert(direction),
+            ));
+            assert_eq!(system.all_windows_in_layout(layout), expected);
+            for (&node, size) in nodes.iter().zip([5.0, 2.0, 1.0]) {
+                assert_eq!(system.tree.data.layout.info[node].size, size);
+            }
+            assert_eq!(system.tree.data.layout.info[root].total, 8.0);
+        }
+    }
+
+    #[test]
+    fn source_slot_move_can_leave_a_nested_split() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        assert!(system.apply_explicit_window_drop(
+            layout,
+            w(3),
+            w(2),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
+        ));
+        let source = system.window_node(layout, w(3)).unwrap();
+        let root = system.root(layout);
+        assert_ne!(source.parent(system.map()), Some(root));
+        assert!(system.apply_window_drop(
+            layout,
+            w(3),
+            w(3),
+            crate::layout_engine::WindowDropAction::Move(Direction::Right),
+        ));
+        assert_eq!(source.parent(system.map()), Some(root));
     }
 
     #[test]
@@ -4852,75 +5066,6 @@ mod tests {
             unconstrained_frame.size.height >= 399.0,
             "an unconstrained focused child should still be allowed to use the stack's full height"
         );
-    }
-
-    // Focused stack frames should be identical to normal stack frames.
-    #[test]
-    fn test_get_focused_frame_for_index_horizontal_index_zero() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_vertical_index_zero() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, false);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_horizontal_index_one() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, true);
-        let frame = stack_result.get_focused_frame_for_index(1, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(1));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_vertical_index_one() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, false);
-        let frame = stack_result.get_focused_frame_for_index(1, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(1));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_window_larger_than_container() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
-        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_zero_stack_offset() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(1, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(1));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_floating_point_precision() {
-        // Test case that could cause min > max due to precision
-        let container_rect = CGRect::new(
-            CGPoint::new(1726.5118132741347, 1726.5118132741347),
-            CGSize::new(1.0, 1.0),
-        );
-        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_small_container() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
-        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
     }
 
     #[test]

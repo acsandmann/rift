@@ -112,9 +112,29 @@ impl RiftMachClient {
         self.request(RiftRequest::GetWorkspaces { space_id })
     }
 
+    /// Lists virtual workspaces for a display's current macOS space.
+    pub fn get_workspaces_for_display(
+        &self,
+        display_uuid: impl Into<String>,
+    ) -> Result<Vec<WorkspaceData>, ClientError> {
+        self.request(RiftRequest::GetWorkspacesForDisplay {
+            display_uuid: display_uuid.into(),
+        })
+    }
+
     /// Lists managed windows, optionally filtered by a macOS space.
     pub fn get_windows(&self, space_id: Option<u64>) -> Result<Vec<WindowData>, ClientError> {
         self.request(RiftRequest::GetWindows { space_id })
+    }
+
+    /// Lists managed windows for a display's current macOS space.
+    pub fn get_windows_for_display(
+        &self,
+        display_uuid: impl Into<String>,
+    ) -> Result<Vec<WindowData>, ClientError> {
+        self.request(RiftRequest::GetWindowsForDisplay {
+            display_uuid: display_uuid.into(),
+        })
     }
 
     /// Lists connected displays.
@@ -142,6 +162,19 @@ impl RiftMachClient {
         self.request(RiftRequest::GetLayoutState { space_id, workspace_id })
     }
 
+    /// Returns layout state for a display's current macOS space and an optional
+    /// workspace index.
+    pub fn get_workspace_layout_state_for_display(
+        &self,
+        display_uuid: impl Into<String>,
+        workspace_id: Option<usize>,
+    ) -> Result<LayoutStateData, ClientError> {
+        self.request(RiftRequest::GetLayoutStateForDisplay {
+            display_uuid: display_uuid.into(),
+            workspace_id,
+        })
+    }
+
     /// Returns layout modes for workspaces in a macOS space.
     pub fn get_workspace_layouts(
         &self,
@@ -149,6 +182,18 @@ impl RiftMachClient {
         workspace_id: Option<usize>,
     ) -> Result<Vec<WorkspaceLayoutData>, ClientError> {
         self.request(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id })
+    }
+
+    /// Returns layout modes for workspaces in a display's current macOS space.
+    pub fn get_workspace_layouts_for_display(
+        &self,
+        display_uuid: impl Into<String>,
+        workspace_id: Option<usize>,
+    ) -> Result<Vec<WorkspaceLayoutData>, ClientError> {
+        self.request(RiftRequest::GetWorkspaceLayoutsForDisplay {
+            display_uuid: display_uuid.into(),
+            workspace_id,
+        })
     }
 
     /// Lists running applications known to Rift.

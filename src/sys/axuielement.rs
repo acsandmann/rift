@@ -46,6 +46,23 @@ impl From<AXError> for Error {
     fn from(value: AXError) -> Self { Self::Ax(value) }
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) struct WindowAttributes {
+    pub(crate) frame: CGRect,
+    pub(crate) role: String,
+    pub(crate) subrole: String,
+    pub(crate) minimized: bool,
+    pub(crate) title: String,
+}
+
+const WINDOW_ATTRIBUTES: [&str; 5] = ["AXFrame", "AXRole", "AXSubrole", "AXMinimized", "AXTitle"];
+
+thread_local! {
+    // Only immutable attribute names are reused; window values are always fresh.
+    static WINDOW_ATTRIBUTE_NAMES: CFRetained<CFArray<CFString>> =
+        CFArray::from_retained_objects(&WINDOW_ATTRIBUTES.map(CFString::from_static_str));
+}
+
 impl AXUIElement {
     fn new(inner: CFRetained<RawAXUIElement>) -> Self { Self { inner } }
 
@@ -180,6 +197,41 @@ impl AXUIElement {
         let value = self.copy_required_attribute("AXFrame")?;
         let ax_value = self.downcast::<AXValue>(value)?;
         rect_from_axvalue(&ax_value)
+    }
+
+    /// One request-local metadata read. Settable state is deliberately separate.
+    pub(crate) fn window_attributes(&self) -> Result<WindowAttributes> {
+        window_attributes_with_fallback(self.copy_window_attributes(), || {
+            self.window_attributes_individually()
+        })
+    }
+
+    fn window_attributes_individually(&self) -> Result<WindowAttributes> {
+        Ok(WindowAttributes {
+            frame: self.frame()?,
+            role: self.role()?,
+            subrole: self.subrole()?,
+            minimized: self.minimized().unwrap_or_default(),
+            title: self.title().unwrap_or_default(),
+        })
+    }
+
+    fn copy_window_attributes(&self) -> Result<Option<WindowAttributes>> {
+        use objc2_application_services::AXCopyMultipleAttributeOptions;
+        let mut values = ptr::null();
+        // SAFETY: names and the output pointer live through the call. Options 0
+        // keeps errors in their individual slots instead of stopping early.
+        let status = WINDOW_ATTRIBUTE_NAMES.with(|names| unsafe {
+            self.inner.copy_multiple_attribute_values(
+                names.as_opaque(),
+                AXCopyMultipleAttributeOptions(0),
+                NonNull::from(&mut values),
+            )
+        });
+        // Adopt any returned array immediately, including on an error response.
+        let values =
+            NonNull::new(values.cast_mut()).map(|values| unsafe { CFRetained::from_raw(values) });
+        finish_bulk_window_attributes(status, values)
     }
 
     pub fn fframe(&self, wid: WindowId) -> Result<CGRect> {
@@ -356,6 +408,94 @@ impl Hash for AXUIElement {
 
 impl fmt::Debug for AXUIElement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { self.deref().fmt(f) }
+}
+
+fn finish_bulk_window_attributes(
+    status: AXError,
+    values: Option<CFRetained<CFArray>>,
+) -> Result<Option<WindowAttributes>> {
+    match status {
+        AXError::Success => {
+            let Some(values) = values else {
+                return Ok(None);
+            };
+            if values.len() != WINDOW_ATTRIBUTES.len() {
+                return Ok(None);
+            }
+            // SAFETY: this API returns an array of CFType values.
+            let values = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(values) };
+            decode_window_attributes(values.iter()).map(Some)
+        }
+        AXError::NotImplemented | AXError::AttributeUnsupported | AXError::IllegalArgument => {
+            Ok(None)
+        }
+        err => Err(Error::Ax(err)),
+    }
+}
+
+fn window_attributes_with_fallback(
+    bulk: Result<Option<WindowAttributes>>,
+    fallback: impl FnOnce() -> Result<WindowAttributes>,
+) -> Result<WindowAttributes> {
+    match bulk? {
+        Some(attributes) => Ok(attributes),
+        None => fallback(),
+    }
+}
+
+fn bulk_attribute(value: CFRetained<CFType>) -> Result<CFRetained<CFType>> {
+    use objc2_core_foundation::CFNull;
+    if value.downcast_ref::<CFNull>().is_some() {
+        return Err(Error::NotFound);
+    }
+    if let Some(ax_value) = value.downcast_ref::<AXValue>() {
+        // SAFETY: AXValue is a checked concrete type; the error output has the
+        // exact layout required for kAXValueAXErrorType.
+        if unsafe { ax_value.r#type() } == AXValueType::AXError {
+            let mut error = AXError::Failure;
+            let decoded =
+                unsafe { ax_value.value(AXValueType::AXError, NonNull::from(&mut error).cast()) };
+            return Err(if !decoded {
+                Error::Ax(AXError::Failure)
+            } else if error == AXError::NoValue {
+                Error::NotFound
+            } else {
+                Error::Ax(error)
+            });
+        }
+    }
+    Ok(value)
+}
+
+fn decode_window_attributes(
+    values: impl IntoIterator<Item = CFRetained<CFType>>,
+) -> Result<WindowAttributes> {
+    let mut values = values.into_iter();
+    let mut next = || values.next().ok_or(Error::NotFound).and_then(bulk_attribute);
+    // Decode every slot independently before applying required/optional policy.
+    let frame = next()
+        .and_then(|v| v.downcast::<AXValue>().map_err(|_| Error::Ax(AXError::Failure)))
+        .and_then(|v| rect_from_axvalue(&v));
+    let role = next().and_then(decode_string);
+    let subrole = next().and_then(decode_string);
+    let minimized = next()
+        .and_then(|v| v.downcast::<CFBoolean>().map_err(|_| Error::Ax(AXError::Failure)))
+        .map(|v| v.value());
+    let title = next().and_then(decode_string);
+    Ok(WindowAttributes {
+        frame: frame?,
+        role: role?,
+        subrole: subrole?,
+        minimized: minimized.unwrap_or_default(),
+        title: title.unwrap_or_default(),
+    })
+}
+
+fn decode_string(value: CFRetained<CFType>) -> Result<String> {
+    value
+        .downcast::<CFString>()
+        .map(|v| v.to_string())
+        .map_err(|_| Error::Ax(AXError::Failure))
 }
 
 fn rect_from_axvalue(value: &AXValue) -> Result<CGRect> {

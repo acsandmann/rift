@@ -7,8 +7,7 @@ use objc2::MainThreadMarker;
 use objc2_application_services::AXUIElement;
 use rift_wm::actor::config::ConfigActor;
 use rift_wm::actor::config_watcher::ConfigWatcher;
-use rift_wm::actor::event_tap::EventTap;
-use rift_wm::actor::gesture_tap::GestureTap;
+use rift_wm::actor::input::Input;
 use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
 use rift_wm::actor::mission_control_observer::NativeMissionControl;
@@ -39,6 +38,7 @@ use tokio::join;
 embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
 
 #[derive(Parser)]
+#[command(name = "rift", version = env!("RIFT_VERSION"))]
 struct Cli {
     /// Only run the window manager on the current space.
     #[arg(long)]
@@ -84,12 +84,20 @@ enum Commands {
     },
 }
 
-/// this is okay because there is no recovery mechanism for actors
-/// so we want to immediately exit (and most likely restart since
-/// rift runs as a service most of the time)
+/// Actors cannot recover after exiting; panic so the service can restart.
 async fn supervise(name: &'static str, fut: impl Future<Output = ()>) {
     fut.await;
     panic!("{name} exited");
+}
+
+fn spawn_supervised<F: Future<Output = ()> + 'static>(
+    name: &'static str,
+    task: impl FnOnce() -> F + Send + 'static,
+) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || Executor::run(supervise(name, task())))
+        .unwrap_or_else(|error| panic!("failed to spawn {name} thread: {error}"));
 }
 
 fn main() {
@@ -192,23 +200,23 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         &config.settings.layout,
         Some(broadcast_tx.clone()),
     );
-    let (event_tap_tx, event_tap_rx) = rift_wm::actor::channel();
+    let (input_tx, input_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
     let (wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let window_tx_store = WindowTxStore::new();
-    let (gesture_tap_tx, gesture_tap_rx) = rift_wm::actor::channel();
+    let native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
     let reactor = Reactor::spawn(
         config.clone(),
         layout,
         reactor::Record::new(opt.record.as_deref()),
-        event_tap_tx.clone(),
+        input_tx.clone(),
         broadcast_tx.clone(),
         menu_tx.clone(),
         stack_line_tx.clone(),
         Some((wnd_tx.clone(), window_tx_store.clone())),
-        Some(gesture_tap_tx.clone()),
         opt.one,
+        native_motion_active.clone(),
     );
     let events_tx = reactor.sender();
 
@@ -253,10 +261,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         wm_config,
         config_tx.clone(),
         events_tx.clone(),
-        event_tap_tx.clone(),
+        input_tx.clone(),
         stack_line_tx.clone(),
         mc_tx.clone(),
-        Some(gesture_tap_tx.clone()),
         Some(window_tx_store.clone()),
     );
 
@@ -277,6 +284,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
+            CGSEventType::Known(KnownCGSEvent::WindowClosed),
             // Native focus wakeups. Payload identities are racy, so adjacent
             // events are coalesced before re-querying WindowServer key focus.
             CGSEventType::Known(KnownCGSEvent::WindowReordered),
@@ -298,15 +306,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let process_actor = ProcessActor::new(wm_controller_sender.clone(), spaces_tx);
 
     let stack_line_hit_rects = rift_wm::actor::stack_line::new_shared_hit_rects();
-    let event_tap = EventTap::new(
-        config.clone(),
-        events_tx.clone(),
-        event_tap_rx,
-        wm_controller_sender.clone(),
-        stack_line_tx.clone(),
-        stack_line_hit_rects.clone(),
-    );
-    let gesture_tap = GestureTap::new(config.clone(), wm_controller_sender.clone(), gesture_tap_rx);
     let menu = Menu::new(
         config.clone(),
         menu_rx,
@@ -320,11 +319,17 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         mtm,
         events_tx.clone(),
         CoordinateConverter::default(),
-        stack_line_hit_rects,
+        stack_line_hit_rects.clone(),
     );
 
-    let mission_control =
-        MissionControlActor::new(config.clone(), mc_rx, mc_tx.clone(), reactor.clone(), mtm);
+    let mission_control = MissionControlActor::new(
+        config.clone(),
+        mc_rx,
+        mc_tx.clone(),
+        reactor.clone(),
+        mtm,
+        input_tx.clone(),
+    );
     let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
 
     if config.settings.default_disable {
@@ -340,15 +345,23 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     CGSetLocalEventsSuppressionInterval(0.0);
     CGEnableEventStateCombining(false);
 
-    // The event tap runs on a dedicated thread with its own CFRunLoop,
-    // isolated from main-thread stalls (layout, animation, SLS IPC).
-    std::thread::Builder::new()
-        .name("input".into())
-        .spawn(move || {
-            rift_wm::sys::executor::Executor::run(event_tap.run());
-            panic!("input thread exited");
-        })
-        .expect("failed to spawn input thread");
+    // Construct the unified HID tap on its dedicated input CFRunLoop thread.
+    let input_config = config.clone();
+    let input_wm_sender = wm_controller_sender.clone();
+    let input_mc_tx = mc_tx.clone();
+    spawn_supervised("input", move || {
+        Input::new(
+            input_config,
+            events_tx,
+            input_rx,
+            input_wm_sender,
+            stack_line_tx,
+            input_mc_tx,
+            stack_line_hit_rects,
+            native_motion_active,
+        )
+        .run()
+    });
 
     Executor::run_main(mtm, async move {
         join!(
@@ -358,7 +371,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
                 notification_center.watch_for_notifications()
             ),
             supervise("spaces", spaces_actor.run()),
-            supervise("gesture_tap", gesture_tap.run()),
             supervise("menu", menu.run()),
             supervise("stack_line", stack_line.run()),
             supervise("window_notify", wn_actor.run()),

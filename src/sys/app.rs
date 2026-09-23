@@ -16,6 +16,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSString, ns_string};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tracing::trace;
 
 use super::geometry::CGRectDef;
 use super::window_server::{WindowServerId, WindowServerInfo, window_parent};
@@ -69,11 +70,11 @@ define_class!(
 
 impl ApplicationObserver {
     fn new(
+        pid: pid_t,
         app: Retained<NSRunningApplication>,
         info: AppInfo,
         handler: ApplicationCallback,
     ) -> Retained<Self> {
-        let pid = app.pid();
         let observer = Self::alloc().set_ivars(ApplicationObserverIvars {
             app,
             handler,
@@ -93,6 +94,11 @@ impl ApplicationObserver {
             return;
         }
         ivars.observing_activation_policy.set(true);
+        trace!(
+            pid = ivars.pid,
+            policy = ?ivars.app.activationPolicy(),
+            "Installing application activation-policy KVO observer"
+        );
         unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -110,6 +116,11 @@ impl ApplicationObserver {
             return;
         }
         ivars.observing_finished_launching.set(true);
+        trace!(
+            pid = ivars.pid,
+            finished = ivars.app.isFinishedLaunching(),
+            "Installing application finished-launching KVO observer"
+        );
         unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -122,6 +133,11 @@ impl ApplicationObserver {
     }
 
     fn handle_activation_policy(&self) {
+        trace!(
+            pid = self.ivars().pid,
+            policy = ?self.ivars().app.activationPolicy(),
+            "Received application activation-policy KVO callback"
+        );
         let (callback, info, pid) = {
             let ivars = self.ivars();
             if ivars.activation_policy_notified.get() {
@@ -139,6 +155,11 @@ impl ApplicationObserver {
     }
 
     fn handle_finished_launching(&self) {
+        trace!(
+            pid = self.ivars().pid,
+            finished = self.ivars().app.isFinishedLaunching(),
+            "Received application finished-launching KVO callback"
+        );
         let (callback, info, pid) = {
             let ivars = self.ivars();
             if ivars.finished_launching_notified.get() {
@@ -160,6 +181,10 @@ impl ApplicationObserver {
         if !ivars.observing_activation_policy.replace(false) {
             return;
         }
+        trace!(
+            pid = ivars.pid,
+            "Removing application activation-policy KVO observer"
+        );
         let _ = exception::catch(AssertUnwindSafe(|| unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -175,6 +200,10 @@ impl ApplicationObserver {
         if !ivars.observing_finished_launching.replace(false) {
             return;
         }
+        trace!(
+            pid = ivars.pid,
+            "Removing application finished-launching KVO observer"
+        );
         let _ = exception::catch(AssertUnwindSafe(|| unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -204,33 +233,34 @@ where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
     *APPLICATION_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
-pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
+pub fn ensure_activation_policy_observer(
+    pid: pid_t,
+    app: Retained<NSRunningApplication>,
+    info: AppInfo,
+) {
     let callback = APPLICATION_CALLBACK.lock().clone();
     let Some(callback) = callback else {
         return;
     };
-    let Some(app) = NSRunningApplication::with_process_id(pid) else {
-        callback(pid, info);
-        return;
-    };
-    observe_application(app, info, callback, |observer| {
+    observe_application(pid, app, info, callback, |observer| {
         observer.observe_activation_policy()
     });
 }
 
-pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
+pub fn ensure_finished_launching_observer(
+    pid: pid_t,
+    app: Retained<NSRunningApplication>,
+    info: AppInfo,
+) {
     let callback = APPLICATION_CALLBACK.lock().clone();
     let Some(callback) = callback else {
-        return;
-    };
-    let Some(app) = NSRunningApplication::with_process_id(pid) else {
         return;
     };
     if app.isFinishedLaunching() {
         callback(pid, info);
         return;
     };
-    observe_application(app, info, callback, |observer| {
+    observe_application(pid, app, info, callback, |observer| {
         observer.observe_finished_launching()
     });
 }
@@ -260,17 +290,17 @@ fn with_application_observer(pid: pid_t, f: impl FnOnce(&ApplicationObserver)) {
 }
 
 fn observe_application(
+    pid: pid_t,
     app: Retained<NSRunningApplication>,
     info: AppInfo,
     callback: ApplicationCallback,
     observe: impl FnOnce(&ApplicationObserver),
 ) {
-    let pid = app.pid();
     let mut observers = APPLICATION_OBSERVERS.lock();
     let raw = match observers.entry(pid) {
         Entry::Occupied(entry) => *entry.get(),
         Entry::Vacant(entry) => {
-            let observer = ApplicationObserver::new(app, info, callback);
+            let observer = ApplicationObserver::new(pid, app, info, callback);
             *entry.insert(Retained::into_raw(observer) as usize)
         }
     };
@@ -303,7 +333,7 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
                 && bundle_id.as_deref() != Some("com.apple.loginwindow")
             {
                 if let Some(cb) = callback.clone() {
-                    observe_application(app, info, cb, |observer| {
+                    observe_application(pid, app, info, cb, |observer| {
                         observer.observe_activation_policy()
                     });
                 }
@@ -380,25 +410,60 @@ pub struct WindowInfo {
     pub ax_subrole: Option<String>,
 }
 
+/// A successful native identity shared only while processing one owned AX element.
+/// Failures remain retryable, including within the same inventory transaction.
+#[derive(Default)]
+pub(crate) struct NativeWindowIdentity(Option<WindowServerId>);
+
+impl NativeWindowIdentity {
+    pub(crate) fn resolve(
+        &mut self,
+        query: impl FnOnce() -> Option<WindowServerId>,
+    ) -> Option<WindowServerId> {
+        if let Some(id) = self.0 {
+            return Some(id);
+        }
+        let resolved = query();
+        // Zero still uses a process-local identity and may acquire a native ID later.
+        self.0 = resolved.filter(|id| id.as_nonzero().is_some());
+        resolved
+    }
+}
+
 impl WindowInfo {
     pub fn from_ax_element(
         element: &AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
     ) -> Result<(Self, Option<WindowServerInfo>), AxError> {
-        let frame = element.frame()?;
-        let role = element.role()?;
-        let subrole = element.subrole()?;
+        Self::from_ax_element_with_identity(
+            element,
+            server_info_hint,
+            &mut NativeWindowIdentity::default(),
+        )
+    }
+
+    pub(crate) fn from_ax_element_with_identity(
+        element: &AXUIElement,
+        server_info_hint: Option<WindowServerInfo>,
+        identity: &mut NativeWindowIdentity,
+    ) -> Result<(Self, Option<WindowServerInfo>), AxError> {
+        let super::axuielement::WindowAttributes {
+            frame,
+            role,
+            subrole,
+            minimized: is_minimized,
+            title,
+        } = element.window_attributes()?;
         let is_standard = role == AX_WINDOW_ROLE && subrole == AX_STANDARD_WINDOW_SUBROLE;
 
-        let ax_role = Some(role.clone());
-        let ax_subrole = Some(subrole.clone());
+        let ax_role = Some(role);
+        let ax_subrole = Some(subrole);
 
         let mut server_info = server_info_hint;
         let id = server_info
             .map(|info| info.id)
             .filter(|id| id.as_nonzero().is_some())
-            .or_else(|| WindowServerId::try_from(element).ok());
-        let is_minimized = element.minimized().unwrap_or_default();
+            .or_else(|| identity.resolve(|| WindowServerId::try_from(element).ok()));
         let is_resizable = element.can_resize().unwrap_or(true);
 
         let (bundle_id, path) = if !is_standard {
@@ -422,7 +487,7 @@ impl WindowInfo {
             is_resizable,
             min_size,
             max_size,
-            title: element.title().unwrap_or_default(),
+            title,
             frame,
             sys_id: id,
             bundle_id,
@@ -454,4 +519,52 @@ fn bundle_info_for_pid(pid: pid_t) -> (Option<String>, Option<PathBuf>) {
             (bundle_id, path)
         })
         .unwrap_or((None, None))
+}
+
+#[cfg(test)]
+mod native_identity_tests {
+    use super::*;
+
+    #[test]
+    fn inventory_identity_queries_success_once_and_new_pass_queries_again() {
+        let mut calls = 0;
+        for _ in 0..2 {
+            let mut identity = NativeWindowIdentity::default();
+            for _ in 0..4 {
+                assert_eq!(
+                    identity.resolve(|| {
+                        calls += 1;
+                        Some(WindowServerId::new(42))
+                    }),
+                    Some(WindowServerId::new(42))
+                );
+            }
+        }
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn inventory_identity_retries_failure_and_zero_before_sharing_success() {
+        let mut identity = NativeWindowIdentity::default();
+        let mut responses = [
+            None,
+            Some(WindowServerId::new(0)),
+            Some(WindowServerId::new(42)),
+        ]
+        .into_iter();
+        assert_eq!(identity.resolve(|| responses.next().unwrap()), None);
+        assert_eq!(
+            identity.resolve(|| responses.next().unwrap()),
+            Some(WindowServerId::new(0))
+        );
+        assert_eq!(
+            identity.resolve(|| responses.next().unwrap()),
+            Some(WindowServerId::new(42))
+        );
+        assert_eq!(
+            identity.resolve(|| panic!("successful identity must be reused")),
+            Some(WindowServerId::new(42))
+        );
+        assert!(responses.next().is_none());
+    }
 }

@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -72,6 +73,8 @@ struct LayoutState {
     last_gap_x: AtomicU64,
     #[serde(skip, default = "default_atomic")]
     last_step_px: AtomicU64,
+    #[serde(skip, default)]
+    last_column_ratios: Mutex<HashMap<u64, f64>>,
     #[serde(skip, default = "default_atomic")]
     last_center_offset_delta_px: AtomicU64,
     #[serde(skip, default = "default_atomic")]
@@ -94,6 +97,7 @@ impl LayoutState {
             last_screen_width: AtomicU64::new(0.0f64.to_bits()),
             last_gap_x: AtomicU64::new(0.0f64.to_bits()),
             last_step_px: AtomicU64::new(0.0f64.to_bits()),
+            last_column_ratios: Mutex::default(),
             last_center_offset_delta_px: AtomicU64::new(0.0f64.to_bits()),
             overscroll_accumulation: AtomicU64::new(0.0f64.to_bits()),
             fullscreen: HashSet::default(),
@@ -309,6 +313,9 @@ impl Clone for LayoutState {
             last_screen_width: AtomicU64::new(self.last_screen_width.load(Ordering::Relaxed)),
             last_gap_x: AtomicU64::new(self.last_gap_x.load(Ordering::Relaxed)),
             last_step_px: AtomicU64::new(self.last_step_px.load(Ordering::Relaxed)),
+            last_column_ratios: Mutex::new(
+                self.last_column_ratios.lock().map(|ratios| ratios.clone()).unwrap_or_default(),
+            ),
             last_center_offset_delta_px: AtomicU64::new(
                 self.last_center_offset_delta_px.load(Ordering::Relaxed),
             ),
@@ -325,11 +332,11 @@ fn default_atomic_bool() -> AtomicBool { AtomicBool::new(false) }
 fn default_atomic_i8() -> AtomicI8 { AtomicI8::new(0) }
 fn default_atomic() -> AtomicU64 { AtomicU64::new(0.0f64.to_bits()) }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ScrollingLayoutSystem {
     layouts: slotmap::SlotMap<LayoutId, LayoutState>,
     #[serde(skip, default = "default_scrolling_settings")]
-    settings: ScrollingLayoutSettings,
+    pub(super) settings: ScrollingLayoutSettings,
 }
 
 fn default_scrolling_settings() -> ScrollingLayoutSettings { ScrollingLayoutSettings::default() }
@@ -406,10 +413,19 @@ impl ScrollingLayoutSystem {
         let mut widths = Vec::with_capacity(state.columns.len());
         let mut starts = Vec::with_capacity(state.columns.len());
         let mut cursor = 0.0;
+        let last_ratios = state.last_column_ratios.lock().ok();
         for col in &state.columns {
             starts.push(cursor);
-            let ratio =
-                Self::clamp_ratio_with_bounds(base_ratio + col.width_offset, min_ratio, max_ratio);
+            let ratio = last_ratios
+                .as_ref()
+                .and_then(|ratios| ratios.get(&col.stable_node_id()).copied())
+                .unwrap_or_else(|| {
+                    Self::clamp_ratio_with_bounds(
+                        base_ratio + col.width_offset,
+                        min_ratio,
+                        max_ratio,
+                    )
+                });
             let width = Self::proportional_column_width(screen_width, gap_x, ratio);
             widths.push(width);
             cursor += width + gap_x;
@@ -768,7 +784,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let mut column_widths = Vec::with_capacity(state.columns.len());
         let mut column_ratios = Vec::with_capacity(state.columns.len());
         for col in state.columns.iter() {
-            let ratio = if state.columns.len() == 1 && !col.width_overridden {
+            let preserved_width = (self.settings.preserve_window_sizes
+                && !col.width_overridden
+                && col.windows.len() == 1)
+                .then(|| {
+                    constraints
+                        .get(&col.windows[0])
+                        .map(|c| c.locked_width)
+                        .filter(|width| width.is_finite() && *width > 0.0)
+                })
+                .flatten();
+            let ratio = if let Some(width) = preserved_width {
+                self.clamp_ratio(Self::ratio_for_column_width(tiling.size.width, gap_x, width))
+            } else if state.columns.len() == 1 && !col.width_overridden {
                 1.0
             } else {
                 self.clamp_ratio(base_ratio + col.width_offset)
@@ -811,7 +839,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 0.0
             });
         }
-
+        if let Ok(mut last_ratios) = state.last_column_ratios.lock() {
+            last_ratios.clear();
+            last_ratios.extend(
+                state
+                    .columns
+                    .iter()
+                    .zip(column_ratios.iter())
+                    .map(|(column, ratio)| (column.stable_node_id(), *ratio)),
+            );
+        }
         let mut column_starts = Vec::with_capacity(state.columns.len());
         let mut strip_cursor = 0.0;
         for width in &column_widths {
@@ -960,7 +997,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 Self::proportional_column_width(tiling.size.width, gap_x, ratio)
             });
             let start = column_starts.get(col_idx).copied().unwrap_or(0.0);
-            let x = anchor_x + start - offset;
+            let mut x = anchor_x + start - offset;
+            // Detect columns outside the tiling viewport, but park them beyond
+            // the physical screen edge. Using the tiling edge as the parking
+            // position would leave outer-gap pixels on-screen and can still
+            // overlap an adjacent display.
+            let visible_left = tiling.origin.x;
+            let visible_right = tiling.origin.x + tiling.size.width;
+            if x + column_width <= visible_left {
+                // Column is fully off-screen left.
+                x = screen.origin.x - column_width;
+            } else if x >= visible_right {
+                // Column is fully off-screen right.
+                x = screen.max().x;
+            }
             if col.windows.is_empty() {
                 continue;
             }
@@ -1286,9 +1336,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
-        if state.selected != Some(wid) {
-            return;
-        }
         let tiling = compute_tiling_area(screen, gaps);
         if tiling.size.width <= 0.0 {
             return;
@@ -1298,13 +1345,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
             gaps.inner.horizontal,
             new_frame.size.width,
         );
-        let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05);
+        let resized_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05);
 
         let base_ratio = state.column_width_ratio;
         let Some((col_idx, row_idx)) = state.locate(wid) else {
             return;
         };
-        state.columns[col_idx].width_offset = clamped - base_ratio;
+        state.columns[col_idx].width_offset = resized_ratio - base_ratio;
         state.columns[col_idx].width_overridden = true;
 
         // Handle vertical resizing within columns
@@ -1359,10 +1406,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
             }
         }
 
-        if niri_navigation && state.selected == Some(wid) {
-            state.reveal_selected_without_direction();
-        } else if state.selected == Some(wid) {
-            state.align_scroll_to_selected();
+        if state.selected == Some(wid) {
+            if niri_navigation {
+                state.reveal_selected_without_direction();
+            } else {
+                state.align_scroll_to_selected();
+            }
         }
     }
 
@@ -1395,6 +1444,74 @@ impl LayoutSystem for ScrollingLayoutSystem {
             state.columns[a_col].height_weights[a_row] = b_weight;
             state.columns[b_col].height_weights[b_row] = a_weight;
         }
+        true
+    }
+
+    fn apply_target_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if source == target {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return self.swap_windows(layout, source, target);
+        }
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
+        let Some((source_col, source_row)) = state.locate(source) else {
+            return false;
+        };
+        if state.locate(target).is_none() {
+            return false;
+        }
+
+        state.columns[source_col].ensure_height_weights();
+        let weight = state.columns[source_col].height_weights.remove(source_row);
+        state.columns[source_col].windows.remove(source_row);
+        if state.columns[source_col].windows.is_empty() {
+            state.columns.remove(source_col);
+        }
+        let Some((target_col, target_row)) = state.locate(target) else {
+            return false;
+        };
+
+        match action {
+            crate::layout_engine::WindowDropAction::Swap
+            | crate::layout_engine::WindowDropAction::Move(_) => unreachable!(),
+            crate::layout_engine::WindowDropAction::Stack
+            | crate::layout_engine::WindowDropAction::Insert(Direction::Up)
+            | crate::layout_engine::WindowDropAction::Insert(Direction::Down) => {
+                let insert_after = matches!(
+                    action,
+                    crate::layout_engine::WindowDropAction::Stack
+                        | crate::layout_engine::WindowDropAction::Insert(Direction::Down)
+                );
+                let row = target_row + usize::from(insert_after);
+                let column = &mut state.columns[target_col];
+                column.ensure_height_weights();
+                column.windows.insert(row, source);
+                column.height_weights.insert(row, weight);
+            }
+            crate::layout_engine::WindowDropAction::Insert(
+                direction @ (Direction::Left | Direction::Right),
+            ) => {
+                let insert_at = target_col + usize::from(direction == Direction::Right);
+                state.columns.insert(insert_at, Column {
+                    node_id: column_node_id(source),
+                    windows: vec![source],
+                    width_offset: 0.0,
+                    width_overridden: false,
+                    height_weights: vec![weight],
+                });
+            }
+        }
+        state.selected = Some(source);
+        state.reveal_selected_without_direction();
         true
     }
 
@@ -1740,7 +1857,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return;
         }
 
-        let current = base_ratio + state.columns[col_idx].width_offset;
+        let rendered_step = f64::from_bits(state.last_step_px.load(Ordering::Relaxed));
+        let screen_width = f64::from_bits(state.last_screen_width.load(Ordering::Relaxed));
+        let gap_x = f64::from_bits(state.last_gap_x.load(Ordering::Relaxed));
+        let current = if screen_width > 0.0 && rendered_step > gap_x {
+            Self::ratio_for_column_width(screen_width, gap_x, rendered_step - gap_x)
+        } else {
+            base_ratio + state.columns[col_idx].width_offset
+        };
         let next = current + amount;
         let clamped = next.clamp(min_ratio, max_ratio).max(0.05);
         state.columns[col_idx].width_offset = clamped - base_ratio;
@@ -1847,6 +1971,52 @@ mod tests {
         system.add_window_after_selection(layout, w1);
         system.add_window_after_selection(layout, w2);
         (system, layout, w1, w2)
+    }
+
+    #[test]
+    fn preserves_width_and_resizes_from_it() {
+        let settings = ScrollingLayoutSettings::default();
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let window = wid(20, 1);
+        system.add_window_after_selection(layout, window);
+        let gaps = GapSettings::default();
+        let screen = screen(1000.0, 800.0);
+        let mut constraints = HashMap::default();
+        constraints.insert(window, WindowLayoutConstraints {
+            is_resizable: true,
+            locked_width: 500.0,
+            ..Default::default()
+        });
+        let calculate = |system: &ScrollingLayoutSystem| {
+            system.calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+        };
+        assert_eq!(frame_for(&calculate(&system), window).size.width, 500.0);
+
+        let tiling = compute_tiling_area(screen, &gaps);
+        let preserved_ratio = ScrollingLayoutSystem::ratio_for_column_width(
+            tiling.size.width,
+            gaps.inner.horizontal,
+            500.0,
+        );
+        system.resize_selection_by(layout, 0.1, ResizeOrientation::Horizontal);
+
+        let frames = calculate(&system);
+        let expected_width = ScrollingLayoutSystem::proportional_column_width(
+            tiling.size.width,
+            gaps.inner.horizontal,
+            preserved_ratio + 0.1,
+        );
+        assert!((frame_for(&frames, window).size.width - expected_width).abs() < 1.0);
     }
 
     #[test]
@@ -2798,5 +2968,40 @@ mod tests {
         system.set_windows_for_app(layout, 1, vec![w1, w2, w3]);
 
         assert_eq!(system.all_windows_in_layout(layout), vec![w1, w2, w3]);
+    }
+
+    #[test]
+    fn explicit_drop_preserves_scrolling_direction_semantics() {
+        let mut system = ScrollingLayoutSystem::default();
+        let layout = system.create_layout();
+        let (w1, w2, w3) = (wid(1, 1), wid(1, 2), wid(1, 3));
+        for window in [w1, w2, w3] {
+            system.add_window_after_selection(layout, window);
+        }
+
+        assert!(system.apply_window_drop(
+            layout,
+            w3,
+            w1,
+            crate::layout_engine::WindowDropAction::Insert(Direction::Left),
+        ));
+        let state = system.layouts.get(layout).unwrap();
+        assert_eq!(
+            state.columns.iter().map(|c| c.windows.clone()).collect::<Vec<_>>(),
+            vec![vec![w3], vec![w1], vec![w2],]
+        );
+
+        assert!(system.apply_window_drop(
+            layout,
+            w2,
+            w1,
+            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
+        ));
+        let state = system.layouts.get(layout).unwrap();
+        assert_eq!(
+            state.columns.iter().map(|c| c.windows.clone()).collect::<Vec<_>>(),
+            vec![vec![w3], vec![w1, w2],]
+        );
+        assert_eq!(state.selected, Some(w2));
     }
 }

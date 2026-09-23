@@ -21,6 +21,8 @@ pub(crate) struct WindowFrameWriteRequest {
     pub(crate) window: WindowId,
     pub(crate) frame: CGRect,
     pub(crate) requested: bool,
+    pub(crate) coalesced: bool,
+    pub(crate) set_size: bool,
 }
 
 #[derive(Debug)]
@@ -69,7 +71,7 @@ pub(crate) struct EventOutcome {
     pub(crate) mouse_warps: Vec<CGPoint>,
     pub(crate) post_arrange_mouse_warp: Option<WindowId>,
     pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
-    pub(crate) drag_swap_evaluations: Vec<(WindowId, CGRect)>,
+    pub(crate) interactive_window_frame_write: Option<WindowFrameWriteRequest>,
     pub(crate) dispatch_mouse_up: bool,
     pub(crate) close_window: Option<CloseWindowRequest>,
     pub(crate) service_config_update: Option<Config>,
@@ -121,9 +123,16 @@ impl EventOutcome {
         self.mouse_warps.append(&mut other.mouse_warps);
         self.post_arrange_mouse_warp =
             other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
-        self.pre_layout_window_frame_writes
-            .append(&mut other.pre_layout_window_frame_writes);
-        self.drag_swap_evaluations.append(&mut other.drag_swap_evaluations);
+        if !other.pre_layout_window_frame_writes.is_empty()
+            || other.interactive_window_frame_write.is_some()
+        {
+            if let Some(write) = self.interactive_window_frame_write.take() {
+                self.pre_layout_window_frame_writes.push(write);
+            }
+            self.pre_layout_window_frame_writes
+                .append(&mut other.pre_layout_window_frame_writes);
+            self.interactive_window_frame_write = other.interactive_window_frame_write.take();
+        }
         self.dispatch_mouse_up |= other.dispatch_mouse_up;
         self.close_window = other.close_window.or(self.close_window);
         self.service_config_update =
@@ -289,10 +298,34 @@ impl EventOutcome {
         frame: CGRect,
         requested: bool,
     ) -> Self {
+        if let Some(write) = self.interactive_window_frame_write.take() {
+            self.pre_layout_window_frame_writes.push(write);
+        }
         self.pre_layout_window_frame_writes.push(WindowFrameWriteRequest {
             window,
             frame,
             requested,
+            coalesced: false,
+            set_size: true,
+        });
+        self
+    }
+
+    pub(crate) fn with_interactive_window_frame_write(
+        mut self,
+        window: WindowId,
+        frame: CGRect,
+        set_size: bool,
+    ) -> Self {
+        if let Some(write) = self.interactive_window_frame_write.take() {
+            self.pre_layout_window_frame_writes.push(write);
+        }
+        self.interactive_window_frame_write = Some(WindowFrameWriteRequest {
+            window,
+            frame,
+            requested: true,
+            coalesced: true,
+            set_size,
         });
         self
     }
@@ -333,6 +366,26 @@ impl EventOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_write_stays_inline_and_follows_earlier_frame_writes() {
+        let first = WindowId::new(1, 1);
+        let second = WindowId::new(1, 2);
+        let frame = CGRect::default();
+        let mut outcome =
+            EventOutcome::no_change().with_pre_layout_window_frame_write(first, frame, true);
+        let interactive =
+            EventOutcome::no_change().with_interactive_window_frame_write(second, frame, false);
+        assert_eq!(interactive.pre_layout_window_frame_writes.capacity(), 0);
+        outcome.absorb(interactive);
+        let ordered: Vec<_> = outcome
+            .pre_layout_window_frame_writes
+            .into_iter()
+            .chain(outcome.interactive_window_frame_write)
+            .map(|write| write.window)
+            .collect();
+        assert_eq!(ordered, [first, second]);
+    }
 
     #[test]
     fn absorbed_arrange_requests_keep_only_a_common_space_scope() {

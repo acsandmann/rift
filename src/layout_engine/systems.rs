@@ -160,6 +160,8 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     /// unmatchable hidden member can survive forever as a ghost.
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
+    /// Members sharing the stack/group that directly contains `window`.
+    fn stack_members(&self, _layout: LayoutId, _window: WindowId) -> Vec<WindowId> { Vec::new() }
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
     fn descend_selection(&mut self, layout: LayoutId) -> bool;
@@ -198,6 +200,30 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     );
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
+
+    /// Route source-slot drags through the same operation as keyboard MoveNode.
+    fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if let crate::layout_engine::WindowDropAction::Move(direction) = action {
+            return self.select_window(layout, source) && self.move_selection(layout, direction);
+        }
+        self.apply_target_drop(layout, source, target, action)
+    }
+
+    fn apply_target_drop(
+        &mut self,
+        _layout: LayoutId,
+        _source: WindowId,
+        _target: WindowId,
+        _action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        false
+    }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
     fn move_selection_to_layout_after_selection(
@@ -244,14 +270,16 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 /// Forward representation-level operations shared by tree-backed layout policies.
 /// Policy implementations still spell out every operation that can change their invariants.
 macro_rules! delegate_traditional_layout_system {
-    () => {
+    (@tree) => {
         fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
-        fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
         fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
             self.inner.selected_window(layout)
         }
         fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_in_layout(layout)
+        }
+        fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+            self.inner.stack_members(layout, window)
         }
         fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_under_selection(layout)
@@ -262,35 +290,11 @@ macro_rules! delegate_traditional_layout_system {
         fn descend_selection(&mut self, layout: LayoutId) -> bool {
             self.inner.descend_selection(layout)
         }
-        fn move_focus(
-            &mut self,
-            layout: LayoutId,
-            direction: Direction,
-        ) -> (Option<WindowId>, Vec<WindowId>) {
-            self.inner.move_focus(layout, direction)
-        }
-        fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-            self.inner.window_in_direction(layout, direction)
-        }
-        fn replace_window(&mut self, from: WindowId, to: WindowId) {
-            self.inner.replace_window(from, to);
-        }
         fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
             self.inner.contains_window(layout, wid)
         }
         fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
             self.inner.select_window(layout, wid)
-        }
-        fn on_window_resized(
-            &mut self,
-            layout: LayoutId,
-            wid: WindowId,
-            old_frame: CGRect,
-            new_frame: CGRect,
-            screen: CGRect,
-            gaps: &crate::common::config::GapSettings,
-        ) {
-            self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
         }
         fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
             self.inner.swap_windows(layout, a, b)
@@ -307,6 +311,39 @@ macro_rules! delegate_traditional_layout_system {
         fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
             self.inner.has_any_fullscreen_node(layout)
         }
+    };
+    () => {
+        delegate_traditional_layout_system!(@tree);
+        fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
+
+
+        fn move_focus(
+            &mut self,
+            layout: LayoutId,
+            direction: Direction,
+        ) -> (Option<WindowId>, Vec<WindowId>) {
+            self.inner.move_focus(layout, direction)
+        }
+        fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+            self.inner.window_in_direction(layout, direction)
+        }
+        fn replace_window(&mut self, from: WindowId, to: WindowId) {
+            self.inner.replace_window(from, to);
+        }
+
+        fn on_window_resized(
+            &mut self,
+            layout: LayoutId,
+            wid: WindowId,
+            old_frame: CGRect,
+            new_frame: CGRect,
+            screen: CGRect,
+            gaps: &crate::common::config::GapSettings,
+        ) {
+            self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
+        }
+
+
     };
 }
 
@@ -526,6 +563,8 @@ mod tests {
         assert_stable_unique_ids(&tree, &scrolling.container_tree(layout));
     }
 }
+mod floating;
+pub use floating::FloatingLayoutSystem;
 mod stack;
 pub use stack::StackLayoutSystem;
 
@@ -539,4 +578,18 @@ pub enum LayoutSystemKind {
     MasterStack(MasterStackLayoutSystem),
     Scrolling(ScrollingLayoutSystem),
     Stack(StackLayoutSystem),
+    Floating(FloatingLayoutSystem),
+}
+
+impl LayoutSystemKind {
+    pub(crate) fn preview_clone(&self) -> Option<Self> {
+        match self {
+            Self::Traditional(system) => Some(Self::Traditional(system.clone())),
+            Self::Bsp(system) => Some(Self::Bsp(system.clone())),
+            Self::MasterStack(system) => Some(Self::MasterStack(system.clone())),
+            Self::Scrolling(system) => Some(Self::Scrolling(system.clone())),
+            Self::Stack(system) => Some(Self::Stack(system.clone())),
+            Self::Floating(_) => None,
+        }
+    }
 }

@@ -11,9 +11,15 @@ pub enum RiftRequest {
     GetWorkspaces {
         space_id: Option<u64>,
     },
+    GetWorkspacesForDisplay {
+        display_uuid: String,
+    },
     GetDisplays,
     GetWindows {
         space_id: Option<u64>,
+    },
+    GetWindowsForDisplay {
+        display_uuid: String,
     },
     GetWindowInfo {
         window_id: WindowId,
@@ -22,8 +28,16 @@ pub enum RiftRequest {
         space_id: Option<u64>,
         workspace_id: Option<usize>,
     },
+    GetLayoutStateForDisplay {
+        display_uuid: String,
+        workspace_id: Option<usize>,
+    },
     GetWorkspaceLayouts {
         space_id: Option<u64>,
+        workspace_id: Option<usize>,
+    },
+    GetWorkspaceLayoutsForDisplay {
+        display_uuid: String,
         workspace_id: Option<usize>,
     },
     GetApplications,
@@ -108,6 +122,57 @@ mod tests {
                 space_id: None,
                 workspace_id: None,
             }
+        );
+    }
+
+    #[test]
+    fn display_queries_do_not_change_existing_query_shapes() {
+        let legacy = serde_json::json!({ "get_windows": { "space_id": 7 } });
+        assert_eq!(
+            serde_json::from_value::<RiftRequest>(legacy.clone()).unwrap(),
+            RiftRequest::GetWindows { space_id: Some(7) }
+        );
+        assert_eq!(
+            serde_json::to_value(RiftRequest::GetWindows { space_id: Some(7) }).unwrap(),
+            legacy
+        );
+
+        assert_eq!(
+            serde_json::to_value(RiftRequest::GetWorkspacesForDisplay {
+                display_uuid: "display-a".into(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "get_workspaces_for_display": { "display_uuid": "display-a" }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(RiftRequest::GetLayoutStateForDisplay {
+                display_uuid: "display-a".into(),
+                workspace_id: Some(2),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "get_layout_state_for_display": {
+                    "display_uuid": "display-a",
+                    "workspace_id": 2
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(RiftRequest::GetWorkspaceLayoutsForDisplay {
+                display_uuid: "display-a".into(),
+                workspace_id: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "get_workspace_layouts_for_display": {
+                    "display_uuid": "display-a",
+                    "workspace_id": null
+                }
+            })
         );
     }
 

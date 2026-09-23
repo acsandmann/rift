@@ -208,7 +208,7 @@ impl NotificationCenterInner {
             // session-lock boundary.
             let bundle_id = app.bundle_id().as_deref().map(ToString::to_string);
             if bundle_id.as_deref() == Some("com.apple.loginwindow") {
-                // OmniWM found loginwindow activation to be a more reliable lock
+                // loginwindow activation to be a more reliable lock
                 // boundary than the distributed lock notification alone. Route it
                 // through the same session event stream so the spaces actor
                 // buffers topology while macOS swaps in the lock-screen spaces.
