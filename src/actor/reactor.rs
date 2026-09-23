@@ -379,6 +379,8 @@ pub enum Event {
 
     #[serde(skip)]
     InstallIpc(crate::ipc::InstallRequest),
+    #[serde(skip)]
+    ExternalManagerDisconnected(crate::model::window_store::ExternalManagerId),
 
     Command(Command),
 
@@ -763,10 +765,7 @@ impl Reactor {
             let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
                 continue;
             };
-            let Some(state) = self.state.windows.window(wid) else {
-                continue;
-            };
-            if !state.can_reconcile_admission() {
+            if !self.state.windows.can_reconcile_admission(wid) {
                 continue;
             }
             windows_by_pid.entry(wid.pid).or_default().push(wid);
@@ -1017,6 +1016,9 @@ impl Reactor {
     fn handle_thread_event(reactor: &Rc<RefCell<Reactor>>, event: Event) {
         match event {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
+            Event::ExternalManagerDisconnected(manager) => {
+                reactor.borrow_mut().release_manager(manager);
+            }
             Event::MouseFocusPending(publisher) => {
                 if let Some(point) = publisher.take_latest() {
                     // Resolve against WindowServer when processing the latest position,
@@ -1768,7 +1770,7 @@ impl Reactor {
                 let session_id = self.drag_manager.actor.await_modifier(button, point, action);
                 let source = self.window_id_under_cursor().and_then(|window| {
                     let state = self.state.windows.window(window)?;
-                    state.is_admitted().then_some((
+                    self.state.windows.is_admitted(window).then_some((
                         window,
                         state.frame_monotonic,
                         state.info.sys_id,
@@ -2361,7 +2363,7 @@ impl Reactor {
                 {
                     self.process_windows_for_app_rules(vec![window], app_info, false);
                 }
-                if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
+                if self.state.windows.is_admitted(window) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
                 }
             }
@@ -2632,7 +2634,8 @@ impl Reactor {
 
     fn create_window_data(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         let window_state = self.state.windows.window(window_id)?;
-        if !window_state.is_admitted() {
+        let externally_managed = self.state.windows.external_manager(window_id).is_some();
+        if !self.state.windows.is_admitted(window_id) && !externally_managed {
             return None;
         }
         let app = self.app_manager.apps.get(&window_id.pid)?;
@@ -2643,6 +2646,7 @@ impl Reactor {
         Some(RuntimeWindowData {
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
+            externally_managed,
             is_focused: self.main_window() == Some(window_id),
             layout_position: None,
             app_name,
@@ -2653,6 +2657,74 @@ impl Reactor {
                 ..window_state.info.clone()
             },
         })
+    }
+
+    pub(crate) fn claim_window(
+        &mut self,
+        wid: WindowId,
+        manager: crate::model::window_store::ExternalManagerId,
+    ) -> Result<bool, &'static str> {
+        if !self.state.windows.contains_window(wid) {
+            return Err("Window not found");
+        }
+        match self.state.windows.external_manager(wid) {
+            Some(owner) if owner == manager => return Ok(false),
+            Some(_) => return Err("Window owned by another external manager"),
+            None => {}
+        }
+        let was_admitted = self.state.windows.is_admitted(wid);
+        let space = self
+            .assigned_space_for_window_id(wid)
+            .or_else(|| self.best_space_for_window_id(wid));
+        self.state.windows.set_external_manager(wid, Some(manager));
+        self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+        if was_admitted && let Some(space) = space {
+            self.update_layout_or_warn(false, false, Some(space));
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn release_window(
+        &mut self,
+        wid: WindowId,
+        manager: crate::model::window_store::ExternalManagerId,
+    ) -> Result<bool, &'static str> {
+        if !self.state.windows.contains_window(wid) {
+            return Err("Window not found");
+        }
+        match self.state.windows.external_manager(wid) {
+            None => return Ok(false),
+            Some(owner) if owner != manager => {
+                return Err("Window owned by another external manager");
+            }
+            Some(_) => {}
+        }
+        self.state.windows.set_external_manager(wid, None);
+        if self.state.windows.is_admitted(wid)
+            && let Some(space) = self
+                .authoritative_space_for_window_id(wid)
+                .or_else(|| self.best_space_for_window_id(wid))
+        {
+            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+            self.update_layout_or_warn(false, false, Some(space));
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn release_manager(
+        &mut self,
+        manager: crate::model::window_store::ExternalManagerId,
+    ) {
+        for wid in self.state.windows.windows_owned_by(manager) {
+            let _ = self.release_window(wid, manager);
+        }
+    }
+
+    pub(crate) fn manager_has_windows(
+        &self,
+        manager: crate::model::window_store::ExternalManagerId,
+    ) -> bool {
+        !self.state.windows.windows_owned_by(manager).is_empty()
     }
 
     fn update_complete_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
@@ -2939,12 +3011,7 @@ impl Reactor {
             return;
         }
 
-        let is_rule_candidate = match self.state.windows.window(window_id) {
-            Some(window_state) => window_state.can_reconcile_admission(),
-            None => return,
-        };
-
-        if !is_rule_candidate {
+        if !self.state.windows.can_reconcile_admission(window_id) {
             return;
         }
 
@@ -3523,7 +3590,7 @@ impl Reactor {
         // Treat this as the single gate for authoritative-space reconciliation:
         // if a window is not query-manageable, remove any stale layout/workspace
         // membership instead of re-assigning it from the WindowServer snapshot.
-        if !self.state.windows.window(wid).is_some_and(WindowState::is_admitted) {
+        if !self.state.windows.is_admitted(wid) {
             let changed_space = self.assigned_space_for_window_id(wid);
             self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             return changed_space.is_some_and(|space| self.is_space_active(space));
@@ -3600,7 +3667,7 @@ impl Reactor {
         // Same invariant as `reassign_window_to_authoritative_space`: a visible
         // WindowServer id may be a transient fullscreen projection. Do not let
         // visibility alone add it back to the active layout.
-        if !window.is_admitted() {
+        if !self.state.windows.is_admitted(wid) {
             self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             return false;
         }
@@ -3844,9 +3911,7 @@ impl Reactor {
         }
     }
 
-    fn window_is_standard(&self, id: WindowId) -> bool {
-        self.state.windows.window(id).is_some_and(WindowState::is_admitted)
-    }
+    fn window_is_standard(&self, id: WindowId) -> bool { self.state.windows.is_admitted(id) }
 
     pub(crate) fn visible_spaces_for_layout(
         &self,
@@ -4031,7 +4096,7 @@ impl Reactor {
             return false;
         };
 
-        if !window.is_admitted() && !self.layout_manager.layout_engine.is_window_floating(wid) {
+        if !self.state.windows.is_admitted(wid) {
             trace!(
                 ?wid,
                 "Skipping mouse focus for a window outside admission policy"
@@ -4139,10 +4204,7 @@ impl Reactor {
 
         let mut windows_by_space: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
         for &wid in &window_ids {
-            let Some(state) = self.state.windows.window(wid) else {
-                continue;
-            };
-            if !state.can_reconcile_admission() {
+            if !self.state.windows.can_reconcile_admission(wid) {
                 continue;
             }
             let Some(space) = self.best_space_for_window_id(wid) else {
@@ -4622,8 +4684,8 @@ impl Reactor {
 
     fn activation_from_unmanageable_window(&self, pid: pid_t) -> Option<WindowServerId> {
         let (wsid, wid) = self.tracked_window_under_cursor()?;
-        let window = self.state.windows.window(wid)?;
-        (wid.pid == pid && !window.is_admitted()).then_some(wsid)
+        self.state.windows.window(wid)?;
+        (wid.pid == pid && !self.state.windows.is_admitted(wid)).then_some(wsid)
     }
 
     fn focus_untracked_window_under_cursor(&mut self) -> bool {

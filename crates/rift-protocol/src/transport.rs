@@ -24,6 +24,12 @@ pub enum RiftRequest {
     GetWindowInfo {
         window_id: WindowId,
     },
+    ClaimWindow {
+        window_id: WindowId,
+    },
+    ReleaseWindow {
+        window_id: WindowId,
+    },
     GetLayoutState {
         space_id: Option<u64>,
         workspace_id: Option<usize>,
@@ -89,6 +95,21 @@ pub type JsonRiftResponse = RiftResponse<Value>;
 mod tests {
     use super::*;
     use crate::LayoutCommand;
+
+    #[test]
+    fn management_requests_round_trip() {
+        for request in [
+            RiftRequest::ClaimWindow {
+                window_id: WindowId { pid: 7, idx: 3 },
+            },
+            RiftRequest::ReleaseWindow {
+                window_id: WindowId { pid: 7, idx: 3 },
+            },
+        ] {
+            let encoded = serde_json::to_string(&request).unwrap();
+            assert_eq!(serde_json::from_str::<RiftRequest>(&encoded).unwrap(), request);
+        }
+    }
 
     #[test]
     fn request_uses_typed_command_wire_shape() {

@@ -76,6 +76,13 @@ pub enum ClientError {
 pub struct RiftMachClient;
 
 impl RiftMachClient {
+    /// Opens a lifetime-bound handle for external window management.
+    pub fn window_management_session(&self) -> Result<WindowManagementSession, ClientError> {
+        Ok(WindowManagementSession {
+            reply_port: ReplyPort::allocate(1)?,
+        })
+    }
+
     /// Creates a client handle.
     ///
     /// Service discovery happens when a request is sent, allowing callers to
@@ -239,6 +246,33 @@ impl RiftMachClient {
     fn request<T: DeserializeOwned>(&self, request: RiftRequest) -> Result<T, ClientError> {
         match self.send_typed_request(&request)? {
             RiftResponse::Success { data } => Ok(data),
+            RiftResponse::Error { error } => Err(ClientError::Server(error)),
+            _ => Err(ClientError::UnknownResponse),
+        }
+    }
+}
+
+/// Owns one persistent Mach receive right used as the server's management identity.
+/// Dropping this handle releases all its claims when Rift observes port death.
+#[derive(Debug)]
+pub struct WindowManagementSession {
+    reply_port: ReplyPort,
+}
+
+impl WindowManagementSession {
+    pub fn claim_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
+        self.request(RiftRequest::ClaimWindow { window_id })
+    }
+
+    pub fn release_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
+        self.request(RiftRequest::ReleaseWindow { window_id })
+    }
+
+    fn request(&mut self, request: RiftRequest) -> Result<(), ClientError> {
+        let payload = serde_json::to_vec(&request).map_err(ClientError::Encode)?;
+        let response = unsafe { send_request(&payload, Some(self.reply_port.name))? };
+        match parse_json_payload::<RiftResponse>(&response, "response")? {
+            RiftResponse::Success { .. } => Ok(()),
             RiftResponse::Error { error } => Err(ClientError::Server(error)),
             _ => Err(ClientError::UnknownResponse),
         }
@@ -572,6 +606,17 @@ const fn message_bits(remote: u32, local: u32) -> u32 { remote | (local << 8) }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn management_session_keeps_one_reply_port() {
+        let mut session = RiftMachClient.window_management_session().unwrap();
+        let port = session.reply_port.name;
+        // A failed request does not replace the lifetime token.
+        let _ = session.claim_window(WindowId { pid: 1, idx: 1 });
+        assert_eq!(session.reply_port.name, port);
+        let _ = session.release_window(WindowId { pid: 1, idx: 1 });
+        assert_eq!(session.reply_port.name, port);
+    }
 
     #[test]
     fn inline_send_initializes_header_payload_and_padding() {

@@ -1,8 +1,8 @@
 use tracing::{trace, warn};
 
+use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
-use crate::actor::reactor::{LayoutEvent, WindowState};
 use crate::model::RiftState;
 use crate::sys::screen::SpaceId;
 
@@ -95,7 +95,7 @@ pub fn handle_mouse_up(
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
         }
         if let Some(space) = payload.final_space
-            && state.windows.window(window).is_some_and(WindowState::is_admitted)
+            && state.windows.is_admitted(window)
         {
             if let Some(server_id) =
                 state.windows.window(window).and_then(|window| window.info.sys_id)

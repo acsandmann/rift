@@ -1248,6 +1248,9 @@ impl LayoutEngine {
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
+        if window_store.window(wid).is_some() && !window_store.is_admitted(wid) {
+            return false;
+        }
         let active_space_before = self.space_with_window(wid);
 
         let assigned_workspace =

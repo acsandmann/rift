@@ -7,7 +7,7 @@ use crate::actor::app::{AppThreadHandle, Request, pid_t};
 use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
-use crate::model::window_store::NativeFullscreenTransition;
+use crate::model::window_store::{ExternalManagerId, NativeFullscreenTransition};
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
@@ -1003,6 +1003,120 @@ fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect
     );
 
     (reactor, wid, space1, screen, floating_frame)
+}
+
+#[test]
+fn external_claim_detaches_tiled_window_and_release_readmits_it() {
+    let (mut reactor, wid, _, space, _, _) = reactor_with_window_on_space1();
+    let manager = ExternalManagerId(101);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    assert!(reactor.test_active_workspace_windows(space).contains(&wid));
+
+    assert_eq!(reactor.claim_window(wid, manager), Ok(true));
+    assert_eq!(reactor.claim_window(wid, manager), Ok(false));
+    assert!(reactor.state.windows.contains_window(wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+    assert!(!reactor.state.windows.is_admitted(wid));
+    assert!(reactor.query_window_info(wid).unwrap().externally_managed);
+    assert!(
+        reactor
+            .query_windows(Some(space))
+            .iter()
+            .any(|window| { window.id == wid && window.externally_managed })
+    );
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+
+    assert_eq!(
+        reactor.claim_window(wid, ExternalManagerId(102)),
+        Err("Window owned by another external manager")
+    );
+    assert_eq!(
+        reactor.release_window(wid, ExternalManagerId(102)),
+        Err("Window owned by another external manager")
+    );
+    assert_eq!(reactor.release_window(wid, manager), Ok(true));
+    assert!(reactor.test_active_workspace_windows(space).contains(&wid));
+}
+
+#[test]
+fn claiming_and_releasing_reflows_remaining_tiles() {
+    let (mut reactor, first, _, space, _, frame) = reactor_with_window_on_space1();
+    let second = WindowId::new(1, 2);
+    reactor.add_test_window(second, WindowServerId::new(102), Some(space), frame);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, first));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, second));
+    reactor.update_layout_or_warn(false, false, Some(space));
+    let before = reactor.state.windows.window(second).unwrap().frame_monotonic;
+
+    let manager = ExternalManagerId(101);
+    reactor.claim_window(first, manager).unwrap();
+    let after_claim = reactor.state.windows.window(second).unwrap().frame_monotonic;
+    assert!(after_claim.size.width > before.size.width);
+
+    reactor.release_window(first, manager).unwrap();
+    let after_release = reactor.state.windows.window(second).unwrap().frame_monotonic;
+    assert!(after_release.size.width < after_claim.size.width);
+    assert!(
+        reactor.state.windows.window(first).unwrap().frame_monotonic.size.width
+            < after_claim.size.width
+    );
+}
+
+#[test]
+fn external_claim_clears_floating_layout_state() {
+    let (mut reactor, wid, space, _, _) = reactor_with_floating_window();
+    reactor.claim_window(wid, ExternalManagerId(101)).unwrap();
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+    assert!(reactor.state.windows.contains_window(wid));
+}
+
+#[test]
+fn manager_disconnect_releases_all_surviving_windows_without_overriding_policy() {
+    let (mut reactor, first, _, space, _, frame) = reactor_with_window_on_space1();
+    let second = WindowId::new(1, 2);
+    reactor.add_test_window(second, WindowServerId::new(102), Some(space), frame);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, first));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, second));
+    let manager = ExternalManagerId(101);
+    reactor.claim_window(first, manager).unwrap();
+    reactor.claim_window(second, manager).unwrap();
+    reactor.state.windows.window_mut(second).unwrap().manage_override = Some(false);
+    reactor.release_manager(manager);
+    assert!(reactor.test_active_workspace_windows(space).contains(&first));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&second));
+    assert_eq!(reactor.state.windows.external_manager(first), None);
+    assert_eq!(reactor.state.windows.external_manager(second), None);
+
+    reactor.claim_window(first, manager).unwrap();
+    reactor.handle_event(Event::WindowDestroyed(first));
+    reactor.release_manager(manager);
+    assert!(!reactor.state.windows.contains_window(first));
+}
+
+#[test]
+fn external_owner_survives_window_identity_transfer() {
+    let (mut reactor, old, _, space, _, frame) = reactor_with_window_on_space1();
+    let new = WindowId::new(1, 2);
+    reactor.add_test_window(new, WindowServerId::new(102), Some(space), frame);
+    let manager = ExternalManagerId(101);
+    reactor.claim_window(old, manager).unwrap();
+    reactor.state.windows.transfer_persistent_window_metadata(old, new);
+    assert_eq!(reactor.state.windows.external_manager(old), None);
+    assert_eq!(reactor.state.windows.external_manager(new), Some(manager));
+}
+
+#[test]
+fn releasing_minimized_window_waits_for_normal_readmission() {
+    let (mut reactor, wid, _, space, _, _) = reactor_with_window_on_space1();
+    let manager = ExternalManagerId(101);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.claim_window(wid, manager).unwrap();
+    reactor.state.windows.window_mut(wid).unwrap().info.is_minimized = true;
+    reactor.release_window(wid, manager).unwrap();
+    assert!(!reactor.state.windows.is_admitted(wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
 }
 
 fn window_server_appeared(
