@@ -20,6 +20,21 @@ use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
 pub type Sender = actor::Sender<WmEvent>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppDiscoverySource {
+    Process,
+    WindowServer,
+}
+
+fn should_spawn_app(policy: NSApplicationActivationPolicy, source: AppDiscoverySource) -> bool {
+    match policy {
+        NSApplicationActivationPolicy::Regular => true,
+        NSApplicationActivationPolicy::Accessory => source == AppDiscoverySource::WindowServer,
+        NSApplicationActivationPolicy::Prohibited => false,
+        _ => false,
+    }
+}
+
 type Receiver = actor::Receiver<WmEvent>;
 
 use self::WmCmd::*;
@@ -35,7 +50,7 @@ use crate::{layout_engine as layout, sys};
 pub enum WmEvent {
     DiscoverRunningApps,
     AppEventsRegistered,
-    AppLaunch(pid_t, AppInfo),
+    AppLaunch(pid_t, AppInfo, AppDiscoverySource),
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
@@ -139,7 +154,7 @@ struct AppLifecycle(HashMap<pid_t, (AppThreadHandle, AppPhase)>);
 
 enum AppPhase {
     Active, // Includes initialization.
-    Stopping(Option<AppInfo>),
+    Stopping(Option<(AppInfo, AppDiscoverySource)>),
 }
 
 impl AppLifecycle {
@@ -147,10 +162,19 @@ impl AppLifecycle {
         &mut self,
         pid: pid_t,
         info: AppInfo,
+        source: AppDiscoverySource,
     ) -> Option<(AppThreadHandle, actor::Receiver<Request>)> {
         if let Some((_, phase)) = self.0.get_mut(&pid) {
             if let AppPhase::Stopping(relaunch) = phase {
-                *relaunch = Some(info);
+                let source = if relaunch
+                    .as_ref()
+                    .is_some_and(|(_, previous)| *previous == AppDiscoverySource::WindowServer)
+                {
+                    AppDiscoverySource::WindowServer
+                } else {
+                    source
+                };
+                *relaunch = Some((info, source));
             }
             return None;
         }
@@ -166,7 +190,11 @@ impl AppLifecycle {
         }
     }
 
-    fn exited(&mut self, pid: pid_t, handle: &AppThreadHandle) -> Option<Option<AppInfo>> {
+    fn exited(
+        &mut self,
+        pid: pid_t,
+        handle: &AppThreadHandle,
+    ) -> Option<Option<(AppInfo, AppDiscoverySource)>> {
         if !self.0.get(&pid)?.0.same_actor(handle) {
             return None;
         }
@@ -190,7 +218,7 @@ impl WmController {
         let (sender, receiver) = actor::channel();
         sys::app::set_application_callback({
             let sender = sender.clone();
-            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
+            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info, AppDiscoverySource::Process))
         });
         let this = Self {
             config,
@@ -272,11 +300,11 @@ impl WmController {
             }
             DiscoverRunningApps => {
                 for (pid, info) in sys::app::running_apps(None) {
-                    self.new_app(pid, info);
+                    self.new_app(pid, info, AppDiscoverySource::Process);
                 }
             }
-            AppLaunch(pid, info) => {
-                self.new_app(pid, info);
+            AppLaunch(pid, info, source) => {
+                self.new_app(pid, info, source);
             }
             AppGloballyActivated(pid) => {
                 _ = self.input_tx.send(input::Request::EnforceHidden);
@@ -292,8 +320,8 @@ impl WmController {
             AppExited(pid, handle) => {
                 if let Some(relaunch) = self.apps.exited(pid, &handle) {
                     self.events_tx.send(Event::AppActorExited(pid, handle));
-                    if let Some(info) = relaunch {
-                        self.new_app(pid, info);
+                    if let Some((info, source)) = relaunch {
+                        self.new_app(pid, info, source);
                     }
                 }
             }
@@ -424,15 +452,20 @@ impl WmController {
         }
     }
 
-    fn new_app(&mut self, pid: pid_t, info: AppInfo) {
+    fn new_app(&mut self, pid: pid_t, info: AppInfo, source: AppDiscoverySource) {
         let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
             debug!(?pid, "Failed to resolve NSRunningApplication for new app");
             return;
         };
 
-        if running_app.activationPolicy() != NSApplicationActivationPolicy::Regular
-            && info.bundle_id.as_deref() != Some("com.apple.loginwindow")
-        {
+        let policy = running_app.activationPolicy();
+        if policy == NSApplicationActivationPolicy::Prohibited {
+            return;
+        }
+        if !should_spawn_app(policy, source) {
+            if policy != NSApplicationActivationPolicy::Accessory {
+                return;
+            }
             sys::app::ensure_activation_policy_observer(pid, running_app.clone(), info.clone());
             debug!(
                 pid = ?pid,
@@ -448,7 +481,18 @@ impl WmController {
         }
 
         if !running_app.isFinishedLaunching() {
-            sys::app::ensure_finished_launching_observer(pid, running_app.clone(), info.clone());
+            let override_handler = (source == AppDiscoverySource::WindowServer).then(|| {
+                let sender = self.sender.clone();
+                std::sync::Arc::new(move |pid, info| {
+                    sender.send(WmEvent::AppLaunch(pid, info, AppDiscoverySource::WindowServer));
+                }) as std::sync::Arc<dyn Fn(pid_t, AppInfo) + Send + Sync>
+            });
+            sys::app::ensure_finished_launching_observer(
+                pid,
+                running_app.clone(),
+                info.clone(),
+                override_handler,
+            );
             debug!(
                 pid = ?pid,
                 bundle = ?info.bundle_id,
@@ -462,7 +506,7 @@ impl WmController {
             }
         }
 
-        if let Some((handle, rx)) = self.apps.reserve(pid, info.clone()) {
+        if let Some((handle, rx)) = self.apps.reserve(pid, info.clone(), source) {
             actor::app::spawn_app_thread(
                 pid,
                 info,
@@ -535,6 +579,24 @@ mod app_lifecycle_tests {
     use super::*;
 
     #[test]
+    fn discovery_source_controls_activation_policy_admission() {
+        use AppDiscoverySource::{Process, WindowServer};
+        let regular = NSApplicationActivationPolicy::Regular;
+        let accessory = NSApplicationActivationPolicy::Accessory;
+        let prohibited = NSApplicationActivationPolicy::Prohibited;
+        for (policy, source, expected) in [
+            (regular, Process, true),
+            (regular, WindowServer, true),
+            (accessory, Process, false),
+            (accessory, WindowServer, true),
+            (prohibited, Process, false),
+            (prohibited, WindowServer, false),
+        ] {
+            assert_eq!(should_spawn_app(policy, source), expected);
+        }
+    }
+
+    #[test]
     fn dedupe_failure_termination_and_reuse() {
         for terminated in [false, true] {
             let mut apps = AppLifecycle::default();
@@ -542,18 +604,18 @@ mod app_lifecycle_tests {
                 bundle_id: None,
                 localized_name: None,
             };
-            let (old, mut rx) = apps.reserve(42, info()).unwrap();
-            assert!(apps.reserve(42, info()).is_none());
+            let (old, mut rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
+            assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
             if terminated {
                 apps.terminate(42);
                 assert!(matches!(rx.try_recv().unwrap().1, Request::Terminate));
-                assert!(apps.reserve(42, info()).is_none());
+                assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
             }
             assert!(apps.exited(42, &old).is_some());
-            let (new, _rx) = apps.reserve(42, info()).unwrap();
+            let (new, _rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
             assert!(apps.exited(42, &old).is_none());
             assert!(!new.same_actor(&old));
-            assert!(apps.reserve(42, info()).is_none());
+            assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
         }
     }
 }
