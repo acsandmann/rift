@@ -1042,8 +1042,9 @@ impl State {
         }
     }
 
+    /// Leaves `captured_button` alone: dropping it here strands a modifier drag without a
+    /// DragCancel, so callers that end a drag take it and cancel explicitly.
     fn reset(&mut self, enabled: bool) {
-        self.captured_button = None;
         if enabled {
             self.reset_mouse_sampling();
         }
@@ -1325,6 +1326,19 @@ mod tests {
             events_rx.try_recv().unwrap().1,
             Event::MouseUp(crate::actor::drag::MouseButton::Right)
         ));
+    }
+
+    #[test]
+    fn focus_follows_mouse_reset_keeps_a_captured_drag() {
+        let (input, _, _) = input();
+        let mut state = input.state.borrow_mut();
+        state.captured_button = Some(crate::actor::drag::MouseButton::Left);
+        state.reset(false);
+        state.reset(true);
+        assert_eq!(
+            state.captured_button,
+            Some(crate::actor::drag::MouseButton::Left)
+        );
     }
 
     #[test]
