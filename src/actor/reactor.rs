@@ -282,6 +282,10 @@ pub enum Event {
     /// WindowServer window was destroyed. This commonly happens before macOS
     /// publishes sleep/session lifecycle notifications.
     WindowInvalidated(WindowId, WindowInvalidationSource),
+    /// A native window was ordered out. Reconcile its app inventory even if
+    /// closing the last window did not move focus to another application.
+    #[serde(skip)]
+    WindowServerHidden(WindowServerId),
     #[serde(skip)]
     WindowServerDestroyed(
         crate::sys::window_server::WindowServerId,
@@ -1091,6 +1095,7 @@ impl Reactor {
             Event::WindowClosed(wsid) => Some(wsid.as_u32()),
             Event::WindowServerDestroyed(wsid, ..) => Some(wsid.as_u32()),
             Event::WindowServerAppeared(wsid, ..) => Some(wsid.as_u32()),
+            Event::WindowServerHidden(wsid) => Some(wsid.as_u32()),
             _ => None,
         };
         if let Some(wsid) = wsid {
@@ -1138,6 +1143,7 @@ impl Reactor {
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowServerAppeared(..)
                 | Event::WindowFrameChanged(..)
+                | Event::WindowServerHidden(..)
                 | Event::WindowMinimized(..)
                 | Event::WindowDeminiaturized(..)
                 | Event::WindowTitleChanged(..)
@@ -1395,6 +1401,16 @@ impl Reactor {
             }
             Event::WindowInventoryRefreshRequested(pid) => {
                 self.request_window_inventory(pid);
+                return Ok(EventOutcome::default());
+            }
+            Event::WindowServerHidden(wsid) => {
+                // A hide notification is a refresh hint, not proof of destruction:
+                // minimized windows and windows on inactive spaces must survive.
+                // The revisioned inventory coordinator also coalesces this with
+                // any earlier AX invalidation and defers it during lifecycle churn.
+                if let Some(window) = self.state.windows.tracked_window_id(wsid) {
+                    self.request_window_inventory(window.pid);
+                }
                 return Ok(EventOutcome::default());
             }
             Event::RaiseTargetsMissing { windows, sequence_id } => {

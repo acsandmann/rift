@@ -167,14 +167,11 @@ fn stale_cleanup_candidates(
     snapshot: &StaleCleanupSnapshot,
 ) -> Vec<(WindowId, WindowServerId)> {
     let known_visible_set: HashSet<WindowId> = known_visible.iter().cloned().collect();
-    let has_visible_window_server_ids = state
-        .windows
-        .iter_visible_window_server_ids()
-        .any(|wsid| state.windows.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid));
-    let skip_stale_cleanup = snapshot.suppressed
-        || snapshot.mission_control_active
-        || snapshot.drag_active
-        || (known_visible_set.is_empty() && !has_visible_window_server_ids);
+    // An empty AX inventory is normal after an application's last window closes.
+    // Cached visibility may already be cleared by then, so it must not prevent
+    // checking fresh native evidence for the remaining logical windows.
+    let skip_stale_cleanup =
+        snapshot.suppressed || snapshot.mission_control_active || snapshot.drag_active;
 
     if skip_stale_cleanup {
         return Vec::new();
@@ -240,6 +237,13 @@ pub(crate) fn identify_stale_windows(
         .into_iter()
         .filter_map(|(wid, ws_id)| {
             let observation = snapshot.server_observations.get(&ws_id)?;
+            // These explicit negatives remain authoritative even if WindowServer
+            // can no longer supply frame metadata for the closed window.
+            if matches!(observation.suitable, Some(false))
+                || matches!(observation.ordered_in, Some(false))
+            {
+                return Some(wid);
+            }
             let info = match observation.info.as_ref() {
                 Some(info) => info,
                 None => {
@@ -259,11 +263,9 @@ pub(crate) fn identify_stale_windows(
             // Only explicit negative observations may retire an AX-omitted window. This also
             // applies to the first tracked recovery refresh: blanket suppression there leaves
             // genuine closes that occurred during sleep/display churn as layout ghosts.
-            let unsuitable = matches!(observation.suitable, Some(false));
             let invalid_layer = info.layer != 0;
             let too_small = width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
-            let ordered_out = matches!(observation.ordered_in, Some(false));
-            if unsuitable || invalid_layer || too_small || ordered_out {
+            if invalid_layer || too_small {
                 Some(wid)
             } else {
                 None
