@@ -579,7 +579,8 @@ pub enum MouseDropAction {
 /// a window can be moved from anywhere inside it. Floating windows
 /// remain floating. A tiled destination is divided into five local zones: its center
 /// performs [`Self::drop_action`], while its edges insert the source on that side.
-/// Dragging to an edge of the source's vacated tile performs the matching MoveNode command.
+/// Dragging to an edge of the source's vacated tile performs the matching MoveNode command when no
+/// window lies that way; an edge that would drop the source back in place acts like the center.
 /// Preview simulation runs only when the destination or zone changes.
 ///
 /// Example:

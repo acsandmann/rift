@@ -209,3 +209,21 @@ fn stack_drop_actions_are_arbitrary_swaps() {
     assert_eq!(system.selected_window(layout), Some(source));
     assert!(!system.apply_window_drop(layout, source, source, WindowDropAction::Swap));
 }
+
+#[test]
+fn inserting_on_the_side_the_source_already_is_lands_in_place() {
+    use crate::layout_engine::engine::lands_in_place;
+
+    let mut system = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
+    let layout = system.create_layout();
+    for window in [w(1), w(2)] {
+        system.add_window_after_selection(layout, window);
+    }
+    let before = calculated_source(&system, layout, w(2));
+    for (direction, in_place) in [(Direction::Right, true), (Direction::Left, false)] {
+        let mut preview = system.preview_clone().unwrap();
+        assert!(preview.apply_window_drop(layout, w(2), w(1), WindowDropAction::Insert(direction)));
+        let after = calculated_source(&preview, layout, w(2));
+        assert_eq!(lands_in_place(before, after), in_place, "{direction:?}");
+    }
+}

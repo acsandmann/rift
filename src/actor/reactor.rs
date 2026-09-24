@@ -3307,7 +3307,11 @@ impl Reactor {
                     &self.config.settings.ui.stack_line,
                 )
             });
-            if !self.drag_manager.actor.set_preview(intent, preview) {
+            let retargeted = matches!(preview, Some((_, true)))
+                && self.drag_manager.actor.redirect_in_place(intent);
+            if !retargeted
+                && !self.drag_manager.actor.set_preview(intent, preview.map(|(frame, _)| frame))
+            {
                 break;
             }
         }

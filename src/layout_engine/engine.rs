@@ -35,6 +35,13 @@ pub use rift_protocol::LayoutCommand;
 const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
 const SMART_FLOATING_HEIGHT_RATIO: f64 = 0.93;
 
+/// Whether a dropped window would end up where it already is. Mostly overlapping rather than
+/// equal, because reinserting a window can reset the split ratio it had.
+pub(crate) fn lands_in_place(current: CGRect, dropped: CGRect) -> bool {
+    use crate::sys::geometry::CGRectExt;
+    current.intersection(&dropped).area() >= 0.5 * current.area().max(dropped.area())
+}
+
 fn requested_floating_frame(
     mut frame: CGRect,
     screen: CGRect,
@@ -244,9 +251,9 @@ impl LayoutEngine {
         screen: CGRect,
         display_uuid: Option<&str>,
         stack_line: &crate::common::config::StackLineSettings,
-    ) -> Option<CGRect> {
+    ) -> Option<(CGRect, bool)> {
         if action == crate::layout_engine::WindowDropAction::Swap {
-            return (source != target).then_some(target_frame);
+            return (source != target).then_some((target_frame, false));
         }
         let Some(workspace) = self.active_workspace(space) else {
             return None;
@@ -255,21 +262,29 @@ impl LayoutEngine {
             return None;
         };
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
+        let source_frame = |system: &LayoutSystemKind| {
+            system
+                .calculate_layout(
+                    layout,
+                    screen,
+                    self.layout_settings.stack.stack_offset,
+                    &self.window_layout_constraints,
+                    &gaps,
+                    stack_line.thickness(),
+                    stack_line.horiz_placement,
+                    stack_line.vert_placement,
+                )
+                .into_iter()
+                .find_map(|(window, frame)| (window == source).then_some(frame))
+        };
+        let current = source_frame(self.workspace_tree(workspace));
         let mut system = self.workspace_tree(workspace).preview_clone()?;
         system.apply_window_drop(layout, source, target, action).then_some(())?;
-        system
-            .calculate_layout(
-                layout,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                &self.window_layout_constraints,
-                &gaps,
-                stack_line.thickness(),
-                stack_line.horiz_placement,
-                stack_line.vert_placement,
-            )
-            .into_iter()
-            .find_map(|(window, frame)| (window == source).then_some(frame))
+        let frame = source_frame(&system)?;
+        Some((
+            frame,
+            current.is_some_and(|current| lands_in_place(current, frame)),
+        ))
     }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
