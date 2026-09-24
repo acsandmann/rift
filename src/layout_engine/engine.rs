@@ -1308,6 +1308,20 @@ impl LayoutEngine {
         self.space_with_window(wid) != active_space_before
     }
 
+    #[cfg(test)]
+    pub(crate) fn insert_test_layout_ghost(
+        &mut self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        wid: WindowId,
+    ) {
+        let layout = self
+            .workspace_layouts
+            .active(space, workspace)
+            .expect("active layout for test ghost");
+        self.workspace_tree_mut(workspace).add_window_after_selection(layout, wid);
+    }
+
     fn remove_window_from_all_tiling_trees(&mut self, wid: WindowId) {
         let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
         for ws_id in ws_ids {

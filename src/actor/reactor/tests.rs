@@ -2096,7 +2096,11 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     );
 
     assert!(reactor.assign_test_window_to_workspace(user_space, duplicate_wid, active_workspace));
-    reactor.send_layout_event(LayoutEvent::WindowAdded(user_space, duplicate_wid));
+    reactor.layout_manager.layout_engine.insert_test_layout_ghost(
+        user_space,
+        active_workspace,
+        duplicate_wid,
+    );
     assert!(has_window_in_layout(
         &mut reactor,
         user_space,

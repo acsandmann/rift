@@ -43,7 +43,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let _ = stop_tx.send(());
     })?;
     stop_rx.recv()?;
-    // Dropping the receive right lets Rift release the claim on Mach dead-name notification.
+    // Release while the port is live; port death handles abrupt exits.
+    let release_result = session.release_window(window_id);
     drop(session);
     release_result?;
     Ok(())
