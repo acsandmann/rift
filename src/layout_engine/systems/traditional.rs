@@ -682,6 +682,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             .collect()
     }
 
+    fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        crate::layout_engine::systems::node_slot(
+            self.window_node(layout, window)?,
+            self.root(layout),
+            self.map(),
+        )
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let root = self.root(layout);
         self.visible_windows_under_internal(root)

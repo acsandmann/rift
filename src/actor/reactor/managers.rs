@@ -85,8 +85,10 @@ impl DragManager {
         if cfg!(test) {
             return;
         }
-        let Some(target) =
-            self.actor.target().filter(|_| self.preview_enabled && !self.preview_suppressed)
+        let Some(target) = self
+            .actor
+            .preview_target()
+            .filter(|_| self.preview_enabled && !self.preview_suppressed)
         else {
             self.hide_preview();
             return;

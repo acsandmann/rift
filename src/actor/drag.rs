@@ -15,7 +15,7 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
-use crate::sys::geometry::{CGRectExt, SameAs};
+use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
@@ -69,8 +69,6 @@ pub struct Session {
     pub scene: DragScene,
     target: TargetState,
     unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
-    /// Edge zones whose drop would land the source where it already is.
-    in_place: Vec<(WindowId, DropZone)>,
     pub kind: DragKind,
 }
 
@@ -115,7 +113,6 @@ impl Session {
             scene,
             target: TargetState::None,
             unavailable: Vec::new(),
-            in_place: Vec::new(),
             kind,
         }
     }
@@ -123,28 +120,6 @@ impl Session {
     fn invalidate_drop(&mut self) {
         self.target = TargetState::None;
         self.unavailable.clear();
-        self.in_place.clear();
-    }
-
-    /// Inside a window, an in-place edge takes the center action, so the highlight moves to
-    /// that window as soon as the pointer enters it instead of staying on the source's tile.
-    fn redirected(
-        &self,
-        intent: Option<DropIntent>,
-        center: MouseDropAction,
-    ) -> Option<DropIntent> {
-        intent.map(|intent| {
-            if self.in_place.contains(&(intent.window, intent.zone))
-                && contains(intent.frame, self.pointer, 0.0)
-            {
-                DropIntent {
-                    action: resolve_action(DropZone::Center, center),
-                    ..intent
-                }
-            } else {
-                intent
-            }
-        })
     }
 }
 
@@ -203,6 +178,28 @@ impl DragActor {
 
     pub fn target(&self) -> Option<DropTarget> { self.session()?.target.validated() }
 
+    pub fn preview_target(&self) -> Option<DropTarget> {
+        let session = self.session()?;
+        if let Some(target) = session.target.validated() {
+            return Some(target);
+        }
+        if !matches!(session.target, TargetState::None)
+            || !contains(session.source.origin_frame, session.pointer, 0.0)
+        {
+            return None;
+        }
+        Some(DropTarget {
+            intent: DropIntent {
+                window: session.source.window,
+                space: session.source.current_space?,
+                frame: session.source.origin_frame,
+                zone: DropZone::Center,
+                action: WindowDropAction::Swap,
+            },
+            preview_area: session.source.origin_frame,
+        })
+    }
+
     pub fn intent(&self) -> Option<DropIntent> { self.session()?.target.intent() }
 
     pub fn kind(&self) -> Option<DragKind> { self.session().map(|session| session.kind) }
@@ -240,9 +237,7 @@ impl DragActor {
                 &session.unavailable,
                 Some(session.source),
             );
-            session.target = session
-                .redirected(next, self.settings.drop_action)
-                .map_or(TargetState::None, TargetState::Candidate);
+            session.target = next.map_or(TargetState::None, TargetState::Candidate);
         }
     }
 
@@ -250,7 +245,16 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return false;
         };
-        if session.target.intent() != Some(intent) {
+        if !session
+            .target
+            .intent()
+            .is_some_and(|current| current.window == intent.window && current.zone == intent.zone)
+        {
+            return false;
+        }
+        if intent.window == session.source.window
+            && !matches!(intent.action, WindowDropAction::Move(_))
+        {
             return false;
         }
         if let Some(preview_area) = preview_area {
@@ -267,28 +271,8 @@ impl DragActor {
             &session.unavailable,
             Some(session.source),
         );
-        session.target = session
-            .redirected(next, self.settings.drop_action)
-            .map_or(TargetState::None, TargetState::Candidate);
-        !matches!(session.target, TargetState::None)
-    }
-
-    /// Records that `intent` would drop the source where it already is. Returns true when that
-    /// re-targeted the current intent, which then needs its own preview.
-    pub fn redirect_in_place(&mut self, intent: DropIntent) -> bool {
-        let State::Dragging(session) = &mut self.state else {
-            return false;
-        };
-        if session.target.intent() != Some(intent) || intent.window == session.source.window {
-            return false;
-        }
-        session.in_place.push((intent.window, intent.zone));
-        let next = session.redirected(Some(intent), self.settings.drop_action);
-        if next == Some(intent) {
-            return false;
-        }
         session.target = next.map_or(TargetState::None, TargetState::Candidate);
-        true
+        !matches!(session.target, TargetState::None)
     }
 
     pub fn update_config(&mut self, settings: DragDropSettings) {
@@ -438,6 +422,8 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return false;
         };
+        let home_preview_changed = contains(session.source.origin_frame, session.pointer, 0.0)
+            != contains(session.source.origin_frame, motion.point, 0.0);
         session.pointer = motion.point;
         if session.kind == DragKind::ModifierMove {
             let dx = motion.point.x - session.anchor_point.x;
@@ -469,12 +455,11 @@ impl DragActor {
                 Some(session.source),
             )
         };
-        let next = session.redirected(next, self.settings.drop_action);
         let changed = next != session.target.intent();
         if changed {
             session.target = next.map_or(TargetState::None, TargetState::Candidate);
         }
-        changed
+        changed || home_preview_changed
     }
 
     pub fn interactive_update(&mut self) -> Option<(WindowId, CGRect)> {
@@ -628,16 +613,15 @@ fn hit_test_available(
     unavailable: &[(WindowId, DropZone, WindowDropAction)],
     source: Option<DragSource>,
 ) -> Option<DropIntent> {
-    if let Some(previous) = previous
+    if !source.is_some_and(|source| contains(source.origin_frame, point, 0.0))
+        && let Some(previous) = previous
         && let Some(target) = scene.targets.iter().find(|target| target.window == previous.window)
     {
         let retained = zone_frame(target.frame, previous.zone, fraction);
         if contains(retained, point, HYSTERESIS_POINTS) {
             let intent = DropIntent {
                 frame: target.frame,
-                action: scene
-                    .action_override
-                    .unwrap_or_else(|| resolve_action(previous.zone, center)),
+                action: previous.action,
                 ..previous
             };
             if !unavailable.contains(&(intent.window, intent.zone, intent.action)) {
@@ -665,28 +649,28 @@ fn hit_test_available(
         }
     }
 
-    if scene.action_override.is_none()
-        && let Some(source) = source
+    if let Some(source) = source
         && let Some(space) = source.current_space
         && let Some(zone) = classify_zone(source.origin_frame, point, fraction)
-        && let WindowDropAction::Insert(direction) = resolve_action(zone, center)
-        // A window that way is reached by dropping onto it; offering the step as well lit up
-        // its spot before the pointer got there.
-        && !scene.targets.iter().any(|target| {
-            source.origin_frame.intersection(&target.frame).area() > 0.0
-                || lies_toward(source.origin_frame, target.frame, direction)
-        })
     {
-        let intent = DropIntent {
-            window: source.window,
-            space,
-            frame: source.origin_frame,
-            zone,
-            action: WindowDropAction::Move(direction),
-        };
-        if !unavailable.contains(&(intent.window, intent.zone, intent.action)) {
-            return Some(intent);
+        if let (None, WindowDropAction::Insert(direction)) =
+            (scene.action_override, resolve_action(zone, center))
+            && !scene.source_neighbors[match direction {
+                Direction::Left => 0,
+                Direction::Right => 1,
+                Direction::Up => 2,
+                Direction::Down => 3,
+            }]
+        {
+            return Some(DropIntent {
+                window: source.window,
+                space,
+                frame: source.origin_frame,
+                zone,
+                action: WindowDropAction::Move(direction),
+            });
         }
+        return None;
     }
 
     let nearest = scene
@@ -733,19 +717,6 @@ fn hit_test_available(
         })
         .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
         .map(|(_, _, intent)| intent)
-}
-
-/// Whether `to` sits entirely on the `direction` side of `from` and overlaps it across that axis.
-fn lies_toward(from: CGRect, to: CGRect, direction: Direction) -> bool {
-    let overlap = |a: f64, a_len: f64, b: f64, b_len: f64| a.max(b) < (a + a_len).min(b + b_len);
-    let rows = overlap(from.origin.y, from.size.height, to.origin.y, to.size.height);
-    let columns = overlap(from.origin.x, from.size.width, to.origin.x, to.size.width);
-    match direction {
-        Direction::Left => rows && to.max().x <= from.origin.x,
-        Direction::Right => rows && to.origin.x >= from.max().x,
-        Direction::Up => columns && to.max().y <= from.origin.y,
-        Direction::Down => columns && to.origin.y >= from.max().y,
-    }
 }
 
 fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
@@ -800,11 +771,16 @@ mod tests {
     fn scene(frame: CGRect) -> DragScene {
         DragScene {
             action_override: None,
+            source_neighbors: [false; 4],
             targets: vec![target(2, frame)],
         }
     }
     fn scene_with(targets: Vec<DragSceneTarget>) -> DragScene {
-        DragScene { action_override: None, targets }
+        DragScene {
+            action_override: None,
+            source_neighbors: [false; 4],
+            targets,
+        }
     }
     fn motion(actor: &mut DragActor, x: f64, y: f64) -> bool {
         actor.motion(DragMotion { point: point(x, y) })
@@ -903,15 +879,15 @@ mod tests {
 
     #[test]
     fn native_tiled_move_targets_pointer_zone_and_commits_once() {
-        let target_frame = frame(100.0, 0.0, 100.0, 100.0);
+        let target_frame = frame(200.0, 0.0, 100.0, 100.0);
         let moved = frame(10.0, 0.0, 200.0, 100.0);
         let mut actor = native(true, moved, scene(target_frame));
-        assert!(motion(&mut actor, 1.0, 50.0));
+        assert!(motion(&mut actor, 201.0, 50.0));
         let intent = actor.intent().unwrap();
         assert_eq!(intent.action, WindowDropAction::Insert(Direction::Left));
         actor.set_preview(intent, Some(target_frame));
         let preview = preview_frame(actor.target().unwrap());
-        assert_eq!(preview.origin, CGPoint::new(104.0, 4.0));
+        assert_eq!(preview.origin, CGPoint::new(204.0, 4.0));
         assert_eq!(preview.size, CGSize::new(92.0, 92.0));
         let commit = actor.finish(MouseButton::Left).unwrap();
         assert_eq!(commit.source.window, w(1));
@@ -943,20 +919,34 @@ mod tests {
     }
 
     #[test]
-    fn highlight_stays_home_until_the_pointer_enters_a_neighbour() {
-        let mut actor = native(true, rect(), scene(frame(220.0, 0.0, 200.0, 100.0)));
-        // The source tile's edge facing the neighbour offers no step toward it.
+    fn source_tile_edge_is_preview_only_until_pointer_enters_neighbor() {
+        let mut drag_scene = scene(frame(200.0, 0.0, 200.0, 100.0));
+        drag_scene.source_neighbors[1] = true;
+        let mut actor = native(true, rect(), drag_scene.clone());
+        // Home is preview-only; mouse-up has no validated operation to commit.
         motion(&mut actor, 199.0, 50.0);
-        let near_edge = actor.intent().unwrap();
-        assert_eq!(near_edge.window, w(2));
-        assert_eq!(near_edge.action, WindowDropAction::Insert(Direction::Left));
-        // Outside the neighbour, landing in place keeps the highlight on the source's tile.
-        assert!(!actor.redirect_in_place(near_edge));
+        assert!(actor.intent().is_none());
+        assert!(actor.preview_target().is_some());
+        assert!(actor.target().is_none());
+        assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
 
-        motion(&mut actor, 221.0, 50.0);
-        assert_eq!(actor.intent().unwrap().action, WindowDropAction::Swap);
+        let mut actor = native(true, rect(), drag_scene);
+        motion(&mut actor, 201.0, 50.0);
+        assert_eq!(
+            actor.intent().unwrap().action,
+            WindowDropAction::Insert(Direction::Left)
+        );
+        let intent = actor.intent().unwrap();
+        actor.set_preview(intent, Some(rect()));
         assert!(!motion(&mut actor, 225.0, 50.0));
-        assert_eq!(actor.intent().unwrap().action, WindowDropAction::Swap);
+        assert_eq!(
+            actor.intent().unwrap().action,
+            WindowDropAction::Insert(Direction::Left)
+        );
+        assert!(motion(&mut actor, 199.0, 50.0));
+        assert!(actor.intent().is_none());
+        assert_eq!(actor.preview_target().unwrap().preview_area, rect());
+        assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
     }
 
     #[test]
@@ -974,11 +964,11 @@ mod tests {
         let nearest = w(2);
         let fallback = w(3);
         let scene = scene_with(vec![
-            target(2, rect()),
-            target(3, frame(220.0, 0.0, 200.0, 100.0)),
+            target(2, frame(220.0, 0.0, 200.0, 100.0)),
+            target(3, frame(440.0, 0.0, 200.0, 100.0)),
         ]);
         let mut actor = native(true, rect(), scene);
-        motion(&mut actor, 100.0, 50.0);
+        motion(&mut actor, 230.0, 50.0);
         let intent = actor.intent().unwrap();
         assert_eq!(intent.window, nearest);
         assert!(actor.set_preview(intent, None));
@@ -1009,8 +999,8 @@ mod tests {
 
     #[test]
     fn replacing_scene_invalidates_a_validated_preview() {
-        let mut actor = native(true, rect(), scene(rect()));
-        motion(&mut actor, 100.0, 50.0);
+        let mut actor = native(true, rect(), scene(frame(200.0, 0.0, 200.0, 100.0)));
+        motion(&mut actor, 201.0, 50.0);
         let intent = actor.intent().unwrap();
         actor.set_preview(intent, Some(rect()));
         assert!(actor.target().is_some());

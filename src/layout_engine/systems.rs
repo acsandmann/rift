@@ -159,6 +159,13 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     /// Persistence validation must not confuse "currently visible" with "serialized" or an
     /// unmatchable hidden member can survive forever as a ghost.
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
+    /// Structural location of a window, independent of its rendered frame.
+    fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        self.all_windows_in_layout(layout)
+            .iter()
+            .position(|&candidate| candidate == window)
+            .map(|index| vec![index])
+    }
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     /// Members sharing the stack/group that directly contains `window`.
     fn stack_members(&self, _layout: LayoutId, _window: WindowId) -> Vec<WindowId> { Vec::new() }
@@ -265,6 +272,21 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     );
     fn rebalance(&mut self, _layout: LayoutId) {}
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
+}
+
+pub(super) fn node_slot(
+    mut node: crate::model::tree::NodeId,
+    root: crate::model::tree::NodeId,
+    map: &crate::model::tree::NodeMap,
+) -> Option<Vec<usize>> {
+    let mut path = Vec::new();
+    while node != root {
+        let parent = node.parent(map)?;
+        path.push(parent.children(map).position(|child| child == node)?);
+        node = parent;
+    }
+    path.reverse();
+    Some(path)
 }
 
 /// Forward representation-level operations shared by tree-backed layout policies.

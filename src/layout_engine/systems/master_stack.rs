@@ -678,6 +678,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.all_windows_in_layout(layout)
     }
 
+    fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        self.inner.window_slot(layout, window)
+    }
+
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         let (_root, master, stack) = self.ensure_structure(layout);
         let target = self.target_container_for_new_window(layout, master, stack);

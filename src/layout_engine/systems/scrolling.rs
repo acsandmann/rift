@@ -1114,6 +1114,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layout_state(layout).map(Self::all_windows).unwrap_or_default()
     }
 
+    fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        let (column, row) = self.layout_state(layout)?.locate(window)?;
+        Some(vec![column, row])
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         self.layout_state(layout).map(Self::all_windows).unwrap_or_default()
     }
