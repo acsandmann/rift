@@ -247,7 +247,8 @@ haptic_pattern = "level_change"
 enabled = true
 # Modifier used with action1/action2: cmd | alt | shift | ctrl | fn.
 modifier = "fn"
-# Left-button and right-button actions: move.
+# Left-button and right-button actions: move | resize | none.
+# Resize drags the edges nearest to where the button was pressed.
 # With the modifier held, the action works from anywhere inside a managed window.
 action1 = "move"
 # Dropping in the center of another tiled window: swap | stack.

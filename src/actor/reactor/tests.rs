@@ -1441,6 +1441,7 @@ fn cross_display_drag_clears_source_floating_position() {
         crate::actor::reactor::events::drag::MouseUpPayload {
             button: crate::actor::drag::MouseButton::Left,
             final_space: Some(space2),
+            screens: Vec::new(),
         },
     )
     .unwrap();

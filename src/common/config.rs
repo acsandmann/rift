@@ -570,6 +570,8 @@ pub enum MouseAction {
     /// Move a window from anywhere inside it.
     #[default]
     Move,
+    /// Resize a window from anywhere inside it by dragging the edges nearest to the press.
+    Resize,
 }
 
 /// Action used when a tiled window is released in another tile's center zone.
@@ -587,7 +589,7 @@ pub enum MouseDropAction {
 ///
 /// Native title-bar dragging continues to work normally. Holding [`Self::modifier`]
 /// reserves `action1` for the left button and `action2` for the right button, so
-/// a window can be moved from anywhere inside it. Floating windows
+/// a window can be moved or resized from anywhere inside it. Floating windows
 /// remain floating. A tiled destination is divided into five local zones: its center
 /// performs [`Self::drop_action`], while its edges insert the source on that side.
 /// Dragging to an edge of the source's vacated tile performs the matching MoveNode command when no

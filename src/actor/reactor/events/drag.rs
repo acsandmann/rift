@@ -35,6 +35,7 @@ pub fn build_drag_scene(
 pub struct MouseUpPayload {
     pub button: crate::actor::drag::MouseButton,
     pub final_space: Option<SpaceId>,
+    pub screens: Vec<(SpaceId, objc2_core_foundation::CGRect, Option<String>)>,
 }
 
 pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
@@ -45,11 +46,10 @@ pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
         return EventOutcome::no_change();
     };
     let source = cancelled.source;
+    use crate::actor::drag::DragKind::{ModifierMove, ModifierResize};
     match (cancelled.kind, source.tiled) {
-        (crate::actor::drag::DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
-        (crate::actor::drag::DragKind::ModifierMove, false)
-            if source.last_frame != source.origin_frame =>
-        {
+        (ModifierMove | ModifierResize, true) => EventOutcome::layout_changed(false),
+        (ModifierMove | ModifierResize, false) if source.last_frame != source.origin_frame => {
             EventOutcome::no_change().with_pre_layout_window_frame_write(
                 source.window,
                 source.origin_frame,
@@ -74,6 +74,15 @@ pub fn handle_mouse_up(
     let window = commit.source.window;
     drag.externally_controlled_window = None;
     let mut needs_layout = commit.source.tiled;
+
+    if commit.kind == crate::actor::drag::DragKind::ModifierResize && commit.source.tiled {
+        outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
+            wid: window,
+            old_frame: commit.source.origin_frame,
+            new_frame: commit.source.last_frame,
+            screens: payload.screens.into(),
+        });
+    }
 
     if let Some(target) = commit.target
         && commit.source.current_space == Some(target.intent.space)
