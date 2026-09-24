@@ -1331,7 +1331,7 @@ impl LayoutEngine {
             .is_some_and(|layout| self.workspace_tree(workspace_id).contains_window(layout, wid))
     }
 
-    fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
+    pub(crate) fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
         for space in self.workspace_layouts.spaces() {
             if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
                 if let Some(layout) = self.workspace_layouts.active(space, ws_id) {
@@ -1736,6 +1736,9 @@ impl LayoutEngine {
                 };
             }
             LayoutEvent::AppClosed(pid) => {
+                if self.focused_window.is_some_and(|wid| wid.pid == pid) {
+                    self.focused_window = None;
+                }
                 for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
                     ws.layout_system.remove_windows_for_app(pid);
                 }

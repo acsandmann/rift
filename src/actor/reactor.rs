@@ -3896,6 +3896,7 @@ impl Reactor {
             LayoutEvent::WindowRemoved(wid)
                 if self.layout_manager.layout_engine.focused_window() == Some(wid)
         );
+        self.prepare_refocus_before_removal(&event);
         let event_clone = event.clone();
         let layout_outcome =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
@@ -4501,7 +4502,7 @@ impl Reactor {
                     }
                 }
             } else if let Some(space) = pending_refocus_space.take() {
-                if let Some(wid) = self.last_focused_window_in_space(space) {
+                if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, None) {
                     focus_window = Some(wid);
                     false
                 } else if !self.is_in_drag() {
@@ -4763,6 +4764,25 @@ impl Reactor {
             .virtual_workspace_manager()
             .workspace_for_window(&self.state.windows, space, window_id)
             .is_some_and(|window_workspace| window_workspace != active_workspace)
+    }
+
+    fn prepare_refocus_before_removal(&mut self, event: &LayoutEvent) {
+        let focused = self.layout_manager.layout_engine.focused_window();
+        let removed_focus = match event {
+            LayoutEvent::AppClosed(pid) => focused.filter(|wid| wid.pid == *pid),
+            LayoutEvent::WindowRemoved(wid) if focused == Some(*wid) => focused,
+            _ => None,
+        };
+        if let Some(wid) = removed_focus
+            && let Some(space) = self
+                .layout_manager
+                .layout_engine
+                .space_with_window(wid)
+                .filter(|space| self.is_space_active(*space))
+                .or_else(|| self.workspace_command_space())
+        {
+            self.refocus_manager.refocus_state = RefocusState::Pending(space);
+        }
     }
 
     fn prepare_refocus_after_layout_event(&mut self, event: &LayoutEvent) {
