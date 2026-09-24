@@ -1,4 +1,5 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 
 use super::{LayoutSystem, WindowLayoutConstraints};
@@ -149,7 +150,6 @@ impl FloatingLayoutSystem {
         let source = self.frames.get(&focused)?;
         let origin = source.mid();
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
-        let forward = matches!(direction, Direction::Right | Direction::Down);
         self.inner
             .visible_windows_in_layout(layout)
             .into_iter()
@@ -164,20 +164,19 @@ impl FloatingLayoutSystem {
             .filter_map(|wid| {
                 let frame = self.frames.get(&wid)?;
                 let candidate = frame.mid();
-                let (along, across, overlaps) = if horizontal {
+                let (across, overlaps) = if horizontal {
                     (
-                        candidate.x - origin.x,
                         candidate.y - origin.y,
                         source.origin.y < frame.max().y && frame.origin.y < source.max().y,
                     )
                 } else {
                     (
-                        candidate.y - origin.y,
                         candidate.x - origin.x,
                         source.origin.x < frame.max().x && frame.origin.x < source.max().x,
                     )
                 };
-                let along = if forward { along } else { -along };
+                let along = (origin.x, origin.y)
+                    .distance_in_direction((candidate.x, candidate.y), direction)?;
                 (along > 0.0).then_some((wid, !overlaps, along * along + across * across))
             })
             .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)))

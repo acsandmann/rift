@@ -22,6 +22,23 @@ pub enum Direction {
     Down,
 }
 
+/// Directional distance in screen coordinates, where Y increases downward.
+pub trait DirectionalDistance {
+    fn distance_in_direction(self, target: Self, direction: Direction) -> Option<f64>;
+}
+
+impl DirectionalDistance for (f64, f64) {
+    fn distance_in_direction(self, target: Self, direction: Direction) -> Option<f64> {
+        let distance = match direction {
+            Direction::Left => self.0 - target.0,
+            Direction::Right => target.0 - self.0,
+            Direction::Up => self.1 - target.1,
+            Direction::Down => target.1 - self.1,
+        };
+        (distance >= 0.0).then_some(distance)
+    }
+}
+
 impl Direction {
     pub fn orientation(self) -> Orientation {
         match self {

@@ -2,7 +2,9 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
+use rift_protocol::{
+    DirectionalDistance, FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -1187,8 +1189,9 @@ impl LayoutEngine {
                 continue;
             }
             if let Some(candidate_center) = space_centers.get(&candidate_space) {
-                if let Some(delta) =
-                    Self::directional_delta(direction, current_center, candidate_center)
+                if let Some(delta) = (current_center.x, current_center.y)
+                    .distance_in_direction((candidate_center.x, candidate_center.y), direction)
+                    .filter(|distance| *distance > 0.0)
                 {
                     candidates.push((candidate_space, delta));
                 }
@@ -1208,31 +1211,6 @@ impl LayoutEngine {
                 visible_spaces.iter().copied().find(|&space| space != current_space)
             }
             Direction::Up | Direction::Down => None,
-        }
-    }
-
-    fn directional_delta(
-        direction: Direction,
-        current: &CGPoint,
-        candidate: &CGPoint,
-    ) -> Option<f64> {
-        match direction {
-            Direction::Left => {
-                let delta = current.x - candidate.x;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
-            Direction::Right => {
-                let delta = candidate.x - current.x;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
-            Direction::Up => {
-                let delta = candidate.y - current.y;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
-            Direction::Down => {
-                let delta = current.y - candidate.y;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
         }
     }
 
@@ -3675,6 +3653,32 @@ mod tests {
             engine.next_space_for_direction(middle, Direction::Up, &visible_spaces, &centers),
             None
         );
+
+        let upper = SpaceId::new(4);
+        let lower = SpaceId::new(5);
+        let mut vertical_centers = HashMap::default();
+        vertical_centers.insert(upper, CGPoint::new(960.0, -1080.0));
+        vertical_centers.insert(middle, CGPoint::new(960.0, 0.0));
+        vertical_centers.insert(lower, CGPoint::new(960.0, 1080.0));
+        let vertical_spaces = vec![lower, middle, upper];
+        assert_eq!(
+            engine.next_space_for_direction(
+                middle,
+                Direction::Up,
+                &vertical_spaces,
+                &vertical_centers
+            ),
+            Some(upper)
+        );
+        assert_eq!(
+            engine.next_space_for_direction(
+                middle,
+                Direction::Down,
+                &vertical_spaces,
+                &vertical_centers
+            ),
+            Some(lower)
+        );
     }
 
     #[test]
@@ -4222,7 +4226,7 @@ mod tests {
         let visible_spaces = vec![current_space, upper_space];
         let mut visible_space_centers = HashMap::default();
         visible_space_centers.insert(current_space, CGPoint::new(960.0, 540.0));
-        visible_space_centers.insert(upper_space, CGPoint::new(960.0, 1620.0));
+        visible_space_centers.insert(upper_space, CGPoint::new(960.0, -540.0));
 
         let response = engine.handle_command(
             &mut window_store,

@@ -80,6 +80,7 @@ use main_window::MainWindowTracker;
 use managers::LayoutManager;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
+use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tracing::{debug, instrument, trace, warn};
@@ -5039,32 +5040,28 @@ impl Reactor {
             let min = frame.min();
             let max = frame.max();
 
-            let (primary_dist, orth_gap) = match direction {
-                Direction::Left => {
-                    if max.x > origin.x {
-                        continue;
-                    }
-                    (origin.x - max.x, interval_gap(min.y, max.y, origin.y, origin.y))
-                }
-                Direction::Right => {
-                    if min.x < origin.x {
-                        continue;
-                    }
-                    (min.x - origin.x, interval_gap(min.y, max.y, origin.y, origin.y))
-                }
-                Direction::Up => {
-                    // Smaller y means visually "up".
-                    if max.y > origin.y {
-                        continue;
-                    }
-                    (origin.y - max.y, interval_gap(min.x, max.x, origin.x, origin.x))
-                }
-                Direction::Down => {
-                    if min.y < origin.y {
-                        continue;
-                    }
-                    (min.y - origin.y, interval_gap(min.x, max.x, origin.x, origin.x))
-                }
+            let (edge, orth_gap) = match direction {
+                Direction::Left => (
+                    CGPoint::new(max.x, origin.y),
+                    interval_gap(min.y, max.y, origin.y, origin.y),
+                ),
+                Direction::Right => (
+                    CGPoint::new(min.x, origin.y),
+                    interval_gap(min.y, max.y, origin.y, origin.y),
+                ),
+                Direction::Up => (
+                    CGPoint::new(origin.x, max.y),
+                    interval_gap(min.x, max.x, origin.x, origin.x),
+                ),
+                Direction::Down => (
+                    CGPoint::new(origin.x, min.y),
+                    interval_gap(min.x, max.x, origin.x, origin.x),
+                ),
+            };
+            let Some(primary_dist) =
+                (origin.x, origin.y).distance_in_direction((edge.x, edge.y), direction)
+            else {
+                continue;
             };
 
             let should_replace = best.as_ref().map_or(true, |(best_primary, best_orth, _)| {
