@@ -69,6 +69,8 @@ pub struct Session {
     pub scene: DragScene,
     target: TargetState,
     unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
+    /// Edge zones whose drop would land the source where it already is.
+    in_place: Vec<(WindowId, DropZone)>,
     pub kind: DragKind,
 }
 
@@ -113,6 +115,7 @@ impl Session {
             scene,
             target: TargetState::None,
             unavailable: Vec::new(),
+            in_place: Vec::new(),
             kind,
         }
     }
@@ -120,6 +123,28 @@ impl Session {
     fn invalidate_drop(&mut self) {
         self.target = TargetState::None;
         self.unavailable.clear();
+        self.in_place.clear();
+    }
+
+    /// Inside a window, an in-place edge takes the center action, so the highlight moves to
+    /// that window as soon as the pointer enters it instead of staying on the source's tile.
+    fn redirected(
+        &self,
+        intent: Option<DropIntent>,
+        center: MouseDropAction,
+    ) -> Option<DropIntent> {
+        intent.map(|intent| {
+            if self.in_place.contains(&(intent.window, intent.zone))
+                && contains(intent.frame, self.pointer, 0.0)
+            {
+                DropIntent {
+                    action: resolve_action(DropZone::Center, center),
+                    ..intent
+                }
+            } else {
+                intent
+            }
+        })
     }
 }
 
@@ -206,7 +231,7 @@ impl DragActor {
             && matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove)
             && session.source.origin_space == session.source.current_space
         {
-            session.target = hit_test_available(
+            let next = hit_test_available(
                 &session.scene,
                 session.pointer,
                 self.settings.drop_zone_fraction,
@@ -214,8 +239,10 @@ impl DragActor {
                 previous,
                 &session.unavailable,
                 Some(session.source),
-            )
-            .map_or(TargetState::None, TargetState::Candidate);
+            );
+            session.target = session
+                .redirected(next, self.settings.drop_action)
+                .map_or(TargetState::None, TargetState::Candidate);
         }
     }
 
@@ -231,7 +258,7 @@ impl DragActor {
             return false;
         }
         session.unavailable.push((intent.window, intent.zone, intent.action));
-        session.target = hit_test_available(
+        let next = hit_test_available(
             &session.scene,
             session.pointer,
             self.settings.drop_zone_fraction,
@@ -239,9 +266,29 @@ impl DragActor {
             None,
             &session.unavailable,
             Some(session.source),
-        )
-        .map_or(TargetState::None, TargetState::Candidate);
+        );
+        session.target = session
+            .redirected(next, self.settings.drop_action)
+            .map_or(TargetState::None, TargetState::Candidate);
         !matches!(session.target, TargetState::None)
+    }
+
+    /// Records that `intent` would drop the source where it already is. Returns true when that
+    /// re-targeted the current intent, which then needs its own preview.
+    pub fn redirect_in_place(&mut self, intent: DropIntent) -> bool {
+        let State::Dragging(session) = &mut self.state else {
+            return false;
+        };
+        if session.target.intent() != Some(intent) || intent.window == session.source.window {
+            return false;
+        }
+        session.in_place.push((intent.window, intent.zone));
+        let next = session.redirected(Some(intent), self.settings.drop_action);
+        if next == Some(intent) {
+            return false;
+        }
+        session.target = next.map_or(TargetState::None, TargetState::Candidate);
+        true
     }
 
     pub fn update_config(&mut self, settings: DragDropSettings) {
@@ -422,6 +469,7 @@ impl DragActor {
                 Some(session.source),
             )
         };
+        let next = session.redirected(next, self.settings.drop_action);
         let changed = next != session.target.intent();
         if changed {
             session.target = next.map_or(TargetState::None, TargetState::Candidate);
@@ -622,10 +670,12 @@ fn hit_test_available(
         && let Some(space) = source.current_space
         && let Some(zone) = classify_zone(source.origin_frame, point, fraction)
         && let WindowDropAction::Insert(direction) = resolve_action(zone, center)
-        && !scene
-            .targets
-            .iter()
-            .any(|target| source.origin_frame.intersection(&target.frame).area() > 0.0)
+        // A window that way is reached by dropping onto it; offering the step as well lit up
+        // its spot before the pointer got there.
+        && !scene.targets.iter().any(|target| {
+            source.origin_frame.intersection(&target.frame).area() > 0.0
+                || lies_toward(source.origin_frame, target.frame, direction)
+        })
     {
         let intent = DropIntent {
             window: source.window,
@@ -683,6 +733,19 @@ fn hit_test_available(
         })
         .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
         .map(|(_, _, intent)| intent)
+}
+
+/// Whether `to` sits entirely on the `direction` side of `from` and overlaps it across that axis.
+fn lies_toward(from: CGRect, to: CGRect, direction: Direction) -> bool {
+    let overlap = |a: f64, a_len: f64, b: f64, b_len: f64| a.max(b) < (a + a_len).min(b + b_len);
+    let rows = overlap(from.origin.y, from.size.height, to.origin.y, to.size.height);
+    let columns = overlap(from.origin.x, from.size.width, to.origin.x, to.size.width);
+    match direction {
+        Direction::Left => rows && to.max().x <= from.origin.x,
+        Direction::Right => rows && to.origin.x >= from.max().x,
+        Direction::Up => columns && to.max().y <= from.origin.y,
+        Direction::Down => columns && to.origin.y >= from.max().y,
+    }
 }
 
 fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
@@ -858,7 +921,8 @@ mod tests {
 
     #[test]
     fn original_tile_edges_offer_keyboard_equivalent_moves() {
-        let scene = scene(frame(220.0, 0.0, 200.0, 100.0));
+        // Diagonal, so no window lies straight past any edge of the source's tile.
+        let scene = scene(frame(220.0, 120.0, 200.0, 100.0));
         for ((x, y), direction) in [
             ((1.0, 50.0), Direction::Left),
             ((199.0, 50.0), Direction::Right),
@@ -876,6 +940,23 @@ mod tests {
                 WindowDropAction::Move(direction)
             );
         }
+    }
+
+    #[test]
+    fn highlight_stays_home_until_the_pointer_enters_a_neighbour() {
+        let mut actor = native(true, rect(), scene(frame(220.0, 0.0, 200.0, 100.0)));
+        // The source tile's edge facing the neighbour offers no step toward it.
+        motion(&mut actor, 199.0, 50.0);
+        let near_edge = actor.intent().unwrap();
+        assert_eq!(near_edge.window, w(2));
+        assert_eq!(near_edge.action, WindowDropAction::Insert(Direction::Left));
+        // Outside the neighbour, landing in place keeps the highlight on the source's tile.
+        assert!(!actor.redirect_in_place(near_edge));
+
+        motion(&mut actor, 221.0, 50.0);
+        assert_eq!(actor.intent().unwrap().action, WindowDropAction::Swap);
+        assert!(!motion(&mut actor, 225.0, 50.0));
+        assert_eq!(actor.intent().unwrap().action, WindowDropAction::Swap);
     }
 
     #[test]
