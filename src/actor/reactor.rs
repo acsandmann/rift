@@ -2454,7 +2454,11 @@ impl Reactor {
         for (response, workspace_switch_space) in outcome.layout_responses {
             self.handle_layout_response(response, workspace_switch_space);
         }
-        if outcome.dispatch_mouse_up {
+        // The input tap captured a modifier drag's button and always reports its real release,
+        // so none is inferred from button state for it.
+        let modifier_drag =
+            self.drag_manager.actor.kind() == Some(crate::actor::drag::DragKind::ModifierMove);
+        if outcome.dispatch_mouse_up && !modifier_drag {
             self.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
         }
 
