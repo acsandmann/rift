@@ -1571,6 +1571,38 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
 }
 
 #[test]
+fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
+    let (mut reactor, wid, _wsid, space, _space2, frame, _) =
+        reactor_with_window_on_space1_two_displays();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.drag_manager.actor.begin_modifier(
+        crate::actor::drag::DragSource {
+            window: wid,
+            origin_frame: frame,
+            last_frame: frame,
+            origin_space: Some(space),
+            current_space: Some(space),
+            tiled: true,
+        },
+        frame.mid(),
+        crate::common::config::MouseAction::Move,
+        crate::actor::drag::DragScene::default(),
+    );
+    let moved = CGRect::new(CGPoint::new(frame.origin.x + 30.0, frame.origin.y), frame.size);
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        moved,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+    assert!(reactor.drag_manager.actor.is_active());
+
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    assert!(!reactor.drag_manager.actor.is_active());
+}
+
+#[test]
 fn stale_user_space_disappearance_does_not_restore_old_display_assignment() {
     let (mut reactor, wid, wsid, space1, space2, _) = reactor_with_window_moved_to_space2();
 
