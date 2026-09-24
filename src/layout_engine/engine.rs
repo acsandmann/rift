@@ -35,6 +35,26 @@ pub use rift_protocol::LayoutCommand;
 const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
 const SMART_FLOATING_HEIGHT_RATIO: f64 = 0.93;
 
+#[derive(Clone, Copy)]
+pub(crate) struct DropPreview {
+    pub frame: CGRect,
+    pub same_slot: bool,
+}
+
+impl DropPreview {
+    pub(crate) fn action(
+        self,
+        action: crate::layout_engine::WindowDropAction,
+        center: crate::common::config::MouseDropAction,
+    ) -> crate::layout_engine::WindowDropAction {
+        if self.same_slot && matches!(action, crate::layout_engine::WindowDropAction::Insert(_)) {
+            center.into()
+        } else {
+            action
+        }
+    }
+}
+
 fn requested_floating_frame(
     mut frame: CGRect,
     screen: CGRect,
@@ -244,9 +264,12 @@ impl LayoutEngine {
         screen: CGRect,
         display_uuid: Option<&str>,
         stack_line: &crate::common::config::StackLineSettings,
-    ) -> Option<CGRect> {
+    ) -> Option<DropPreview> {
         if action == crate::layout_engine::WindowDropAction::Swap {
-            return (source != target).then_some(target_frame);
+            return (source != target).then_some(DropPreview {
+                frame: target_frame,
+                same_slot: false,
+            });
         }
         let Some(workspace) = self.active_workspace(space) else {
             return None;
@@ -256,8 +279,9 @@ impl LayoutEngine {
         };
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
         let mut system = self.workspace_tree(workspace).preview_clone()?;
+        let before = system.window_slot(layout, source)?;
         system.apply_window_drop(layout, source, target, action).then_some(())?;
-        system
+        let frame = system
             .calculate_layout(
                 layout,
                 screen,
@@ -269,7 +293,33 @@ impl LayoutEngine {
                 stack_line.vert_placement,
             )
             .into_iter()
-            .find_map(|(window, frame)| (window == source).then_some(frame))
+            .find_map(|(window, frame)| (window == source).then_some(frame))?;
+        Some(DropPreview {
+            frame,
+            same_slot: system.window_slot(layout, source)? == before,
+        })
+    }
+
+    pub(crate) fn source_move_neighbors(&self, space: SpaceId, source: WindowId) -> [bool; 4] {
+        let Some(workspace) = self.active_workspace(space) else {
+            return [false; 4];
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace) else {
+            return [false; 4];
+        };
+        let baseline = self.workspace_tree(workspace);
+        let directions = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ];
+        directions.map(|direction| {
+            let Some(mut system) = baseline.preview_clone() else {
+                return false;
+            };
+            system.select_window(layout, source) && system.move_selection(layout, direction)
+        })
     }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.

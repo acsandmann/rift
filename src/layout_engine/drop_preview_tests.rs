@@ -209,3 +209,73 @@ fn stack_drop_actions_are_arbitrary_swaps() {
     assert_eq!(system.selected_window(layout), Some(source));
     assert!(!system.apply_window_drop(layout, source, source, WindowDropAction::Swap));
 }
+
+#[test]
+fn drop_slot_identity_uses_topology_in_traditional_and_bsp() {
+    let mut traditional = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
+    let layout = populate(&mut traditional);
+    let source_slot = traditional.window_slot(layout, w(2)).unwrap();
+
+    let mut same = traditional.preview_clone().unwrap();
+    assert!(same.apply_window_drop(layout, w(2), w(1), WindowDropAction::Insert(Direction::Right)));
+    assert_eq!(same.window_slot(layout, w(2)), Some(source_slot.clone()));
+
+    let mut reordered = traditional.preview_clone().unwrap();
+    assert!(reordered.apply_window_drop(
+        layout,
+        w(2),
+        w(1),
+        WindowDropAction::Insert(Direction::Left)
+    ));
+    assert_ne!(reordered.window_slot(layout, w(2)), Some(source_slot));
+
+    let mut bsp = LayoutSystemKind::Bsp(BspLayoutSystem::default());
+    let layout = bsp.create_layout();
+    bsp.add_window_after_selection(layout, w(1));
+    bsp.add_window_after_selection(layout, w(2));
+    let old_frame = calculated_source(&bsp, layout, w(2));
+    bsp.on_window_resized(
+        layout,
+        w(2),
+        old_frame,
+        CGRect::new(CGPoint::new(960.0, 0.0), CGSize::new(240.0, 800.0)),
+        screen(),
+        &GapSettings::default(),
+    );
+    let resized_frame = calculated_source(&bsp, layout, w(2));
+    assert!(resized_frame.size.width < old_frame.size.width / 2.0);
+    let source_slot = bsp.window_slot(layout, w(2)).unwrap();
+    let mut same = bsp.preview_clone().unwrap();
+    assert!(same.apply_window_drop(layout, w(2), w(1), WindowDropAction::Insert(Direction::Right)));
+    assert_eq!(same.window_slot(layout, w(2)), Some(source_slot));
+    let new_frame = calculated_source(&same, layout, w(2));
+    assert!(new_frame.size.width > resized_frame.size.width * 2.0);
+}
+
+#[test]
+fn same_slot_edges_use_the_configured_center_action() {
+    use crate::common::config::MouseDropAction;
+    use crate::layout_engine::engine::DropPreview;
+
+    let same_slot = DropPreview {
+        frame: screen(),
+        same_slot: true,
+    };
+    let insert = WindowDropAction::Insert(Direction::Right);
+    assert_eq!(
+        same_slot.action(insert, MouseDropAction::Swap),
+        WindowDropAction::Swap
+    );
+    assert_eq!(
+        same_slot.action(insert, MouseDropAction::Stack),
+        WindowDropAction::Stack
+    );
+    assert_eq!(
+        DropPreview {
+            frame: screen(),
+            same_slot: false
+        }
+        .action(insert, MouseDropAction::Swap),
+        insert
+    );
+}

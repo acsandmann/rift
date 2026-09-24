@@ -1272,6 +1272,16 @@ impl LayoutSystem for BspLayoutSystem {
         out
     }
 
+    fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        let root = self.layouts.get(layout)?.root;
+        let node = self.node_for_window_in_layout(layout, window)?;
+        let mut slot = crate::layout_engine::systems::node_slot(node, root, &self.tree.map)?;
+        if let Some(members) = self.stacks.get(&node) {
+            slot.push(members.iter().position(|&member| member == window)?);
+        }
+        Some(slot)
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
