@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
@@ -19,6 +20,9 @@ use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
+/// Apps re-render for every size they are given, so a size per pointer sample leaves their
+/// content trailing far behind the frame. Raise this if content still lags.
+const RESIZE_WRITE_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
@@ -70,6 +74,7 @@ pub struct Session {
     target: TargetState,
     unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
     pub kind: DragKind,
+    last_resize_write: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -114,6 +119,7 @@ impl Session {
             target: TargetState::None,
             unavailable: Vec::new(),
             kind,
+            last_resize_write: None,
         }
     }
 
@@ -470,8 +476,18 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return None;
         };
-        matches!(session.kind, DragKind::ModifierMove | DragKind::ModifierResize)
-            .then_some((session.source.window, session.source.last_frame))
+        match session.kind {
+            DragKind::ModifierMove => {}
+            DragKind::ModifierResize => {
+                if session.last_resize_write.is_some_and(|at| at.elapsed() < RESIZE_WRITE_INTERVAL)
+                {
+                    return None;
+                }
+                session.last_resize_write = Some(Instant::now());
+            }
+            DragKind::NativeMove | DragKind::NativeResize => return None,
+        }
+        Some((session.source.window, session.source.last_frame))
     }
 
     pub fn finish(&mut self, button: MouseButton) -> Option<DragCommit> {
@@ -1100,6 +1116,21 @@ mod tests {
                 actor.finish(MouseButton::Left).unwrap().kind,
                 DragKind::ModifierResize
             );
+        }
+    }
+
+    #[test]
+    fn modifier_resize_writes_are_throttled_and_moves_are_not() {
+        let mut resize = modifier(MouseAction::Resize, false);
+        motion(&mut resize, 110.0, 60.0);
+        assert!(resize.interactive_update().is_some());
+        motion(&mut resize, 120.0, 70.0);
+        assert!(resize.interactive_update().is_none());
+
+        let mut moved = modifier(MouseAction::Move, false);
+        for x in [110.0, 120.0] {
+            motion(&mut moved, x, 50.0);
+            assert!(moved.interactive_update().is_some());
         }
     }
 

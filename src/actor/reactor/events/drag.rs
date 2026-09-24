@@ -75,13 +75,18 @@ pub fn handle_mouse_up(
     drag.externally_controlled_window = None;
     let mut needs_layout = commit.source.tiled;
 
-    if commit.kind == crate::actor::drag::DragKind::ModifierResize && commit.source.tiled {
-        outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
-            wid: window,
-            old_frame: commit.source.origin_frame,
-            new_frame: commit.source.last_frame,
-            screens: payload.screens.into(),
-        });
+    if commit.kind == crate::actor::drag::DragKind::ModifierResize {
+        outcome = if commit.source.tiled {
+            outcome.with_layout_event(LayoutEvent::WindowResized {
+                wid: window,
+                old_frame: commit.source.origin_frame,
+                new_frame: commit.source.last_frame,
+                screens: payload.screens.into(),
+            })
+        } else {
+            // The last pointer samples may have been throttled; the layout writes tiled frames.
+            outcome.with_pre_layout_window_frame_write(window, commit.source.last_frame, true)
+        };
     }
 
     if let Some(target) = commit.target
