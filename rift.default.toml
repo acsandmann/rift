@@ -214,6 +214,10 @@ vert_placement = "left"
 thickness = 20.0
 # spacing between the stack line and window edges (in px)
 spacing = 1.0
+# RGBA components range from 0.0 to 1.0. Each color can be customized
+# selected_color = { r = 0.0, g = 0.5, b = 1.0, a = 1.0 }
+# unselected_color = { r = 0.8, g = 0.8, b = 0.8, a = 1.0 }
+# border_color = { r = 0.6, g = 0.6, b = 0.6, a = 1.0 }
 
 # Trackpad gestures
 [settings.gestures]

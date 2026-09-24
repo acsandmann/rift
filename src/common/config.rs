@@ -718,7 +718,46 @@ pub struct StackLineSettings {
     /// This creates spacing between the window and the stack line
     #[serde(default = "default_stack_line_spacing")]
     pub spacing: f64,
+    /// Color of the selected stack segment, with normalized RGBA components.
+    #[serde(default = "default_stack_line_selected_color")]
+    pub selected_color: Color,
+    /// Color of unselected stack segments, with normalized RGBA components.
+    #[serde(default = "default_stack_line_unselected_color")]
+    pub unselected_color: Color,
+    /// Color of segment borders and separators, with normalized RGBA components.
+    #[serde(default = "default_stack_line_border_color")]
+    pub border_color: Color,
 }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct Color {
+    #[serde(default = "default_color_component")]
+    pub r: f64,
+    #[serde(default = "default_color_component")]
+    pub g: f64,
+    #[serde(default = "default_color_component")]
+    pub b: f64,
+    #[serde(default = "default_color_alpha")]
+    pub a: f64,
+}
+
+fn default_color_component() -> f64 { 0.0 }
+fn default_color_alpha() -> f64 { 1.0 }
+
+impl Color {
+    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self { Self { r, g, b, a } }
+}
+
+impl Default for Color {
+    fn default() -> Self { Self::new(0.0, 0.0, 0.0, 1.0) }
+}
+
+fn default_stack_line_selected_color() -> Color { Color::new(0.0, 0.5, 1.0, 1.0) }
+
+fn default_stack_line_unselected_color() -> Color { Color::new(0.8, 0.8, 0.8, 1.0) }
+
+fn default_stack_line_border_color() -> Color { Color::new(0.6, 0.6, 0.6, 1.0) }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
