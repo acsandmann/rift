@@ -6,7 +6,7 @@ use regex::RegexBuilder;
 pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
 use serde::{Deserialize, Serialize};
 
-use super::collections::HashMap;
+use super::collections::{HashMap, HashSet};
 use crate::actor::wm_controller::WmCommand;
 use crate::sys::hotkey::{Hotkey, HotkeySpec};
 
@@ -333,6 +333,8 @@ struct ConfigFile {
     settings: Settings,
     keys: HashMap<String, WmCommand>,
     #[serde(default)]
+    binding_modes: HashMap<String, HashMap<String, WmCommand>>,
+    #[serde(default)]
     virtual_workspaces: VirtualWorkspaceSettings,
     /// Modifier combinations that can be reused in key bindings
     /// e.g., "comb1" = "Alt + Shift" allows using "comb1 + C" in keys
@@ -380,9 +382,11 @@ pub struct Config {
     pub settings: Settings,
     pub keys: Vec<(Hotkey, WmCommand)>,
     #[serde(default)]
-    pub key_specs: Vec<(String, WmCommand)>,
+    pub binding_mode_specs: BindingModeSpecs,
     pub virtual_workspaces: VirtualWorkspaceSettings,
 }
+
+pub type BindingModeSpecs = Vec<(String, Vec<(String, WmCommand)>)>;
 
 impl<'de> Deserialize<'de> for Config {
     fn deserialize<D>(deserializer: D) -> Result<Config, D::Error>
@@ -393,24 +397,31 @@ impl<'de> Deserialize<'de> for Config {
             keys: Vec<(Hotkey, WmCommand)>,
             #[serde(default)]
             key_specs: Vec<(String, WmCommand)>,
+            #[serde(default)]
+            binding_mode_specs: BindingModeSpecs,
             virtual_workspaces: VirtualWorkspaceSettings,
         }
 
         let config = ConfigSerde::deserialize(deserializer)?;
-        let key_specs = if config.key_specs.is_empty() && !config.keys.is_empty() {
-            config
-                .keys
-                .iter()
-                .map(|(hotkey, command)| (hotkey.to_string(), command.clone()))
-                .collect()
+        let binding_mode_specs = if config.binding_mode_specs.is_empty() {
+            let default_specs = if config.key_specs.is_empty() {
+                config
+                    .keys
+                    .iter()
+                    .map(|(hotkey, command)| (hotkey.to_string(), command.clone()))
+                    .collect()
+            } else {
+                config.key_specs
+            };
+            vec![("default".to_string(), default_specs)]
         } else {
-            config.key_specs
+            config.binding_mode_specs
         };
 
         Ok(Config {
             settings: config.settings,
             keys: config.keys,
-            key_specs,
+            binding_mode_specs,
             virtual_workspaces: config.virtual_workspaces,
         })
     }
@@ -1482,9 +1493,16 @@ impl Config {
         let config_file = ConfigFile {
             settings: self.settings.clone(),
             keys: self
-                .key_specs
+                .binding_mode_specs
+                .first()
+                .filter(|(name, _)| name == "default")
+                .map(|(_, specs)| specs.iter().cloned().collect())
+                .unwrap_or_default(),
+            binding_modes: self
+                .binding_mode_specs
                 .iter()
-                .map(|(hotkey, command)| (hotkey.clone(), command.clone()))
+                .skip(1)
+                .map(|(name, specs)| (name.clone(), specs.iter().cloned().collect()))
                 .collect(),
             virtual_workspaces: self.virtual_workspaces.clone(),
             modifier_combinations: HashMap::default(),
@@ -1510,6 +1528,27 @@ impl Config {
 
         // Validate virtual workspace settings
         issues.extend(self.virtual_workspaces.validate());
+
+        let mode_names: HashSet<_> =
+            self.binding_mode_specs.iter().map(|(name, _)| name.as_str()).collect();
+        if mode_names.len() != self.binding_mode_specs.len() {
+            issues.push("Binding mode names must be unique".to_string());
+        }
+        if self.binding_mode_specs.first().map(|(name, _)| name.as_str()) != Some("default") {
+            issues.push("The default binding mode must be the first mode".to_string());
+        }
+        for (mode, bindings) in &self.binding_mode_specs {
+            for (_, command) in bindings {
+                if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) =
+                    command
+                    && !mode_names.contains(target.as_str())
+                {
+                    issues.push(format!(
+                        "Binding mode `{mode}` references nonexistent mode `{target}`"
+                    ));
+                }
+            }
+        }
 
         issues
     }
@@ -1726,27 +1765,51 @@ impl Config {
         None
     }
 
-    fn parse(buf: &str) -> anyhow::Result<Config> {
+    pub(crate) fn parse(buf: &str) -> anyhow::Result<Config> {
         // Attempt to deserialize. If it fails, and the error indicates an unknown enum
         // variant, attempt to provide a helpful suggestion.
         match parse_config_file(buf) {
             Ok(c) => {
+                if c.binding_modes.contains_key("default") {
+                    bail!("`default` is reserved and cannot be defined in [binding_modes]");
+                }
+
+                let mut binding_sets: Vec<_> = c.binding_modes.into_iter().collect();
+                binding_sets.sort_by(|a, b| a.0.cmp(&b.0));
+                binding_sets.insert(0, ("default".to_string(), c.keys));
+
+                let mut binding_mode_specs = Vec::with_capacity(binding_sets.len());
                 let mut keys = Vec::new();
-                let mut key_specs = Vec::new();
-                for (key, cmd) in c.keys {
-                    let expanded_key =
-                        Self::expand_modifier_combinations(&key, &c.modifier_combinations);
-                    let normalized_key = Self::normalize_hotkey_string(&expanded_key);
-                    let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
-                        bail!("Could not parse hotkey: {key}");
-                    };
-                    keys.push((hotkey, cmd.clone()));
-                    key_specs.push((normalized_key, cmd));
+                let mode_names: HashSet<String> =
+                    binding_sets.iter().map(|(name, _)| name.clone()).collect();
+                for (mode, bindings) in binding_sets {
+                    let mut specs = Vec::with_capacity(bindings.len());
+                    for (key, cmd) in bindings {
+                        let expanded_key =
+                            Self::expand_modifier_combinations(&key, &c.modifier_combinations);
+                        let normalized_key = Self::normalize_hotkey_string(&expanded_key);
+                        let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
+                            bail!("Could not parse hotkey `{key}` in binding mode `{mode}`");
+                        };
+                        if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(
+                            target,
+                        )) = &cmd
+                            && target != "default"
+                            && !mode_names.contains(target)
+                        {
+                            bail!("Binding mode `{mode}` references nonexistent mode `{target}`");
+                        }
+                        if mode == "default" {
+                            keys.push((hotkey, cmd.clone()));
+                        }
+                        specs.push((normalized_key, cmd));
+                    }
+                    binding_mode_specs.push((mode, specs));
                 }
                 Ok(Config {
                     settings: c.settings,
                     keys,
-                    key_specs,
+                    binding_mode_specs,
                     virtual_workspaces: c.virtual_workspaces,
                 })
             }
@@ -2083,26 +2146,101 @@ mod tests {
     }
 
     #[test]
-    fn serde_round_trip_preserves_key_specs() {
+    fn serde_round_trip_preserves_binding_mode_specs() {
         let cfg = Config::default();
-        assert!(!cfg.key_specs.is_empty());
+        assert!(!cfg.binding_mode_specs[0].1.is_empty());
 
         let json = serde_json::to_string(&cfg).unwrap();
         let round_tripped: Config = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(round_tripped.key_specs, cfg.key_specs);
+        assert_eq!(round_tripped.binding_mode_specs, cfg.binding_mode_specs);
     }
 
     #[test]
-    fn serde_without_key_specs_reconstructs_from_keys() {
+    fn serde_without_binding_mode_specs_reconstructs_from_keys() {
         let cfg = Config::default();
         let mut json = serde_json::to_value(&cfg).unwrap();
-        json.as_object_mut().unwrap().remove("key_specs");
+        json.as_object_mut().unwrap().remove("binding_mode_specs");
 
         let round_tripped: Config = serde_json::from_value(json).unwrap();
 
-        assert_eq!(round_tripped.key_specs.len(), round_tripped.keys.len());
-        assert!(!round_tripped.key_specs.is_empty());
+        assert_eq!(
+            round_tripped.binding_mode_specs[0].1.len(),
+            round_tripped.keys.len()
+        );
+        assert!(!round_tripped.binding_mode_specs[0].1.is_empty());
+    }
+
+    #[test]
+    fn keys_only_config_still_has_only_the_default_binding_set() {
+        let config = Config::parse(
+            r#"
+                [settings]
+                [keys]
+                "A" = "reload_config"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.binding_mode_specs.len(), 1);
+        assert_eq!(config.binding_mode_specs[0].0, "default");
+        assert!(config.binding_mode_specs[0].1.iter().any(|(spec, _)| spec == "A"));
+    }
+
+    #[test]
+    fn custom_binding_modes_parse_and_expand_modifier_combinations() {
+        let config = Config::parse(
+            r#"
+                [settings]
+                [modifier_combinations]
+                nav = "Alt + Shift"
+                [keys]
+                "Alt + R" = { binding_mode = "resize" }
+                [binding_modes.resize]
+                "nav + N" = { binding_mode = "default" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.binding_mode_specs[0].0, "default");
+        assert_eq!(config.binding_mode_specs[1].0, "resize");
+        assert!(config.binding_mode_specs[1]
+            .1
+            .iter()
+            .any(|(spec, command)| spec == "Alt + Shift + N"
+                && matches!(command, WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) if target == "default")));
+    }
+
+    #[test]
+    fn binding_mode_config_rejects_bad_targets_reserved_default_and_bad_hotkeys() {
+        let missing = r#"
+            [settings]
+            [keys]
+            "Alt + R" = { binding_mode = "does-not-exist" }
+            [binding_modes.resize]
+            "Escape" = { binding_mode = "default" }
+        "#;
+        assert!(Config::parse(&missing).unwrap_err().to_string().contains("does-not-exist"));
+
+        let reserved = r#"
+            [settings]
+            [keys]
+            [binding_modes.default]
+        "#;
+        assert!(Config::parse(&reserved).unwrap_err().to_string().contains("reserved"));
+
+        let malformed = r#"
+            [settings]
+            [keys]
+            "NotARealHotkey" = { binding_mode = "default" }
+        "#;
+        assert!(Config::parse(&malformed).unwrap_err().to_string().contains("hotkey"));
+    }
+
+    #[test]
+    fn config_validation_rejects_duplicate_binding_mode_names() {
+        let mut json = serde_json::to_value(Config::default()).unwrap();
+        json["binding_mode_specs"] = serde_json::json!([["default", []], ["default", []]]);
+        let config: Config = serde_json::from_value(json).unwrap();
+        assert!(config.validate().iter().any(|issue| issue.contains("unique")));
     }
 
     #[test]

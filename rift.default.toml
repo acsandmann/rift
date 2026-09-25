@@ -428,6 +428,9 @@ comb1 = "Alt + Shift"
 # - focus_window = { window_id = 123, window_server_id = 456 }
 # - show_mission_control_all / show_mission_control_current / dismiss_mission_control (this is rift's own mission control, not macOS's)
 
+# To enter a resize mode, add a binding to [keys] before declaring the mode.
+# "Alt + R" = { binding_mode = "resize" }
+
 # the following commands *only* work when the master stack layout is active
 # - adjust_master_ratio = 0.05 / adjust_master_count = 1
 # - promote_to_master / swap_master_stack
@@ -521,3 +524,12 @@ comb1 = "Alt + Shift"
 
 "Alt + Ctrl + S" = "serialize"
 "Alt + Ctrl + Q" = "save_and_exit"
+
+# Binding modes replace the active keymap until another mode is selected.
+# Keep all [keys] entries above the first [binding_modes.*] table: TOML table
+# headers set the scope for following entries, so later keys would belong to
+# the binding mode instead.
+# [binding_modes.resize]
+# "H" = { resize_window_shrink = "horizontal" }
+# "L" = { resize_window_grow = "horizontal" }
+# "Escape" = { binding_mode = "default" }

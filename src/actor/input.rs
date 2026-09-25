@@ -21,8 +21,8 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    Config, DragDropSettings, HapticPattern, LayoutMode, MouseAction, MouseModifier,
-    StackLineHoverMode,
+    BindingModeSpecs, Config, DragDropSettings, HapticPattern, LayoutMode, MouseAction,
+    MouseModifier, StackLineHoverMode,
 };
 use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::event::{self, Hotkey, KeyCode};
@@ -48,7 +48,8 @@ pub enum Request {
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     SetEventProcessing(bool),
     SetFocusFollowsMouseEnabled(bool),
-    SetHotkeys(Vec<(String, WmCommand)>),
+    EnableHotkeys,
+    SetBindingMode(String),
     KeyboardLayoutChanged,
     ConfigUpdated(Config),
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
@@ -71,8 +72,11 @@ pub struct Input {
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     tap_generation: Cell<u64>,
     disable_hotkey: RefCell<Option<Hotkey>>,
-    hotkey_specs: RefCell<Vec<(String, WmCommand)>>,
-    hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
+    binding_mode_specs: RefCell<BindingModeSpecs>,
+    hotkeys: RefCell<Vec<HashMap<Hotkey, Vec<WmCommand>>>>,
+    mode_indices: RefCell<HashMap<String, usize>>,
+    active_mode: Cell<usize>,
+    hotkeys_active: Cell<bool>,
     wm_sender: wm_controller::Sender,
     stack_line_tx: stack_line::Sender,
     mission_control_tx: super::mission_control::Sender,
@@ -165,7 +169,7 @@ impl Input {
         let disable_hotkey = self.disable_hotkey.borrow();
         let keyed_disable =
             disable_hotkey.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
-        let hotkeys_enabled = !self.hotkeys.borrow().is_empty();
+        let hotkeys_enabled = self.hotkeys.borrow().iter().any(|map| !map.is_empty());
         let mut mask = build_event_mask(
             hotkeys_enabled || keyed_disable || self.mission_control_active.get(),
             hotkeys_enabled || disable_hotkey.is_some(),
@@ -305,7 +309,7 @@ impl Input {
             .unwrap_or(false);
         (state.swipe, state.scroll) = Self::build_gesture_handlers(&config);
         let mouse_move_min_interval_ticks = mouse_move_sampling_profile(state.low_power_mode);
-        Input {
+        let input = Input {
             events_tx,
             requests_rx: Some(requests_rx),
             state: RefCell::new(state),
@@ -320,13 +324,18 @@ impl Input {
             tap: RefCell::new(None),
             tap_generation: Cell::new(0),
             disable_hotkey: RefCell::new(disable_hotkey),
-            hotkey_specs: RefCell::new(Vec::new()),
-            hotkeys: RefCell::new(HashMap::default()),
+            binding_mode_specs: RefCell::new(Vec::new()),
+            hotkeys: RefCell::new(Vec::new()),
+            mode_indices: RefCell::new(HashMap::default()),
+            active_mode: Cell::new(0),
+            hotkeys_active: Cell::new(false),
             wm_sender,
             stack_line_tx,
             mission_control_tx,
             stack_line_hit_rects,
-        }
+        };
+        input.install_binding_specs(config.binding_mode_specs);
+        input
     }
 
     pub async fn run(mut self) {
@@ -436,16 +445,23 @@ impl Input {
                 }
                 should_rebuild_mask = true;
             }
-            Request::SetHotkeys(bindings) => {
-                *self.hotkey_specs.borrow_mut() = bindings;
-                self.rebuild_hotkeys_for_current_layout();
-                should_rebuild_mask = true;
+            Request::EnableHotkeys => {
+                if !self.hotkeys_active.replace(true) {
+                    self.rebuild_binding_maps();
+                    should_rebuild_mask = true;
+                }
             }
+            Request::SetBindingMode(target) => self.transition_binding_mode(&target),
             Request::KeyboardLayoutChanged => {
-                self.rebuild_hotkeys_for_current_layout();
-                should_rebuild_mask = true;
+                if self.hotkeys_active.get() {
+                    self.rebuild_binding_maps();
+                    should_rebuild_mask = true;
+                }
             }
             Request::ConfigUpdated(new_config) => {
+                if *self.binding_mode_specs.borrow() != new_config.binding_mode_specs {
+                    self.install_binding_specs(new_config.binding_mode_specs.clone());
+                }
                 self.reset_gesture_state(&mut state);
                 let cancel_captured_drag = state.captured_button.is_some()
                     && (!new_config.settings.drag_drop.enabled
@@ -811,8 +827,9 @@ impl Input {
                     modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
                     key_code,
                 );
+                let active_mode = self.active_mode.get();
                 let bindings = self.hotkeys.borrow();
-                if let Some(commands) = bindings.get(&hotkey) {
+                if let Some(commands) = bindings.get(active_mode).and_then(|map| map.get(&hotkey)) {
                     // A held key generates repeated KeyDown events. Hotkeys
                     // are press-triggered, so dispatching those repeats can
                     // execute a command over and over. This is especially
@@ -827,6 +844,9 @@ impl Input {
                     }
                     for cmd in commands {
                         match cmd {
+                            WmCommand::Wm(wm_controller::WmCmd::BindingMode(target)) => {
+                                self.transition_binding_mode(target);
+                            }
                             WmCommand::ReactorCommand(command) => {
                                 self.events_tx.send(Event::Command(command.clone()))
                             }
@@ -841,37 +861,54 @@ impl Input {
         true
     }
 
-    fn rebuild_hotkeys_for_current_layout(&self) {
-        let specs = self.hotkey_specs.borrow();
-        let mut map: HashMap<Hotkey, Vec<WmCommand>> = HashMap::default();
+    fn install_binding_specs(&self, specs: BindingModeSpecs) {
+        let indices = specs
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (name.clone(), index))
+            .collect();
+        *self.binding_mode_specs.borrow_mut() = specs;
+        *self.mode_indices.borrow_mut() = indices;
+        self.active_mode.set(0);
+        if self.hotkeys_active.get() {
+            self.rebuild_binding_maps();
+        }
+    }
 
-        for (spec, command) in specs.iter() {
-            let Ok(hotkey) = Hotkey::from_str(spec) else {
-                warn!(%spec, "Skipping hotkey that no longer resolves for current keyboard layout");
-                continue;
-            };
+    fn transition_binding_mode(&self, target: &str) {
+        if let Some(&index) = self.mode_indices.borrow().get(target) {
+            self.active_mode.set(index);
+        }
+    }
 
-            if hotkey.modifiers.has_generic_modifiers() {
-                for expanded_mods in hotkey.modifiers.expand_to_specific() {
-                    let expanded_hotkey = Hotkey::new(expanded_mods, hotkey.key_code);
-                    let entry = map.entry(expanded_hotkey).or_default();
+    fn rebuild_binding_maps(&self) {
+        let specs = self.binding_mode_specs.borrow();
+        let mut maps = Vec::with_capacity(specs.len());
+        for (mode, bindings) in specs.iter() {
+            let mut map: HashMap<Hotkey, Vec<WmCommand>> = HashMap::default();
+            for (spec, command) in bindings {
+                let Ok(hotkey) = Hotkey::from_str(spec) else {
+                    warn!(%spec, %mode, "Skipping hotkey that no longer resolves for current keyboard layout");
+                    continue;
+                };
+                let mut insert = |hotkey| {
+                    let entry = map.entry(hotkey).or_default();
                     if !entry.contains(command) {
                         entry.push(command.clone());
                     }
-                }
-            } else {
-                let entry = map.entry(hotkey).or_default();
-                if !entry.contains(command) {
-                    entry.push(command.clone());
+                };
+                if hotkey.modifiers.has_generic_modifiers() {
+                    for modifiers in hotkey.modifiers.expand_to_specific() {
+                        insert(Hotkey::new(modifiers, hotkey.key_code));
+                    }
+                } else {
+                    insert(hotkey);
                 }
             }
+            maps.push(map);
         }
-
-        trace!(
-            "Updated hotkey bindings for current keyboard layout: {}",
-            map.len()
-        );
-        *self.hotkeys.borrow_mut() = map;
+        trace!("Updated hotkey maps for current keyboard layout: {}", maps.len());
+        *self.hotkeys.borrow_mut() = maps;
     }
 }
 
@@ -1212,6 +1249,7 @@ mod tests {
     #[test]
     fn mask_tracks_mouse_feature_enablement() {
         let (input, _, _) = input();
+        assert!(input.hotkeys.borrow().is_empty());
         assert_eq!(input.desired_event_mask(), 0);
         input.state.borrow_mut().mouse_features_enabled = false;
         input.state.borrow_mut().event_processing_enabled = true;
@@ -1252,11 +1290,29 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_maps_are_deferred_until_app_events_are_registered() {
+        let (input, _, _) = input();
+        assert!(!input.hotkeys_active.get());
+        assert!(input.hotkeys.borrow().is_empty());
+
+        input.hotkeys_active.set(true);
+        input.rebuild_binding_maps();
+
+        assert!(!input.hotkeys.borrow().is_empty());
+        let key_mask = (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::FlagsChanged.0);
+        assert_eq!(input.desired_event_mask() & key_mask, key_mask);
+    }
+
+    #[test]
     fn hotkeys_suppress_repeats_but_do_not_intercept_rift_synthetic_keys() {
         let (input, mut wm_rx, _) = input();
+        input.hotkeys_active.set(true);
+        input.rebuild_binding_maps();
         input
             .hotkeys
             .borrow_mut()
+            .get_mut(0)
+            .unwrap()
             .insert(Hotkey::new(Modifiers::empty(), KeyCode::KeyA), vec![
                 WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
             ]);
@@ -1274,6 +1330,124 @@ mod tests {
         );
         assert!(input.on_event(CGEventType::KeyDown, &event));
         assert!(wm_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn active_mode_replacement_unbinds_default_keys_and_mode_switches_are_immediate() {
+        let (input, mut wm_rx, _) = input();
+        let config = Config::parse(
+            r#"
+                [settings]
+                [keys]
+                "A" = "reload_config"
+                "B" = { binding_mode = "resize" }
+                [binding_modes.resize]
+                "Escape" = { binding_mode = "default" }
+            "#,
+        )
+        .unwrap();
+        input.install_binding_specs(config.binding_mode_specs);
+        input.hotkeys_active.set(true);
+        input.rebuild_binding_maps();
+
+        let b = CGEvent::new_keyboard_event(None, 11, true).unwrap();
+        assert!(!input.on_event(CGEventType::KeyDown, &b));
+        assert_eq!(input.active_mode.get(), 1);
+
+        let a = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+        assert!(input.on_event(CGEventType::KeyDown, &a));
+        assert!(wm_rx.try_recv().is_err());
+
+        CGEvent::set_integer_value_field(Some(&b), CGEventField::KeyboardEventAutorepeat, 1);
+        assert!(input.on_event(CGEventType::KeyDown, &b));
+        assert_eq!(input.active_mode.get(), 1);
+
+        let escape = CGEvent::new_keyboard_event(None, 53, true).unwrap();
+        assert!(!input.on_event(CGEventType::KeyDown, &escape));
+        assert_eq!(input.active_mode.get(), 0);
+
+        assert!(!input.on_event(CGEventType::KeyDown, &a));
+        assert!(matches!(
+            wm_rx.try_recv().unwrap().1,
+            WmEvent::Command(WmCommand::Wm(wm_controller::WmCmd::ReloadConfig))
+        ));
+        assert!(wm_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn normal_command_after_binding_mode_transition_still_runs() {
+        let (input, mut wm_rx, _) = input();
+        input.install_binding_specs(vec![
+            ("default".into(), vec![(
+                "A".into(),
+                WmCommand::Wm(wm_controller::WmCmd::BindingMode("other".into())),
+            )]),
+            ("other".into(), vec![]),
+        ]);
+        input.hotkeys_active.set(true);
+        input.rebuild_binding_maps();
+        input.hotkeys.borrow_mut()[0]
+            .get_mut(&Hotkey::new(Modifiers::empty(), KeyCode::KeyA))
+            .unwrap()
+            .push(WmCommand::Wm(wm_controller::WmCmd::ReloadConfig));
+
+        let a = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+        assert!(!input.on_event(CGEventType::KeyDown, &a));
+        assert_eq!(input.active_mode.get(), 1);
+        assert!(matches!(
+            wm_rx.try_recv().unwrap().1,
+            WmEvent::Command(WmCommand::Wm(wm_controller::WmCmd::ReloadConfig))
+        ));
+    }
+
+    #[test]
+    fn layout_rebuild_preserves_active_mode_and_rebuilds_each_map() {
+        let (input, _, _) = input();
+        input.install_binding_specs(vec![
+            ("default".into(), vec![(
+                "Ctrl + A".into(),
+                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+            )]),
+            ("other".into(), vec![(
+                "Ctrl + B".into(),
+                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+            )]),
+        ]);
+        input.hotkeys_active.set(true);
+        input.active_mode.set(1);
+        input.rebuild_binding_maps();
+        assert_eq!(input.active_mode.get(), 1);
+        let maps = input.hotkeys.borrow();
+        assert!(!maps[0].is_empty());
+        assert!(!maps[1].is_empty());
+    }
+
+    #[test]
+    fn generic_modifiers_expand_inside_each_mode_and_replacement_resets_to_default() {
+        let (input, _, _) = input();
+        let specs = vec![
+            ("default".into(), vec![(
+                "Ctrl + A".into(),
+                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+            )]),
+            ("other".into(), vec![(
+                "Alt + B".into(),
+                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+            )]),
+        ];
+        input.install_binding_specs(specs.clone());
+        input.hotkeys_active.set(true);
+        input.rebuild_binding_maps();
+        input.active_mode.set(1);
+        input.install_binding_specs(specs);
+        assert_eq!(input.active_mode.get(), 0);
+        let maps = input.hotkeys.borrow();
+        assert!(maps[0].keys().any(|key| {
+            key.key_code == KeyCode::KeyA && !key.modifiers.has_generic_modifiers()
+        }));
+        assert!(maps[1].keys().any(|key| {
+            key.key_code == KeyCode::KeyB && !key.modifiers.has_generic_modifiers()
+        }));
     }
 
     #[test]
