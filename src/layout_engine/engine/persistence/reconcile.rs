@@ -201,6 +201,9 @@ impl LayoutEngine {
         live: WindowId,
         fingerprint: &WindowFingerprint,
     ) -> ReconcileOutcome {
+        if window_store.external_manager(live).is_some() {
+            return ReconcileOutcome::default();
+        }
         if self.persistence.pending_windows.is_empty() {
             return ReconcileOutcome::default();
         }

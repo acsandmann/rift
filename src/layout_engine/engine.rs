@@ -1272,6 +1272,9 @@ impl LayoutEngine {
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
+        if window_store.window(wid).is_some() && !window_store.is_admitted(wid) {
+            return false;
+        }
         let active_space_before = self.space_with_window(wid);
 
         let assigned_workspace =
@@ -1322,6 +1325,20 @@ impl LayoutEngine {
         }
 
         self.space_with_window(wid) != active_space_before
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_layout_ghost(
+        &mut self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        wid: WindowId,
+    ) {
+        let layout = self
+            .workspace_layouts
+            .active(space, workspace)
+            .expect("active layout for test ghost");
+        self.workspace_tree_mut(workspace).add_window_after_selection(layout, wid);
     }
 
     fn preserve_scrolling_window_width(&mut self, window_store: &WindowStore, wid: WindowId) {

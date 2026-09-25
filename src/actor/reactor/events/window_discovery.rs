@@ -19,7 +19,7 @@ fn sync_existing_window_state(
     active_space: Option<SpaceId>,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
-    let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
+    let was_manageable = state.windows.is_admitted(wid);
 
     if let Some(existing) = state.windows.window_mut(wid) {
         existing.info.title = info.title.clone();
@@ -451,10 +451,7 @@ pub(crate) fn emit_layout_events(
         .windows
         .iter_visible_window_server_ids()
         .filter_map(|wsid| state.windows.tracked_window_id(wsid))
-        .any(|wid| {
-            wid.pid == pid
-                && state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
-        });
+        .any(|wid| wid.pid == pid && state.windows.can_reconcile_admission(wid));
 
     // Collect windows from visible window server IDs
     for wid in state
@@ -462,7 +459,7 @@ pub(crate) fn emit_layout_events(
         .iter_visible_window_server_ids()
         .filter_map(|wsid| state.windows.tracked_window_id(wsid))
         .filter(|wid| wid.pid == pid)
-        .filter(|wid| state.windows.window(*wid).is_some_and(WindowState::can_reconcile_admission))
+        .filter(|wid| state.windows.can_reconcile_admission(*wid))
     {
         let Some(space) = discovery_spaces.get(&wid).copied() else {
             continue;
@@ -477,9 +474,7 @@ pub(crate) fn emit_layout_events(
     // If we have no visible WSIDs (e.g., SpaceChanged provided empty ws_info),
     // fall back to the app-reported known_visible list for this pid.
     for wid in known_visible.iter().copied().filter(|wid| wid.pid == pid) {
-        if included.contains(&wid)
-            || !state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
-        {
+        if included.contains(&wid) || !state.windows.can_reconcile_admission(wid) {
             continue;
         }
         if has_visible_window_server_windows
@@ -516,7 +511,7 @@ pub(crate) fn emit_layout_events(
             let Some(effects) = effects else {
                 continue;
             };
-            let Some(window) = state.windows.window(wid).filter(|window| window.is_admitted())
+            let Some(window) = state.windows.window(wid).filter(|_| state.windows.is_admitted(wid))
             else {
                 continue;
             };

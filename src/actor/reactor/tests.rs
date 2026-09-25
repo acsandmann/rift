@@ -7,7 +7,7 @@ use crate::actor::app::{AppThreadHandle, Request, pid_t};
 use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
-use crate::model::window_store::NativeFullscreenTransition;
+use crate::model::window_store::{ExternalManagerId, NativeFullscreenTransition};
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
@@ -1033,6 +1033,319 @@ fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect
     (reactor, wid, space1, screen, floating_frame)
 }
 
+#[test]
+fn external_claim_detaches_tiled_window_and_release_readmits_it() {
+    let (mut reactor, wid, _, space, _, _) = reactor_with_window_on_space1();
+    let manager = ExternalManagerId(101);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    assert!(reactor.test_active_workspace_windows(space).contains(&wid));
+
+    assert_eq!(
+        reactor.claim_window(wid, manager, rift_protocol::WindowClaimFlags::empty()),
+        Ok(true)
+    );
+    assert_eq!(
+        reactor.claim_window(wid, manager, rift_protocol::WindowClaimFlags::empty()),
+        Ok(false)
+    );
+    assert!(reactor.state.windows.contains_window(wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+    assert!(!reactor.state.windows.is_admitted(wid));
+    assert!(reactor.query_window_info(wid).unwrap().externally_managed);
+    assert!(
+        reactor
+            .query_windows(Some(space))
+            .iter()
+            .any(|window| { window.id == wid && window.externally_managed })
+    );
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+
+    assert_eq!(
+        reactor.claim_window(
+            wid,
+            ExternalManagerId(102),
+            rift_protocol::WindowClaimFlags::empty()
+        ),
+        Err("Window owned by another external manager")
+    );
+    assert_eq!(
+        reactor.release_window(wid, ExternalManagerId(102)),
+        Err("Window owned by another external manager")
+    );
+    assert_eq!(reactor.release_window(wid, manager), Ok(true));
+    assert!(reactor.test_active_workspace_windows(space).contains(&wid));
+}
+
+#[test]
+fn claim_flags_update_without_layout_churn_or_owner_change() {
+    let (mut reactor, wid, _, space, _, frame) = reactor_with_window_on_space1();
+    let other = WindowId::new(wid.pid, 2);
+    reactor.add_test_window(other, WindowServerId::new(102), Some(space), frame);
+    let manager = ExternalManagerId(101);
+    let flag = rift_protocol::WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE;
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, other));
+    assert_eq!(reactor.claim_window(wid, manager, flag), Ok(true));
+    let other_frame = reactor.state.windows.window(other).unwrap().frame_monotonic;
+    let generation = reactor.state.windows.record(wid).unwrap().pending_operation();
+    assert_eq!(reactor.claim_window(wid, manager, flag), Ok(false));
+    assert_eq!(
+        reactor.claim_window(wid, manager, rift_protocol::WindowClaimFlags::empty()),
+        Ok(true)
+    );
+    assert_eq!(reactor.state.windows.external_manager(wid), Some(manager));
+    assert_eq!(
+        reactor.state.windows.external_claim(wid).unwrap().flags,
+        rift_protocol::WindowClaimFlags::empty()
+    );
+    assert_eq!(
+        reactor.state.windows.record(wid).unwrap().pending_operation(),
+        generation
+    );
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+    assert_eq!(
+        reactor.state.windows.window(other).unwrap().frame_monotonic,
+        other_frame
+    );
+    assert_eq!(
+        reactor.claim_window(wid, ExternalManagerId(102), flag),
+        Err("Window owned by another external manager")
+    );
+    assert_eq!(
+        reactor.claim_window(
+            wid,
+            manager,
+            rift_protocol::WindowClaimFlags::from_bits_retain(2)
+        ),
+        Err("Unsupported window claim flags")
+    );
+    assert_eq!(reactor.state.windows.external_manager(wid), Some(manager));
+}
+
+#[test]
+fn focused_claim_controls_ffm_and_release_recomputes_policy() {
+    let (mut reactor, wid, _, space, _, _) = reactor_with_window_on_space1();
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::ApplicationGloballyActivated(wid.pid));
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::WindowServerFocusChanged(wid, space));
+    assert_eq!(reactor.main_window(), Some(wid));
+    let manager = ExternalManagerId(101);
+    let flag = rift_protocol::WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE;
+    reactor.claim_window(wid, manager, flag).unwrap();
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
+    ));
+    reactor
+        .claim_window(wid, manager, rift_protocol::WindowClaimFlags::empty())
+        .unwrap();
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
+    ));
+    reactor.claim_window(wid, manager, flag).unwrap();
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
+    ));
+    reactor.release_manager(manager);
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
+    ));
+
+    reactor.claim_window(wid, manager, flag).unwrap();
+    let _ = input_rx.try_recv().unwrap();
+    reactor.config.settings.focus_follows_mouse = false;
+    reactor.release_window(wid, manager).unwrap();
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
+    ));
+}
+
+#[test]
+fn menu_and_mission_control_still_suppress_ffm_after_claim_release() {
+    let (mut reactor, wid, _, space, _, _) = reactor_with_window_on_space1();
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::ApplicationGloballyActivated(wid.pid));
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::WindowServerFocusChanged(wid, space));
+    let manager = ExternalManagerId(101);
+    let flag = rift_protocol::WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE;
+    reactor.claim_window(wid, manager, flag).unwrap();
+    let _ = input_rx.try_recv().unwrap();
+    reactor.menu_manager.menu_state = MenuState::Open(wid.pid);
+    reactor.release_window(wid, manager).unwrap();
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
+    ));
+    reactor.menu_manager.menu_state = MenuState::Closed;
+    reactor.claim_window(wid, manager, flag).unwrap();
+    let _ = input_rx.try_recv().unwrap();
+    reactor.set_mission_control_active(true);
+    let _ = input_rx.try_recv().unwrap();
+    reactor.release_window(wid, manager).unwrap();
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
+    ));
+}
+
+#[test]
+fn focusing_another_window_restores_ffm_when_claim_is_flagged() {
+    let (mut reactor, wid, _, space, _, frame) = reactor_with_window_on_space1();
+    let other = WindowId::new(wid.pid, 2);
+    reactor.add_test_window(other, WindowServerId::new(102), Some(space), frame);
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::ApplicationGloballyActivated(wid.pid));
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::WindowServerFocusChanged(wid, space));
+    reactor
+        .claim_window(
+            wid,
+            ExternalManagerId(101),
+            rift_protocol::WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE,
+        )
+        .unwrap();
+    assert!(matches!(
+        input_rx.try_recv().unwrap().1,
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
+    ));
+    reactor.handle_event(Event::WindowServerFocusChanged(other, space));
+    assert_eq!(reactor.main_window(), Some(other));
+    let requests: Vec<_> =
+        std::iter::from_fn(|| input_rx.try_recv().ok().map(|(_, request)| request)).collect();
+    assert!(
+        requests.iter().any(|request| matches!(
+            request,
+            crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
+        )),
+        "{requests:?}"
+    );
+}
+
+#[test]
+fn claiming_and_releasing_reflows_remaining_tiles() {
+    let (mut reactor, first, _, space, _, frame) = reactor_with_window_on_space1();
+    let second = WindowId::new(1, 2);
+    reactor.add_test_window(second, WindowServerId::new(102), Some(space), frame);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, first));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, second));
+    reactor.update_layout_or_warn(false, false, Some(space));
+    let before = reactor.state.windows.window(second).unwrap().frame_monotonic;
+
+    let manager = ExternalManagerId(101);
+    reactor
+        .claim_window(first, manager, rift_protocol::WindowClaimFlags::empty())
+        .unwrap();
+    let after_claim = reactor.state.windows.window(second).unwrap().frame_monotonic;
+    assert!(after_claim.size.width > before.size.width);
+
+    reactor.release_window(first, manager).unwrap();
+    let after_release = reactor.state.windows.window(second).unwrap().frame_monotonic;
+    assert!(after_release.size.width < after_claim.size.width);
+    assert!(
+        reactor.state.windows.window(first).unwrap().frame_monotonic.size.width
+            < after_claim.size.width
+    );
+}
+
+#[test]
+fn external_claim_clears_floating_layout_state() {
+    let (mut reactor, wid, space, _, _) = reactor_with_floating_window();
+    reactor
+        .claim_window(
+            wid,
+            ExternalManagerId(101),
+            rift_protocol::WindowClaimFlags::empty(),
+        )
+        .unwrap();
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+    assert!(reactor.state.windows.contains_window(wid));
+}
+
+#[test]
+fn manager_disconnect_releases_all_surviving_windows_without_overriding_policy() {
+    let (mut reactor, first, _, space, _, frame) = reactor_with_window_on_space1();
+    let second = WindowId::new(1, 2);
+    reactor.add_test_window(second, WindowServerId::new(102), Some(space), frame);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, first));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, second));
+    let manager = ExternalManagerId(101);
+    reactor
+        .claim_window(first, manager, rift_protocol::WindowClaimFlags::empty())
+        .unwrap();
+    reactor
+        .claim_window(second, manager, rift_protocol::WindowClaimFlags::empty())
+        .unwrap();
+    reactor.state.windows.window_mut(second).unwrap().manage_override = Some(false);
+    reactor.release_manager(manager);
+    assert!(reactor.test_active_workspace_windows(space).contains(&first));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&second));
+    assert_eq!(reactor.state.windows.external_manager(first), None);
+    assert_eq!(reactor.state.windows.external_manager(second), None);
+
+    reactor
+        .claim_window(first, manager, rift_protocol::WindowClaimFlags::empty())
+        .unwrap();
+    reactor.handle_event(Event::WindowDestroyed(first));
+    reactor.release_manager(manager);
+    assert!(!reactor.state.windows.contains_window(first));
+}
+
+#[test]
+fn external_owner_survives_window_identity_transfer() {
+    let (mut reactor, old, _, space, _, frame) = reactor_with_window_on_space1();
+    let new = WindowId::new(1, 2);
+    reactor.add_test_window(new, WindowServerId::new(102), Some(space), frame);
+    let manager = ExternalManagerId(101);
+    reactor
+        .claim_window(
+            old,
+            manager,
+            rift_protocol::WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE,
+        )
+        .unwrap();
+    reactor.state.windows.transfer_persistent_window_metadata(old, new);
+    assert_eq!(reactor.state.windows.external_manager(old), None);
+    assert_eq!(reactor.state.windows.external_manager(new), Some(manager));
+    assert_eq!(
+        reactor.state.windows.external_claim(new).unwrap().flags,
+        rift_protocol::WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE
+    );
+}
+
+#[test]
+fn releasing_minimized_window_waits_for_normal_readmission() {
+    let (mut reactor, wid, _, space, _, _) = reactor_with_window_on_space1();
+    let manager = ExternalManagerId(101);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor
+        .claim_window(wid, manager, rift_protocol::WindowClaimFlags::empty())
+        .unwrap();
+    reactor.state.windows.window_mut(wid).unwrap().info.is_minimized = true;
+    reactor.release_window(wid, manager).unwrap();
+    assert!(!reactor.state.windows.is_admitted(wid));
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+}
+
 fn window_server_appeared(
     reactor: &mut Reactor,
     wsid: WindowServerId,
@@ -2042,7 +2355,11 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     );
 
     assert!(reactor.assign_test_window_to_workspace(user_space, duplicate_wid, active_workspace));
-    reactor.send_layout_event(LayoutEvent::WindowAdded(user_space, duplicate_wid));
+    reactor.layout_manager.layout_engine.insert_test_layout_ghost(
+        user_space,
+        active_workspace,
+        duplicate_wid,
+    );
     assert!(has_window_in_layout(
         &mut reactor,
         user_space,

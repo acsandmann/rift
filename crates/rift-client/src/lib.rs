@@ -30,6 +30,9 @@ type MachMessageOption = u32;
 const KERN_SUCCESS: KernReturn = 0;
 const MACH_SEND_MSG: MachMessageOption = 0x0000_0001;
 const MACH_RCV_MSG: MachMessageOption = 0x0000_0002;
+const MACH_RCV_TIMEOUT: MachMessageOption = 0x0000_0100;
+const MACH_RCV_TIMED_OUT: KernReturn = 0x1000_4003;
+const REQUEST_TIMEOUT_MS: u32 = 10_000;
 const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
 const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
@@ -42,6 +45,8 @@ const TASK_BOOTSTRAP_PORT: c_int = 4;
 pub enum ClientError {
     #[error("Rift's Mach service is not registered")]
     ServiceUnavailable,
+    #[error("Rift did not respond to the request within 10 seconds")]
+    RequestTimedOut,
     #[error("invalid Mach service name")]
     InvalidServiceName,
     #[error("Mach operation {operation} failed with code {code}")]
@@ -76,6 +81,14 @@ pub enum ClientError {
 pub struct RiftMachClient;
 
 impl RiftMachClient {
+    /// Opens a lifetime-bound handle for external window management.
+    pub fn window_management_session(&self) -> Result<WindowManagementSession, ClientError> {
+        Ok(WindowManagementSession {
+            reply_port: ReplyPort::allocate(1)?,
+            timed_out: false,
+        })
+    }
+
     /// Creates a client handle.
     ///
     /// Service discovery happens when a request is sent, allowing callers to
@@ -245,6 +258,53 @@ impl RiftMachClient {
     }
 }
 
+/// Owns one persistent Mach receive right used as the server's management identity.
+/// Dropping this handle releases all its claims when Rift observes port death.
+#[derive(Debug)]
+pub struct WindowManagementSession {
+    reply_port: ReplyPort,
+    timed_out: bool,
+}
+
+impl WindowManagementSession {
+    pub fn claim_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
+        self.claim_window_with_flags(window_id, WindowClaimFlags::default())
+    }
+
+    pub fn claim_window_with_flags(
+        &mut self,
+        window_id: WindowId,
+        flags: WindowClaimFlags,
+    ) -> Result<(), ClientError> {
+        self.request(RiftRequest::ClaimWindow { window_id, flags })
+    }
+
+    pub fn release_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
+        self.request(RiftRequest::ReleaseWindow { window_id })
+    }
+
+    fn request(&mut self, request: RiftRequest) -> Result<(), ClientError> {
+        // A late response on this persistent port could otherwise be mistaken
+        // for the response to the next management request.
+        if self.timed_out {
+            return Err(ClientError::RequestTimedOut);
+        }
+        let payload = serde_json::to_vec(&request).map_err(ClientError::Encode)?;
+        let response = match unsafe { send_request(&payload, Some(self.reply_port.name)) } {
+            Err(ClientError::RequestTimedOut) => {
+                self.timed_out = true;
+                return Err(ClientError::RequestTimedOut);
+            }
+            result => result?,
+        };
+        match parse_json_payload::<RiftResponse>(&response, "response")? {
+            RiftResponse::Success { .. } => Ok(()),
+            RiftResponse::Error { error } => Err(ClientError::Server(error)),
+            _ => Err(ClientError::UnknownResponse),
+        }
+    }
+}
+
 /// A live event subscription. Dropping it releases its Mach receive right.
 #[derive(Debug)]
 pub struct RiftMachSubscription {
@@ -264,7 +324,7 @@ impl RiftMachSubscription {
     /// Blocks until the next event arrives and decodes it into the requested
     /// type.
     pub fn recv_event_as<T: DeserializeOwned>(&self) -> Result<T, ClientError> {
-        let payload = unsafe { receive_message(self.reply_port.name)? };
+        let payload = unsafe { receive_message(self.reply_port.name, None)? };
         parse_json_payload(&payload, "event")
     }
 }
@@ -528,10 +588,13 @@ unsafe fn send_request(
         });
     }
 
-    unsafe { receive_message(reply_port) }
+    unsafe { receive_message(reply_port, Some(REQUEST_TIMEOUT_MS)) }
 }
 
-unsafe fn receive_message(reply_port: MachPort) -> Result<Vec<u8>, ClientError> {
+unsafe fn receive_message(
+    reply_port: MachPort,
+    timeout_ms: Option<u32>,
+) -> Result<Vec<u8>, ClientError> {
     // The kernel initializes the received header, payload, and trailer. Leave
     // the maximum-sized backing storage untouched until then.
     let mut buffer = MaybeUninit::<ReceiveBuffer>::uninit();
@@ -540,14 +603,22 @@ unsafe fn receive_message(reply_port: MachPort) -> Result<Vec<u8>, ClientError> 
     let result = unsafe {
         mach_msg(
             header_ptr,
-            MACH_RCV_MSG,
+            MACH_RCV_MSG
+                | if timeout_ms.is_some() {
+                    MACH_RCV_TIMEOUT
+                } else {
+                    0
+                },
             0,
             size_of::<ReceiveBuffer>() as u32,
             reply_port,
-            0,
+            timeout_ms.unwrap_or(0),
             0,
         )
     };
+    if result == MACH_RCV_TIMED_OUT {
+        return Err(ClientError::RequestTimedOut);
+    }
     if result != KERN_SUCCESS {
         return Err(ClientError::Mach {
             operation: "mach_msg(receive)",
@@ -572,6 +643,34 @@ const fn message_bits(remote: u32, local: u32) -> u32 { remote | (local << 8) }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn management_session_keeps_one_reply_port() {
+        let mut session = RiftMachClient.window_management_session().unwrap();
+        let port = session.reply_port.name;
+        // A failed request does not replace the lifetime token.
+        let _ = session.claim_window(WindowId { pid: 1, idx: 1 });
+        assert_eq!(session.reply_port.name, port);
+        let _ = session.release_window(WindowId { pid: 1, idx: 1 });
+        assert_eq!(session.reply_port.name, port);
+    }
+
+    #[test]
+    fn empty_request_port_times_out() {
+        let port = ReplyPort::allocate(1).unwrap();
+        let result = unsafe { receive_message(port.name, Some(1)) };
+        assert!(matches!(result, Err(ClientError::RequestTimedOut)));
+    }
+
+    #[test]
+    fn timed_out_management_session_cannot_consume_a_late_reply() {
+        let mut session = RiftMachClient.window_management_session().unwrap();
+        session.timed_out = true;
+        assert!(matches!(
+            session.claim_window(WindowId { pid: 1, idx: 1 }),
+            Err(ClientError::RequestTimedOut)
+        ));
+    }
 
     #[test]
     fn inline_send_initializes_header_payload_and_padding() {

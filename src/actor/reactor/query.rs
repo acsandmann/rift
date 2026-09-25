@@ -502,6 +502,19 @@ impl Reactor {
                 .layout_engine
                 .windows_in_active_workspace(&self.state.windows, space);
 
+            let mut active_windows = active_windows;
+            let external: Vec<_> = self
+                .state
+                .windows
+                .iter_windows()
+                .filter_map(|(wid, _)| {
+                    (self.state.windows.external_manager(wid).is_some()
+                        && self.best_space_for_window_id(wid) == Some(space)
+                        && !active_windows.contains(&wid))
+                    .then_some(wid)
+                })
+                .collect();
+            active_windows.extend(external);
             active_windows
                 .into_iter()
                 .filter_map(|wid| self.create_window_data(wid))

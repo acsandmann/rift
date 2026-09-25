@@ -28,6 +28,7 @@ pub struct RuntimeWorkspaceData {
 pub struct RuntimeWindowData {
     pub id: WindowId,
     pub is_floating: bool,
+    pub externally_managed: bool,
     pub is_focused: bool,
     pub layout_position: Option<protocol::WindowLayoutPosition>,
     pub app_name: Option<String>,
@@ -76,6 +77,7 @@ impl From<RuntimeWindowData> for protocol::WindowData {
             title: value.info.title,
             frame: protocol_rect(value.info.frame),
             is_floating: value.is_floating,
+            externally_managed: value.externally_managed,
             is_focused: value.is_focused,
             bundle_id: value.info.bundle_id,
             app_name: value.app_name,
@@ -126,6 +128,7 @@ impl Serialize for RuntimeWindowData {
             #[serde_as(as = "CGRectDef")]
             frame: &'a objc2_core_foundation::CGRect,
             is_floating: bool,
+            externally_managed: bool,
             is_focused: bool,
             bundle_id: Option<&'a String>,
             app_name: Option<&'a String>,
@@ -138,6 +141,7 @@ impl Serialize for RuntimeWindowData {
             title: &self.info.title,
             frame: &self.info.frame,
             is_floating: self.is_floating,
+            externally_managed: self.externally_managed,
             is_focused: self.is_focused,
             bundle_id: self.info.bundle_id.as_ref(),
             app_name: self.app_name.as_ref(),
@@ -160,6 +164,8 @@ impl<'de> Deserialize<'de> for RuntimeWindowData {
             #[serde_as(as = "CGRectDef")]
             frame: objc2_core_foundation::CGRect,
             is_floating: bool,
+            #[serde(default)]
+            externally_managed: bool,
             is_focused: bool,
             bundle_id: Option<String>,
             app_name: Option<String>,
@@ -187,6 +193,7 @@ impl<'de> Deserialize<'de> for RuntimeWindowData {
         Ok(RuntimeWindowData {
             id: helper.id,
             is_floating: helper.is_floating,
+            externally_managed: helper.externally_managed,
             is_focused: helper.is_focused,
             layout_position: helper.layout_position,
             app_name: helper.app_name,
@@ -293,6 +300,7 @@ mod tests {
         let data = RuntimeWindowData {
             id: WindowId::new(123, 7),
             is_floating: true,
+            externally_managed: false,
             is_focused: false,
             layout_position: Some(protocol::WindowLayoutPosition { column: 2, row: 1 }),
             app_name: Some("Test App".to_string()),
@@ -305,6 +313,7 @@ mod tests {
             "title": "Test",
             "frame": { "origin": { "x": 1.0, "y": 2.0 }, "size": { "width": 3.0, "height": 4.0 } },
             "is_floating": true,
+            "externally_managed": false,
             "is_focused": false,
             "bundle_id": "com.example.test",
             "app_name": "Test App",
@@ -312,6 +321,10 @@ mod tests {
             "layout_position": { "column": 2, "row": 1 },
         });
         assert_eq!(value, expected);
+        let mut old = value;
+        old.as_object_mut().unwrap().remove("externally_managed");
+        let decoded: protocol::WindowData = serde_json::from_value(old).unwrap();
+        assert!(!decoded.externally_managed);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{Sender as ConfigJobSender, TrySendError, bounded};
 use serde::Serialize;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 
 pub mod cli_exec;
 pub mod protocol;
@@ -34,6 +34,7 @@ const CONFIG_QUEUE_CAPACITY: usize = 8;
 
 pub struct InstallRequest {
     config_tx: config_actor::Sender,
+    disconnect_tx: reactor::Sender,
     response: std::sync::mpsc::SyncSender<Result<SharedServerState, String>>,
 }
 
@@ -54,13 +55,21 @@ pub fn run_mach_server(
     }
     let (response, result) = sync_channel(1);
     reactor
-        .try_send(Event::InstallIpc(InstallRequest { config_tx, response }))
+        .try_send(Event::InstallIpc(InstallRequest {
+            config_tx,
+            disconnect_tx: reactor.sender(),
+            response,
+        }))
         .map_err(|_| "Reactor is unavailable".to_string())?;
     result.recv().map_err(|_| "Reactor stopped while installing IPC".to_string())?
 }
 
 pub(crate) fn install_mach_server(reactor: Rc<RefCell<reactor::Reactor>>, request: InstallRequest) {
-    let InstallRequest { config_tx, response } = request;
+    let InstallRequest {
+        config_tx,
+        disconnect_tx,
+        response,
+    } = request;
     let result = (|| {
         if is_mach_server_registered() {
             return Err(
@@ -88,6 +97,7 @@ pub(crate) fn install_mach_server(reactor: Rc<RefCell<reactor::Reactor>>, reques
             reactor,
             server_state.clone(),
             config_jobs,
+            disconnect_tx,
         ));
         let context = Box::into_raw(handler);
         if !unsafe {
@@ -112,6 +122,7 @@ struct IpcRequestHandler {
     reactor: Rc<RefCell<reactor::Reactor>>,
     server_state: SharedServerState,
     config_jobs: ConfigJobSender<ConfigJob>,
+    disconnect_tx: reactor::Sender,
 }
 
 impl IpcRequestHandler {
@@ -119,11 +130,13 @@ impl IpcRequestHandler {
         reactor: Rc<RefCell<reactor::Reactor>>,
         server_state: SharedServerState,
         config_jobs: ConfigJobSender<ConfigJob>,
+        disconnect_tx: reactor::Sender,
     ) -> Self {
         Self {
             reactor,
             server_state,
             config_jobs,
+            disconnect_tx,
         }
     }
 
@@ -187,6 +200,51 @@ impl IpcRequestHandler {
             }
             RiftRequest::ListCliSubscriptions => {
                 encode_success(self.server_state.list_cli_subscriptions())
+            }
+            RiftRequest::ClaimWindow { window_id, flags } => {
+                let manager = crate::model::window_store::ExternalManagerId(client_port);
+                match self.reactor.try_borrow_mut() {
+                    Ok(mut reactor) => {
+                        if !self.server_state.retain_management(client_port) {
+                            encode_error(
+                                serde_json::json!({ "message": "Failed to monitor management port" }),
+                            )
+                        } else {
+                            let wid =
+                                crate::actor::app::WindowId::new(window_id.pid, window_id.idx);
+                            match reactor.claim_window(wid, manager, flags) {
+                                Ok(_) => {
+                                    encode_success(serde_json::json!({ "claimed": window_id }))
+                                }
+                                Err(error) => {
+                                    if !reactor.manager_has_windows(manager) {
+                                        self.server_state.release_management(client_port);
+                                    }
+                                    encode_error(serde_json::json!({ "message": error }))
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => encode_error(serde_json::json!({ "message": "Reactor is busy" })),
+                }
+            }
+            RiftRequest::ReleaseWindow { window_id } => {
+                let manager = crate::model::window_store::ExternalManagerId(client_port);
+                match self.reactor.try_borrow_mut() {
+                    Ok(mut reactor) => {
+                        let wid = crate::actor::app::WindowId::new(window_id.pid, window_id.idx);
+                        match reactor.release_window(wid, manager) {
+                            Ok(_) => {
+                                if !reactor.manager_has_windows(manager) {
+                                    self.server_state.release_management(client_port);
+                                }
+                                encode_success(serde_json::json!({ "released": window_id }))
+                            }
+                            Err(error) => encode_error(serde_json::json!({ "message": error })),
+                        }
+                    }
+                    Err(_) => encode_error(serde_json::json!({ "message": "Reactor is busy" })),
+                }
             }
             request => match self.reactor.try_borrow_mut() {
                 Ok(mut reactor) => encode_reactor_response(&mut reactor, request),
@@ -446,7 +504,18 @@ unsafe extern "C" fn handle_mach_client_disconnect_c(
         return;
     }
 
+    debug!(
+        client_port,
+        "Mach client port closed; releasing its claims and subscriptions"
+    );
     let handler = unsafe { &*(context as *const IpcRequestHandler) };
+    if let Ok(mut reactor) = handler.reactor.try_borrow_mut() {
+        reactor.release_manager(crate::model::window_store::ExternalManagerId(client_port));
+    } else {
+        handler.disconnect_tx.send(Event::ExternalManagerDisconnected(
+            crate::model::window_store::ExternalManagerId(client_port),
+        ));
+    }
     handler.server_state.remove_client(client_port);
 }
 
