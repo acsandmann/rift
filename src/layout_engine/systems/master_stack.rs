@@ -227,7 +227,6 @@ impl MasterStackLayoutSystem {
         };
         self.inner.set_layout(master, LayoutKind::from(self.master_orientation()));
         self.inner.set_layout(stack, LayoutKind::from(self.stack_orientation()));
-        self.apply_master_ratio(root, master, stack);
         (root, master, stack)
     }
 
@@ -477,6 +476,8 @@ impl MasterStackLayoutSystem {
         let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
         for layout in layouts {
             self.normalize_layout(layout);
+            let (root, master, stack) = self.ensure_structure(layout);
+            self.apply_master_ratio(root, master, stack);
         }
     }
 
@@ -1028,6 +1029,26 @@ mod tests {
         let after = system.inner.tree.data.layout.info[stack].size;
         assert_ne!(after, before);
         assert_ne!(master, stack);
+    }
+
+    #[test]
+    fn master_keyboard_resize_survives_structure_checks() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        assert!(system.select_window(layout, w(1)));
+
+        let (_, master, _) = system.ensure_structure(layout);
+        let original = system.inner.tree.data.layout.info[master].size;
+        system.resize_selection_by(layout, 0.05, ResizeOrientation::Horizontal);
+        let resized = system.inner.tree.data.layout.info[master].size;
+        assert_ne!(resized, original);
+
+        system.ensure_structure(layout);
+        assert_eq!(system.inner.tree.data.layout.info[master].size, resized);
+        system.resize_selection_by(layout, 0.05, ResizeOrientation::Horizontal);
+        assert_ne!(system.inner.tree.data.layout.info[master].size, resized);
     }
 
     #[test]
