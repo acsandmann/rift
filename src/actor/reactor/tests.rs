@@ -1469,6 +1469,7 @@ fn cross_display_drag_clears_source_floating_position() {
         crate::actor::reactor::events::drag::MouseUpPayload {
             button: crate::actor::drag::MouseButton::Left,
             final_space: Some(space2),
+            screens: Vec::new(),
         },
     )
     .unwrap();
@@ -1603,31 +1604,36 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
     let (mut reactor, wid, _wsid, space, _space2, frame, _) =
         reactor_with_window_on_space1_two_displays();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-    reactor.drag_manager.actor.begin_modifier(
-        crate::actor::drag::DragSource {
-            window: wid,
-            origin_frame: frame,
-            last_frame: frame,
-            origin_space: Some(space),
-            current_space: Some(space),
-            tiled: true,
-        },
-        frame.mid(),
+    for action in [
         crate::common::config::MouseAction::Move,
-        crate::actor::drag::DragScene::default(),
-    );
-    let moved = CGRect::new(CGPoint::new(frame.origin.x + 30.0, frame.origin.y), frame.size);
-    reactor.handle_event(Event::WindowFrameChanged(
-        wid,
-        moved,
-        None,
-        Requested(false),
-        Some(MouseState::Up),
-    ));
-    assert!(reactor.drag_manager.actor.is_active());
+        crate::common::config::MouseAction::Resize,
+    ] {
+        reactor.drag_manager.actor.begin_modifier(
+            crate::actor::drag::DragSource {
+                window: wid,
+                origin_frame: frame,
+                last_frame: frame,
+                origin_space: Some(space),
+                current_space: Some(space),
+                tiled: true,
+            },
+            frame.mid(),
+            action,
+            crate::actor::drag::DragScene::default(),
+        );
+        let moved = CGRect::new(CGPoint::new(frame.origin.x + 30.0, frame.origin.y), frame.size);
+        reactor.handle_event(Event::WindowFrameChanged(
+            wid,
+            moved,
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ));
+        assert!(reactor.drag_manager.actor.is_active(), "{action:?}");
 
-    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
-    assert!(!reactor.drag_manager.actor.is_active());
+        reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        assert!(!reactor.drag_manager.actor.is_active(), "{action:?}");
+    }
 }
 
 #[test]

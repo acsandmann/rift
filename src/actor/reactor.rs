@@ -1676,13 +1676,7 @@ impl Reactor {
                 let screens = if old_frame.size.same_as(new_frame.size) {
                     Vec::new()
                 } else {
-                    self.space_state
-                        .screens
-                        .iter()
-                        .filter_map(|screen| {
-                            Some((screen.space?, screen.frame, screen.display_uuid_owned()))
-                        })
-                        .collect()
+                    self.resize_screens()
                 };
                 let mut outcome = window_workflow::handle_window_frame_changed(
                     &mut self.state,
@@ -1785,8 +1779,10 @@ impl Reactor {
                 let Some((window, new_frame)) = self.drag_manager.actor.interactive_update() else {
                     return Ok(EventOutcome::no_change());
                 };
+                let set_size = self.drag_manager.actor.kind()
+                    == Some(crate::actor::drag::DragKind::ModifierResize);
                 return Ok(EventOutcome::no_change()
-                    .with_interactive_window_frame_write(window, new_frame, false));
+                    .with_interactive_window_frame_write(window, new_frame, set_size));
             }
             Event::DragCancel => {
                 return Ok(interaction_workflow::handle_cancel(&mut self.drag_manager));
@@ -1829,7 +1825,7 @@ impl Reactor {
                     scene,
                 );
                 self.drag_manager.sync_preview();
-                if tiled && action == crate::common::config::MouseAction::Move {
+                if tiled {
                     self.drag_manager.externally_controlled_window = Some(window);
                 }
                 return Ok(EventOutcome::no_change());
@@ -1853,11 +1849,12 @@ impl Reactor {
                 let focused = self.window_id_under_cursor().and_then(|window| {
                     self.best_space_for_window_id(window).map(|space| (space, window))
                 });
+                let screens = self.resize_screens();
                 let mut outcome = interaction_workflow::handle_mouse_up(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.drag_manager,
-                    interaction_workflow::MouseUpPayload { button, final_space },
+                    interaction_workflow::MouseUpPayload { button, final_space, screens },
                 )?;
                 if let Some((space, window)) = focused {
                     outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
@@ -2482,8 +2479,13 @@ impl Reactor {
         }
         // The input tap captured a modifier drag's button and always reports its real release,
         // so none is inferred from button state for it.
-        let modifier_drag =
-            self.drag_manager.actor.kind() == Some(crate::actor::drag::DragKind::ModifierMove);
+        let modifier_drag = matches!(
+            self.drag_manager.actor.kind(),
+            Some(
+                crate::actor::drag::DragKind::ModifierMove
+                    | crate::actor::drag::DragKind::ModifierResize
+            )
+        );
         if outcome.dispatch_mouse_up && !modifier_drag {
             self.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
         }
@@ -3314,6 +3316,14 @@ impl Reactor {
                 .max_by_key(|(area, _)| *area)
                 .map(|(_, space)| space)
         })
+    }
+
+    fn resize_screens(&self) -> Vec<(SpaceId, CGRect, Option<String>)> {
+        self.space_state
+            .screens
+            .iter()
+            .filter_map(|screen| Some((screen.space?, screen.frame, screen.display_uuid_owned())))
+            .collect()
     }
 
     fn drag_scene(&self, source: WindowId, space: SpaceId) -> crate::actor::drag::DragScene {

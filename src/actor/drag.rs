@@ -5,8 +5,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 use crate::actor::app::WindowId;
 use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
@@ -19,6 +20,9 @@ use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 const HYSTERESIS_POINTS: f64 = 8.0;
+/// Apps re-render for every size they are given, so a size per pointer sample leaves their
+/// content trailing far behind the frame. Raise this if content still lags.
+const RESIZE_WRITE_INTERVAL: Duration = Duration::from_millis(33);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
@@ -70,6 +74,7 @@ pub struct Session {
     target: TargetState,
     unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
     pub kind: DragKind,
+    last_resize_write: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -114,6 +119,7 @@ impl Session {
             target: TargetState::None,
             unavailable: Vec::new(),
             kind,
+            last_resize_write: None,
         }
     }
 
@@ -413,6 +419,7 @@ impl DragActor {
     ) {
         let kind = match action {
             MouseAction::Move => DragKind::ModifierMove,
+            MouseAction::Resize => DragKind::ModifierResize,
             MouseAction::None => return,
         };
         self.state = State::Dragging(Session::new(source, button, point, scene, kind));
@@ -425,7 +432,7 @@ impl DragActor {
         let home_preview_changed = contains(session.source.origin_frame, session.pointer, 0.0)
             != contains(session.source.origin_frame, motion.point, 0.0);
         session.pointer = motion.point;
-        if session.kind == DragKind::ModifierMove {
+        if matches!(session.kind, DragKind::ModifierMove | DragKind::ModifierResize) {
             let dx = motion.point.x - session.anchor_point.x;
             let dy = motion.point.y - session.anchor_point.y;
             session.source.last_frame = match session.kind {
@@ -436,10 +443,13 @@ impl DragActor {
                     ),
                     session.source.origin_frame.size,
                 ),
+                DragKind::ModifierResize => {
+                    resize_from_anchor(session.source.origin_frame, session.anchor_point, dx, dy)
+                }
                 DragKind::NativeMove | DragKind::NativeResize => unreachable!(),
             };
         }
-        let next = if session.kind == DragKind::NativeResize
+        let next = if matches!(session.kind, DragKind::NativeResize | DragKind::ModifierResize)
             || !session.source.tiled
             || session.source.origin_space != session.source.current_space
         {
@@ -466,8 +476,18 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return None;
         };
-        (session.kind == DragKind::ModifierMove)
-            .then_some((session.source.window, session.source.last_frame))
+        match session.kind {
+            DragKind::ModifierMove => {}
+            DragKind::ModifierResize => {
+                if session.last_resize_write.is_some_and(|at| at.elapsed() < RESIZE_WRITE_INTERVAL)
+                {
+                    return None;
+                }
+                session.last_resize_write = Some(Instant::now());
+            }
+            DragKind::NativeMove | DragKind::NativeResize => return None,
+        }
+        Some((session.source.window, session.source.last_frame))
     }
 
     pub fn finish(&mut self, button: MouseButton) -> Option<DragCommit> {
@@ -533,6 +553,21 @@ impl PartialEq for DropIntent {
     fn eq(&self, other: &Self) -> bool {
         self.window == other.window && self.space == other.space && self.action == other.action
     }
+}
+
+/// Moves the edges on the anchor's side of the frame's center; the opposite edges stay put.
+fn resize_from_anchor(frame: CGRect, anchor: CGPoint, dx: f64, dy: f64) -> CGRect {
+    let (mid, max) = (frame.mid(), frame.max());
+    let (left, top) = (anchor.x < mid.x, anchor.y < mid.y);
+    let width = (frame.size.width + if left { -dx } else { dx }).max(1.0);
+    let height = (frame.size.height + if top { -dy } else { dy }).max(1.0);
+    CGRect::new(
+        CGPoint::new(
+            if left { max.x - width } else { frame.origin.x },
+            if top { max.y - height } else { frame.origin.y },
+        ),
+        CGSize::new(width, height),
+    )
 }
 
 fn contains(rect: CGRect, point: CGPoint, margin: f64) -> bool {
@@ -1063,6 +1098,40 @@ mod tests {
 
         actor.begin_modifier(moved, point(10.0, 10.0), MouseAction::Move, DragScene::default());
         assert_eq!(actor.cancel().unwrap().kind, DragKind::ModifierMove);
+    }
+
+    #[test]
+    fn modifier_resize_moves_the_edges_nearest_the_press() {
+        for ((ax, ay), (dx, dy), expected) in [
+            ((10.0, 10.0), (-10.0, -20.0), frame(-10.0, -20.0, 210.0, 120.0)),
+            ((190.0, 90.0), (10.0, 20.0), frame(0.0, 0.0, 210.0, 120.0)),
+            ((10.0, 90.0), (500.0, 0.0), frame(199.0, 0.0, 1.0, 100.0)),
+        ] {
+            let mut actor = DragActor::new(DragDropSettings::default());
+            actor.begin_modifier(source(true), point(ax, ay), MouseAction::Resize, scene(rect()));
+            motion(&mut actor, ax + dx, ay + dy);
+            assert!(actor.intent().is_none());
+            assert_eq!(actor.interactive_update(), Some((w(1), expected)));
+            assert_eq!(
+                actor.finish(MouseButton::Left).unwrap().kind,
+                DragKind::ModifierResize
+            );
+        }
+    }
+
+    #[test]
+    fn modifier_resize_writes_are_throttled_and_moves_are_not() {
+        let mut resize = modifier(MouseAction::Resize, false);
+        motion(&mut resize, 110.0, 60.0);
+        assert!(resize.interactive_update().is_some());
+        motion(&mut resize, 120.0, 70.0);
+        assert!(resize.interactive_update().is_none());
+
+        let mut moved = modifier(MouseAction::Move, false);
+        for x in [110.0, 120.0] {
+            motion(&mut moved, x, 50.0);
+            assert!(moved.interactive_update().is_some());
+        }
     }
 
     #[test]

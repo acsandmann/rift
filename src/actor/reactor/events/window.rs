@@ -289,7 +289,10 @@ pub fn handle_window_frame_changed(
     // An adjusted acknowledgement of our own frame write is not a new native drag.
     if matches!(
         drag.actor.kind(),
-        Some(crate::actor::drag::DragKind::ModifierMove)
+        Some(
+            crate::actor::drag::DragKind::ModifierMove
+                | crate::actor::drag::DragKind::ModifierResize
+        )
     ) && drag.actor.source().is_some_and(|source| source.window == wid)
     {
         return Ok(EventOutcome::no_change());
