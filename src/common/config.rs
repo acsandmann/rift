@@ -874,6 +874,8 @@ impl Default for TraditionalLayoutSettings {
 pub struct BspLayoutSettings {
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
+    /// Center a lone window at this width-to-height ratio.
+    pub single_window_aspect_ratio: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
