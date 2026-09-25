@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::ffi::c_void;
@@ -32,6 +32,7 @@ type ApplicationCallback = Arc<dyn Fn(pid_t, AppInfo) + Send + Sync + 'static>;
 struct ApplicationObserverIvars {
     app: Retained<NSRunningApplication>,
     handler: ApplicationCallback,
+    finished_handler: RefCell<Option<ApplicationCallback>>,
     info: AppInfo,
     pid: pid_t,
     observing_activation_policy: Cell<bool>,
@@ -78,6 +79,7 @@ impl ApplicationObserver {
         let observer = Self::alloc().set_ivars(ApplicationObserverIvars {
             app,
             handler,
+            finished_handler: RefCell::new(None),
             info,
             pid,
             observing_activation_policy: Cell::new(false),
@@ -110,8 +112,11 @@ impl ApplicationObserver {
         }
     }
 
-    fn observe_finished_launching(&self) {
+    fn observe_finished_launching(&self, handler: Option<ApplicationCallback>) {
         let ivars = self.ivars();
+        if let Some(handler) = handler {
+            *ivars.finished_handler.borrow_mut() = Some(handler);
+        }
         if ivars.observing_finished_launching.get() || ivars.finished_launching_notified.get() {
             return;
         }
@@ -169,7 +174,11 @@ impl ApplicationObserver {
                 return;
             }
             ivars.finished_launching_notified.set(true);
-            (ivars.handler.clone(), ivars.info.clone(), ivars.pid)
+            (
+                ivars.finished_handler.borrow().clone().unwrap_or_else(|| ivars.handler.clone()),
+                ivars.info.clone(),
+                ivars.pid,
+            )
         };
 
         self.unobserve_finished_launching();
@@ -251,17 +260,18 @@ pub fn ensure_finished_launching_observer(
     pid: pid_t,
     app: Retained<NSRunningApplication>,
     info: AppInfo,
+    override_handler: Option<Arc<dyn Fn(pid_t, AppInfo) + Send + Sync + 'static>>,
 ) {
     let callback = APPLICATION_CALLBACK.lock().clone();
     let Some(callback) = callback else {
         return;
     };
     if app.isFinishedLaunching() {
-        callback(pid, info);
+        override_handler.unwrap_or(callback)(pid, info);
         return;
     };
     observe_application(pid, app, info, callback, |observer| {
-        observer.observe_finished_launching()
+        observer.observe_finished_launching(override_handler)
     });
 }
 

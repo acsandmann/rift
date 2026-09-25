@@ -66,9 +66,24 @@ impl From<&crate::common::config::StackLineSettings> for IndicatorConfig {
     fn from(config: &crate::common::config::StackLineSettings) -> Self {
         Self {
             bar_thickness: config.thickness,
-            selected_color: Color::blue(),
-            unselected_color: Color::light_gray(),
-            border_color: Color::gray(),
+            selected_color: Color::new(
+                config.selected_color.r,
+                config.selected_color.g,
+                config.selected_color.b,
+                config.selected_color.a,
+            ),
+            unselected_color: Color::new(
+                config.unselected_color.r,
+                config.unselected_color.g,
+                config.unselected_color.b,
+                config.unselected_color.a,
+            ),
+            border_color: Color::new(
+                config.border_color.r,
+                config.border_color.g,
+                config.border_color.b,
+                config.border_color.a,
+            ),
             border_width: 0.5,
             horizontal_placement: config.horiz_placement,
             vertical_placement: config.vert_placement,

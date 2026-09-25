@@ -44,6 +44,8 @@ pub struct BspLayoutSystem {
     stacks: HashMap<NodeId, Vec<WindowId>>,
     #[serde(skip, default)]
     window_insertion_point: WindowInsertionPoint,
+    #[serde(skip, default)]
+    single_window_aspect_ratio: Option<f64>,
 }
 
 impl BspLayoutSystem {
@@ -201,6 +203,7 @@ impl Default for BspLayoutSystem {
             window_to_node: Default::default(),
             stacks: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
+            single_window_aspect_ratio: None,
         }
     }
 }
@@ -215,6 +218,10 @@ impl BspLayoutSystem {
 
     pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
         self.window_insertion_point = value;
+    }
+
+    pub fn set_single_window_aspect_ratio(&mut self, ratio: Option<f64>) {
+        self.single_window_aspect_ratio = ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0);
     }
 
     fn index_window(&mut self, wid: WindowId, node: NodeId) {
@@ -1256,6 +1263,27 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = compute_tiling_area(screen, gaps);
             self.calculate_layout_recursive(state.root, rect, screen, constraints, gaps, &mut out);
+            if let (Some(ratio), [(_, frame)]) =
+                (self.single_window_aspect_ratio, out.as_mut_slice())
+                && matches!(
+                    self.kind.get(state.root),
+                    Some(NodeKind::Leaf {
+                        fullscreen: false,
+                        fullscreen_within_gaps: false,
+                        ..
+                    })
+                )
+                && !self.stacks.contains_key(&state.root)
+            {
+                let (width, height) = if frame.size.width > frame.size.height * ratio {
+                    (frame.size.height * ratio, frame.size.height)
+                } else {
+                    (frame.size.width, frame.size.width / ratio)
+                };
+                frame.origin.x = rect.origin.x + (rect.size.width - width) / 2.0;
+                frame.origin.y = rect.origin.y + (rect.size.height - height) / 2.0;
+                frame.size = CGSize::new(width, height);
+            }
         }
         out
     }
@@ -1270,6 +1298,16 @@ impl LayoutSystem for BspLayoutSystem {
             self.collect_windows_under(state.root, &mut out);
         }
         out
+    }
+
+    fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        let root = self.layouts.get(layout)?.root;
+        let node = self.node_for_window_in_layout(layout, window)?;
+        let mut slot = crate::layout_engine::systems::node_slot(node, root, &self.tree.map)?;
+        if let Some(members) = self.stacks.get(&node) {
+            slot.push(members.iter().position(|&member| member == window)?);
+        }
+        Some(slot)
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {

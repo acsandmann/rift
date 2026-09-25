@@ -80,6 +80,7 @@ use main_window::MainWindowTracker;
 use managers::LayoutManager;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
+use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tracing::{debug, instrument, trace, warn};
@@ -492,11 +493,12 @@ impl Reactor {
             main_window_tracker: MainWindowTracker::default(),
             pending_mouse_focus: None,
             drag_manager: managers::DragManager {
-                actor: crate::actor::drag::DragActor::new(config.settings.mouse),
+                actor: crate::actor::drag::DragActor::new(config.settings.drag_drop),
                 native_motion_active: std::sync::Arc::default(),
                 externally_controlled_window: None,
                 preview: None,
-                preview_enabled: config.settings.mouse.enabled && config.settings.mouse.preview,
+                preview_enabled: config.settings.drag_drop.enabled
+                    && config.settings.drag_drop.preview,
                 preview_suppressed: false,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
@@ -2096,6 +2098,11 @@ impl Reactor {
                     .as_ref()
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
+                if focus_window.is_none()
+                    && let Some(space) = screen.as_ref().and_then(|screen| screen.space)
+                {
+                    self.focus_desktop_if_active_workspace_empty(space);
+                }
                 let focus_window_center = focus_window
                     .and_then(|wid| self.state.windows.window(wid))
                     .map(|window| window.frame_monotonic.mid());
@@ -2451,7 +2458,11 @@ impl Reactor {
         for (response, workspace_switch_space) in outcome.layout_responses {
             self.handle_layout_response(response, workspace_switch_space);
         }
-        if outcome.dispatch_mouse_up {
+        // The input tap captured a modifier drag's button and always reports its real release,
+        // so none is inferred from button state for it.
+        let modifier_drag =
+            self.drag_manager.actor.kind() == Some(crate::actor::drag::DragKind::ModifierMove);
+        if outcome.dispatch_mouse_up && !modifier_drag {
             self.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
         }
 
@@ -3381,20 +3392,35 @@ impl Reactor {
         let Some(source) = self.drag_manager.actor.source() else {
             return;
         };
-        while let Some(intent) = self.drag_manager.actor.intent() {
-            let preview = self.space_state.screen_by_space(intent.space).and_then(|screen| {
-                self.layout_manager.layout_engine.drop_preview_frame(
-                    intent.space,
-                    source.window,
-                    intent.window,
-                    intent.frame,
-                    intent.action,
-                    screen.frame,
-                    screen.display_uuid_opt(),
-                    &self.config.settings.ui.stack_line,
-                )
-            });
-            if !self.drag_manager.actor.set_preview(intent, preview) {
+        while let Some(mut intent) = self.drag_manager.actor.intent() {
+            if intent.window == source.window
+                && !matches!(intent.action, crate::layout_engine::WindowDropAction::Move(_))
+            {
+                self.drag_manager.actor.set_preview(intent, Some(source.origin_frame));
+                break;
+            }
+            let preview = loop {
+                let preview = self.space_state.screen_by_space(intent.space).and_then(|screen| {
+                    self.layout_manager.layout_engine.drop_preview_frame(
+                        intent.space,
+                        source.window,
+                        intent.window,
+                        intent.frame,
+                        intent.action,
+                        screen.frame,
+                        screen.display_uuid_opt(),
+                        &self.config.settings.ui.stack_line,
+                    )
+                });
+                let Some(result) = preview else { break None };
+                let action =
+                    result.action(intent.action, self.config.settings.drag_drop.drop_action);
+                if action == intent.action {
+                    break Some(result);
+                }
+                intent.action = action;
+            };
+            if !self.drag_manager.actor.set_preview(intent, preview.map(|result| result.frame)) {
                 break;
             }
         }
@@ -3981,6 +4007,7 @@ impl Reactor {
             LayoutEvent::WindowRemoved(wid)
                 if self.layout_manager.layout_engine.focused_window() == Some(wid)
         );
+        self.prepare_refocus_before_removal(&event);
         let event_clone = event.clone();
         let layout_outcome =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
@@ -4583,7 +4610,7 @@ impl Reactor {
                     }
                 }
             } else if let Some(space) = pending_refocus_space.take() {
-                if let Some(wid) = self.last_focused_window_in_space(space) {
+                if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, None) {
                     focus_window = Some(wid);
                     false
                 } else if !self.is_in_drag() {
@@ -4847,6 +4874,25 @@ impl Reactor {
             .is_some_and(|window_workspace| window_workspace != active_workspace)
     }
 
+    fn prepare_refocus_before_removal(&mut self, event: &LayoutEvent) {
+        let focused = self.layout_manager.layout_engine.focused_window();
+        let removed_focus = match event {
+            LayoutEvent::AppClosed(pid) => focused.filter(|wid| wid.pid == *pid),
+            LayoutEvent::WindowRemoved(wid) if focused == Some(*wid) => focused,
+            _ => None,
+        };
+        if let Some(wid) = removed_focus
+            && let Some(space) = self
+                .layout_manager
+                .layout_engine
+                .space_with_window(wid)
+                .filter(|space| self.is_space_active(*space))
+                .or_else(|| self.workspace_command_space())
+        {
+            self.refocus_manager.refocus_state = RefocusState::Pending(space);
+        }
+    }
+
     fn prepare_refocus_after_layout_event(&mut self, event: &LayoutEvent) {
         match event {
             LayoutEvent::WindowAdded(space, wid) => {
@@ -5090,32 +5136,28 @@ impl Reactor {
             let min = frame.min();
             let max = frame.max();
 
-            let (primary_dist, orth_gap) = match direction {
-                Direction::Left => {
-                    if max.x > origin.x {
-                        continue;
-                    }
-                    (origin.x - max.x, interval_gap(min.y, max.y, origin.y, origin.y))
-                }
-                Direction::Right => {
-                    if min.x < origin.x {
-                        continue;
-                    }
-                    (min.x - origin.x, interval_gap(min.y, max.y, origin.y, origin.y))
-                }
-                Direction::Up => {
-                    // Smaller y means visually "up".
-                    if max.y > origin.y {
-                        continue;
-                    }
-                    (origin.y - max.y, interval_gap(min.x, max.x, origin.x, origin.x))
-                }
-                Direction::Down => {
-                    if min.y < origin.y {
-                        continue;
-                    }
-                    (min.y - origin.y, interval_gap(min.x, max.x, origin.x, origin.x))
-                }
+            let (edge, orth_gap) = match direction {
+                Direction::Left => (
+                    CGPoint::new(max.x, origin.y),
+                    interval_gap(min.y, max.y, origin.y, origin.y),
+                ),
+                Direction::Right => (
+                    CGPoint::new(min.x, origin.y),
+                    interval_gap(min.y, max.y, origin.y, origin.y),
+                ),
+                Direction::Up => (
+                    CGPoint::new(origin.x, max.y),
+                    interval_gap(min.x, max.x, origin.x, origin.x),
+                ),
+                Direction::Down => (
+                    CGPoint::new(origin.x, min.y),
+                    interval_gap(min.x, max.x, origin.x, origin.x),
+                ),
+            };
+            let Some(primary_dist) =
+                (origin.x, origin.y).distance_in_direction((edge.x, edge.y), direction)
+            else {
+                continue;
             };
 
             let should_replace = best.as_ref().map_or(true, |(best_primary, best_orth, _)| {

@@ -6,7 +6,7 @@ use regex::RegexBuilder;
 pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
 use serde::{Deserialize, Serialize};
 
-use super::collections::HashMap;
+use super::collections::{HashMap, HashSet};
 use crate::actor::wm_controller::WmCommand;
 use crate::sys::hotkey::{Hotkey, HotkeySpec};
 
@@ -333,6 +333,8 @@ struct ConfigFile {
     settings: Settings,
     keys: HashMap<String, WmCommand>,
     #[serde(default)]
+    binding_modes: HashMap<String, HashMap<String, WmCommand>>,
+    #[serde(default)]
     virtual_workspaces: VirtualWorkspaceSettings,
     /// Modifier combinations that can be reused in key bindings
     /// e.g., "comb1" = "Alt + Shift" allows using "comb1 + C" in keys
@@ -380,9 +382,11 @@ pub struct Config {
     pub settings: Settings,
     pub keys: Vec<(Hotkey, WmCommand)>,
     #[serde(default)]
-    pub key_specs: Vec<(String, WmCommand)>,
+    pub binding_mode_specs: BindingModeSpecs,
     pub virtual_workspaces: VirtualWorkspaceSettings,
 }
+
+pub type BindingModeSpecs = Vec<(String, Vec<(String, WmCommand)>)>;
 
 impl<'de> Deserialize<'de> for Config {
     fn deserialize<D>(deserializer: D) -> Result<Config, D::Error>
@@ -393,24 +397,31 @@ impl<'de> Deserialize<'de> for Config {
             keys: Vec<(Hotkey, WmCommand)>,
             #[serde(default)]
             key_specs: Vec<(String, WmCommand)>,
+            #[serde(default)]
+            binding_mode_specs: BindingModeSpecs,
             virtual_workspaces: VirtualWorkspaceSettings,
         }
 
         let config = ConfigSerde::deserialize(deserializer)?;
-        let key_specs = if config.key_specs.is_empty() && !config.keys.is_empty() {
-            config
-                .keys
-                .iter()
-                .map(|(hotkey, command)| (hotkey.to_string(), command.clone()))
-                .collect()
+        let binding_mode_specs = if config.binding_mode_specs.is_empty() {
+            let default_specs = if config.key_specs.is_empty() {
+                config
+                    .keys
+                    .iter()
+                    .map(|(hotkey, command)| (hotkey.to_string(), command.clone()))
+                    .collect()
+            } else {
+                config.key_specs
+            };
+            vec![("default".to_string(), default_specs)]
         } else {
-            config.key_specs
+            config.binding_mode_specs
         };
 
         Ok(Config {
             settings: config.settings,
             keys: config.keys,
-            key_specs,
+            binding_mode_specs,
             virtual_workspaces: config.virtual_workspaces,
         })
     }
@@ -454,9 +465,9 @@ pub struct Settings {
     /// Trackpad gesture settings
     #[serde(default)]
     pub gestures: GestureSettings,
-    /// Mouse settings
+    /// Modifier-assisted dragging and tiled-window drop settings.
     #[serde(default)]
-    pub mouse: MouseSettings,
+    pub drag_drop: DragDropSettings,
 
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
@@ -579,13 +590,14 @@ pub enum MouseDropAction {
 /// a window can be moved from anywhere inside it. Floating windows
 /// remain floating. A tiled destination is divided into five local zones: its center
 /// performs [`Self::drop_action`], while its edges insert the source on that side.
-/// Dragging to an edge of the source's vacated tile performs the matching MoveNode command.
+/// Dragging to an edge of the source's vacated tile performs the matching MoveNode command when no
+/// window lies that way; an edge that would drop the source back in place acts like the center.
 /// Preview simulation runs only when the destination or zone changes.
 ///
 /// Example:
 ///
 /// ```toml
-/// [settings.mouse]
+/// [settings.drag_drop]
 /// enabled = true
 /// modifier = "fn"
 /// action1 = "move"
@@ -596,7 +608,7 @@ pub enum MouseDropAction {
 /// ```
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(deny_unknown_fields)]
-pub struct MouseSettings {
+pub struct DragDropSettings {
     /// Enables native drag targeting and modifier mouse actions.
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -622,7 +634,7 @@ pub struct MouseSettings {
     pub preview: bool,
 }
 
-impl Default for MouseSettings {
+impl Default for DragDropSettings {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -718,7 +730,46 @@ pub struct StackLineSettings {
     /// This creates spacing between the window and the stack line
     #[serde(default = "default_stack_line_spacing")]
     pub spacing: f64,
+    /// Color of the selected stack segment, with normalized RGBA components.
+    #[serde(default = "default_stack_line_selected_color")]
+    pub selected_color: Color,
+    /// Color of unselected stack segments, with normalized RGBA components.
+    #[serde(default = "default_stack_line_unselected_color")]
+    pub unselected_color: Color,
+    /// Color of segment borders and separators, with normalized RGBA components.
+    #[serde(default = "default_stack_line_border_color")]
+    pub border_color: Color,
 }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct Color {
+    #[serde(default = "default_color_component")]
+    pub r: f64,
+    #[serde(default = "default_color_component")]
+    pub g: f64,
+    #[serde(default = "default_color_component")]
+    pub b: f64,
+    #[serde(default = "default_color_alpha")]
+    pub a: f64,
+}
+
+fn default_color_component() -> f64 { 0.0 }
+fn default_color_alpha() -> f64 { 1.0 }
+
+impl Color {
+    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self { Self { r, g, b, a } }
+}
+
+impl Default for Color {
+    fn default() -> Self { Self::new(0.0, 0.0, 0.0, 1.0) }
+}
+
+fn default_stack_line_selected_color() -> Color { Color::new(0.0, 0.5, 1.0, 1.0) }
+
+fn default_stack_line_unselected_color() -> Color { Color::new(0.8, 0.8, 0.8, 1.0) }
+
+fn default_stack_line_border_color() -> Color { Color::new(0.6, 0.6, 0.6, 1.0) }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
@@ -823,6 +874,8 @@ impl Default for TraditionalLayoutSettings {
 pub struct BspLayoutSettings {
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
+    /// Center a lone window at this width-to-height ratio.
+    pub single_window_aspect_ratio: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -1134,10 +1187,10 @@ impl Settings {
 
         issues.extend(self.layout.validate());
 
-        if !(0.10..=0.45).contains(&self.mouse.drop_zone_fraction) {
+        if !(0.10..=0.45).contains(&self.drag_drop.drop_zone_fraction) {
             issues.push(format!(
-                "mouse.drop_zone_fraction must be between 0.10 and 0.45, got {}",
-                self.mouse.drop_zone_fraction
+                "drag_drop.drop_zone_fraction must be between 0.10 and 0.45, got {}",
+                self.drag_drop.drop_zone_fraction
             ));
         }
 
@@ -1442,9 +1495,16 @@ impl Config {
         let config_file = ConfigFile {
             settings: self.settings.clone(),
             keys: self
-                .key_specs
+                .binding_mode_specs
+                .first()
+                .filter(|(name, _)| name == "default")
+                .map(|(_, specs)| specs.iter().cloned().collect())
+                .unwrap_or_default(),
+            binding_modes: self
+                .binding_mode_specs
                 .iter()
-                .map(|(hotkey, command)| (hotkey.clone(), command.clone()))
+                .skip(1)
+                .map(|(name, specs)| (name.clone(), specs.iter().cloned().collect()))
                 .collect(),
             virtual_workspaces: self.virtual_workspaces.clone(),
             modifier_combinations: HashMap::default(),
@@ -1470,6 +1530,27 @@ impl Config {
 
         // Validate virtual workspace settings
         issues.extend(self.virtual_workspaces.validate());
+
+        let mode_names: HashSet<_> =
+            self.binding_mode_specs.iter().map(|(name, _)| name.as_str()).collect();
+        if mode_names.len() != self.binding_mode_specs.len() {
+            issues.push("Binding mode names must be unique".to_string());
+        }
+        if self.binding_mode_specs.first().map(|(name, _)| name.as_str()) != Some("default") {
+            issues.push("The default binding mode must be the first mode".to_string());
+        }
+        for (mode, bindings) in &self.binding_mode_specs {
+            for (_, command) in bindings {
+                if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) =
+                    command
+                    && !mode_names.contains(target.as_str())
+                {
+                    issues.push(format!(
+                        "Binding mode `{mode}` references nonexistent mode `{target}`"
+                    ));
+                }
+            }
+        }
 
         issues
     }
@@ -1686,27 +1767,51 @@ impl Config {
         None
     }
 
-    fn parse(buf: &str) -> anyhow::Result<Config> {
+    pub(crate) fn parse(buf: &str) -> anyhow::Result<Config> {
         // Attempt to deserialize. If it fails, and the error indicates an unknown enum
         // variant, attempt to provide a helpful suggestion.
         match parse_config_file(buf) {
             Ok(c) => {
+                if c.binding_modes.contains_key("default") {
+                    bail!("`default` is reserved and cannot be defined in [binding_modes]");
+                }
+
+                let mut binding_sets: Vec<_> = c.binding_modes.into_iter().collect();
+                binding_sets.sort_by(|a, b| a.0.cmp(&b.0));
+                binding_sets.insert(0, ("default".to_string(), c.keys));
+
+                let mut binding_mode_specs = Vec::with_capacity(binding_sets.len());
                 let mut keys = Vec::new();
-                let mut key_specs = Vec::new();
-                for (key, cmd) in c.keys {
-                    let expanded_key =
-                        Self::expand_modifier_combinations(&key, &c.modifier_combinations);
-                    let normalized_key = Self::normalize_hotkey_string(&expanded_key);
-                    let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
-                        bail!("Could not parse hotkey: {key}");
-                    };
-                    keys.push((hotkey, cmd.clone()));
-                    key_specs.push((normalized_key, cmd));
+                let mode_names: HashSet<String> =
+                    binding_sets.iter().map(|(name, _)| name.clone()).collect();
+                for (mode, bindings) in binding_sets {
+                    let mut specs = Vec::with_capacity(bindings.len());
+                    for (key, cmd) in bindings {
+                        let expanded_key =
+                            Self::expand_modifier_combinations(&key, &c.modifier_combinations);
+                        let normalized_key = Self::normalize_hotkey_string(&expanded_key);
+                        let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
+                            bail!("Could not parse hotkey `{key}` in binding mode `{mode}`");
+                        };
+                        if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(
+                            target,
+                        )) = &cmd
+                            && target != "default"
+                            && !mode_names.contains(target)
+                        {
+                            bail!("Binding mode `{mode}` references nonexistent mode `{target}`");
+                        }
+                        if mode == "default" {
+                            keys.push((hotkey, cmd.clone()));
+                        }
+                        specs.push((normalized_key, cmd));
+                    }
+                    binding_mode_specs.push((mode, specs));
                 }
                 Ok(Config {
                     settings: c.settings,
                     keys,
-                    key_specs,
+                    binding_mode_specs,
                     virtual_workspaces: c.virtual_workspaces,
                 })
             }
@@ -1964,10 +2069,10 @@ mod tests {
 
     #[test]
     fn mouse_settings_defaults_and_variants_parse() {
-        let defaults: MouseSettings = toml::from_str("").unwrap();
-        assert_eq!(defaults, MouseSettings::default());
+        let defaults: DragDropSettings = toml::from_str("").unwrap();
+        assert_eq!(defaults, DragDropSettings::default());
 
-        let settings: MouseSettings = toml::from_str(
+        let settings: DragDropSettings = toml::from_str(
             r#"
                 enabled = false
                 modifier = "ctrl"
@@ -1989,7 +2094,8 @@ mod tests {
             ("option", MouseModifier::Alt),
             ("control", MouseModifier::Ctrl),
         ] {
-            let parsed: MouseSettings = toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
+            let parsed: DragDropSettings =
+                toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
             assert_eq!(parsed.modifier, expected);
         }
     }
@@ -2004,56 +2110,139 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.settings.mouse, MouseSettings::default());
+        assert_eq!(cfg.settings.drag_drop, DragDropSettings::default());
     }
 
     #[test]
-    fn new_mouse_settings_win_when_legacy_table_is_also_present() {
+    fn drag_drop_settings_take_precedence_over_legacy_window_snapping() {
         let cfg = Config::parse(
             r#"
                 [settings.window_snapping]
                 drag_swap_fraction = 0.3
-                [settings.mouse]
+                [settings.drag_drop]
                 modifier = "alt"
                 drop_action = "stack"
                 [keys]
             "#,
         )
         .unwrap();
-        assert_eq!(cfg.settings.mouse.modifier, MouseModifier::Alt);
-        assert_eq!(cfg.settings.mouse.drop_action, MouseDropAction::Stack);
+        assert_eq!(cfg.settings.drag_drop.modifier, MouseModifier::Alt);
+        assert_eq!(cfg.settings.drag_drop.drop_action, MouseDropAction::Stack);
     }
 
     #[test]
     fn invalid_drop_zone_fraction_has_clear_validation_error() {
         let mut cfg = Config::default();
-        cfg.settings.mouse.drop_zone_fraction = 0.09;
-        assert!(cfg.validate().iter().any(|issue| issue.contains("mouse.drop_zone_fraction")));
-        cfg.settings.mouse.drop_zone_fraction = 0.46;
-        assert!(cfg.validate().iter().any(|issue| issue.contains("mouse.drop_zone_fraction")));
+        cfg.settings.drag_drop.drop_zone_fraction = 0.09;
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+        );
+        cfg.settings.drag_drop.drop_zone_fraction = 0.46;
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+        );
     }
 
     #[test]
-    fn serde_round_trip_preserves_key_specs() {
+    fn serde_round_trip_preserves_binding_mode_specs() {
         let cfg = Config::default();
-        assert!(!cfg.key_specs.is_empty());
+        assert!(!cfg.binding_mode_specs[0].1.is_empty());
 
         let json = serde_json::to_string(&cfg).unwrap();
         let round_tripped: Config = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(round_tripped.key_specs, cfg.key_specs);
+        assert_eq!(round_tripped.binding_mode_specs, cfg.binding_mode_specs);
     }
 
     #[test]
-    fn serde_without_key_specs_reconstructs_from_keys() {
+    fn serde_without_binding_mode_specs_reconstructs_from_keys() {
         let cfg = Config::default();
         let mut json = serde_json::to_value(&cfg).unwrap();
-        json.as_object_mut().unwrap().remove("key_specs");
+        json.as_object_mut().unwrap().remove("binding_mode_specs");
 
         let round_tripped: Config = serde_json::from_value(json).unwrap();
 
-        assert_eq!(round_tripped.key_specs.len(), round_tripped.keys.len());
-        assert!(!round_tripped.key_specs.is_empty());
+        assert_eq!(
+            round_tripped.binding_mode_specs[0].1.len(),
+            round_tripped.keys.len()
+        );
+        assert!(!round_tripped.binding_mode_specs[0].1.is_empty());
+    }
+
+    #[test]
+    fn keys_only_config_still_has_only_the_default_binding_set() {
+        let config = Config::parse(
+            r#"
+                [settings]
+                [keys]
+                "A" = "reload_config"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.binding_mode_specs.len(), 1);
+        assert_eq!(config.binding_mode_specs[0].0, "default");
+        assert!(config.binding_mode_specs[0].1.iter().any(|(spec, _)| spec == "A"));
+    }
+
+    #[test]
+    fn custom_binding_modes_parse_and_expand_modifier_combinations() {
+        let config = Config::parse(
+            r#"
+                [settings]
+                [modifier_combinations]
+                nav = "Alt + Shift"
+                [keys]
+                "Alt + R" = { binding_mode = "resize" }
+                [binding_modes.resize]
+                "nav + N" = { binding_mode = "default" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.binding_mode_specs[0].0, "default");
+        assert_eq!(config.binding_mode_specs[1].0, "resize");
+        assert!(config.binding_mode_specs[1]
+            .1
+            .iter()
+            .any(|(spec, command)| spec == "Alt + Shift + N"
+                && matches!(command, WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) if target == "default")));
+    }
+
+    #[test]
+    fn binding_mode_config_rejects_bad_targets_reserved_default_and_bad_hotkeys() {
+        let missing = r#"
+            [settings]
+            [keys]
+            "Alt + R" = { binding_mode = "does-not-exist" }
+            [binding_modes.resize]
+            "Escape" = { binding_mode = "default" }
+        "#;
+        assert!(Config::parse(&missing).unwrap_err().to_string().contains("does-not-exist"));
+
+        let reserved = r#"
+            [settings]
+            [keys]
+            [binding_modes.default]
+        "#;
+        assert!(Config::parse(&reserved).unwrap_err().to_string().contains("reserved"));
+
+        let malformed = r#"
+            [settings]
+            [keys]
+            "NotARealHotkey" = { binding_mode = "default" }
+        "#;
+        assert!(Config::parse(&malformed).unwrap_err().to_string().contains("hotkey"));
+    }
+
+    #[test]
+    fn config_validation_rejects_duplicate_binding_mode_names() {
+        let mut json = serde_json::to_value(Config::default()).unwrap();
+        json["binding_mode_specs"] = serde_json::json!([["default", []], ["default", []]]);
+        let config: Config = serde_json::from_value(json).unwrap();
+        assert!(config.validate().iter().any(|issue| issue.contains("unique")));
     }
 
     #[test]

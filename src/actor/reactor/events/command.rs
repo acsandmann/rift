@@ -218,7 +218,7 @@ pub fn handle_config_updated(
     drag: &mut DragManager,
     new_config: Config,
 ) -> anyhow::Result<EventOutcome> {
-    let mut outcome = if config.settings.mouse != new_config.settings.mouse {
+    let mut outcome = if config.settings.drag_drop != new_config.settings.drag_drop {
         super::drag::handle_cancel(drag)
     } else {
         EventOutcome::no_change()
@@ -230,7 +230,7 @@ pub fn handle_config_updated(
         .layout_engine
         .update_virtual_workspace_settings(&state.windows, &config.virtual_workspaces);
 
-    drag.update_config(config.settings.mouse);
+    drag.update_config(config.settings.drag_drop);
 
     outcome.absorb(EventOutcome {
         service_config_update: Some(config.clone()),

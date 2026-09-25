@@ -11,7 +11,6 @@ use dispatchr::time::Time;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use strum::VariantNames;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -19,6 +18,21 @@ use crate::common::config::WorkspaceSelector;
 use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
 pub type Sender = actor::Sender<WmEvent>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppDiscoverySource {
+    Process,
+    WindowServer,
+}
+
+fn should_spawn_app(policy: NSApplicationActivationPolicy, source: AppDiscoverySource) -> bool {
+    match policy {
+        NSApplicationActivationPolicy::Regular => true,
+        NSApplicationActivationPolicy::Accessory => source == AppDiscoverySource::WindowServer,
+        NSApplicationActivationPolicy::Prohibited => false,
+        _ => false,
+    }
+}
 
 type Receiver = actor::Receiver<WmEvent>;
 
@@ -35,7 +49,7 @@ use crate::{layout_engine as layout, sys};
 pub enum WmEvent {
     DiscoverRunningApps,
     AppEventsRegistered,
-    AppLaunch(pid_t, AppInfo),
+    AppLaunch(pid_t, AppInfo, AppDiscoverySource),
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
@@ -67,6 +81,7 @@ pub enum WmCmd {
     ToggleSpaceActivated,
     Exec(ExecCmd),
     ReloadConfig,
+    BindingMode(String),
 
     NextWorkspace,
     PrevWorkspace,
@@ -129,7 +144,6 @@ pub struct WmController {
     window_tx_store: Option<WindowTxStore>,
     receiver: Receiver,
     sender: Sender,
-    hotkeys_installed: bool,
     apps: AppLifecycle,
 }
 
@@ -139,7 +153,7 @@ struct AppLifecycle(HashMap<pid_t, (AppThreadHandle, AppPhase)>);
 
 enum AppPhase {
     Active, // Includes initialization.
-    Stopping(Option<AppInfo>),
+    Stopping(Option<(AppInfo, AppDiscoverySource)>),
 }
 
 impl AppLifecycle {
@@ -147,10 +161,19 @@ impl AppLifecycle {
         &mut self,
         pid: pid_t,
         info: AppInfo,
+        source: AppDiscoverySource,
     ) -> Option<(AppThreadHandle, actor::Receiver<Request>)> {
         if let Some((_, phase)) = self.0.get_mut(&pid) {
             if let AppPhase::Stopping(relaunch) = phase {
-                *relaunch = Some(info);
+                let source = if relaunch
+                    .as_ref()
+                    .is_some_and(|(_, previous)| *previous == AppDiscoverySource::WindowServer)
+                {
+                    AppDiscoverySource::WindowServer
+                } else {
+                    source
+                };
+                *relaunch = Some((info, source));
             }
             return None;
         }
@@ -166,7 +189,11 @@ impl AppLifecycle {
         }
     }
 
-    fn exited(&mut self, pid: pid_t, handle: &AppThreadHandle) -> Option<Option<AppInfo>> {
+    fn exited(
+        &mut self,
+        pid: pid_t,
+        handle: &AppThreadHandle,
+    ) -> Option<Option<(AppInfo, AppDiscoverySource)>> {
         if !self.0.get(&pid)?.0.same_actor(handle) {
             return None;
         }
@@ -190,7 +217,7 @@ impl WmController {
         let (sender, receiver) = actor::channel();
         sys::app::set_application_callback({
             let sender = sender.clone();
-            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
+            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info, AppDiscoverySource::Process))
         });
         let this = Self {
             config,
@@ -202,7 +229,6 @@ impl WmController {
             window_tx_store,
             receiver,
             sender: sender.clone(),
-            hotkeys_installed: false,
             apps: AppLifecycle::default(),
         };
         (this, sender)
@@ -249,12 +275,8 @@ impl WmController {
                 }
             }
             AppEventsRegistered => {
+                _ = self.input_tx.send(input::Request::EnableHotkeys);
                 _ = self.input_tx.send(input::Request::SetEventProcessing(false));
-
-                if !self.hotkeys_installed {
-                    self.register_hotkeys();
-                    self.hotkeys_installed = true;
-                }
 
                 let sender = self.sender.clone();
                 let input_tx = self.input_tx.clone();
@@ -272,11 +294,11 @@ impl WmController {
             }
             DiscoverRunningApps => {
                 for (pid, info) in sys::app::running_apps(None) {
-                    self.new_app(pid, info);
+                    self.new_app(pid, info, AppDiscoverySource::Process);
                 }
             }
-            AppLaunch(pid, info) => {
-                self.new_app(pid, info);
+            AppLaunch(pid, info, source) => {
+                self.new_app(pid, info, source);
             }
             AppGloballyActivated(pid) => {
                 _ = self.input_tx.send(input::Request::EnforceHidden);
@@ -292,38 +314,15 @@ impl WmController {
             AppExited(pid, handle) => {
                 if let Some(relaunch) = self.apps.exited(pid, &handle) {
                     self.events_tx.send(Event::AppActorExited(pid, handle));
-                    if let Some(info) = relaunch {
-                        self.new_app(pid, info);
+                    if let Some((info, source)) = relaunch {
+                        self.new_app(pid, info, source);
                     }
                 }
             }
             ConfigUpdated(new_cfg) => {
-                let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
-
                 self.config.config = new_cfg;
 
                 _ = self.input_tx.send(input::Request::ConfigUpdated(self.config.config.clone()));
-
-                if !self.hotkeys_installed {
-                    debug!(
-                        "hotkeys not yet installed; deferring hotkey update until AppEventsRegistered"
-                    );
-                    return;
-                }
-
-                if let Some(old_ser) = old_keys_ser {
-                    if serde_json::to_string(&self.config.config.keys).ok().as_deref()
-                        != Some(&old_ser)
-                    {
-                        debug!("hotkey bindings changed; reloading hotkeys");
-                        self.register_hotkeys();
-                    } else {
-                        debug!("hotkey bindings unchanged; skipping reload");
-                    }
-                } else {
-                    debug!("could not compare hotkey bindings; reloading hotkeys");
-                    self.register_hotkeys();
-                }
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
@@ -333,6 +332,9 @@ impl WmController {
                 _ = self.input_tx.send(input::Request::KeyboardLayoutChanged);
             }
             Command(Wm(ReloadConfig)) => self.reload_config(),
+            Command(Wm(BindingMode(target))) => {
+                _ = self.input_tx.send(input::Request::SetBindingMode(target));
+            }
             Command(Wm(crate::actor::wm_controller::WmCmd::ToggleSpaceActivated)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Reactor(
                     reactor::ReactorCommand::ToggleSpaceActivated,
@@ -424,15 +426,20 @@ impl WmController {
         }
     }
 
-    fn new_app(&mut self, pid: pid_t, info: AppInfo) {
+    fn new_app(&mut self, pid: pid_t, info: AppInfo, source: AppDiscoverySource) {
         let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
             debug!(?pid, "Failed to resolve NSRunningApplication for new app");
             return;
         };
 
-        if running_app.activationPolicy() != NSApplicationActivationPolicy::Regular
-            && info.bundle_id.as_deref() != Some("com.apple.loginwindow")
-        {
+        let policy = running_app.activationPolicy();
+        if policy == NSApplicationActivationPolicy::Prohibited {
+            return;
+        }
+        if !should_spawn_app(policy, source) {
+            if policy != NSApplicationActivationPolicy::Accessory {
+                return;
+            }
             sys::app::ensure_activation_policy_observer(pid, running_app.clone(), info.clone());
             debug!(
                 pid = ?pid,
@@ -448,7 +455,18 @@ impl WmController {
         }
 
         if !running_app.isFinishedLaunching() {
-            sys::app::ensure_finished_launching_observer(pid, running_app.clone(), info.clone());
+            let override_handler = (source == AppDiscoverySource::WindowServer).then(|| {
+                let sender = self.sender.clone();
+                std::sync::Arc::new(move |pid, info| {
+                    sender.send(WmEvent::AppLaunch(pid, info, AppDiscoverySource::WindowServer));
+                }) as std::sync::Arc<dyn Fn(pid_t, AppInfo) + Send + Sync>
+            });
+            sys::app::ensure_finished_launching_observer(
+                pid,
+                running_app.clone(),
+                info.clone(),
+                override_handler,
+            );
             debug!(
                 pid = ?pid,
                 bundle = ?info.bundle_id,
@@ -462,7 +480,7 @@ impl WmController {
             }
         }
 
-        if let Some((handle, rx)) = self.apps.reserve(pid, info.clone()) {
+        if let Some((handle, rx)) = self.apps.reserve(pid, info.clone(), source) {
             actor::app::spawn_app_thread(
                 pid,
                 info,
@@ -473,13 +491,6 @@ impl WmController {
                 rx,
             );
         }
-    }
-
-    fn register_hotkeys(&mut self) {
-        debug!("register_hotkeys");
-        let bindings: Vec<(String, WmCommand)> =
-            self.config.config.key_specs.iter().cloned().collect();
-        _ = self.input_tx.send(input::Request::SetHotkeys(bindings));
     }
 
     fn reload_config(&self) {
@@ -535,6 +546,24 @@ mod app_lifecycle_tests {
     use super::*;
 
     #[test]
+    fn discovery_source_controls_activation_policy_admission() {
+        use AppDiscoverySource::{Process, WindowServer};
+        let regular = NSApplicationActivationPolicy::Regular;
+        let accessory = NSApplicationActivationPolicy::Accessory;
+        let prohibited = NSApplicationActivationPolicy::Prohibited;
+        for (policy, source, expected) in [
+            (regular, Process, true),
+            (regular, WindowServer, true),
+            (accessory, Process, false),
+            (accessory, WindowServer, true),
+            (prohibited, Process, false),
+            (prohibited, WindowServer, false),
+        ] {
+            assert_eq!(should_spawn_app(policy, source), expected);
+        }
+    }
+
+    #[test]
     fn dedupe_failure_termination_and_reuse() {
         for terminated in [false, true] {
             let mut apps = AppLifecycle::default();
@@ -542,18 +571,18 @@ mod app_lifecycle_tests {
                 bundle_id: None,
                 localized_name: None,
             };
-            let (old, mut rx) = apps.reserve(42, info()).unwrap();
-            assert!(apps.reserve(42, info()).is_none());
+            let (old, mut rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
+            assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
             if terminated {
                 apps.terminate(42);
                 assert!(matches!(rx.try_recv().unwrap().1, Request::Terminate));
-                assert!(apps.reserve(42, info()).is_none());
+                assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
             }
             assert!(apps.exited(42, &old).is_some());
-            let (new, _rx) = apps.reserve(42, info()).unwrap();
+            let (new, _rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
             assert!(apps.exited(42, &old).is_none());
             assert!(!new.same_actor(&old));
-            assert!(apps.reserve(42, info()).is_none());
+            assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
         }
     }
 }

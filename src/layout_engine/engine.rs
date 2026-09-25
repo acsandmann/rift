@@ -2,7 +2,9 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
+use rift_protocol::{
+    DirectionalDistance, FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -34,6 +36,26 @@ pub use rift_protocol::LayoutCommand;
 
 const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
 const SMART_FLOATING_HEIGHT_RATIO: f64 = 0.93;
+
+#[derive(Clone, Copy)]
+pub(crate) struct DropPreview {
+    pub frame: CGRect,
+    pub same_slot: bool,
+}
+
+impl DropPreview {
+    pub(crate) fn action(
+        self,
+        action: crate::layout_engine::WindowDropAction,
+        center: crate::common::config::MouseDropAction,
+    ) -> crate::layout_engine::WindowDropAction {
+        if self.same_slot && matches!(action, crate::layout_engine::WindowDropAction::Insert(_)) {
+            center.into()
+        } else {
+            action
+        }
+    }
+}
 
 fn requested_floating_frame(
     mut frame: CGRect,
@@ -244,9 +266,12 @@ impl LayoutEngine {
         screen: CGRect,
         display_uuid: Option<&str>,
         stack_line: &crate::common::config::StackLineSettings,
-    ) -> Option<CGRect> {
+    ) -> Option<DropPreview> {
         if action == crate::layout_engine::WindowDropAction::Swap {
-            return (source != target).then_some(target_frame);
+            return (source != target).then_some(DropPreview {
+                frame: target_frame,
+                same_slot: false,
+            });
         }
         let Some(workspace) = self.active_workspace(space) else {
             return None;
@@ -256,8 +281,9 @@ impl LayoutEngine {
         };
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
         let mut system = self.workspace_tree(workspace).preview_clone()?;
+        let before = system.window_slot(layout, source)?;
         system.apply_window_drop(layout, source, target, action).then_some(())?;
-        system
+        let frame = system
             .calculate_layout(
                 layout,
                 screen,
@@ -269,7 +295,33 @@ impl LayoutEngine {
                 stack_line.vert_placement,
             )
             .into_iter()
-            .find_map(|(window, frame)| (window == source).then_some(frame))
+            .find_map(|(window, frame)| (window == source).then_some(frame))?;
+        Some(DropPreview {
+            frame,
+            same_slot: system.window_slot(layout, source)? == before,
+        })
+    }
+
+    pub(crate) fn source_move_neighbors(&self, space: SpaceId, source: WindowId) -> [bool; 4] {
+        let Some(workspace) = self.active_workspace(space) else {
+            return [false; 4];
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace) else {
+            return [false; 4];
+        };
+        let baseline = self.workspace_tree(workspace);
+        let directions = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ];
+        directions.map(|direction| {
+            let Some(mut system) = baseline.preview_clone() else {
+                return false;
+            };
+            system.select_window(layout, source) && system.move_selection(layout, direction)
+        })
     }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
@@ -404,12 +456,7 @@ impl LayoutEngine {
 
         if mode == LayoutMode::Scrolling && self.layout_settings.scrolling.preserve_window_sizes {
             for &wid in &window_order {
-                if let (Some(frame), Some(constraints)) = (
-                    window_store.window(wid).map(|window| window.frame_monotonic),
-                    self.window_layout_constraints.get_mut(&wid),
-                ) {
-                    constraints.locked_width = frame.size.width;
-                }
+                self.preserve_scrolling_window_width(window_store, wid);
             }
         }
 
@@ -602,6 +649,7 @@ impl LayoutEngine {
                 }
                 LayoutSystemKind::Bsp(system) => {
                     system.set_window_insertion_point(insertion_point);
+                    system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
                 }
                 LayoutSystemKind::Stack(system) => {
                     system.update_settings(settings.stack.default_orientation, insertion_point);
@@ -1137,8 +1185,9 @@ impl LayoutEngine {
                 continue;
             }
             if let Some(candidate_center) = space_centers.get(&candidate_space) {
-                if let Some(delta) =
-                    Self::directional_delta(direction, current_center, candidate_center)
+                if let Some(delta) = (current_center.x, current_center.y)
+                    .distance_in_direction((candidate_center.x, candidate_center.y), direction)
+                    .filter(|distance| *distance > 0.0)
                 {
                     candidates.push((candidate_space, delta));
                 }
@@ -1158,31 +1207,6 @@ impl LayoutEngine {
                 visible_spaces.iter().copied().find(|&space| space != current_space)
             }
             Direction::Up | Direction::Down => None,
-        }
-    }
-
-    fn directional_delta(
-        direction: Direction,
-        current: &CGPoint,
-        candidate: &CGPoint,
-    ) -> Option<f64> {
-        match direction {
-            Direction::Left => {
-                let delta = current.x - candidate.x;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
-            Direction::Right => {
-                let delta = candidate.x - current.x;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
-            Direction::Up => {
-                let delta = candidate.y - current.y;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
-            Direction::Down => {
-                let delta = current.y - candidate.y;
-                if delta > 0.0 { Some(delta) } else { None }
-            }
         }
     }
 
@@ -1288,12 +1312,7 @@ impl LayoutEngine {
                     LayoutSystemKind::Scrolling(_)
                 ) && self.layout_settings.scrolling.preserve_window_sizes
                 {
-                    if let (Some(window), Some(constraints)) = (
-                        window_store.window(wid),
-                        self.window_layout_constraints.get_mut(&wid),
-                    ) {
-                        constraints.locked_width = window.frame_monotonic.size.width;
-                    }
+                    self.preserve_scrolling_window_width(window_store, wid);
                 }
                 self.workspace_tree_mut(assigned_workspace)
                     .add_window_after_selection(layout, wid);
@@ -1320,6 +1339,22 @@ impl LayoutEngine {
             .active(space, workspace)
             .expect("active layout for test ghost");
         self.workspace_tree_mut(workspace).add_window_after_selection(layout, wid);
+    fn preserve_scrolling_window_width(&mut self, window_store: &WindowStore, wid: WindowId) {
+        if let Some(window) = window_store.window(wid) {
+            let constraints = self.window_layout_constraints.entry(wid).or_insert_with(|| {
+                WindowLayoutConstraints {
+                    is_resizable: window.info.is_resizable,
+                    locked_height: window.frame_monotonic.size.height,
+                    min_width: window.info.min_size.map_or(0.0, |size| size.width),
+                    min_height: window.info.min_size.map_or(0.0, |size| size.height),
+                    max_width: window.info.max_size.map_or(0.0, |size| size.width),
+                    max_height: window.info.max_size.map_or(0.0, |size| size.height),
+                    ..Default::default()
+                }
+                .normalized()
+            });
+            constraints.locked_width = window.frame_monotonic.size.width;
+        }
     }
 
     fn remove_window_from_all_tiling_trees(&mut self, wid: WindowId) {
@@ -1348,7 +1383,7 @@ impl LayoutEngine {
             .is_some_and(|layout| self.workspace_tree(workspace_id).contains_window(layout, wid))
     }
 
-    fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
+    pub(crate) fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
         for space in self.workspace_layouts.spaces() {
             if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
                 if let Some(layout) = self.workspace_layouts.active(space, ws_id) {
@@ -1753,6 +1788,9 @@ impl LayoutEngine {
                 };
             }
             LayoutEvent::AppClosed(pid) => {
+                if self.focused_window.is_some_and(|wid| wid.pid == pid) {
+                    self.focused_window = None;
+                }
                 for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
                     ws.layout_system.remove_windows_for_app(pid);
                 }
@@ -2147,6 +2185,13 @@ impl LayoutEngine {
                             .visible_windows_under_selection(layout);
                         for wid in windows {
                             self.workspace_tree_mut(workspace_id).remove_window(wid);
+                            if matches!(
+                                self.workspace_tree(new_ws_id),
+                                LayoutSystemKind::Scrolling(_)
+                            ) && self.layout_settings.scrolling.preserve_window_sizes
+                            {
+                                self.preserve_scrolling_window_width(window_store, wid);
+                            }
                             self.workspace_tree_mut(new_ws_id)
                                 .add_window_after_selection(new_layout, wid);
                             self.virtual_workspace_manager.assign_window_to_workspace(
@@ -2828,6 +2873,13 @@ impl LayoutEngine {
                     if let Some(target_layout) =
                         self.workspace_layouts.active(op_space, target_workspace_id)
                     {
+                        if matches!(
+                            self.workspace_tree(target_workspace_id),
+                            LayoutSystemKind::Scrolling(_)
+                        ) && self.layout_settings.scrolling.preserve_window_sizes
+                        {
+                            self.preserve_scrolling_window_width(window_store, focused_window);
+                        }
                         self.workspace_tree_mut(target_workspace_id)
                             .add_window_after_selection(target_layout, focused_window);
                     }
@@ -3325,6 +3377,13 @@ impl LayoutEngine {
         } else if let Some(target_layout) =
             self.workspace_layouts.active(target_space, target_workspace_id)
         {
+            if matches!(
+                self.workspace_tree(target_workspace_id),
+                LayoutSystemKind::Scrolling(_)
+            ) && self.layout_settings.scrolling.preserve_window_sizes
+            {
+                self.preserve_scrolling_window_width(window_store, window_id);
+            }
             self.workspace_tree_mut(target_workspace_id)
                 .add_window_after_selection(target_layout, window_id);
         }
@@ -3638,6 +3697,32 @@ mod tests {
         assert_eq!(
             engine.next_space_for_direction(middle, Direction::Up, &visible_spaces, &centers),
             None
+        );
+
+        let upper = SpaceId::new(4);
+        let lower = SpaceId::new(5);
+        let mut vertical_centers = HashMap::default();
+        vertical_centers.insert(upper, CGPoint::new(960.0, -1080.0));
+        vertical_centers.insert(middle, CGPoint::new(960.0, 0.0));
+        vertical_centers.insert(lower, CGPoint::new(960.0, 1080.0));
+        let vertical_spaces = vec![lower, middle, upper];
+        assert_eq!(
+            engine.next_space_for_direction(
+                middle,
+                Direction::Up,
+                &vertical_spaces,
+                &vertical_centers
+            ),
+            Some(upper)
+        );
+        assert_eq!(
+            engine.next_space_for_direction(
+                middle,
+                Direction::Down,
+                &vertical_spaces,
+                &vertical_centers
+            ),
+            Some(lower)
         );
     }
 
@@ -4186,7 +4271,7 @@ mod tests {
         let visible_spaces = vec![current_space, upper_space];
         let mut visible_space_centers = HashMap::default();
         visible_space_centers.insert(current_space, CGPoint::new(960.0, 540.0));
-        visible_space_centers.insert(upper_space, CGPoint::new(960.0, 1620.0));
+        visible_space_centers.insert(upper_space, CGPoint::new(960.0, -540.0));
 
         let response = engine.handle_command(
             &mut window_store,

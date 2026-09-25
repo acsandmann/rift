@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use objc2::rc::Retained;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGColor;
-use objc2_quartz_core::CALayer;
+use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::actor::drag::{DropTarget, preview_frame};
 use crate::layout_engine::WindowDropAction;
@@ -23,6 +23,7 @@ static STACK_FILL: LazyLock<Retained<CGColor>> =
 
 const PREVIEW_CORNER_RADIUS: f64 = 12.0;
 const PREVIEW_BLUR_RADIUS: f64 = 6.0;
+const FADE_DURATION: f64 = 0.12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewStyle {
@@ -72,6 +73,7 @@ impl DragPreview {
             root.setOpaque(false);
             root.setGeometryFlipped(false);
             root.setMasksToBounds(true);
+            root.setOpacity(0.0);
             root.setCornerRadius(PREVIEW_CORNER_RADIUS);
             root.setBorderColor(Some(&BORDER));
             root.setBorderWidth(2.0);
@@ -85,7 +87,11 @@ impl DragPreview {
             tint.setBackgroundColor(Some(&FILL));
             root.addSublayer(&tint);
 
-            card.setHidden(style != PreviewStyle::Stack);
+            card.setOpacity(if style == PreviewStyle::Stack {
+                1.0
+            } else {
+                0.0
+            });
             card.setFrame(Self::card_frame(frame.size));
             card.setCornerRadius(8.0);
             card.setBackgroundColor(Some(&STACK_FILL));
@@ -125,21 +131,15 @@ impl DragPreview {
             return Ok(());
         }
 
-        if size_changed || style_changed {
+        if size_changed {
             with_disabled_actions(|| {
-                if size_changed {
-                    self.root.setBounds(Self::bounds(frame.size));
-                    if let Some(backdrop) = &self.backdrop {
-                        backdrop.setFrame(Self::bounds(frame.size));
-                    }
-                    self.tint.setFrame(Self::bounds(frame.size));
-                    self.card.setFrame(Self::card_frame(frame.size));
+                self.root.setBounds(Self::bounds(frame.size));
+                if let Some(backdrop) = &self.backdrop {
+                    backdrop.setFrame(Self::bounds(frame.size));
                 }
-                if style_changed {
-                    self.card.setHidden(style != PreviewStyle::Stack);
-                }
+                self.tint.setFrame(Self::bounds(frame.size));
+                self.card.setFrame(Self::card_frame(frame.size));
             });
-            self.style = style;
         }
 
         if frame_changed {
@@ -154,10 +154,6 @@ impl DragPreview {
             self.frame = frame;
         }
 
-        if size_changed || style_changed {
-            self.surface.flush();
-        }
-
         if ordering_changed {
             if !self.visible {
                 self.window.set_alpha(1.0)?;
@@ -165,12 +161,33 @@ impl DragPreview {
             self.window.order_above(Some(relative_window))?;
             self.relative_window = Some(relative_window);
         }
+        if style_changed || !self.visible {
+            CATransaction::begin();
+            CATransaction::setAnimationDuration(FADE_DURATION);
+            if style_changed {
+                self.card.setOpacity(if style == PreviewStyle::Stack {
+                    1.0
+                } else {
+                    0.0
+                });
+            }
+            if !self.visible {
+                self.root.setOpacity(1.0);
+            }
+            CATransaction::commit();
+            self.style = style;
+        }
+        if size_changed || style_changed || !self.visible {
+            self.surface.flush();
+        }
         self.visible = true;
         Ok(())
     }
 
     pub fn hide(&mut self) {
         if self.visible {
+            with_disabled_actions(|| self.root.setOpacity(0.0));
+            self.surface.flush();
             let _ = self.window.set_alpha(0.0);
             let _ = self.window.order_out();
             self.visible = false;

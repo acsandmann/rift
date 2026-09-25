@@ -214,14 +214,10 @@ vert_placement = "left"
 thickness = 20.0
 # spacing between the stack line and window edges (in px)
 spacing = 1.0
-
-# experimental mission control
-[settings.ui.mission_control]
-enabled = false
-# enable fade animation when entering/exiting mission control
-fade_enabled = false
-# native macos mission control fade is about 180ms
-fade_duration_ms = 180.0
+# RGBA components range from 0.0 to 1.0. Each color can be customized
+# selected_color = { r = 0.0, g = 0.5, b = 1.0, a = 1.0 }
+# unselected_color = { r = 0.8, g = 0.8, b = 0.8, a = 1.0 }
+# border_color = { r = 0.6, g = 0.6, b = 0.6, a = 1.0 }
 
 # Trackpad gestures
 [settings.gestures]
@@ -246,7 +242,7 @@ haptics_enabled = true
 haptic_pattern = "level_change"
 
 # Mouse move and tiled-window drop behavior
-[settings.mouse]
+[settings.drag_drop]
 # Disable to leave all mouse gestures entirely to macOS and applications.
 enabled = true
 # Modifier used with action1/action2: cmd | alt | shift | ctrl | fn.
@@ -256,7 +252,8 @@ modifier = "fn"
 action1 = "move"
 # Dropping in the center of another tiled window: swap | stack.
 # Dropping near an edge of another tiled window inserts on that side.
-# Dropping near an edge of the dragged window's vacated tile moves it one step, like move_node.
+# Dropping near an edge of the dragged window's vacated tile moves it one step, like move_node,
+# toward sides with no window to drop onto. An edge that would put it back in place acts like the center.
 drop_action = "swap"
 # Edge-zone depth. Must be between 0.10 and 0.45; 0.25 leaves a 50% x 50% center.
 drop_zone_fraction = 0.25
@@ -431,6 +428,9 @@ comb1 = "Alt + Shift"
 # - focus_window = { window_id = 123, window_server_id = 456 }
 # - show_mission_control_all / show_mission_control_current / dismiss_mission_control (this is rift's own mission control, not macOS's)
 
+# To enter a resize mode, add a binding to [keys] before declaring the mode.
+# "Alt + R" = { binding_mode = "resize" }
+
 # the following commands *only* work when the master stack layout is active
 # - adjust_master_ratio = 0.05 / adjust_master_count = 1
 # - promote_to_master / swap_master_stack
@@ -524,3 +524,12 @@ comb1 = "Alt + Shift"
 
 "Alt + Ctrl + S" = "serialize"
 "Alt + Ctrl + Q" = "save_and_exit"
+
+# Binding modes replace the active keymap until another mode is selected.
+# Keep all [keys] entries above the first [binding_modes.*] table: TOML table
+# headers set the scope for following entries, so later keys would belong to
+# the binding mode instead.
+# [binding_modes.resize]
+# "H" = { resize_window_shrink = "horizontal" }
+# "L" = { resize_window_grow = "horizontal" }
+# "Escape" = { binding_mode = "default" }

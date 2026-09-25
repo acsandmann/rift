@@ -14,7 +14,7 @@ use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, MouseSettings};
+use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::screen::SpaceId;
@@ -69,7 +69,7 @@ impl DragManager {
         self.externally_controlled_window = None;
     }
 
-    pub fn update_config(&mut self, config: MouseSettings) {
+    pub fn update_config(&mut self, config: DragDropSettings) {
         self.actor.update_config(config);
         self.preview_enabled = config.enabled && config.preview;
         if !config.enabled || !config.preview {
@@ -85,8 +85,10 @@ impl DragManager {
         if cfg!(test) {
             return;
         }
-        let Some(target) =
-            self.actor.target().filter(|_| self.preview_enabled && !self.preview_suppressed)
+        let Some(target) = self
+            .actor
+            .preview_target()
+            .filter(|_| self.preview_enabled && !self.preview_suppressed)
         else {
             self.hide_preview();
             return;
