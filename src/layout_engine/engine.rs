@@ -456,12 +456,7 @@ impl LayoutEngine {
 
         if mode == LayoutMode::Scrolling && self.layout_settings.scrolling.preserve_window_sizes {
             for &wid in &window_order {
-                if let (Some(frame), Some(constraints)) = (
-                    window_store.window(wid).map(|window| window.frame_monotonic),
-                    self.window_layout_constraints.get_mut(&wid),
-                ) {
-                    constraints.locked_width = frame.size.width;
-                }
+                self.preserve_scrolling_window_width(window_store, wid);
             }
         }
 
@@ -1314,12 +1309,7 @@ impl LayoutEngine {
                     LayoutSystemKind::Scrolling(_)
                 ) && self.layout_settings.scrolling.preserve_window_sizes
                 {
-                    if let (Some(window), Some(constraints)) = (
-                        window_store.window(wid),
-                        self.window_layout_constraints.get_mut(&wid),
-                    ) {
-                        constraints.locked_width = window.frame_monotonic.size.width;
-                    }
+                    self.preserve_scrolling_window_width(window_store, wid);
                 }
                 self.workspace_tree_mut(assigned_workspace)
                     .add_window_after_selection(layout, wid);
@@ -1332,6 +1322,24 @@ impl LayoutEngine {
         }
 
         self.space_with_window(wid) != active_space_before
+    }
+
+    fn preserve_scrolling_window_width(&mut self, window_store: &WindowStore, wid: WindowId) {
+        if let Some(window) = window_store.window(wid) {
+            let constraints = self.window_layout_constraints.entry(wid).or_insert_with(|| {
+                WindowLayoutConstraints {
+                    is_resizable: window.info.is_resizable,
+                    locked_height: window.frame_monotonic.size.height,
+                    min_width: window.info.min_size.map_or(0.0, |size| size.width),
+                    min_height: window.info.min_size.map_or(0.0, |size| size.height),
+                    max_width: window.info.max_size.map_or(0.0, |size| size.width),
+                    max_height: window.info.max_size.map_or(0.0, |size| size.height),
+                    ..Default::default()
+                }
+                .normalized()
+            });
+            constraints.locked_width = window.frame_monotonic.size.width;
+        }
     }
 
     fn remove_window_from_all_tiling_trees(&mut self, wid: WindowId) {
@@ -2162,6 +2170,13 @@ impl LayoutEngine {
                             .visible_windows_under_selection(layout);
                         for wid in windows {
                             self.workspace_tree_mut(workspace_id).remove_window(wid);
+                            if matches!(
+                                self.workspace_tree(new_ws_id),
+                                LayoutSystemKind::Scrolling(_)
+                            ) && self.layout_settings.scrolling.preserve_window_sizes
+                            {
+                                self.preserve_scrolling_window_width(window_store, wid);
+                            }
                             self.workspace_tree_mut(new_ws_id)
                                 .add_window_after_selection(new_layout, wid);
                             self.virtual_workspace_manager.assign_window_to_workspace(
@@ -2843,6 +2858,13 @@ impl LayoutEngine {
                     if let Some(target_layout) =
                         self.workspace_layouts.active(op_space, target_workspace_id)
                     {
+                        if matches!(
+                            self.workspace_tree(target_workspace_id),
+                            LayoutSystemKind::Scrolling(_)
+                        ) && self.layout_settings.scrolling.preserve_window_sizes
+                        {
+                            self.preserve_scrolling_window_width(window_store, focused_window);
+                        }
                         self.workspace_tree_mut(target_workspace_id)
                             .add_window_after_selection(target_layout, focused_window);
                     }
@@ -3340,6 +3362,13 @@ impl LayoutEngine {
         } else if let Some(target_layout) =
             self.workspace_layouts.active(target_space, target_workspace_id)
         {
+            if matches!(
+                self.workspace_tree(target_workspace_id),
+                LayoutSystemKind::Scrolling(_)
+            ) && self.layout_settings.scrolling.preserve_window_sizes
+            {
+                self.preserve_scrolling_window_width(window_store, window_id);
+            }
             self.workspace_tree_mut(target_workspace_id)
                 .add_window_after_selection(target_layout, window_id);
         }
