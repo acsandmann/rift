@@ -1339,6 +1339,8 @@ impl LayoutEngine {
             .active(space, workspace)
             .expect("active layout for test ghost");
         self.workspace_tree_mut(workspace).add_window_after_selection(layout, wid);
+    }
+
     fn preserve_scrolling_window_width(&mut self, window_store: &WindowStore, wid: WindowId) {
         if let Some(window) = window_store.window(wid) {
             let constraints = self.window_layout_constraints.entry(wid).or_insert_with(|| {
