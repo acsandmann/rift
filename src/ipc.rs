@@ -201,7 +201,7 @@ impl IpcRequestHandler {
             RiftRequest::ListCliSubscriptions => {
                 encode_success(self.server_state.list_cli_subscriptions())
             }
-            RiftRequest::ClaimWindow { window_id } => {
+            RiftRequest::ClaimWindow { window_id, flags } => {
                 let manager = crate::model::window_store::ExternalManagerId(client_port);
                 match self.reactor.try_borrow_mut() {
                     Ok(mut reactor) => {
@@ -212,7 +212,7 @@ impl IpcRequestHandler {
                         } else {
                             let wid =
                                 crate::actor::app::WindowId::new(window_id.pid, window_id.idx);
-                            match reactor.claim_window(wid, manager) {
+                            match reactor.claim_window(wid, manager, flags) {
                                 Ok(_) => {
                                     encode_success(serde_json::json!({ "claimed": window_id }))
                                 }

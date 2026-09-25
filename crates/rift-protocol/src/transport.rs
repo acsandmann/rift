@@ -3,6 +3,33 @@ use serde_json::Value;
 
 use crate::{EventKind, RiftCommand, WindowId};
 
+/// Behavior requested for the lifetime of an external window claim.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WindowClaimFlags(u32);
+
+impl WindowClaimFlags {
+    const SUPPORTED_BITS: u32 = Self::SUPPRESS_FOCUS_FOLLOWS_MOUSE.0;
+    pub const SUPPRESS_FOCUS_FOLLOWS_MOUSE: Self = Self(1 << 0);
+
+    pub const fn empty() -> Self { Self(0) }
+
+    pub const fn bits(self) -> u32 { self.0 }
+
+    pub const fn from_bits_retain(bits: u32) -> Self { Self(bits) }
+
+    pub const fn contains(self, other: Self) -> bool { self.0 & other.0 == other.0 }
+
+    pub const fn is_supported(self) -> bool { self.0 & !Self::SUPPORTED_BITS == 0 }
+}
+
+impl std::ops::BitOr for WindowClaimFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+}
+
 /// A request accepted by Rift's Mach IPC server.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,6 +53,8 @@ pub enum RiftRequest {
     },
     ClaimWindow {
         window_id: WindowId,
+        #[serde(default)]
+        flags: WindowClaimFlags,
     },
     ReleaseWindow {
         window_id: WindowId,
@@ -101,6 +130,7 @@ mod tests {
         for request in [
             RiftRequest::ClaimWindow {
                 window_id: WindowId { pid: 7, idx: 3 },
+                flags: WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE,
             },
             RiftRequest::ReleaseWindow {
                 window_id: WindowId { pid: 7, idx: 3 },
@@ -109,6 +139,36 @@ mod tests {
             let encoded = serde_json::to_string(&request).unwrap();
             assert_eq!(serde_json::from_str::<RiftRequest>(&encoded).unwrap(), request);
         }
+    }
+
+    #[test]
+    fn legacy_claim_defaults_to_empty_flags() {
+        let request: RiftRequest = serde_json::from_value(serde_json::json!({
+            "claim_window": { "window_id": { "pid": 7, "idx": 3 } }
+        }))
+        .unwrap();
+        assert_eq!(request, RiftRequest::ClaimWindow {
+            window_id: WindowId { pid: 7, idx: 3 },
+            flags: WindowClaimFlags::empty(),
+        });
+    }
+
+    #[test]
+    fn claim_flags_are_an_integer_on_the_wire() {
+        let request = RiftRequest::ClaimWindow {
+            window_id: WindowId { pid: 7, idx: 3 },
+            flags: WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE,
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["claim_window"]["flags"], 1);
+        assert_eq!(serde_json::from_value::<RiftRequest>(value).unwrap(), request);
+        let unknown = WindowClaimFlags::from_bits_retain(0x8000_0001);
+        assert_eq!(
+            serde_json::from_str::<WindowClaimFlags>(&serde_json::to_string(&unknown).unwrap())
+                .unwrap(),
+            unknown
+        );
+        assert!(!unknown.is_supported());
     }
 
     #[test]

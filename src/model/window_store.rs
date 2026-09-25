@@ -1,3 +1,4 @@
+use rift_protocol::WindowClaimFlags;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
@@ -35,7 +36,7 @@ pub struct PendingWindowOperation {
 #[derive(Debug, Default)]
 pub struct WindowRecord {
     state: Option<WindowState>,
-    external_manager: Option<ExternalManagerId>,
+    external_claim: Option<ExternalWindowClaim>,
     window_server_id: Option<WindowServerId>,
     native_space: Option<SpaceId>,
     workspace: Option<WindowWorkspaceInfo>,
@@ -47,7 +48,9 @@ pub struct WindowRecord {
 }
 
 impl WindowRecord {
-    pub(crate) fn external_manager(&self) -> Option<ExternalManagerId> { self.external_manager }
+    pub(crate) fn external_manager(&self) -> Option<ExternalManagerId> {
+        self.external_claim.map(|claim| claim.manager)
+    }
 
     /// Last frame observed from Accessibility/WindowServer.
     pub fn observed_frame(&self) -> Option<objc2_core_foundation::CGRect> {
@@ -68,7 +71,7 @@ impl WindowRecord {
         rule_override: Option<bool>,
     ) -> Option<bool> {
         self.state.as_ref().map(|state| {
-            self.external_manager.is_none() && state.is_admitted_with_override(rule_override)
+            self.external_claim.is_none() && state.is_admitted_with_override(rule_override)
         })
     }
 
@@ -87,6 +90,12 @@ impl WindowRecord {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExternalManagerId(pub(crate) u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExternalWindowClaim {
+    pub manager: ExternalManagerId,
+    pub flags: WindowClaimFlags,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeFullscreenTransition {
@@ -160,14 +169,14 @@ pub struct WindowStore {
 impl WindowStore {
     pub(crate) fn is_admitted(&self, window_id: WindowId) -> bool {
         self.record(window_id).is_some_and(|record| {
-            record.external_manager.is_none()
+            record.external_claim.is_none()
                 && record.state.as_ref().is_some_and(WindowState::is_admitted)
         })
     }
 
     pub(crate) fn can_reconcile_admission(&self, window_id: WindowId) -> bool {
         self.record(window_id).is_some_and(|record| {
-            record.external_manager.is_none()
+            record.external_claim.is_none()
                 && record.state.as_ref().is_some_and(WindowState::can_reconcile_admission)
         })
     }
@@ -176,16 +185,20 @@ impl WindowStore {
         self.record(window_id).and_then(WindowRecord::external_manager)
     }
 
-    pub(crate) fn set_external_manager(
+    pub(crate) fn external_claim(&self, window_id: WindowId) -> Option<ExternalWindowClaim> {
+        self.record(window_id).and_then(|record| record.external_claim)
+    }
+
+    pub(crate) fn set_external_claim(
         &mut self,
         window_id: WindowId,
-        manager: Option<ExternalManagerId>,
+        claim: Option<ExternalWindowClaim>,
     ) -> bool {
         let Some(record) = self.windows.get_mut(&window_id).filter(|record| record.state.is_some())
         else {
             return false;
         };
-        record.external_manager = manager;
+        record.external_claim = claim;
         true
     }
 
@@ -193,7 +206,7 @@ impl WindowStore {
         self.windows
             .iter()
             .filter_map(|(&id, record)| {
-                (record.state.is_some() && record.external_manager == Some(manager)).then_some(id)
+                (record.state.is_some() && record.external_manager() == Some(manager)).then_some(id)
             })
             .collect()
     }
@@ -792,26 +805,19 @@ impl WindowStore {
             return;
         }
 
-        let (
-            workspace,
-            rule_floating,
-            placement,
-            visibility,
-            pending,
-            generation,
-            external_manager,
-        ) = match self.windows.get(&from) {
-            Some(record) => (
-                record.workspace,
-                record.rule_floating,
-                record.placement,
-                record.visibility,
-                record.pending_operation,
-                record.operation_generation,
-                record.external_manager,
-            ),
-            None => return,
-        };
+        let (workspace, rule_floating, placement, visibility, pending, generation, external_claim) =
+            match self.windows.get(&from) {
+                Some(record) => (
+                    record.workspace,
+                    record.rule_floating,
+                    record.placement,
+                    record.visibility,
+                    record.pending_operation,
+                    record.operation_generation,
+                    record.external_claim,
+                ),
+                None => return,
+            };
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
@@ -832,14 +838,14 @@ impl WindowStore {
         target.visibility = visibility;
         target.pending_operation = pending;
         target.operation_generation = target.operation_generation.max(generation);
-        target.external_manager = external_manager;
+        target.external_claim = external_claim;
         self.app_windows.entry(to.pid).or_default().insert(to);
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
             source.rule_floating = false;
             source.pending_operation = None;
-            source.external_manager = None;
+            source.external_claim = None;
         }
 
         if let Some(original_window_id) = self.native_fullscreen_original_window(from)

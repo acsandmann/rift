@@ -22,4 +22,4 @@ pub use queries::{
     Rect, Size, WindowData, WindowId, WindowLayoutPosition, WorkspaceData, WorkspaceLayoutData,
 };
 pub use selectors::{DisplaySelector, RestoreScope, RestoreSource, WorkspaceSelector};
-pub use transport::{JsonRiftResponse, RiftRequest, RiftResponse};
+pub use transport::{JsonRiftResponse, RiftRequest, RiftResponse, WindowClaimFlags};

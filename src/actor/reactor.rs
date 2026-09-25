@@ -1212,10 +1212,11 @@ impl Reactor {
         match self.dispatch_workflow(event) {
             Ok(mut outcome) => {
                 let focused_window = self.main_window();
-                if focused_window != previously_focused_window
-                    && let Some(focused_window) = focused_window
-                {
-                    outcome = outcome.with_focused_window_broadcast(focused_window);
+                if focused_window != previously_focused_window {
+                    outcome = outcome.with_focus_follows_mouse_refresh();
+                    if let Some(focused_window) = focused_window {
+                        outcome = outcome.with_focused_window_broadcast(focused_window);
+                    }
                 }
                 self.apply_event_outcome(outcome);
             }
@@ -2663,12 +2664,28 @@ impl Reactor {
         &mut self,
         wid: WindowId,
         manager: crate::model::window_store::ExternalManagerId,
+        flags: rift_protocol::WindowClaimFlags,
     ) -> Result<bool, &'static str> {
+        if !flags.is_supported() {
+            return Err("Unsupported window claim flags");
+        }
         if !self.state.windows.contains_window(wid) {
             return Err("Window not found");
         }
-        match self.state.windows.external_manager(wid) {
-            Some(owner) if owner == manager => return Ok(false),
+        match self.state.windows.external_claim(wid) {
+            Some(claim) if claim.manager == manager => {
+                if claim.flags == flags {
+                    return Ok(false);
+                }
+                self.state.windows.set_external_claim(
+                    wid,
+                    Some(crate::model::window_store::ExternalWindowClaim { manager, flags }),
+                );
+                if self.main_window() == Some(wid) {
+                    self.update_focus_follows_mouse_state();
+                }
+                return Ok(true);
+            }
             Some(_) => return Err("Window owned by another external manager"),
             None => {}
         }
@@ -2676,10 +2693,16 @@ impl Reactor {
         let space = self
             .assigned_space_for_window_id(wid)
             .or_else(|| self.best_space_for_window_id(wid));
-        self.state.windows.set_external_manager(wid, Some(manager));
+        self.state.windows.set_external_claim(
+            wid,
+            Some(crate::model::window_store::ExternalWindowClaim { manager, flags }),
+        );
         self.send_layout_event(LayoutEvent::WindowRemoved(wid));
         if was_admitted && let Some(space) = space {
             self.update_layout_or_warn(false, false, Some(space));
+        }
+        if self.main_window() == Some(wid) {
+            self.update_focus_follows_mouse_state();
         }
         Ok(true)
     }
@@ -2699,7 +2722,7 @@ impl Reactor {
             }
             Some(_) => {}
         }
-        self.state.windows.set_external_manager(wid, None);
+        self.state.windows.set_external_claim(wid, None);
         if self.state.windows.is_admitted(wid)
             && let Some(space) = self
                 .authoritative_space_for_window_id(wid)
@@ -2707,6 +2730,9 @@ impl Reactor {
         {
             self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             self.update_layout_or_warn(false, false, Some(space));
+        }
+        if self.main_window() == Some(wid) {
+            self.update_focus_follows_mouse_state();
         }
         Ok(true)
     }
@@ -4861,7 +4887,15 @@ impl Reactor {
     fn update_focus_follows_mouse_state(&mut self) {
         let should_enable = self.config.settings.focus_follows_mouse
             && matches!(self.menu_manager.menu_state, MenuState::Closed)
-            && !self.is_mission_control_active();
+            && !self.is_mission_control_active()
+            && !self
+                .main_window()
+                .and_then(|wid| self.state.windows.external_claim(wid))
+                .is_some_and(|claim| {
+                    claim
+                        .flags
+                        .contains(rift_protocol::WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
+                });
         self.set_focus_follows_mouse_enabled(should_enable);
     }
 

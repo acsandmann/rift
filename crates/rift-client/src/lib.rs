@@ -268,7 +268,15 @@ pub struct WindowManagementSession {
 
 impl WindowManagementSession {
     pub fn claim_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
-        self.request(RiftRequest::ClaimWindow { window_id })
+        self.claim_window_with_flags(window_id, WindowClaimFlags::default())
+    }
+
+    pub fn claim_window_with_flags(
+        &mut self,
+        window_id: WindowId,
+        flags: WindowClaimFlags,
+    ) -> Result<(), ClientError> {
+        self.request(RiftRequest::ClaimWindow { window_id, flags })
     }
 
     pub fn release_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
