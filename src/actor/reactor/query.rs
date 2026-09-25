@@ -212,7 +212,7 @@ impl Reactor {
         }
     }
 
-    fn default_query_space(&self) -> Option<SpaceId> {
+    pub(super) fn default_query_space(&self) -> Option<SpaceId> {
         self.workspace_command_space()
             .or_else(|| self.active_display_space())
             .or_else(|| self.raw_command_space())

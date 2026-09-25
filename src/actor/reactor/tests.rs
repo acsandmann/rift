@@ -13,6 +13,34 @@ use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn startup_ready_waits_for_queryable_authoritative_space_and_fires_once() {
+    let mut reactor = test_reactor_with_workspace_count(9);
+    reactor.config.settings.default_disable = true;
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    reactor.startup_ready = Some(tx);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![None]));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert_eq!(rx.try_recv(), Ok(()));
+    assert!(reactor.startup_ready.is_none());
+    assert_eq!(reactor.test_default_query_space(), Some(space));
+    assert_eq!(reactor.query_workspaces(None).len(), 9);
+    assert_eq!(
+        reactor.query_layout_state(None, None).unwrap().space_id,
+        space.get()
+    );
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(reactor.startup_ready.is_none());
+}
+
+#[test]
 fn event_outcome_execution_keeps_phase_order() {
     let mut reactor = test_reactor();
     reactor.apply_event_outcome(EventOutcome::default());

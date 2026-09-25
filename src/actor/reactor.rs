@@ -83,6 +83,7 @@ pub use replay::{Record, replay};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use tokio::sync::oneshot;
 use tracing::{debug, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
@@ -422,6 +423,7 @@ pub struct Reactor {
     refresh_quarantine_manager: managers::RefreshQuarantineManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
+    startup_ready: Option<oneshot::Sender<()>>,
     pub animation_tx: Option<AnimationSender>,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
@@ -439,8 +441,9 @@ impl Reactor {
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
         native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> ReactorHandle {
+    ) -> (ReactorHandle, oneshot::Receiver<()>) {
         let (events_tx, events) = actor::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
         let events_tx_clone = events_tx.clone();
         let mut reactor = Reactor::new(
             config,
@@ -450,6 +453,7 @@ impl Reactor {
             window_notify,
             one_space,
         );
+        reactor.startup_ready = Some(ready_tx);
         reactor.drag_manager.native_motion_active = native_motion_active;
         reactor.communication_manager.input_tx = Some(input_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
@@ -462,7 +466,7 @@ impl Reactor {
                 Executor::run(Reactor::run(reactor, events, events_tx_clone));
             })
             .unwrap();
-        ReactorHandle::new(events_tx, query_handle)
+        (ReactorHandle::new(events_tx, query_handle), ready_rx)
     }
 
     pub fn new(
@@ -552,6 +556,7 @@ impl Reactor {
                 pending_space_change: None,
             },
             active_spaces: HashSet::default(),
+            startup_ready: None,
             animation_tx: None,
             #[cfg(test)]
             event_outcome_phase_trace: Vec::new(),
@@ -1208,6 +1213,7 @@ impl Reactor {
     fn handle_event_traced(&mut self, event: Event) { self.handle_event_inner(event) }
 
     fn handle_event_inner(&mut self, event: Event) {
+        let may_make_ready = matches!(&event, Event::SpaceStateChanged(_));
         let previously_focused_window = self.main_window();
         match self.dispatch_workflow(event) {
             Ok(mut outcome) => {
@@ -1218,6 +1224,16 @@ impl Reactor {
                     outcome = outcome.with_focused_window_broadcast(focused_window);
                 }
                 self.apply_event_outcome(outcome);
+                if may_make_ready
+                    && self.startup_ready.is_some()
+                    && let Some(space) = self.default_query_space()
+                    && self.space_state.screen_by_space(space).is_some()
+                {
+                    self.expose_space_if_known(space);
+                    if let Some(tx) = self.startup_ready.take() {
+                        let _ = tx.send(());
+                    }
+                }
             }
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
