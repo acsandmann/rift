@@ -5526,6 +5526,65 @@ fn stale_cleanup_uses_ordered_state_instead_of_cached_visibility() {
         unknown_suitability_stale.is_empty(),
         "an unavailable suitability query must not remove a valid layout node",
     );
+
+    reactor.state.windows.mark_window_hidden(wsid);
+    let mut no_metadata = snapshot(None, None);
+    no_metadata.server_observations.get_mut(&wsid).unwrap().info = None;
+    assert!(
+        window_discovery::identify_stale_windows(&reactor.state, wid.pid, &[], &no_metadata)
+            .is_empty(),
+        "empty inventory and unknown native state must preserve the last window",
+    );
+    no_metadata.server_observations.get_mut(&wsid).unwrap().ordered_in = Some(false);
+    assert_eq!(
+        window_discovery::identify_stale_windows(&reactor.state, wid.pid, &[], &no_metadata),
+        vec![wid],
+        "explicit negative native evidence must work without frame metadata",
+    );
+}
+
+#[test]
+fn empty_inventory_retires_last_ordered_out_window_without_cached_visibility() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    reactor.state.windows.mark_window_hidden(wsid);
+    assert!(!reactor.state.windows.is_window_visible(wsid));
+
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert!(reactor.state.windows.record(wid).is_none());
+    assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
+}
+
+#[test]
+fn window_hidden_requests_inventory_and_defers_during_display_churn() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::DisplayChurnBegin);
+    reactor.handle_event(Event::WindowServerHidden(wsid));
+    assert!(reactor.state.windows.contains_window(wid));
+    assert!(apps.requests().is_empty());
+    assert!(reactor.window_inventory_manager.pending.contains(&wid.pid));
+
+    reactor.handle_event(Event::DisplayChurnEnd);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(
+        apps.requests()
+            .iter()
+            .any(|request| matches!(request, Request::RefreshWindowInventory(_)))
+    );
 }
 
 #[test]
