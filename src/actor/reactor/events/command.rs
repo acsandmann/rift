@@ -332,7 +332,7 @@ pub struct DisplayFocusPayload {
     pub focus_window_center: Option<objc2_core_foundation::CGPoint>,
 }
 
-fn focus_window_raise_request(apps: &AppManager, window: WindowId) -> raise_manager::Event {
+pub(crate) fn focus_window_raise_request(apps: &AppManager, window: WindowId) -> raise_manager::Event {
     let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
     if let Some(app) = apps.apps.get(&window.pid) {
         app_handles.insert(window.pid, app.handle.clone());

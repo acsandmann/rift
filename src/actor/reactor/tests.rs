@@ -5863,6 +5863,393 @@ fn closing_focused_app_refocuses_surviving_app() {
 }
 
 #[test]
+fn discovery_with_new_window_focuses_new_instead_of_stale_main() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old = WindowId::new(1, 1);
+    let new = WindowId::new(1, 2);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(old));
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(old));
+
+    let active_workspace = reactor.layout_manager.layout_engine.active_workspace(space).unwrap();
+    let other_workspace =
+        reactor.test_workspace_ids(space).into_iter().find(|workspace| *workspace != active_workspace).unwrap();
+    assert!(reactor.assign_test_window_to_workspace(space, old, other_workspace));
+
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    let mut info = make_window(2);
+    let new_wsid = WindowServerId::new(10_002);
+    info.sys_id = Some(new_wsid);
+    crate::sys::window_server::set_window_spaces_override(new_wsid, Some(vec![space.get()]));
+    reactor.discover_test_windows(1, vec![(new, info)], vec![old, new]);
+    crate::sys::window_server::set_window_spaces_override(new_wsid, None);
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(new),
+        "discovery admitting a new window must focus it instead of replaying the stale main window"
+    );
+    let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
+        .map(|(_, event)| event)
+        .collect();
+    assert!(
+        !requests.iter().any(|event| matches!(
+            event,
+            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
+                if *wid == old
+        )),
+        "discovery must not request focus for the stale window: {requests:?}"
+    );
+}
+
+#[test]
+fn discovery_without_new_windows_keeps_main_window_focus_sync() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let pid = 1;
+    let focused = WindowId::new(pid, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(focused));
+
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(pid, 2)));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(WindowId::new(pid, 2))
+    );
+
+    reactor.discover_test_windows(pid, vec![], vec![focused, WindowId::new(pid, 2)]);
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(focused),
+        "click-to-focus sync without new windows must keep restoring the main window"
+    );
+}
+
+#[test]
+fn created_workspace_gets_layout_on_switch_so_new_windows_tile_and_focus() {
+    let mut reactor = test_reactor_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(4242);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.add_test_app(1);
+    reactor.handle_test_layout_command(LayoutCommand::CreateWorkspace);
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(2));
+
+    reactor.add_test_window(wid, wsid, Some(space), screen);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, wid),
+        "a window opened on a freshly created workspace must enter the tiling tree"
+    );
+
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(wid),
+        "a window on a freshly created workspace must be focusable"
+    );
+}
+
+#[test]
+fn created_window_of_frontmost_app_takes_focus_in_layout_and_raise() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old = WindowId::new(1, 1);
+    let new = WindowId::new(1, 2);
+    let new_wsid = WindowServerId::new(10_002);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(old));
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(old));
+
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    let mut info = make_window(2);
+    info.sys_id = Some(new_wsid);
+    let ws_info = WindowServerInfo {
+        id: new_wsid,
+        pid: 1,
+        layer: 0,
+        frame: info.frame,
+        min_frame: info.frame.size,
+        max_frame: info.frame.size,
+    };
+    reactor.handle_event(Event::WindowCreated(new, info, Some(ws_info), Some(MouseState::Up)));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(new),
+        "a newborn frontmost-app window must take layout focus immediately"
+    );
+    let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
+        .map(|(_, event)| event)
+        .collect();
+    assert!(
+        requests.iter().any(|event| matches!(
+            event,
+            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
+                if *wid == new
+        )),
+        "a newborn frontmost-app window must be re-keyed natively: {requests:?}"
+    );
+}
+
+#[test]
+fn created_window_of_background_app_does_not_steal_focus() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old = WindowId::new(1, 1);
+    let background = WindowId::new(2, 1);
+    let background_wsid = WindowServerId::new(20_001);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(old));
+    reactor.add_test_app(2);
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(old));
+
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    let mut info = make_window(1);
+    info.sys_id = Some(background_wsid);
+    let ws_info = WindowServerInfo {
+        id: background_wsid,
+        pid: 2,
+        layer: 0,
+        frame: info.frame,
+        min_frame: info.frame.size,
+        max_frame: info.frame.size,
+    };
+    reactor.handle_event(Event::WindowCreated(
+        background,
+        info,
+        Some(ws_info),
+        Some(MouseState::Up),
+    ));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(old),
+        "a background window must not steal layout focus"
+    );
+    assert!(
+        raise_manager_rx.try_recv().is_err(),
+        "a background window must not request a native re-key"
+    );
+}
+
+#[test]
+fn terminated_app_drops_pending_autofocus() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old = WindowId::new(1, 1);
+    let new = WindowId::new(2, 1);
+    let new_wsid = WindowServerId::new(20_001);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(old));
+    reactor.add_test_app(2);
+
+    let mut info = make_window(1);
+    info.sys_id = Some(new_wsid);
+    let ws_info = WindowServerInfo {
+        id: new_wsid,
+        pid: 2,
+        layer: 0,
+        frame: info.frame,
+        min_frame: info.frame.size,
+        max_frame: info.frame.size,
+    };
+    reactor.handle_event(Event::WindowCreated(new, info, Some(ws_info), Some(MouseState::Up)));
+    assert!(reactor.pending_created_focus.contains_key(&2));
+
+    reactor.handle_event(Event::ApplicationThreadTerminated(2));
+
+    assert!(
+        !reactor.pending_created_focus.contains_key(&2),
+        "terminating the app must drop its remembered newborn windows"
+    );
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(old),
+        "a terminated app must not autofocus on late activation"
+    );
+}
+
+#[test]
+fn destroyed_window_drops_pending_autofocus() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old = WindowId::new(1, 1);
+    let new = WindowId::new(2, 1);
+    let new_wsid = WindowServerId::new(20_001);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(old));
+    reactor.add_test_app(2);
+
+    let mut info = make_window(1);
+    info.sys_id = Some(new_wsid);
+    let ws_info = WindowServerInfo {
+        id: new_wsid,
+        pid: 2,
+        layer: 0,
+        frame: info.frame,
+        min_frame: info.frame.size,
+        max_frame: info.frame.size,
+    };
+    reactor.handle_event(Event::WindowCreated(new, info, Some(ws_info), Some(MouseState::Up)));
+    assert!(reactor.pending_created_focus.contains_key(&2));
+
+    reactor.handle_event(Event::WindowDestroyed(new));
+
+    assert!(
+        !reactor.pending_created_focus.contains_key(&2),
+        "destroying the window must drop its remembered autofocus"
+    );
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(old),
+        "a destroyed window must not autofocus on late activation"
+    );
+}
+
+#[test]
+fn created_window_before_activation_focuses_on_global_activation() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old = WindowId::new(1, 1);
+    let new = WindowId::new(2, 1);
+    let new_wsid = WindowServerId::new(20_001);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(old));
+    reactor.add_test_app(2);
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(old));
+
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    // Kitty opens a window while Chrome is still frontmost: creation wins the
+    // race against activation, so nothing may focus yet.
+    let mut info = make_window(1);
+    info.sys_id = Some(new_wsid);
+    let ws_info = WindowServerInfo {
+        id: new_wsid,
+        pid: 2,
+        layer: 0,
+        frame: info.frame,
+        min_frame: info.frame.size,
+        max_frame: info.frame.size,
+    };
+    reactor.handle_event(Event::WindowCreated(new, info, Some(ws_info), Some(MouseState::Up)));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(old),
+        "a not-yet-activated window must not steal layout focus at creation"
+    );
+    assert!(
+        raise_manager_rx.try_recv().is_err(),
+        "a not-yet-activated window must not request a native re-key at creation"
+    );
+
+    // The brokered activation lands after creation; the remembered window must
+    // take focus now instead of the stale main window.
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(new),
+        "activation must finish the autofocus of the remembered newborn window"
+    );
+    let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
+        .map(|(_, event)| event)
+        .collect();
+    assert!(
+        requests.iter().any(|event| matches!(
+            event,
+            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
+                if *wid == new
+        )),
+        "activation must re-key the remembered newborn window: {requests:?}"
+    );
+}
+
+#[test]
+fn app_activation_does_not_follow_stale_main_when_layout_focuses_new_window() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old = WindowId::new(1, 1);
+    let new = WindowId::new(1, 2);
+    let new_wsid = WindowServerId::new(10_002);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(old));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+
+    // A newborn window on the active workspace takes focus via autofocus while
+    // the tracked main window stays stale (old).
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    while raise_manager_rx.try_recv().is_ok() {}
+    let mut info = make_window(2);
+    info.sys_id = Some(new_wsid);
+    let ws_info = WindowServerInfo {
+        id: new_wsid,
+        pid: 1,
+        layer: 0,
+        frame: info.frame,
+        min_frame: info.frame.size,
+        max_frame: info.frame.size,
+    };
+    reactor.handle_event(Event::WindowCreated(new, info, Some(ws_info), Some(MouseState::Up)));
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(new));
+    assert_eq!(reactor.main_window(), Some(old));
+    let active_workspace = reactor.layout_manager.layout_engine.active_workspace(space).unwrap();
+
+    // The brokered activation resolves to the stale main window; it must not
+    // yank the active workspace back to the old window.
+    reactor.handle_event(Event::ApplicationActivated(1, Quiet::No));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(space),
+        Some(active_workspace),
+        "activation must not follow the stale main window off the active workspace"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(new),
+        "activation must not refocus the stale main window"
+    );
+    while raise_manager_rx.try_recv().is_ok() {}
+}
+
+#[test]
 fn genuine_close_during_sleep_recovery_does_not_leave_layout_ghost() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

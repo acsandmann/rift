@@ -422,6 +422,8 @@ pub struct Reactor {
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
+    pending_created_focus: HashMap<pid_t, Vec<WindowId>>,
+    recent_autofocus: HashSet<WindowId>,
     refresh_quarantine_manager: managers::RefreshQuarantineManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
@@ -545,6 +547,8 @@ impl Reactor {
                 stale_cleanup_state: StaleCleanupState::Enabled,
                 refocus_state: RefocusState::None,
             },
+            pending_created_focus: HashMap::default(),
+            recent_autofocus: HashSet::default(),
             refresh_quarantine_manager: managers::RefreshQuarantineManager {
                 sleeping: false,
                 session_inactive: false,
@@ -1351,6 +1355,8 @@ impl Reactor {
             Event::ApplicationThreadTerminated(pid) => {
                 self.forget_window_inventory(pid);
                 self.clear_menu_state_for_pid(pid);
+                self.pending_created_focus.remove(&pid);
+                self.recent_autofocus.retain(|wid| wid.pid != pid);
                 return application_workflow::handle_application_thread_terminated(
                     &mut self.app_manager,
                     pid,
@@ -1386,6 +1392,10 @@ impl Reactor {
                 }
                 // The app thread will resolve the current AX main window and
                 // emit ApplicationActivated. Do not replay cached focus here.
+                // A window created just before this activation lost the
+                // creation-time autofocus race; finish it now that the app is
+                // frontmost.
+                self.autofocus_pending_created_windows(pid);
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
@@ -1477,6 +1487,7 @@ impl Reactor {
                 if self.refreshes_blocked() {
                     return Ok(EventOutcome::default());
                 }
+                self.forget_autofocus_window(wid);
 
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
@@ -1491,6 +1502,7 @@ impl Reactor {
                 let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
                     return Ok(EventOutcome::default());
                 };
+                self.forget_autofocus_window(wid);
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
@@ -2395,6 +2407,7 @@ impl Reactor {
                 }
                 if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                    self.autofocus_created_window(window, space);
                 }
             }
         }
@@ -3233,7 +3246,15 @@ impl Reactor {
             observed_windows,
         );
         outcome.absorb(process_outcome);
+        let new_ids: Vec<WindowId> =
+            new_windows.iter().map(|(wid, _)| *wid).collect();
         window_discovery::update_window_states(&mut self.state, new_windows);
+        let newly_admitted: Vec<WindowId> = new_ids
+            .into_iter()
+            .filter(|wid| {
+                self.state.windows.window(*wid).is_some_and(WindowState::is_admitted)
+            })
+            .collect();
 
         let candidate_windows: HashSet<WindowId> = self
             .state
@@ -3259,7 +3280,7 @@ impl Reactor {
             .filter_map(|screen| screen.space)
             .filter(|space| self.is_space_active(*space))
             .collect();
-        let focused_window = self.focused_window_for_discovery(pid);
+        let focused_window = self.focused_window_for_discovery(pid, &newly_admitted);
         outcome.absorb(window_discovery::emit_layout_events(
             &mut self.state,
             &mut self.layout_manager,
@@ -4370,6 +4391,23 @@ impl Reactor {
         // so a missing main window means there is no authoritative switch
         // target. Picking an arbitrary window for the process is especially
         // unsafe for apps whose windows span multiple virtual workspaces.
+        //
+        // The main window can also lag a just-opened window (single-instance
+        // launchers broker activation through the existing process, so macOS
+        // keys the old window). If layout just autofocused a window of this app
+        // on an active space, there is nowhere to follow.
+        if let Some(focused) = self.layout_manager.layout_engine.focused_window()
+            && focused.pid == pid
+            && self.is_window_on_active_space(focused)
+            && self.state.windows.window(focused).is_some_and(WindowState::is_admitted)
+            && self.is_recently_autofocused(focused)
+        {
+            debug!(
+                "Skipping auto workspace switch for pid {} after fresh autofocus",
+                pid
+            );
+            return EventOutcome::no_change();
+        }
         let app_window =
             self.main_window().filter(|wid| wid.pid == pid && self.window_is_standard(*wid));
 
@@ -4450,6 +4488,16 @@ impl Reactor {
                 RefocusState::Pending(space) => Some(space),
                 RefocusState::None => None,
             };
+        if let Some(space) = workspace_switch_space
+            && let Some(size) =
+                self.space_state.screen_by_space(space).map(|screen| screen.frame.size)
+        {
+            // A switch can land on a workspace created after the last expose, which
+            // has no layout object yet; without one its windows never enter the
+            // tiling tree and every focus for them is ignored. Heal it up front so
+            // focus resolution below sees the new active workspace's tree.
+            self.layout_manager.layout_engine.ensure_workspace_layouts(space, size);
+        }
         let layout::EventResponse {
             changed: _,
             raise_windows,
@@ -4983,10 +5031,158 @@ impl Reactor {
     /// the layout, but it must never replay another application's global main
     /// window. Requiring the command space also prevents a refresh racing an
     /// active-display change from restoring focus on the display being left.
-    fn focused_window_for_discovery(&self, pid: pid_t) -> Option<(SpaceId, WindowId)> {
+    ///
+    /// When the frontmost app's batch admits new windows, macOS's main window still points at
+    /// the app's old window (worse with single-instance launchers), so a
+    /// synthetic focus for it would race back to the old workspace. Prefer the
+    /// native key window then, falling back to the newest admitted window.
+    /// Batches without new windows (e.g. click-to-focus sync) keep the
+    /// main-window behavior.
+    fn focused_window_for_discovery(
+        &self,
+        pid: pid_t,
+        newly_admitted: &[WindowId],
+    ) -> Option<(SpaceId, WindowId)> {
+        if !newly_admitted.is_empty()
+            && self.main_window_tracker.is_globally_frontmost(pid)
+        {
+            let main = self.main_window().filter(|window| window.pid == pid);
+            if main.is_none_or(|window| !newly_admitted.contains(&window)) {
+                if let Some(key_focus) = self.key_window_for_discovery(pid) {
+                    return Some(key_focus);
+                }
+                if let Some(new_focus) = self.newest_window_for_discovery(newly_admitted) {
+                    return Some(new_focus);
+                }
+                // New windows exist but none are focusable; suppress the stale
+                // main window and let native focus reconcile instead.
+                return None;
+            }
+        }
         let window = self.main_window().filter(|window| window.pid == pid)?;
         let space = self.main_window_space()?;
         (self.workspace_command_space() == Some(space)).then_some((space, window))
+    }
+
+    fn key_window_for_discovery(&self, pid: pid_t) -> Option<(SpaceId, WindowId)> {
+        let mut spaces = Vec::new();
+        if let Some(command) = self.workspace_command_space() {
+            spaces.push(command);
+        }
+        for space in self.iter_active_spaces() {
+            if !spaces.contains(&space) {
+                spaces.push(space);
+            }
+        }
+        for space in spaces {
+            let Some(key) = window_server::key_focused_window(space) else {
+                continue;
+            };
+            if key.pid != pid {
+                continue;
+            }
+            if !self.state.windows.window(key).is_some_and(WindowState::is_admitted) {
+                continue;
+            }
+            if !self.is_space_active(space) {
+                continue;
+            }
+            return Some((space, key));
+        }
+        None
+    }
+
+    fn newest_window_for_discovery(
+        &self,
+        newly_admitted: &[WindowId],
+    ) -> Option<(SpaceId, WindowId)> {
+        let mut candidates: Vec<(SpaceId, WindowId)> = newly_admitted
+            .iter()
+            .copied()
+            .filter_map(|wid| self.best_space_for_window_id(wid).map(|space| (space, wid)))
+            .collect();
+        candidates.sort_by_key(|(_, wid)| wid.idx.get());
+        candidates.pop().filter(|(space, _)| {
+            self.workspace_command_space() == Some(*space) || self.is_space_active(*space)
+        })
+    }
+
+    /// Drop autofocus marks for a window that is going away. Marks for
+    /// preserved windows (e.g. across AX churn) clear on their next lifecycle
+    /// transition instead.
+    fn forget_autofocus_window(&mut self, window: WindowId) {
+        self.recent_autofocus.remove(&window);
+        self.pending_created_focus.retain(|_, windows| {
+            windows.retain(|wid| *wid != window);
+            !windows.is_empty()
+        });
+    }
+
+    /// Focus a newborn window in layout and natively, but only when its app is
+    /// frontmost and the window landed on an active space. Single-instance
+    /// launchers broker activation through the existing process, so macOS keys
+    /// the app's *old* window; without an explicit re-key the new window loses
+    /// the race and the old workspace stays visible. Background windows must
+    /// never steal focus this way.
+    ///
+    /// Creation can also win the race against activation: when the app is not
+    /// frontmost yet, the window is remembered and focused when its global
+    /// activation arrives (see `autofocus_pending_created_windows`).
+    fn autofocus_created_window(&mut self, window: WindowId, space: SpaceId) {
+        if !self.main_window_tracker.is_globally_frontmost(window.pid) {
+            debug!(?window, "Remembering newborn window for autofocus on activation");
+            self.remember_created_window_for_autofocus(window);
+            return;
+        }
+        self.focus_new_window(window, space);
+    }
+
+    fn focus_new_window(&mut self, window: WindowId, space: SpaceId) {
+        if self.is_in_drag() || self.is_mission_control_active() {
+            debug!(?window, "Skipping newborn autofocus during drag or Mission Control");
+            return;
+        }
+        debug!(?window, ?space, "Autofocusing newborn window");
+        self.recent_autofocus.insert(window);
+        self.send_layout_event(LayoutEvent::WindowFocused(space, window));
+        let msg =
+            command_workflow::focus_window_raise_request(&self.app_manager, window);
+        if let Err(error) = self.communication_manager.raise_manager_tx.try_send(msg) {
+            warn!(%error, "failed to send autofocus raise request");
+        }
+    }
+
+    /// Whether this window was claimed by a newborn autofocus that nothing has
+    /// superseded. Used to suppress a stale follow, never to grant focus.
+    fn is_recently_autofocused(&self, window: WindowId) -> bool {
+        self.recent_autofocus.contains(&window)
+    }
+
+    fn remember_created_window_for_autofocus(&mut self, window: WindowId) {
+        let pending = self.pending_created_focus.entry(window.pid).or_default();
+        if !pending.contains(&window) {
+            pending.push(window);
+        }
+    }
+
+    /// Focus windows that were created just before their app finished
+    /// activating. Oldest first so the newest newborn ends up focused.
+    fn autofocus_pending_created_windows(&mut self, pid: pid_t) {
+        let Some(pending) = self.pending_created_focus.remove(&pid) else {
+            return;
+        };
+        debug!(pid, pending = pending.len(), "Firing remembered newborn autofocus");
+        for wid in pending {
+            if !self.state.windows.window(wid).is_some_and(WindowState::is_admitted) {
+                continue;
+            }
+            let Some(space) =
+                self.best_space_for_window_id(wid).filter(|space| self.is_space_active(*space))
+            else {
+                continue;
+            };
+            self.focus_new_window(wid, space);
+        }
     }
 
     fn raw_command_space(&self) -> Option<SpaceId> { self.space_state.command_space }

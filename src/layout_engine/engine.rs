@@ -3303,7 +3303,7 @@ impl LayoutEngine {
         }
     }
 
-    fn ensure_workspace_layouts(&mut self, space: SpaceId, screen_size: CGSize) {
+    pub(crate) fn ensure_workspace_layouts(&mut self, space: SpaceId, screen_size: CGSize) {
         for (workspace_id, _) in self.virtual_workspace_manager.list_workspaces(space) {
             let tree = &mut self.virtual_workspace_manager.workspaces[workspace_id].layout_system;
             self.workspace_layouts.ensure_active_for_workspace(
