@@ -352,14 +352,45 @@ impl Default for ScrollingLayoutSystem {
 
 impl ScrollingLayoutSystem {
     pub fn new(settings: &ScrollingLayoutSettings) -> Self {
+        let mut settings = settings.clone();
+        settings.per_display.clear();
         Self {
             layouts: Default::default(),
-            settings: settings.clone(),
+            settings,
         }
     }
 
     pub fn update_settings(&mut self, settings: &ScrollingLayoutSettings) {
+        self.rebase_default(settings.column_width_ratio);
         self.settings = settings.clone();
+        self.settings.per_display.clear();
+    }
+
+    pub fn update_width_settings(&mut self, (ratio, min, max): (f64, f64, f64)) {
+        self.rebase_default(ratio);
+        self.settings.column_width_ratio = ratio;
+        self.settings.min_column_width_ratio = min;
+        self.settings.max_column_width_ratio = max;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_widths(&self) -> (f64, f64, f64) {
+        (
+            self.settings.column_width_ratio,
+            self.settings.min_column_width_ratio,
+            self.settings.max_column_width_ratio,
+        )
+    }
+
+    fn rebase_default(&mut self, new_default: f64) {
+        let old_default = self.settings.column_width_ratio;
+        if old_default != new_default {
+            for state in self.layouts.values_mut() {
+                if state.column_width_ratio == old_default {
+                    state.column_width_ratio = new_default;
+                }
+            }
+        }
     }
 
     fn insert_new_column(
@@ -1891,10 +1922,77 @@ mod tests {
     use super::{Column, ScrollingLayoutSystem};
     use crate::actor::app::{WindowId, pid_t};
     use crate::common::collections::HashMap;
-    use crate::common::config::{GapSettings, ScrollingLayoutSettings, WindowInsertionPoint};
+    use crate::common::config::{
+        GapSettings, ScrollingLayoutSettings, ScrollingWidthOverride, WindowInsertionPoint,
+    };
     use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
     use crate::layout_engine::utils::compute_tiling_area;
     use crate::layout_engine::{Direction, LayoutId, ResizeOrientation};
+
+    #[test]
+    fn display_default_rebases_untouched_layout_and_preserves_column_offset() {
+        let mut system = ScrollingLayoutSystem::default();
+        let layout = system.create_layout();
+        let first = wid(1, 1);
+        system.add_window_after_selection(layout, first);
+        system.add_window_after_selection(layout, wid(1, 2));
+        system.layouts[layout].columns[0].width_offset = 0.12;
+        system.update_width_settings((0.5, 0.2, 0.8));
+        assert_eq!(system.layouts[layout].column_width_ratio, 0.5);
+        assert_eq!(system.layouts[layout].columns[0].width_offset, 0.12);
+        assert_eq!(
+            frame_for(
+                &render(&system, layout, screen(1000.0, 800.0), &GapSettings::default()),
+                first
+            )
+            .size
+            .width,
+            620.0
+        );
+        system.layouts[layout].column_width_ratio = 0.6;
+        let settings = ScrollingLayoutSettings {
+            column_width_ratio: 0.4,
+            ..Default::default()
+        };
+        system.update_settings(&settings);
+        assert_eq!(system.layouts[layout].column_width_ratio, 0.6);
+    }
+
+    #[test]
+    fn display_width_bounds_limit_horizontal_resize() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.per_display.insert("display-a".into(), ScrollingWidthOverride {
+            column_width_ratio: Some(0.5),
+            min_column_width_ratio: Some(0.4),
+            max_column_width_ratio: Some(0.6),
+        });
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, wid(1, 1));
+        let selected = wid(1, 2);
+        system.add_window_after_selection(layout, selected);
+        system.update_width_settings(settings.widths_for_display(Some("display-a")));
+        system.resize_selection_by(layout, 1.0, ResizeOrientation::Horizontal);
+        assert_eq!(
+            frame_for(
+                &render(&system, layout, screen(1000.0, 800.0), &GapSettings::default()),
+                selected
+            )
+            .size
+            .width,
+            600.0
+        );
+        system.resize_selection_by(layout, -1.0, ResizeOrientation::Horizontal);
+        assert_eq!(
+            frame_for(
+                &render(&system, layout, screen(1000.0, 800.0), &GapSettings::default()),
+                selected
+            )
+            .size
+            .width,
+            400.0
+        );
+    }
 
     fn wid(pid: pid_t, idx: u32) -> WindowId {
         WindowId {

@@ -118,6 +118,13 @@ preserve_window_sizes = true
 # min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
 min_column_width_ratio = 0.3
 max_column_width_ratio = 0.9
+# Per-display width overrides inherit unspecified values above. Find display UUIDs
+# with `rift-cli query displays`.
+# [settings.layout.scrolling.per_display."11111111-2222-3333-4444-555555555555"]
+# column_width_ratio = 0.5
+# min_column_width_ratio = 0.2
+# max_column_width_ratio = 0.7
+
 # Alignment for the focused column: "left", "center", or "right"
 alignment = "center"
 # Horizontal focus behavior:

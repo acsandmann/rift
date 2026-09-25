@@ -927,6 +927,9 @@ pub struct ScrollingLayoutSettings {
     /// Maximum column width ratio allowed by resize commands.
     #[serde(default = "default_scrolling_max_column_width_ratio")]
     pub max_column_width_ratio: f64,
+    /// Sparse width overrides keyed by display UUID.
+    #[serde(default)]
+    pub per_display: HashMap<String, ScrollingWidthOverride>,
     /// Alignment for the focused column (left, center, right).
     #[serde(default)]
     pub alignment: ScrollingAlignment,
@@ -949,11 +952,20 @@ impl Default for ScrollingLayoutSettings {
             preserve_window_sizes: true,
             min_column_width_ratio: default_scrolling_min_column_width_ratio(),
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
+            per_display: HashMap::default(),
             alignment: ScrollingAlignment::default(),
             focus_navigation_style: ScrollingFocusNavigationStyle::default(),
             gestures: ScrollingGestureSettings::default(),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScrollingWidthOverride {
+    pub column_width_ratio: Option<f64>,
+    pub min_column_width_ratio: Option<f64>,
+    pub max_column_width_ratio: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
@@ -1246,44 +1258,39 @@ impl LayoutSettings {
 }
 
 impl ScrollingLayoutSettings {
+    pub fn widths_for_display(&self, display_uuid: Option<&str>) -> (f64, f64, f64) {
+        let override_ = display_uuid.and_then(|uuid| self.per_display.get(uuid));
+        (
+            override_.and_then(|o| o.column_width_ratio).unwrap_or(self.column_width_ratio),
+            override_
+                .and_then(|o| o.min_column_width_ratio)
+                .unwrap_or(self.min_column_width_ratio),
+            override_
+                .and_then(|o| o.max_column_width_ratio)
+                .unwrap_or(self.max_column_width_ratio),
+        )
+    }
+
+    pub fn effective_for_display(&self, display_uuid: Option<&str>) -> Self {
+        let mut resolved = self.clone();
+        (
+            resolved.column_width_ratio,
+            resolved.min_column_width_ratio,
+            resolved.max_column_width_ratio,
+        ) = self.widths_for_display(display_uuid);
+        resolved.per_display.clear();
+        resolved
+    }
+
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
-
-        if !(0.0..=1.0).contains(&self.column_width_ratio) {
-            issues.push(format!(
-                "layout.scrolling.column_width_ratio must be between 0.0 and 1.0, got {}",
-                self.column_width_ratio
-            ));
-        }
-
-        if !(0.0..=1.0).contains(&self.min_column_width_ratio) {
-            issues.push(format!(
-                "layout.scrolling.min_column_width_ratio must be between 0.0 and 1.0, got {}",
-                self.min_column_width_ratio
-            ));
-        }
-
-        if !(0.0..=1.0).contains(&self.max_column_width_ratio) {
-            issues.push(format!(
-                "layout.scrolling.max_column_width_ratio must be between 0.0 and 1.0, got {}",
-                self.max_column_width_ratio
-            ));
-        }
-
-        if self.min_column_width_ratio > self.max_column_width_ratio {
-            issues.push(format!(
-                "layout.scrolling.min_column_width_ratio ({}) must be <= max_column_width_ratio ({})",
-                self.min_column_width_ratio, self.max_column_width_ratio
-            ));
-        }
-
-        if !(self.min_column_width_ratio..=self.max_column_width_ratio)
-            .contains(&self.column_width_ratio)
-        {
-            issues.push(format!(
-                "layout.scrolling.column_width_ratio ({}) must be within min/max bounds",
-                self.column_width_ratio
-            ));
+        Self::validate_widths("layout.scrolling", self.widths_for_display(None), &mut issues);
+        for uuid in self.per_display.keys() {
+            Self::validate_widths(
+                &format!("layout.scrolling.per_display[{uuid}]"),
+                self.widths_for_display(Some(uuid)),
+                &mut issues,
+            );
         }
 
         if self.gestures.vertical_tolerance < 0.0 {
@@ -1294,6 +1301,34 @@ impl ScrollingLayoutSettings {
         }
 
         issues
+    }
+
+    fn validate_widths(path: &str, (ratio, min, max): (f64, f64, f64), issues: &mut Vec<String>) {
+        if !(0.0..=1.0).contains(&ratio) {
+            issues.push(format!(
+                "{path}.column_width_ratio must be between 0.0 and 1.0, got {ratio}",
+            ));
+        }
+        if !(0.0..=1.0).contains(&min) {
+            issues.push(format!(
+                "{path}.min_column_width_ratio must be between 0.0 and 1.0, got {min}",
+            ));
+        }
+        if !(0.0..=1.0).contains(&max) {
+            issues.push(format!(
+                "{path}.max_column_width_ratio must be between 0.0 and 1.0, got {max}",
+            ));
+        }
+        if min > max {
+            issues.push(format!(
+                "{path}.min_column_width_ratio ({min}) must be <= max_column_width_ratio ({max})",
+            ));
+        }
+        if !(min..=max).contains(&ratio) {
+            issues.push(format!(
+                "{path}.column_width_ratio ({ratio}) must be within min/max bounds",
+            ));
+        }
     }
 }
 
@@ -1847,6 +1882,34 @@ mod tests {
     use super::*;
     use crate::actor::reactor;
     use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+
+    #[test]
+    fn scrolling_display_widths_merge_and_validate() {
+        let settings: ScrollingLayoutSettings = toml::from_str(
+            r#"
+            column_width_ratio = 0.7
+            min_column_width_ratio = 0.3
+            max_column_width_ratio = 0.9
+            [per_display."display-a"]
+            column_width_ratio = 0.5
+            "#,
+        )
+        .unwrap();
+        assert_eq!(settings.widths_for_display(Some("display-a")), (0.5, 0.3, 0.9));
+        assert_eq!(settings.widths_for_display(Some("other")), (0.7, 0.3, 0.9));
+        assert_eq!(settings.widths_for_display(None), (0.7, 0.3, 0.9));
+        assert!(settings.validate().is_empty());
+        assert!(settings.effective_for_display(Some("display-a")).per_display.is_empty());
+
+        let mut invalid = settings;
+        invalid.per_display.get_mut("display-a").unwrap().max_column_width_ratio = Some(0.4);
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|issue| issue.contains("per_display[display-a].column_width_ratio"))
+        );
+    }
 
     #[test]
     fn layout_insertion_point_supports_global_default_and_per_mode_override() {
