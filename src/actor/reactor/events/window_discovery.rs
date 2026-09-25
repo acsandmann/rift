@@ -126,6 +126,7 @@ fn sync_window_server_id_mapping(
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous_wid));
             state.windows.remove_window(previous_wid);
         }
+        state.windows.clear_window_server_observed(new_wsid);
         if let (Some(record), Some(current_space)) = (
             state.windows.native_fullscreen_record_for_window(wid),
             current_native_space,

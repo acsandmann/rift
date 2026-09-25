@@ -468,6 +468,14 @@ impl WindowStore {
         self.window_servers.get(&wsid).is_some_and(|record| record.observed)
     }
 
+    pub fn has_untracked_observed_window_for_pid(&self, pid: i32) -> bool {
+        self.window_servers.values().any(|record| {
+            record.observed
+                && record.window_id.is_none()
+                && record.info.is_some_and(|info| info.pid == pid)
+        })
+    }
+
     pub fn set_window_server_space(&mut self, wsid: WindowServerId, space: Option<SpaceId>) {
         let record = self.server_record_mut(wsid);
         record.space = space;

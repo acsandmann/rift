@@ -1362,9 +1362,19 @@ impl Reactor {
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
                 if quiet == Quiet::No {
-                    outcome.absorb(self.handle_app_activation_workspace_switch(pid));
+                    let activation_window =
+                        if self.state.windows.has_untracked_observed_window_for_pid(pid) {
+                            None
+                        } else {
+                            self.main_window_tracker.app_main_window(pid)
+                        };
+                    outcome.absorb(
+                        self.handle_app_activation_workspace_switch(pid, activation_window),
+                    );
+                    outcome.focused_window = activation_window;
+                } else {
+                    outcome.focused_window = raised_window;
                 }
-                outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
             Event::ApplicationDeactivated(pid) => {
@@ -2697,13 +2707,13 @@ impl Reactor {
     }
 
     fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
-        // Mark visible windows and remove any corresponding observed WSID markers
-        // for ids we now have server info for.
+        // Keep unknown observed windows pending until AX maps them to WindowIds.
         self.state.windows.set_visible_windows(ws_info.iter().map(|info| info.id));
         for info in ws_info.iter() {
-            // If we've been observing this server id from SLS callbacks, clear it.
-            self.state.windows.clear_window_server_observed(info.id);
             self.state.windows.track_window_server_info(*info);
+            if self.state.windows.tracked_window_id(info.id).is_some() {
+                self.state.windows.clear_window_server_observed(info.id);
+            }
 
             if let Some(wid) = self.state.windows.tracked_window_id(info.id) {
                 if let Some(window) = self.state.windows.window_mut(wid) {
@@ -3233,7 +3243,11 @@ impl Reactor {
             observed_windows,
         );
         outcome.absorb(process_outcome);
+        let new_window_ids: Vec<_> = new_windows.iter().map(|(wid, _)| *wid).collect();
         window_discovery::update_window_states(&mut self.state, new_windows);
+        let has_admitted_windows = new_window_ids
+            .iter()
+            .any(|wid| self.state.windows.window(*wid).is_some_and(WindowState::is_admitted));
 
         let candidate_windows: HashSet<WindowId> = self
             .state
@@ -3259,7 +3273,9 @@ impl Reactor {
             .filter_map(|screen| screen.space)
             .filter(|space| self.is_space_active(*space))
             .collect();
-        let focused_window = self.focused_window_for_discovery(pid);
+        let focused_window = self
+            .focused_window_for_discovery(pid)
+            .filter(|(_, wid)| !has_admitted_windows || new_window_ids.contains(wid));
         outcome.absorb(window_discovery::emit_layout_events(
             &mut self.state,
             &mut self.layout_manager,
@@ -4303,7 +4319,11 @@ impl Reactor {
         }
     }
 
-    fn handle_app_activation_workspace_switch(&mut self, pid: pid_t) -> EventOutcome {
+    fn handle_app_activation_workspace_switch(
+        &mut self,
+        pid: pid_t,
+        activation_window: Option<WindowId>,
+    ) -> EventOutcome {
         if self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input {
             debug!(
                 pid,
@@ -4370,8 +4390,7 @@ impl Reactor {
         // so a missing main window means there is no authoritative switch
         // target. Picking an arbitrary window for the process is especially
         // unsafe for apps whose windows span multiple virtual workspaces.
-        let app_window =
-            self.main_window().filter(|wid| wid.pid == pid && self.window_is_standard(*wid));
+        let app_window = activation_window.filter(|wid| self.window_is_standard(*wid));
 
         let Some(app_window_id) = app_window else {
             return EventOutcome::no_change();
