@@ -2849,7 +2849,13 @@ fn native_focus_race_waits_for_new_window_activation() {
         SpaceEventKind::User,
     ));
     reactor.update_partial_window_server_info(vec![new_info]);
-    assert!(reactor.state.windows.has_untracked_observed_window_for_pid(pid));
+    assert!(reactor.state.windows.has_pending_window_for_pid(pid));
+    // A native membership snapshot confirms presence, not AX registration.
+    reactor.refresh_active_space_window_membership(vec![
+        (reactor.test_window_server_id(old), Some(space)),
+        (new_wsid, Some(space)),
+    ]);
+    assert!(reactor.state.windows.has_pending_window_for_pid(pid));
     reactor.handle_event(Event::ApplicationGloballyActivated(pid));
     reactor.handle_event(Event::WindowServerFocusChanged(old, space));
     assert_eq!(
@@ -2874,7 +2880,7 @@ fn native_focus_race_waits_for_new_window_activation() {
         Some(new_info),
         None,
     ));
-    assert!(!reactor.state.windows.has_untracked_observed_window_for_pid(pid));
+    assert!(!reactor.state.windows.has_pending_window_for_pid(pid));
     reactor.handle_event(Event::ApplicationMainWindowChanged(pid, Some(new), Quiet::No));
     reactor.handle_event(Event::ApplicationActivated(pid, Quiet::No));
     assert_eq!(
@@ -2883,6 +2889,108 @@ fn native_focus_race_waits_for_new_window_activation() {
     );
     assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(new));
     assert!(raise_rx.try_recv().is_err());
+}
+
+fn pending_activation_context() -> (Apps, Reactor, SpaceId, WindowId, WindowServerInfo) {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let main = WindowId::new(2, 1);
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, main.pid, make_windows(1));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_event(Event::ApplicationGloballyActivated(main.pid));
+    reactor.handle_event(Event::WindowServerFocusChanged(main, space));
+    let info = WindowServerInfo {
+        id: WindowServerId::new(20_002),
+        pid: main.pid,
+        layer: 0,
+        frame,
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    };
+    (apps, reactor, space, main, info)
+}
+
+fn assert_repeated_activation_follows_main(
+    apps: &mut Apps,
+    reactor: &mut Reactor,
+    space: SpaceId,
+    main: WindowId,
+) {
+    for _ in 0..2 {
+        reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+        apps.simulate_until_quiet(reactor);
+        reactor.handle_event(Event::ApplicationMainWindowChanged(
+            main.pid,
+            Some(main),
+            Quiet::No,
+        ));
+        reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::No));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.active_workspace_idx(space),
+            Some(0)
+        );
+        assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
+        apps.simulate_until_quiet(reactor);
+    }
+}
+
+#[test]
+fn unmapped_native_disappearance_restores_repeated_activation() {
+    for disappearance in 0..3 {
+        let (mut apps, mut reactor, space, main, info) = pending_activation_context();
+        reactor.handle_event(Event::WindowServerAppeared(info.id, space, SpaceEventKind::User));
+        reactor.update_partial_window_server_info(vec![info]);
+        assert!(reactor.state.windows.has_pending_window_for_pid(main.pid));
+
+        reactor.handle_event(match disappearance {
+            0 => Event::WindowServerDestroyed(info.id, space, SpaceEventKind::User),
+            1 => Event::WindowServerHidden(info.id),
+            _ => Event::WindowClosed(info.id),
+        });
+        assert!(!reactor.state.windows.is_window_server_observed(info.id));
+        assert!(!reactor.state.windows.has_pending_window_for_pid(main.pid));
+        assert_repeated_activation_follows_main(&mut apps, &mut reactor, space, main);
+    }
+}
+
+#[test]
+fn ignored_native_window_does_not_block_repeated_activation() {
+    for non_normal_layer in [true, false] {
+        let (mut apps, mut reactor, space, main, mut info) = pending_activation_context();
+        if non_normal_layer {
+            info.layer = 1;
+        } else {
+            info.frame.size = CGSize::new(1., 1.);
+        }
+        let outcome = topology_workflow::handle_window_server_appeared(
+            &mut reactor.state,
+            topology_workflow::WindowServerLifecyclePayload {
+                window_server_id: info.id,
+                space,
+                kind: SpaceEventKind::User,
+            },
+            topology_workflow::WindowServerAppearedObservations {
+                resolved_space: Some(space),
+                active_spaces: [space].into_iter().collect(),
+                mission_control_active: false,
+                assigned_space: None,
+                last_known_user_space: Some(space),
+                window_server_info: Some(info),
+                app_known: true,
+                running_app_info: None,
+            },
+        )
+        .unwrap();
+        reactor.apply_event_outcome(outcome);
+        // Later metadata snapshots must not turn an ignored window into a barrier.
+        reactor.update_partial_window_server_info(vec![info]);
+        assert!(!reactor.state.windows.is_window_server_observed(info.id));
+        assert!(!reactor.state.windows.has_pending_window_for_pid(main.pid));
+        assert_repeated_activation_follows_main(&mut apps, &mut reactor, space, main);
+    }
 }
 
 #[test]

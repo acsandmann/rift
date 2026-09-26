@@ -861,7 +861,9 @@ impl Reactor {
                 self.clear_pending_target_if_confirmed_space(wsid, space);
             }
             self.state.windows.mark_window_visible(wsid);
-            self.state.windows.clear_window_server_observed(wsid);
+            if self.state.windows.tracked_window_id(wsid).is_some() {
+                self.state.windows.clear_window_server_observed(wsid);
+            }
         }
     }
 
@@ -1362,12 +1364,11 @@ impl Reactor {
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
                 if quiet == Quiet::No {
-                    let activation_window =
-                        if self.state.windows.has_untracked_observed_window_for_pid(pid) {
-                            None
-                        } else {
-                            self.main_window_tracker.app_main_window(pid)
-                        };
+                    let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
+                        None
+                    } else {
+                        self.main_window_tracker.app_main_window(pid)
+                    };
                     outcome.absorb(
                         self.handle_app_activation_workspace_switch(pid, activation_window),
                     );
@@ -1499,6 +1500,7 @@ impl Reactor {
             }
             Event::WindowClosed(wsid) => {
                 let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
+                    self.state.windows.mark_window_hidden(wsid);
                     return Ok(EventOutcome::default());
                 };
                 let mut outcome = window_workflow::handle_window_destroyed(
@@ -1513,6 +1515,8 @@ impl Reactor {
             Event::WindowServerHidden(wsid) => {
                 if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
                     self.request_window_inventory(wid.pid);
+                } else {
+                    self.state.windows.mark_window_hidden(wsid);
                 }
                 return Ok(EventOutcome::default());
             }

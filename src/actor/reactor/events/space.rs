@@ -333,6 +333,7 @@ pub fn handle_window_server_appeared(
     // why dont we get notifications that its being launched?
     if let Some(window_server_info) = window_server_info {
         if window_server_info.layer != 0 {
+            state.windows.clear_window_server_observed(wsid);
             trace!(
                 ?wsid,
                 layer = window_server_info.layer,
@@ -347,6 +348,7 @@ pub fn handle_window_server_appeared(
         if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
             || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
         {
+            state.windows.clear_window_server_observed(wsid);
             trace!(
                 ?wsid,
                 "Ignoring tiny window ({}x{}) - likely tooltip",
