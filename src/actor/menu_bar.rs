@@ -9,20 +9,34 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::actor::{config, reactor};
 use crate::common::config::{Config, ConfigCommand};
 use crate::layout_engine::LayoutCommand;
-use crate::model::VirtualWorkspaceId;
-use crate::model::server::{RuntimeWindowData, RuntimeWorkspaceData};
+use crate::model::server::RuntimeWorkspaceData;
 use crate::sys::screen::SpaceId;
 use crate::ui::menu_bar::{MenuAction, MenuIcon};
 use crate::{actor, common};
 
+/// Menu-bar-only projection; workspace indices remain local to each space.
+#[derive(Debug, Clone)]
+pub struct DisplayWorkspaces {
+    pub display_uuid: String,
+    pub space: SpaceId,
+    pub is_active_context: bool,
+    pub workspaces: Vec<RuntimeWorkspaceData>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Update {
-    pub active_space: SpaceId,
     pub active_space_is_activated: bool,
-    pub workspaces: Vec<RuntimeWorkspaceData>,
-    pub active_workspace_idx: Option<u64>,
-    pub active_workspace: Option<VirtualWorkspaceId>,
-    pub windows: Vec<RuntimeWindowData>,
+    pub displays: Vec<DisplayWorkspaces>,
+}
+
+impl Update {
+    pub fn context_workspaces(&self) -> &[RuntimeWorkspaceData] {
+        self.displays
+            .iter()
+            .find(|display| display.is_active_context)
+            .map(|display| display.workspaces.as_slice())
+            .unwrap_or_default()
+    }
 }
 
 pub enum Event {
@@ -152,15 +166,15 @@ impl Menu {
     fn apply_update(&mut self, update: &Update) {
         let Some(icon) = &mut self.icon else { return };
 
-        let sig = sig(update.active_space_is_activated, &update.workspaces);
+        let sig = sig(update);
         if self.last_signature == Some(sig) {
             return;
         }
         self.last_signature = Some(sig);
 
-        icon.sync_workspace_topology(&update.workspaces, &self.config.keys);
-        icon.update_menu_state(update.active_space_is_activated, &update.workspaces);
-        icon.update_status_icon(&update.workspaces, &self.config.settings.ui.menu_bar);
+        icon.sync_workspace_topology(update.context_workspaces(), &self.config.keys);
+        icon.update_menu_state(update.active_space_is_activated, update.context_workspaces());
+        icon.update_status_icon(&update.displays, &self.config.settings.ui.menu_bar);
     }
 
     fn handle_config_updated(&mut self, new_config: Config) {
@@ -317,65 +331,42 @@ impl Menu {
     }
 }
 
-// this is kind of reinventing the wheel but oh well i am using my brain
-#[inline(always)]
-fn sig(active_space_is_activated: bool, workspaces: &[RuntimeWorkspaceData]) -> u64 {
-    let mut x = (workspaces.len() as u64).rotate_left(13);
-    if active_space_is_activated {
-        x ^= 0x9E37_79B9_7F4A_7C15u64;
+fn sig(update: &Update) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    update.active_space_is_activated.hash(&mut hash);
+    update.displays.len().hash(&mut hash);
+    for display in &update.displays {
+        display.display_uuid.hash(&mut hash);
+        display.space.hash(&mut hash);
+        display.is_active_context.hash(&mut hash);
+        display.workspaces.len().hash(&mut hash);
+        for workspace in &display.workspaces {
+            workspace.id.hash(&mut hash);
+            workspace.index.hash(&mut hash);
+            workspace.name.hash(&mut hash);
+            workspace.layout_mode.hash(&mut hash);
+            workspace.is_active.hash(&mut hash);
+            workspace.window_count.hash(&mut hash);
+            workspace.windows.len().hash(&mut hash);
+            for window in &workspace.windows {
+                let frame = window.info.frame;
+                [
+                    frame.origin.x.to_bits(),
+                    frame.origin.y.to_bits(),
+                    frame.size.width.to_bits(),
+                    frame.size.height.to_bits(),
+                ]
+                .hash(&mut hash);
+            }
+        }
     }
-    let mut s = (workspaces.len() as u64).rotate_left(5);
-
-    for ws in workspaces {
-        let v = workspace_sig(ws);
-        x ^= v.rotate_left(9);
-        s = s.wrapping_add(v);
-    }
-
-    x ^ s.rotate_left(29) ^ (s >> 17)
-}
-
-#[inline(always)]
-fn workspace_sig(ws: &RuntimeWorkspaceData) -> u64 {
-    let mut x = (ws.index as u64).rotate_left(3)
-        ^ (ws.window_count as u64).rotate_left(19)
-        ^ hash_str(&ws.id).rotate_left(11)
-        ^ hash_str(&ws.name).rotate_left(17)
-        ^ hash_str(&ws.layout_mode).rotate_left(23);
-    if ws.is_active {
-        x ^= 0xD6E8_FEB8_6659_FD93u64;
-    }
-    let mut s = x ^ (ws.windows.len() as u64).rotate_left(7);
-    for w in &ws.windows {
-        let v = window_sig(w).rotate_left(13);
-        x ^= v;
-        s = s.wrapping_add(v);
-    }
-    x ^ s.rotate_left(21) ^ (s >> 11)
-}
-
-#[inline(always)]
-fn window_sig(w: &RuntimeWindowData) -> u64 {
-    (w.id.idx.get() as u64)
-        ^ w.info.frame.origin.x.to_bits().rotate_left(11)
-        ^ w.info.frame.origin.y.to_bits().rotate_left(23)
-        ^ w.info.frame.size.width.to_bits().rotate_left(37)
-        ^ w.info.frame.size.height.to_bits().rotate_left(51)
-}
-
-#[inline(always)]
-fn hash_str(s: &str) -> u64 {
-    let mut x = 0xcbf2_9ce4_8422_2325u64;
-    for &b in s.as_bytes() {
-        x ^= b as u64;
-        x = x.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    x
+    hash.finish()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sig;
+    use super::*;
     use crate::model::server::RuntimeWorkspaceData;
 
     fn workspace(layout_mode: &str) -> RuntimeWorkspaceData {
@@ -390,13 +381,52 @@ mod tests {
         }
     }
 
+    fn update(workspaces: Vec<RuntimeWorkspaceData>) -> Update {
+        Update {
+            active_space_is_activated: true,
+            displays: vec![DisplayWorkspaces {
+                display_uuid: "a".into(),
+                space: SpaceId::new(1),
+                is_active_context: true,
+                workspaces,
+            }],
+        }
+    }
+
+    #[test]
+    fn grouped_signature_and_command_context() {
+        let mut base = update(vec![workspace("bsp")]);
+        base.displays.push(DisplayWorkspaces {
+            display_uuid: "b".into(),
+            space: SpaceId::new(2),
+            is_active_context: false,
+            workspaces: vec![workspace("stack"), workspace("floating")],
+        });
+        let before = sig(&base);
+        assert_eq!(before, sig(&base.clone()));
+        assert_eq!(base.context_workspaces().len(), 1);
+        let mut changed = base.clone();
+        changed.displays[1].workspaces[0].is_active = false;
+        assert_ne!(before, sig(&changed));
+        changed = base.clone();
+        changed.displays.reverse();
+        assert_ne!(before, sig(&changed));
+        assert_eq!(changed.context_workspaces().len(), 1);
+        changed.displays[0].is_active_context = true;
+        changed.displays[1].is_active_context = false;
+        assert_eq!(changed.context_workspaces().len(), 2);
+        changed = base.clone();
+        changed.displays.pop();
+        assert_ne!(before, sig(&changed));
+    }
+
     #[test]
     fn signature_changes_when_workspace_layout_mode_changes() {
         let base = vec![workspace("bsp")];
         let changed = vec![workspace("master_stack")];
 
-        let before = sig(true, &base);
-        let after = sig(true, &changed);
+        let before = sig(&update(base));
+        let after = sig(&update(changed));
 
         assert_ne!(before, after);
     }

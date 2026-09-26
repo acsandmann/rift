@@ -26,6 +26,13 @@ animation_fps = 100.0
 focus_follows_mouse = true
 mouse_follows_focus = true
 mouse_hides_on_focus = true
+# Treat displays stacked in macOS as a horizontal mouse crossing chain when
+# they are physically side-by-side. At a left/right edge, the cursor enters
+# the logical neighbor at the same vertical offset, if that point exists.
+# "top-to-bottom": upper display is logically left of the lower display.
+# "bottom-to-top": lower display is logically left of the upper display.
+# This changes mouse crossing only, not the macOS display arrangement.
+#horizontal_mouse_warp = "top-to-bottom"
 # focus_follows_mouse_disable_hotkey temporarily suspends focus-follows-mouse while held
 # e.g. "Fn"; omit or set to null to keep focus-follows-mouse always active
 #focus_follows_mouse_disable_hotkey = "Fn"
@@ -118,6 +125,13 @@ preserve_window_sizes = true
 # min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
 min_column_width_ratio = 0.3
 max_column_width_ratio = 0.9
+# Per-display width overrides inherit unspecified values above. Find display UUIDs
+# with `rift-cli query displays`.
+# [settings.layout.scrolling.per_display."11111111-2222-3333-4444-555555555555"]
+# column_width_ratio = 0.5
+# min_column_width_ratio = 0.2
+# max_column_width_ratio = 0.7
+
 # Alignment for the focused column: "left", "center", or "right"
 alignment = "center"
 # Horizontal focus behavior:
@@ -191,12 +205,12 @@ enabled = false
 # if enabled, it will show all workspaces including empty ones. disabled because this
 # tends to take up too much room in the menubar and then is auto hidden by macos
 show_empty = false
-# choose between drawing every workspace or only the active workspace
+# choose between drawing every workspace or only the active workspace on each display
 mode = "all"
 # when showing workspaces as labels ("index" or "name"), choose which label to render
 active_label = "index"
 # when displaying workspaces, choose whether to draw the layout preview or a set of labels
-# options are "layout" or "label"
+# options are "layout" or "label" (i3-style)
 display_style = "layout"
 # .ron files in this folder appear under Layout Files in the menu bar
 layout_folder = "~/.config/rift/layouts"

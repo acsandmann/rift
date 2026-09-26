@@ -168,7 +168,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         process::exit(0);
     }
 
-    execute_startup_commands(&config.settings.run_on_start);
+    let startup_commands = config.settings.run_on_start.clone();
 
     let (broadcast_tx, broadcast_rx) = rift_wm::actor::channel();
 
@@ -206,7 +206,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let (wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let window_tx_store = WindowTxStore::new();
     let native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
-    let reactor = Reactor::spawn(
+    let (reactor, startup_ready) = Reactor::spawn(
         config.clone(),
         layout,
         reactor::Record::new(opt.record.as_deref()),
@@ -365,6 +365,11 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     Executor::run_main(mtm, async move {
         join!(
+            async move {
+                if startup_ready.await.is_ok() {
+                    execute_startup_commands(&startup_commands);
+                }
+            },
             supervise("wm_controller", wm_controller.run()),
             supervise(
                 "notification_center",

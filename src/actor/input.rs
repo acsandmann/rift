@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource, CGEventSourceStateID,
-    CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt, CGEventTapProxy, CGEventType,
+    CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
+    CGEventSourceStateID, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
+    CGEventTapProxy, CGEventType,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -21,8 +22,8 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    BindingModeSpecs, Config, DragDropSettings, HapticPattern, LayoutMode, MouseAction,
-    MouseModifier, StackLineHoverMode,
+    BindingModeSpecs, Config, DragDropSettings, HapticPattern, HorizontalMouseWarp, LayoutMode,
+    MouseAction, MouseModifier, StackLineHoverMode,
 };
 use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::event::{self, Hotkey, KeyCode};
@@ -66,6 +67,8 @@ pub struct Input {
     mouse_move_last_timestamp: Cell<Option<u64>>,
     mouse_move_min_interval_ticks: Cell<u64>,
     mouse_location: Cell<CGPoint>,
+    horizontal_mouse_warp: Cell<Option<HorizontalMouseWarp>>,
+    warp_screens: RefCell<Vec<CGRect>>,
     mouse_focus_publisher: reactor::MouseFocusPublisher,
     drag_motion_publisher: crate::actor::drag::DragMotionPublisher,
     native_motion_active: Arc<AtomicBool>,
@@ -176,6 +179,7 @@ impl Input {
             (state.event_processing_enabled
                 && (state.stack_line_enabled
                     || state.mouse_hides_on_focus
+                    || self.horizontal_mouse_warp.get().is_some()
                     || (state.focus_follows_mouse_config_enabled
                         && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
@@ -199,6 +203,10 @@ impl Input {
                 mask |= (1u64 << CGEventType::RightMouseDown.0)
                     | (1u64 << CGEventType::RightMouseDragged.0);
             }
+        }
+        if state.event_processing_enabled && self.horizontal_mouse_warp.get().is_some() {
+            mask |= (1u64 << CGEventType::LeftMouseDragged.0)
+                | (1u64 << CGEventType::RightMouseDragged.0);
         }
         if state.swipe.is_some() || state.scroll.is_some() {
             mask |= gesture::EVENT_MASK;
@@ -318,6 +326,8 @@ impl Input {
             mouse_move_last_timestamp: Cell::new(None),
             mouse_move_min_interval_ticks: Cell::new(mouse_move_min_interval_ticks),
             mouse_location: Cell::new(CGPoint::new(0.0, 0.0)),
+            horizontal_mouse_warp: Cell::new(config.settings.horizontal_mouse_warp),
+            warp_screens: RefCell::new(Vec::new()),
             mouse_focus_publisher: reactor::MouseFocusPublisher::default(),
             drag_motion_publisher: crate::actor::drag::DragMotionPublisher::default(),
             native_motion_active,
@@ -415,6 +425,14 @@ impl Input {
             }
             Request::SpaceStateUpdated(space_state, converter) => {
                 state.screens = space_state.screens.iter().map(|screen| screen.frame).collect();
+                // ScreenInfo.frame excludes menu bar/Dock areas; cursor edges use raw CG bounds.
+                let mut screens = self.warp_screens.borrow_mut();
+                *screens = space_state
+                    .screens
+                    .iter()
+                    .map(|screen| CGDisplayBounds(screen.id.as_u32()))
+                    .collect();
+                sort_warp_screens(&mut screens, self.horizontal_mouse_warp.get());
                 state.screen_spaces = space_state
                     .screens
                     .into_iter()
@@ -493,6 +511,10 @@ impl Input {
                     let prev_stack_line_hover_mode = state.stack_line_hover_mode;
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
                     state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
+                    let direction = new_config.settings.horizontal_mouse_warp;
+                    if self.horizontal_mouse_warp.replace(direction) != direction {
+                        sort_warp_screens(&mut self.warp_screens.borrow_mut(), direction);
+                    }
                     state.stack_line_enabled = stack_line_enabled;
                     state.stack_line_hover_mode = stack_line_hover_mode;
                     state.default_layout_mode = default_layout_mode;
@@ -615,12 +637,13 @@ impl Input {
                 } else {
                     crate::actor::drag::MouseButton::Right
                 };
+                let point = self
+                    .maybe_horizontal_mouse_warp(event)
+                    .unwrap_or_else(|| CGEvent::location(Some(event)));
                 let captured = self.state.borrow().captured_button == Some(button);
                 if captured || self.native_motion_active.load(Ordering::Acquire) {
                     let publisher = &self.drag_motion_publisher;
-                    if publisher.publish(crate::actor::drag::DragMotion {
-                        point: CGEvent::location(Some(event)),
-                    }) {
+                    if publisher.publish(crate::actor::drag::DragMotion { point }) {
                         self.events_tx.send(Event::DragMotionPending(publisher.clone()));
                     }
                 }
@@ -774,6 +797,22 @@ impl Input {
         _ = self.mouse_focus_publisher.publish(&self.events_tx, loc);
     }
 
+    fn maybe_horizontal_mouse_warp(&self, event: &CGEvent) -> Option<CGPoint> {
+        self.horizontal_mouse_warp.get()?;
+        if !self.state.borrow().event_processing_enabled {
+            return None;
+        }
+        let point = CGEvent::location(Some(event));
+        let delta = CGEvent::integer_value_field(Some(event), CGEventField::MouseEventDeltaX);
+        let target = horizontal_warp_target(&self.warp_screens.borrow(), point, delta)?;
+        if let Err(error) = event::warp_mouse(target) {
+            warn!(?error, "Horizontal mouse warp failed");
+            return None;
+        }
+        CGEvent::set_location(Some(event), target);
+        Some(target)
+    }
+
     #[inline]
     fn admit_mouse_move(&self, event: &CGEvent) -> Option<CGPoint> {
         let timestamp = CGEvent::timestamp(Some(event));
@@ -925,12 +964,13 @@ unsafe extern "C-unwind" fn input_callback(
     let event = unsafe { event_ref.as_ref() };
 
     // Keep rejected high-frequency mouse events out of catch_unwind and the
-    // actor/state path entirely. The admission check is scalar-only and has
-    // no fallible or panicking operations.
+    // actor/state path. Edge crossings are checked before sampling so a quick
+    // movement cannot stall at the edge.
     let this = unsafe { &*ctx.this };
     let mouse_point = if event_type == CGEventType::MouseMoved {
+        let warped = this.maybe_horizontal_mouse_warp(event);
         match this.admit_mouse_move(event) {
-            Some(point) => Some(point),
+            Some(point) => Some(warped.unwrap_or(point)),
             None => {
                 return if this.mission_control_active.get() {
                     core::ptr::null_mut()
@@ -1124,6 +1164,63 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> u64 {
     interval_in_ticks(interval_ns, timebase.numer, timebase.denom)
 }
 
+const WARP_EDGE_THRESHOLD: f64 = 3.0;
+const WARP_LANDING_INSET: f64 = 6.0;
+
+fn sort_warp_screens(screens: &mut [CGRect], direction: Option<HorizontalMouseWarp>) {
+    screens.sort_by(|a, b| {
+        let order = a
+            .origin
+            .y
+            .total_cmp(&b.origin.y)
+            .then_with(|| a.origin.x.total_cmp(&b.origin.x));
+        if direction == Some(HorizontalMouseWarp::BottomToTop) {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+}
+
+fn horizontal_warp_target(screens: &[CGRect], point: CGPoint, delta_x: i64) -> Option<CGPoint> {
+    if delta_x == 0 {
+        return None;
+    }
+    let index = screens.iter().position(|screen| {
+        point.x >= screen.origin.x
+            && point.x < screen.origin.x + screen.size.width
+            && point.y >= screen.origin.y
+            && point.y < screen.origin.y + screen.size.height
+    })?;
+    let source = screens[index];
+    let right = delta_x > 0;
+    if right && point.x < source.origin.x + source.size.width - WARP_EDGE_THRESHOLD
+        || !right && point.x > source.origin.x + WARP_EDGE_THRESHOLD
+    {
+        return None;
+    }
+    let target = *screens.get(if right {
+        index.checked_add(1)?
+    } else {
+        index.checked_sub(1)?
+    })?;
+    // Keep the same distance from the top; a shorter target has no crossing below its bottom.
+    let y = target.origin.y + point.y - source.origin.y;
+    if y < target.origin.y || y >= target.origin.y + target.size.height {
+        return None;
+    }
+    // Inset the landing point so a following reverse movement cannot immediately warp back.
+    let inset = WARP_LANDING_INSET.min((target.size.width / 2.0).max(0.0));
+    Some(CGPoint::new(
+        if right {
+            target.origin.x + inset
+        } else {
+            target.origin.x + target.size.width - inset
+        },
+        y,
+    ))
+}
+
 fn interval_in_ticks(nanoseconds: u64, numer: u32, denom: u32) -> u64 {
     (nanoseconds * u64::from(denom)).div_ceil(u64::from(numer)).max(1)
 }
@@ -1165,6 +1262,92 @@ fn build_event_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn horizontal_warp_geometry() {
+        let rect =
+            |x, y, w, h| CGRect::new(CGPoint::new(x, y), objc2_core_foundation::CGSize::new(w, h));
+        let top = rect(100.0, 0.0, 100.0, 100.0);
+        let middle = rect(-50.0, 100.0, 80.0, 70.0);
+        let bottom = rect(300.0, 170.0, 100.0, 100.0);
+        let mut screens = vec![bottom, top, middle];
+        sort_warp_screens(&mut screens, Some(HorizontalMouseWarp::TopToBottom));
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(198.0, 20.0), 1),
+            Some(CGPoint::new(-44.0, 120.0))
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(-49.0, 120.0), -1),
+            Some(CGPoint::new(194.0, 20.0))
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(101.0, 20.0), -1),
+            None
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(398.0, 190.0), 1),
+            None
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(101.0, 20.0), 1),
+            None
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(198.0, 20.0), -1),
+            None
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(198.0, 90.0), 1),
+            None
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(-49.0, 120.0), 1),
+            None
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(28.0, 120.0), 1),
+            Some(CGPoint::new(306.0, 190.0))
+        );
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(-44.0, 120.0), -1),
+            None
+        );
+        sort_warp_screens(&mut screens, Some(HorizontalMouseWarp::BottomToTop));
+        assert_eq!(
+            horizontal_warp_target(&screens, CGPoint::new(398.0, 190.0), 1),
+            Some(CGPoint::new(-44.0, 120.0))
+        );
+    }
+
+    #[test]
+    fn horizontal_warp_shared_boundary_belongs_to_lower_display() {
+        let top = CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(100.0, 900.0),
+        );
+        let bottom = CGRect::new(CGPoint::new(0.0, 900.0), top.size);
+        assert_eq!(
+            horizontal_warp_target(&[top, bottom], CGPoint::new(0.0, 900.0), -1),
+            Some(CGPoint::new(94.0, 0.0))
+        );
+        assert_eq!(
+            horizontal_warp_target(&[bottom, top], CGPoint::new(99.0, 900.0), 1),
+            Some(CGPoint::new(6.0, 0.0))
+        );
+        assert_eq!(
+            horizontal_warp_target(&[top, bottom], CGPoint::new(100.0, 900.0), -1),
+            None
+        );
+    }
+
+    #[test]
+    fn disabled_horizontal_warp_does_not_borrow_state_or_screens() {
+        let (input, _, _) = input();
+        let event = CGEvent::new(None).unwrap();
+        let _state = input.state.borrow_mut();
+        let _screens = input.warp_screens.borrow_mut();
+        assert_eq!(input.maybe_horizontal_mouse_warp(&event), None);
+    }
 
     #[test]
     fn hid_mouse_throttle_uses_mach_ticks_instead_of_nanoseconds() {
@@ -1516,6 +1699,33 @@ mod tests {
     }
 
     #[test]
+    fn drag_motion_uses_rewritten_event_position() {
+        for (event_type, button, cg_button) in [
+            (
+                CGEventType::LeftMouseDragged,
+                crate::actor::drag::MouseButton::Left,
+                objc2_core_graphics::CGMouseButton::Left,
+            ),
+            (
+                CGEventType::RightMouseDragged,
+                crate::actor::drag::MouseButton::Right,
+                objc2_core_graphics::CGMouseButton::Right,
+            ),
+        ] {
+            let (input, _, _) = input();
+            input.state.borrow_mut().captured_button = Some(button);
+            let event =
+                CGEvent::new_mouse_event(None, event_type, CGPoint::new(99.0, 20.0), cg_button)
+                    .unwrap();
+            let target = CGPoint::new(6.0, 920.0);
+            // Horizontal warping rewrites the event before the drag publisher sees it.
+            CGEvent::set_location(Some(&event), target);
+            assert!(!input.on_event(event_type, &event));
+            assert_eq!(input.drag_motion_publisher.take_latest().unwrap().point, target);
+        }
+    }
+
+    #[test]
     fn drag_motion_publishes_only_for_captured_or_native_drags() {
         let (input, _, mut events_rx) = input();
         let event = CGEvent::new_mouse_event(
@@ -1574,6 +1784,8 @@ mod tests {
             objc2_core_graphics::CGMouseButton::Left,
         )
         .unwrap();
+        // Synthetic test events must not inherit modifiers held on the real keyboard.
+        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         assert!(input.on_mouse_moved(&event, CGPoint::new(20.0, 30.0)));
         assert!(matches!(
             events_rx.try_recv().unwrap().1,

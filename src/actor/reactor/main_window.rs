@@ -116,6 +116,10 @@ impl MainWindowTracker {
     }
 
     pub fn is_globally_frontmost(&self, pid: pid_t) -> bool { self.global_frontmost == Some(pid) }
+
+    pub fn app_main_window(&self, pid: pid_t) -> Option<WindowId> {
+        self.apps.get(&pid)?.main_window
+    }
 }
 
 #[cfg(test)]

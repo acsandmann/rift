@@ -2,8 +2,9 @@ use std::convert::TryFrom;
 
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGEvent, CGEventField, CGEventFlags,
-    CGEventSource, CGEventSourceStateID, CGMouseButton, kCGNullDirectDisplay,
+    CGAssociateMouseAndMouseCursorPosition, CGDisplayHideCursor, CGDisplayShowCursor, CGError,
+    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGMouseButton,
+    kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +61,10 @@ pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     unsafe { CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0) };
 
     let res = cg_ok(unsafe { CGWarpMouseCursorPosition(point) });
+    if res.is_ok() {
+        // Reassociation is best-effort: the cursor has already moved.
+        let _ = CGAssociateMouseAndMouseCursorPosition(true);
+    }
     unsafe { CFRelease(src) };
     res
 }

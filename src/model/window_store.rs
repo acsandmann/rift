@@ -499,6 +499,9 @@ impl WindowStore {
             record.visible = false;
             if let Some(window_id) = record.window_id {
                 self.windows.entry(window_id).or_default().visibility = WindowVisibility::Hidden;
+            } else {
+                // An unmapped window that ordered out is no longer awaiting AX registration.
+                record.observed = false;
             }
         }
         self.prune_window_server_record(wsid);
@@ -527,6 +530,15 @@ impl WindowStore {
 
     pub fn is_window_server_observed(&self, wsid: WindowServerId) -> bool {
         self.window_servers.get(&wsid).is_some_and(|record| record.observed)
+    }
+
+    pub fn has_pending_window_for_pid(&self, pid: i32) -> bool {
+        self.window_servers.values().any(|record| {
+            record.observed
+                && record.visible
+                && record.window_id.is_none()
+                && record.info.is_some_and(|info| info.pid == pid)
+        })
     }
 
     pub fn set_window_server_space(&mut self, wsid: WindowServerId, space: Option<SpaceId>) {
@@ -1093,6 +1105,27 @@ impl WindowStore {
 mod tests {
     use super::*;
     use crate::model::virtual_workspace::WorkspaceStore;
+
+    #[test]
+    fn pending_registration_requires_visible_unmapped_window_for_pid() {
+        let mut store = WindowStore::default();
+        let wsid = WindowServerId::new(77);
+        store.track_window_server_info(WindowServerInfo {
+            id: wsid,
+            pid: 2,
+            layer: 0,
+            frame: Default::default(),
+            min_frame: Default::default(),
+            max_frame: Default::default(),
+        });
+        store.mark_window_server_observed(wsid);
+        assert!(!store.has_pending_window_for_pid(2));
+        store.mark_window_visible(wsid);
+        assert!(store.has_pending_window_for_pid(2));
+        assert!(!store.has_pending_window_for_pid(3));
+        store.track_window_server_id(wsid, WindowId::new(2, 1));
+        assert!(!store.has_pending_window_for_pid(2));
+    }
 
     #[test]
     fn authoritative_space_only_record_is_not_pruned() {
