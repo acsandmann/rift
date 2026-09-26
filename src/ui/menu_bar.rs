@@ -11,22 +11,23 @@ use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuDelegate,
-    NSMenuItem, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength, NSView,
+    NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSGraphicsContext, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{CGBlendMode, CGContext};
-use objc2_core_text::CTLine;
+use objc2_core_text::{CTLine, kCTForegroundColorFromContextAttributeName};
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSObject,
-    NSRect, NSSize, NSString, NSURL,
+    MainThreadMarker, NSArray, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSNumber,
+    NSObject, NSRect, NSSize, NSString, NSURL,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 
+use crate::actor::menu_bar::DisplayWorkspaces;
 use crate::actor::reactor::{
     Command as ReactorTopCommand, Event as ReactorEvent, ReactorCommand, Sender as ReactorSender,
 };
@@ -38,15 +39,24 @@ use crate::common::config::{
 use crate::layout_engine::{LayoutCommand, LayoutEngine, RestoreScope, RestoreSource};
 use crate::model::server::RuntimeWorkspaceData;
 use crate::sys::hotkey::{Hotkey, KeyCode, Modifiers};
+use crate::sys::screen::SpaceId;
 use crate::ui::common::compute_window_layout_metrics;
 
 const CELL_WIDTH: f64 = 20.0;
 const CELL_HEIGHT: f64 = 15.0;
 const CELL_SPACING: f64 = 4.0;
+const SEPARATOR_SPACING: f64 = 3.0;
+const SEPARATOR_BOTTOM_PADDING: f64 = 3.0;
+// Compact point-space geometry: single digits stay square, longer labels expand.
+const LABEL_HEIGHT: f64 = 16.0;
+const LABEL_SPACING: f64 = 3.0;
+const LABEL_BORDER_WIDTH: f64 = 1.0;
+const LABEL_CORNER_RADIUS: f64 = 2.0;
+const LABEL_PADDING: f64 = 3.0;
 const CORNER_RADIUS: f64 = 3.0;
 const BORDER_WIDTH: f64 = 1.0;
 const CONTENT_INSET: f64 = 2.0;
-const FONT_SIZE: f64 = 12.0;
+const FONT_SIZE: f64 = 11.0;
 
 #[cfg(test)]
 thread_local! {
@@ -288,34 +298,10 @@ impl MenuIcon {
 
     pub fn update_status_icon(
         &mut self,
-        workspaces: &[RuntimeWorkspaceData],
+        displays: &[DisplayWorkspaces],
         settings: &MenuBarSettings,
     ) {
-        let show_windows = matches!(settings.display_style, WorkspaceDisplayStyle::Layout);
-        let make_input = |workspace| WorkspaceRenderInput {
-            workspace,
-            label: if show_windows {
-                Cow::Borrowed("")
-            } else {
-                workspace_label(workspace, settings.active_label)
-            },
-            show_windows,
-        };
-
-        let render_inputs: Vec<_> = match settings.mode {
-            MenuBarDisplayMode::All => workspaces
-                .iter()
-                .filter(|workspace| {
-                    settings.show_empty || workspace.window_count > 0 || workspace.is_active
-                })
-                .map(|workspace| make_input(workspace))
-                .collect(),
-            MenuBarDisplayMode::Active => workspaces
-                .iter()
-                .find(|workspace| workspace.is_active)
-                .map(|workspace| vec![make_input(workspace)])
-                .unwrap_or_default(),
-        };
+        let render_inputs = render_inputs(displays, settings);
         let render_changed =
             self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
 
@@ -330,15 +316,10 @@ impl MenuIcon {
             return;
         }
 
-        let size = NSSize::new(workspace_strip_width(render_inputs.len()), CELL_HEIGHT);
         if render_changed {
             let layout = {
                 let ivars = self.view.ivars();
-                build_layout(
-                    &render_inputs,
-                    ivars.active_text_attrs.as_ref(),
-                    ivars.inactive_text_attrs.as_ref(),
-                )
+                build_layout(&render_inputs, ivars.text_attrs.as_ref())
             };
             self.view.set_layout(layout);
             self.render_key = Some(MenuIconRenderKey::from_inputs(&render_inputs));
@@ -347,6 +328,7 @@ impl MenuIcon {
             self.status_item.setVisible(true);
         }
 
+        let size = self.view.ivars().layout.borrow().size;
         let width_changed = self.prev_width != size.width;
         if width_changed {
             self.prev_width = size.width;
@@ -384,7 +366,10 @@ impl Drop for MenuIcon {
 
 #[derive(Default)]
 struct MenuIconLayout {
+    size: CGSize,
     workspaces: Vec<WorkspaceRenderData>,
+    separators: Vec<f64>,
+    separator_line: Option<CachedTextLine>,
 }
 
 struct WorkspaceRenderData {
@@ -395,9 +380,43 @@ struct WorkspaceRenderData {
 }
 
 struct WorkspaceRenderInput<'a> {
+    display_uuid: &'a str,
+    space: SpaceId,
     workspace: &'a RuntimeWorkspaceData,
     label: Cow<'a, str>,
     show_windows: bool,
+}
+
+fn render_inputs<'a>(
+    displays: &'a [DisplayWorkspaces],
+    settings: &MenuBarSettings,
+) -> Vec<WorkspaceRenderInput<'a>> {
+    let show_windows = settings.display_style == WorkspaceDisplayStyle::Layout;
+    displays
+        .iter()
+        .flat_map(|display| {
+            display
+                .workspaces
+                .iter()
+                .filter(|workspace| match settings.mode {
+                    MenuBarDisplayMode::All => {
+                        settings.show_empty || workspace.window_count > 0 || workspace.is_active
+                    }
+                    MenuBarDisplayMode::Active => workspace.is_active,
+                })
+                .map(move |workspace| WorkspaceRenderInput {
+                    display_uuid: &display.display_uuid,
+                    space: display.space,
+                    workspace,
+                    label: if show_windows {
+                        Cow::Borrowed("")
+                    } else {
+                        workspace_label(workspace, settings.active_label)
+                    },
+                    show_windows,
+                })
+        })
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -407,6 +426,9 @@ struct MenuIconRenderKey {
 
 #[derive(Debug, PartialEq, Eq)]
 struct WorkspaceRenderKey {
+    display_uuid: String,
+    space: SpaceId,
+    workspace_id: String,
     label: String,
     show_windows: bool,
     is_active: bool,
@@ -419,6 +441,9 @@ impl MenuIconRenderKey {
         let workspaces = inputs
             .iter()
             .map(|input| WorkspaceRenderKey {
+                display_uuid: input.display_uuid.to_owned(),
+                space: input.space,
+                workspace_id: input.workspace.id.clone(),
                 label: input.label.to_string(),
                 show_windows: input.show_windows,
                 is_active: input.workspace.is_active,
@@ -453,7 +478,10 @@ impl MenuIconRenderKey {
     fn matches_inputs(&self, inputs: &[WorkspaceRenderInput<'_>]) -> bool {
         self.workspaces.len() == inputs.len()
             && self.workspaces.iter().zip(inputs).all(|(key, input)| {
-                key.label == input.label
+                key.display_uuid == input.display_uuid
+                    && key.space == input.space
+                    && key.workspace_id == input.workspace.id
+                    && key.label == input.label
                     && key.show_windows == input.show_windows
                     && key.is_active == input.workspace.is_active
                     && (!input.show_windows || key.window_count == input.workspace.window_count)
@@ -484,18 +512,12 @@ struct CachedTextLine {
 
 struct MenuIconViewIvars {
     layout: RefCell<MenuIconLayout>,
-    active_text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
-    inactive_text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
+    text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
 }
 
 #[inline]
 fn centered_origin(container_origin: f64, container_size: f64, content_size: f64) -> f64 {
     container_origin + (container_size - content_size) / 2.0
-}
-
-#[inline]
-fn workspace_strip_width(count: usize) -> f64 {
-    CELL_WIDTH * count as f64 + CELL_SPACING * count.saturating_sub(1) as f64
 }
 
 fn workspace_label(
@@ -512,16 +534,13 @@ fn workspace_label(
 }
 
 #[inline]
-fn workspace_cell_rect(index: usize) -> CGRect {
+fn workspace_cell_rect(x: f64, width: f64, height: f64) -> CGRect {
     // Keep the centered stroke entirely inside its cell so the first and last
     // borders are not clipped by the view bounds.
     let stroke_inset = BORDER_WIDTH / 2.0;
     CGRect::new(
-        CGPoint::new(
-            index as f64 * (CELL_WIDTH + CELL_SPACING) + stroke_inset,
-            stroke_inset,
-        ),
-        CGSize::new(CELL_WIDTH - BORDER_WIDTH, CELL_HEIGHT - BORDER_WIDTH),
+        CGPoint::new(x + stroke_inset, stroke_inset),
+        CGSize::new(width - BORDER_WIDTH, height - BORDER_WIDTH),
     )
 }
 
@@ -1327,16 +1346,9 @@ mod layout_library_tests {
     }
 
     #[test]
-    fn workspace_strip_math_has_no_trailing_spacing() {
-        assert_eq!(workspace_strip_width(0), 0.0);
-        assert_eq!(workspace_strip_width(1), CELL_WIDTH);
-        assert_eq!(workspace_strip_width(3), 3.0 * CELL_WIDTH + 2.0 * CELL_SPACING);
-    }
-
-    #[test]
     fn workspace_borders_are_centered_and_remain_inside_the_strip() {
-        let first = workspace_cell_rect(0);
-        let last = workspace_cell_rect(2);
+        let first = workspace_cell_rect(0.0, CELL_WIDTH, CELL_HEIGHT);
+        let last = workspace_cell_rect(2.0 * (CELL_WIDTH + CELL_SPACING), CELL_WIDTH, CELL_HEIGHT);
         let half_stroke = BORDER_WIDTH / 2.0;
 
         assert_eq!(first.origin.x - half_stroke, 0.0);
@@ -1344,7 +1356,7 @@ mod layout_library_tests {
         assert_eq!(first.origin.y + first.size.height + half_stroke, CELL_HEIGHT);
         assert_eq!(
             last.origin.x + last.size.width + half_stroke,
-            workspace_strip_width(3)
+            3.0 * CELL_WIDTH + 2.0 * CELL_SPACING
         );
     }
 
@@ -1354,16 +1366,187 @@ mod layout_library_tests {
         assert_eq!(centered_origin(-2.0, 15.0, 5.0), 3.0);
     }
 
+    fn displays() -> Vec<DisplayWorkspaces> {
+        (1..=2)
+            .map(|number| DisplayWorkspaces {
+                display_uuid: format!("display-{number}"),
+                space: SpaceId::new(number),
+                is_active_context: number == 1,
+                workspaces: vec![
+                    workspace("one", 0, "main", true, "bsp"),
+                    workspace("two", 1, "web", false, "stack"),
+                ],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_display_filters_independently_and_retains_active_empty_workspaces() {
+        let mut displays = displays();
+        for display in &mut displays {
+            for workspace in &mut display.workspaces {
+                workspace.window_count = 0;
+            }
+        }
+        displays[1].workspaces[1].window_count = 1;
+        for display_style in [WorkspaceDisplayStyle::Label, WorkspaceDisplayStyle::Layout] {
+            let mut settings = MenuBarSettings {
+                display_style,
+                ..Default::default()
+            };
+            let inputs = render_inputs(&displays, &settings);
+            assert_eq!(inputs.len(), 3);
+            assert_eq!(
+                inputs.iter().filter(|input| input.workspace.is_active).count(),
+                2
+            );
+            assert_eq!(inputs[0].display_uuid, "display-1");
+            assert_eq!(inputs[1].display_uuid, "display-2");
+            settings.show_empty = true;
+            assert_eq!(render_inputs(&displays, &settings).len(), 4);
+            settings.mode = MenuBarDisplayMode::Active;
+            let inputs = render_inputs(&displays, &settings);
+            assert_eq!(inputs.len(), 2);
+            assert!(inputs.iter().all(|input| input.workspace.is_active));
+        }
+    }
+
+    #[test]
+    fn grouped_geometry_highlights_both_displays_without_outer_gaps() {
+        let displays = displays();
+        let attrs = build_text_attrs(&NSFont::systemFontOfSize_weight(FONT_SIZE, unsafe {
+            NSFontWeightMedium
+        }));
+        for display_style in [WorkspaceDisplayStyle::Label, WorkspaceDisplayStyle::Layout] {
+            let settings = MenuBarSettings {
+                display_style,
+                show_empty: true,
+                ..Default::default()
+            };
+            let inputs = render_inputs(&displays, &settings);
+            let layout = build_layout(&inputs, &attrs);
+            let cells = &layout.workspaces;
+            assert_eq!(cells.len(), 4);
+            assert_eq!(cells[0].fill_alpha, 1.0);
+            assert_eq!(cells[2].fill_alpha, 1.0);
+            if display_style == WorkspaceDisplayStyle::Label {
+                assert_eq!(cells[1].fill_alpha, 0.0);
+                assert_eq!(cells[3].fill_alpha, 0.0);
+            }
+            let spacing = if display_style == WorkspaceDisplayStyle::Label {
+                LABEL_SPACING
+            } else {
+                CELL_SPACING
+            };
+            let cell_widths: Vec<_> = cells
+                .iter()
+                .map(|cell| {
+                    if display_style == WorkspaceDisplayStyle::Label {
+                        cell.bg_rect.size.width
+                    } else {
+                        CELL_WIDTH
+                    }
+                })
+                .collect();
+            assert_eq!(
+                layout.size.width,
+                cell_widths.iter().sum::<f64>()
+                    + 2.0 * spacing
+                    + 2.0 * SEPARATOR_SPACING
+                    + layout.separator_line.as_ref().unwrap().width
+            );
+            let inset = if display_style == WorkspaceDisplayStyle::Label {
+                0.0
+            } else {
+                BORDER_WIDTH / 2.0
+            };
+            assert_eq!(layout.separators, vec![
+                cell_widths[..2].iter().sum::<f64>() + spacing + SEPARATOR_SPACING
+            ]);
+            assert_eq!(cells[0].bg_rect.origin.x, inset);
+            assert_eq!(cells[3].bg_rect.max().x + inset, layout.size.width);
+            let single = build_layout(&render_inputs(&displays[..1], &settings), &attrs);
+            assert_eq!(single.size.width, cell_widths[..2].iter().sum::<f64>() + spacing);
+            assert!(single.separators.is_empty());
+            assert!(single.separator_line.is_none());
+            assert_eq!(build_layout(&[], &attrs).size.width, 0.0);
+        }
+    }
+
+    #[test]
+    fn labels_use_cached_text_width_for_numbers_and_names() {
+        let mut displays = displays();
+        displays[0].workspaces[1].index = 9;
+        displays[0].workspaces[1].name = "Development".into();
+        let attrs = build_text_attrs(&NSFont::systemFontOfSize_weight(FONT_SIZE, unsafe {
+            NSFontWeightMedium
+        }));
+        for active_label in [ActiveWorkspaceLabel::Index, ActiveWorkspaceLabel::Name] {
+            let settings = MenuBarSettings {
+                display_style: WorkspaceDisplayStyle::Label,
+                active_label,
+                show_empty: true,
+                ..Default::default()
+            };
+            let layout = build_layout(&render_inputs(&displays, &settings), &attrs);
+            for cell in &layout.workspaces {
+                let line = cell.label_line.as_ref().unwrap();
+                assert!(cell.bg_rect.size.width >= line.width + 2.0 * LABEL_PADDING);
+            }
+            assert!(layout.workspaces[1].bg_rect.size.width > LABEL_HEIGHT);
+            if active_label == ActiveWorkspaceLabel::Index {
+                // A narrow single digit must not become a tall, cramped cell.
+                assert_eq!(layout.workspaces[0].bg_rect.size.width, LABEL_HEIGHT);
+                assert!(
+                    layout.workspaces[0].bg_rect.size.width
+                        < layout.workspaces[1].bg_rect.size.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_key_tracks_second_display_identity_order_and_state() {
+        let base = displays();
+        let settings = MenuBarSettings {
+            display_style: WorkspaceDisplayStyle::Label,
+            show_empty: true,
+            ..Default::default()
+        };
+        let key = MenuIconRenderKey::from_inputs(&render_inputs(&base, &settings));
+        assert!(key.matches_inputs(&render_inputs(&base, &settings)));
+        let mut changed = base.clone();
+        changed[1].workspaces[0].is_active = false;
+        assert!(!key.matches_inputs(&render_inputs(&changed, &settings)));
+        changed = base.clone();
+        changed.reverse();
+        assert!(!key.matches_inputs(&render_inputs(&changed, &settings)));
+        changed = base.clone();
+        changed.pop();
+        assert!(!key.matches_inputs(&render_inputs(&changed, &settings)));
+        changed = base.clone();
+        changed[1].display_uuid = "replacement".into();
+        assert!(!key.matches_inputs(&render_inputs(&changed, &settings)));
+        changed = base.clone();
+        changed[1].is_active_context = true;
+        changed[0].is_active_context = false;
+        assert!(key.matches_inputs(&render_inputs(&changed, &settings)));
+    }
+
     #[test]
     fn render_key_only_matches_visually_identical_inputs() {
         let mut workspace = workspace("one", 0, "main", true, "bsp");
         let key = MenuIconRenderKey::from_inputs(&[WorkspaceRenderInput {
+            display_uuid: "a",
+            space: SpaceId::new(1),
             workspace: &workspace,
             label: Cow::Borrowed("1"),
             show_windows: false,
         }]);
 
         assert!(key.matches_inputs(&[WorkspaceRenderInput {
+            display_uuid: "a",
+            space: SpaceId::new(1),
             workspace: &workspace,
             label: Cow::Borrowed("1"),
             show_windows: false,
@@ -1371,6 +1554,8 @@ mod layout_library_tests {
 
         workspace.is_active = false;
         assert!(!key.matches_inputs(&[WorkspaceRenderInput {
+            display_uuid: "a",
+            space: SpaceId::new(1),
             workspace: &workspace,
             label: Cow::Borrowed("1"),
             show_windows: false,
@@ -1378,10 +1563,7 @@ mod layout_library_tests {
     }
 }
 
-fn build_text_attrs(
-    font: &NSFont,
-    color: &NSColor,
-) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
+fn build_text_attrs(font: &NSFont) -> Retained<NSDictionary<NSAttributedStringKey, AnyObject>> {
     let dict = NSMutableDictionary::<NSAttributedStringKey, AnyObject>::new();
     unsafe {
         dict.setObject_forKeyedSubscript(
@@ -1389,8 +1571,10 @@ fn build_text_attrs(
             ProtocolObject::from_ref(NSFontAttributeName),
         );
         dict.setObject_forKeyedSubscript(
-            Some(as_any_object(color)),
-            ProtocolObject::from_ref(NSForegroundColorAttributeName),
+            Some(as_any_object(&*NSNumber::numberWithBool(true))),
+            ProtocolObject::from_ref::<NSString>(
+                kCTForegroundColorFromContextAttributeName.as_ref(),
+            ),
         );
     }
     unsafe { Retained::cast_unchecked(dict) }
@@ -1427,17 +1611,13 @@ fn build_cached_text_line(
 
 impl MenuIconView {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let font = NSFont::menuBarFontOfSize(FONT_SIZE);
-        let active_color = NSColor::blackColor();
-        let inactive_color = NSColor::whiteColor();
-        let active_attrs = build_text_attrs(font.as_ref(), active_color.as_ref());
-        let inactive_attrs = build_text_attrs(font.as_ref(), inactive_color.as_ref());
+        let font = NSFont::systemFontOfSize_weight(FONT_SIZE, unsafe { NSFontWeightMedium });
+        let text_attrs = build_text_attrs(font.as_ref());
 
         let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
         let view = mtm.alloc().set_ivars(MenuIconViewIvars {
             layout: RefCell::new(MenuIconLayout::default()),
-            active_text_attrs: active_attrs,
-            inactive_text_attrs: inactive_attrs,
+            text_attrs,
         });
         unsafe { msg_send![super(view), initWithFrame: frame] }
     }
@@ -1448,16 +1628,60 @@ impl MenuIconView {
     }
 }
 
+fn label_cell_width(text_width: f64) -> f64 {
+    // Keep breathing room around narrow glyphs such as 1 without clipping names.
+    LABEL_HEIGHT.max((text_width * 2.0).ceil() / 2.0 + 2.0 * LABEL_PADDING)
+}
+
 fn build_layout(
     inputs: &[WorkspaceRenderInput<'_>],
-    active_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
-    inactive_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    text_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
 ) -> MenuIconLayout {
     let count = inputs.len();
     let mut workspaces = Vec::with_capacity(count);
-    for (i, input) in inputs.iter().enumerate() {
+    let height = if inputs.first().is_some_and(|input| !input.show_windows) {
+        LABEL_HEIGHT
+    } else {
+        CELL_HEIGHT
+    };
+    let mut width = 0.0;
+    let mut previous_display = None;
+    let mut separators = Vec::new();
+    let mut separator_line = None;
+    for input in inputs {
         let workspace = input.workspace;
-        let bg_rect = workspace_cell_rect(i);
+        let display = (input.display_uuid, input.space);
+        if let Some(previous) = previous_display {
+            width += if previous == display {
+                if input.show_windows {
+                    CELL_SPACING
+                } else {
+                    LABEL_SPACING
+                }
+            } else {
+                let line = separator_line.get_or_insert_with(|| {
+                    // AeroSpace's largeTitle.bold pipe, rendered at half scale.
+                    let font = NSFont::systemFontOfSize_weight(13.0, unsafe { NSFontWeightBold });
+                    build_cached_text_line("|", &build_text_attrs(&font))
+                        .expect("nonempty separator")
+                });
+                separators.push(width + SEPARATOR_SPACING);
+                2.0 * SEPARATOR_SPACING + line.width
+            };
+        }
+        previous_display = Some(display);
+        let label_line = build_cached_text_line(&input.label, text_attrs);
+        let cell_width = if input.show_windows {
+            CELL_WIDTH
+        } else {
+            label_cell_width(label_line.as_ref().map_or(0.0, |line| line.width))
+        };
+        let bg_rect = if input.show_windows {
+            workspace_cell_rect(width, cell_width, height)
+        } else {
+            CGRect::new(CGPoint::new(width, 0.0), CGSize::new(cell_width, height))
+        };
+        width += cell_width;
 
         let fill_alpha = if input.show_windows {
             if workspace.is_active {
@@ -1470,7 +1694,7 @@ fn build_layout(
         } else if workspace.is_active {
             1.0
         } else {
-            0.35
+            0.0
         };
 
         let windows = if input.show_windows && !workspace.windows.is_empty() {
@@ -1497,17 +1721,6 @@ fn build_layout(
             Vec::new()
         };
 
-        let label_line = if !input.label.is_empty() {
-            let attrs = if fill_alpha > 0.0 {
-                active_attrs
-            } else {
-                inactive_attrs
-            };
-            build_cached_text_line(&input.label, attrs)
-        } else {
-            None
-        };
-
         workspaces.push(WorkspaceRenderData {
             bg_rect,
             fill_alpha,
@@ -1516,7 +1729,12 @@ fn build_layout(
         });
     }
 
-    MenuIconLayout { workspaces }
+    MenuIconLayout {
+        workspaces,
+        separators,
+        separator_line,
+        size: CGSize::new(width, height),
+    }
 }
 
 fn add_rounded_rect(ctx: &CGContext, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -1543,6 +1761,12 @@ define_class!(
     struct MenuIconView;
 
     impl MenuIconView {
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn appearance_changed(&self) {
+            unsafe { let _: () = msg_send![super(self), viewDidChangeEffectiveAppearance]; }
+            self.setNeedsDisplay(true);
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
             let layout = self.ivars().layout.borrow();
@@ -1554,11 +1778,22 @@ define_class!(
                 CGContext::save_g_state(Some(cg));
                 CGContext::clear_rect(Some(cg), bounds);
 
-                let y_offset = (bounds.size.height - CELL_HEIGHT) / 2.0;
+                let y_offset = (bounds.size.height - layout.size.height) / 2.0;
+                // Resolve dynamic AppKit color at draw time, under the view's effective appearance.
+                let foreground = NSColor::labelColor();
                 CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
                 CGContext::set_line_width(Some(cg), BORDER_WIDTH);
 
                 for workspace in layout.workspaces.iter() {
+                    let is_label = workspace.label_line.is_some();
+                    let corner_radius = if is_label { LABEL_CORNER_RADIUS } else { CORNER_RADIUS };
+                    CGContext::set_line_width(Some(cg), if is_label { LABEL_BORDER_WIDTH } else { BORDER_WIDTH });
+                    if is_label {
+                        foreground.setStroke();
+                        unsafe { CGContext::begin_transparency_layer(Some(cg), None); }
+                    } else {
+                        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+                    }
                     let rect = workspace.bg_rect;
                     let bg_y = rect.origin.y + y_offset;
 
@@ -1569,7 +1804,7 @@ define_class!(
                             bg_y,
                             rect.size.width,
                             rect.size.height,
-                            CORNER_RADIUS,
+                            corner_radius,
                         );
                         CGContext::set_rgb_fill_color(
                             Some(cg),
@@ -1578,18 +1813,24 @@ define_class!(
                             1.0,
                             workspace.fill_alpha,
                         );
+                        if is_label { foreground.setFill(); }
                         CGContext::fill_path(Some(cg));
                     }
 
-                    add_rounded_rect(
-                        cg,
-                        rect.origin.x,
-                        bg_y,
-                        rect.size.width,
-                        rect.size.height,
-                        CORNER_RADIUS,
-                    );
-                    CGContext::stroke_path(Some(cg));
+                    // SwiftUI's strokeBorder is entirely inside the cell; an active
+                    // label is a solid shape without an additional outline.
+                    if !is_label || workspace.fill_alpha == 0.0 {
+                        let inset = if is_label { LABEL_BORDER_WIDTH / 2.0 } else { 0.0 };
+                        add_rounded_rect(
+                            cg,
+                            rect.origin.x + inset,
+                            bg_y + inset,
+                            rect.size.width - 2.0 * inset,
+                            rect.size.height - 2.0 * inset,
+                            corner_radius - inset,
+                        );
+                        CGContext::stroke_path(Some(cg));
+                    }
 
                     for window in &workspace.windows {
                         add_rounded_rect(
@@ -1633,14 +1874,31 @@ define_class!(
 
                         CGContext::save_g_state(Some(cg));
                         if workspace.fill_alpha > 0.0 {
-                            CGContext::set_rgb_fill_color(Some(cg), 0.0, 0.0, 0.0, 1.0);
-                        } else {
+                            CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
                             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+                        } else {
+                            foreground.setFill();
                         }
                         CGContext::set_text_position(Some(cg), text_x as CGFloat, baseline_y as CGFloat);
                         let line_ref: &CTLine = label_line.line.as_ref();
                         unsafe { line_ref.draw(cg) };
                         CGContext::restore_g_state(Some(cg));
+                    }
+                    if is_label { CGContext::end_transparency_layer(Some(cg)); }
+                }
+
+                if let Some(line) = &layout.separator_line {
+                    foreground.setFill();
+                    CGContext::set_alpha(Some(cg), 0.6);
+                    // Center the glyph plus bottom padding, as in AeroSpace's HStack.
+                    let baseline = centered_origin(
+                        y_offset,
+                        layout.size.height,
+                        line.ascent + line.descent + SEPARATOR_BOTTOM_PADDING,
+                    ) + line.descent + SEPARATOR_BOTTOM_PADDING;
+                    for &x in &layout.separators {
+                        CGContext::set_text_position(Some(cg), x, baseline);
+                        unsafe { line.line.draw(cg); }
                     }
                 }
 

@@ -205,12 +205,12 @@ enabled = false
 # if enabled, it will show all workspaces including empty ones. disabled because this
 # tends to take up too much room in the menubar and then is auto hidden by macos
 show_empty = false
-# choose between drawing every workspace or only the active workspace
+# choose between drawing every workspace or only the active workspace on each display
 mode = "all"
 # when showing workspaces as labels ("index" or "name"), choose which label to render
 active_label = "index"
 # when displaying workspaces, choose whether to draw the layout preview or a set of labels
-# options are "layout" or "label"
+# options are "layout" or "label" (i3-style)
 display_style = "layout"
 # .ron files in this folder appear under Layout Files in the menu bar
 layout_folder = "~/.config/rift/layouts"

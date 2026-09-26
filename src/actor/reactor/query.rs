@@ -236,25 +236,38 @@ impl Reactor {
         };
 
         let active_space =
-            match self.resolve_menu_bar_space_with_preferred(self.space_state.menu_bar_space) {
-                Some(space) => space,
-                None => return,
-            };
-
-        let workspaces = self.query_workspaces(Some(active_space));
-        let active_space_is_activated = self.is_space_active(active_space);
-        let active_workspace = self.layout_manager.layout_engine.active_workspace(active_space);
-        let active_workspace_idx =
-            self.layout_manager.layout_engine.active_workspace_idx(active_space);
-        let windows = self.query_windows(Some(active_space));
+            self.resolve_menu_bar_space_with_preferred(self.space_state.menu_bar_space);
+        let active_space_is_activated =
+            active_space.is_some_and(|space| self.is_space_active(space));
+        // Order by physical arrangement, independent of the command/focused display.
+        let mut screens: Vec<_> = self
+            .space_state
+            .screens
+            .iter()
+            .filter_map(|screen| {
+                screen.space.map(|space| (screen.frame, screen.display_uuid.clone(), space))
+            })
+            .collect();
+        screens.sort_by(|a, b| {
+            a.0.origin
+                .x
+                .total_cmp(&b.0.origin.x)
+                .then_with(|| a.0.origin.y.total_cmp(&b.0.origin.y))
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        let displays = screens
+            .into_iter()
+            .map(|(_, display_uuid, space)| menu_bar::DisplayWorkspaces {
+                display_uuid,
+                space,
+                is_active_context: Some(space) == active_space,
+                workspaces: self.query_workspaces(Some(space)),
+            })
+            .collect();
 
         menu_tx.send(menu_bar::Event::Update(menu_bar::Update {
-            active_space,
             active_space_is_activated,
-            workspaces,
-            active_workspace_idx,
-            active_workspace,
-            windows,
+            displays,
         }));
     }
 

@@ -830,6 +830,66 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
 }
 
 #[test]
+fn menu_bar_update_groups_visible_displays_and_keeps_command_topology_scoped() {
+    let mut reactor = test_reactor();
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+    reactor.handle_event(space_state_event(vec![right, left, left], vec![
+        Some(space2),
+        Some(space1),
+        None,
+    ]));
+    reactor.handle_test_workspace_command(space1, &LayoutCommand::SwitchToWorkspace(0));
+    reactor.handle_test_workspace_command(space2, &LayoutCommand::SwitchToWorkspace(1));
+    let (tx, mut rx) = crate::actor::channel();
+    reactor.menu_manager.menu_tx = Some(tx);
+
+    for context in [space1, space2] {
+        reactor.space_state.menu_bar_space = Some(context);
+        reactor.maybe_send_menu_update();
+        let (_, menu_bar::Event::Update(update)) = rx.try_recv().unwrap() else {
+            panic!("expected menu update")
+        };
+        assert_eq!(
+            update.displays.iter().map(|display| display.space).collect::<Vec<_>>(),
+            [space1, space2]
+        );
+        assert_eq!(
+            update.displays[0].workspaces.iter().position(|ws| ws.is_active),
+            Some(0)
+        );
+        assert_eq!(
+            update.displays[1].workspaces.iter().position(|ws| ws.is_active),
+            Some(1)
+        );
+        let expected = reactor.query_workspaces(Some(context));
+        assert_eq!(
+            update
+                .context_workspaces()
+                .iter()
+                .map(|ws| (&ws.id, ws.index))
+                .collect::<Vec<_>>(),
+            expected.iter().map(|ws| (&ws.id, ws.index)).collect::<Vec<_>>()
+        );
+    }
+    reactor.space_state.screens.retain(|screen| screen.space == Some(space1));
+    reactor.maybe_send_menu_update();
+    let (_, menu_bar::Event::Update(update)) = rx.try_recv().unwrap() else {
+        panic!("expected menu update")
+    };
+    assert_eq!(update.displays.len(), 1);
+    assert!(update.displays[0].is_active_context);
+    reactor.space_state.screens.clear();
+    reactor.maybe_send_menu_update();
+    let (_, menu_bar::Event::Update(update)) = rx.try_recv().unwrap() else {
+        panic!("expected menu update")
+    };
+    assert!(update.displays.is_empty());
+}
+
+#[test]
 fn menu_bar_space_prefers_active_menu_bar_display_space() {
     let mut reactor = test_reactor();
     let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
