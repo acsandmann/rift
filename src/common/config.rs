@@ -449,6 +449,10 @@ pub struct Settings {
     pub mouse_hides_on_focus: bool,
     #[serde(default = "yes")]
     pub focus_follows_mouse: bool,
+    /// Treat vertically stacked displays as a horizontal pointer chain.
+    /// `top-to-bottom` maps higher displays to the left; `bottom-to-top` reverses it.
+    #[serde(default)]
+    pub horizontal_mouse_warp: Option<HorizontalMouseWarp>,
     /// Hotkey that disables focus-follows-mouse while held.
     /// Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier-only spec (e.g. "Ctrl")
     #[serde(default)]
@@ -477,6 +481,13 @@ pub struct Settings {
     /// Enable hot-reloading of the config file when it changes
     #[serde(default = "yes")]
     pub hot_reload: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HorizontalMouseWarp {
+    TopToBottom,
+    BottomToTop,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -2029,6 +2040,21 @@ mod tests {
         let issues = settings.validate();
         assert!(issues.iter().any(|issue| issue.contains("invalid title_regex")));
         assert!(issues.iter().any(|issue| issue.contains("effects are ignored")));
+    }
+
+    #[test]
+    fn horizontal_mouse_warp_config_parsing() {
+        let missing: Settings = toml::from_str("").unwrap();
+        assert_eq!(missing.horizontal_mouse_warp, None);
+        for (value, expected) in [
+            ("top-to-bottom", HorizontalMouseWarp::TopToBottom),
+            ("bottom-to-top", HorizontalMouseWarp::BottomToTop),
+        ] {
+            let settings: Settings =
+                toml::from_str(&format!("horizontal_mouse_warp = \"{value}\" ")).unwrap();
+            assert_eq!(settings.horizontal_mouse_warp, Some(expected));
+        }
+        assert!(toml::from_str::<Settings>("horizontal_mouse_warp = \"sideways\"").is_err());
     }
 
     #[test]
