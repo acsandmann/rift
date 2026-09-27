@@ -803,7 +803,16 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
     ] {
         add_action_item(&help_menu, mtm, handler, title, action);
     }
-    add_action_item(&menu, mtm, handler, "Support Rift…", sel!(onOpenSponsor:));
+
+    add_separator(&menu);
+    let sponsor_item = add_action_item(
+        &menu,
+        mtm,
+        handler,
+        "Sponsor Rift on GitHub",
+        sel!(onOpenSponsor:),
+    );
+    sponsor_item.setSubtitle(Some(&NSString::from_str("help fund continued development")));
 
     add_separator(&menu);
     let quit_item = add_action_item(&menu, mtm, handler, "Quit Rift", sel!(onQuitRift:));
