@@ -661,6 +661,7 @@ fn hit_test_available(
                 Direction::Up => 2,
                 Direction::Down => 3,
             }]
+            && !unavailable.contains(&(source.window, zone, WindowDropAction::Move(direction)))
         {
             return Some(DropIntent {
                 window: source.window,
@@ -947,6 +948,30 @@ mod tests {
         assert!(actor.intent().is_none());
         assert_eq!(actor.preview_target().unwrap().preview_area, rect());
         assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
+    }
+
+    #[test]
+    fn unavailable_source_tile_edge_does_not_retry_the_same_move() {
+        for ((x, y), direction) in [
+            ((1.0, 50.0), Direction::Left),
+            ((199.0, 50.0), Direction::Right),
+            ((100.0, 1.0), Direction::Up),
+            ((100.0, 99.0), Direction::Down),
+        ] {
+            let mut actor = native(true, rect(), scene_with(vec![]));
+            motion(&mut actor, x, y);
+            let intent = actor.intent().unwrap();
+            assert_eq!(intent.window, w(1));
+            assert_eq!(intent.action, WindowDropAction::Move(direction));
+
+            // A rejected preview must terminate the reactor's resolution loop.
+            assert!(
+                !actor.set_preview(intent, None),
+                "retries rejected {direction:?} move"
+            );
+            assert!(actor.intent().is_none());
+            assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
+        }
     }
 
     #[test]
