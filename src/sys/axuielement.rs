@@ -279,8 +279,8 @@ impl AXUIElement {
     /// This is primarily used by developer tooling and may not be supported by all elements.
     pub fn main(&self) -> Result<bool> { self.bool_attribute("AXMain") }
 
-    pub fn windows(&self) -> Result<Vec<AXUIElement>> {
-        let Some(value) = self.copy_attribute("AXWindows")? else {
+    fn elements_attribute(&self, name: &'static str) -> Result<Vec<AXUIElement>> {
+        let Some(value) = self.copy_attribute(name)? else {
             return Ok(Vec::new());
         };
         let array = self.downcast::<CFArray>(value)?;
@@ -292,6 +292,10 @@ impl AXUIElement {
         }
         Ok(out)
     }
+
+    pub fn windows(&self) -> Result<Vec<AXUIElement>> { self.elements_attribute("AXWindows") }
+
+    pub fn children(&self) -> Result<Vec<AXUIElement>> { self.elements_attribute("AXChildren") }
 
     pub fn parent(&self) -> Result<Option<AXUIElement>> {
         let Some(value) = self.copy_attribute("AXParent")? else {
