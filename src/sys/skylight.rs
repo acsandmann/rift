@@ -460,6 +460,7 @@ unsafe extern "C" {
     pub fn SLSWindowIteratorGetAttachedWindowCount(iterator: *mut CFType) -> c_int;
     pub fn SLSWindowIteratorGetPID(iterator: *mut CFType) -> c_int;
     pub fn SLSWindowIteratorGetBounds(iterator: *mut CFType) -> CGRect;
+    pub fn SLSWindowIteratorCopyTitle(iterator: *mut CFType) -> *mut CFString;
     pub fn SLSWindowIteratorGetAlpha(iterator: *mut CFType) -> f32;
     pub fn SLSWindowIteratorGetConstraints(
         iterator: *mut CFType,

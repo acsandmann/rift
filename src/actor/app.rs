@@ -1381,7 +1381,12 @@ impl State {
                     trace!(?wid, "Ignoring title change for superseded AX element");
                     return;
                 }
-                match elem.title() {
+                let wsid = self.windows.get(&wid).and_then(|window| window.window_server_id);
+                let sls_title = wsid
+                    .and_then(window_server::window_title)
+                    .filter(|(pid, _)| *pid == self.pid)
+                    .map(|(_, title)| title);
+                match sls_title.map(Ok).unwrap_or_else(|| elem.title()) {
                     Ok(title) => {
                         let Ok(window) = self.window_mut(wid) else {
                             return;

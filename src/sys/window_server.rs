@@ -229,6 +229,17 @@ impl WindowIterator {
     }
 }
 
+pub fn window_title(id: WindowServerId) -> Option<(i32, String)> {
+    let ids = cf_array_from_ids(&[id]);
+    let query = WindowIterator::new_from_cfarray(CFRetained::as_ptr(&ids).as_ptr(), 1)?;
+    query.advance()?;
+    if query.window_id() != id.as_u32() {
+        return None;
+    }
+    let title = NonNull::new(unsafe { SLSWindowIteratorCopyTitle(query.iter) })?;
+    Some((query.pid(), unsafe { CFRetained::from_raw(title) }.to_string()))
+}
+
 impl Drop for WindowIterator {
     fn drop(&mut self) { unsafe { CFRelease(self.iter) } }
 }
