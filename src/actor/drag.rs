@@ -181,9 +181,11 @@ impl DragActor {
     pub fn preview_target(&self) -> Option<DropTarget> {
         let session = self.session()?;
         if let Some(target) = session.target.validated() {
-            return Some(target);
+            return (session.source.tiled || target.intent.action == WindowDropAction::Stack)
+                .then_some(target);
         }
-        if !matches!(session.target, TargetState::None)
+        if !session.source.tiled
+            || !matches!(session.target, TargetState::None)
             || !contains(session.source.origin_frame, session.pointer, 0.0)
         {
             return None;
@@ -917,6 +919,24 @@ mod tests {
                 WindowDropAction::Move(direction)
             );
         }
+    }
+
+    #[test]
+    fn floating_moves_do_not_preview_the_starting_position() {
+        let mut native_drag = native(false, rect(), DragScene::default());
+        motion(&mut native_drag, 100.0, 50.0);
+        assert!(native_drag.preview_target().is_none());
+
+        let mut modifier_drag = DragActor::new(DragDropSettings::default());
+        modifier_drag.begin_modifier(
+            source(false),
+            point(100.0, 50.0),
+            MouseAction::Move,
+            DragScene::default(),
+        );
+        assert!(modifier_drag.preview_target().is_none());
+        motion(&mut modifier_drag, 110.0, 50.0);
+        assert!(modifier_drag.preview_target().is_none());
     }
 
     #[test]
