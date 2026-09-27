@@ -630,6 +630,117 @@ fn active_display_update_only_changes_command_context() {
     );
 }
 
+fn display_focus_context() -> (Reactor, SpaceId, SpaceId) {
+    crate::sys::screen::TEST_ACTIVE_DISPLAY.with(|display| display.take());
+    let mut reactor = test_reactor_with_workspace_count(3);
+    let (left, right) = (SpaceId::new(1), SpaceId::new(2));
+    let frames = [0., 1000.].map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 1000.)));
+    reactor.handle_event(space_state_event(frames.to_vec(), vec![Some(left), Some(right)]));
+    (reactor, left, right)
+}
+
+fn focus_display_command(selector: DisplaySelector) -> Event {
+    Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector)))
+}
+
+#[test]
+fn focus_display_empty_target_routes_workspace_commands_and_return_direction() {
+    let (mut reactor, left, right) = display_focus_context();
+    let left_workspace = reactor.test_workspace(left, 0);
+    let next_right_workspace = reactor.test_workspace(right, 1);
+    let outcome = reactor
+        .dispatch_workflow(focus_display_command(DisplaySelector::Direction(
+            Direction::Right,
+        )))
+        .unwrap();
+    assert_eq!(reactor.raw_command_space(), Some(right));
+    assert_eq!(reactor.space_state.menu_bar_space, Some(right));
+    crate::sys::screen::TEST_ACTIVE_DISPLAY.with(|display| {
+        assert_eq!(display.borrow().as_deref(), Some("test-display-1"));
+    });
+    assert_eq!(outcome.mouse_warps, vec![CGPoint::new(1500., 500.)]);
+    assert!(outcome.raise_requests.is_empty() && outcome.make_key_windows.is_empty());
+    reactor.apply_event_outcome(outcome);
+    let engine = &reactor.layout_manager.layout_engine;
+    assert!(engine.windows_in_active_workspace(&reactor.state.windows, right).is_empty());
+    assert_eq!(engine.focused_window(), None);
+    reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
+    let engine = &reactor.layout_manager.layout_engine;
+    assert_eq!(engine.active_workspace(left), Some(left_workspace));
+    assert_eq!(engine.active_workspace(right), Some(next_right_workspace));
+    // Resolve the return direction without an intervening native notification.
+    reactor.handle_event(focus_display_command(DisplaySelector::Direction(
+        Direction::Left,
+    )));
+    assert_eq!(reactor.raw_command_space(), Some(left));
+}
+
+#[test]
+fn focus_display_with_window_preserves_selection_raise_and_cursor() {
+    for remember_focus in [false, true] {
+        let (mut reactor, left, right) = display_focus_context();
+        reactor.space_state.screens[1].frame.origin = CGPoint::new(0., 1000.);
+        reactor.add_test_app(1);
+        reactor.handle_event(Event::ApplicationGloballyActivated(1));
+        let window = WindowId::new(1, 1);
+        let frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
+        reactor.add_test_window(window, WindowServerId::new(101), Some(left), frame);
+        let workspace = reactor.test_workspace(left, 0);
+        assert!(reactor.assign_test_window_to_workspace(left, window, workspace));
+        reactor.send_layout_event(LayoutEvent::WindowAdded(left, window));
+        reactor.layout_manager.layout_engine.commit_workspace_focus(
+            &mut reactor.state.windows,
+            left,
+            remember_focus.then_some(window),
+        );
+        let center = reactor.state.windows.window(window).unwrap().frame_monotonic.mid();
+        reactor.handle_event(focus_display_command(DisplaySelector::Direction(
+            Direction::Down,
+        )));
+        let outcome = reactor
+            .dispatch_workflow(focus_display_command(DisplaySelector::Direction(Direction::Up)))
+            .unwrap();
+        assert_eq!(reactor.raw_command_space(), Some(left));
+        assert_eq!(outcome.mouse_warps, vec![center]);
+        assert!(matches!(outcome.raise_requests.as_slice(),
+            [raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), focus_quiet: Quiet::Yes, .. })]
+                if *wid == window));
+        reactor.apply_event_outcome(outcome);
+        assert_eq!(
+            reactor.layout_manager.layout_engine.focused_window(),
+            Some(window)
+        );
+        reactor.handle_event(focus_display_command(DisplaySelector::Direction(
+            Direction::Down,
+        )));
+        assert_eq!(reactor.raw_command_space(), Some(right));
+        reactor.handle_event(Event::WindowServerFocusChanged(window, left));
+        assert_eq!(reactor.raw_command_space(), Some(left));
+        assert_eq!(reactor.main_window(), Some(window));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.focused_window(),
+            Some(window)
+        );
+        reactor.space_state.command_space = Some(right);
+        reactor.handle_loop_event(Event::MouseMoved(WindowServerId::new(101)));
+        assert_eq!(reactor.raw_command_space(), Some(left));
+    }
+}
+
+#[test]
+fn focus_display_invalid_or_inactive_target_preserves_context() {
+    let (mut reactor, left, right) = display_focus_context();
+    reactor.handle_event(focus_display_command(DisplaySelector::Index(99)));
+    assert_eq!(reactor.raw_command_space(), Some(left));
+    reactor.space_state.active_spaces.remove(&right);
+    reactor.active_spaces.remove(&right);
+    reactor.handle_event(focus_display_command(DisplaySelector::Direction(
+        Direction::Right,
+    )));
+    assert_eq!(reactor.raw_command_space(), Some(left));
+    crate::sys::screen::TEST_ACTIVE_DISPLAY.with(|display| assert!(display.borrow().is_none()));
+}
+
 #[test]
 fn passive_command_space_change_does_not_override_clicked_window_focus() {
     let (mut apps, mut reactor) = test_context();

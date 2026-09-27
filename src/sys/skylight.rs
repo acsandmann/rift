@@ -430,6 +430,11 @@ unsafe extern "C" {
     pub fn SLSCopyAssociatedWindows(cid: cid_t, wid: u32) -> *mut CFArray<CFNumber>;
     pub fn SLSManagedDisplayGetCurrentSpace(cid: cid_t, uuid: *mut CFString) -> u64;
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: cid_t) -> *mut CFString;
+    pub fn SLSSetActiveMenuBarDisplayIdentifier(
+        cid: cid_t,
+        uuid: *mut CFString,
+        repeat_uuid: *mut CFString,
+    ) -> CGError;
     pub fn SLSSpaceGetType(cid: cid_t, sid: u64) -> c_int;
     pub fn SLSGetMenuBarAutohideEnabled(cid: cid_t, enabled: *mut i32) -> i32;
     pub fn SLSGetDisplayMenubarHeight(did: u32, height: *mut u32) -> i32;

@@ -588,6 +588,43 @@ pub fn active_menu_bar_display_uuid() -> Option<String> {
     )
 }
 
+pub fn set_active_menu_bar_display_uuid(display_uuid: &str) -> bool {
+    if display_uuid.is_empty() {
+        return false;
+    }
+    #[cfg(test)]
+    {
+        TEST_ACTIVE_DISPLAY.with(|display| display.replace(Some(display_uuid.to_string())));
+        return true;
+    }
+    #[cfg(not(test))]
+    {
+        let uuid = CFString::from_str(display_uuid);
+        let ptr = CFRetained::as_ptr(&uuid).as_ptr();
+        let result = crate::sys::cg_ok(unsafe {
+            super::skylight::SLSSetActiveMenuBarDisplayIdentifier(SLSMainConnectionID(), ptr, ptr)
+        });
+        if let Err(error) = result {
+            warn!(?error, display_uuid, "Failed to activate menu-bar display");
+            return false;
+        }
+        let active = unsafe {
+            NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(SLSMainConnectionID()))
+                .map(|ptr| CFRetained::<CFString>::from_raw(ptr))
+        };
+        let confirmed = active.as_deref().is_some_and(|active| active == &*uuid);
+        if !confirmed {
+            debug!(display_uuid, "Menu-bar display activation was not confirmed");
+        }
+        confirmed
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_ACTIVE_DISPLAY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
     if display_uuid.is_empty() {
         return None;
