@@ -49,59 +49,35 @@ pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {
     }
 }
 
-/// Computes whether a window is manageable based on its properties and window server information.
-///
-/// A window is manageable if:
-/// - It is not minimized
-/// - Its layer/level is normal (if info available), except for known IBKR Desktop AX dialogs
-/// - It is not sticky
-/// - It is a standard AX window and AX root, except for known IBKR Desktop AX dialogs
-pub fn compute_window_info_manageability(
+fn compute_window_info_manageability(
     info: &WindowInfo,
-    window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
-) -> bool {
-    let allow_nonstandard_window = is_ibkr_desktop_dialog(info);
-    compute_window_manageability(
-        info.sys_id,
-        info.is_minimized,
-        info.is_ax_window,
-        info.is_standard,
-        info.is_root,
-        allow_nonstandard_window,
-        window_server_info,
-    )
-}
-
-fn compute_window_manageability(
-    window_server_id: Option<WindowServerId>,
-    is_minimized: bool,
-    is_ax_window: bool,
-    is_ax_standard: bool,
-    is_ax_root: bool,
-    allow_nonstandard_window: bool,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
-    if is_minimized {
+    if info.is_minimized
+        || !info.is_root
+        || info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
+    {
         return false;
     }
 
-    if let Some(wsid) = window_server_id {
-        if let Some(info) = window_server_info(wsid) {
-            if info.layer != 0 && !allow_nonstandard_window {
-                return false;
-            }
-        }
+    let allow_nonstandard_window = is_ibkr_desktop_dialog(info);
+    if !info.is_standard && !allow_nonstandard_window {
+        return false;
+    }
+
+    if let Some(wsid) = info.sys_id {
         if window_is_sticky(wsid) {
             return false;
         }
-
-        if let Some(level) = window_level(wsid.0) {
-            if level != NSNormalWindowLevel && !allow_nonstandard_window {
+        if !allow_nonstandard_window {
+            if window_server_info(wsid).is_some_and(|server| server.layer != 0)
+                || window_level(wsid.0).is_some_and(|level| level != NSNormalWindowLevel)
+            {
                 return false;
             }
         }
     }
-    is_ax_window && is_ax_root && (is_ax_standard || allow_nonstandard_window)
+    true
 }
 
 fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
@@ -145,7 +121,6 @@ mod tests {
             is_root: true,
             is_minimized: false,
             is_resizable: true,
-            is_ax_window: true,
             title: "Window".into(),
             frame: CGRect::new(CGPoint::ZERO, CGSize::new(800.0, 600.0)),
             min_size: None,
@@ -161,6 +136,22 @@ mod tests {
     #[test]
     fn standard_ax_window_without_window_server_metadata_is_manageable() {
         let info = ax_window("AXStandardWindow", true);
+
+        assert!(compute_window_info_manageability(&info, |_| None));
+    }
+
+    #[test]
+    fn non_window_ax_role_is_not_manageable() {
+        let mut info = ax_window("AXStandardWindow", true);
+        info.ax_role = Some("AXTextField".into());
+
+        assert!(!compute_window_info_manageability(&info, |_| None));
+    }
+
+    #[test]
+    fn synthesized_standard_window_without_ax_role_remains_manageable() {
+        let mut info = ax_window("AXStandardWindow", true);
+        info.ax_role = None;
 
         assert!(compute_window_info_manageability(&info, |_| None));
     }
