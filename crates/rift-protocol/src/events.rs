@@ -15,6 +15,7 @@ pub enum EventKind {
     StacksChanged,
     LayoutChanged,
     SelectionChanged,
+    BindingModeChanged,
     #[serde(rename = "*")]
     All,
 }
@@ -29,6 +30,7 @@ impl EventKind {
             Self::StacksChanged => "stacks_changed",
             Self::LayoutChanged => "layout_changed",
             Self::SelectionChanged => "selection_changed",
+            Self::BindingModeChanged => "binding_mode_changed",
             Self::All => "*",
         }
     }
@@ -45,6 +47,10 @@ impl fmt::Display for EventKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RiftEvent {
+    BindingModeChanged {
+        previous_mode: String,
+        mode: String,
+    },
     WorkspaceChanged {
         space_id: u64,
         workspace_id: WorkspaceId,
@@ -106,6 +112,7 @@ pub enum RiftEvent {
 impl RiftEvent {
     pub const fn kind(&self) -> EventKind {
         match self {
+            Self::BindingModeChanged { .. } => EventKind::BindingModeChanged,
             Self::WorkspaceChanged { .. } => EventKind::WorkspaceChanged,
             Self::WindowsChanged { .. } => EventKind::WindowsChanged,
             Self::WindowTitleChanged { .. } => EventKind::WindowTitleChanged,
@@ -116,20 +123,32 @@ impl RiftEvent {
         }
     }
 
+    /// Returns the associated macOS space, or `0` for global events.
+    /// Use `space_id_opt` to distinguish events without space context.
     pub const fn space_id(&self) -> u64 {
+        match self.space_id_opt() {
+            Some(space_id) => space_id,
+            None => 0,
+        }
+    }
+
+    /// Global events have no associated macOS space.
+    pub const fn space_id_opt(&self) -> Option<u64> {
         match self {
+            Self::BindingModeChanged { .. } => None,
             Self::WorkspaceChanged { space_id, .. }
             | Self::WindowsChanged { space_id, .. }
             | Self::WindowTitleChanged { space_id, .. }
             | Self::FocusedWindowChanged { space_id, .. }
             | Self::StacksChanged { space_id, .. }
             | Self::LayoutChanged { space_id, .. }
-            | Self::SelectionChanged { space_id, .. } => *space_id,
+            | Self::SelectionChanged { space_id, .. } => Some(*space_id),
         }
     }
 
     pub fn display_uuid(&self) -> Option<&str> {
         match self {
+            Self::BindingModeChanged { .. } => None,
             Self::WorkspaceChanged { display_uuid, .. }
             | Self::WindowsChanged { display_uuid, .. }
             | Self::WindowTitleChanged { display_uuid, .. }
@@ -166,6 +185,21 @@ pub struct StackInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_mode_event_has_global_context_and_round_trips() {
+        let event = RiftEvent::BindingModeChanged {
+            previous_mode: "default".into(),
+            mode: "resize".into(),
+        };
+        let json = serde_json::json!({"type": "binding_mode_changed", "previous_mode": "default", "mode": "resize"});
+        assert_eq!(serde_json::to_value(&event).unwrap(), json);
+        assert_eq!(serde_json::from_value::<RiftEvent>(json).unwrap(), event);
+        assert_eq!(event.kind().as_str(), "binding_mode_changed");
+        assert_eq!(event.space_id(), 0);
+        assert_eq!(event.space_id_opt(), None);
+        assert_eq!(event.display_uuid(), None);
+    }
 
     #[test]
     fn typed_event_preserves_the_legacy_wire_shape() {
@@ -233,6 +267,7 @@ mod tests {
 
         assert_eq!(event.kind(), EventKind::LayoutChanged);
         assert_eq!(event.space_id(), 42);
+        assert_eq!(event.space_id_opt(), Some(42));
         assert_eq!(event.display_uuid(), Some("display"));
         assert_eq!(
             serde_json::to_value(event).unwrap(),

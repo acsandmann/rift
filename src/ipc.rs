@@ -375,6 +375,8 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
             encode_success(applications)
         }
 
+        RiftRequest::GetBindingMode => encode_success(&reactor.binding_mode),
+
         RiftRequest::GetMetrics => encode_success(reactor.query_metrics()),
 
         RiftRequest::GetConfig => unreachable!("config requests run on config workers"),

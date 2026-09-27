@@ -900,7 +900,23 @@ impl Input {
         true
     }
 
+    fn active_binding_mode(&self) -> String {
+        self.binding_mode_specs
+            .borrow()
+            .get(self.active_mode.get())
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| "default".into())
+    }
+
+    fn notify_binding_mode_changed(&self, previous_mode: String) {
+        let mode = self.active_binding_mode();
+        if mode != previous_mode {
+            self.events_tx.send(Event::BindingModeChanged { mode });
+        }
+    }
+
     fn install_binding_specs(&self, specs: BindingModeSpecs) {
+        let previous_mode = self.active_binding_mode();
         let indices = specs
             .iter()
             .enumerate()
@@ -909,6 +925,7 @@ impl Input {
         *self.binding_mode_specs.borrow_mut() = specs;
         *self.mode_indices.borrow_mut() = indices;
         self.active_mode.set(0);
+        self.notify_binding_mode_changed(previous_mode);
         if self.hotkeys_active.get() {
             self.rebuild_binding_maps();
         }
@@ -916,7 +933,9 @@ impl Input {
 
     fn transition_binding_mode(&self, target: &str) {
         if let Some(&index) = self.mode_indices.borrow().get(target) {
+            let previous_mode = self.active_binding_mode();
             self.active_mode.set(index);
+            self.notify_binding_mode_changed(previous_mode);
         }
     }
 
@@ -1513,6 +1532,26 @@ mod tests {
         );
         assert!(input.on_event(CGEventType::KeyDown, &event));
         assert!(wm_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn binding_mode_changes_notify_and_reload_resets_to_default() {
+        let (input, _, mut events) = input();
+        let specs = vec![("default".into(), vec![]), ("resize".into(), vec![])];
+        input.install_binding_specs(specs.clone());
+        assert!(events.try_recv().is_err());
+        input.transition_binding_mode("resize");
+        assert!(
+            matches!(events.try_recv().unwrap().1, Event::BindingModeChanged { mode } if mode == "resize")
+        );
+        input.transition_binding_mode("resize");
+        input.transition_binding_mode("missing");
+        assert!(events.try_recv().is_err());
+        input.install_binding_specs(specs);
+        assert!(
+            matches!(events.try_recv().unwrap().1, Event::BindingModeChanged { mode } if mode == "default")
+        );
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

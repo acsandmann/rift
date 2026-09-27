@@ -110,6 +110,8 @@ enum QueryCommands {
         #[arg(long)]
         workspace_id: Option<usize>,
     },
+    /// Get the active binding mode name
+    BindingMode,
     /// Get performance metrics
     Metrics,
 }
@@ -499,12 +501,12 @@ enum DisplayCommands {
 enum SubscribeCommands {
     /// Subscribe to Mach IPC events
     Mach {
-        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, *)
+        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, *)
         event: String,
     },
     /// Subscribe to events via CLI command execution
     Cli {
-        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, *)
+        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, *)
         #[arg(long)]
         event: String,
         /// Command to execute when event occurs
@@ -648,6 +650,7 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
             }
             None => Ok(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id }),
         },
+        QueryCommands::BindingMode => Ok(RiftRequest::GetBindingMode),
         QueryCommands::Metrics => Ok(RiftRequest::GetMetrics),
     }
 }
@@ -882,10 +885,11 @@ fn parse_event_kind(input: &str) -> Result<EventKind, String> {
         "focused_window_changed" => Ok(EventKind::FocusedWindowChanged),
         "stacks_changed" => Ok(EventKind::StacksChanged),
         "layout_changed" => Ok(EventKind::LayoutChanged),
+        "binding_mode_changed" => Ok(EventKind::BindingModeChanged),
         "selection_changed" => Ok(EventKind::SelectionChanged),
         "*" => Ok(EventKind::All),
         other => Err(format!(
-            "Invalid event '{}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, or *",
+            "Invalid event '{}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, or *",
             other
         )),
     }
@@ -1194,6 +1198,22 @@ fn run_mach_subscription(event: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_mode_query_and_subscription_parse() {
+        let cli = Cli::try_parse_from(["rift-cli", "query", "binding-mode"]).unwrap();
+        assert!(matches!(cli.command, Commands::Query {
+            query: QueryCommands::BindingMode
+        }));
+        assert_eq!(
+            build_query_request(QueryCommands::BindingMode).unwrap(),
+            RiftRequest::GetBindingMode
+        );
+        assert_eq!(
+            parse_event_kind("binding_mode_changed").unwrap(),
+            EventKind::BindingModeChanged
+        );
+    }
 
     #[test]
     fn execute_requests_use_typed_protocol_commands() {

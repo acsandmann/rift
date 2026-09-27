@@ -386,6 +386,10 @@ pub enum Event {
     #[serde(skip)]
     ExternalManagerDisconnected(crate::model::window_store::ExternalManagerId),
 
+    BindingModeChanged {
+        mode: String,
+    },
+
     Command(Command),
 
     #[serde(skip)]
@@ -407,6 +411,7 @@ pub enum WindowInvalidationSource {
 pub struct Reactor {
     pub config: Config,
     pub one_space: bool,
+    pub(crate) binding_mode: String,
     app_manager: managers::AppManager,
     layout_manager: managers::LayoutManager,
     pub(crate) state: RiftState,
@@ -491,6 +496,7 @@ impl Reactor {
         let reactor = Reactor {
             config: config.clone(),
             one_space,
+            binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
             state: RiftState::default(),
@@ -1055,6 +1061,16 @@ impl Reactor {
     }
 
     fn handle_loop_event(&mut self, event: Event) {
+        if let Event::BindingModeChanged { mode } = event {
+            if self.binding_mode != mode {
+                let previous_mode = std::mem::replace(&mut self.binding_mode, mode.clone());
+                let _ = self
+                    .communication_manager
+                    .event_broadcaster
+                    .send(BroadcastEvent::BindingModeChanged { previous_mode, mode });
+            }
+            return;
+        }
         let high_frequency = matches!(&event, Event::DragMotion(..));
         if let Event::Query(req) = event {
             self.handle_query_request(req);
@@ -1066,6 +1082,12 @@ impl Reactor {
                 && self.main_window() == Some(window)
                 && self.layout_manager.layout_engine.focused_window() == Some(window)
             {
+                if let Some(space) = self.assigned_space_for_window_id(window)
+                    && self.is_space_active(space)
+                    && self.space_state.screen_by_space(space).is_some()
+                {
+                    self.space_state.command_space = Some(space);
+                }
                 // Keep hit testing live, but avoid native space/stack queries and
                 // outcome processing when actual focus already matches the hit.
                 return;
@@ -1403,6 +1425,12 @@ impl Reactor {
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
+                if self.state.windows.contains_window(window)
+                    && self.is_space_active(reported_space)
+                    && self.space_state.screen_by_space(reported_space).is_some()
+                {
+                    self.space_state.command_space = Some(reported_space);
+                }
                 if self.layout_manager.layout_engine.focused_window() == Some(window) {
                     if let Some(input_tx) = &self.communication_manager.input_tx {
                         _ = input_tx.send(crate::actor::input::Request::EnforceHidden);
@@ -2137,10 +2165,15 @@ impl Reactor {
                     .as_ref()
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
-                if focus_window.is_none()
-                    && let Some(space) = screen.as_ref().and_then(|screen| screen.space)
+                if target_is_active
+                    && let Some(screen) = screen.as_ref().filter(|screen| screen.space.is_some())
                 {
-                    self.focus_desktop_if_active_workspace_empty(space);
+                    if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
+                        self.space_state.menu_bar_space = screen.space;
+                    }
+                    // Honor explicit display selection before the native notification arrives,
+                    // even on activation failure. Later spaces-actor updates remain authoritative.
+                    self.space_state.command_space = screen.space;
                 }
                 let focus_window_center = focus_window
                     .and_then(|wid| self.state.windows.window(wid))

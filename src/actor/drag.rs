@@ -181,9 +181,11 @@ impl DragActor {
     pub fn preview_target(&self) -> Option<DropTarget> {
         let session = self.session()?;
         if let Some(target) = session.target.validated() {
-            return Some(target);
+            return (session.source.tiled || target.intent.action == WindowDropAction::Stack)
+                .then_some(target);
         }
-        if !matches!(session.target, TargetState::None)
+        if !session.source.tiled
+            || !matches!(session.target, TargetState::None)
             || !contains(session.source.origin_frame, session.pointer, 0.0)
         {
             return None;
@@ -661,6 +663,7 @@ fn hit_test_available(
                 Direction::Up => 2,
                 Direction::Down => 3,
             }]
+            && !unavailable.contains(&(source.window, zone, WindowDropAction::Move(direction)))
         {
             return Some(DropIntent {
                 window: source.window,
@@ -919,6 +922,24 @@ mod tests {
     }
 
     #[test]
+    fn floating_moves_do_not_preview_the_starting_position() {
+        let mut native_drag = native(false, rect(), DragScene::default());
+        motion(&mut native_drag, 100.0, 50.0);
+        assert!(native_drag.preview_target().is_none());
+
+        let mut modifier_drag = DragActor::new(DragDropSettings::default());
+        modifier_drag.begin_modifier(
+            source(false),
+            point(100.0, 50.0),
+            MouseAction::Move,
+            DragScene::default(),
+        );
+        assert!(modifier_drag.preview_target().is_none());
+        motion(&mut modifier_drag, 110.0, 50.0);
+        assert!(modifier_drag.preview_target().is_none());
+    }
+
+    #[test]
     fn source_tile_edge_is_preview_only_until_pointer_enters_neighbor() {
         let mut drag_scene = scene(frame(200.0, 0.0, 200.0, 100.0));
         drag_scene.source_neighbors[1] = true;
@@ -947,6 +968,30 @@ mod tests {
         assert!(actor.intent().is_none());
         assert_eq!(actor.preview_target().unwrap().preview_area, rect());
         assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
+    }
+
+    #[test]
+    fn unavailable_source_tile_edge_does_not_retry_the_same_move() {
+        for ((x, y), direction) in [
+            ((1.0, 50.0), Direction::Left),
+            ((199.0, 50.0), Direction::Right),
+            ((100.0, 1.0), Direction::Up),
+            ((100.0, 99.0), Direction::Down),
+        ] {
+            let mut actor = native(true, rect(), scene_with(vec![]));
+            motion(&mut actor, x, y);
+            let intent = actor.intent().unwrap();
+            assert_eq!(intent.window, w(1));
+            assert_eq!(intent.action, WindowDropAction::Move(direction));
+
+            // A rejected preview must terminate the reactor's resolution loop.
+            assert!(
+                !actor.set_preview(intent, None),
+                "retries rejected {direction:?} move"
+            );
+            assert!(actor.intent().is_none());
+            assert!(actor.finish(MouseButton::Left).unwrap().target.is_none());
+        }
     }
 
     #[test]
