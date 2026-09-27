@@ -37,6 +37,11 @@ impl CliExecutor for DefaultCliExecutor {
     ) -> Result<i32, std::io::Error> {
         let mut env_vars: HashMap<String, String> = HashMap::default();
         match event {
+            BroadcastEvent::BindingModeChanged { previous_mode, mode } => {
+                env_vars.insert("RIFT_EVENT_TYPE".into(), "binding_mode_changed".into());
+                env_vars.insert("RIFT_PREVIOUS_BINDING_MODE".into(), previous_mode.clone());
+                env_vars.insert("RIFT_BINDING_MODE".into(), mode.clone());
+            }
             BroadcastEvent::WorkspaceChanged {
                 workspace_id,
                 workspace_name,

@@ -42,6 +42,7 @@ pub enum RiftRequest {
     },
     GetApplications,
     GetMetrics,
+    GetBindingMode,
     GetConfig,
     ExecuteCommand {
         command: RiftCommand,

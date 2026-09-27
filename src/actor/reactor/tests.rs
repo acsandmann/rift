@@ -6641,3 +6641,19 @@ fn display_churn_release_still_flushes_the_deferred_inventory_refresh() {
         "the first snapshot after display churn must still flush the deferred refresh: {requests:?}"
     );
 }
+
+#[test]
+fn binding_mode_changes_update_query_state_before_broadcast() {
+    let mut reactor = test_reactor();
+    let (tx, mut rx) = crate::actor::channel();
+    reactor.communication_manager.event_broadcaster = tx;
+    assert_eq!(reactor.binding_mode, "default");
+    reactor.handle_loop_event(Event::BindingModeChanged { mode: "resize".into() });
+    assert_eq!(reactor.binding_mode, "resize");
+    assert_eq!(rx.try_recv().unwrap().1, BroadcastEvent::BindingModeChanged {
+        previous_mode: "default".into(),
+        mode: "resize".into(),
+    });
+    reactor.handle_loop_event(Event::BindingModeChanged { mode: "resize".into() });
+    assert!(rx.try_recv().is_err());
+}

@@ -66,7 +66,9 @@ impl Dimmer {
     }
 
     fn handle_event(&mut self, event: &RiftEvent) -> Result<()> {
-        let space_id = event.space_id();
+        let Some(space_id) = event.space_id_opt() else {
+            return Ok(());
+        };
 
         match event {
             RiftEvent::WorkspaceChanged { display_uuid, .. } => {

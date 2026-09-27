@@ -384,6 +384,10 @@ pub enum Event {
     #[serde(skip)]
     InstallIpc(crate::ipc::InstallRequest),
 
+    BindingModeChanged {
+        mode: String,
+    },
+
     Command(Command),
 
     #[serde(skip)]
@@ -405,6 +409,7 @@ pub enum WindowInvalidationSource {
 pub struct Reactor {
     pub config: Config,
     pub one_space: bool,
+    pub(crate) binding_mode: String,
     app_manager: managers::AppManager,
     layout_manager: managers::LayoutManager,
     pub(crate) state: RiftState,
@@ -489,6 +494,7 @@ impl Reactor {
         let reactor = Reactor {
             config: config.clone(),
             one_space,
+            binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
             state: RiftState::default(),
@@ -1053,6 +1059,16 @@ impl Reactor {
     }
 
     fn handle_loop_event(&mut self, event: Event) {
+        if let Event::BindingModeChanged { mode } = event {
+            if self.binding_mode != mode {
+                let previous_mode = std::mem::replace(&mut self.binding_mode, mode.clone());
+                let _ = self
+                    .communication_manager
+                    .event_broadcaster
+                    .send(BroadcastEvent::BindingModeChanged { previous_mode, mode });
+            }
+            return;
+        }
         let high_frequency = matches!(&event, Event::DragMotion(..));
         if let Event::Query(req) = event {
             self.handle_query_request(req);

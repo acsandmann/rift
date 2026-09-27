@@ -201,6 +201,11 @@ impl RiftMachClient {
         self.request(RiftRequest::GetApplications)
     }
 
+    /// Returns the active binding mode name.
+    pub fn get_binding_mode(&self) -> Result<String, ClientError> {
+        self.request(RiftRequest::GetBindingMode)
+    }
+
     /// Returns the current metrics payload.
     pub fn get_metrics(&self) -> Result<Value, ClientError> {
         self.request(RiftRequest::GetMetrics)
