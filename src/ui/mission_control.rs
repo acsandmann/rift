@@ -1,11 +1,12 @@
 //! Session-owned Overview. Runtime frames are truth; captured images only decorate cards.
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use block2::RcBlock;
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSFont, NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen};
+use objc2_app_kit::{NSColor, NSFont, NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen};
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGContext,
@@ -135,8 +136,12 @@ fn workspace_heading(ws: &WorkspaceProjection, scale: f64) -> CGRect {
 
 fn update_heading(heading: &CATextLayer, data: &RuntimeWorkspaceData) {
     let text = CFString::from_str(&format!(
-        "Workspace {}  ·  {} window{}",
-        data.name,
+        "{}  ·  {} window{}",
+        if data.name.parse::<usize>().is_ok() {
+            format!("Workspace {}", data.name)
+        } else {
+            data.name.clone()
+        },
         data.windows.len(),
         if data.windows.len() == 1 { "" } else { "s" }
     ));
@@ -370,6 +375,16 @@ fn hit(
     None
 }
 
+pub(crate) enum OverviewAction {
+    Dismiss,
+    Activate {
+        display: String,
+        workspace: String,
+        selection: Selection,
+        sys_id: Option<WindowServerId>,
+    },
+}
+
 struct WindowCard {
     id: WindowId,
     layer: Retained<CALayer>,
@@ -402,6 +417,16 @@ struct DisplayOverview {
     // Field order matters: unbind the surface before releasing its CGS window.
     _surface: WindowSurface,
     _window: CgsWindow,
+}
+
+// Draw on the fitted image, leaving the caption and transparent card gutters unboxed.
+fn set_preview_border(image: &CALayer, width: f64) {
+    image.setBorderWidth(width);
+    if width > 0.0 {
+        image.setBorderColor(Some(&NSColor::controlAccentColor().CGColor()));
+    } else {
+        image.setBorderColor(None);
+    }
 }
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
@@ -652,8 +677,7 @@ impl DisplayOverview {
                         card.layer.setFrame(w.frame);
                         let image_frame = pixel_aligned(preview_frame(w.frame.size), self.scale);
                         let height = image_frame.origin.y + image_frame.size.height;
-                        card.image.setBorderWidth(0.0);
-                        card.image.setBorderColor(None);
+
                         card.image.setBackgroundColor(None);
                         card.image.setFrame(image_frame);
                         card.caption.setFrame(rect(
@@ -670,7 +694,8 @@ impl DisplayOverview {
                                 20.0,
                             ));
                         }
-                        card.title.setHidden(true);
+                        card.title.setHidden(false);
+                        card.title.setOpacity(0.65);
                         card.title.setFrame(rect(0.0, 27.0, image_frame.size.width, 20.0));
                         container.addSublayer(&card.layer);
                         if self.animate {
@@ -722,7 +747,9 @@ impl DisplayOverview {
                     image.setBorderWidth(0.0);
                     image.setBackgroundColor(None);
                     unsafe {
-                        image.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspect);
+                        // Cached captures may have the window's old aspect ratio after a tile resize.
+                        // Fill the preview bounds so the border stays flush with the image.
+                        image.setContentsGravity(objc2_quartz_core::kCAGravityResize);
                     }
                     if let Some(image_data) = previews
                         .and_then(|p| p.images.get(&data.id))
@@ -781,7 +808,8 @@ impl DisplayOverview {
                     unsafe {
                         title.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
                     }
-                    title.setHidden(true);
+                    title.setHidden(false);
+                    title.setOpacity(0.65);
                     container.addSublayer(&card);
                     cards.push(WindowCard {
                         id: data.id,
@@ -921,6 +949,7 @@ pub struct OverviewSession {
     displays: Vec<DisplayOverview>,
     active: usize,
     selection: Selection,
+    hovered: Option<WindowId>,
     pub(crate) previews: Option<PreviewSession>,
     drag: Option<OverviewDrag>,
     drop: Option<crate::actor::reactor::OverviewDrop>,
@@ -1069,6 +1098,7 @@ impl OverviewSession {
             displays,
             active,
             selection,
+            hovered: None,
             previews: None,
             drag: None,
             drop: None,
@@ -1123,13 +1153,18 @@ impl OverviewSession {
         self.end_drag();
         let selected = moved.or(self.selection.window);
         for (i, d) in self.displays.iter_mut().enumerate() {
+            let centered_id = d.workspaces.get(d.centered).map(|ws| ws.id.clone());
             d.workspaces = reactor.query_workspaces(d.info.space);
             filter_workspaces(&mut d.workspaces, self.show_empty_workspaces);
             expand_scrolling_columns(&mut d.workspaces, d.info.frame);
             if d.workspaces.is_empty() {
                 continue;
             }
-            d.centered = d.centered.min(d.workspaces.len() - 1);
+            d.centered = d
+                .workspaces
+                .iter()
+                .position(|ws| Some(&ws.id) == centered_id.as_ref())
+                .unwrap_or_else(|| d.centered.min(d.workspaces.len() - 1));
             d.workspace_offset = (d.centered as f64 + d.workspace_offset)
                 .clamp(0.0, (d.workspaces.len() - 1) as f64)
                 - d.centered as f64;
@@ -1226,12 +1261,12 @@ impl OverviewSession {
         let preview = layer(source.image.frame(), d.scale);
         unsafe {
             preview.setContents(source.image.contents().as_deref());
-            preview.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspect);
+            preview.setContentsGravity(objc2_quartz_core::kCAGravityResize);
         }
         preview.setCornerRadius(CORNER);
         preview.setMasksToBounds(true);
         preview.setBackgroundColor(None);
-        preview.setBorderWidth(0.0);
+        set_preview_border(&preview, 2.5);
         card.addSublayer(&preview);
         if let Some(icon) = &source.icon {
             let icon_layer = layer(
@@ -1394,18 +1429,44 @@ impl OverviewSession {
         &mut self,
         generation: u64,
         enabled: bool,
+        wake: crate::actor::mission_control::Sender,
         remembered: Option<&RememberedPreviewCache>,
     ) {
         let _transaction = OverviewTransaction::begin();
         if generation != self.generation {
             return;
         }
-        self.previews = PreviewSession::open(enabled, generation);
+        self.previews = PreviewSession::open(enabled, generation, wake);
         self.request_previews(remembered);
+    }
+
+    fn update_hover(&mut self, point: CGPoint) {
+        let hovered = self.displays.iter().find(|d| contains(d.bounds, point)).and_then(|d| {
+            let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
+            hit(&d.workspaces, &d.projection, local).and_then(|selection| selection.window)
+        });
+        if hovered != self.hovered {
+            self.hovered = hovered;
+            self.update_preview_borders();
+        }
+    }
+
+    fn update_preview_borders(&self) {
+        for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
+            set_preview_border(
+                &card.image,
+                if Some(card.id) == self.hovered {
+                    1.5
+                } else {
+                    0.0
+                },
+            );
+        }
     }
 
     fn highlight(&self, previous: Option<(usize, Selection)>) {
         with_disabled_actions(|| {
+            self.update_preview_borders();
             for (display, selection, width) in previous
                 .into_iter()
                 .map(|(d, s)| (d, s, 0.5))
@@ -1420,21 +1481,20 @@ impl OverviewSession {
                         1.0,
                         if width > 0.5 { 0.065 } else { 0.035 },
                     )));
-                    if let Some(id) = selection.window {
-                        if let Some(card) = ws.cards.iter().find(|c| c.id == id) {
-                            let selected = width > 0.5;
-                            card.title.setHidden(!selected);
-                            if let Some(icon) = &card.icon {
-                                icon.setOpacity(if selected { 1.0 } else { 0.82 });
-                            }
+                    ws.heading.setForegroundColor(Some(&color(
+                        1.0,
+                        1.0,
+                        1.0,
+                        if width > 0.5 { 0.95 } else { 0.55 },
+                    )));
+                    if let Some(id) = selection.window
+                        && let Some(card) = ws.cards.iter().find(|c| c.id == id)
+                    {
+                        let selected = width > 0.5;
+                        card.title.setOpacity(if selected { 1.0 } else { 0.65 });
+                        if let Some(icon) = &card.icon {
+                            icon.setOpacity(if selected { 1.0 } else { 0.82 });
                         }
-                    } else {
-                        let foreground = if width > 0.5 {
-                            color(1.0, 1.0, 1.0, 1.0)
-                        } else {
-                            color(0.94, 0.94, 0.97, 0.62)
-                        };
-                        ws.heading.setForegroundColor(Some(&foreground));
                     }
                 }
             }
@@ -1445,8 +1505,21 @@ impl OverviewSession {
         &mut self,
         input: Input,
         remembered: Option<&RememberedPreviewCache>,
-    ) -> Option<(String, Selection, Option<WindowServerId>)> {
+    ) -> Option<OverviewAction> {
         let _transaction = OverviewTransaction::begin();
+        let pointer = match &input {
+            Input::Move(point)
+            | Input::Click(point)
+            | Input::PointerDown(point)
+            | Input::PointerUp(point)
+            | Input::Scroll { point, .. } => Some(*point),
+            _ => None,
+        };
+        if self.drag.is_none()
+            && let Some(point) = pointer
+        {
+            self.update_hover(point);
+        }
         match input {
             Input::PointerDown(point) => {
                 self.pressed = Some(point);
@@ -1460,6 +1533,7 @@ impl OverviewSession {
             Input::PointerUp(point) => {
                 self.move_drag(point);
                 let drag = self.end_drag();
+                self.update_hover(point);
                 let pressed = self.pressed.take();
                 if let Some(drag) = drag.filter(|drag| drag.started) {
                     if !drag.intent.workspace.is_empty() {
@@ -1484,10 +1558,19 @@ impl OverviewSession {
         let activate = matches!(input, Input::Activate | Input::Click(_));
         match input {
             Input::Move(point) | Input::Click(point) => {
-                let i = self.displays.iter().position(|d| contains(d.bounds, point))?;
-                let d = &self.displays[i];
-                let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
-                let selection = hit(&d.workspaces, &d.projection, local)?;
+                let target = self
+                    .displays
+                    .iter()
+                    .enumerate()
+                    .find(|(_, d)| contains(d.bounds, point))
+                    .and_then(|(i, d)| {
+                        let local =
+                            CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
+                        hit(&d.workspaces, &d.projection, local).map(|selection| (i, selection))
+                    });
+                let Some((i, selection)) = target else {
+                    return activate.then_some(OverviewAction::Dismiss);
+                };
                 self.active = i;
                 self.selection = selection;
             }
@@ -1594,6 +1677,11 @@ impl OverviewSession {
             }
             _ => {}
         }
+        if self.drag.is_none()
+            && let Some(point) = pointer
+        {
+            self.update_hover(point);
+        }
         if old != (self.active, self.selection) || (reprojected && !only_translated) {
             self.highlight(Some(old));
         }
@@ -1604,7 +1692,13 @@ impl OverviewSession {
                 .window
                 .and_then(|id| d.workspaces.iter().flat_map(|w| &w.windows).find(|w| w.id == id))
                 .and_then(|w| w.info.sys_id);
-            return Some((d.info.display_uuid.clone(), self.selection, sys_id));
+            let workspace = d.workspaces.iter().find(|ws| ws.index == self.selection.workspace)?;
+            return Some(OverviewAction::Activate {
+                display: d.info.display_uuid.clone(),
+                workspace: workspace.id.clone(),
+                selection: self.selection,
+                sys_id,
+            });
         }
         None
     }
@@ -1710,8 +1804,20 @@ impl OverviewSession {
         match result {
             PreviewEvent::Content(generation, content) if generation == self.generation => {
                 if let Some(content) = content {
+                    let managed: HashSet<_> = self
+                        .displays
+                        .iter()
+                        .flat_map(|d| &d.workspaces)
+                        .flat_map(|ws| &ws.windows)
+                        .filter_map(|w| w.info.sys_id.map(|id| id.as_u32()))
+                        .collect();
                     previews.windows = Some(unsafe {
-                        content.windows().iter().map(|w| (w.windowID(), w)).collect()
+                        content
+                            .windows()
+                            .iter()
+                            .filter(|w| managed.contains(&w.windowID()))
+                            .map(|w| (w.windowID(), w))
+                            .collect()
                     });
                 } else {
                     previews.schedule.pending.clear();
@@ -1842,7 +1948,18 @@ fn deliver(tx: actor::Sender<PreviewEvent>, result: PreviewEvent) {
     });
 }
 
+// Framework captures may finish after a session closes. Bound jobs across all sessions.
+static CAPTURE_JOBS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn outstanding_preview_captures() -> usize { CAPTURE_JOBS.load(Ordering::Acquire) }
+
+fn acquire_capture_slot(jobs: &AtomicUsize) -> bool {
+    jobs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
+        .is_ok()
+}
+
 pub(crate) struct PreviewSession {
+    wake: crate::actor::mission_control::Sender,
     pub(crate) rx: actor::Receiver<PreviewEvent>,
     tx: actor::Sender<PreviewEvent>,
     windows: Option<HashMap<u32, Retained<SCWindow>>>,
@@ -1853,7 +1970,11 @@ pub(crate) struct PreviewSession {
 }
 
 impl PreviewSession {
-    fn open(enabled: bool, generation: u64) -> Option<Self> {
+    fn open(
+        enabled: bool,
+        generation: u64,
+        wake: crate::actor::mission_control::Sender,
+    ) -> Option<Self> {
         if !enabled {
             return None;
         }
@@ -1863,10 +1984,10 @@ impl PreviewSession {
             );
             return None;
         }
-        Some(Self::new(generation))
+        Some(Self::new(generation, wake))
     }
 
-    fn new(generation: u64) -> Self {
+    fn new(generation: u64, wake: crate::actor::mission_control::Sender) -> Self {
         let (tx, rx) = actor::channel();
         let callback_tx = tx.clone();
         let callback = RcBlock::new(move |content: *mut SCShareableContent, _: *mut NSError| {
@@ -1880,6 +2001,7 @@ impl PreviewSession {
             SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(true,false,&callback);
         }
         Self {
+            wake,
             rx,
             tx,
             windows: None,
@@ -1890,15 +2012,20 @@ impl PreviewSession {
         }
     }
 
-    fn pump(&mut self, generation: u64) {
+    pub(crate) fn pump(&mut self, generation: u64) {
         if self.failed {
             return;
         }
         let Some(windows) = &self.windows else {
             return;
         };
-        while let Some(request) = self.schedule.next() {
+        while self.schedule.active < 2 && !self.schedule.pending.is_empty() {
+            if !acquire_capture_slot(&CAPTURE_JOBS) {
+                break;
+            }
+            let request = self.schedule.next().unwrap();
             let Some(window) = windows.get(&request.sys_id.as_u32()) else {
+                CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
                 self.schedule.complete();
                 continue;
             };
@@ -1906,6 +2033,7 @@ impl PreviewSession {
             if !owner.is_some_and(|app| unsafe {
                 owner_matches(&request, app.processID(), &app.bundleIdentifier().to_string())
             }) {
+                CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
                 self.schedule.complete();
                 continue;
             }
@@ -1921,10 +2049,20 @@ impl PreviewSession {
                 config.setIgnoreShadowsSingleWindow(true);
                 config.setIgnoreGlobalClipSingleWindow(true);
                 config.setScalesToFit(true);
-                config.setPreservesAspectRatio(true);
+                // Match the requested tile bounds without baking letterboxing into the image.
+                config.setPreservesAspectRatio(false);
             }
             let tx = self.tx.clone();
+            let wake = self.wake.clone();
             let callback = RcBlock::new(move |image: *mut CGImage, _: *mut NSError| {
+                CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
+                dispatchr::queue::main().after_f_s(
+                    dispatchr::time::Time::NOW,
+                    wake.clone(),
+                    |wake| {
+                        wake.send(crate::actor::mission_control::Event::PumpPreviews);
+                    },
+                );
                 if tx.is_closed() {
                     return;
                 }
@@ -2743,7 +2881,9 @@ mod tests {
         let image_cf: &objc2_core_foundation::CFType = image_ref.as_ref();
         let count = image_cf.retain_count();
         let (tx, rx) = actor::channel();
+        let (wake, _wake_rx) = actor::channel();
         let mut session = PreviewSession {
+            wake,
             rx,
             tx: tx.clone(),
             windows: None,
@@ -2762,7 +2902,22 @@ mod tests {
 
     #[test]
     fn disabled_previews_never_enter_permission_or_capture_path() {
-        assert!(PreviewSession::open(false, 1).is_none());
+        let (wake, _rx) = actor::channel();
+        assert!(PreviewSession::open(false, 1, wake).is_none());
+    }
+
+    #[test]
+    fn capture_limit_survives_closing_and_reopening_sessions() {
+        let jobs = AtomicUsize::new(0);
+        assert!(acquire_capture_slot(&jobs));
+        assert!(acquire_capture_slot(&jobs));
+        // Closing a receiver does not mean its native capture has completed.
+        assert!(!acquire_capture_slot(&jobs));
+        jobs.fetch_sub(1, Ordering::AcqRel);
+        assert!(acquire_capture_slot(&jobs));
+        assert!(!acquire_capture_slot(&jobs));
+        jobs.fetch_sub(2, Ordering::AcqRel);
+        assert_eq!(jobs.load(Ordering::Acquire), 0);
     }
 
     #[test]

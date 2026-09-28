@@ -796,7 +796,7 @@ pub struct MissionControlSettings {
     /// Include workspaces without windows in Overview.
     #[serde(default = "yes")]
     pub show_empty_workspaces: bool,
-    #[serde(default = "no")]
+    #[serde(default = "yes")]
     pub window_previews: bool,
     #[serde(default = "no")]
     pub enabled: bool,

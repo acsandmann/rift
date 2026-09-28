@@ -218,6 +218,11 @@ pub enum SpaceEventKind {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
     #[serde(skip)]
+    OverviewSelectWorkspace {
+        display: String,
+        workspace: String,
+    },
+    #[serde(skip)]
     OverviewDrop {
         intent: events::drag::OverviewDrop,
         reply: std::sync::mpsc::SyncSender<bool>,
@@ -1881,6 +1886,53 @@ impl Reactor {
                     self.drag_manager.externally_controlled_window = Some(window);
                 }
                 return Ok(EventOutcome::no_change());
+            }
+            Event::OverviewSelectWorkspace { display, workspace } => {
+                let Some(space) = self
+                    .screen_for_selector(&rift_protocol::DisplaySelector::Uuid(display), None)
+                    .and_then(|s| s.space)
+                else {
+                    return Ok(EventOutcome::no_change());
+                };
+                if !self.is_space_active(space) {
+                    return Ok(EventOutcome::no_change());
+                }
+                // Change display context without first focusing its old workspace's window.
+                if let Some(screen) = self.space_state.screen_by_space(space) {
+                    if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
+                        self.space_state.menu_bar_space = Some(space);
+                    }
+                }
+                self.space_state.command_space = Some(space);
+                let workspaces = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager_mut()
+                    .list_workspaces(space);
+                let Some(index) =
+                    workspaces.iter().position(|(id, _)| format!("{id:?}") == workspace)
+                else {
+                    return Ok(EventOutcome::no_change());
+                };
+                // Overview selects an identity, never invokes configured back-and-forth.
+                if self.layout_manager.layout_engine.active_workspace(space)
+                    == Some(workspaces[index].0)
+                {
+                    return Ok(EventOutcome::no_change());
+                }
+                let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
+                return command_workflow::handle_command_layout(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    &mut self.workspace_switch_manager,
+                    command_workflow::LayoutCommandPayload {
+                        command: crate::layout_engine::LayoutCommand::SwitchToWorkspace(index),
+                        command_space: Some(space),
+                        visible_spaces,
+                        visible_space_centers,
+                        post_arrange_mouse_warp: None,
+                    },
+                );
             }
             Event::OverviewDrop { intent, reply } => {
                 let valid = self.state.windows.window(intent.window).is_some_and(|window| {

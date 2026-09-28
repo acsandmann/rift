@@ -6883,3 +6883,56 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
     );
     assert_eq!(reactor.state.windows.workspace_for_window(source, window), None);
 }
+
+#[test]
+fn overview_selects_exact_display_workspace_without_back_and_forth() {
+    let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
+    settings.workspace_auto_back_and_forth = true;
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    reactor.handle_event(space_state_event(
+        vec![
+            CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
+        ],
+        vec![Some(left_space), Some(right_space)],
+    ));
+    let right = reactor.query_workspaces(Some(right_space));
+    let left_active = reactor.layout_manager.layout_engine.active_workspace(left_space);
+    let target = right[1].id.clone();
+    reactor
+        .dispatch_workflow(Event::OverviewSelectWorkspace {
+            display: "test-display-1".into(),
+            workspace: target.clone(),
+        })
+        .unwrap();
+    let selected = reactor.layout_manager.layout_engine.active_workspace(right_space);
+    assert_ne!(selected.map(|id| format!("{id:?}")), Some(right[0].id.clone()));
+    assert_eq!(selected.map(|id| format!("{id:?}")), Some(target.clone()));
+    let repeated = reactor
+        .dispatch_workflow(Event::OverviewSelectWorkspace {
+            display: "test-display-1".into(),
+            workspace: target,
+        })
+        .unwrap();
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        selected
+    );
+    assert_eq!(repeated.arrange.passes, 0);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(left_space),
+        left_active
+    );
+    reactor
+        .dispatch_workflow(Event::OverviewSelectWorkspace {
+            display: "test-display-1".into(),
+            workspace: "removed-workspace".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        selected
+    );
+}

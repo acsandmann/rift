@@ -6,11 +6,12 @@ use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::timer::Timer;
-use crate::ui::mission_control::{OverviewSession, RememberedPreviewCache};
+use crate::ui::mission_control::{OverviewAction, OverviewSession, RememberedPreviewCache};
 
 #[derive(Debug)]
 pub enum Event {
     StartPreviews(u64),
+    PumpPreviews,
     ShowAll,
     ShowCurrent,
     Dismiss,
@@ -188,6 +189,7 @@ impl MissionControlActor {
             tracing::debug!(
                 remembered_preview_count,
                 remembered_preview_bytes,
+                outstanding_captures = crate::ui::mission_control::outstanding_preview_captures(),
                 "Overview closed"
             );
         }
@@ -196,11 +198,17 @@ impl MissionControlActor {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::PumpPreviews => {
+                if let Some(previews) = self.session.as_mut().and_then(|s| s.previews.as_mut()) {
+                    previews.pump(self.generation);
+                }
+            }
             Event::StartPreviews(generation) => {
                 if let Some(session) = &mut self.session {
                     session.start_previews(
                         generation,
                         self.settings.window_previews,
+                        self.tx.clone(),
                         self.remembered.as_ref(),
                     );
                 }
@@ -264,16 +272,18 @@ impl MissionControlActor {
                         );
                     }
                 }
-                if let Some((display, selection, sys_id)) = action {
+                if matches!(action, Some(OverviewAction::Dismiss)) {
                     self.close();
-                    self.reactor.send(reactor::Event::Command(reactor::Command::Reactor(
-                        reactor::ReactorCommand::FocusDisplay(
-                            rift_protocol::DisplaySelector::Uuid(display),
-                        ),
-                    )));
-                    self.reactor.send(reactor::Event::Command(reactor::Command::Layout(
-                        crate::layout_engine::LayoutCommand::SwitchToWorkspace(selection.workspace),
-                    )));
+                } else if let Some(OverviewAction::Activate {
+                    display,
+                    workspace,
+                    selection,
+                    sys_id,
+                }) = action
+                {
+                    self.close();
+                    self.reactor
+                        .send(reactor::Event::OverviewSelectWorkspace { display, workspace });
                     if let Some(window_id) = selection.window {
                         self.reactor.send(reactor::Event::Command(reactor::Command::Reactor(
                             reactor::ReactorCommand::FocusWindow {
@@ -329,7 +339,8 @@ mod tests {
     fn disabled_settings_do_not_create_a_channel() {
         assert!(channel_if_enabled(&MissionControlSettings::default()).is_none());
         assert!(!MissionControlSettings::default().window_previews);
-        let settings: MissionControlSettings = toml::from_str("enabled = true").unwrap();
+        let settings: MissionControlSettings =
+            toml::from_str("enabled = true\nwindow_previews = false").unwrap();
         assert!(channel_if_enabled(&settings).is_some());
         assert!(!settings.window_previews);
     }
