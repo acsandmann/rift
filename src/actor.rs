@@ -36,6 +36,8 @@ impl<Event> Sender<Event> {
         _ = self.try_send(event)
     }
 
+    pub(crate) fn is_closed(&self) -> bool { self.0.is_closed() }
+
     pub fn try_send(&self, event: Event) -> Result<(), SendError<(Span, Event)>> {
         self.0.send((Span::current(), event))
     }

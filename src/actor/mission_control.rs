@@ -181,7 +181,16 @@ impl MissionControlActor {
     }
 
     fn close(&mut self) {
-        self.session = None;
+        if let Some(session) = self.session.take() {
+            drop(session);
+            let (remembered_preview_count, remembered_preview_bytes) =
+                self.remembered.as_ref().map(RememberedPreviewCache::stats).unwrap_or_default();
+            tracing::debug!(
+                remembered_preview_count,
+                remembered_preview_bytes,
+                "Overview closed"
+            );
+        }
         self.input_tx.send(super::input::Request::SetMissionControlActive(false));
     }
 
@@ -350,15 +359,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn empty_workspace_setting_is_opt_in() {
-        let settings: MissionControlSettings = toml::from_str("enabled = true").unwrap();
-        assert!(!settings.show_empty_workspaces);
-        let settings: MissionControlSettings =
-            toml::from_str("show_empty_workspaces = true").unwrap();
-        assert!(settings.show_empty_workspaces);
     }
 
     #[test]

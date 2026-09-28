@@ -35,7 +35,7 @@ use crate::ui::common::with_disabled_actions;
 
 const GAP: f64 = 40.0;
 const CORNER: f64 = 8.0;
-const CAPTION: f64 = 28.0;
+const CAPTION: f64 = 48.0;
 
 /// All layer changes for one input/capture update reach the compositor together.
 /// Nested helpers may create transactions, but only this outer scope flushes.
@@ -92,16 +92,57 @@ fn pixel_aligned(frame: CGRect, scale: f64) -> CGRect {
     )
 }
 
-fn heading_frame(frame: CGRect, scale: f64) -> CGRect {
+fn workspace_backdrop(ws: &WorkspaceProjection) -> CGRect {
+    let margin = 24.0_f64.min(ws.frame.size.width / 4.0);
+    let width = (ws.frame.size.width * 0.55).max(360.0).min(ws.frame.size.width - margin * 2.0);
+    let center = ws.frame.size.width / 2.0;
+    let (left, right) = ws.windows.iter().fold(
+        (center - width / 2.0, center + width / 2.0),
+        |(left, right), w| {
+            (
+                left.min(w.frame.origin.x - 16.0),
+                right.max(w.frame.origin.x + w.frame.size.width + 16.0),
+            )
+        },
+    );
+    let left = left.max(margin);
+    let right = right.min(ws.frame.size.width - margin);
+    rect(left, 0.0, (right - left).max(1.0), ws.frame.size.height)
+}
+
+fn workspace_hit_frame(ws: &WorkspaceProjection) -> CGRect {
+    let backdrop = workspace_backdrop(ws);
+    rect(
+        ws.frame.origin.x + backdrop.origin.x,
+        ws.frame.origin.y,
+        backdrop.size.width,
+        ws.frame.size.height,
+    )
+}
+
+fn workspace_heading(ws: &WorkspaceProjection, scale: f64) -> CGRect {
+    let backdrop = workspace_backdrop(ws);
     pixel_aligned(
         rect(
-            (frame.size.width - 300.0) / 2.0,
-            frame.origin.y - 26.0,
-            300.0,
+            backdrop.origin.x + 16.0,
+            ws.frame.origin.y - 26.0,
+            (backdrop.size.width - 32.0).max(1.0),
             20.0,
         ),
         scale,
     )
+}
+
+fn update_heading(heading: &CATextLayer, data: &RuntimeWorkspaceData) {
+    let text = CFString::from_str(&format!(
+        "Workspace {}  ·  {} window{}",
+        data.name,
+        data.windows.len(),
+        if data.windows.len() == 1 { "" } else { "s" }
+    ));
+    unsafe {
+        heading.setString(Some(&*(text.as_ref() as *const AnyObject)));
+    }
 }
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
@@ -124,6 +165,60 @@ fn filter_workspaces(workspaces: &mut Vec<RuntimeWorkspaceData>, show_empty: boo
     }
 }
 
+/// Native offscreen columns share parking coordinates. Expand only the session's
+/// query snapshot into logical strip positions; native windows remain untouched.
+fn expand_scrolling_columns(workspaces: &mut [RuntimeWorkspaceData], display: CGRect) {
+    for ws in workspaces.iter_mut().filter(|ws| ws.layout_mode == "scrolling") {
+        let mut columns: HashMap<usize, (f64, f64, bool)> = HashMap::default();
+        for w in ws.windows.iter().filter(|w| !w.is_floating) {
+            let Some(position) = w.layout_position else {
+                continue;
+            };
+            let entry =
+                columns.entry(position.column).or_insert((0.0, w.info.frame.origin.x, false));
+            entry.0 = entry.0.max(w.info.frame.size.width);
+            entry.1 = entry.1.min(w.info.frame.origin.x);
+            entry.2 |= w.is_focused;
+        }
+        let mut columns: Vec<_> = columns.into_iter().collect();
+        columns.sort_by_key(|(column, _)| *column);
+        if columns.len() < 2 {
+            continue;
+        }
+        let gap = columns
+            .windows(2)
+            .find_map(|pair| {
+                let gap = pair[1].1.1 - pair[0].1.1 - pair[0].1.0;
+                (pair[1].0 == pair[0].0 + 1 && (0.0..=128.0).contains(&gap)).then_some(gap)
+            })
+            .unwrap_or(12.0);
+        let anchor = columns
+            .iter()
+            .position(|(_, (_, _, focused))| *focused)
+            .or_else(|| {
+                columns.iter().position(|(_, (width, x, _))| {
+                    *x < display.origin.x + display.size.width && *x + *width > display.origin.x
+                })
+            })
+            .unwrap_or(0);
+        let start = columns[anchor].1.1
+            - columns[..anchor].iter().map(|(_, (width, _, _))| width + gap).sum::<f64>();
+        let mut x = start;
+        let mut positions = HashMap::default();
+        for (column, (width, _, _)) in columns {
+            positions.insert(column, x);
+            x += width + gap;
+        }
+        for w in ws.windows.iter_mut().filter(|w| !w.is_floating) {
+            if let Some(position) = w.layout_position
+                && let Some(x) = positions.get(&position.column)
+            {
+                w.info.frame.origin.x = *x;
+            }
+        }
+    }
+}
+
 fn vertical_scroll(delta: CGPoint) -> bool { delta.y.abs() >= delta.x.abs() }
 
 fn scrolled_horizontal_offset(
@@ -135,13 +230,23 @@ fn scrolled_horizontal_offset(
 ) -> f64 {
     let scale = ((overview.height - 2.0 * GAP) * 0.5).max(1.0) / display.size.height;
     let base = (overview.width - display.size.width * scale) / 2.0;
-    let (min, max) = workspace.windows.iter().fold((0.0_f64, 0.0_f64), |(min, max), w| {
-        let x = base + (w.info.frame.origin.x - display.origin.x) * scale;
-        (
-            min.min(x - 12.0),
-            max.max(x + w.info.frame.size.width * scale - overview.width + 12.0),
-        )
-    });
+    let scrolling = workspace.layout_mode == "scrolling";
+    // Navigation is relative to the projected desktop, not the larger overlay.
+    let (left, right) = if scrolling {
+        (base - 12.0, base + display.size.width * scale + 12.0)
+    } else {
+        (12.0, overview.width - 12.0)
+    };
+    let (min, max) = workspace.windows.iter().filter(|w| !scrolling || !w.is_floating).fold(
+        (0.0_f64, 0.0_f64),
+        |(min, max), w| {
+            let x = base + (w.info.frame.origin.x - display.origin.x) * scale;
+            (
+                min.min(x - left),
+                max.max(x + w.info.frame.size.width * scale - right),
+            )
+        },
+    );
     (offset - delta).clamp(min, max)
 }
 
@@ -235,7 +340,7 @@ fn hit(
     point: CGPoint,
 ) -> Option<Selection> {
     for ws in projection.iter().rev() {
-        if !contains(ws.frame, point) {
+        if !contains(workspace_hit_frame(ws), point) {
             continue;
         }
         let local = CGPoint::new(point.x - ws.frame.origin.x, point.y - ws.frame.origin.y);
@@ -244,7 +349,18 @@ fn hit(
             .windows
             .iter()
             .rev()
-            .find(|w| contains(w.frame, local))
+            .find(|w| {
+                let image = preview_frame(w.frame.size);
+                contains(
+                    rect(
+                        w.frame.origin.x + image.origin.x,
+                        w.frame.origin.y + image.origin.y,
+                        image.size.width,
+                        image.size.height + CAPTION,
+                    ),
+                    local,
+                )
+            })
             .map(|w| workspace.windows[w.source].id);
         return Some(Selection {
             workspace: workspace.index,
@@ -267,6 +383,7 @@ struct WorkspaceView {
     layer: Retained<CALayer>,
     heading: Retained<CATextLayer>,
     empty: Retained<CATextLayer>,
+    backdrop: Retained<CALayer>,
     cards: Vec<WindowCard>,
 }
 struct DisplayOverview {
@@ -317,12 +434,10 @@ fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) -> Retained<CA
 
 impl DisplayOverview {
     fn reveal(&mut self, workspace: usize, window: WindowId) -> bool {
-        let Some(w) = self
-            .workspaces
-            .iter()
-            .find(|ws| ws.index == workspace)
-            .and_then(|ws| ws.windows.iter().find(|w| w.id == window))
-        else {
+        let Some(ws) = self.workspaces.iter().find(|ws| ws.index == workspace) else {
+            return false;
+        };
+        let Some(w) = ws.windows.iter().find(|w| w.id == window) else {
             return false;
         };
         let scale =
@@ -332,10 +447,15 @@ impl DisplayOverview {
         let right = x + w.info.frame.size.width * scale;
         let offset = self.offsets.entry(workspace).or_default();
         let previous = *offset;
-        if x - *offset < 12.0 {
-            *offset = x - 12.0;
-        } else if right - *offset > self.bounds.size.width - 12.0 {
-            *offset = right - self.bounds.size.width + 12.0;
+        let (left_edge, right_edge) = if ws.layout_mode == "scrolling" {
+            (base - 12.0, base + self.info.frame.size.width * scale + 12.0)
+        } else {
+            (12.0, self.bounds.size.width - 12.0)
+        };
+        if x - *offset < left_edge {
+            *offset = x - left_edge;
+        } else if right - *offset > right_edge {
+            *offset = right - right_edge;
         }
         *offset != previous
     }
@@ -374,7 +494,12 @@ impl DisplayOverview {
                         != card_visible(self.bounds.size, ws.frame, w.frame)
                 });
                 view.layer.setFrame(pixel_aligned(ws.frame, self.scale));
-                view.heading.setFrame(heading_frame(ws.frame, self.scale));
+                let mut heading = view.heading.frame();
+                heading.origin.y =
+                    pixel_aligned(rect(0.0, ws.frame.origin.y - 26.0, 1.0, 20.0), self.scale)
+                        .origin
+                        .y;
+                view.heading.setFrame(heading);
             }
         });
         Some(visibility_changed)
@@ -407,7 +532,8 @@ impl DisplayOverview {
             for ((view, projected), previous) in self.views.iter().zip(&next).zip(&self.projection)
             {
                 view.layer.setFrame(pixel_aligned(projected.frame, self.scale));
-                view.heading.setFrame(heading_frame(projected.frame, self.scale));
+                view.heading.setFrame(workspace_heading(projected, self.scale));
+                view.backdrop.setFrame(pixel_aligned(workspace_backdrop(projected), self.scale));
                 for ((card, window), old) in
                     view.cards.iter().zip(&projected.windows).zip(&previous.windows)
                 {
@@ -466,22 +592,29 @@ impl DisplayOverview {
                     .map(|pos| old_views.swap_remove(pos));
                 if let Some(view) = existing.as_ref().filter(|view| !view.cards.is_empty()) {
                     view.layer.setFrame(pixel_aligned(ws.frame, self.scale));
-                    view.heading.setFrame(heading_frame(ws.frame, self.scale));
+                    view.heading.setFrame(workspace_heading(ws, self.scale));
+                    view.backdrop.setFrame(pixel_aligned(workspace_backdrop(ws), self.scale));
+                    update_heading(&view.heading, data);
                     self.views.push(existing.unwrap());
                     continue;
                 }
-                let (container, heading, empty) = if let Some(view) = existing {
-                    (view.layer, view.heading, view.empty)
+                let (container, heading, empty, backdrop) = if let Some(view) = existing {
+                    (view.layer, view.heading, view.empty, view.backdrop)
                 } else {
                     let container = layer(ws.frame, self.scale);
+                    let backdrop =
+                        layer(pixel_aligned(workspace_backdrop(ws), self.scale), self.scale);
+                    backdrop.setCornerRadius(16.0);
+                    backdrop.setBackgroundColor(Some(&color(1.0, 1.0, 1.0, 0.035)));
+                    container.addSublayer(&backdrop);
                     let heading = label(
                         &self.root,
                         &data.name,
-                        heading_frame(ws.frame, self.scale),
+                        workspace_heading(ws, self.scale),
                         self.scale,
                     );
                     unsafe {
-                        heading.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
+                        heading.setAlignmentMode(objc2_quartz_core::kCAAlignmentLeft);
                     }
                     let font = unsafe {
                         NSFont::systemFontOfSize_weight(13.0, objc2_app_kit::NSFontWeightMedium)
@@ -502,12 +635,14 @@ impl DisplayOverview {
                         self.scale,
                     );
                     empty.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 0.38)));
-                    (container, heading, empty)
+                    (container, heading, empty, backdrop)
                 };
                 container.setFrame(pixel_aligned(ws.frame, self.scale));
                 container.setMasksToBounds(true);
                 empty.setHidden(!data.windows.is_empty());
-                heading.setFrame(heading_frame(ws.frame, self.scale));
+                backdrop.setFrame(pixel_aligned(workspace_backdrop(ws), self.scale));
+                update_heading(&heading, data);
+                heading.setFrame(workspace_heading(ws, self.scale));
                 self.root.addSublayer(&container);
                 self.root.addSublayer(&heading);
                 let mut cards = Vec::new();
@@ -517,8 +652,9 @@ impl DisplayOverview {
                         card.layer.setFrame(w.frame);
                         let image_frame = pixel_aligned(preview_frame(w.frame.size), self.scale);
                         let height = image_frame.origin.y + image_frame.size.height;
-                        card.image.setBorderWidth(0.5);
-                        card.image.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
+                        card.image.setBorderWidth(0.0);
+                        card.image.setBorderColor(None);
+                        card.image.setBackgroundColor(None);
                         card.image.setFrame(image_frame);
                         card.caption.setFrame(rect(
                             image_frame.origin.x,
@@ -528,19 +664,14 @@ impl DisplayOverview {
                         ));
                         if let Some(icon) = &card.icon {
                             icon.setFrame(rect(
-                                (image_frame.size.width - 16.0) / 2.0,
-                                6.0,
-                                16.0,
-                                16.0,
+                                (image_frame.size.width - 20.0) / 2.0,
+                                4.0,
+                                20.0,
+                                20.0,
                             ));
                         }
                         card.title.setHidden(true);
-                        card.title.setFrame(rect(
-                            26.0,
-                            5.0,
-                            (image_frame.size.width - 32.0).max(0.0),
-                            20.0,
-                        ));
+                        card.title.setFrame(rect(0.0, 27.0, image_frame.size.width, 20.0));
                         container.addSublayer(&card.layer);
                         if self.animate {
                             let animation = CABasicAnimation::animationWithKeyPath(Some(
@@ -588,9 +719,8 @@ impl DisplayOverview {
                     let image = layer(image_frame, self.scale);
                     image.setCornerRadius(CORNER);
                     image.setMasksToBounds(true);
-                    image.setBorderWidth(0.5);
-                    image.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
-                    image.setBackgroundColor(Some(&color(0.13, 0.13, 0.14, 1.0)));
+                    image.setBorderWidth(0.0);
+                    image.setBackgroundColor(None);
                     unsafe {
                         image.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspect);
                     }
@@ -625,7 +755,7 @@ impl DisplayOverview {
                     });
                     let icon_layer = if let Some(icon) = icon {
                         let icon_layer = layer(
-                            rect((image_frame.size.width - 16.0) / 2.0, 6.0, 16.0, 16.0),
+                            rect((image_frame.size.width - 20.0) / 2.0, 4.0, 20.0, 20.0),
                             self.scale,
                         );
                         unsafe {
@@ -645,9 +775,12 @@ impl DisplayOverview {
                         } else {
                             &data.info.title
                         },
-                        rect(26.0, 5.0, (image_frame.size.width - 32.0).max(0.0), 20.0),
+                        rect(0.0, 27.0, image_frame.size.width, 20.0),
                         self.scale,
                     );
+                    unsafe {
+                        title.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
+                    }
                     title.setHidden(true);
                     container.addSublayer(&card);
                     cards.push(WindowCard {
@@ -664,6 +797,7 @@ impl DisplayOverview {
                     layer: container,
                     heading,
                     empty,
+                    backdrop,
                     cards,
                 });
             }
@@ -793,6 +927,40 @@ pub struct OverviewSession {
     pressed: Option<CGPoint>,
 }
 
+fn release_layer_tree(root: &CALayer) {
+    root.removeAllAnimations();
+    unsafe {
+        root.setContents(None);
+    }
+    unsafe {
+        root.setMask(None);
+    }
+    if let Some(children) = unsafe { root.sublayers() } {
+        // Core Animation may return a live array; snapshot before detaching siblings.
+        let children: Vec<_> = children.iter().collect();
+        for child in children {
+            release_layer_tree(&child);
+            child.removeFromSuperlayer();
+        }
+    }
+}
+
+impl Drop for OverviewSession {
+    fn drop(&mut self) {
+        let _transaction = OverviewTransaction::begin();
+        // Close the receiver first so concurrent capture completions are discarded.
+        self.previews.take();
+        if let Some(drag) = self.end_drag() {
+            release_layer_tree(&drag.card);
+        }
+        for display in &self.displays {
+            release_layer_tree(&display.root);
+        }
+        // Detach CAContexts and release CGS windows before flushing this teardown.
+        self.displays.clear();
+    }
+}
+
 impl OverviewSession {
     pub(crate) fn new(
         reactor: &ReactorHandle,
@@ -811,6 +979,7 @@ impl OverviewSession {
                 let space = display.info.space?;
                 let mut workspaces = reactor.query_workspaces(Some(space));
                 filter_workspaces(&mut workspaces, settings.show_empty_workspaces);
+                expand_scrolling_columns(&mut workspaces, display.info.frame);
                 Some((display, workspaces))
             })
             .collect();
@@ -831,12 +1000,12 @@ impl OverviewSession {
             let root = layer(rect(0.0, 0.0, bounds.size.width, bounds.size.height), scale);
             root.setGeometryFlipped(true);
             root.setMasksToBounds(true);
-            root.setBackgroundColor(Some(&color(0.035, 0.035, 0.045, 0.48)));
+            root.setBackgroundColor(Some(&color(0.035, 0.035, 0.045, 0.32)));
             let result = (|| {
                 let window = CgsWindow::new_compositor(bounds, 0.0)?;
                 window.set_resolution(scale)?;
                 window.set_level(NSPopUpMenuWindowLevel as i32)?;
-                window.set_blur(36, None)?;
+                window.set_blur(24, None)?;
                 let surface = WindowSurface::new_scaled(window.id(), root.bounds(), &root, scale)?;
                 Ok::<_, crate::sys::cgs_window::CgsWindowError>((window, surface))
             })();
@@ -956,6 +1125,7 @@ impl OverviewSession {
         for (i, d) in self.displays.iter_mut().enumerate() {
             d.workspaces = reactor.query_workspaces(d.info.space);
             filter_workspaces(&mut d.workspaces, self.show_empty_workspaces);
+            expand_scrolling_columns(&mut d.workspaces, d.info.frame);
             if d.workspaces.is_empty() {
                 continue;
             }
@@ -1060,23 +1230,45 @@ impl OverviewSession {
         }
         preview.setCornerRadius(CORNER);
         preview.setMasksToBounds(true);
-        preview.setBackgroundColor(Some(&color(0.13, 0.13, 0.14, 1.0)));
-        preview.setBorderColor(Some(&color(0.0, 0.48, 1.0, 1.0)));
-        preview.setBorderWidth(2.0);
+        preview.setBackgroundColor(None);
+        preview.setBorderWidth(0.0);
         card.addSublayer(&preview);
-        label(
+        if let Some(icon) = &source.icon {
+            let icon_layer = layer(
+                rect(
+                    source.image.frame().origin.x + (source.image.frame().size.width - 20.0) / 2.0,
+                    height + 4.0,
+                    20.0,
+                    20.0,
+                ),
+                d.scale,
+            );
+            unsafe {
+                icon_layer.setContents(icon.contents().as_deref());
+            }
+            card.addSublayer(&icon_layer);
+        }
+        let title = label(
             &card,
-            &data.info.title,
+            if data.info.title.is_empty() {
+                data.app_name.as_deref().unwrap_or("Window")
+            } else {
+                &data.info.title
+            },
             rect(
-                source.image.frame().origin.x + 4.0,
-                height + 5.0,
-                (source.image.frame().size.width - 8.0).max(0.0),
+                source.image.frame().origin.x,
+                height + 27.0,
+                source.image.frame().size.width,
                 20.0,
             ),
             d.scale,
         );
+        unsafe {
+            title.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
+        }
         let indicator = layer(CGRect::ZERO, d.scale);
-        indicator.setBackgroundColor(Some(&color(0.0, 0.48, 1.0, 0.25)));
+        indicator.setBackgroundColor(Some(&color(0.35, 0.65, 1.0, 0.8)));
+        indicator.setCornerRadius(2.0);
         self.drag = Some(OverviewDrag {
             intent: crate::actor::reactor::OverviewDrop {
                 window: data.id,
@@ -1131,7 +1323,8 @@ impl OverviewSession {
                 drag.size.height,
             ));
             drag.indicator.setHidden(true);
-            let Some(ws) = d.projection.iter().find(|ws| contains(ws.frame, local)) else {
+            let Some(ws) = d.projection.iter().find(|ws| contains(workspace_hit_frame(ws), local))
+            else {
                 return;
             };
             let data = &d.workspaces[ws.source];
@@ -1141,7 +1334,13 @@ impl OverviewSession {
             drag.intent.target = None;
             drag.intent.frame = None;
             let p = CGPoint::new(local.x, local.y - ws.frame.origin.y);
-            let mut indicator = ws.frame;
+            let backdrop = workspace_backdrop(ws);
+            let mut indicator = rect(
+                backdrop.origin.x + 16.0,
+                ws.frame.origin.y + ws.frame.size.height - 4.0,
+                (backdrop.size.width - 32.0).max(1.0),
+                2.0,
+            );
             if drag.intent.floating {
                 drag.intent.frame = Some(floating_drop_frame(
                     d.info.frame,
@@ -1150,7 +1349,14 @@ impl OverviewSession {
                     p,
                     d.offsets.get(&data.index).copied().unwrap_or(0.0),
                 ));
-                indicator = drag.card.frame();
+                let ghost = drag.card.frame();
+                let image = drag.preview.frame();
+                indicator = rect(
+                    ghost.origin.x + image.origin.x,
+                    ghost.origin.y + image.origin.y + image.size.height + 2.0,
+                    image.size.width,
+                    2.0,
+                );
             } else if let Some(target) = tiled_target(data, ws, p, Some(drag.intent.window)) {
                 let action = drop_action(target.frame, p, &data.layout_mode);
                 if data.windows[target.source].id == drag.intent.window {
@@ -1208,29 +1414,19 @@ impl OverviewSession {
                 if let Some(ws) =
                     self.displays[display].views.iter().find(|w| w.index == selection.workspace)
                 {
+                    ws.backdrop.setBackgroundColor(Some(&color(
+                        1.0,
+                        1.0,
+                        1.0,
+                        if width > 0.5 { 0.065 } else { 0.035 },
+                    )));
                     if let Some(id) = selection.window {
                         if let Some(card) = ws.cards.iter().find(|c| c.id == id) {
                             let selected = width > 0.5;
                             card.title.setHidden(!selected);
                             if let Some(icon) = &card.icon {
-                                icon.setFrame(rect(
-                                    if selected {
-                                        4.0
-                                    } else {
-                                        (card.caption.bounds().size.width - 16.0) / 2.0
-                                    },
-                                    6.0,
-                                    16.0,
-                                    16.0,
-                                ));
+                                icon.setOpacity(if selected { 1.0 } else { 0.82 });
                             }
-                            card.image.setBorderWidth(if selected { 1.5 } else { 0.5 });
-                            let border = if width > 0.5 {
-                                color(0.0, 0.48, 1.0, 1.0)
-                            } else {
-                                color(1.0, 1.0, 1.0, 0.14)
-                            };
-                            card.image.setBorderColor(Some(&border));
                         }
                     } else {
                         let foreground = if width > 0.5 {
@@ -1529,12 +1725,12 @@ impl OverviewSession {
                 {
                     let compact = compact_preview(&image);
                     // Small cards share the independent compact bitmap with the cache.
-                    let image = if CGImage::width(Some(&image)) <= REMEMBERED_EDGE
+                    let owned_small = if CGImage::width(Some(&image)) <= REMEMBERED_EDGE
                         && CGImage::height(Some(&image)) <= REMEMBERED_EDGE
                     {
-                        compact.as_ref().cloned().unwrap_or(image)
+                        compact.clone()
                     } else {
-                        image
+                        None
                     };
                     if let Some(compact) = compact {
                         remembered
@@ -1559,11 +1755,10 @@ impl OverviewSession {
                     let available = SESSION_PREVIEW_BYTES.saturating_sub(bytes);
                     let fair = SESSION_PREVIEW_BYTES / previews.visible.len().max(1);
                     let budget = available.min(fair);
-                    let image = if image_bytes(&image) > budget && budget >= 4 {
-                        let factor = (budget as f64 / image_bytes(&image) as f64).sqrt();
-                        resized_preview(&image, factor)
+                    let image = if visible {
+                        owned_preview(&image, budget, owned_small.as_ref())
                     } else {
-                        Some(image)
+                        None
                     };
                     if visible && let Some(image) = image.filter(|i| image_bytes(i) <= available) {
                         previews.images.insert(request.id, image);
@@ -1639,6 +1834,9 @@ impl PreviewEvent {
 /// Callbacks transfer retained native results to the main queue before sending to this
 /// local channel. It never crosses the input thread and needs no unsafe Send wrapper.
 fn deliver(tx: actor::Sender<PreviewEvent>, result: PreviewEvent) {
+    if tx.is_closed() {
+        return;
+    }
     dispatchr::queue::main().after_f_s(dispatchr::time::Time::NOW, (tx, result), |(tx, result)| {
         tx.send(result)
     });
@@ -1672,6 +1870,9 @@ impl PreviewSession {
         let (tx, rx) = actor::channel();
         let callback_tx = tx.clone();
         let callback = RcBlock::new(move |content: *mut SCShareableContent, _: *mut NSError| {
+            if callback_tx.is_closed() {
+                return;
+            }
             let content = unsafe { Retained::retain(content) };
             deliver(callback_tx.clone(), PreviewEvent::Content(generation, content));
         });
@@ -1724,6 +1925,9 @@ impl PreviewSession {
             }
             let tx = self.tx.clone();
             let callback = RcBlock::new(move |image: *mut CGImage, _: *mut NSError| {
+                if tx.is_closed() {
+                    return;
+                }
                 let image = NonNull::new(image).map(|image| unsafe { CFRetained::retain(image) });
                 deliver(
                     tx.clone(),
@@ -1813,6 +2017,27 @@ fn compact_preview(image: &CGImage) -> Option<CFRetained<CGImage>> {
     let scale = (REMEMBERED_EDGE as f64 / width.max(height) as f64).min(1.0);
     resized_preview(image, scale)
 }
+fn owned_preview(
+    image: &CGImage,
+    budget: usize,
+    compact: Option<&CFRetained<CGImage>>,
+) -> Option<CFRetained<CGImage>> {
+    if let Some(compact) = compact.filter(|image| image_bytes(image) <= budget) {
+        return Some(compact.clone());
+    }
+    if budget < 4 {
+        return None;
+    }
+    let bytes = CGImage::width(Some(image))
+        .saturating_mul(CGImage::height(Some(image)))
+        .saturating_mul(4);
+    if bytes == 0 {
+        return None;
+    }
+    // Even at 1:1, make independent pixels so layers cannot pin an SCK IOSurface.
+    resized_preview(image, (budget as f64 / bytes as f64).sqrt().min(1.0))
+}
+
 fn resized_preview(image: &CGImage, scale: f64) -> Option<CFRetained<CGImage>> {
     let width = CGImage::width(Some(image));
     let height = CGImage::height(Some(image));
@@ -1860,6 +2085,8 @@ pub(crate) struct RememberedPreviewCache {
 }
 impl RememberedPreviewCache {
     fn bytes(&self) -> usize { self.entries.iter().map(|e| image_bytes(&e.image)).sum() }
+
+    pub(crate) fn stats(&self) -> (usize, usize) { (self.entries.len(), self.bytes()) }
 
     fn get(&self, window: &RuntimeWindowData) -> Option<&CFRetained<CGImage>> {
         self.entries
@@ -1951,6 +2178,22 @@ mod tests {
         }
         .unwrap();
         CGBitmapContextCreateImage(Some(&context)).unwrap()
+    }
+
+    #[test]
+    fn full_preview_copy_releases_capture_backing_and_enforces_pixel_budget() {
+        let source = bitmap(1024, 768);
+        let source_ref: &CGImage = &source;
+        let source_cf: &CFType = source_ref.as_ref();
+        let baseline = source_cf.retain_count();
+        let owned = owned_preview(&source, 1024 * 768 * 4, None).unwrap();
+        assert_eq!(CGImage::width(Some(&owned)), 1024);
+        assert_eq!(CGImage::height(Some(&owned)), 768);
+        assert_eq!(source_cf.retain_count(), baseline);
+        let bounded = owned_preview(&source, 512 * 384 * 4, None).unwrap();
+        assert!(image_bytes(&bounded) <= 512 * 384 * 4);
+        assert_eq!(source_cf.retain_count(), baseline);
+        assert!(owned_preview(&source, 0, None).is_none());
     }
 
     #[test]
@@ -2116,6 +2359,70 @@ mod tests {
     }
 
     #[test]
+    fn parked_columns_expand_in_logical_order_and_preserve_stacked_rows() {
+        let display = rect(0.0, 0.0, 1200.0, 800.0);
+        let mut windows: Vec<_> = (0..4)
+            .map(|i| {
+                let mut w = window(
+                    i + 1,
+                    rect(if i == 0 { 300.0 } else { 1200.0 }, 0.0, 600.0, 800.0),
+                    false,
+                );
+                w.layout_position =
+                    Some(rift_protocol::WindowLayoutPosition { column: i as usize, row: 0 });
+                w.is_focused = i == 0;
+                w
+            })
+            .collect();
+        let mut stacked = window(10, rect(1200.0, 400.0, 600.0, 400.0), false);
+        stacked.layout_position = Some(rift_protocol::WindowLayoutPosition { column: 2, row: 1 });
+        windows.push(stacked);
+        let original = workspace(0, windows);
+        let mut workspaces = vec![original.clone()];
+        expand_scrolling_columns(&mut workspaces, display);
+        let windows = &workspaces[0].windows;
+        assert_eq!(windows[0].info.frame.origin.x, 300.0);
+        assert!(windows[1].info.frame.origin.x < windows[2].info.frame.origin.x);
+        assert!(windows[2].info.frame.origin.x < windows[3].info.frame.origin.x);
+        assert_eq!(windows[4].info.frame.origin.x, windows[2].info.frame.origin.x);
+        assert_eq!(windows[4].info.frame.origin.y, 400.0);
+        assert_eq!(original.windows[2].info.frame.origin.x, 1200.0);
+    }
+
+    #[test]
+    fn strip_pans_columns_that_fit_overlay_but_extend_past_desktop() {
+        let display = rect(0.0, 0.0, 1200.0, 800.0);
+        let ws = workspace(0, vec![
+            window(1, rect(0.0, 0.0, 600.0, 800.0), false),
+            window(2, rect(600.0, 0.0, 600.0, 800.0), false),
+            window(3, rect(1200.0, 0.0, 600.0, 800.0), false),
+        ]);
+        let p = project(
+            display,
+            display.size,
+            std::slice::from_ref(&ws),
+            0,
+            0.0,
+            &HashMap::default(),
+        );
+        assert_eq!(p[0].windows.len(), 3); // All three fit in the physical overlay.
+        let next = scrolled_horizontal_offset(display, display.size, &ws, 0.0, -80.0);
+        assert_eq!(next, 80.0);
+        let end = scrolled_horizontal_offset(display, display.size, &ws, next, -10000.0);
+        assert_eq!(end, 258.0);
+        assert_eq!(
+            scrolled_horizontal_offset(display, display.size, &ws, end, 10000.0),
+            0.0
+        );
+        let mut fitting = ws.clone();
+        fitting.windows.pop();
+        assert_eq!(
+            scrolled_horizontal_offset(display, display.size, &fitting, 0.0, -80.0),
+            0.0
+        );
+    }
+
+    #[test]
     fn dominant_axis_and_pointer_workspace_pan_are_independent_and_bounded() {
         assert!(vertical_scroll(CGPoint::new(10.0, -10.0)));
         assert!(!vertical_scroll(CGPoint::new(-11.0, 10.0)));
@@ -2151,6 +2458,55 @@ mod tests {
     }
 
     #[test]
+    fn workspace_surface_encloses_visible_cards_and_stays_inside_screen() {
+        let ws = WorkspaceProjection {
+            source: 0,
+            frame: rect(0.0, 200.0, 1200.0, 360.0),
+            windows: vec![
+                WindowProjection {
+                    source: 0,
+                    frame: rect(150.0, 0.0, 300.0, 360.0),
+                },
+                WindowProjection {
+                    source: 1,
+                    frame: rect(600.0, 0.0, 400.0, 360.0),
+                },
+            ],
+        };
+        let bounds = workspace_backdrop(&ws);
+        assert!(bounds.origin.x <= 150.0);
+        assert!(bounds.origin.x + bounds.size.width >= 1000.0);
+        assert!(bounds.origin.x >= 24.0);
+        assert!(bounds.origin.x + bounds.size.width <= 1176.0);
+        assert_eq!(bounds.size.height, 360.0);
+    }
+
+    #[test]
+    fn transparent_preview_gutters_select_workspace_instead_of_window() {
+        let workspaces = vec![workspace(1, vec![window(
+            1,
+            rect(0.0, 0.0, 400.0, 200.0),
+            false,
+        )])];
+        let projection = vec![WorkspaceProjection {
+            source: 0,
+            frame: rect(0.0, 100.0, 1200.0, 360.0),
+            windows: vec![WindowProjection {
+                source: 0,
+                frame: rect(400.0, 0.0, 400.0, 200.0),
+            }],
+        }];
+        assert_eq!(
+            hit(&workspaces, &projection, CGPoint::new(402.0, 150.0)).unwrap().window,
+            None
+        );
+        assert_eq!(
+            hit(&workspaces, &projection, CGPoint::new(600.0, 150.0)).unwrap().window,
+            Some(WindowId::new(123, 1))
+        );
+    }
+
+    #[test]
     fn preview_geometry_preserves_aspect_ratio_and_caption_space() {
         for size in [
             CGSize::new(600.0, 300.0),
@@ -2172,7 +2528,14 @@ mod tests {
         let frame = rect(0.0, 123.27, 1200.0, 360.0);
         for scale in [1.0, 2.0] {
             let aligned = pixel_aligned(frame, scale);
-            let heading = heading_frame(frame, scale);
+            let heading = workspace_heading(
+                &WorkspaceProjection {
+                    source: 0,
+                    frame,
+                    windows: vec![],
+                },
+                scale,
+            );
             assert_eq!(heading.origin.y + 26.0, aligned.origin.y);
             assert_eq!(aligned.origin.y * scale, (frame.origin.y * scale).round());
         }
@@ -2251,7 +2614,7 @@ mod tests {
         assert_eq!(cards[1].source, 0);
         assert_eq!(cards[0].frame, rect(375.0, 45.0, 180.0, 90.0));
         assert_eq!(
-            hit(&workspaces, &projection, CGPoint::new(400.0, 280.0)),
+            hit(&workspaces, &projection, CGPoint::new(460.0, 280.0)),
             Some(Selection {
                 workspace: 1,
                 window: Some(WindowId::new(123, 1))
@@ -2318,6 +2681,43 @@ mod tests {
             .len()
                 <= 5
         );
+    }
+
+    #[test]
+    fn teardown_releases_layer_images_while_old_layers_remain_retained() {
+        objc2::rc::autoreleasepool(|_| {
+            let image = bitmap(640, 480);
+            let image_ref: &CGImage = &image;
+            let cf: &CFType = image_ref.as_ref();
+            let baseline = cf.retain_count();
+            for _ in 0..40 {
+                let root = layer(rect(0.0, 0.0, 1200.0, 800.0), 2.0);
+                let child = layer(rect(0.0, 0.0, 600.0, 400.0), 2.0);
+                set_image(&child, Some(&image));
+                root.addSublayer(&child);
+                let sibling = layer(rect(600.0, 0.0, 600.0, 400.0), 2.0);
+                set_image(&sibling, Some(&image));
+                root.addSublayer(&sibling);
+                assert!(cf.retain_count() > baseline);
+                let _transaction = OverviewTransaction::begin();
+                release_layer_tree(&root);
+                assert!(unsafe { child.contents() }.is_none());
+                assert_eq!(cf.retain_count(), baseline);
+            }
+        });
+    }
+
+    #[test]
+    fn late_preview_for_closed_session_is_dropped_before_main_queue_dispatch() {
+        let image = bitmap(640, 480);
+        let image_ref: &CGImage = &image;
+        let cf: &CFType = image_ref.as_ref();
+        let baseline = cf.retain_count();
+        let (tx, rx) = actor::channel();
+        drop(rx);
+        assert!(tx.is_closed());
+        deliver(tx, PreviewEvent::Image(1, request(1), Some(image.clone())));
+        assert_eq!(cf.retain_count(), baseline);
     }
 
     #[test]

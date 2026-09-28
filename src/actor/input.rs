@@ -671,9 +671,12 @@ impl Input {
                 self.send_overview(super::mission_control::Event::Input(
                     super::mission_control::Input::Scroll {
                         point: CGEvent::location(Some(event)),
-                        delta: CGPoint::new(
-                            CGEvent::integer_value_field(Some(event), x) as f64 * scale,
-                            CGEvent::integer_value_field(Some(event), y) as f64 * scale,
+                        delta: overview_scroll_delta(
+                            CGPoint::new(
+                                CGEvent::integer_value_field(Some(event), x) as f64 * scale,
+                                CGEvent::integer_value_field(Some(event), y) as f64 * scale,
+                            ),
+                            CGEvent::flags(Some(event)),
                         ),
                     },
                 ));
@@ -1056,6 +1059,21 @@ impl Input {
         }
         trace!("Updated hotkey maps for current keyboard layout: {}", maps.len());
         *self.hotkeys.borrow_mut() = maps;
+    }
+}
+
+fn overview_scroll_delta(delta: CGPoint, flags: CGEventFlags) -> CGPoint {
+    if flags.contains(CGEventFlags::MaskShift) {
+        CGPoint::new(
+            if delta.y.abs() >= delta.x.abs() {
+                delta.y
+            } else {
+                delta.x
+            },
+            0.0,
+        )
+    } else {
+        delta
     }
 }
 
@@ -1628,6 +1646,36 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert!(native_rx.try_recv().is_err());
         assert!(wm_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn shift_wheel_pans_strip_without_changing_workspace_axis() {
+        let (input, _, _) = input();
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        input.mission_control_active.set(true);
+        let event = CGEvent::new_scroll_wheel_event2(
+            None,
+            objc2_core_graphics::CGScrollEventUnit::Pixel,
+            2,
+            -60,
+            0,
+            0,
+        )
+        .unwrap();
+        CGEvent::set_flags(Some(&event), CGEventFlags::MaskShift);
+        assert!(!input.on_event(CGEventType::ScrollWheel, &event));
+        assert!(
+            matches!(rx.try_recv().unwrap().1, super::super::mission_control::Event::Input(super::super::mission_control::Input::Scroll { delta, .. }) if delta == CGPoint::new(-60.0, 0.0))
+        );
+        assert_eq!(
+            overview_scroll_delta(CGPoint::new(-30.0, 0.0), CGEventFlags::MaskShift),
+            CGPoint::new(-30.0, 0.0)
+        );
+        assert_eq!(
+            overview_scroll_delta(CGPoint::new(0.0, -60.0), CGEventFlags::empty()),
+            CGPoint::new(0.0, -60.0)
+        );
     }
 
     #[test]
