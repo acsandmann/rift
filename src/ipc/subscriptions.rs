@@ -30,6 +30,26 @@ pub struct ServerState {
     subscriptions_by_event: Arc<DashMap<String, Vec<ClientPort>>>,
     cli_subscriptions: Arc<Mutex<HashMap<String, Vec<CliSubscription>>>>,
     event_dispatch_tx: Sender<DispatchBatch>,
+    client_uses: Arc<Mutex<HashMap<ClientPort, ClientUses>>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ClientUses {
+    subscriptions: bool,
+    management: bool,
+}
+
+impl ClientUses {
+    fn active(self) -> bool { self.subscriptions || self.management }
+
+    fn with_use(mut self, management: bool, enabled: bool) -> Self {
+        if management {
+            self.management = enabled;
+        } else {
+            self.subscriptions = enabled;
+        }
+        self
+    }
 }
 
 /// Subscription state is internally synchronized by `DashMap`, `Mutex`, and
@@ -50,15 +70,18 @@ impl ServerState {
         let subscriptions_by_client = Arc::new(DashMap::new());
         let subscriptions_by_event = Arc::new(DashMap::new());
         let cli_subscriptions = Arc::new(Mutex::new(HashMap::default()));
+        let client_uses = Arc::new(Mutex::new(HashMap::default()));
         let (event_dispatch_tx, event_dispatch_rx) = bounded(EVENT_DISPATCH_QUEUE_CAPACITY);
 
         let worker_subscriptions_by_client = Arc::clone(&subscriptions_by_client);
         let worker_subscriptions_by_event = Arc::clone(&subscriptions_by_event);
+        let worker_client_uses = Arc::clone(&client_uses);
         thread::spawn(move || {
             Self::run_event_dispatch_worker(
                 event_dispatch_rx,
                 worker_subscriptions_by_client,
                 worker_subscriptions_by_event,
+                worker_client_uses,
             );
         });
 
@@ -67,7 +90,44 @@ impl ServerState {
             subscriptions_by_event,
             cli_subscriptions,
             event_dispatch_tx,
+            client_uses,
         }
+    }
+
+    fn set_use(
+        uses: &Mutex<HashMap<ClientPort, ClientUses>>,
+        port: ClientPort,
+        management: bool,
+        enabled: bool,
+    ) -> bool {
+        let mut uses = uses.lock();
+        let old = uses.get(&port).copied().unwrap_or_default();
+        let new = old.with_use(management, enabled);
+        if !old.active() && new.active() {
+            if !unsafe { mach_retain_send_right(port) } {
+                return false;
+            }
+            if !unsafe { mach_watch_send_right(port) } {
+                let _ = unsafe { mach_release_send_right(port) };
+                return false;
+            }
+        }
+        if new.active() {
+            uses.insert(port, new);
+        } else if old.active() {
+            uses.remove(&port);
+            unsafe { mach_unwatch_send_right(port) };
+            let _ = unsafe { mach_release_send_right(port) };
+        }
+        true
+    }
+
+    pub(crate) fn retain_management(&self, port: ClientPort) -> bool {
+        Self::set_use(&self.client_uses, port, true, true)
+    }
+
+    pub(crate) fn release_management(&self, port: ClientPort) {
+        Self::set_use(&self.client_uses, port, true, false);
     }
 
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) -> bool {
@@ -83,12 +143,7 @@ impl ServerState {
                 }
             }
             Entry::Vacant(entry) => {
-                if !unsafe { mach_retain_send_right(client_port) } {
-                    warn!("Failed to retain send right for client {}", client_port);
-                    return false;
-                }
-                if !unsafe { mach_watch_send_right(client_port) } {
-                    let _ = unsafe { mach_release_send_right(client_port) };
+                if !Self::set_use(&self.client_uses, client_port, false, true) {
                     warn!("Failed to watch client {} for disconnection", client_port);
                     return false;
                 }
@@ -138,7 +193,7 @@ impl ServerState {
         }
 
         if removed_client_entry {
-            let _ = unsafe { mach_release_send_right(client_port) };
+            Self::set_use(&self.client_uses, client_port, false, false);
         }
     }
 
@@ -279,13 +334,16 @@ impl ServerState {
             client_port,
             &self.subscriptions_by_client,
             &self.subscriptions_by_event,
+            &self.client_uses,
         );
+        self.release_management(client_port);
     }
 
     fn run_event_dispatch_worker(
         event_dispatch_rx: crossbeam_channel::Receiver<DispatchBatch>,
         subscriptions_by_client: Arc<DashMap<ClientPort, Vec<String>>>,
         subscriptions_by_event: Arc<DashMap<String, Vec<ClientPort>>>,
+        client_uses: Arc<Mutex<HashMap<ClientPort, ClientUses>>>,
     ) {
         while let Ok(batch) = event_dispatch_rx.recv() {
             let c_message = match CString::new(batch.event_json) {
@@ -302,6 +360,7 @@ impl ServerState {
                         client_port,
                         &subscriptions_by_client,
                         &subscriptions_by_event,
+                        &client_uses,
                     );
                 }
             }
@@ -312,6 +371,7 @@ impl ServerState {
         client_port: ClientPort,
         subscriptions_by_client: &DashMap<ClientPort, Vec<String>>,
         subscriptions_by_event: &DashMap<String, Vec<ClientPort>>,
+        client_uses: &Mutex<HashMap<ClientPort, ClientUses>>,
     ) {
         if let Some((_k, events)) = subscriptions_by_client.remove(&client_port) {
             for event in events {
@@ -323,8 +383,35 @@ impl ServerState {
                     }
                 }
             }
-            unsafe { mach_unwatch_send_right(client_port) };
-            let _ = unsafe { mach_release_send_right(client_port) };
+            Self::set_use(client_uses, client_port, false, false);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientUses;
+
+    #[test]
+    fn shared_port_has_one_watch_lifetime_for_both_uses() {
+        let none = ClientUses::default();
+        let subscribed = none.with_use(false, true);
+        let both = subscribed.with_use(true, true);
+        let managed = both.with_use(false, false);
+        let none_again = managed.with_use(true, false);
+        let transitions = [
+            (none, subscribed),
+            (subscribed, both),
+            (both, managed),
+            (managed, none_again),
+        ];
+        assert_eq!(
+            transitions.iter().filter(|(old, new)| !old.active() && new.active()).count(),
+            1
+        );
+        assert_eq!(
+            transitions.iter().filter(|(old, new)| old.active() && !new.active()).count(),
+            1
+        );
     }
 }

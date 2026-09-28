@@ -53,13 +53,11 @@ pub fn handle_window_created(
     let _ = utils::refresh_heuristic(state, wid);
 
     let outcome = EventOutcome::window_membership_changed(false, true);
-    Ok(
-        if state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission) {
-            outcome.with_created_window_finalization(wid)
-        } else {
-            outcome
-        },
-    )
+    Ok(if state.windows.can_reconcile_admission(wid) {
+        outcome.with_created_window_finalization(wid)
+    } else {
+        outcome
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -151,7 +149,7 @@ pub fn handle_window_deminiaturized(
     state.windows.set_visibility(wid, WindowVisibility::Visible);
 
     let mut outcome = crate::actor::reactor::events::EventOutcome::no_change();
-    if state.windows.window(wid).is_some_and(WindowState::is_admitted)
+    if state.windows.is_admitted(wid)
         && let Some(space) = active_space
     {
         outcome =
@@ -365,9 +363,7 @@ pub fn handle_window_frame_changed(
                     state.windows.set_window_server_space(server, Some(space));
                     state.windows.mark_window_visible(server);
                 }
-                if new_space_active
-                    && state.windows.window(wid).is_some_and(WindowState::is_admitted)
-                {
+                if new_space_active && state.windows.is_admitted(wid) {
                     if let Some(workspace) = layout.layout_engine.active_workspace(space) {
                         let _ = layout
                             .layout_engine

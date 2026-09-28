@@ -113,7 +113,7 @@ impl WindowState {
         }
     }
 
-    /// The single admission policy used by every layout-facing caller.
+    /// Normal management policy; layout admission also checks WindowRecord ownership.
     pub(crate) fn is_admitted(&self) -> bool {
         self.is_admitted_with_override(self.manage_override)
     }

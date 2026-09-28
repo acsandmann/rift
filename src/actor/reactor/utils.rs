@@ -17,7 +17,7 @@ pub(crate) fn refresh_heuristic(
     wid: WindowId,
 ) -> Option<AdmissionTransition> {
     let window = state.windows.window(wid)?;
-    let was_admitted = window.is_admitted();
+    let was_admitted = state.windows.is_admitted(wid);
     let manageable = compute_window_info_manageability(&window.info, |wsid| {
         state.windows.get_window_server_info(wsid)
     });
@@ -25,7 +25,7 @@ pub(crate) fn refresh_heuristic(
     window.is_manageable = manageable;
     Some(AdmissionTransition {
         was_admitted,
-        is_admitted: window.is_admitted(),
+        is_admitted: state.windows.is_admitted(wid),
     })
 }
 

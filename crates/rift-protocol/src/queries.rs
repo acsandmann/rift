@@ -119,6 +119,8 @@ pub struct WindowData {
     pub title: String,
     pub frame: Rect,
     pub is_floating: bool,
+    #[serde(default)]
+    pub externally_managed: bool,
     pub is_focused: bool,
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
