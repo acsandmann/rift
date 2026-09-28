@@ -32,7 +32,7 @@ use crate::sys::window_surface::WindowSurface;
 use crate::ui::common::with_disabled_actions;
 
 const GAP: f64 = 28.0;
-const CORNER: f64 = 10.0;
+const CORNER: f64 = 8.0;
 const CAPTION: f64 = 28.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -306,16 +306,25 @@ impl DisplayOverview {
             return;
         }
         with_disabled_actions(|| {
-            for (view, projected) in self.views.iter().zip(&next) {
+            for ((view, projected), previous) in self.views.iter().zip(&next).zip(&self.projection)
+            {
                 view.layer.setFrame(projected.frame);
-                view.heading.setFrame(rect(24.0, projected.frame.origin.y - 24.0, 300.0, 20.0));
-                for (card, window) in view.cards.iter().zip(&projected.windows) {
-                    card.layer.setFrame(window.frame);
+                view.heading.setFrame(rect(
+                    (projected.frame.size.width - 300.0) / 2.0,
+                    projected.frame.origin.y - 24.0,
+                    300.0,
+                    20.0,
+                ));
+                for ((card, window), old) in
+                    view.cards.iter().zip(&projected.windows).zip(&previous.windows)
+                {
+                    if window.frame != old.frame {
+                        card.layer.setFrame(window.frame);
+                    }
                 }
             }
         });
         self.projection = next;
-        self.surface.flush();
     }
 
     fn rebuild(
@@ -334,6 +343,16 @@ impl DisplayOverview {
         let mut old_views = std::mem::take(&mut self.views);
         let mut old_cards: HashMap<_, _> = old_views
             .iter_mut()
+            .filter(|view| {
+                !self.projection.iter().any(|ws| {
+                    let data = &self.workspaces[ws.source];
+                    view.index == data.index
+                        && view.cards.len() == ws.windows.len()
+                        && view.cards.iter().zip(&ws.windows).all(|(card, w)| {
+                            card.id == data.windows[w.source].id && card.layer.frame() == w.frame
+                        })
+                })
+            })
             .flat_map(|view| {
                 let origin = view.layer.frame().origin;
                 view.cards.drain(..).map(move |card| {
@@ -352,16 +371,36 @@ impl DisplayOverview {
                     .iter()
                     .position(|view| view.index == data.index)
                     .map(|pos| old_views.swap_remove(pos));
+                if let Some(view) = existing.as_ref().filter(|view| !view.cards.is_empty()) {
+                    view.layer.setFrame(ws.frame);
+                    view.heading.setFrame(rect(
+                        (ws.frame.size.width - 300.0) / 2.0,
+                        ws.frame.origin.y - 24.0,
+                        300.0,
+                        20.0,
+                    ));
+                    self.views.push(existing.unwrap());
+                    continue;
+                }
                 let (container, heading, empty) = if let Some(view) = existing {
                     (view.layer, view.heading, view.empty)
                 } else {
                     let container = layer(ws.frame, self.scale);
                     let heading = label(
                         &self.root,
-                        &format!("{}  ·  {}", data.index + 1, data.name),
-                        rect(24.0, ws.frame.origin.y - 24.0, 300.0, 20.0),
+                        &data.name,
+                        rect(
+                            (ws.frame.size.width - 300.0) / 2.0,
+                            ws.frame.origin.y - 24.0,
+                            300.0,
+                            20.0,
+                        ),
                         self.scale,
                     );
+                    unsafe {
+                        heading.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
+                    }
+                    heading.setFontSize(12.0);
                     let empty = label(
                         &container,
                         "Empty workspace",
@@ -379,7 +418,12 @@ impl DisplayOverview {
                 container.setFrame(ws.frame);
                 container.setMasksToBounds(true);
                 empty.setHidden(!data.windows.is_empty());
-                heading.setFrame(rect(24.0, ws.frame.origin.y - 24.0, 300.0, 20.0));
+                heading.setFrame(rect(
+                    (ws.frame.size.width - 300.0) / 2.0,
+                    ws.frame.origin.y - 24.0,
+                    300.0,
+                    20.0,
+                ));
                 self.root.addSublayer(&container);
                 self.root.addSublayer(&heading);
                 let mut cards = Vec::new();
@@ -390,11 +434,16 @@ impl DisplayOverview {
                         let height = (w.frame.size.height - CAPTION).max(1.0);
                         card.image.setBorderWidth(0.5);
                         card.image.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
-                        card.image.setFrame(rect(0.0, 0.0, w.frame.size.width, height));
+                        card.image.setFrame(rect(
+                            4.0,
+                            4.0,
+                            (w.frame.size.width - 8.0).max(1.0),
+                            (height - 4.0).max(1.0),
+                        ));
                         card.caption.setFrame(rect(0.0, height, w.frame.size.width, CAPTION));
                         card.title.setFrame(rect(
                             26.0,
-                            7.0,
+                            5.0,
                             (w.frame.size.width - 32.0).max(0.0),
                             20.0,
                         ));
@@ -435,7 +484,15 @@ impl DisplayOverview {
                     }
                     let card = layer(w.frame, self.scale);
                     let height = (w.frame.size.height - CAPTION).max(1.0);
-                    let image = layer(rect(0.0, 0.0, w.frame.size.width, height), self.scale);
+                    let image = layer(
+                        rect(
+                            4.0,
+                            4.0,
+                            (w.frame.size.width - 8.0).max(1.0),
+                            (height - 4.0).max(1.0),
+                        ),
+                        self.scale,
+                    );
                     image.setCornerRadius(CORNER);
                     image.setMasksToBounds(true);
                     image.setBorderWidth(0.5);
@@ -471,7 +528,7 @@ impl DisplayOverview {
                         }
                     });
                     if let Some(icon) = icon {
-                        let icon_layer = layer(rect(4.0, 7.0, 16.0, 16.0), self.scale);
+                        let icon_layer = layer(rect(4.0, 6.0, 16.0, 16.0), self.scale);
                         unsafe {
                             icon_layer.setContents(Some(
                                 &*(icon.as_ref() as *const CGImage as *const AnyObject),
@@ -486,7 +543,7 @@ impl DisplayOverview {
                         } else {
                             &data.info.title
                         },
-                        rect(26.0, 7.0, (w.frame.size.width - 32.0).max(0.0), 20.0),
+                        rect(26.0, 5.0, (w.frame.size.width - 32.0).max(0.0), 20.0),
                         self.scale,
                     );
                     container.addSublayer(&card);
@@ -668,7 +725,7 @@ impl OverviewSession {
             let root = layer(rect(0.0, 0.0, bounds.size.width, bounds.size.height), scale);
             root.setGeometryFlipped(true);
             root.setMasksToBounds(true);
-            root.setBackgroundColor(Some(&color(0.025, 0.025, 0.03, 0.58)));
+            root.setBackgroundColor(Some(&color(0.035, 0.035, 0.045, 0.48)));
             let result = (|| {
                 let window = CgsWindow::new_compositor(bounds, 0.0)?;
                 window.set_resolution(scale)?;
@@ -1242,7 +1299,44 @@ impl OverviewSession {
                 }
             }
         }
-        previews.images.retain(|id, _| visible.contains(id));
+        if previews.visible == visible {
+            previews.pump(self.generation);
+            return;
+        }
+        for id in previews.visible.difference(&visible) {
+            // Keep in-flight attempts deduplicated; successful nonresident captures
+            // clear their own marker on completion.
+            if previews.images.contains_key(id) {
+                previews.schedule.attempted.remove(id);
+            }
+        }
+        previews.visible = visible.clone();
+        previews.images.retain(|id, _| {
+            if visible.contains(id) {
+                true
+            } else {
+                previews.schedule.attempted.remove(id);
+                false
+            }
+        });
+        // Divide the bounded pixel budget among visible cards, including queued captures.
+        let per_image_bytes = SESSION_PREVIEW_BYTES / visible.len().max(1);
+        for image in previews.images.values_mut() {
+            if image_bytes(image) > per_image_bytes {
+                let factor = (per_image_bytes as f64 / image_bytes(image) as f64).sqrt();
+                if let Some(smaller) = resized_preview(image, factor) {
+                    *image = smaller;
+                }
+            }
+        }
+        let pixel_budget = per_image_bytes / 4;
+        for request in &mut previews.schedule.pending {
+            let factor = (pixel_budget as f64 / (request.width * request.height).max(1) as f64)
+                .sqrt()
+                .min(1.0);
+            request.width = (request.width as f64 * factor).floor().max(1.0) as usize;
+            request.height = (request.height as f64 * factor).floor().max(1.0) as usize;
+        }
         previews.schedule.pending.retain(|p| visible.contains(&p.id));
         previews.schedule.pending.sort_by_key(|p| self.selection.window != Some(p.id));
         previews.pump(self.generation);
@@ -1288,23 +1382,35 @@ impl OverviewSession {
                             .get_or_insert_with(RememberedPreviewCache::default)
                             .insert(&request, compact);
                     }
-                    let visible = self.displays.iter().any(|d| {
-                        d.projection.iter().any(|ws| {
-                            ws.windows.iter().any(|w| {
-                                d.workspaces[ws.source].windows[w.source].id == request.id
-                                    && card_visible(d.bounds.size, ws.frame, w.frame)
+                    let visible = previews.visible.contains(&request.id)
+                        || self.displays.iter().any(|d| {
+                            d.projection.iter().any(|ws| {
+                                ws.windows.iter().any(|w| {
+                                    d.workspaces[ws.source].windows[w.source].id == request.id
+                                        && card_visible(d.bounds.size, ws.frame, w.frame)
+                                })
                             })
-                        })
-                    });
+                        });
                     let bytes = previews
                         .images
                         .iter()
                         .filter(|(id, _)| **id != request.id)
                         .map(|(_, image)| image_bytes(image))
                         .sum::<usize>();
-                    if visible && image_bytes(&image) <= SESSION_PREVIEW_BYTES.saturating_sub(bytes)
-                    {
+                    let available = SESSION_PREVIEW_BYTES.saturating_sub(bytes);
+                    let fair = SESSION_PREVIEW_BYTES / previews.visible.len().max(1);
+                    let budget = available.min(fair);
+                    let image = if image_bytes(&image) > budget && budget >= 4 {
+                        let factor = (budget as f64 / image_bytes(&image) as f64).sqrt();
+                        resized_preview(&image, factor)
+                    } else {
+                        Some(image)
+                    };
+                    if visible && let Some(image) = image.filter(|i| image_bytes(i) <= available) {
                         previews.images.insert(request.id, image);
+                    } else {
+                        // A successful capture discarded offscreen must be eligible on return.
+                        previews.schedule.attempted.remove(&request.id);
                     }
                 }
             }
@@ -1312,6 +1418,7 @@ impl OverviewSession {
         }
         previews.pump(self.generation);
         self.sync_images(remembered.as_ref());
+        CATransaction::flush();
     }
 
     fn sync_images(&self, remembered: Option<&RememberedPreviewCache>) {
@@ -1345,7 +1452,6 @@ impl OverviewSession {
                 }
             }
         });
-        CATransaction::flush();
     }
 }
 
@@ -1386,6 +1492,7 @@ pub(crate) struct PreviewSession {
     windows: Option<HashMap<u32, Retained<SCWindow>>>,
     schedule: PreviewSchedule,
     failed: bool,
+    visible: HashSet<WindowId>,
     images: HashMap<WindowId, CFRetained<CGImage>>,
 }
 
@@ -1419,6 +1526,7 @@ impl PreviewSession {
             windows: None,
             schedule: PreviewSchedule::default(),
             failed: false,
+            visible: HashSet::default(),
             images: HashMap::default(),
         }
     }
@@ -1545,6 +1653,11 @@ fn compact_preview(image: &CGImage) -> Option<CFRetained<CGImage>> {
         return None;
     }
     let scale = (REMEMBERED_EDGE as f64 / width.max(height) as f64).min(1.0);
+    resized_preview(image, scale)
+}
+fn resized_preview(image: &CGImage, scale: f64) -> Option<CFRetained<CGImage>> {
+    let width = CGImage::width(Some(image));
+    let height = CGImage::height(Some(image));
     let width = (width as f64 * scale).floor().max(1.0) as usize;
     let height = (height as f64 * scale).floor().max(1.0) as usize;
     let space = CGColorSpace::new_device_rgb()?;
@@ -2031,6 +2144,7 @@ mod tests {
             windows: None,
             schedule: PreviewSchedule::default(),
             failed: false,
+            visible: HashSet::default(),
             images: HashMap::default(),
         };
         session.images.insert(WindowId::new(123, 1), image.clone());
@@ -2063,6 +2177,20 @@ mod tests {
         schedule.pending.push(request(4));
         schedule.complete();
         assert_eq!(schedule.next().unwrap().id, WindowId::new(123, 4));
+    }
+
+    #[test]
+    fn discarded_or_evicted_capture_can_upgrade_on_return() {
+        let mut schedule = PreviewSchedule::default();
+        schedule.pending.push(request(1));
+        let id = schedule.next().unwrap().id;
+        assert!(!schedule.needs(id)); // No duplicate while in flight.
+        schedule.complete();
+        schedule.attempted.remove(&id); // Successful image discarded offscreen.
+        assert!(schedule.needs(id));
+        schedule.pending.push(request(1));
+        assert!(!schedule.needs(id));
+        assert_eq!(schedule.next().unwrap().id, id);
     }
 
     #[test]
