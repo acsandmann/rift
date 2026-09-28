@@ -6,14 +6,13 @@ use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::timer::Timer;
-use crate::ui::mission_control::{OverviewAction, OverviewSession, RememberedPreviewCache};
+use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewCache};
 
 #[derive(Debug)]
 pub enum Event {
     StartPreviews(u64),
     PumpPreviews,
     ShowAll,
-    ShowCurrent,
     Dismiss,
     RefreshCurrentWorkspace,
     Configure(MissionControlSettings),
@@ -108,7 +107,7 @@ pub struct MissionControlActor {
     settings: MissionControlSettings,
     rx: Receiver,
     tx: Sender,
-    remembered: Option<RememberedPreviewCache>,
+    cache: Option<PreviewCache>,
     reactor: reactor::ReactorHandle,
     session: Option<OverviewSession>,
     generation: u64,
@@ -129,7 +128,7 @@ impl MissionControlActor {
             settings,
             rx,
             tx,
-            remembered: None,
+            cache: None,
             reactor,
             session: None,
             generation: 0,
@@ -147,7 +146,7 @@ impl MissionControlActor {
             tokio::select! {
                 _ = async { if let Some(timer) = &mut edge_timer { timer.await } else { std::future::pending().await } } => {
                     edge_timer = None;
-                    if let Some(session) = &mut self.session { session.edge_tick(self.remembered.as_ref()); }
+                    if let Some(session) = &mut self.session { session.edge_tick(self.cache.as_ref()); }
                 }
                 event = async {
                     if pending_event.is_some() { pending_event.take() } else { self.rx.recv().await }
@@ -173,7 +172,7 @@ impl MissionControlActor {
                 } => {
                     if let Some((_, result)) = result {
                         let current = result.window_id().and_then(|id| self.reactor.query_window_info(id));
-                        if let Some(session) = &mut self.session { session.preview_ready(result, current.as_ref(), &mut self.remembered); }
+                        if let Some(session) = &mut self.session { session.preview_ready(result, current.as_ref(), &mut self.cache); }
                     }
                 }
             }
@@ -184,11 +183,14 @@ impl MissionControlActor {
     fn close(&mut self) {
         if let Some(session) = self.session.take() {
             drop(session);
-            let (remembered_preview_count, remembered_preview_bytes) =
-                self.remembered.as_ref().map(RememberedPreviewCache::stats).unwrap_or_default();
+            if let Some(cache) = &mut self.cache {
+                cache.close();
+            }
+            let (cache_preview_count, cache_preview_bytes) =
+                self.cache.as_ref().map(PreviewCache::stats).unwrap_or_default();
             tracing::debug!(
-                remembered_preview_count,
-                remembered_preview_bytes,
+                cache_preview_count,
+                cache_preview_bytes,
                 outstanding_captures = crate::ui::mission_control::outstanding_preview_captures(),
                 "Overview closed"
             );
@@ -209,11 +211,11 @@ impl MissionControlActor {
                         generation,
                         self.settings.window_previews,
                         self.tx.clone(),
-                        self.remembered.as_ref(),
+                        self.cache.as_ref(),
                     );
                 }
             }
-            Event::ShowAll | Event::ShowCurrent => {
+            Event::ShowAll => {
                 if self.session.is_some() {
                     self.close();
                 } else if self.settings.enabled {
@@ -223,7 +225,7 @@ impl MissionControlActor {
                         self.mtm,
                         &self.settings,
                         self.generation,
-                        &mut self.remembered,
+                        &mut self.cache,
                     );
                     if self.session.is_some() && self.settings.window_previews {
                         dispatchr::queue::main().after_f_s(
@@ -240,7 +242,7 @@ impl MissionControlActor {
             Event::Dismiss => self.close(),
             Event::RefreshCurrentWorkspace => {
                 if let Some(session) = &mut self.session {
-                    session.refresh(&self.reactor, self.remembered.as_ref(), None);
+                    session.refresh(&self.reactor, self.cache.as_ref(), None);
                 }
                 if self.session.as_ref().is_some_and(OverviewSession::is_empty) {
                     self.close();
@@ -249,7 +251,7 @@ impl MissionControlActor {
             Event::Configure(settings) => {
                 self.close();
                 if !settings.enabled || !settings.window_previews {
-                    self.remembered = None;
+                    self.cache = None;
                 }
                 self.settings = settings;
             }
@@ -258,7 +260,7 @@ impl MissionControlActor {
                 let action = self
                     .session
                     .as_mut()
-                    .and_then(|session| session.input(input, self.remembered.as_ref()));
+                    .and_then(|session| session.input(input, self.cache.as_ref()));
                 if let Some(intent) = self.session.as_mut().and_then(OverviewSession::take_drop) {
                     let window = intent.window;
                     let (reply, rx) = std::sync::mpsc::sync_channel(1);
@@ -267,7 +269,7 @@ impl MissionControlActor {
                     if let Some(session) = &mut self.session {
                         session.refresh(
                             &self.reactor,
-                            self.remembered.as_ref(),
+                            self.cache.as_ref(),
                             changed.then_some(window),
                         );
                     }

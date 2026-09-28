@@ -6,7 +6,7 @@
 
 mod animation;
 mod events;
-pub(crate) use events::drag::OverviewDrop;
+pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
 mod query;
@@ -220,11 +220,11 @@ pub enum Event {
     #[serde(skip)]
     OverviewSelectWorkspace {
         display: String,
-        workspace: String,
+        workspace: crate::model::VirtualWorkspaceId,
     },
     #[serde(skip)]
     OverviewDrop {
-        intent: events::drag::OverviewDrop,
+        intent: OverviewDrop,
         reply: std::sync::mpsc::SyncSender<bool>,
     },
     #[serde(skip)]
@@ -1897,6 +1897,14 @@ impl Reactor {
                 if !self.is_space_active(space) {
                     return Ok(EventOutcome::no_change());
                 }
+                let workspaces = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager_mut()
+                    .list_workspaces(space);
+                let Some(index) = workspaces.iter().position(|(id, _)| *id == workspace) else {
+                    return Ok(EventOutcome::no_change());
+                };
                 // Change display context without first focusing its old workspace's window.
                 if let Some(screen) = self.space_state.screen_by_space(space) {
                     if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
@@ -1904,16 +1912,6 @@ impl Reactor {
                     }
                 }
                 self.space_state.command_space = Some(space);
-                let workspaces = self
-                    .layout_manager
-                    .layout_engine
-                    .virtual_workspace_manager_mut()
-                    .list_workspaces(space);
-                let Some(index) =
-                    workspaces.iter().position(|(id, _)| format!("{id:?}") == workspace)
-                else {
-                    return Ok(EventOutcome::no_change());
-                };
                 // Overview selects an identity, never invokes configured back-and-forth.
                 if self.layout_manager.layout_engine.active_workspace(space)
                     == Some(workspaces[index].0)
@@ -1935,57 +1933,57 @@ impl Reactor {
                 );
             }
             Event::OverviewDrop { intent, reply } => {
+                let source = self.state.windows.workspace_info_for_window(intent.window);
+                let destination = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager()
+                    .workspaces
+                    .get(intent.workspace)
+                    .map(|ws| ws.space);
                 let valid = self.state.windows.window(intent.window).is_some_and(|window| {
-                    window.is_admitted()
-                        && window.info.is_standard
-                        && !window.info.is_minimized
-                        && window.info.sys_id == intent.server_id
-                }) && self
-                    .app_manager
-                    .apps
-                    .get(&intent.window.pid)
-                    .is_some_and(|app| app.info.bundle_id == intent.bundle)
-                    && self.space_state.screens.iter().any(|screen| {
-                        screen.space == Some(intent.space) && screen.display_uuid == intent.display
+                    window.is_admitted() && window.info.is_standard && !window.info.is_minimized
+                }) && source.zip(destination).is_some_and(|(source, destination)| {
+                    [source.space, destination].into_iter().all(|space| {
+                        self.space_state.screen_by_space(space).is_some()
+                            && !self.is_fullscreen_space(space)
                     })
-                    && self
-                        .space_state
-                        .screens
-                        .iter()
-                        .any(|screen| screen.space == Some(intent.source_space))
-                    && !self.is_fullscreen_space(intent.space)
-                    && !self.is_fullscreen_space(intent.source_space);
+                });
                 let changed = valid
                     && self
                         .layout_manager
                         .layout_engine
-                        .commit_overview_drop(&mut self.state.windows, &intent);
+                        .relocate_window_with_drop(&mut self.state.windows, &intent);
                 let _ = reply.send(changed);
                 if !changed {
                     return Ok(EventOutcome::no_change());
                 }
+                let source_space = source.unwrap().space;
+                let destination = destination.unwrap();
                 let mut outcome = EventOutcome::layout_changed(false);
-                outcome = outcome.with_arrange_space_scope(Some(intent.space));
-                if intent.source_space != intent.space {
-                    outcome.arrange.secondary_space_scope = Some(intent.source_space);
+                outcome = outcome.with_arrange_space_scope(Some(destination));
+                if source_space != destination {
+                    outcome.arrange.secondary_space_scope = Some(source_space);
                 }
-                if intent.source_space != intent.space {
-                    if let Some(server_id) = intent.server_id {
-                        self.state.windows.set_window_server_space(server_id, Some(intent.space));
+                if source_space != destination {
+                    if let Some(server_id) =
+                        self.state.windows.window(intent.window).and_then(|w| w.info.sys_id)
+                    {
+                        self.state.windows.set_window_server_space(server_id, Some(destination));
                     }
                     let frame = intent.frame.unwrap_or_else(|| {
                         let destination = self
                             .space_state
                             .screens
                             .iter()
-                            .find(|s| s.space == Some(intent.space))
+                            .find(|s| s.space == Some(destination))
                             .unwrap()
                             .frame;
                         let source = self
                             .space_state
                             .screens
                             .iter()
-                            .find(|s| s.space == Some(intent.source_space))
+                            .find(|s| s.space == Some(source_space))
                             .map(|s| s.frame)
                             .unwrap_or(destination);
                         let mut frame =
@@ -2851,6 +2849,7 @@ impl Reactor {
         let bundle_id = app.info.bundle_id.clone();
 
         Some(RuntimeWindowData {
+            layout_frame: None,
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
             is_focused: self.main_window() == Some(window_id),

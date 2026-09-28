@@ -142,22 +142,3 @@ pub fn handle_mouse_up(
 
     Ok(outcome.with_arrange_passes(u8::from(needs_layout)))
 }
-
-/// Only emitted on Overview mouse-up. Geometry and hover never reach the Reactor.
-#[derive(Debug, Clone)]
-pub struct OverviewDrop {
-    pub window: crate::actor::app::WindowId,
-    pub server_id: Option<crate::sys::window_server::WindowServerId>,
-    pub bundle: Option<String>,
-    pub source_space: SpaceId,
-    pub source_workspace: String,
-    pub display: String,
-    pub space: SpaceId,
-    pub workspace: String,
-    pub floating: bool,
-    pub target: Option<(
-        crate::actor::app::WindowId,
-        crate::layout_engine::WindowDropAction,
-    )>,
-    pub frame: Option<objc2_core_foundation::CGRect>,
-}

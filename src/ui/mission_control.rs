@@ -1,4 +1,5 @@
 //! Session-owned Overview. Runtime frames are truth; captured images only decorate cards.
+use std::collections::VecDeque;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -63,6 +64,8 @@ pub struct Selection {
 
 #[derive(Debug)]
 struct WindowProjection {
+    id: WindowId,
+    floating: bool,
     source: usize,
     frame: CGRect,
 }
@@ -70,6 +73,7 @@ struct WindowProjection {
 struct WorkspaceProjection {
     source: usize,
     frame: CGRect,
+    scene: crate::actor::drag::DragScene,
     windows: Vec<WindowProjection>,
 }
 
@@ -170,60 +174,6 @@ fn filter_workspaces(workspaces: &mut Vec<RuntimeWorkspaceData>, show_empty: boo
     }
 }
 
-/// Native offscreen columns share parking coordinates. Expand only the session's
-/// query snapshot into logical strip positions; native windows remain untouched.
-fn expand_scrolling_columns(workspaces: &mut [RuntimeWorkspaceData], display: CGRect) {
-    for ws in workspaces.iter_mut().filter(|ws| ws.layout_mode == "scrolling") {
-        let mut columns: HashMap<usize, (f64, f64, bool)> = HashMap::default();
-        for w in ws.windows.iter().filter(|w| !w.is_floating) {
-            let Some(position) = w.layout_position else {
-                continue;
-            };
-            let entry =
-                columns.entry(position.column).or_insert((0.0, w.info.frame.origin.x, false));
-            entry.0 = entry.0.max(w.info.frame.size.width);
-            entry.1 = entry.1.min(w.info.frame.origin.x);
-            entry.2 |= w.is_focused;
-        }
-        let mut columns: Vec<_> = columns.into_iter().collect();
-        columns.sort_by_key(|(column, _)| *column);
-        if columns.len() < 2 {
-            continue;
-        }
-        let gap = columns
-            .windows(2)
-            .find_map(|pair| {
-                let gap = pair[1].1.1 - pair[0].1.1 - pair[0].1.0;
-                (pair[1].0 == pair[0].0 + 1 && (0.0..=128.0).contains(&gap)).then_some(gap)
-            })
-            .unwrap_or(12.0);
-        let anchor = columns
-            .iter()
-            .position(|(_, (_, _, focused))| *focused)
-            .or_else(|| {
-                columns.iter().position(|(_, (width, x, _))| {
-                    *x < display.origin.x + display.size.width && *x + *width > display.origin.x
-                })
-            })
-            .unwrap_or(0);
-        let start = columns[anchor].1.1
-            - columns[..anchor].iter().map(|(_, (width, _, _))| width + gap).sum::<f64>();
-        let mut x = start;
-        let mut positions = HashMap::default();
-        for (column, (width, _, _)) in columns {
-            positions.insert(column, x);
-            x += width + gap;
-        }
-        for w in ws.windows.iter_mut().filter(|w| !w.is_floating) {
-            if let Some(position) = w.layout_position
-                && let Some(x) = positions.get(&position.column)
-            {
-                w.info.frame.origin.x = *x;
-            }
-        }
-    }
-}
-
 fn vertical_scroll(delta: CGPoint) -> bool { delta.y.abs() >= delta.x.abs() }
 
 fn scrolled_horizontal_offset(
@@ -245,11 +195,9 @@ fn scrolled_horizontal_offset(
     let (min, max) = workspace.windows.iter().filter(|w| !scrolling || !w.is_floating).fold(
         (0.0_f64, 0.0_f64),
         |(min, max), w| {
-            let x = base + (w.info.frame.origin.x - display.origin.x) * scale;
-            (
-                min.min(x - left),
-                max.max(x + w.info.frame.size.width * scale - right),
-            )
+            let frame = w.layout_frame.unwrap_or(w.info.frame);
+            let x = base + (frame.origin.x - display.origin.x) * scale;
+            (min.min(x - left), max.max(x + frame.size.width * scale - right))
         },
     );
     (offset - delta).clamp(min, max)
@@ -321,7 +269,7 @@ fn project(
                 .iter()
                 .enumerate()
                 .filter_map(|(source, window)| {
-                    let w = window.info.frame;
+                    let w = window.layout_frame.unwrap_or(window.info.frame);
                     let projected = rect(
                         x + (w.origin.x - display.origin.x) * scale
                             - offsets.get(&ws.index).copied().unwrap_or(0.0),
@@ -330,11 +278,32 @@ fn project(
                         w.size.height * scale,
                     );
                     intersects(projected, rect(0.0, 0.0, frame.size.width, frame.size.height))
-                        .then_some(WindowProjection { source, frame: projected })
+                        .then_some(WindowProjection {
+                            id: window.id,
+                            floating: window.is_floating,
+                            source,
+                            frame: projected,
+                        })
                 })
                 .collect();
-            windows.sort_by_key(|w| ws.windows[w.source].is_floating);
-            Some(WorkspaceProjection { source, frame, windows })
+            windows.sort_by_key(|w| w.floating);
+            let scene = crate::actor::drag::DragScene {
+                action_override: (ws.layout_mode == "stack")
+                    .then_some(crate::layout_engine::WindowDropAction::Swap),
+                source_neighbors: [false; 4],
+                targets: windows
+                    .iter()
+                    .rev()
+                    .filter_map(|w| {
+                        (!w.floating).then_some(crate::actor::drag::DragSceneTarget {
+                            window: w.id,
+                            space: ws.space,
+                            frame: w.frame,
+                        })
+                    })
+                    .collect(),
+            };
+            Some(WorkspaceProjection { source, frame, scene, windows })
         })
         .collect()
 }
@@ -366,7 +335,7 @@ fn hit(
                     local,
                 )
             })
-            .map(|w| workspace.windows[w.source].id);
+            .map(|w| w.id);
         return Some(Selection {
             workspace: workspace.index,
             window,
@@ -379,7 +348,7 @@ pub(crate) enum OverviewAction {
     Dismiss,
     Activate {
         display: String,
-        workspace: String,
+        workspace: crate::model::VirtualWorkspaceId,
         selection: Selection,
         sys_id: Option<WindowServerId>,
     },
@@ -392,6 +361,72 @@ struct WindowCard {
     caption: Retained<CALayer>,
     title: Retained<CATextLayer>,
     icon: Option<Retained<CALayer>>,
+}
+impl WindowCard {
+    fn new(
+        data: &RuntimeWindowData,
+        frame: CGRect,
+        scale: f64,
+        image_contents: Option<&AnyObject>,
+        icon_contents: Option<&AnyObject>,
+    ) -> Self {
+        let card = layer(frame, scale);
+        let image = layer(CGRect::ZERO, scale);
+        image.setCornerRadius(CORNER);
+        image.setMasksToBounds(true);
+        unsafe {
+            // Fill resized tiles, including cached images with an older aspect ratio.
+            image.setContentsGravity(objc2_quartz_core::kCAGravityResize);
+            image.setContents(image_contents);
+        }
+        card.addSublayer(&image);
+        let caption = layer(CGRect::ZERO, scale);
+        card.addSublayer(&caption);
+        let icon = icon_contents.map(|contents| {
+            let icon = layer(CGRect::ZERO, scale);
+            unsafe {
+                icon.setContents(Some(contents));
+            }
+            caption.addSublayer(&icon);
+            icon
+        });
+        let title = label(
+            &caption,
+            if data.info.title.is_empty() {
+                data.app_name.as_deref().unwrap_or("Window")
+            } else {
+                &data.info.title
+            },
+            CGRect::ZERO,
+            scale,
+        );
+        unsafe {
+            title.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
+        }
+        title.setOpacity(0.65);
+        let result = Self {
+            id: data.id,
+            layer: card,
+            image,
+            caption,
+            title,
+            icon,
+        };
+        result.set_frame(frame, scale);
+        result
+    }
+
+    fn set_frame(&self, frame: CGRect, scale: f64) {
+        self.layer.setFrame(frame);
+        let image = pixel_aligned(preview_frame(frame.size), scale);
+        self.image.setFrame(image);
+        self.caption
+            .setFrame(rect(image.origin.x, image.max().y, image.size.width, CAPTION));
+        if let Some(icon) = &self.icon {
+            icon.setFrame(rect((image.size.width - 20.0) / 2.0, 4.0, 20.0, 20.0));
+        }
+        self.title.setFrame(rect(0.0, 27.0, image.size.width, 20.0));
+    }
 }
 struct WorkspaceView {
     index: usize,
@@ -468,8 +503,9 @@ impl DisplayOverview {
         let scale =
             ((self.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) / self.info.frame.size.height;
         let base = (self.bounds.size.width - self.info.frame.size.width * scale) / 2.0;
-        let x = base + (w.info.frame.origin.x - self.info.frame.origin.x) * scale;
-        let right = x + w.info.frame.size.width * scale;
+        let frame = w.layout_frame.unwrap_or(w.info.frame);
+        let x = base + (frame.origin.x - self.info.frame.origin.x) * scale;
+        let right = x + frame.size.width * scale;
         let offset = self.offsets.entry(workspace).or_default();
         let previous = *offset;
         let (left_edge, right_edge) = if ws.layout_mode == "scrolling" {
@@ -530,11 +566,7 @@ impl DisplayOverview {
         Some(visibility_changed)
     }
 
-    fn reproject(
-        &mut self,
-        previews: Option<&PreviewSession>,
-        remembered: Option<&RememberedPreviewCache>,
-    ) {
+    fn reproject(&mut self, cache: Option<&PreviewCache>) {
         let next = project(
             self.info.frame,
             self.bounds.size,
@@ -547,10 +579,10 @@ impl DisplayOverview {
             && next.iter().zip(&self.projection).all(|(a, b)| {
                 a.source == b.source
                     && a.windows.len() == b.windows.len()
-                    && a.windows.iter().zip(&b.windows).all(|(a, b)| a.source == b.source)
+                    && a.windows.iter().zip(&b.windows).all(|(a, b)| a.id == b.id)
             });
         if !same_cards {
-            self.rebuild(previews, remembered);
+            self.rebuild(cache);
             return;
         }
         with_disabled_actions(|| {
@@ -563,7 +595,7 @@ impl DisplayOverview {
                     view.cards.iter().zip(&projected.windows).zip(&previous.windows)
                 {
                     if window.frame != old.frame {
-                        card.layer.setFrame(window.frame);
+                        card.set_frame(window.frame, self.scale);
                     }
                 }
             }
@@ -571,11 +603,7 @@ impl DisplayOverview {
         self.projection = next;
     }
 
-    fn rebuild(
-        &mut self,
-        previews: Option<&PreviewSession>,
-        remembered: Option<&RememberedPreviewCache>,
-    ) {
+    fn rebuild(&mut self, cache: Option<&PreviewCache>) {
         self.projection = project(
             self.info.frame,
             self.bounds.size,
@@ -592,9 +620,11 @@ impl DisplayOverview {
                     let data = &self.workspaces[ws.source];
                     view.index == data.index
                         && view.cards.len() == ws.windows.len()
-                        && view.cards.iter().zip(&ws.windows).all(|(card, w)| {
-                            card.id == data.windows[w.source].id && card.layer.frame() == w.frame
-                        })
+                        && view
+                            .cards
+                            .iter()
+                            .zip(&ws.windows)
+                            .all(|(card, w)| card.id == w.id && card.layer.frame() == w.frame)
                 })
             })
             .flat_map(|view| {
@@ -674,29 +704,8 @@ impl DisplayOverview {
                 for w in &ws.windows {
                     let data = &data.windows[w.source];
                     if let Some((card, previous)) = old_cards.remove(&data.id) {
-                        card.layer.setFrame(w.frame);
-                        let image_frame = pixel_aligned(preview_frame(w.frame.size), self.scale);
-                        let height = image_frame.origin.y + image_frame.size.height;
-
-                        card.image.setBackgroundColor(None);
-                        card.image.setFrame(image_frame);
-                        card.caption.setFrame(rect(
-                            image_frame.origin.x,
-                            height,
-                            image_frame.size.width,
-                            CAPTION,
-                        ));
-                        if let Some(icon) = &card.icon {
-                            icon.setFrame(rect(
-                                (image_frame.size.width - 20.0) / 2.0,
-                                4.0,
-                                20.0,
-                                20.0,
-                            ));
-                        }
-                        card.title.setHidden(false);
-                        card.title.setOpacity(0.65);
-                        card.title.setFrame(rect(0.0, 27.0, image_frame.size.width, 20.0));
+                        card.set_frame(w.frame, self.scale);
+                        set_image(&card.image, cache.and_then(|c| c.get(data)).map(|i| &**i));
                         container.addSublayer(&card.layer);
                         if self.animate {
                             let animation = CABasicAnimation::animationWithKeyPath(Some(
@@ -738,35 +747,6 @@ impl DisplayOverview {
                         cards.push(card);
                         continue;
                     }
-                    let card = layer(w.frame, self.scale);
-                    let image_frame = pixel_aligned(preview_frame(w.frame.size), self.scale);
-                    let height = image_frame.origin.y + image_frame.size.height;
-                    let image = layer(image_frame, self.scale);
-                    image.setCornerRadius(CORNER);
-                    image.setMasksToBounds(true);
-                    image.setBorderWidth(0.0);
-                    image.setBackgroundColor(None);
-                    unsafe {
-                        // Cached captures may have the window's old aspect ratio after a tile resize.
-                        // Fill the preview bounds so the border stays flush with the image.
-                        image.setContentsGravity(objc2_quartz_core::kCAGravityResize);
-                    }
-                    if let Some(image_data) = previews
-                        .and_then(|p| p.images.get(&data.id))
-                        .or_else(|| remembered.and_then(|c| c.get(data)))
-                    {
-                        unsafe {
-                            image.setContents(Some(
-                                &*(image_data.as_ref() as *const CGImage as *const AnyObject),
-                            ));
-                        }
-                    }
-                    card.addSublayer(&image);
-                    let caption = layer(
-                        rect(image_frame.origin.x, height, image_frame.size.width, CAPTION),
-                        self.scale,
-                    );
-                    card.addSublayer(&caption);
                     let icon = self.icons.entry(data.id.pid).or_insert_with(|| {
                         let app = NSRunningApplication::runningApplicationWithProcessIdentifier(
                             data.id.pid,
@@ -780,45 +760,19 @@ impl DisplayOverview {
                             )
                         }
                     });
-                    let icon_layer = if let Some(icon) = icon {
-                        let icon_layer = layer(
-                            rect((image_frame.size.width - 20.0) / 2.0, 4.0, 20.0, 20.0),
+                    let image = cache.and_then(|c| c.get(data));
+                    let card = unsafe {
+                        WindowCard::new(
+                            data,
+                            w.frame,
                             self.scale,
-                        );
-                        unsafe {
-                            icon_layer.setContents(Some(
-                                &*(icon.as_ref() as *const CGImage as *const AnyObject),
-                            ));
-                        }
-                        caption.addSublayer(&icon_layer);
-                        Some(icon_layer)
-                    } else {
-                        None
+                            image.map(|i| &*(i.as_ref() as *const CGImage as *const AnyObject)),
+                            icon.as_ref()
+                                .map(|i| &*(i.as_ref() as *const CGImage as *const AnyObject)),
+                        )
                     };
-                    let title = label(
-                        &caption,
-                        if data.info.title.is_empty() {
-                            data.app_name.as_deref().unwrap_or("Window")
-                        } else {
-                            &data.info.title
-                        },
-                        rect(0.0, 27.0, image_frame.size.width, 20.0),
-                        self.scale,
-                    );
-                    unsafe {
-                        title.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
-                    }
-                    title.setHidden(false);
-                    title.setOpacity(0.65);
-                    container.addSublayer(&card);
-                    cards.push(WindowCard {
-                        id: data.id,
-                        layer: card,
-                        image,
-                        caption,
-                        title,
-                        icon: icon_layer,
-                    });
+                    container.addSublayer(&card.layer);
+                    cards.push(card);
                 }
                 self.views.push(WorkspaceView {
                     index: data.index,
@@ -839,7 +793,9 @@ impl DisplayOverview {
 }
 
 struct OverviewDrag {
-    intent: crate::actor::reactor::OverviewDrop,
+    window: WindowId,
+    floating: bool,
+    intent: Option<crate::actor::reactor::OverviewDrop>,
     start: CGPoint,
     point: CGPoint,
     size: CGSize,
@@ -847,27 +803,6 @@ struct OverviewDrag {
     card: Retained<CALayer>,
     preview: Retained<CALayer>,
     indicator: Retained<CALayer>,
-}
-
-fn drop_action(
-    frame: CGRect,
-    point: CGPoint,
-    mode: &str,
-) -> crate::layout_engine::WindowDropAction {
-    use crate::layout_engine::{Direction, WindowDropAction};
-    if mode == "stack" {
-        return WindowDropAction::Swap;
-    }
-    let x = (point.x - frame.origin.x) / frame.size.width.max(1.0);
-    if x < 0.25 {
-        WindowDropAction::Insert(Direction::Left)
-    } else if x >= 0.75 {
-        WindowDropAction::Insert(Direction::Right)
-    } else if mode == "scrolling" && point.y < frame.origin.y + frame.size.height / 2.0 {
-        WindowDropAction::Insert(Direction::Up)
-    } else {
-        WindowDropAction::Stack
-    }
 }
 
 fn floating_drop_frame(
@@ -889,48 +824,6 @@ fn floating_drop_frame(
         width,
         height,
     )
-}
-
-fn tiled_target<'a>(
-    data: &RuntimeWorkspaceData,
-    ws: &'a WorkspaceProjection,
-    point: CGPoint,
-    source: Option<WindowId>,
-) -> Option<&'a WindowProjection> {
-    let target =
-        ws.windows
-            .iter()
-            .filter(|w| !data.windows[w.source].is_floating)
-            .min_by(|a, b| {
-                let distances = |w: &WindowProjection| {
-                    (
-                        (w.frame.origin.x - point.x)
-                            .max(0.0)
-                            .max(point.x - w.frame.origin.x - w.frame.size.width),
-                        (point.y - w.frame.origin.y - w.frame.size.height / 2.0).abs(),
-                    )
-                };
-                let (ax, ay) = distances(a);
-                let (bx, by) = distances(b);
-                ax.total_cmp(&bx).then(ay.total_cmp(&by))
-            })?;
-    if source == Some(data.windows[target.source].id)
-        && matches!(
-            drop_action(target.frame, point, &data.layout_mode),
-            crate::layout_engine::WindowDropAction::Insert(
-                crate::layout_engine::Direction::Left | crate::layout_engine::Direction::Right
-            )
-        )
-        && let Some(sibling) = ws.windows.iter().find(|w| {
-            data.windows[w.source].id != data.windows[target.source].id
-                && !data.windows[w.source].is_floating
-                && w.frame.origin.x == target.frame.origin.x
-                && w.frame.size.width == target.frame.size.width
-        })
-    {
-        return Some(sibling);
-    }
-    Some(target)
 }
 
 fn edge_direction(height: f64, y: f64) -> f64 {
@@ -996,7 +889,7 @@ impl OverviewSession {
         mtm: MainThreadMarker,
         settings: &MissionControlSettings,
         generation: u64,
-        remembered: &mut Option<RememberedPreviewCache>,
+        cache: &mut Option<PreviewCache>,
     ) -> Option<Self> {
         let _transaction = OverviewTransaction::begin();
         let mut displays = Vec::new();
@@ -1008,11 +901,11 @@ impl OverviewSession {
                 let space = display.info.space?;
                 let mut workspaces = reactor.query_workspaces(Some(space));
                 filter_workspaces(&mut workspaces, settings.show_empty_workspaces);
-                expand_scrolling_columns(&mut workspaces, display.info.frame);
+
                 Some((display, workspaces))
             })
             .collect();
-        if let Some(cache) = remembered {
+        if let Some(cache) = cache {
             cache.prune(snapshot.iter().flat_map(|(_, ws)| ws).flat_map(|ws| &ws.windows));
         }
         for (display, workspaces) in snapshot {
@@ -1064,7 +957,7 @@ impl OverviewSession {
                 _surface: surface,
                 _window: window,
             };
-            view.rebuild(None, remembered.as_ref());
+            view.rebuild(cache.as_ref());
             if let Err(error) = view._window.order_above(None) {
                 tracing::warn!(?error, "Overview ordering failed");
                 continue;
@@ -1126,7 +1019,7 @@ impl OverviewSession {
         })
     }
 
-    pub(crate) fn edge_tick(&mut self, remembered: Option<&RememberedPreviewCache>) {
+    pub(crate) fn edge_tick(&mut self, cache: Option<&PreviewCache>) {
         let _transaction = OverviewTransaction::begin();
         let Some(point) = self.drag.as_ref().filter(|drag| drag.started).map(|drag| drag.point)
         else {
@@ -1137,33 +1030,33 @@ impl OverviewSession {
             d.workspace_offset = (d.centered as f64 + d.workspace_offset + direction * 0.2)
                 .clamp(0.0, d.workspaces.len().saturating_sub(1) as f64)
                 - d.centered as f64;
-            d.reproject(self.previews.as_ref(), remembered);
+            d.reproject(cache);
         }
         self.move_drag(point);
-        self.request_previews(remembered);
+        self.request_previews(cache);
     }
 
     pub(crate) fn refresh(
         &mut self,
         reactor: &ReactorHandle,
-        remembered: Option<&RememberedPreviewCache>,
+        cache: Option<&PreviewCache>,
         moved: Option<WindowId>,
     ) {
         let _transaction = OverviewTransaction::begin();
         self.end_drag();
         let selected = moved.or(self.selection.window);
         for (i, d) in self.displays.iter_mut().enumerate() {
-            let centered_id = d.workspaces.get(d.centered).map(|ws| ws.id.clone());
+            let centered_id = d.workspaces.get(d.centered).map(|ws| ws.workspace_id);
             d.workspaces = reactor.query_workspaces(d.info.space);
             filter_workspaces(&mut d.workspaces, self.show_empty_workspaces);
-            expand_scrolling_columns(&mut d.workspaces, d.info.frame);
+
             if d.workspaces.is_empty() {
                 continue;
             }
             d.centered = d
                 .workspaces
                 .iter()
-                .position(|ws| Some(&ws.id) == centered_id.as_ref())
+                .position(|ws| Some(&ws.workspace_id) == centered_id.as_ref())
                 .unwrap_or_else(|| d.centered.min(d.workspaces.len() - 1));
             d.workspace_offset = (d.centered as f64 + d.workspace_offset)
                 .clamp(0.0, (d.workspaces.len() - 1) as f64)
@@ -1189,7 +1082,7 @@ impl OverviewSession {
                 d.reveal(self.selection.workspace, window);
             }
             d.animate = true;
-            d.rebuild(self.previews.as_ref(), remembered);
+            d.rebuild(cache);
         }
         let active_uuid = self.displays.get(self.active).map(|d| d.info.display_uuid.clone());
         self.displays.retain(|d| !d.workspaces.is_empty());
@@ -1207,7 +1100,8 @@ impl OverviewSession {
             };
         }
         self.highlight(None);
-        self.request_previews(remembered);
+        self.sync_images(cache);
+        self.request_previews(cache);
     }
 
     fn end_drag(&mut self) -> Option<OverviewDrag> {
@@ -1215,7 +1109,7 @@ impl OverviewSession {
         drag.card.removeFromSuperlayer();
         drag.indicator.removeFromSuperlayer();
         for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
-            if card.id == drag.intent.window {
+            if card.id == drag.window {
                 card.layer.setHidden(false);
             }
         }
@@ -1248,82 +1142,34 @@ impl OverviewSession {
         let Some(source) = view.cards.iter().find(|c| c.id == data.id) else {
             return;
         };
-        let card = layer(
-            rect(
-                0.0,
-                0.0,
-                source.layer.frame().size.width,
-                source.layer.frame().size.height,
-            ),
-            d.scale,
-        );
-        let height = source.image.frame().origin.y + source.image.frame().size.height;
-        let preview = layer(source.image.frame(), d.scale);
-        unsafe {
-            preview.setContents(source.image.contents().as_deref());
-            preview.setContentsGravity(objc2_quartz_core::kCAGravityResize);
-        }
-        preview.setCornerRadius(CORNER);
-        preview.setMasksToBounds(true);
-        preview.setBackgroundColor(None);
-        set_preview_border(&preview, 2.5);
-        card.addSublayer(&preview);
-        if let Some(icon) = &source.icon {
-            let icon_layer = layer(
+        let ghost = unsafe {
+            WindowCard::new(
+                data,
                 rect(
-                    source.image.frame().origin.x + (source.image.frame().size.width - 20.0) / 2.0,
-                    height + 4.0,
-                    20.0,
-                    20.0,
+                    0.0,
+                    0.0,
+                    source.layer.frame().size.width,
+                    source.layer.frame().size.height,
                 ),
                 d.scale,
-            );
-            unsafe {
-                icon_layer.setContents(icon.contents().as_deref());
-            }
-            card.addSublayer(&icon_layer);
-        }
-        let title = label(
-            &card,
-            if data.info.title.is_empty() {
-                data.app_name.as_deref().unwrap_or("Window")
-            } else {
-                &data.info.title
-            },
-            rect(
-                source.image.frame().origin.x,
-                height + 27.0,
-                source.image.frame().size.width,
-                20.0,
-            ),
-            d.scale,
-        );
-        unsafe {
-            title.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
-        }
+                source.image.contents().as_deref(),
+                source.icon.as_ref().and_then(|icon| icon.contents()).as_deref(),
+            )
+        };
+        set_preview_border(&ghost.image, 2.5);
         let indicator = layer(CGRect::ZERO, d.scale);
         indicator.setBackgroundColor(Some(&color(0.35, 0.65, 1.0, 0.8)));
         indicator.setCornerRadius(2.0);
         self.drag = Some(OverviewDrag {
-            intent: crate::actor::reactor::OverviewDrop {
-                window: data.id,
-                server_id: data.info.sys_id,
-                bundle: data.info.bundle_id.clone(),
-                source_space: d.info.space.unwrap(),
-                source_workspace: ws.id.clone(),
-                display: d.info.display_uuid.clone(),
-                space: d.info.space.unwrap(),
-                workspace: ws.id.clone(),
-                floating: data.is_floating,
-                target: None,
-                frame: None,
-            },
+            window: data.id,
+            floating: data.is_floating,
+            intent: None,
             start: point,
             point,
             size: source.layer.frame().size,
             started: false,
-            card,
-            preview,
+            card: ghost.layer,
+            preview: ghost.image,
             indicator,
         });
     }
@@ -1335,10 +1181,10 @@ impl OverviewSession {
             return;
         }
         drag.started = true;
-        drag.intent.workspace.clear();
+        drag.intent = None;
         with_disabled_actions(|| {
             for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
-                if card.id == drag.intent.window {
+                if card.id == drag.window {
                     card.layer.setHidden(true);
                 }
             }
@@ -1363,11 +1209,12 @@ impl OverviewSession {
                 return;
             };
             let data = &d.workspaces[ws.source];
-            drag.intent.display.clone_from(&d.info.display_uuid);
-            drag.intent.space = d.info.space.unwrap();
-            drag.intent.workspace.clone_from(&data.id);
-            drag.intent.target = None;
-            drag.intent.frame = None;
+            let mut intent = crate::actor::reactor::OverviewDrop {
+                window: drag.window,
+                workspace: data.workspace_id,
+                target: None,
+                frame: None,
+            };
             let p = CGPoint::new(local.x, local.y - ws.frame.origin.y);
             let backdrop = workspace_backdrop(ws);
             let mut indicator = rect(
@@ -1376,8 +1223,8 @@ impl OverviewSession {
                 (backdrop.size.width - 32.0).max(1.0),
                 2.0,
             );
-            if drag.intent.floating {
-                drag.intent.frame = Some(floating_drop_frame(
+            if drag.floating {
+                intent.frame = Some(floating_drop_frame(
                     d.info.frame,
                     ws.frame,
                     drag.size,
@@ -1392,13 +1239,11 @@ impl OverviewSession {
                     image.size.width,
                     2.0,
                 );
-            } else if let Some(target) = tiled_target(data, ws, p, Some(drag.intent.window)) {
-                let action = drop_action(target.frame, p, &data.layout_mode);
-                if data.windows[target.source].id == drag.intent.window {
-                    drag.intent.workspace.clear();
-                    return;
-                }
-                drag.intent.target = Some((data.windows[target.source].id, action));
+            } else if let Some(target) =
+                crate::actor::drag::hit_test_projected(&ws.scene, drag.window, p)
+            {
+                let action = target.action;
+                intent.target = Some((target.window, action));
                 indicator = target.frame;
                 indicator.origin.y += ws.frame.origin.y;
                 match action {
@@ -1420,6 +1265,7 @@ impl OverviewSession {
                     }
                 }
             }
+            drag.intent = Some(intent);
             drag.indicator.setFrame(indicator);
             drag.indicator.setHidden(false);
         });
@@ -1430,25 +1276,35 @@ impl OverviewSession {
         generation: u64,
         enabled: bool,
         wake: crate::actor::mission_control::Sender,
-        remembered: Option<&RememberedPreviewCache>,
+        cache: Option<&PreviewCache>,
     ) {
-        let _transaction = OverviewTransaction::begin();
-        if generation != self.generation {
+        if generation != self.generation || !enabled {
             return;
         }
+        let _transaction = OverviewTransaction::begin();
         self.previews = PreviewSession::open(enabled, generation, wake);
-        self.request_previews(remembered);
+        self.request_previews(cache);
     }
 
-    fn update_hover(&mut self, point: CGPoint) {
-        let hovered = self.displays.iter().find(|d| contains(d.bounds, point)).and_then(|d| {
-            let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
-            hit(&d.workspaces, &d.projection, local).and_then(|selection| selection.window)
-        });
+    fn pointer_target(&self, point: CGPoint) -> Option<(usize, Selection)> {
+        self.displays
+            .iter()
+            .enumerate()
+            .find(|(_, d)| contains(d.bounds, point))
+            .and_then(|(i, d)| {
+                let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
+                hit(&d.workspaces, &d.projection, local).map(|selection| (i, selection))
+            })
+    }
+
+    fn update_hover(&mut self, point: CGPoint) -> bool {
+        let hovered = self.pointer_target(point).and_then(|(_, selection)| selection.window);
         if hovered != self.hovered {
             self.hovered = hovered;
             self.update_preview_borders();
+            return true;
         }
+        false
     }
 
     fn update_preview_borders(&self) {
@@ -1504,8 +1360,29 @@ impl OverviewSession {
     pub(crate) fn input(
         &mut self,
         input: Input,
-        remembered: Option<&RememberedPreviewCache>,
+        cache: Option<&PreviewCache>,
     ) -> Option<OverviewAction> {
+        // Most sampled motion stays in the same card: no layer writes or compositor flush.
+        if let Input::Move(point) = &input {
+            if self.drag.is_some() {
+                return None;
+            }
+            let target = self.pointer_target(*point);
+            let hovered = target.and_then(|(_, selection)| selection.window);
+            if hovered == self.hovered
+                && target.is_none_or(|target| target == (self.active, self.selection))
+            {
+                return None;
+            }
+        }
+        if let Input::PointerDrag(point) = &input
+            && let Some(drag) = &mut self.drag
+            && !drag.started
+            && (point.x - drag.start.x).hypot(point.y - drag.start.y) < 5.0
+        {
+            drag.point = *point;
+            return None;
+        }
         let _transaction = OverviewTransaction::begin();
         let pointer = match &input {
             Input::Move(point)
@@ -1536,13 +1413,11 @@ impl OverviewSession {
                 self.update_hover(point);
                 let pressed = self.pressed.take();
                 if let Some(drag) = drag.filter(|drag| drag.started) {
-                    if !drag.intent.workspace.is_empty() {
-                        self.drop = Some(drag.intent);
-                    }
+                    self.drop = drag.intent;
                     return None;
                 }
                 if pressed.is_some() {
-                    return self.input(Input::Click(point), remembered);
+                    return self.input(Input::Click(point), cache);
                 }
                 return None;
             }
@@ -1558,16 +1433,7 @@ impl OverviewSession {
         let activate = matches!(input, Input::Activate | Input::Click(_));
         match input {
             Input::Move(point) | Input::Click(point) => {
-                let target = self
-                    .displays
-                    .iter()
-                    .enumerate()
-                    .find(|(_, d)| contains(d.bounds, point))
-                    .and_then(|(i, d)| {
-                        let local =
-                            CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
-                        hit(&d.workspaces, &d.projection, local).map(|selection| (i, selection))
-                    });
+                let target = self.pointer_target(point);
                 let Some((i, selection)) = target else {
                     return activate.then_some(OverviewAction::Dismiss);
                 };
@@ -1623,10 +1489,10 @@ impl OverviewSession {
                 if reprojected {
                     only_translated = translated;
                     if !translated {
-                        d.reproject(self.previews.as_ref(), remembered);
+                        d.reproject(cache);
                     }
                     if refresh_previews {
-                        self.request_previews(remembered);
+                        self.request_previews(cache);
                     }
                 }
                 if let Some(point) = self.drag.as_ref().map(|drag| drag.point) {
@@ -1650,9 +1516,9 @@ impl OverviewSession {
                     workspace: d.workspaces[d.centered].index,
                     window: None,
                 };
-                d.reproject(self.previews.as_ref(), remembered);
+                d.reproject(cache);
                 reprojected = true;
-                self.request_previews(remembered);
+                self.request_previews(cache);
             }
             Input::Left | Input::Right | Input::Cycle(_) => {
                 let d = &mut self.displays[self.active];
@@ -1669,9 +1535,9 @@ impl OverviewSession {
                     let w = &ws.windows[next];
                     self.selection.window = Some(w.id);
                     if d.reveal(self.selection.workspace, w.id) {
-                        d.reproject(self.previews.as_ref(), remembered);
+                        d.reproject(cache);
                         reprojected = true;
-                        self.request_previews(remembered);
+                        self.request_previews(cache);
                     }
                 }
             }
@@ -1695,7 +1561,7 @@ impl OverviewSession {
             let workspace = d.workspaces.iter().find(|ws| ws.index == self.selection.workspace)?;
             return Some(OverviewAction::Activate {
                 display: d.info.display_uuid.clone(),
-                workspace: workspace.id.clone(),
+                workspace: workspace.workspace_id,
                 selection: self.selection,
                 sys_id,
             });
@@ -1703,7 +1569,7 @@ impl OverviewSession {
         None
     }
 
-    fn request_previews(&mut self, remembered: Option<&RememberedPreviewCache>) {
+    fn request_previews(&mut self, cache: Option<&PreviewCache>) {
         let Some(previews) = &mut self.previews else {
             return;
         };
@@ -1711,9 +1577,12 @@ impl OverviewSession {
             return;
         }
         let mut visible = HashSet::default();
+        if let Some(id) = self.selection.window {
+            visible.insert(id);
+        }
         // The lifted layer shares this image; account for its pixels inside the session cap.
         if let Some(drag) = &self.drag {
-            visible.insert(drag.intent.window);
+            visible.insert(drag.window);
         }
         for i in (0..self.displays.len()).map(|n| (self.active + n) % self.displays.len()) {
             let display = &self.displays[i];
@@ -1731,11 +1600,14 @@ impl OverviewSession {
                         continue;
                     }
                     if let Some(sys_id) = data.info.sys_id {
+                        if visible.len() >= 32 && !visible.contains(&data.id) {
+                            continue;
+                        }
                         visible.insert(data.id);
                         if previews.schedule.needs(data.id) {
                             let (width, height) =
                                 capture_size(preview_frame(w.frame.size).size, display.scale);
-                            previews.schedule.pending.push(PreviewRequest {
+                            previews.schedule.enqueue(PreviewRequest {
                                 id: data.id,
                                 sys_id,
                                 bundle: data.info.bundle_id.clone(),
@@ -1751,32 +1623,13 @@ impl OverviewSession {
             previews.pump(self.generation);
             return;
         }
-        for id in previews.visible.difference(&visible) {
-            // Keep in-flight attempts deduplicated; successful nonresident captures
-            // clear their own marker on completion.
-            if previews.images.contains_key(id) {
-                previews.schedule.attempted.remove(id);
-            }
-        }
+        previews
+            .schedule
+            .attempted
+            .retain(|id| visible.contains(id) || previews.schedule.active.contains(id));
         previews.visible = visible.clone();
-        previews.images.retain(|id, _| {
-            if visible.contains(id) {
-                true
-            } else {
-                previews.schedule.attempted.remove(id);
-                false
-            }
-        });
-        // Divide the bounded pixel budget among visible cards, including queued captures.
-        let per_image_bytes = SESSION_PREVIEW_BYTES / visible.len().max(1);
-        for image in previews.images.values_mut() {
-            if image_bytes(image) > per_image_bytes {
-                let factor = (per_image_bytes as f64 / image_bytes(image) as f64).sqrt();
-                if let Some(smaller) = resized_preview(image, factor) {
-                    *image = smaller;
-                }
-            }
-        }
+        // Requests already target card size; cap each against the shared pixel budget.
+        let per_image_bytes = PREVIEW_BYTES / visible.len().max(1);
         let pixel_budget = per_image_bytes / 4;
         for request in &mut previews.schedule.pending {
             let factor = (pixel_budget as f64 / (request.width * request.height).max(1) as f64)
@@ -1786,16 +1639,20 @@ impl OverviewSession {
             request.height = (request.height as f64 * factor).floor().max(1.0) as usize;
         }
         previews.schedule.pending.retain(|p| visible.contains(&p.id));
-        previews.schedule.pending.sort_by_key(|p| self.selection.window != Some(p.id));
+        previews
+            .schedule
+            .pending
+            .make_contiguous()
+            .sort_by_key(|p| self.selection.window != Some(p.id));
         previews.pump(self.generation);
-        self.sync_images(remembered);
+        self.sync_images(cache);
     }
 
     pub(crate) fn preview_ready(
         &mut self,
         result: PreviewEvent,
         current: Option<&crate::model::server::RuntimeWindowData>,
-        remembered: &mut Option<RememberedPreviewCache>,
+        cache: &mut Option<PreviewCache>,
     ) {
         let _transaction = OverviewTransaction::begin();
         let Some(previews) = &mut self.previews else {
@@ -1825,51 +1682,18 @@ impl OverviewSession {
                 }
             }
             PreviewEvent::Image(generation, request, image) if generation == self.generation => {
-                previews.schedule.complete();
+                previews.schedule.complete(request.id);
                 if preview_is_current(generation, self.generation, &request, current)
                     && let Some(image) = image
                 {
-                    let compact = compact_preview(&image);
-                    // Small cards share the independent compact bitmap with the cache.
-                    let owned_small = if CGImage::width(Some(&image)) <= REMEMBERED_EDGE
-                        && CGImage::height(Some(&image)) <= REMEMBERED_EDGE
-                    {
-                        compact.clone()
+                    if previews.visible.contains(&request.id) {
+                        let budget = PREVIEW_BYTES / previews.visible.len().max(1);
+                        if let Some(owned) = owned_preview(&image, budget) {
+                            let cache = cache.get_or_insert_with(PreviewCache::default);
+                            cache.prepare_visible(&previews.visible);
+                            cache.insert(&request, owned);
+                        }
                     } else {
-                        None
-                    };
-                    if let Some(compact) = compact {
-                        remembered
-                            .get_or_insert_with(RememberedPreviewCache::default)
-                            .insert(&request, compact);
-                    }
-                    let visible = previews.visible.contains(&request.id)
-                        || self.displays.iter().any(|d| {
-                            d.projection.iter().any(|ws| {
-                                ws.windows.iter().any(|w| {
-                                    d.workspaces[ws.source].windows[w.source].id == request.id
-                                        && card_visible(d.bounds.size, ws.frame, w.frame)
-                                })
-                            })
-                        });
-                    let bytes = previews
-                        .images
-                        .iter()
-                        .filter(|(id, _)| **id != request.id)
-                        .map(|(_, image)| image_bytes(image))
-                        .sum::<usize>();
-                    let available = SESSION_PREVIEW_BYTES.saturating_sub(bytes);
-                    let fair = SESSION_PREVIEW_BYTES / previews.visible.len().max(1);
-                    let budget = available.min(fair);
-                    let image = if visible {
-                        owned_preview(&image, budget, owned_small.as_ref())
-                    } else {
-                        None
-                    };
-                    if visible && let Some(image) = image.filter(|i| image_bytes(i) <= available) {
-                        previews.images.insert(request.id, image);
-                    } else {
-                        // A successful capture discarded offscreen must be eligible on return.
                         previews.schedule.attempted.remove(&request.id);
                     }
                 }
@@ -1877,10 +1701,10 @@ impl OverviewSession {
             _ => return,
         }
         previews.pump(self.generation);
-        self.sync_images(remembered.as_ref());
+        self.sync_images(cache.as_ref());
     }
 
-    fn sync_images(&self, remembered: Option<&RememberedPreviewCache>) {
+    fn sync_images(&self, cache: Option<&PreviewCache>) {
         with_disabled_actions(|| {
             if let Some(drag) = &self.drag {
                 let data = self
@@ -1888,24 +1712,15 @@ impl OverviewSession {
                     .iter()
                     .flat_map(|d| &d.workspaces)
                     .flat_map(|ws| &ws.windows)
-                    .find(|w| w.id == drag.intent.window);
-                let image = data.and_then(|data| {
-                    self.previews
-                        .as_ref()
-                        .and_then(|p| p.images.get(&data.id))
-                        .or_else(|| remembered.and_then(|c| c.get(data)))
-                });
+                    .find(|w| w.id == drag.window);
+                let image = data.and_then(|data| cache.and_then(|c| c.get(data)));
                 set_image(&drag.preview, image.map(|i| &**i));
             }
             for display in &self.displays {
                 for (view, ws) in display.views.iter().zip(&display.projection) {
                     for (card, w) in view.cards.iter().zip(&ws.windows) {
                         let data = &display.workspaces[ws.source].windows[w.source];
-                        let image = self
-                            .previews
-                            .as_ref()
-                            .and_then(|p| p.images.get(&data.id))
-                            .or_else(|| remembered.and_then(|c| c.get(data)));
+                        let image = cache.and_then(|c| c.get(data));
                         set_image(&card.image, image.map(|i| &**i));
                     }
                 }
@@ -1914,7 +1729,7 @@ impl OverviewSession {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PreviewRequest {
     id: WindowId,
     sys_id: WindowServerId,
@@ -1966,7 +1781,6 @@ pub(crate) struct PreviewSession {
     schedule: PreviewSchedule,
     failed: bool,
     visible: HashSet<WindowId>,
-    images: HashMap<WindowId, CFRetained<CGImage>>,
 }
 
 impl PreviewSession {
@@ -2008,7 +1822,6 @@ impl PreviewSession {
             schedule: PreviewSchedule::default(),
             failed: false,
             visible: HashSet::default(),
-            images: HashMap::default(),
         }
     }
 
@@ -2019,14 +1832,14 @@ impl PreviewSession {
         let Some(windows) = &self.windows else {
             return;
         };
-        while self.schedule.active < 2 && !self.schedule.pending.is_empty() {
+        while self.schedule.active.len() < 2 && !self.schedule.pending.is_empty() {
             if !acquire_capture_slot(&CAPTURE_JOBS) {
                 break;
             }
             let request = self.schedule.next().unwrap();
             let Some(window) = windows.get(&request.sys_id.as_u32()) else {
                 CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
-                self.schedule.complete();
+                self.schedule.complete(request.id);
                 continue;
             };
             let owner = unsafe { window.owningApplication() };
@@ -2034,7 +1847,7 @@ impl PreviewSession {
                 owner_matches(&request, app.processID(), &app.bundleIdentifier().to_string())
             }) {
                 CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
-                self.schedule.complete();
+                self.schedule.complete(request.id);
                 continue;
             }
             let filter = unsafe {
@@ -2069,17 +1882,7 @@ impl PreviewSession {
                 let image = NonNull::new(image).map(|image| unsafe { CFRetained::retain(image) });
                 deliver(
                     tx.clone(),
-                    PreviewEvent::Image(
-                        generation,
-                        PreviewRequest {
-                            id: request.id,
-                            sys_id: request.sys_id,
-                            bundle: request.bundle.clone(),
-                            width: request.width,
-                            height: request.height,
-                        },
-                        image,
-                    ),
+                    PreviewEvent::Image(generation, request.clone(), image),
                 );
             });
             unsafe {
@@ -2096,25 +1899,29 @@ impl PreviewSession {
 #[derive(Default)]
 struct PreviewSchedule {
     attempted: HashSet<WindowId>,
-    pending: Vec<PreviewRequest>,
-    active: usize,
+    pending: VecDeque<PreviewRequest>,
+    active: HashSet<WindowId>,
 }
 impl PreviewSchedule {
-    fn needs(&self, id: WindowId) -> bool {
-        !self.attempted.contains(&id) && !self.pending.iter().any(|p| p.id == id)
+    fn needs(&self, id: WindowId) -> bool { !self.attempted.contains(&id) }
+
+    fn enqueue(&mut self, request: PreviewRequest) {
+        if self.attempted.insert(request.id) {
+            self.pending.push_back(request);
+        }
     }
 
     fn next(&mut self) -> Option<PreviewRequest> {
-        if self.active >= 2 || self.pending.is_empty() {
+        if self.active.len() >= 2 || self.pending.is_empty() {
             return None;
         }
-        self.active += 1;
-        let request = self.pending.remove(0);
+        let request = self.pending.pop_front()?;
+        self.active.insert(request.id);
         self.attempted.insert(request.id);
         Some(request)
     }
 
-    fn complete(&mut self) { self.active = self.active.saturating_sub(1); }
+    fn complete(&mut self, id: WindowId) { self.active.remove(&id); }
 }
 fn owner_matches(request: &PreviewRequest, pid: i32, bundle: &str) -> bool {
     request.id.pid == pid && request.bundle.as_ref().is_none_or(|expected| expected == bundle)
@@ -2133,9 +1940,8 @@ fn preview_is_current(
         })
 }
 
-const REMEMBERED_EDGE: usize = 320;
-const REMEMBERED_BYTES: usize = 4 * 1024 * 1024;
-const SESSION_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
+const PREVIEW_BYTES: usize = 8 * 1024 * 1024;
+const CLOSED_PREVIEW_BYTES: usize = 8 * 1024 * 1024;
 
 fn image_bytes(image: &CGImage) -> usize {
     CGImage::bytes_per_row(Some(image)).saturating_mul(CGImage::height(Some(image)))
@@ -2146,23 +1952,7 @@ fn capture_size(size: CGSize, backing: f64) -> (usize, usize) {
     let scale = (1024.0 / width).min(768.0 / height).min(1.0);
     ((width * scale).ceil() as usize, (height * scale).ceil() as usize)
 }
-fn compact_preview(image: &CGImage) -> Option<CFRetained<CGImage>> {
-    let width = CGImage::width(Some(image));
-    let height = CGImage::height(Some(image));
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let scale = (REMEMBERED_EDGE as f64 / width.max(height) as f64).min(1.0);
-    resized_preview(image, scale)
-}
-fn owned_preview(
-    image: &CGImage,
-    budget: usize,
-    compact: Option<&CFRetained<CGImage>>,
-) -> Option<CFRetained<CGImage>> {
-    if let Some(compact) = compact.filter(|image| image_bytes(image) <= budget) {
-        return Some(compact.clone());
-    }
+fn owned_preview(image: &CGImage, budget: usize) -> Option<CFRetained<CGImage>> {
     if budget < 4 {
         return None;
     }
@@ -2211,18 +2001,29 @@ fn set_image(layer: &CALayer, image: Option<&CGImage>) {
         }
     }
 }
-struct RememberedPreview {
+struct PreviewEntry {
     id: WindowId,
     sys_id: WindowServerId,
     bundle: Option<String>,
     image: CFRetained<CGImage>,
 }
 #[derive(Default)]
-pub(crate) struct RememberedPreviewCache {
-    entries: Vec<RememberedPreview>,
+pub(crate) struct PreviewCache {
+    entries: VecDeque<PreviewEntry>,
+    bytes: usize,
 }
-impl RememberedPreviewCache {
-    fn bytes(&self) -> usize { self.entries.iter().map(|e| image_bytes(&e.image)).sum() }
+impl PreviewCache {
+    fn bytes(&self) -> usize { self.bytes }
+
+    pub(crate) fn close(&mut self) { self.trim(CLOSED_PREVIEW_BYTES); }
+
+    fn trim(&mut self, budget: usize) {
+        while self.bytes > budget || self.entries.len() > 32 {
+            if let Some(entry) = self.entries.pop_front() {
+                self.bytes -= image_bytes(&entry.image);
+            }
+        }
+    }
 
     pub(crate) fn stats(&self) -> (usize, usize) { (self.entries.len(), self.bytes()) }
 
@@ -2239,29 +2040,54 @@ impl RememberedPreviewCache {
 
     fn prune<'a>(&mut self, windows: impl Iterator<Item = &'a RuntimeWindowData> + Clone) {
         self.entries.retain(|e| {
-            windows.clone().any(|w| {
+            let keep = windows.clone().any(|w| {
                 w.id == e.id && w.info.sys_id == Some(e.sys_id) && w.info.bundle_id == e.bundle
-            })
+            });
+            if !keep {
+                self.bytes -= image_bytes(&e.image);
+            }
+            keep
         });
     }
 
+    // A cached image from a sparse workspace can exceed a dense workspace's share.
+    // Rebalance that same cache before insertion, then evict offscreen entries first.
+    fn prepare_visible(&mut self, visible: &HashSet<WindowId>) {
+        let budget = PREVIEW_BYTES / visible.len().max(1);
+        for entry in &mut self.entries {
+            let old = image_bytes(&entry.image);
+            if visible.contains(&entry.id)
+                && old > budget
+                && let Some(image) = owned_preview(&entry.image, budget)
+            {
+                self.bytes = self.bytes - old + image_bytes(&image);
+                entry.image = image;
+            }
+        }
+        self.entries.make_contiguous().sort_by_key(|entry| visible.contains(&entry.id));
+    }
+
     fn insert(&mut self, request: &PreviewRequest, image: CFRetained<CGImage>) {
-        self.entries.retain(|e| e.id != request.id);
+        self.entries.retain(|e| {
+            if e.id == request.id {
+                self.bytes -= image_bytes(&e.image);
+                false
+            } else {
+                true
+            }
+        });
         let cost = image_bytes(&image);
-        if cost > REMEMBERED_BYTES {
+        if cost > PREVIEW_BYTES {
             return;
         }
-        while !self.entries.is_empty()
-            && (self.entries.len() >= 32 || self.bytes() > REMEMBERED_BYTES - cost)
-        {
-            self.entries.remove(0);
-        }
-        self.entries.push(RememberedPreview {
+        self.bytes += cost;
+        self.entries.push_back(PreviewEntry {
             id: request.id,
             sys_id: request.sys_id,
             bundle: request.bundle.clone(),
             image,
         });
+        self.trim(PREVIEW_BYTES);
     }
 }
 
@@ -2282,6 +2108,8 @@ mod tests {
     }
     fn workspace(index: usize, windows: Vec<RuntimeWindowData>) -> RuntimeWorkspaceData {
         RuntimeWorkspaceData {
+            workspace_id: slotmap::KeyData::from_ffi((1u64 << 32) | (index as u64 + 1)).into(),
+            space: crate::sys::screen::SpaceId::new(1),
             id: index.to_string(),
             index,
             name: index.to_string(),
@@ -2324,28 +2152,28 @@ mod tests {
         let source_ref: &CGImage = &source;
         let source_cf: &CFType = source_ref.as_ref();
         let baseline = source_cf.retain_count();
-        let owned = owned_preview(&source, 1024 * 768 * 4, None).unwrap();
+        let owned = owned_preview(&source, 1024 * 768 * 4).unwrap();
         assert_eq!(CGImage::width(Some(&owned)), 1024);
         assert_eq!(CGImage::height(Some(&owned)), 768);
         assert_eq!(source_cf.retain_count(), baseline);
-        let bounded = owned_preview(&source, 512 * 384 * 4, None).unwrap();
+        let bounded = owned_preview(&source, 512 * 384 * 4).unwrap();
         assert!(image_bytes(&bounded) <= 512 * 384 * 4);
         assert_eq!(source_cf.retain_count(), baseline);
-        assert!(owned_preview(&source, 0, None).is_none());
+        assert!(owned_preview(&source, 0).is_none());
     }
 
     #[test]
-    fn compact_cache_does_not_retain_large_capture_storage() {
+    fn cache_does_not_retain_capture_storage() {
         let source = bitmap(1024, 768);
         let source_ref: &CGImage = &source;
         let source_cf: &objc2_core_foundation::CFType = source_ref.as_ref();
         let count = source_cf.retain_count();
-        let image = compact_preview(&source).unwrap();
+        let image = owned_preview(&source, 320 * 240 * 4).unwrap();
         assert_eq!(CGImage::width(Some(&image)), 320);
         assert_eq!(CGImage::height(Some(&image)), 240);
         assert_eq!(image_bytes(&image), 320 * 240 * 4);
         assert_eq!(source_cf.retain_count(), count);
-        let mut cache = RememberedPreviewCache::default();
+        let mut cache = PreviewCache::default();
         cache.insert(&request(1), image);
         drop(source);
         assert_eq!(cache.bytes(), 320 * 240 * 4);
@@ -2353,11 +2181,80 @@ mod tests {
     }
 
     #[test]
-    fn remembered_cache_enforces_byte_and_entry_caps_and_prunes_identity() {
-        let mut cache = RememberedPreviewCache::default();
+    fn visible_previews_survive_new_captures_and_density_changes() {
+        let mut cache = PreviewCache::default();
+        cache.insert(&request(1), bitmap(1024, 768));
+        cache.insert(&request(2), bitmap(1024, 768));
+        let visible: HashSet<_> = (1..=12).map(|id| request(id).id).collect();
+        for id in 3..=12 {
+            cache.prepare_visible(&visible);
+            cache.insert(&request(id), bitmap(256, 256));
+            for previous in 1..=id {
+                assert!(cache.get(&window(previous, CGRect::ZERO, false)).is_some());
+            }
+            assert!(cache.bytes() <= PREVIEW_BYTES);
+        }
+        // Offscreen images, rather than these displayed images, are evicted first.
+        cache.insert(&request(99), bitmap(1024, 768));
+        cache.prepare_visible(&visible);
+        cache.insert(&request(12), bitmap(256, 256));
+        for id in 1..=12 {
+            assert!(cache.get(&window(id, CGRect::ZERO, false)).is_some());
+        }
+    }
+
+    #[test]
+    fn replacing_and_closing_cache_releases_pixels_and_keeps_accounting_exact() {
+        let mut cache = PreviewCache::default();
+        cache.insert(&request(1), bitmap(1024, 768));
+        cache.insert(&request(1), bitmap(100, 100));
+        assert_eq!(cache.stats(), (1, 40_000));
+        cache.insert(&request(2), bitmap(1024, 768));
+        cache.insert(&request(3), bitmap(1024, 768));
+        cache.close();
+        assert!(cache.bytes() <= CLOSED_PREVIEW_BYTES);
+        assert_eq!(
+            cache.bytes(),
+            cache.entries.iter().map(|e| image_bytes(&e.image)).sum::<usize>()
+        );
+        cache.prune(std::iter::empty());
+        assert_eq!(cache.stats(), (0, 0));
+    }
+
+    #[test]
+    fn projected_drag_scene_uses_logical_geometry_and_excludes_floating_windows() {
+        let mut tiled = window(1, rect(1200.0, 0.0, 200.0, 400.0), false);
+        tiled.layout_frame = Some(rect(200.0, 0.0, 200.0, 400.0));
+        let data = workspace(0, vec![tiled, window(2, rect(200.0, 0.0, 200.0, 400.0), true)]);
+        let projection = project(
+            rect(0.0, 0.0, 1000.0, 800.0),
+            CGSize::new(1000.0, 800.0),
+            &[data],
+            0,
+            0.0,
+            &HashMap::default(),
+        );
+        let ws = &projection[0];
+        assert_eq!(ws.scene.targets.len(), 1);
+        assert_eq!(ws.scene.targets[0].frame, ws.windows[0].frame);
+        let center = ws.scene.targets[0].frame;
+        let center = CGPoint::new(
+            center.origin.x + center.size.width / 2.0,
+            center.origin.y + center.size.height / 2.0,
+        );
+        let target =
+            crate::actor::drag::hit_test_projected(&ws.scene, WindowId::new(123, 99), center)
+                .unwrap();
+        assert_eq!(target.window, WindowId::new(123, 1));
+        assert!(crate::actor::drag::hit_test_projected(&ws.scene, target.window, center).is_none());
+    }
+
+    #[test]
+    fn cache_enforces_byte_and_entry_caps_and_prunes_identity() {
+        let mut cache = PreviewCache::default();
         for id in 1..65 {
             cache.insert(&request(id), bitmap(320, 240));
-            assert!(cache.bytes() <= REMEMBERED_BYTES);
+            assert!(cache.bytes() <= PREVIEW_BYTES);
             assert!(cache.entries.len() <= 32);
         }
         let mut current = window(64, rect(0.0, 0.0, 100.0, 100.0), false);
@@ -2402,73 +2299,6 @@ mod tests {
     }
 
     #[test]
-    fn drop_regions_and_stack_row_use_projected_geometry() {
-        use crate::layout_engine::{Direction, WindowDropAction};
-        let frame = rect(100.0, 50.0, 200.0, 100.0);
-        assert_eq!(
-            drop_action(frame, CGPoint::new(120.0, 100.0), "scrolling"),
-            WindowDropAction::Insert(Direction::Left)
-        );
-        assert_eq!(
-            drop_action(frame, CGPoint::new(280.0, 100.0), "scrolling"),
-            WindowDropAction::Insert(Direction::Right)
-        );
-        assert_eq!(
-            drop_action(frame, CGPoint::new(200.0, 80.0), "scrolling"),
-            WindowDropAction::Insert(Direction::Up)
-        );
-        assert_eq!(
-            drop_action(frame, CGPoint::new(200.0, 120.0), "scrolling"),
-            WindowDropAction::Stack
-        );
-        let data = workspace(0, vec![
-            window(1, rect(0.0, 0.0, 200.0, 100.0), false),
-            window(2, rect(0.0, 100.0, 200.0, 100.0), false),
-        ]);
-        let ws = WorkspaceProjection {
-            source: 0,
-            frame: rect(0.0, 0.0, 600.0, 400.0),
-            windows: vec![
-                WindowProjection {
-                    source: 0,
-                    frame: rect(100.0, 0.0, 200.0, 100.0),
-                },
-                WindowProjection {
-                    source: 1,
-                    frame: rect(100.0, 100.0, 200.0, 100.0),
-                },
-            ],
-        };
-        assert_eq!(
-            tiled_target(&data, &ws, CGPoint::new(110.0, 60.0), Some(data.windows[0].id))
-                .unwrap()
-                .source,
-            1
-        );
-        assert_eq!(
-            tiled_target(&data, &ws, CGPoint::new(200.0, 60.0), None).unwrap().source,
-            0
-        );
-        assert_eq!(
-            tiled_target(&data, &ws, CGPoint::new(200.0, 160.0), None).unwrap().source,
-            1
-        );
-        assert!(
-            tiled_target(
-                &workspace(0, vec![]),
-                &WorkspaceProjection {
-                    source: 0,
-                    frame: ws.frame,
-                    windows: vec![]
-                },
-                CGPoint::new(200.0, 100.0),
-                None
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
     fn floating_drop_inverse_projection_rebases_and_clamps() {
         let display = rect(1200.0, -200.0, 1200.0, 800.0);
         let ribbon = rect(0.0, 300.0, 1200.0, 400.0);
@@ -2494,37 +2324,6 @@ mod tests {
         assert_eq!(edge_direction(800.0, 790.0), 1.0);
         assert!((scrolled_workspace_offset(1, 0.0, -80.0, 400.0, 5) - 0.2).abs() < 1e-12);
         assert_eq!(scrolled_workspace_offset(1, 3.0, -80.0, 400.0, 5), 3.0);
-    }
-
-    #[test]
-    fn parked_columns_expand_in_logical_order_and_preserve_stacked_rows() {
-        let display = rect(0.0, 0.0, 1200.0, 800.0);
-        let mut windows: Vec<_> = (0..4)
-            .map(|i| {
-                let mut w = window(
-                    i + 1,
-                    rect(if i == 0 { 300.0 } else { 1200.0 }, 0.0, 600.0, 800.0),
-                    false,
-                );
-                w.layout_position =
-                    Some(rift_protocol::WindowLayoutPosition { column: i as usize, row: 0 });
-                w.is_focused = i == 0;
-                w
-            })
-            .collect();
-        let mut stacked = window(10, rect(1200.0, 400.0, 600.0, 400.0), false);
-        stacked.layout_position = Some(rift_protocol::WindowLayoutPosition { column: 2, row: 1 });
-        windows.push(stacked);
-        let original = workspace(0, windows);
-        let mut workspaces = vec![original.clone()];
-        expand_scrolling_columns(&mut workspaces, display);
-        let windows = &workspaces[0].windows;
-        assert_eq!(windows[0].info.frame.origin.x, 300.0);
-        assert!(windows[1].info.frame.origin.x < windows[2].info.frame.origin.x);
-        assert!(windows[2].info.frame.origin.x < windows[3].info.frame.origin.x);
-        assert_eq!(windows[4].info.frame.origin.x, windows[2].info.frame.origin.x);
-        assert_eq!(windows[4].info.frame.origin.y, 400.0);
-        assert_eq!(original.windows[2].info.frame.origin.x, 1200.0);
     }
 
     #[test]
@@ -2600,12 +2399,17 @@ mod tests {
         let ws = WorkspaceProjection {
             source: 0,
             frame: rect(0.0, 200.0, 1200.0, 360.0),
+            scene: Default::default(),
             windows: vec![
                 WindowProjection {
+                    id: WindowId::new(123, 1),
+                    floating: false,
                     source: 0,
                     frame: rect(150.0, 0.0, 300.0, 360.0),
                 },
                 WindowProjection {
+                    id: WindowId::new(123, 2),
+                    floating: false,
                     source: 1,
                     frame: rect(600.0, 0.0, 400.0, 360.0),
                 },
@@ -2629,7 +2433,10 @@ mod tests {
         let projection = vec![WorkspaceProjection {
             source: 0,
             frame: rect(0.0, 100.0, 1200.0, 360.0),
+            scene: Default::default(),
             windows: vec![WindowProjection {
+                id: WindowId::new(123, 1),
+                floating: false,
                 source: 0,
                 frame: rect(400.0, 0.0, 400.0, 200.0),
             }],
@@ -2670,6 +2477,7 @@ mod tests {
                 &WorkspaceProjection {
                     source: 0,
                     frame,
+                    scene: Default::default(),
                     windows: vec![],
                 },
                 scale,
@@ -2859,7 +2667,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_preview_session_releases_cached_and_queued_images() {
+    fn dropping_preview_session_releases_queued_images() {
         use objc2_core_graphics::{
             CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
         };
@@ -2882,7 +2690,7 @@ mod tests {
         let count = image_cf.retain_count();
         let (tx, rx) = actor::channel();
         let (wake, _wake_rx) = actor::channel();
-        let mut session = PreviewSession {
+        let session = PreviewSession {
             wake,
             rx,
             tx: tx.clone(),
@@ -2890,11 +2698,9 @@ mod tests {
             schedule: PreviewSchedule::default(),
             failed: false,
             visible: HashSet::default(),
-            images: HashMap::default(),
         };
-        session.images.insert(WindowId::new(123, 1), image.clone());
         tx.send(PreviewEvent::Image(1, request(2), Some(image.clone())));
-        assert!(image_cf.retain_count() >= count + 2);
+        assert!(image_cf.retain_count() >= count + 1);
         drop(session);
         assert_eq!(image_cf.retain_count(), count);
         assert!(tx.try_send(PreviewEvent::Content(1, None)).is_err());
@@ -2927,28 +2733,28 @@ mod tests {
         assert_eq!(schedule.next().unwrap().id, WindowId::new(123, 1));
         schedule.next().unwrap();
         assert!(schedule.next().is_none());
-        assert_eq!(schedule.active, 2);
-        schedule.complete();
+        assert_eq!(schedule.active.len(), 2);
+        schedule.complete(WindowId::new(123, 1));
         assert_eq!(schedule.next().unwrap().id, WindowId::new(123, 3));
         assert!(!schedule.needs(WindowId::new(123, 1)));
         assert!(schedule.needs(WindowId::new(123, 4)));
         // An unstarted card removed when hidden may be queued when newly exposed.
         assert!(!schedule.attempted.contains(&WindowId::new(123, 4)));
-        schedule.pending.push(request(4));
-        schedule.complete();
+        schedule.enqueue(request(4));
+        schedule.complete(WindowId::new(123, 2));
         assert_eq!(schedule.next().unwrap().id, WindowId::new(123, 4));
     }
 
     #[test]
     fn discarded_or_evicted_capture_can_upgrade_on_return() {
         let mut schedule = PreviewSchedule::default();
-        schedule.pending.push(request(1));
+        schedule.enqueue(request(1));
         let id = schedule.next().unwrap().id;
         assert!(!schedule.needs(id)); // No duplicate while in flight.
-        schedule.complete();
+        schedule.complete(WindowId::new(123, 1));
         schedule.attempted.remove(&id); // Successful image discarded offscreen.
         assert!(schedule.needs(id));
-        schedule.pending.push(request(1));
+        schedule.enqueue(request(1));
         assert!(!schedule.needs(id));
         assert_eq!(schedule.next().unwrap().id, id);
     }

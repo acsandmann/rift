@@ -369,10 +369,29 @@ impl Reactor {
                 .map(|snapshot| logical_window_positions(&snapshot.container_tree))
                 .unwrap_or_default();
 
+            let layout_frames = space_id
+                .and_then(|space| {
+                    self.space_state.screen_by_space(space).map(|screen| {
+                        let gaps = self
+                            .config
+                            .settings
+                            .layout
+                            .gaps
+                            .effective_for_display(screen.display_uuid_opt());
+                        self.layout_manager.layout_engine.logical_window_frames(
+                            space,
+                            *workspace_id,
+                            screen.frame,
+                            &gaps,
+                        )
+                    })
+                })
+                .unwrap_or_default();
             let mut windows: Vec<RuntimeWindowData> = Vec::new();
             for wid in workspace_windows_ids.into_iter() {
                 if let Some(mut wd) = self.create_window_data(wid) {
                     if !wd.is_floating {
+                        wd.layout_frame = layout_frames.get(&wid).copied();
                         wd.layout_position = logical_positions.get(&wid).copied();
                     }
                     if !is_active {
@@ -402,6 +421,8 @@ impl Reactor {
                 .unwrap_or_else(|| "unknown".to_string());
 
             workspaces.push(RuntimeWorkspaceData {
+                workspace_id: *workspace_id,
+                space: space_id.unwrap(),
                 id: format!("{:?}", workspace_id),
                 name: workspace_name.to_string(),
                 layout_mode,

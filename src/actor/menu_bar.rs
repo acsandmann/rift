@@ -371,6 +371,8 @@ mod tests {
 
     fn workspace(layout_mode: &str) -> RuntimeWorkspaceData {
         RuntimeWorkspaceData {
+            workspace_id: crate::model::VirtualWorkspaceId::default(),
+            space: crate::sys::screen::SpaceId::new(1),
             id: "VirtualWorkspaceId(1v1)".to_string(),
             index: 0,
             name: "main".to_string(),

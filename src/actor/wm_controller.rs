@@ -401,14 +401,10 @@ impl WmController {
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
             }
-            Command(Wm(ShowMissionControlAll)) => {
+            // Deprecated Current spelling forwards to the canonical Overview.
+            Command(Wm(ShowMissionControlAll | ShowMissionControlCurrent)) => {
                 if let Some(tx) = &self.mission_control_tx {
                     let _ = tx.try_send(mission_control::Event::ShowAll);
-                }
-            }
-            Command(Wm(ShowMissionControlCurrent)) => {
-                if let Some(tx) = &self.mission_control_tx {
-                    let _ = tx.try_send(mission_control::Event::ShowCurrent);
                 }
             }
             Command(Wm(DismissMissionControl)) => {

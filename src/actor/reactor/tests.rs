@@ -6770,7 +6770,7 @@ fn binding_mode_changes_update_query_state_before_broadcast() {
 }
 
 #[test]
-fn overview_drop_rejects_reused_native_identity_and_removed_display_before_mutation() {
+fn overview_drop_rejects_missing_window_workspace_and_display_before_mutation() {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);
     reactor.handle_event(space_state_event(
@@ -6781,17 +6781,10 @@ fn overview_drop_rejects_reused_native_identity_and_removed_display_before_mutat
     let window = WindowId::new(1, 1);
     let workspaces = reactor.query_workspaces(Some(space));
     let source = reactor.state.windows.workspace_for_window(space, window).unwrap();
-    let destination = workspaces.iter().find(|ws| ws.id != format!("{source:?}")).unwrap();
+    let destination = workspaces.iter().find(|ws| ws.workspace_id != source).unwrap();
     let intent = OverviewDrop {
         window,
-        server_id: reactor.state.windows.window(window).unwrap().info.sys_id,
-        bundle: reactor.app_manager.apps[&window.pid].info.bundle_id.clone(),
-        source_space: space,
-        source_workspace: format!("{source:?}"),
-        display: reactor.space_state.screens[0].display_uuid.clone(),
-        space,
-        workspace: destination.id.clone(),
-        floating: false,
+        workspace: destination.workspace_id,
         target: None,
         frame: None,
     };
@@ -6799,9 +6792,14 @@ fn overview_drop_rejects_reused_native_identity_and_removed_display_before_mutat
         [intent.clone(), intent.clone(), intent.clone()].into_iter().enumerate()
     {
         match index {
-            0 => invalid.server_id = Some(WindowServerId::new(99999)),
-            1 => invalid.bundle = Some("reused.app".into()),
-            _ => invalid.source_workspace = "removed".into(),
+            0 => invalid.window = WindowId::new(1, 99),
+            1 => invalid.workspace = crate::model::VirtualWorkspaceId::default(),
+            _ => {
+                invalid.target = Some((
+                    WindowId::new(1, 99),
+                    crate::layout_engine::WindowDropAction::Stack,
+                ))
+            }
         }
         let (reply, rx) = std::sync::mpsc::sync_channel(1);
         let outcome = reactor
@@ -6815,8 +6813,8 @@ fn overview_drop_rejects_reused_native_identity_and_removed_display_before_mutat
             Some(source)
         );
     }
-    let mut removed = intent.clone();
-    removed.display = "removed-monitor".into();
+    let screens = std::mem::take(&mut reactor.space_state.screens);
+    let removed = intent.clone();
     let (reply, rx) = std::sync::mpsc::sync_channel(1);
     let outcome = reactor
         .dispatch_workflow(Event::OverviewDrop { intent: removed, reply })
@@ -6828,6 +6826,7 @@ fn overview_drop_rejects_reused_native_identity_and_removed_display_before_mutat
         Some(source)
     );
     let (reply, rx) = std::sync::mpsc::sync_channel(1);
+    reactor.space_state.screens = screens;
     reactor.handle_event(Event::OverviewDrop { intent, reply });
     assert!(rx.recv().unwrap());
     assert_ne!(
@@ -6851,18 +6850,10 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
     ));
     apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
     let window = WindowId::new(1, 1);
-    let source_workspace = reactor.state.windows.workspace_for_window(source, window).unwrap();
-    let target = reactor.query_workspaces(Some(destination))[1].id.clone();
+    let target = reactor.query_workspaces(Some(destination))[1].workspace_id;
     let intent = OverviewDrop {
         window,
-        server_id: reactor.state.windows.window(window).unwrap().info.sys_id,
-        bundle: reactor.app_manager.apps[&window.pid].info.bundle_id.clone(),
-        source_space: source,
-        source_workspace: format!("{source_workspace:?}"),
-        display: reactor.space_state.screens[1].display_uuid.clone(),
-        space: destination,
         workspace: target.clone(),
-        floating: false,
         target: None,
         frame: None,
     };
@@ -6875,10 +6866,7 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
     assert_eq!(outcome.pre_layout_window_frame_writes.len(), 1);
     assert!(outcome.pre_layout_window_frame_writes[0].frame.origin.x >= 1000.0);
     assert_eq!(
-        format!(
-            "{:?}",
-            reactor.state.windows.workspace_for_window(destination, window).unwrap()
-        ),
+        reactor.state.windows.workspace_for_window(destination, window).unwrap(),
         target
     );
     assert_eq!(reactor.state.windows.workspace_for_window(source, window), None);
@@ -6900,7 +6888,7 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
     ));
     let right = reactor.query_workspaces(Some(right_space));
     let left_active = reactor.layout_manager.layout_engine.active_workspace(left_space);
-    let target = right[1].id.clone();
+    let target = right[1].workspace_id;
     reactor
         .dispatch_workflow(Event::OverviewSelectWorkspace {
             display: "test-display-1".into(),
@@ -6908,8 +6896,8 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         })
         .unwrap();
     let selected = reactor.layout_manager.layout_engine.active_workspace(right_space);
-    assert_ne!(selected.map(|id| format!("{id:?}")), Some(right[0].id.clone()));
-    assert_eq!(selected.map(|id| format!("{id:?}")), Some(target.clone()));
+    assert_ne!(selected, Some(right[0].workspace_id));
+    assert_eq!(selected, Some(target));
     let repeated = reactor
         .dispatch_workflow(Event::OverviewSelectWorkspace {
             display: "test-display-1".into(),
@@ -6928,7 +6916,7 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
     reactor
         .dispatch_workflow(Event::OverviewSelectWorkspace {
             display: "test-display-1".into(),
-            workspace: "removed-workspace".into(),
+            workspace: crate::model::VirtualWorkspaceId::default(),
         })
         .unwrap();
     assert_eq!(
