@@ -487,19 +487,19 @@ fn workspace_commands_follow_active_display_space_across_active_displays() {
     assert_eq!(reactor.workspace_command_space(), Some(left_space));
     assert_eq!(reactor.command_context_space(), Some(left_space));
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
         Some(right_workspace)
     );
 
     reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(None));
 
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(left_space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(left_space),
         Some(next_left_workspace),
         "workspace commands should follow the active display space"
     );
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
         Some(right_workspace),
         "workspace commands should not switch the focused window's display when it is not active"
     );
@@ -662,12 +662,20 @@ fn focus_display_empty_target_routes_workspace_commands_and_return_direction() {
     assert!(outcome.raise_requests.is_empty() && outcome.make_key_windows.is_empty());
     reactor.apply_event_outcome(outcome);
     let engine = &reactor.layout_manager.layout_engine;
-    assert!(engine.windows_in_active_workspace(&reactor.state.windows, right).is_empty());
+    assert!(
+        engine
+            .workspaces()
+            .windows_in_active_workspace(&reactor.state.windows, right)
+            .is_empty()
+    );
     assert_eq!(engine.focused_window(), None);
     reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
     let engine = &reactor.layout_manager.layout_engine;
-    assert_eq!(engine.active_workspace(left), Some(left_workspace));
-    assert_eq!(engine.active_workspace(right), Some(next_right_workspace));
+    assert_eq!(engine.workspaces().active_workspace(left), Some(left_workspace));
+    assert_eq!(
+        engine.workspaces().active_workspace(right),
+        Some(next_right_workspace)
+    );
     // Resolve the return direction without an intervening native notification.
     reactor.handle_event(focus_display_command(DisplaySelector::Direction(
         Direction::Left,
@@ -935,7 +943,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
 
     assert_eq!(
         reactor.query_active_workspace(None),
-        reactor.layout_manager.layout_engine.active_workspace(space2),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(space2),
         "default queries must follow authoritative active space state, not stale command_space"
     );
 }
@@ -1241,6 +1249,7 @@ fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect
     let workspace = reactor
         .layout_manager
         .layout_engine
+        .workspaces()
         .active_workspace(space1)
         .expect("workspace");
     let floating_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
@@ -1651,11 +1660,13 @@ fn cross_display_drag_clears_source_floating_position() {
     let source_workspace = reactor
         .layout_manager
         .layout_engine
+        .workspaces()
         .active_workspace(space1)
         .expect("source workspace");
     let target_workspace = reactor
         .layout_manager
         .layout_engine
+        .workspaces()
         .active_workspace(space2)
         .expect("target workspace");
 
@@ -1724,6 +1735,7 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
     let workspace = reactor
         .layout_manager
         .layout_engine
+        .workspaces()
         .active_workspace(space1)
         .expect("workspace");
 
@@ -2240,6 +2252,7 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     let active_workspace = reactor
         .layout_manager
         .layout_engine
+        .workspaces()
         .active_workspace(user_space)
         .expect("active workspace");
 
@@ -2924,7 +2937,7 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     while raise_manager_rx.try_recv().is_ok() {}
 
     assert!(
-        reactor.layout_manager.layout_engine.is_window_in_active_workspace(
+        reactor.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
             &reactor.state.windows,
             space,
             same_app_visible
@@ -2940,7 +2953,7 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     ));
     assert_eq!(reactor.main_window(), Some(same_app_visible));
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(0),
         "Carbon activation must wait for the app thread to resolve its AX focus"
     );
@@ -3030,7 +3043,7 @@ fn native_focus_race_waits_for_new_window_activation() {
     reactor.handle_event(Event::ApplicationGloballyActivated(pid));
     reactor.handle_event(Event::WindowServerFocusChanged(old, space));
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(1)
     );
     assert_ne!(reactor.layout_manager.layout_engine.focused_window(), Some(old));
@@ -3039,7 +3052,7 @@ fn native_focus_race_waits_for_new_window_activation() {
     // AX has not registered the native window yet, so its old main window is ambiguous.
     reactor.handle_event(Event::ApplicationActivated(pid, Quiet::No));
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(1)
     );
     assert_ne!(reactor.layout_manager.layout_engine.focused_window(), Some(old));
@@ -3055,7 +3068,7 @@ fn native_focus_race_waits_for_new_window_activation() {
     reactor.handle_event(Event::ApplicationMainWindowChanged(pid, Some(new), Quiet::No));
     reactor.handle_event(Event::ApplicationActivated(pid, Quiet::No));
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(1)
     );
     assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(new));
@@ -3100,7 +3113,7 @@ fn assert_repeated_activation_follows_main(
         ));
         reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::No));
         assert_eq!(
-            reactor.layout_manager.layout_engine.active_workspace_idx(space),
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
             Some(0)
         );
         assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
@@ -3187,7 +3200,7 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
     reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
 
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(0),
         "loginwindow's restored activation must not change virtual workspaces"
     );
@@ -3197,7 +3210,7 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
     reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(1),
         "auto workspace switching should resume after explicit user input"
     );
@@ -3486,7 +3499,7 @@ fn resolved_activation_without_main_window_does_not_choose_arbitrary_app_window(
     reactor.handle_event(Event::ApplicationActivated(pid, Quiet::No));
 
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
         Some(0)
     );
 }
@@ -3646,7 +3659,7 @@ fn moving_workspace_to_display_preserves_workspace_ordinal_and_follows_it() {
         );
     }
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(target_space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(target_space),
         Some(target_workspaces[0]),
         "the moved workspace should become active on the destination display"
     );
@@ -3654,6 +3667,7 @@ fn moving_workspace_to_display_preserves_workspace_ordinal_and_follows_it() {
         reactor
             .layout_manager
             .layout_engine
+            .workspaces()
             .windows_in_active_workspace(&reactor.state.windows, source_space)
             .is_empty()
     );
@@ -3871,7 +3885,7 @@ fn title_change_non_title_fallback_preserves_manually_moved_workspace() {
         reactor
             .layout_manager
             .layout_engine
-            .virtual_workspace_manager_mut()
+            .workspaces_mut()
             .assign_window_to_workspace(
                 &mut reactor.state.windows,
                 space,
@@ -5177,7 +5191,7 @@ fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules()
         "visibility refresh must preserve an existing non-default assignment when no app rule matches"
     );
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(space),
         Some(secondary_workspace),
         "refresh must not switch the active workspace back to default"
     );
@@ -6195,7 +6209,12 @@ fn closing_focused_window_refocuses_survivor() {
     let other_workspace_window = WindowId::new(1, 3);
 
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
-    let active_workspace = reactor.layout_manager.layout_engine.active_workspace(space).unwrap();
+    let active_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .workspaces()
+        .active_workspace(space)
+        .unwrap();
     let other_workspace = reactor
         .test_workspace_ids(space)
         .into_iter()
@@ -6486,11 +6505,7 @@ fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
         "AX id churn for the same WindowServer window must preserve its workspace assignment"
     );
     assert_eq!(
-        reactor
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_info_for_window_any(&reactor.state.windows, old_wid),
+        reactor.state.windows.workspace_info_for_window(old_wid),
         None,
         "old AX window id should relinquish its assignment after rekey"
     );
@@ -6515,6 +6530,7 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
     let active_workspace = reactor
         .layout_manager
         .layout_engine
+        .workspaces()
         .active_workspace(space)
         .expect("active workspace");
     reactor.layout_manager.layout_engine.store_floating_position(
@@ -6887,7 +6903,8 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         vec![Some(left_space), Some(right_space)],
     ));
     let right = reactor.query_workspaces(Some(right_space));
-    let left_active = reactor.layout_manager.layout_engine.active_workspace(left_space);
+    let left_active =
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(left_space);
     let target = right[1].workspace_id;
     reactor
         .dispatch_workflow(Event::OverviewSelectWorkspace {
@@ -6895,7 +6912,7 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
             workspace: target.clone(),
         })
         .unwrap();
-    let selected = reactor.layout_manager.layout_engine.active_workspace(right_space);
+    let selected = reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space);
     assert_ne!(selected, Some(right[0].workspace_id));
     assert_eq!(selected, Some(target));
     let repeated = reactor
@@ -6905,12 +6922,12 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         })
         .unwrap();
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
         selected
     );
     assert_eq!(repeated.arrange.passes, 0);
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(left_space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(left_space),
         left_active
     );
     reactor
@@ -6920,7 +6937,7 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         })
         .unwrap();
     assert_eq!(
-        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
         selected
     );
 }

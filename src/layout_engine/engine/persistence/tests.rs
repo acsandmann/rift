@@ -39,25 +39,25 @@ fn identity_transfer_preserves_window_tree_position_and_fingerprint() {
         app_id: Some("com.example.editor".into()),
     });
     engine.persistence.pending_windows.insert(old);
-    let workspace = engine.active_workspace(space).unwrap();
-    let layout = engine.workspace_layouts.active(space, workspace).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
+    let layout = engine.workspaces.active_layout(space, workspace).unwrap();
     let other_workspace = engine
-        .virtual_workspace_manager
+        .workspaces
         .list_workspaces(space)
         .into_iter()
         .map(|(workspace, _)| workspace)
         .find(|candidate| *candidate != workspace)
         .unwrap();
-    let other_layout = engine.workspace_layouts.active(space, other_workspace).unwrap();
+    let other_layout = engine.workspaces.active_layout(space, other_workspace).unwrap();
     // Model a provisional live projection created before the restored identity is matched.
-    engine
-        .workspace_tree_mut(other_workspace)
+    engine.workspaces[other_workspace]
+        .layout_system
         .add_window_after_selection(other_layout, replacement);
-    let before = engine.workspace_tree(workspace).visible_windows_in_layout(layout);
+    let before = engine.workspaces[workspace].layout_system.visible_windows_in_layout(layout);
 
     engine.transfer_persistent_window_identity(old, replacement);
 
-    let after = engine.workspace_tree(workspace).visible_windows_in_layout(layout);
+    let after = engine.workspaces[workspace].layout_system.visible_windows_in_layout(layout);
     assert_eq!(
         after,
         before
@@ -73,8 +73,8 @@ fn identity_transfer_preserves_window_tree_position_and_fingerprint() {
     assert!(!engine.persistence.pending_windows.contains(&old));
     assert!(engine.persistence.pending_windows.contains(&replacement));
     assert!(
-        !engine
-            .workspace_tree(other_workspace)
+        !engine.workspaces[other_workspace]
+            .layout_system
             .contains_window(other_layout, replacement),
         "identity replacement must not leave the live id in its provisional workspace"
     );
@@ -103,10 +103,10 @@ fn restored_workspace_is_resolved_before_app_rule_assignment() {
         &mut window_store,
         LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
     );
-    let restored_workspace = engine.virtual_workspace_manager.list_workspaces(space)[1].0;
-    let restored_layout = engine.workspace_layouts.active(space, restored_workspace).unwrap();
-    engine
-        .workspace_tree_mut(restored_workspace)
+    let restored_workspace = engine.workspaces.list_workspaces(space)[1].0;
+    let restored_layout = engine.workspaces.active_layout(space, restored_workspace).unwrap();
+    engine.workspaces[restored_workspace]
+        .layout_system
         .add_window_after_selection(restored_layout, window);
     engine.persistence.windows.insert(window, WindowFingerprint {
         window_server_id: Some(7803),
@@ -155,9 +155,7 @@ fn restored_workspace_is_resolved_before_app_rule_assignment() {
 
     assert_eq!(effects.workspace_id, restored_workspace);
     assert_eq!(
-        engine
-            .virtual_workspace_manager
-            .workspace_for_window(&window_store, space, window),
+        window_store.workspace_for_window(space, window),
         Some(restored_workspace)
     );
 }
@@ -207,9 +205,9 @@ fn full_save_records_floating_window_in_its_inactive_workspace() {
     );
     let window = WindowId::new(41, 6);
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let active_workspace = engine.active_workspace(space).unwrap();
+    let active_workspace = engine.workspaces().active_workspace(space).unwrap();
     let inactive_workspace = engine
-        .virtual_workspace_manager
+        .workspaces
         .list_workspaces(space)
         .into_iter()
         .map(|(workspace, _)| workspace)
@@ -235,7 +233,7 @@ fn full_save_records_floating_window_in_its_inactive_workspace() {
         is_manageable: true,
         manage_override: None,
     });
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         space,
         window,
@@ -275,7 +273,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
     );
     let window = WindowId::new(41, 7);
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let workspace = engine.active_workspace(space).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
     window_store.insert_window(window, WindowState {
         info: WindowInfo {
             is_standard: true,
@@ -296,7 +294,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
         is_manageable: true,
         manage_override: None,
     });
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         space,
         window,
@@ -333,7 +331,7 @@ fn load_does_not_arm_locationless_fingerprints() {
         &mut window_store,
         LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
     );
-    let workspace = engine.active_workspace(space).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
     engine.persistence.windows.insert(orphan, WindowFingerprint {
         window_server_id: None,
         title: Some("Untitled".into()),
@@ -341,18 +339,13 @@ fn load_does_not_arm_locationless_fingerprints() {
         height: 600.0,
         app_id: Some("com.example.orphan".into()),
     });
-    engine
-        .virtual_workspace_manager
-        .set_last_focused_window(space, workspace, Some(orphan));
+    engine.workspaces.set_last_focused_window(space, workspace, Some(orphan));
 
     let loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
 
     assert!(loaded.persistence.windows.contains_key(&orphan));
     assert!(!loaded.persistence.pending_windows.contains(&orphan));
-    assert_eq!(
-        loaded.virtual_workspace_manager.last_focused_window(space, workspace),
-        None,
-    );
+    assert_eq!(loaded.workspaces.last_focused_window(space, workspace), None,);
 }
 
 #[test]
@@ -366,7 +359,7 @@ fn load_removes_serialized_window_state_without_a_fingerprint() {
         LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
     );
     let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, ghost));
-    let workspace = engine.active_workspace(space).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
     engine.floating.add_floating(ghost);
     engine.floating_positions.store(
         space,
@@ -377,21 +370,16 @@ fn load_removes_serialized_window_state_without_a_fingerprint() {
             CGSize::new(700.0, 500.0),
         ),
     );
-    engine
-        .virtual_workspace_manager
-        .set_last_focused_window(space, workspace, Some(ghost));
+    engine.workspaces.set_last_focused_window(space, workspace, Some(ghost));
     assert!(!engine.persistence.windows.contains_key(&ghost));
 
     let loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
-    let layout = loaded.workspace_layouts.active(space, workspace).unwrap();
+    let layout = loaded.workspaces.active_layout(space, workspace).unwrap();
 
-    assert!(!loaded.workspace_tree(workspace).contains_window(layout, ghost));
+    assert!(!loaded.workspaces[workspace].layout_system.contains_window(layout, ghost));
     assert!(!loaded.floating.is_floating(ghost));
     assert_eq!(loaded.floating_positions.get(space, workspace, ghost), None);
-    assert_eq!(
-        loaded.virtual_workspace_manager.last_focused_window(space, workspace),
-        None
-    );
+    assert_eq!(loaded.workspaces.last_focused_window(space, workspace), None);
 }
 
 #[test]
@@ -422,15 +410,19 @@ fn startup_validation_preserves_stale_ids_when_the_app_can_still_fuzzy_match() {
         |window, id| window.pid == still_open.pid && id == still_open.idx.get(),
         |app_id| app_id == format!("com.example.{}", restarted_app.pid),
     );
-    let workspace = engine.active_workspace(space).unwrap();
-    let layout = engine.workspace_layouts.active(space, workspace).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
+    let layout = engine.workspaces.active_layout(space, workspace).unwrap();
 
     assert_eq!(discarded, 1);
-    assert!(!engine.workspace_tree(workspace).contains_window(layout, closed));
+    assert!(!engine.workspaces[workspace].layout_system.contains_window(layout, closed));
     assert!(!engine.persistence.windows.contains_key(&closed));
-    assert!(engine.workspace_tree(workspace).contains_window(layout, still_open));
+    assert!(engine.workspaces[workspace].layout_system.contains_window(layout, still_open));
     assert!(engine.persistence.pending_windows.contains(&still_open));
-    assert!(engine.workspace_tree(workspace).contains_window(layout, restarted_app));
+    assert!(
+        engine.workspaces[workspace]
+            .layout_system
+            .contains_window(layout, restarted_app)
+    );
     assert!(engine.persistence.pending_windows.contains(&restarted_app));
 }
 
@@ -444,16 +436,16 @@ fn workspace_restore_discards_unmatched_scoped_windows_and_floating_state() {
     let out_of_scope = WindowId::new(10, 3);
     let size = CGSize::new(1200.0, 800.0);
     let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
-    let workspaces = snapshot.virtual_workspace_manager.list_workspaces(space);
+    let workspaces = snapshot.workspaces.list_workspaces(space);
     let source_workspace = workspaces[0].0;
     let other_workspace = workspaces[1].0;
-    let source_layout = snapshot.workspace_layouts.active(space, source_workspace).unwrap();
-    let other_layout = snapshot.workspace_layouts.active(space, other_workspace).unwrap();
-    snapshot
-        .workspace_tree_mut(source_workspace)
+    let source_layout = snapshot.workspaces.active_layout(space, source_workspace).unwrap();
+    let other_layout = snapshot.workspaces.active_layout(space, other_workspace).unwrap();
+    snapshot.workspaces[source_workspace]
+        .layout_system
         .add_window_after_selection(source_layout, tiled);
-    snapshot
-        .workspace_tree_mut(other_workspace)
+    snapshot.workspaces[other_workspace]
+        .layout_system
         .add_window_after_selection(other_layout, out_of_scope);
     let floating_frame = objc2_core_foundation::CGRect::new(
         objc2_core_foundation::CGPoint::new(20.0, 30.0),
@@ -482,7 +474,7 @@ fn workspace_restore_discards_unmatched_scoped_windows_and_floating_state() {
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let target_workspace = engine.active_workspace(space).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(space).unwrap();
     let report = engine
         .restore_layout(
             path.clone(),
@@ -522,10 +514,10 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
     let mut snapshot = test_engine();
     let mut snapshot_store = WindowStore::default();
     let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
-    let snapshot_workspace = snapshot.active_workspace(space).unwrap();
-    let snapshot_layout = snapshot.workspace_layouts.active(space, snapshot_workspace).unwrap();
-    snapshot
-        .workspace_tree_mut(snapshot_workspace)
+    let snapshot_workspace = snapshot.workspaces().active_workspace(space).unwrap();
+    let snapshot_layout = snapshot.workspaces.active_layout(space, snapshot_workspace).unwrap();
+    snapshot.workspaces[snapshot_workspace]
+        .layout_system
         .add_window_after_selection(snapshot_layout, saved);
     snapshot.persistence.windows.insert(saved, WindowFingerprint {
         window_server_id: Some(7001),
@@ -544,7 +536,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let target_workspace = engine.active_workspace(space).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(space).unwrap();
     let live_state = |title: &str, bundle_id: &str, window_server_id: u32| WindowState {
         info: WindowInfo {
             is_standard: true,
@@ -571,7 +563,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
         live_state("Live floating", "com.example.live-floating", 7201),
     );
     for window in [live, live_floating] {
-        assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+        assert!(engine.workspaces.assign_window_to_workspace(
             &mut window_store,
             space,
             window,
@@ -594,9 +586,17 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
         .unwrap();
     let _ = std::fs::remove_file(path);
 
-    let target_layout = engine.workspace_layouts.active(space, target_workspace).unwrap();
-    assert!(engine.workspace_tree(target_workspace).contains_window(target_layout, live));
-    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, saved));
+    let target_layout = engine.workspaces.active_layout(space, target_workspace).unwrap();
+    assert!(
+        engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, live)
+    );
+    assert!(
+        !engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, saved)
+    );
     assert_eq!(
         window_store.workspace_for_window(space, live),
         Some(target_workspace)
@@ -608,7 +608,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
     );
     assert_eq!(engine.focused_window, Some(live));
     assert_eq!(
-        engine.virtual_workspace_manager.last_focused_window(space, target_workspace),
+        engine.workspaces.last_focused_window(space, target_workspace),
         Some(live)
     );
 }
@@ -630,11 +630,11 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
         &mut snapshot_store,
         LayoutEvent::SpaceExposed(target_space, size),
     );
-    let snapshot_workspace = snapshot.active_workspace(target_space).unwrap();
+    let snapshot_workspace = snapshot.workspaces().active_workspace(target_space).unwrap();
     let snapshot_layout =
-        snapshot.workspace_layouts.active(target_space, snapshot_workspace).unwrap();
-    snapshot
-        .workspace_tree_mut(snapshot_workspace)
+        snapshot.workspaces.active_layout(target_space, snapshot_workspace).unwrap();
+    snapshot.workspaces[snapshot_workspace]
+        .layout_system
         .add_window_after_selection(snapshot_layout, reused_id);
     snapshot.persistence.windows.insert(reused_id, WindowFingerprint {
         window_server_id: Some(7300),
@@ -655,9 +655,9 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
     for space in [target_space, external_space] {
         let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
     }
-    let external_workspace = engine.active_workspace(external_space).unwrap();
+    let external_workspace = engine.workspaces().active_workspace(external_space).unwrap();
     let external_layout =
-        engine.workspace_layouts.active(external_space, external_workspace).unwrap();
+        engine.workspaces.active_layout(external_space, external_workspace).unwrap();
     window_store.insert_window(reused_id, WindowState {
         info: WindowInfo {
             is_standard: true,
@@ -678,14 +678,14 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
         is_manageable: true,
         manage_override: None,
     });
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         external_space,
         reused_id,
         external_workspace,
     ));
-    engine
-        .workspace_tree_mut(external_workspace)
+    engine.workspaces[external_workspace]
+        .layout_system
         .add_window_after_selection(external_layout, reused_id);
     engine.floating.add_floating(reused_id);
     engine.floating.add_active(external_space, reused_id.pid, reused_id);
@@ -701,16 +701,16 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
         .unwrap();
     let _ = std::fs::remove_file(path);
 
-    let target_workspace = engine.active_workspace(target_space).unwrap();
-    let target_layout = engine.workspace_layouts.active(target_space, target_workspace).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(target_space).unwrap();
+    let target_layout = engine.workspaces.active_layout(target_space, target_workspace).unwrap();
     assert!(
-        engine
-            .workspace_tree(external_workspace)
+        engine.workspaces[external_workspace]
+            .layout_system
             .contains_window(external_layout, reused_id)
     );
     assert!(
-        !engine
-            .workspace_tree(target_workspace)
+        !engine.workspaces[target_workspace]
+            .layout_system
             .contains_window(target_layout, reused_id)
     );
     assert_eq!(
@@ -740,10 +740,10 @@ fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
         &mut snapshot_store,
         LayoutEvent::SpaceExposed(target_space, size),
     );
-    let source_workspace = snapshot.active_workspace(target_space).unwrap();
-    let source_layout = snapshot.workspace_layouts.active(target_space, source_workspace).unwrap();
-    snapshot
-        .workspace_tree_mut(source_workspace)
+    let source_workspace = snapshot.workspaces().active_workspace(target_space).unwrap();
+    let source_layout = snapshot.workspaces.active_layout(target_space, source_workspace).unwrap();
+    snapshot.workspaces[source_workspace]
+        .layout_system
         .add_window_after_selection(source_layout, saved);
     snapshot.persistence.windows.insert(saved, WindowFingerprint {
         window_server_id: Some(window_server_id.as_u32()),
@@ -764,9 +764,9 @@ fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
     for space in [target_space, external_space] {
         let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
     }
-    let external_workspace = engine.active_workspace(external_space).unwrap();
+    let external_workspace = engine.workspaces().active_workspace(external_space).unwrap();
     let external_layout =
-        engine.workspace_layouts.active(external_space, external_workspace).unwrap();
+        engine.workspaces.active_layout(external_space, external_workspace).unwrap();
     window_store.insert_window(live, WindowState {
         info: WindowInfo {
             is_standard: true,
@@ -787,14 +787,14 @@ fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
         is_manageable: true,
         manage_override: None,
     });
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         external_space,
         live,
         external_workspace,
     ));
-    engine
-        .workspace_tree_mut(external_workspace)
+    engine.workspaces[external_workspace]
+        .layout_system
         .add_window_after_selection(external_layout, live);
     // Model the transient that used to make space restore consume the external window.
     window_store.set_window_server_space(window_server_id, Some(target_space));
@@ -810,17 +810,29 @@ fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
         .unwrap();
     let _ = std::fs::remove_file(path);
 
-    let target_workspace = engine.active_workspace(target_space).unwrap();
-    let target_layout = engine.workspace_layouts.active(target_space, target_workspace).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(target_space).unwrap();
+    let target_layout = engine.workspaces.active_layout(target_space, target_workspace).unwrap();
     assert_eq!(report.matched, 0);
     assert_eq!(report.unmatched, 1);
     assert_eq!(
         window_store.workspace_for_window(external_space, live),
         Some(external_workspace)
     );
-    assert!(engine.workspace_tree(external_workspace).contains_window(external_layout, live));
-    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, live));
-    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, saved));
+    assert!(
+        engine.workspaces[external_workspace]
+            .layout_system
+            .contains_window(external_layout, live)
+    );
+    assert!(
+        !engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, live)
+    );
+    assert!(
+        !engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, saved)
+    );
 }
 
 #[test]
@@ -837,10 +849,10 @@ fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
     let mut snapshot = test_engine();
     let mut snapshot_store = WindowStore::default();
     let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
-    let source_workspace = snapshot.active_workspace(space).unwrap();
-    let source_layout = snapshot.workspace_layouts.active(space, source_workspace).unwrap();
-    snapshot
-        .workspace_tree_mut(source_workspace)
+    let source_workspace = snapshot.workspaces().active_workspace(space).unwrap();
+    let source_layout = snapshot.workspaces.active_layout(space, source_workspace).unwrap();
+    snapshot.workspaces[source_workspace]
+        .layout_system
         .add_window_after_selection(source_layout, saved);
     snapshot.persistence.windows.insert(saved, WindowFingerprint {
         window_server_id: Some(7400),
@@ -859,15 +871,15 @@ fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let target_workspace = engine.active_workspace(space).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(space).unwrap();
     let sibling_workspace = engine
-        .virtual_workspace_manager
+        .workspaces
         .existing_workspaces(space)
         .into_iter()
         .map(|(workspace, _)| workspace)
         .find(|workspace| *workspace != target_workspace)
         .unwrap();
-    let sibling_layout = engine.workspace_layouts.active(space, sibling_workspace).unwrap();
+    let sibling_layout = engine.workspaces.active_layout(space, sibling_workspace).unwrap();
     window_store.insert_window(live, WindowState {
         info: WindowInfo {
             is_standard: true,
@@ -888,14 +900,14 @@ fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
         is_manageable: true,
         manage_override: None,
     });
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         space,
         live,
         sibling_workspace,
     ));
-    engine
-        .workspace_tree_mut(sibling_workspace)
+    engine.workspaces[sibling_workspace]
+        .layout_system
         .add_window_after_selection(sibling_layout, live);
 
     let report = engine
@@ -909,16 +921,28 @@ fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
         .unwrap();
     let _ = std::fs::remove_file(path);
 
-    let target_layout = engine.workspace_layouts.active(space, target_workspace).unwrap();
+    let target_layout = engine.workspaces.active_layout(space, target_workspace).unwrap();
     assert_eq!(report.matched, 0);
     assert_eq!(report.unmatched, 1);
     assert_eq!(
         window_store.workspace_for_window(space, live),
         Some(sibling_workspace)
     );
-    assert!(engine.workspace_tree(sibling_workspace).contains_window(sibling_layout, live));
-    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, live));
-    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, saved));
+    assert!(
+        engine.workspaces[sibling_workspace]
+            .layout_system
+            .contains_window(sibling_layout, live)
+    );
+    assert!(
+        !engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, live)
+    );
+    assert!(
+        !engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, saved)
+    );
 }
 
 #[test]
@@ -934,10 +958,10 @@ fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused
     let mut snapshot = test_engine();
     let mut snapshot_store = WindowStore::default();
     let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
-    let source_workspace = snapshot.active_workspace(space).unwrap();
-    let source_layout = snapshot.workspace_layouts.active(space, source_workspace).unwrap();
-    snapshot
-        .workspace_tree_mut(source_workspace)
+    let source_workspace = snapshot.workspaces().active_workspace(space).unwrap();
+    let source_layout = snapshot.workspaces.active_layout(space, source_workspace).unwrap();
+    snapshot.workspaces[source_workspace]
+        .layout_system
         .add_window_after_selection(source_layout, reused);
     snapshot.persistence.windows.insert(reused, WindowFingerprint {
         window_server_id: Some(7600),
@@ -956,7 +980,7 @@ fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let target_workspace = engine.active_workspace(space).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(space).unwrap();
     window_store.insert_window(reused, WindowState {
         info: WindowInfo {
             is_standard: true,
@@ -977,7 +1001,7 @@ fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused
         is_manageable: true,
         manage_override: None,
     });
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         space,
         reused,
@@ -996,10 +1020,14 @@ fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused
         .unwrap();
     let _ = std::fs::remove_file(path);
 
-    let target_layout = engine.workspace_layouts.active(space, target_workspace).unwrap();
+    let target_layout = engine.workspaces.active_layout(space, target_workspace).unwrap();
     assert_eq!(report.matched, 0);
     assert_eq!(report.unmatched, 1);
-    assert!(engine.workspace_tree(target_workspace).contains_window(target_layout, reused));
+    assert!(
+        engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, reused)
+    );
     assert_eq!(
         window_store.workspace_for_window(space, reused),
         Some(target_workspace)
@@ -1048,15 +1076,13 @@ fn completed_app_discovery_discards_unmatched_startup_ghosts() {
         app_id: Some("com.example.closed-window".into()),
     });
     engine.persistence.pending_windows.insert(inactive_ghost);
-    let workspace = engine.active_workspace(space).unwrap();
-    let layout = engine.workspace_layouts.active(space, workspace).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
+    let layout = engine.workspaces.active_layout(space, workspace).unwrap();
     engine.focused_window = Some(ghost);
-    engine
-        .virtual_workspace_manager
-        .set_last_focused_window(space, workspace, Some(ghost));
+    engine.workspaces.set_last_focused_window(space, workspace, Some(ghost));
     engine.floating.add_floating(ghost);
     engine.floating.set_last_focus(Some(ghost));
-    assert!(engine.workspace_tree(workspace).contains_window(layout, ghost));
+    assert!(engine.workspaces[workspace].layout_system.contains_window(layout, ghost));
 
     let completion = engine.handle_event(
         &mut window_store,
@@ -1064,14 +1090,11 @@ fn completed_app_discovery_discards_unmatched_startup_ghosts() {
     );
 
     assert!(completion.response.changed);
-    assert!(!engine.workspace_tree(workspace).contains_window(layout, ghost));
+    assert!(!engine.workspaces[workspace].layout_system.contains_window(layout, ghost));
     assert!(!engine.persistence.windows.contains_key(&ghost));
     assert!(!engine.persistence.pending_windows.contains(&ghost));
     assert_eq!(engine.focused_window, None);
-    assert_eq!(
-        engine.virtual_workspace_manager.last_focused_window(space, workspace),
-        None
-    );
+    assert_eq!(engine.workspaces.last_focused_window(space, workspace), None);
     assert!(!engine.floating.is_floating(ghost));
     assert_ne!(engine.floating.last_focus(), Some(ghost));
     assert!(engine.persistence.pending_windows.contains(&inactive_ghost));
@@ -1082,12 +1105,12 @@ fn completed_app_discovery_discards_unmatched_startup_ghosts() {
 fn persisted_layout_schema_is_versioned_and_legacy_files_still_load() {
     let engine = test_engine();
     let serialized = engine.serialize_to_string();
-    assert!(serialized.contains("\"schema_version\":2"), "{serialized}");
+    assert!(serialized.contains("\"schema_version\":3"), "{serialized}");
 
-    let legacy = serialized.replacen("\"schema_version\":2,", "", 1);
+    let legacy = serialized.replacen("\"schema_version\":3,", "", 1);
     LayoutEngine::deserialize_from_str(&legacy).unwrap();
 
-    let future = serialized.replacen("\"schema_version\":2", "\"schema_version\":3", 1);
+    let future = serialized.replacen("\"schema_version\":3", "\"schema_version\":4", 1);
     let error = match LayoutEngine::deserialize_from_str(&future) {
         Ok(_) => panic!("future schema version should be rejected"),
         Err(error) => error,
@@ -1155,7 +1178,7 @@ fn invalid_persisted_floating_frame_is_rejected() {
         &mut window_store,
         LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
     );
-    let workspace = engine.active_workspace(space).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
     engine.floating_positions.store(
         space,
         workspace,
@@ -1196,9 +1219,9 @@ fn portable_restore_rejects_ambiguous_legacy_multi_space_files() {
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(target_space, size));
-    let target_workspace = engine.active_workspace(target_space).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(target_space).unwrap();
     let before_name = engine
-        .virtual_workspace_manager
+        .workspaces
         .workspace_info(target_space, target_workspace)
         .unwrap()
         .name
@@ -1217,11 +1240,7 @@ fn portable_restore_rejects_ambiguous_legacy_multi_space_files() {
 
     assert!(error.to_string().contains("cannot choose a source"), "{error}");
     assert_eq!(
-        engine
-            .virtual_workspace_manager
-            .workspace_info(target_space, target_workspace)
-            .unwrap()
-            .name,
+        engine.workspaces.workspace_info(target_space, target_workspace).unwrap().name,
         before_name,
     );
 }
@@ -1239,8 +1258,8 @@ fn portable_restore_uses_the_space_that_was_active_when_saved() {
     for space in [source_a, source_b] {
         let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
     }
-    let source_a_workspace = snapshot.active_workspace(source_a).unwrap();
-    let source_b_workspace = snapshot.active_workspace(source_b).unwrap();
+    let source_a_workspace = snapshot.workspaces().active_workspace(source_a).unwrap();
+    let source_b_workspace = snapshot.workspaces().active_workspace(source_b).unwrap();
     assert!(snapshot.switch_workspace_layout_mode(
         &snapshot_store,
         source_a,
@@ -1265,9 +1284,9 @@ fn portable_restore_uses_the_space_that_was_active_when_saved() {
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(target_space, size));
-    let target_workspace = engine.active_workspace(target_space).unwrap();
+    let target_workspace = engine.workspaces().active_workspace(target_space).unwrap();
     let target_name = engine
-        .virtual_workspace_manager
+        .workspaces
         .workspace_info(target_space, target_workspace)
         .unwrap()
         .name
@@ -1284,11 +1303,7 @@ fn portable_restore_uses_the_space_that_was_active_when_saved() {
 
     assert_eq!(engine.active_layout_mode_at(target_space), LayoutMode::Scrolling);
     assert_eq!(
-        engine
-            .virtual_workspace_manager
-            .workspace_info(target_space, target_workspace)
-            .unwrap()
-            .name,
+        engine.workspaces.workspace_info(target_space, target_workspace).unwrap().name,
         target_name,
     );
 
@@ -1296,7 +1311,7 @@ fn portable_restore_uses_the_space_that_was_active_when_saved() {
     let mut master_store = WindowStore::default();
     let _ = master_target
         .handle_event(&mut master_store, LayoutEvent::SpaceExposed(target_space, size));
-    let master_workspace = master_target.active_workspace(target_space).unwrap();
+    let master_workspace = master_target.workspaces().active_workspace(target_space).unwrap();
     master_target
         .restore_layout(
             path.clone(),
@@ -1313,7 +1328,7 @@ fn portable_restore_uses_the_space_that_was_active_when_saved() {
     );
     assert_eq!(
         master_target
-            .virtual_workspace_manager
+            .workspaces
             .workspace_info(target_space, master_workspace)
             .unwrap()
             .name,
@@ -1334,10 +1349,10 @@ fn master_workspace_restore_uses_target_ordinal_and_preserves_configured_name() 
     let mut snapshot = LayoutEngine::new(&workspace_settings, &layout_settings, None);
     let mut snapshot_store = WindowStore::default();
     let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
-    let saved_workspaces = snapshot.virtual_workspace_manager.existing_workspaces(space);
+    let saved_workspaces = snapshot.workspaces.existing_workspaces(space);
     let saved_t = saved_workspaces[3].0;
     let saved_s = saved_workspaces[5].0;
-    assert_eq!(snapshot.active_workspace(space), Some(saved_t));
+    assert_eq!(snapshot.workspaces().active_workspace(space), Some(saved_t));
     assert!(snapshot.switch_workspace_layout_mode(
         &snapshot_store,
         space,
@@ -1362,8 +1377,8 @@ fn master_workspace_restore_uses_target_ordinal_and_preserves_configured_name() 
     let mut engine = LayoutEngine::new(&workspace_settings, &layout_settings, None);
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let target_s = engine.virtual_workspace_manager.existing_workspaces(space)[5].0;
-    assert!(engine.virtual_workspace_manager.set_active_workspace(space, target_s));
+    let target_s = engine.workspaces.existing_workspaces(space)[5].0;
+    assert!(engine.workspaces.set_active_workspace(space, target_s));
 
     engine
         .restore_layout(
@@ -1376,7 +1391,7 @@ fn master_workspace_restore_uses_target_ordinal_and_preserves_configured_name() 
         .unwrap();
     let _ = std::fs::remove_file(path);
 
-    let restored = engine.virtual_workspace_manager.workspace_info(space, target_s).unwrap();
+    let restored = engine.workspaces.workspace_info(space, target_s).unwrap();
     assert_eq!(restored.name, "S");
     assert_eq!(restored.layout_mode(), LayoutMode::Stack);
     assert_eq!(engine.active_layout_mode_at(space), LayoutMode::Stack);
@@ -1396,7 +1411,7 @@ fn master_restore_resolves_old_space_id_by_display_identity() {
     ] {
         let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
         snapshot.update_space_display(space, Some(display.into()));
-        let workspace = snapshot.active_workspace(space).unwrap();
+        let workspace = snapshot.workspaces().active_workspace(space).unwrap();
         assert!(snapshot.switch_workspace_layout_mode(&snapshot_store, space, workspace, mode,));
     }
     let path = std::env::temp_dir().join(format!(
@@ -1445,7 +1460,7 @@ fn startup_restore_reapplies_configured_workspace_names() {
     restored.finish_loading(&current_settings, &layout_settings, None);
 
     let names = restored
-        .virtual_workspace_manager
+        .workspaces
         .existing_workspaces(space)
         .into_iter()
         .map(|(_, name)| name)
@@ -1479,13 +1494,13 @@ fn startup_restore_remaps_saved_space_by_display_identity_once() {
     restored.reconcile_startup_spaces(&mut window_store, &[], 1);
     restored.reconcile_startup_spaces(&mut window_store, &[(current_space, display.clone())], 1);
 
-    assert!(!restored.workspace_layouts.spaces().contains(&saved_space));
-    assert!(restored.workspace_layouts.spaces().contains(&current_space));
+    assert!(!restored.workspaces.layout_spaces().contains(&saved_space));
+    assert!(restored.workspaces.layout_spaces().contains(&current_space));
 
     // The repair is startup-only. A later ordinary native-space switch must not migrate state.
     restored.reconcile_startup_spaces(&mut window_store, &[(later_space, display)], 1);
-    assert!(restored.workspace_layouts.spaces().contains(&current_space));
-    assert!(!restored.workspace_layouts.spaces().contains(&later_space));
+    assert!(restored.workspaces.layout_spaces().contains(&current_space));
+    assert!(!restored.workspaces.layout_spaces().contains(&later_space));
 }
 
 #[test]
@@ -1498,12 +1513,12 @@ fn startup_restore_handles_space_id_swaps_between_displays() {
     for (space, display) in [(space_a, "display-a"), (space_b, "display-b")] {
         let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
         snapshot.update_space_display(space, Some(display.into()));
-        let workspace = snapshot.active_workspace(space).unwrap();
-        assert!(snapshot.virtual_workspace_manager.rename_workspace(
-            space,
-            workspace,
-            format!("saved-{display}"),
-        ));
+        let workspace = snapshot.workspaces().active_workspace(space).unwrap();
+        assert!(
+            snapshot
+                .workspaces
+                .rename_workspace(space, workspace, format!("saved-{display}"),)
+        );
     }
     let path = std::env::temp_dir().join(format!(
         "rift-startup-space-swap-test-{}.ron",
@@ -1520,22 +1535,14 @@ fn startup_restore_handles_space_id_swaps_between_displays() {
         2,
     );
 
-    let active_a = restored.active_workspace(space_b).unwrap();
-    let active_b = restored.active_workspace(space_a).unwrap();
+    let active_a = restored.workspaces().active_workspace(space_b).unwrap();
+    let active_b = restored.workspaces().active_workspace(space_a).unwrap();
     assert_eq!(
-        restored
-            .virtual_workspace_manager
-            .workspace_info(space_b, active_a)
-            .unwrap()
-            .name,
+        restored.workspaces.workspace_info(space_b, active_a).unwrap().name,
         "saved-display-a",
     );
     assert_eq!(
-        restored
-            .virtual_workspace_manager
-            .workspace_info(space_a, active_b)
-            .unwrap()
-            .name,
+        restored.workspaces.workspace_info(space_a, active_b).unwrap().name,
         "saved-display-b",
     );
 }
@@ -1870,12 +1877,12 @@ fn rejected_fuzzy_candidate_is_removed_when_discovery_finishes() {
             space,
         ]),
     );
-    let workspace = engine.active_workspace(space).unwrap();
-    let layout = engine.workspace_layouts.active(space, workspace).unwrap();
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
+    let layout = engine.workspaces.active_layout(space, workspace).unwrap();
 
-    assert!(!engine.workspace_tree(workspace).contains_window(layout, ghost));
+    assert!(!engine.workspaces[workspace].layout_system.contains_window(layout, ghost));
     assert!(!engine.persistence.windows.contains_key(&ghost));
-    assert!(engine.workspace_tree(workspace).contains_window(layout, live));
+    assert!(engine.workspaces[workspace].layout_system.contains_window(layout, live));
 }
 
 #[test]
@@ -1898,10 +1905,10 @@ fn space_restore_rejects_workspace_count_mismatch_before_mutating_layouts() {
     let mut window_store = WindowStore::default();
     let sentinel = WindowId::new(11, 1);
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
-    let target_workspace = engine.active_workspace(space).unwrap();
-    let target_layout = engine.workspace_layouts.active(space, target_workspace).unwrap();
-    engine
-        .workspace_tree_mut(target_workspace)
+    let target_workspace = engine.workspaces().active_workspace(space).unwrap();
+    let target_layout = engine.workspaces.active_layout(space, target_workspace).unwrap();
+    engine.workspaces[target_workspace]
+        .layout_system
         .add_window_after_selection(target_layout, sentinel);
 
     let error = engine
@@ -1917,7 +1924,9 @@ fn space_restore_rejects_workspace_count_mismatch_before_mutating_layouts() {
 
     assert!(error.to_string().contains("different workspace counts"));
     assert!(
-        engine.workspace_tree(target_workspace).contains_window(target_layout, sentinel),
+        engine.workspaces[target_workspace]
+            .layout_system
+            .contains_window(target_layout, sentinel),
         "a rejected restore must leave every existing workspace layout untouched"
     );
 }
@@ -1931,20 +1940,16 @@ fn runtime_restore_cleans_unmatched_windows_from_inactive_size_configurations() 
     let mut snapshot = test_engine();
     let mut snapshot_store = WindowStore::default();
     let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, large));
-    let workspace = snapshot.active_workspace(space).unwrap();
-    let large_layout = snapshot.workspace_layouts.active(space, workspace).unwrap();
-    let small_layout = snapshot.virtual_workspace_manager.workspaces[workspace]
-        .layout_system
-        .create_layout();
-    snapshot.workspace_layouts.insert_layout_configuration_for_test(
-        space,
-        workspace,
-        small,
-        small_layout,
-    );
+    let workspace = snapshot.workspaces().active_workspace(space).unwrap();
+    let large_layout = snapshot.workspaces.active_layout(space, workspace).unwrap();
+    let small_layout = snapshot.workspaces[workspace].layout_system.create_layout();
+    snapshot.workspaces[workspace]
+        .layout_state
+        .configurations
+        .insert(crate::layout_engine::workspaces::Size::from(small), small_layout);
     assert_ne!(small_layout, large_layout);
-    snapshot
-        .workspace_tree_mut(workspace)
+    snapshot.workspaces[workspace]
+        .layout_system
         .add_window_after_selection(small_layout, ghost);
     snapshot.persistence.windows.insert(ghost, WindowFingerprint {
         window_server_id: Some(82684),
@@ -1975,9 +1980,11 @@ fn runtime_restore_cleans_unmatched_windows_from_inactive_size_configurations() 
     let _ = std::fs::remove_file(path);
 
     assert_eq!(report.unmatched, 1);
-    for (_, restored_workspace, layout) in engine.workspace_layouts.all_layouts() {
+    for (_, restored_workspace, layout) in engine.workspaces.all_layouts() {
         assert!(
-            !engine.workspace_tree(restored_workspace).contains_window(layout, ghost),
+            !engine.workspaces[restored_workspace]
+                .layout_system
+                .contains_window(layout, ghost),
             "unmatched runtime-restore candidate survived in a dormant size configuration"
         );
     }
@@ -2070,9 +2077,9 @@ fn restored_window_server_id_cannot_cross_known_application_identity() {
         app_id: Some("com.example.one".into()),
     });
 
-    let workspace = engine.active_workspace(space).unwrap();
-    let layout = engine.workspace_layouts.active(space, workspace).unwrap();
-    let windows = engine.workspace_tree(workspace).visible_windows_in_layout(layout);
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
+    let layout = engine.workspaces.active_layout(space, workspace).unwrap();
+    let windows = engine.workspaces[workspace].layout_system.visible_windows_in_layout(layout);
     assert!(!windows.contains(&titled_match));
     assert!(windows.contains(&live));
     assert!(windows.contains(&id_match));
@@ -2091,18 +2098,18 @@ fn duplicate_window_server_fingerprints_choose_live_assignment_and_are_healed() 
         &mut window_store,
         LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
     );
-    let workspaces = engine.virtual_workspace_manager.list_workspaces(space);
+    let workspaces = engine.workspaces.list_workspaces(space);
     let stale_workspace = workspaces[0].0;
     let preferred_workspace = workspaces[1].0;
-    let stale_layout = engine.workspace_layouts.active(space, stale_workspace).unwrap();
-    let preferred_layout = engine.workspace_layouts.active(space, preferred_workspace).unwrap();
-    engine
-        .workspace_tree_mut(stale_workspace)
+    let stale_layout = engine.workspaces.active_layout(space, stale_workspace).unwrap();
+    let preferred_layout = engine.workspaces.active_layout(space, preferred_workspace).unwrap();
+    engine.workspaces[stale_workspace]
+        .layout_system
         .add_window_after_selection(stale_layout, stale);
-    engine
-        .workspace_tree_mut(preferred_workspace)
+    engine.workspaces[preferred_workspace]
+        .layout_system
         .add_window_after_selection(preferred_layout, preferred);
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         space,
         live,
@@ -2126,10 +2133,14 @@ fn duplicate_window_server_fingerprints_choose_live_assignment_and_are_healed() 
         Some(preferred_workspace),
     );
     assert!(!engine.persistence.windows.contains_key(&stale));
-    assert!(!engine.workspace_tree(stale_workspace).contains_window(stale_layout, stale));
     assert!(
-        engine
-            .workspace_tree(preferred_workspace)
+        !engine.workspaces[stale_workspace]
+            .layout_system
+            .contains_window(stale_layout, stale)
+    );
+    assert!(
+        engine.workspaces[preferred_workspace]
+            .layout_system
             .contains_window(preferred_layout, live)
     );
 }
@@ -2145,18 +2156,18 @@ fn duplicate_restored_identity_prefers_live_workspace_assignment() {
         &mut window_store,
         LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
     );
-    let workspaces = engine.virtual_workspace_manager.list_workspaces(space);
+    let workspaces = engine.workspaces.list_workspaces(space);
     let stale_workspace = workspaces[0].0;
     let preferred_workspace = workspaces[1].0;
-    let stale_layout = engine.workspace_layouts.active(space, stale_workspace).unwrap();
-    let preferred_layout = engine.workspace_layouts.active(space, preferred_workspace).unwrap();
-    engine
-        .workspace_tree_mut(stale_workspace)
+    let stale_layout = engine.workspaces.active_layout(space, stale_workspace).unwrap();
+    let preferred_layout = engine.workspaces.active_layout(space, preferred_workspace).unwrap();
+    engine.workspaces[stale_workspace]
+        .layout_system
         .add_window_after_selection(stale_layout, live);
-    engine
-        .workspace_tree_mut(preferred_workspace)
+    engine.workspaces[preferred_workspace]
+        .layout_system
         .add_window_after_selection(preferred_layout, live);
-    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+    assert!(engine.workspaces.assign_window_to_workspace(
         &mut window_store,
         space,
         live,
@@ -2179,10 +2190,14 @@ fn duplicate_restored_identity_prefers_live_workspace_assignment() {
         window_store.workspace_for_window(space, live),
         Some(preferred_workspace),
     );
-    assert!(!engine.workspace_tree(stale_workspace).contains_window(stale_layout, live));
     assert!(
-        engine
-            .workspace_tree(preferred_workspace)
+        !engine.workspaces[stale_workspace]
+            .layout_system
+            .contains_window(stale_layout, live)
+    );
+    assert!(
+        engine.workspaces[preferred_workspace]
+            .layout_system
             .contains_window(preferred_layout, live)
     );
 }
@@ -2228,9 +2243,9 @@ fn restore_fallback_requires_title_and_size_within_known_app() {
         app_id: Some("com.example.editor".into()),
     });
 
-    let workspace = engine.active_workspace(space).unwrap();
-    let layout = engine.workspace_layouts.active(space, workspace).unwrap();
-    let windows = engine.workspace_tree(workspace).visible_windows_in_layout(layout);
+    let workspace = engine.workspaces().active_workspace(space).unwrap();
+    let layout = engine.workspaces.active_layout(space, workspace).unwrap();
+    let windows = engine.workspaces[workspace].layout_system.visible_windows_in_layout(layout);
     assert!(windows.contains(&title_match));
     assert!(!windows.contains(&live));
     assert!(windows.contains(&size_and_app_match));
@@ -2256,8 +2271,8 @@ fn load_heals_disagreeing_tiled_and_floating_ownership() {
             app_id: Some("com.example.editor".into()),
         });
     }
-    let workspaces = engine.virtual_workspace_manager.existing_workspaces(space);
-    let active = engine.active_workspace(space).unwrap();
+    let workspaces = engine.workspaces.existing_workspaces(space);
+    let active = engine.workspaces().active_workspace(space).unwrap();
     let other = workspaces.iter().find(|(workspace, _)| *workspace != active).unwrap().0;
     let frame = objc2_core_foundation::CGRect::new(
         objc2_core_foundation::CGPoint::new(10.0, 20.0),
@@ -2280,13 +2295,11 @@ fn load_heals_disagreeing_tiled_and_floating_ownership() {
         1
     );
     assert!(
-        loaded
-            .workspace_layouts
-            .all_layouts()
-            .into_iter()
-            .all(|(_, workspace, layout)| {
-                !loaded.workspace_tree(workspace).contains_window(layout, agreed_floating)
-            })
+        loaded.workspaces.all_layouts().into_iter().all(|(_, workspace, layout)| {
+            !loaded.workspaces[workspace]
+                .layout_system
+                .contains_window(layout, agreed_floating)
+        })
     );
     assert!(!loaded.floating.is_floating(frame_without_marker));
     assert!(loaded.floating_positions.locations_for_window(frame_without_marker).is_empty());
@@ -2312,4 +2325,60 @@ fn app_close_removes_saved_fingerprints() {
 
     assert!(!engine.persistence.windows.contains_key(&window));
     assert!(!engine.persistence.pending_windows.contains(&window));
+}
+
+#[test]
+fn legacy_workspace_layouts_migrate_and_round_trip() {
+    let fixture = r#"{"workspace_layouts":(map:{((901),(idx:3,version:1)):(configurations:{(width:1200,height:800):(idx:1,version:1)},active_size:(width:1200,height:800),last_saved:None),((901),(idx:1,version:1)):(configurations:{(width:1600,height:1000):(idx:2,version:1),(width:1200,height:800):(idx:1,version:1)},active_size:(width:1200,height:800),last_saved:Some((idx:1,version:1))),((901),(idx:2,version:1)):(configurations:{(width:1200,height:800):(idx:1,version:1)},active_size:(width:1200,height:800),last_saved:None),((901),(idx:4,version:1)):(configurations:{(width:1200,height:800):(idx:1,version:1)},active_size:(width:1200,height:800),last_saved:None)}),"schema_version":2,"floating":(floating_windows:[(pid:9,idx:3)],last_floating_focus:None),"floating_positions":(positions:{((901),(idx:1,version:1),(pid:9,idx:3)):(origin:(x:12.0,y:34.0),size:(width:400.0,height:300.0))}),"virtual_workspace_manager":(workspaces:[(value:None,version:0),(value:Some((name:"Main",space:(901),last_focused:Some((pid:9,idx:2)),layout_system:stack((inner:(tree:(map:(map:[(value:None,version:0),(value:Some((parent:None,prev_sibling:None,next_sibling:None,first_child:Some((idx:2,version:3)),last_child:Some((idx:3,version:1)))),version:1),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:None,next_sibling:Some((idx:3,version:1)),first_child:None,last_child:None)),version:3),(value:Some((parent:Some((idx:1,version:1)),prev_sibling:Some((idx:2,version:3)),next_sibling:None,first_child:None,last_child:None)),version:1),(value:Some((parent:None,prev_sibling:None,next_sibling:None,first_child:Some((idx:6,version:3)),last_child:Some((idx:5,version:3)))),version:1),(value:Some((parent:Some((idx:4,version:1)),prev_sibling:Some((idx:6,version:3)),next_sibling:None,first_child:None,last_child:None)),version:3),(value:Some((parent:Some((idx:4,version:1)),prev_sibling:None,next_sibling:Some((idx:5,version:3)),first_child:None,last_child:None)),version:3)]),data:(selection:(nodes:[(value:None,version:0),(value:Some((selected_child:(idx:3,version:1),stop_here:false)),version:1),(value:None,version:0),(value:None,version:0),(value:Some((selected_child:(idx:6,version:3),stop_here:false)),version:1)]),layout:(info:[(value:None,version:0),(value:Some((size:0.0,total:1.0,kind:vertical_stack,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:0.5,total:0.0,kind:horizontal,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:3),(value:Some((size:0.5,total:0.0,kind:horizontal,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:0.0,total:2.0,kind:vertical_stack,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1),(value:Some((size:1.0,total:0.0,kind:horizontal,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:3),(value:Some((size:1.0,total:0.0,kind:horizontal,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:3)]),window:(windows:[(value:None,version:0),(value:None,version:0),(value:Some((pid:9,idx:1)),version:3),(value:Some((pid:9,idx:2)),version:1),(value:None,version:0),(value:Some((pid:9,idx:2)),version:3),(value:Some((pid:9,idx:1)),version:3)],window_nodes:{(pid:9,idx:1):([(layout:(idx:1,version:1),node:(idx:2,version:3)),(layout:(idx:2,version:1),node:(idx:6,version:3))]),(pid:9,idx:2):([(layout:(idx:1,version:1),node:(idx:3,version:1)),(layout:(idx:2,version:1),node:(idx:5,version:3))])}))),layout_roots:[(value:None,version:0),(value:Some((Some((idx:1,version:1)),"layout_root")),version:1),(value:Some((Some((idx:4,version:1)),"layout_root")),version:1)]),default_orientation:perpendicular)),layout_mode:stack)),version:1),(value:Some((name:"Development",space:(901),last_focused:None,layout_system:stack((inner:(tree:(map:(map:[(value:None,version:0),(value:Some((parent:None,prev_sibling:None,next_sibling:None,first_child:None,last_child:None)),version:1)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0),(value:Some((size:0.0,total:0.0,kind:vertical_stack,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0),(value:Some((Some((idx:1,version:1)),"layout_root")),version:1)]),default_orientation:perpendicular)),layout_mode:stack)),version:1),(value:Some((name:"Communication",space:(901),last_focused:None,layout_system:stack((inner:(tree:(map:(map:[(value:None,version:0),(value:Some((parent:None,prev_sibling:None,next_sibling:None,first_child:None,last_child:None)),version:1)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0),(value:Some((size:0.0,total:0.0,kind:vertical_stack,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0),(value:Some((Some((idx:1,version:1)),"layout_root")),version:1)]),default_orientation:perpendicular)),layout_mode:stack)),version:1),(value:Some((name:"Utilities",space:(901),last_focused:None,layout_system:stack((inner:(tree:(map:(map:[(value:None,version:0),(value:Some((parent:None,prev_sibling:None,next_sibling:None,first_child:None,last_child:None)),version:1)]),data:(selection:(nodes:[(value:None,version:0)]),layout:(info:[(value:None,version:0),(value:Some((size:0.0,total:0.0,kind:vertical_stack,last_ungrouped_kind:horizontal,is_fullscreen:false,is_fullscreen_within_gaps:false)),version:1)]),window:(windows:[(value:None,version:0)],window_nodes:{}))),layout_roots:[(value:None,version:0),(value:Some((Some((idx:1,version:1)),"layout_root")),version:1)]),default_orientation:perpendicular)),layout_mode:stack)),version:1)],workspaces_by_space:{(901):[(idx:1,version:1),(idx:2,version:1),(idx:3,version:1),(idx:4,version:1)]},active_workspace_per_space:{(901):(None,(idx:1,version:1))},workspace_counter:1),"space_display_map":{},"display_last_space":{},"persisted_windows":{(pid:9,idx:2):(window_server_id:Some(2),title:Some("WindowId { pid: 9, idx: 2 }"),width:400.0,height:300.0,app_id:Some("test.app")),(pid:9,idx:1):(window_server_id:Some(1),title:Some("WindowId { pid: 9, idx: 1 }"),width:400.0,height:300.0,app_id:Some("test.app")),(pid:9,idx:3):(window_server_id:Some(3),title:Some("WindowId { pid: 9, idx: 3 }"),width:400.0,height:300.0,app_id:Some("test.app"))},"saved_active_space":None}"#;
+    let space = SpaceId::new(901);
+    for version in [None, Some(1), Some(2)] {
+        let header = version.map(|v| format!("\"schema_version\":{v},")).unwrap_or_default();
+        let old = fixture.replacen("\"schema_version\":2,", &header, 1);
+        let mut loaded = LayoutEngine::deserialize_from_str(&old).unwrap();
+        let id = loaded.workspaces.active_workspace(space).unwrap();
+        assert_eq!(loaded.workspaces[id].layout_mode, LayoutMode::Stack);
+        assert_eq!(loaded.workspaces[id].layout_state.configurations.len(), 2);
+        assert_eq!(loaded.workspaces[id].last_focused(), Some(WindowId::new(9, 2)));
+        let first = loaded.workspaces[id].active_layout().unwrap();
+        assert_eq!(
+            loaded.workspaces[id].layout_system.selected_window(first),
+            Some(WindowId::new(9, 2))
+        );
+        loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
+        let second = loaded.workspaces[id].active_layout().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            loaded.workspaces[id].layout_system.selected_window(second),
+            Some(WindowId::new(9, 1))
+        );
+        loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1200.0, 800.0));
+        assert_eq!(loaded.workspaces[id].active_layout(), Some(first));
+        let canonical = loaded.serialize_to_string();
+        assert!(!canonical.contains("\"workspace_layouts\":"));
+        let reloaded = LayoutEngine::deserialize_from_str(&canonical).unwrap();
+        assert_eq!(
+            ron::ser::to_string(&loaded.workspaces[id]).unwrap(),
+            ron::ser::to_string(&reloaded.workspaces[id]).unwrap()
+        );
+        assert!(reloaded.floating.is_floating(WindowId::new(9, 3)));
+        assert_eq!(
+            reloaded.floating_positions.get(space, id, WindowId::new(9, 3)),
+            Some(objc2_core_foundation::CGRect::new(
+                objc2_core_foundation::CGPoint::new(12.0, 34.0),
+                CGSize::new(400.0, 300.0)
+            ))
+        );
+    }
+    for invalid in [
+        fixture.replacen("((901),", "((902),", 1),
+        fixture.replacen("(idx:3,version:1)", "(idx:999999,version:1)", 1),
+    ] {
+        assert!(
+            LayoutEngine::deserialize_from_str(&invalid)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("invalid workspace layouts")
+        );
+    }
 }

@@ -299,24 +299,22 @@ impl Reactor {
         let space_id = space_id_param.or_else(|| self.default_query_space());
         let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
             if let Some(space) = space_id {
-                self.layout_manager
-                    .layout_engine
-                    .virtual_workspace_manager_mut()
-                    .list_workspaces(space)
+                self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space)
             } else {
                 Vec::new()
             };
 
         for (index, (workspace_id, workspace_name)) in workspace_list.iter().enumerate() {
             let is_active = if let Some(space) = space_id {
-                self.layout_manager.layout_engine.active_workspace(space) == Some(*workspace_id)
+                self.layout_manager.layout_engine.workspaces().active_workspace(space)
+                    == Some(*workspace_id)
             } else {
                 false
             };
 
             let workspace_windows_ids: Vec<crate::actor::app::WindowId> =
                 if let Some(space) = space_id {
-                    self.layout_manager.layout_engine.virtual_workspace_manager().workspace_windows(
+                    self.layout_manager.layout_engine.workspaces().workspace_windows(
                         &self.state.windows,
                         space,
                         *workspace_id,
@@ -414,7 +412,7 @@ impl Reactor {
                 .and_then(|space| {
                     self.layout_manager
                         .layout_engine
-                        .virtual_workspace_manager()
+                        .workspaces()
                         .workspace_info(space, *workspace_id)
                         .map(|ws| ws.layout_mode().to_string())
                 })
@@ -445,12 +443,10 @@ impl Reactor {
             return Vec::new();
         };
 
-        let workspace_list = self
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager_mut()
-            .list_workspaces(space);
-        let active_workspace = self.layout_manager.layout_engine.active_workspace(space);
+        let workspace_list =
+            self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
+        let active_workspace =
+            self.layout_manager.layout_engine.workspaces().active_workspace(space);
 
         workspace_list
             .iter()
@@ -460,7 +456,7 @@ impl Reactor {
                 let layout_mode = self
                     .layout_manager
                     .layout_engine
-                    .virtual_workspace_manager()
+                    .workspaces()
                     .workspace_info(space, *id)
                     .map(|ws| ws.layout_mode().to_string())?;
 
@@ -480,7 +476,7 @@ impl Reactor {
         space_id_param: Option<SpaceId>,
     ) -> Option<VirtualWorkspaceId> {
         let space_id = space_id_param.or_else(|| self.default_query_space())?;
-        self.layout_manager.layout_engine.active_workspace(space_id)
+        self.layout_manager.layout_engine.workspaces().active_workspace(space_id)
     }
 
     pub fn query_displays(&self) -> Vec<RuntimeDisplayData> {
@@ -534,6 +530,7 @@ impl Reactor {
             let active_windows = self
                 .layout_manager
                 .layout_engine
+                .workspaces()
                 .windows_in_active_workspace(&self.state.windows, space);
 
             active_windows
@@ -615,11 +612,11 @@ impl Reactor {
         attach_target_frames(&mut snapshot.container_tree, &target_frames);
         snapshot.container_tree.frame = protocol_rect(tiling_area);
         propagate_single_child_allocations(&mut snapshot.container_tree);
-        let workspace_windows = self
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_windows(&self.state.windows, space_id, snapshot.workspace_id);
+        let workspace_windows = self.layout_manager.layout_engine.workspaces().workspace_windows(
+            &self.state.windows,
+            space_id,
+            snapshot.workspace_id,
+        );
         let floating_windows: Vec<WindowId> = workspace_windows
             .iter()
             .filter(|&&wid| self.layout_manager.layout_engine.is_window_floating(wid))
@@ -648,11 +645,7 @@ impl Reactor {
     }
 
     pub fn query_metrics(&self) -> serde_json::Value {
-        let stats = self
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .get_stats(&self.state.windows);
+        let stats = self.layout_manager.layout_engine.workspaces().get_stats(&self.state.windows);
 
         let workspace_stats: crate::common::collections::HashMap<String, usize> = stats
             .workspace_window_counts
@@ -671,11 +664,7 @@ impl Reactor {
 
     pub(crate) fn serialize_state(&mut self) -> Result<String, serde_json::Error> {
         let layout_engine_ron = self.layout_manager.layout_engine.serialize_to_string();
-        let stats = self
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .get_stats(&self.state.windows);
+        let stats = self.layout_manager.layout_engine.workspaces().get_stats(&self.state.windows);
         let mut workspace_window_counts = serde_json::Map::new();
         for (ws_id, count) in &stats.workspace_window_counts {
             workspace_window_counts.insert(format!("{:?}", ws_id), serde_json::json!(*count));
@@ -695,12 +684,10 @@ impl Reactor {
 
         for screen in &self.space_state.screens {
             if let Some(space) = screen.space {
-                let workspaces = self
-                    .layout_manager
-                    .layout_engine
-                    .virtual_workspace_manager_mut()
-                    .list_workspaces(space);
-                let active_ws = self.layout_manager.layout_engine.active_workspace(space);
+                let workspaces =
+                    self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
+                let active_ws =
+                    self.layout_manager.layout_engine.workspaces().active_workspace(space);
 
                 let mut ws_entries = Vec::new();
                 for (workspace_id, workspace_name) in workspaces {
@@ -710,7 +697,7 @@ impl Reactor {
                     let last_focused = self
                         .layout_manager
                         .layout_engine
-                        .virtual_workspace_manager()
+                        .workspaces()
                         .last_focused_window(space, workspace_id);
 
                     let floating_positions = self
@@ -851,7 +838,7 @@ impl Reactor {
 
         let out = serde_json::json!({
             "layout_engine_ron": layout_engine_ron,
-            "virtual_workspace_manager": {
+            "workspaces": {
                 "total_workspaces": stats.total_workspaces,
                 "total_windows": stats.total_windows,
                 "active_spaces": stats.active_spaces,

@@ -23,8 +23,8 @@ impl LayoutEngine {
         tracing::info!(
             path = %path.display(),
             schema_version,
-            native_spaces = engine.workspace_layouts.spaces().len(),
-            virtual_workspaces = engine.virtual_workspace_manager.workspaces.len(),
+            native_spaces = engine.workspaces.layout_spaces().len(),
+            virtual_workspaces = engine.workspaces.workspaces.len(),
             saved_windows = engine.persistence.windows.len(),
             restore_candidates = engine.persistence.pending_len(),
             unavailable_windows_ignored = unavailable_windows,
@@ -44,7 +44,7 @@ impl LayoutEngine {
     }
 
     fn deserialize_from_str_with_schema_version(buf: &str) -> anyhow::Result<(Self, u32)> {
-        let persisted = match PersistedLayout::deserialize(buf) {
+        let mut persisted = match PersistedLayout::deserialize(buf) {
             Ok(persisted) => persisted,
             Err(original_error) => {
                 let Some(migrated) = migrate_legacy_layout_system_tags(buf) else {
@@ -65,16 +65,13 @@ impl LayoutEngine {
             ));
         }
         persisted
-            .virtual_workspace_manager
+            .workspaces
             .validate_persisted_topology()
             .map_err(|error| anyhow::anyhow!("invalid workspace topology: {error}"))?;
-        persisted
-            .workspace_layouts
-            .validate_persisted(&persisted.virtual_workspace_manager)
-            .map_err(|error| anyhow::anyhow!("invalid workspace layouts: {error}"))?;
+        persisted.normalize_workspace_layouts()?;
         persisted
             .floating_positions
-            .validate_persisted(&persisted.virtual_workspace_manager)
+            .validate_persisted(&persisted.workspaces)
             .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
         persisted.persistence.validate()?;
         let schema_version = persisted.schema_version;
@@ -83,10 +80,10 @@ impl LayoutEngine {
         engine.normalize_loaded_workspace_focus();
         let fingerprinted: HashSet<_> = engine.persistence.windows.keys().copied().collect();
         let mut unmatchable = HashSet::default();
-        for (_, workspace, layout) in engine.workspace_layouts.all_layouts() {
+        for (_, workspace, layout) in engine.workspaces.all_layouts() {
             unmatchable.extend(
-                engine
-                    .workspace_tree(workspace)
+                engine.workspaces[workspace]
+                    .layout_system
                     .all_windows_in_layout(layout)
                     .into_iter()
                     .filter(|window| !fingerprinted.contains(window)),
@@ -120,14 +117,10 @@ impl LayoutEngine {
     }
 
     pub fn save(&self, path: PathBuf) -> std::io::Result<()> {
-        self.virtual_workspace_manager
+        self.workspaces
             .validate_persisted_topology()
-            .and_then(|_| {
-                self.workspace_layouts.validate_persisted(&self.virtual_workspace_manager)
-            })
-            .and_then(|_| {
-                self.floating_positions.validate_persisted(&self.virtual_workspace_manager)
-            })
+            .and_then(|_| self.workspaces.validate_layouts())
+            .and_then(|_| self.floating_positions.validate_persisted(&self.workspaces))
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         self.persistence
             .validate()
@@ -194,7 +187,7 @@ impl LayoutEngine {
         // Never write an origin hint that has no corresponding saved layout. A stale native-space
         // observation is worse than no hint because it makes a portable file look unambiguous.
         self.persistence.set_saved_active_space(
-            active_space.filter(|space| self.workspace_layouts.spaces().contains(space)),
+            active_space.filter(|space| self.workspaces.layout_spaces().contains(space)),
         );
         for (window, state) in window_store.iter_windows() {
             if self.floating.is_floating(window) {
@@ -256,12 +249,11 @@ impl LayoutEngine {
     }
 
     fn normalize_loaded_workspace_focus(&mut self) {
-        for (space, workspace, window) in self.virtual_workspace_manager.persisted_focus_locations()
-        {
+        for (space, workspace, window) in self.workspaces.persisted_focus_locations() {
             let valid = self.persistence.fingerprint(window).is_some()
                 && self.restored_locations_for_window(window).contains(&(space, workspace));
             if !valid {
-                self.virtual_workspace_manager.set_last_focused_window(space, workspace, None);
+                self.workspaces.set_last_focused_window(space, workspace, None);
             }
         }
     }
@@ -296,7 +288,7 @@ impl LayoutEngine {
         }
         self.startup_restore_pending = false;
 
-        let saved_spaces = self.workspace_layouts.spaces();
+        let saved_spaces = self.workspaces.layout_spaces();
         let mut remaps = Vec::new();
         for (current, display_uuid) in current_spaces {
             let Some(saved) = self.display_last_space.get(display_uuid).copied() else {
@@ -343,8 +335,7 @@ impl LayoutEngine {
         self.broadcast_tx = broadcast_tx;
         self.set_layout_settings(layout_settings);
         self.app_rules = AppRuleEngine::new(&virtual_workspace_config.app_rules);
-        self.virtual_workspace_manager
-            .update_settings(virtual_workspace_config, layout_settings);
+        self.workspaces.update_settings(virtual_workspace_config, layout_settings);
     }
 }
 

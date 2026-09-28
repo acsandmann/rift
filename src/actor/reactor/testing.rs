@@ -35,7 +35,7 @@ impl Reactor {
     ) -> Vec<crate::model::virtual_workspace::VirtualWorkspaceId> {
         self.layout_manager
             .layout_engine
-            .virtual_workspace_manager_mut()
+            .workspaces_mut()
             .list_workspaces(space)
             .iter()
             .map(|(id, _)| *id)
@@ -55,10 +55,7 @@ impl Reactor {
         space: crate::sys::screen::SpaceId,
         wid: WindowId,
     ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
-        self.layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_for_window(&self.state.windows, space, wid)
+        self.state.windows.workspace_for_window(space, wid)
     }
 
     pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
@@ -72,6 +69,7 @@ impl Reactor {
     pub fn test_active_workspace_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.layout_manager
             .layout_engine
+            .workspaces()
             .windows_in_active_workspace(&self.state.windows, space)
     }
 
@@ -80,7 +78,7 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> Vec<WindowId> {
-        self.layout_manager.layout_engine.virtual_workspace_manager().workspace_windows(
+        self.layout_manager.layout_engine.workspaces().workspace_windows(
             &self.state.windows,
             space,
             workspace,
@@ -93,10 +91,12 @@ impl Reactor {
         wid: WindowId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> bool {
-        self.layout_manager
-            .layout_engine
-            .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(&mut self.state.windows, space, wid, workspace)
+        self.layout_manager.layout_engine.workspaces_mut().assign_window_to_workspace(
+            &mut self.state.windows,
+            space,
+            wid,
+            workspace,
+        )
     }
 
     pub fn set_test_active_workspace(
@@ -106,7 +106,7 @@ impl Reactor {
     ) -> bool {
         self.layout_manager
             .layout_engine
-            .virtual_workspace_manager_mut()
+            .workspaces_mut()
             .set_active_workspace(space, workspace)
     }
 

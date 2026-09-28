@@ -346,6 +346,7 @@ impl LayoutManager {
                 let active_workspace_windows: HashSet<WindowId> = reactor
                     .layout_manager
                     .layout_engine
+                    .workspaces()
                     .windows_in_active_workspace(&reactor.state.windows, space)
                     .into_iter()
                     .collect();
@@ -428,10 +429,13 @@ impl LayoutManager {
                 }
 
                 if let Some(workspace_id) =
-                    reactor.layout_manager.layout_engine.active_workspace(space)
+                    reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
                 {
-                    let workspace_index =
-                        reactor.layout_manager.layout_engine.active_workspace_idx(space);
+                    let workspace_index = reactor
+                        .layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .active_workspace_idx(space);
                     let workspace_name = reactor
                         .layout_manager
                         .layout_engine

@@ -3,7 +3,7 @@ mod floating;
 pub(crate) mod graph;
 pub mod systems;
 pub mod utils;
-mod workspaces;
+pub(crate) mod workspaces;
 
 pub(crate) use engine::WindowLayoutInfo;
 pub use engine::{
@@ -50,7 +50,6 @@ pub use systems::{
     BspLayoutSystem, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,
     ScrollingLayoutSystem, StackLayoutSystem, TraditionalLayoutSystem,
 };
-pub(crate) use workspaces::WorkspaceLayouts;
 
 pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStats, WorkspaceStore};
 

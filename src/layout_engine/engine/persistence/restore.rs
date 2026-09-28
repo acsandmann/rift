@@ -2,7 +2,6 @@ use objc2_core_foundation::CGRect;
 
 use super::reconcile::ReconcileOutcome;
 use super::*;
-use crate::layout_engine::workspaces::WorkspaceLayoutSnapshot;
 use crate::model::VirtualWorkspace;
 
 #[derive(Clone, Copy)]
@@ -18,7 +17,6 @@ struct WorkspaceRestoreState {
     target_space: SpaceId,
     target_workspace: VirtualWorkspaceId,
     workspace: VirtualWorkspace,
-    layout: WorkspaceLayoutSnapshot,
     floating_positions: Vec<(WindowId, CGRect)>,
     floating_windows: HashSet<WindowId>,
     replaced_windows: HashSet<WindowId>,
@@ -39,7 +37,7 @@ impl RestorePlan {
         engine: &LayoutEngine,
         request: RestoreRequest,
     ) -> anyhow::Result<SpaceId> {
-        let saved_spaces = snapshot.workspace_layouts.spaces();
+        let saved_spaces = snapshot.workspaces.layout_spaces();
         let saved_active = snapshot
             .persistence
             .saved_active_space
@@ -85,12 +83,11 @@ impl RestorePlan {
         request: RestoreRequest,
     ) -> anyhow::Result<Self> {
         let source_space = Self::source_space(&snapshot, engine, request)?;
-        let source_active = snapshot.virtual_workspace_manager.active_workspace(source_space);
+        let source_active = snapshot.workspaces.active_workspace(source_space);
         let mappings = match request.scope {
             RestoreScope::Space => {
-                let source = snapshot.virtual_workspace_manager.existing_workspaces(source_space);
-                let target =
-                    engine.virtual_workspace_manager.existing_workspaces(request.active_space);
+                let source = snapshot.workspaces.workspace_ids(source_space);
+                let target = engine.workspaces.workspace_ids(request.active_space);
                 // A space restore is all-or-nothing. `zip` silently truncates, which would split
                 // layout ownership between the snapshot and the pre-restore state.
                 if source.len() != target.len() {
@@ -99,21 +96,20 @@ impl RestorePlan {
                     ));
                 }
                 source
-                    .into_iter()
-                    .zip(target)
-                    .map(
-                        |((source_workspace, _), (target_workspace, _))| WorkspaceMapping {
-                            source_space,
-                            source_workspace,
-                            target_space: request.active_space,
-                            target_workspace,
-                        },
-                    )
+                    .iter()
+                    .copied()
+                    .zip(target.iter().copied())
+                    .map(|(source_workspace, target_workspace)| WorkspaceMapping {
+                        source_space,
+                        source_workspace,
+                        target_space: request.active_space,
+                        target_workspace,
+                    })
                     .collect::<Vec<_>>()
             }
             RestoreScope::Workspace => {
                 let target_workspace = engine
-                    .virtual_workspace_manager
+                    .workspaces
                     .active_workspace(request.active_space)
                     .ok_or_else(|| anyhow::anyhow!("current space has no active workspace"))?;
                 let source_workspace = match request.source {
@@ -124,27 +120,26 @@ impl RestorePlan {
                     // therefore read S's ordinal from the saved native space, regardless of which
                     // workspace happened to be active when Rift last quit.
                     RestoreSource::CurrentSpace => {
-                        let target_workspaces = engine
-                            .virtual_workspace_manager
-                            .existing_workspaces(request.active_space);
+                        let target_workspaces =
+                            engine.workspaces.workspace_ids(request.active_space);
                         let target_index = target_workspaces
                             .iter()
-                            .position(|(workspace, _)| *workspace == target_workspace)
+                            .position(|workspace| *workspace == target_workspace)
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "current active workspace is missing from its native space"
                                 )
                             })?;
                         snapshot
-                            .virtual_workspace_manager
-                            .existing_workspaces(source_space)
+                            .workspaces
+                            .workspace_ids(source_space)
                             .get(target_index)
-                            .map(|(workspace, _)| *workspace)
+                            .copied()
                             .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "saved space has no workspace at target index {target_index}"
-                                )
-                            })?
+                            anyhow::anyhow!(
+                                "saved space has no workspace at target index {target_index}"
+                            )
+                        })?
                     }
                 };
                 vec![WorkspaceMapping {
@@ -159,13 +154,11 @@ impl RestorePlan {
         // Validate every source before consuming any snapshot state. This is the transaction
         // boundary: all fallible structural checks belong above it.
         for mapping in &mappings {
-            if !snapshot
-                .virtual_workspace_manager
+            if snapshot
                 .workspaces
-                .contains_key(mapping.source_workspace)
-                || !snapshot
-                    .workspace_layouts
-                    .contains_workspace(mapping.source_space, mapping.source_workspace)
+                .workspace_info(mapping.source_space, mapping.source_workspace)
+                .and_then(VirtualWorkspace::active_layout)
+                .is_none()
             {
                 return Err(anyhow::anyhow!("saved workspace layout is incomplete"));
             }
@@ -233,20 +226,15 @@ impl RestorePlan {
                 .into_iter()
                 .map(|(window, _)| window)
                 .collect();
-            for (space, workspace, layout) in engine.workspace_layouts.all_layouts() {
-                if (space, workspace) == (mapping.target_space, mapping.target_workspace) {
-                    replaced_windows.extend(
-                        engine
-                            .workspace_tree(mapping.target_workspace)
-                            .all_windows_in_layout(layout),
-                    );
-                }
+            let target = &engine.workspaces[mapping.target_workspace];
+            for layout in target.layout_state.all_layouts() {
+                replaced_windows.extend(target.layout_system.all_windows_in_layout(layout));
             }
             replaced_windows.extend(
                 window_store.workspace_windows(mapping.target_space, mapping.target_workspace),
             );
             let mut workspace = snapshot
-                .virtual_workspace_manager
+                .workspaces
                 .workspaces
                 .remove(mapping.source_workspace)
                 .expect("workspace sources were validated before extraction");
@@ -254,16 +242,12 @@ impl RestorePlan {
             // configured/current-session metadata and must not be copied from another workspace or
             // from an old master snapshot.
             workspace.name = engine
-                .virtual_workspace_manager
+                .workspaces
                 .workspace_info(mapping.target_space, mapping.target_workspace)
                 .expect("target workspace was validated before extraction")
                 .name
                 .clone();
             workspace.space = mapping.target_space;
-            let layout = snapshot
-                .workspace_layouts
-                .snapshot_workspace(mapping.source_space, mapping.source_workspace)
-                .expect("workspace layout sources were validated before extraction");
             if source_active == Some(mapping.source_workspace) {
                 target_active = Some(mapping.target_workspace);
             }
@@ -271,7 +255,6 @@ impl RestorePlan {
                 target_space: mapping.target_space,
                 target_workspace: mapping.target_workspace,
                 workspace,
-                layout,
                 floating_positions,
                 floating_windows,
                 replaced_windows,
@@ -311,7 +294,7 @@ impl RestorePlan {
             && let Some(target_active) = self.target_active
         {
             engine
-                .virtual_workspace_manager
+                .workspaces
                 .active_workspace_per_space
                 .insert(self.request.active_space, (None, target_active));
         }
@@ -356,14 +339,10 @@ impl RestorePlan {
             engine.persistence.pending_windows.remove(live);
             preempted_candidates += 1;
             for &(space, workspace) in &restored_targets {
-                engine.workspace_tree_mut(workspace).remove_window(*live);
+                engine.workspaces[workspace].layout_system.remove_window(*live);
                 engine.floating_positions.remove_workspace_window(space, workspace, *live);
-                if engine.virtual_workspace_manager.last_focused_window(space, workspace)
-                    == Some(*live)
-                {
-                    engine
-                        .virtual_workspace_manager
-                        .set_last_focused_window(space, workspace, None);
+                if engine.workspaces.last_focused_window(space, workspace) == Some(*live) {
+                    engine.workspaces.set_last_focused_window(space, workspace, None);
                 }
             }
             if live_floating.contains(live) {
@@ -410,11 +389,7 @@ impl RestorePlan {
                 if live_floating.contains(&live) {
                     engine.floating.add_floating(live);
                     if let (Some(workspace), Some(window)) = (
-                        engine.virtual_workspace_manager.workspace_for_window(
-                            window_store,
-                            live_space,
-                            live,
-                        ),
+                        window_store.workspace_for_window(live_space, live),
                         window_store.window(live),
                     ) {
                         engine.floating_positions.store(
@@ -433,17 +408,9 @@ impl RestorePlan {
             // windows the operation is idempotent when reconciliation already replaced the node.
             engine.add_window_to_layout(window_store, live_space, live);
             if engine.focused_window == Some(live)
-                && let Some(workspace) = engine.virtual_workspace_manager.workspace_for_window(
-                    window_store,
-                    live_space,
-                    live,
-                )
+                && let Some(workspace) = window_store.workspace_for_window(live_space, live)
             {
-                engine.virtual_workspace_manager.set_last_focused_window(
-                    live_space,
-                    workspace,
-                    Some(live),
-                );
+                engine.workspaces.set_last_focused_window(live_space, workspace, Some(live));
             }
             engine.persistence.record(live, fingerprint);
         }
@@ -472,23 +439,18 @@ impl LayoutEngine {
         for &(space, workspace) in targets {
             let expected_assignment =
                 crate::model::window_store::WindowWorkspaceInfo { space, workspace_id: workspace };
-            let tiled_windows = self
-                .workspace_layouts
+            let entry = &self.workspaces[workspace];
+            let tiled_windows = entry
+                .layout_state
                 .all_layouts()
-                .into_iter()
-                .filter(|(candidate_space, candidate_workspace, _)| {
-                    (*candidate_space, *candidate_workspace) == (space, workspace)
-                })
-                .flat_map(|(_, _, layout)| {
-                    self.workspace_tree(workspace).all_windows_in_layout(layout)
-                })
+                .flat_map(|layout| entry.layout_system.all_windows_in_layout(layout))
                 .collect::<HashSet<_>>();
             for window in tiled_windows {
                 let valid = live_windows.contains(&window)
                     && window_store.workspace_info_for_window(window) == Some(expected_assignment)
                     && !self.floating.is_floating(window);
                 if !valid {
-                    self.workspace_tree_mut(workspace).remove_window(window);
+                    self.workspaces[workspace].layout_system.remove_window(window);
                 }
             }
 
@@ -507,16 +469,11 @@ impl LayoutEngine {
                 }
             }
 
-            if self
-                .virtual_workspace_manager
-                .last_focused_window(space, workspace)
-                .is_some_and(|window| {
-                    !live_windows.contains(&window)
-                        || window_store.workspace_info_for_window(window)
-                            != Some(expected_assignment)
-                })
-            {
-                self.virtual_workspace_manager.set_last_focused_window(space, workspace, None);
+            if self.workspaces.last_focused_window(space, workspace).is_some_and(|window| {
+                !live_windows.contains(&window)
+                    || window_store.workspace_info_for_window(window) != Some(expected_assignment)
+            }) {
+                self.workspaces.set_last_focused_window(space, workspace, None);
             }
         }
 
@@ -582,12 +539,7 @@ impl LayoutEngine {
             self.floating.remove_floating(window);
             self.persistence.forget_window(window);
         }
-        self.virtual_workspace_manager.workspaces[state.target_workspace] = state.workspace;
-        self.workspace_layouts.install_workspace_snapshot(
-            state.target_space,
-            state.target_workspace,
-            state.layout,
-        );
+        self.workspaces[state.target_workspace] = state.workspace;
         self.floating_positions.replace_workspace_positions(
             state.target_space,
             state.target_workspace,

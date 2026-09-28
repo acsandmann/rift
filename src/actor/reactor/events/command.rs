@@ -166,6 +166,7 @@ fn current_floating_positions(
         == crate::common::config::LayoutMode::Floating;
     layout
         .layout_engine
+        .workspaces()
         .windows_in_active_workspace(&state.windows, space)
         .into_iter()
         .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))

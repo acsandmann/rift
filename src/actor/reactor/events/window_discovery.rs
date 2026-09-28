@@ -81,11 +81,8 @@ fn should_emit_window_for_space(
     wid: WindowId,
 ) -> bool {
     let engine = &layout.layout_engine;
-    let assigned_workspace =
-        engine
-            .virtual_workspace_manager()
-            .workspace_for_window(&state.windows, space, wid);
-    let active_workspace = engine.active_workspace(space);
+    let assigned_workspace = state.windows.workspace_for_window(space, wid);
+    let active_workspace = engine.workspaces().active_workspace(space);
 
     match (assigned_workspace, active_workspace) {
         (Some(assigned), Some(active)) => assigned == active,

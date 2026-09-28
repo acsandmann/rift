@@ -1,8 +1,17 @@
 use super::*;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 fn legacy_schema_version() -> u32 { 0 }
+
+/// Pre-consolidation file representation. It is normalized before any runtime use.
+#[derive(Deserialize, Default)]
+pub(super) struct LegacyWorkspaceLayouts {
+    map: HashMap<
+        (SpaceId, VirtualWorkspaceId),
+        crate::layout_engine::workspaces::WorkspaceLayoutState,
+    >,
+}
 
 /// Owned, versioned representation of the layout file.
 ///
@@ -12,10 +21,12 @@ fn legacy_schema_version() -> u32 { 0 }
 pub(super) struct PersistedLayout {
     #[serde(default = "legacy_schema_version")]
     pub(super) schema_version: u32,
-    pub(super) workspace_layouts: WorkspaceLayouts,
+    #[serde(default)]
+    pub(super) workspace_layouts: LegacyWorkspaceLayouts,
     pub(super) floating: FloatingManager,
     pub(super) floating_positions: FloatingPositionStore,
-    pub(super) virtual_workspace_manager: WorkspaceStore,
+    #[serde(rename = "virtual_workspace_manager")]
+    pub(super) workspaces: WorkspaceStore,
     #[serde(default)]
     pub(super) space_display_map: HashMap<SpaceId, Option<String>>,
     #[serde(default)]
@@ -28,10 +39,10 @@ pub(super) struct PersistedLayout {
 #[derive(Serialize)]
 struct PersistedLayoutRef<'a> {
     schema_version: u32,
-    workspace_layouts: &'a WorkspaceLayouts,
     floating: &'a FloatingManager,
     floating_positions: &'a FloatingPositionStore,
-    virtual_workspace_manager: &'a WorkspaceStore,
+    #[serde(rename = "virtual_workspace_manager")]
+    workspaces: &'a WorkspaceStore,
     space_display_map: &'a HashMap<SpaceId, Option<String>>,
     display_last_space: &'a HashMap<String, SpaceId>,
     #[serde(flatten)]
@@ -46,10 +57,9 @@ impl PersistedLayout {
     pub(super) fn serialize_engine(engine: &LayoutEngine) -> String {
         ron::ser::to_string(&PersistedLayoutRef {
             schema_version: CURRENT_SCHEMA_VERSION,
-            workspace_layouts: &engine.workspace_layouts,
             floating: &engine.floating,
             floating_positions: &engine.floating_positions,
-            virtual_workspace_manager: &engine.virtual_workspace_manager,
+            workspaces: &engine.workspaces,
             space_display_map: &engine.space_display_map,
             display_last_space: &engine.display_last_space,
             persistence: &engine.persistence,
@@ -57,15 +67,38 @@ impl PersistedLayout {
         .expect("persisted layout serialization must support all engine layout state")
     }
 
+    pub(super) fn normalize_workspace_layouts(&mut self) -> anyhow::Result<()> {
+        for ((space, id), state) in std::mem::take(&mut self.workspace_layouts.map) {
+            let workspace = self.workspaces.workspaces.get_mut(id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid workspace layouts: layout state references missing workspace {id:?}"
+                )
+            })?;
+            if workspace.space != space {
+                return Err(anyhow::anyhow!(
+                    "invalid workspace layouts: workspace {id:?} is stored under the wrong native space"
+                ));
+            }
+            if self.schema_version >= 3 {
+                return Err(anyhow::anyhow!(
+                    "invalid workspace layouts: legacy layout state in schema 3"
+                ));
+            }
+            workspace.layout_state = state;
+        }
+        self.workspaces
+            .validate_layouts()
+            .map_err(|error| anyhow::anyhow!("invalid workspace layouts: {error}"))
+    }
+
     pub(super) fn into_engine(self) -> LayoutEngine {
         LayoutEngine {
-            workspace_layouts: self.workspace_layouts,
             floating: self.floating,
             floating_positions: self.floating_positions,
             app_rules: AppRuleEngine::default(),
             focused_window: None,
             window_layout_constraints: HashMap::default(),
-            virtual_workspace_manager: self.virtual_workspace_manager,
+            workspaces: self.workspaces,
             layout_settings: LayoutSettings::default(),
             broadcast_tx: None,
             space_display_map: self.space_display_map,

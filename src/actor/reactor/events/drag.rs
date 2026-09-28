@@ -104,8 +104,8 @@ pub fn handle_mouse_up(
                 state.windows.set_window_server_space(server_id, Some(space));
                 state.windows.mark_window_visible(server_id);
             }
-            if let Some(workspace) = layout.layout_engine.active_workspace(space)
-                && !layout.layout_engine.virtual_workspace_manager_mut().assign_window_to_workspace(
+            if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)
+                && !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
                     &mut state.windows,
                     space,
                     window,
@@ -125,11 +125,10 @@ pub fn handle_mouse_up(
         if commit.source.origin_space != payload.final_space {
             layout.layout_engine.remove_floating_position(window);
         }
-        if let Some(workspace) = layout
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_for_window(&state.windows, space, window)
-            .or_else(|| layout.layout_engine.active_workspace(space))
+        if let Some(workspace) = state
+            .windows
+            .workspace_for_window(space, window)
+            .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
         {
             layout.layout_engine.store_floating_position(
                 space,

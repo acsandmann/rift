@@ -146,7 +146,9 @@ impl AnimationManager {
         is_resize: bool,
         skip_wid: Option<WindowId>,
     ) -> bool {
-        let Some(active_ws) = reactor.layout_manager.layout_engine.active_workspace(space) else {
+        let Some(active_ws) =
+            reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
+        else {
             return false;
         };
         let mut anim = Animation::new(reactor.config.clone());
@@ -202,10 +204,9 @@ impl AnimationManager {
             };
 
             let is_active = reactor
-                .layout_manager
-                .layout_engine
-                .virtual_workspace_manager()
-                .workspace_for_window(&reactor.state.windows, space, wid)
+                .state
+                .windows
+                .workspace_for_window(space, wid)
                 .is_some_and(|ws| ws == active_ws);
 
             if is_active {
@@ -307,11 +308,11 @@ impl AnimationManager {
                 continue;
             }
 
-            let is_hidden = !reactor.layout_manager.layout_engine.is_window_in_active_workspace(
-                &reactor.state.windows,
-                space,
-                wid,
-            );
+            let is_hidden = !reactor
+                .layout_manager
+                .layout_engine
+                .workspaces()
+                .is_window_in_active_workspace(&reactor.state.windows, space, wid);
             let window_store = &mut reactor.state.windows;
             let Some(window) = window_store.window_mut(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");

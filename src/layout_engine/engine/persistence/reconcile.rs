@@ -16,7 +16,7 @@ impl LayoutEngine {
             self.remove_window_from_all_tiling_trees(*window);
             self.floating_positions.remove_window(*window);
             self.floating.remove_floating(*window);
-            self.virtual_workspace_manager.forget_window_identity(*window);
+            self.workspaces.forget_window_identity(*window);
             self.window_layout_constraints.remove(window);
             if self.focused_window == Some(*window) {
                 self.focused_window = None;
@@ -142,26 +142,19 @@ impl LayoutEngine {
         // Runtime restore installs every display-size configuration. Candidate discovery must
         // inspect that same complete set; looking only at the active size lets unmatched nodes in
         // dormant configurations bypass pending cleanup and reappear after a resize.
-        for (space, workspace, layout) in self.workspace_layouts.all_layouts() {
+        for (space, workspace, layout) in self.workspaces.all_layouts() {
             let location = (space, workspace);
             if !locations.contains(&location)
-                && self.workspace_tree(workspace).contains_window(layout, window)
+                && self.workspaces[workspace].layout_system.contains_window(layout, window)
             {
                 locations.push(location);
             }
         }
-        for space in self.workspace_layouts.spaces() {
-            for (workspace, _) in self.workspace_layouts.active_layouts_for_space(space) {
-                let location = (space, workspace);
-                if !locations.contains(&location)
-                    && self
-                        .floating_positions
-                        .workspace_positions(space, workspace)
-                        .iter()
-                        .any(|(candidate, _)| *candidate == window)
-                {
-                    locations.push(location);
-                }
+        for location @ (space, workspace) in self.floating_positions.locations_for_window(window) {
+            if !locations.contains(&location)
+                && self.workspaces.active_layout(space, workspace).is_some()
+            {
+                locations.push(location);
             }
         }
         locations
@@ -183,9 +176,9 @@ impl LayoutEngine {
         window: WindowId,
         keep: (SpaceId, VirtualWorkspaceId),
     ) {
-        let workspace_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
+        let workspace_ids: Vec<_> = self.workspaces.workspaces.keys().collect();
         for workspace in workspace_ids {
-            let Some(entry) = self.virtual_workspace_manager.workspaces.get_mut(workspace) else {
+            let Some(entry) = self.workspaces.workspaces.get_mut(workspace) else {
                 continue;
             };
             if (entry.space, workspace) != keep {
@@ -249,14 +242,10 @@ impl LayoutEngine {
         }
         if let Some((space, workspace)) = restored_location {
             self.remove_restored_tiling_duplicates(live, (space, workspace));
-            self.virtual_workspace_manager.retain_window_focus_location(live, workspace);
+            self.workspaces.retain_window_focus_location(live, workspace);
             self.floating_positions.retain_window_location(live, (space, workspace));
-            let _ = self.virtual_workspace_manager.assign_window_to_workspace(
-                window_store,
-                space,
-                live,
-                workspace,
-            );
+            let _ =
+                self.workspaces.assign_window_to_workspace(window_store, space, live, workspace);
         }
         ReconcileOutcome {
             matched: true,

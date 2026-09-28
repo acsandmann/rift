@@ -716,10 +716,7 @@ impl Reactor {
         let Some(screen) = self.space_state.screen_by_space(space) else {
             return;
         };
-        self.layout_manager
-            .layout_engine
-            .virtual_workspace_manager_mut()
-            .list_workspaces(space);
+        self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
         self.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
     }
 
@@ -1719,12 +1716,7 @@ impl Reactor {
                     self.layout_manager.layout_engine.active_layout_mode_at(space)
                         == crate::common::config::LayoutMode::Scrolling
                         && !self.layout_manager.layout_engine.is_window_floating(wid)
-                        && self
-                            .layout_manager
-                            .layout_engine
-                            .virtual_workspace_manager()
-                            .workspace_for_window(&self.state.windows, space, wid)
-                            .is_some()
+                        && self.state.windows.workspace_for_window(space, wid).is_some()
                 });
                 let screens = if old_frame.size.same_as(new_frame.size) {
                     Vec::new()
@@ -1897,11 +1889,8 @@ impl Reactor {
                 if !self.is_space_active(space) {
                     return Ok(EventOutcome::no_change());
                 }
-                let workspaces = self
-                    .layout_manager
-                    .layout_engine
-                    .virtual_workspace_manager_mut()
-                    .list_workspaces(space);
+                let workspaces =
+                    self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
                 let Some(index) = workspaces.iter().position(|(id, _)| *id == workspace) else {
                     return Ok(EventOutcome::no_change());
                 };
@@ -1913,7 +1902,7 @@ impl Reactor {
                 }
                 self.space_state.command_space = Some(space);
                 // Overview selects an identity, never invokes configured back-and-forth.
-                if self.layout_manager.layout_engine.active_workspace(space)
+                if self.layout_manager.layout_engine.workspaces().active_workspace(space)
                     == Some(workspaces[index].0)
                 {
                     return Ok(EventOutcome::no_change());
@@ -1937,7 +1926,7 @@ impl Reactor {
                 let destination = self
                     .layout_manager
                     .layout_engine
-                    .virtual_workspace_manager()
+                    .workspaces()
                     .workspaces
                     .get(intent.workspace)
                     .map(|ws| ws.space);
@@ -2248,6 +2237,7 @@ impl Reactor {
                     self.last_focused_window_in_space(space).or_else(|| {
                         self.layout_manager
                             .layout_engine
+                            .workspaces()
                             .windows_in_active_workspace(&self.state.windows, space)
                             .into_iter()
                             .next()
@@ -2274,6 +2264,7 @@ impl Reactor {
                     self.last_focused_window_in_space(space).or_else(|| {
                         self.layout_manager
                             .layout_engine
+                            .workspaces()
                             .windows_in_active_workspace(&self.state.windows, space)
                             .into_iter()
                             .next()
@@ -2334,7 +2325,7 @@ impl Reactor {
                 }
                 let command_space = self.workspace_command_space();
                 let resolved_window = {
-                    let workspaces = self.layout_manager.layout_engine.virtual_workspace_manager();
+                    let workspaces = self.layout_manager.layout_engine.workspaces();
                     match window_id {
                         Some(index) => command_space
                             .and_then(|space| {
@@ -2461,6 +2452,7 @@ impl Reactor {
                 let windows = self
                     .layout_manager
                     .layout_engine
+                    .workspaces()
                     .windows_in_active_workspace(&self.state.windows, source_space);
                 if !windows.is_empty() {
                     self.store_current_floating_positions(source_space);
@@ -3043,9 +3035,11 @@ impl Reactor {
         if previous_title != new_title
             && let Some(space) = self.best_space_for_window_id(window_id)
             && self.is_space_active(space)
-            && let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space)
+            && let Some(workspace_id) =
+                self.layout_manager.layout_engine.workspaces().active_workspace(space)
         {
-            let workspace_index = self.layout_manager.layout_engine.active_workspace_idx(space);
+            let workspace_index =
+                self.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
 
             let workspace_name = self
                 .layout_manager
@@ -3072,9 +3066,11 @@ impl Reactor {
     fn broadcast_focused_window_changed(&self, window_id: WindowId) {
         if let Some(space) = self.best_space_for_window_id(window_id)
             && self.is_space_active(space)
-            && let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space)
+            && let Some(workspace_id) =
+                self.layout_manager.layout_engine.workspaces().active_workspace(space)
         {
-            let workspace_index = self.layout_manager.layout_engine.active_workspace_idx(space);
+            let workspace_index =
+                self.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
             let workspace_name = self
                 .layout_manager
                 .layout_engine
@@ -3101,10 +3097,12 @@ impl Reactor {
     ) {
         if let Some(space) = space
             && self.is_space_active(space)
-            && let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space)
+            && let Some(workspace_id) =
+                self.layout_manager.layout_engine.workspaces().active_workspace(space)
             && let Some(layout) = self.query_layout_state(Some(space.get()), None)
         {
-            let workspace_index = self.layout_manager.layout_engine.active_workspace_idx(space);
+            let workspace_index =
+                self.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
             let workspace_name = self
                 .layout_manager
                 .layout_engine
@@ -3280,10 +3278,7 @@ impl Reactor {
             if !self.is_space_active(space) {
                 continue;
             }
-            self.layout_manager
-                .layout_engine
-                .virtual_workspace_manager_mut()
-                .list_workspaces(space);
+            self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
             outcome = outcome.with_layout_event(LayoutEvent::SpaceExposed(space, size));
         }
         if let Some(delta) = topology_window_delta {
@@ -3606,11 +3601,7 @@ impl Reactor {
     }
 
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_info_for_window_any(&self.state.windows, wid)
-            .map(|info| info.space)
+        self.state.windows.workspace_info_for_window(wid).map(|info| info.space)
     }
 
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
@@ -3769,13 +3760,13 @@ impl Reactor {
         let _ = self
             .layout_manager
             .layout_engine
-            .virtual_workspace_manager_mut()
+            .workspaces_mut()
             .list_workspaces(authoritative_space);
 
         let assigned = if preserve_workspace_ordinal {
             self.layout_manager
                 .layout_engine
-                .virtual_workspace_manager_mut()
+                .workspaces_mut()
                 .assign_window_to_workspace_preserving_ordinal(
                     &mut self.state.windows,
                     authoritative_space,
@@ -3789,21 +3780,21 @@ impl Reactor {
                 .ensure_active_workspace_info(authoritative_space)
                 .map(|(workspace_id, _)| workspace_id)
                 .or_else(|| {
-                    self.layout_manager.layout_engine.active_workspace(authoritative_space)
+                    self.layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .active_workspace(authoritative_space)
                 })
             else {
                 return assigned_space.is_some_and(|space| self.is_space_active(space));
             };
 
-            self.layout_manager
-                .layout_engine
-                .virtual_workspace_manager_mut()
-                .assign_window_to_workspace(
-                    &mut self.state.windows,
-                    authoritative_space,
-                    wid,
-                    target_workspace,
-                )
+            self.layout_manager.layout_engine.workspaces_mut().assign_window_to_workspace(
+                &mut self.state.windows,
+                authoritative_space,
+                wid,
+                target_workspace,
+            )
         };
         if !assigned {
             return assigned_space.is_some_and(|space| self.is_space_active(space));
@@ -4187,13 +4178,9 @@ impl Reactor {
             };
 
             let window_server_id = window.info.sys_id;
-            if let Some(workspace) = self
-                .layout_manager
-                .layout_engine
-                .virtual_workspace_manager()
-                .workspace_for_window(&self.state.windows, placement.space, placement.window)
-                && self.layout_manager.layout_engine.virtual_workspace_manager().workspaces
-                    [workspace]
+            if let Some(workspace) =
+                self.state.windows.workspace_for_window(placement.space, placement.window)
+                && self.layout_manager.layout_engine.workspaces().workspaces[workspace]
                     .layout_mode()
                     == crate::common::config::LayoutMode::Floating
             {
@@ -4286,7 +4273,7 @@ impl Reactor {
             return false;
         }
 
-        if !self.layout_manager.layout_engine.is_window_in_active_workspace(
+        if !self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
             &self.state.windows,
             space,
             wid,
@@ -4392,11 +4379,7 @@ impl Reactor {
                 let (previous_workspace, was_floating, was_ignored) = {
                     let engine = &self.layout_manager.layout_engine;
                     (
-                        engine.virtual_workspace_manager().workspace_for_window(
-                            &self.state.windows,
-                            space,
-                            *wid,
-                        ),
+                        self.state.windows.workspace_for_window(space, *wid),
                         engine.is_window_floating(*wid),
                         self.state
                             .windows
@@ -4572,25 +4555,21 @@ impl Reactor {
         app_window_id: WindowId,
         window_space: SpaceId,
     ) -> EventOutcome {
-        let workspace_state = self.layout_manager.layout_engine.virtual_workspace_manager();
         let Some(window_workspace) =
-            workspace_state.workspace_for_window(&self.state.windows, window_space, app_window_id)
+            self.state.windows.workspace_for_window(window_space, app_window_id)
         else {
             return EventOutcome::no_change();
         };
 
         let Some(current_workspace) =
-            self.layout_manager.layout_engine.active_workspace(window_space)
+            self.layout_manager.layout_engine.workspaces().active_workspace(window_space)
         else {
             return EventOutcome::no_change();
         };
 
         if window_workspace != current_workspace {
-            let workspaces = self
-                .layout_manager
-                .layout_engine
-                .virtual_workspace_manager_mut()
-                .list_workspaces(window_space);
+            let workspaces =
+                self.layout_manager.layout_engine.workspaces_mut().list_workspaces(window_space);
             if let Some((workspace_index, _)) =
                 workspaces.iter().enumerate().find(|(_, (ws_id, _))| *ws_id == window_workspace)
             {
@@ -4715,6 +4694,7 @@ impl Reactor {
                         .map(|space| {
                             self.layout_manager
                                 .layout_engine
+                                .workspaces()
                                 .windows_in_active_workspace(&self.state.windows, space)
                                 .is_empty()
                         })
@@ -4895,6 +4875,7 @@ impl Reactor {
             || !self
                 .layout_manager
                 .layout_engine
+                .workspaces()
                 .windows_in_active_workspace(&self.state.windows, space)
                 .is_empty()
         {
@@ -4916,11 +4897,12 @@ impl Reactor {
     }
 
     fn last_focused_window_in_space(&self, space: SpaceId) -> Option<WindowId> {
-        let active_workspace = self.layout_manager.layout_engine.active_workspace(space)?;
+        let active_workspace =
+            self.layout_manager.layout_engine.workspaces().active_workspace(space)?;
         let wid = self
             .layout_manager
             .layout_engine
-            .virtual_workspace_manager()
+            .workspaces()
             .last_focused_window(space, active_workspace)?;
         let window = self.state.windows.window(wid)?;
 
@@ -4951,7 +4933,7 @@ impl Reactor {
             };
             self.state.windows.is_window_visible(wsid)
                 && self.best_space_for_window_id(wid) == Some(space)
-                && self.layout_manager.layout_engine.is_window_in_active_workspace(
+                && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
                     &self.state.windows,
                     space,
                     wid,
@@ -4970,6 +4952,7 @@ impl Reactor {
 
         self.layout_manager
             .layout_engine
+            .workspaces()
             .windows_in_active_workspace(&self.state.windows, space)
             .into_iter()
             .find(|wid| is_visible_in_space(*wid))
@@ -4982,14 +4965,14 @@ impl Reactor {
     }
 
     fn window_in_non_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
-        let Some(active_workspace) = self.layout_manager.layout_engine.active_workspace(space)
+        let Some(active_workspace) =
+            self.layout_manager.layout_engine.workspaces().active_workspace(space)
         else {
             return false;
         };
-        self.layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_for_window(&self.state.windows, space, window_id)
+        self.state
+            .windows
+            .workspace_for_window(space, window_id)
             .is_some_and(|window_workspace| window_workspace != active_workspace)
     }
 
@@ -5379,6 +5362,7 @@ impl Reactor {
         let floating_windows_in_workspace = self
             .layout_manager
             .layout_engine
+            .workspaces()
             .windows_in_active_workspace(&self.state.windows, space)
             .into_iter()
             .filter(|&wid| self.layout_manager.layout_engine.is_window_floating(wid))
