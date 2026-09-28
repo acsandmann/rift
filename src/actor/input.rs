@@ -413,6 +413,10 @@ impl Input {
             }
             Request::SetMissionControlActive(active) => {
                 self.mission_control_active.set(active);
+                self.reset_mouse_move_sample_gate();
+                if active && state.hide_count > 0 {
+                    state.show_mouse();
+                }
                 should_rebuild_mask = true;
             }
             Request::Warp(point) => {
@@ -682,7 +686,9 @@ impl Input {
                     self.send_overview(super::mission_control::Event::Input(
                         super::mission_control::Input::PointerDrag(CGEvent::location(Some(event))),
                     ));
-                    return false;
+                    // Keep the hardware cursor moving without delivering a drag to apps.
+                    CGEvent::set_type(Some(event), CGEventType::MouseMoved);
+                    return true;
                 }
                 if self.mission_control_active.get() {
                     self.send_overview(super::mission_control::Event::Input(
@@ -697,7 +703,8 @@ impl Input {
                             ),
                         },
                     ));
-                    return false;
+                    CGEvent::set_type(Some(event), CGEventType::MouseMoved);
+                    return true;
                 }
                 let button = if event_type == CGEventType::LeftMouseDragged {
                     crate::actor::drag::MouseButton::Left
@@ -821,7 +828,7 @@ impl Input {
             self.send_overview(super::mission_control::Event::Input(
                 super::mission_control::Input::Move(loc),
             ));
-            return false;
+            return true;
         }
 
         // Recover modifier state at the sampled rate instead of once per raw
@@ -1069,15 +1076,15 @@ unsafe extern "C-unwind" fn input_callback(
     // movement cannot stall at the edge.
     let this = unsafe { &*ctx.this };
     let mouse_point = if event_type == CGEventType::MouseMoved {
-        let warped = this.maybe_horizontal_mouse_warp(event);
+        let warped = if this.mission_control_active.get() {
+            None
+        } else {
+            this.maybe_horizontal_mouse_warp(event)
+        };
         match this.admit_mouse_move(event) {
             Some(point) => Some(warped.unwrap_or(point)),
             None => {
-                return if this.mission_control_active.get() {
-                    core::ptr::null_mut()
-                } else {
-                    event_ref.as_ptr()
-                };
+                return event_ref.as_ptr();
             }
         }
     } else {
@@ -1494,6 +1501,55 @@ mod tests {
     }
 
     #[test]
+    fn overview_passes_sampled_and_skipped_mouse_motion_to_cursor() {
+        let (input, mut wm_rx, mut native_rx) = input();
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        input.mission_control_active.set(true);
+        input.mouse_move_min_interval_ticks.set(100);
+        let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut ctx = CallbackCtx {
+            this: &input,
+            recovery_tx,
+            tap_generation: 0,
+        };
+        let event = CGEvent::new(None).unwrap();
+        CGEvent::set_type(Some(&event), CGEventType::MouseMoved);
+        CGEvent::set_timestamp(Some(&event), 1000);
+        CGEvent::set_location(Some(&event), CGPoint::new(30.0, 40.0));
+        let event_ptr = core::ptr::NonNull::from(&*event);
+        let context = (&mut ctx as *mut CallbackCtx).cast();
+        let result = unsafe {
+            input_callback(
+                core::ptr::null_mut(),
+                CGEventType::MouseMoved,
+                event_ptr,
+                context,
+            )
+        };
+        assert_eq!(result, event_ptr.as_ptr());
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::Move(_)
+            )
+        ));
+        CGEvent::set_timestamp(Some(&event), 1001);
+        let result = unsafe {
+            input_callback(
+                core::ptr::null_mut(),
+                CGEventType::MouseMoved,
+                event_ptr,
+                context,
+            )
+        };
+        assert_eq!(result, event_ptr.as_ptr());
+        assert!(rx.try_recv().is_err());
+        assert!(wm_rx.try_recv().is_err());
+        assert!(native_rx.try_recv().is_err());
+    }
+
+    #[test]
     fn overview_pointer_sequence_never_enters_native_drag_path() {
         let (input, mut wm_rx, mut native_rx) = input();
         let (tx, mut rx) = actor::channel();
@@ -1506,7 +1562,10 @@ mod tests {
             CGEventType::LeftMouseDragged,
             CGEventType::LeftMouseUp,
         ] {
-            assert!(!input.on_event(ty, &event));
+            assert_eq!(input.on_event(ty, &event), ty == CGEventType::LeftMouseDragged);
+            if ty == CGEventType::LeftMouseDragged {
+                assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::MouseMoved);
+            }
         }
         assert!(matches!(
             rx.try_recv().unwrap().1,
@@ -1551,7 +1610,10 @@ mod tests {
             CGEventType::RightMouseDragged,
             CGEventType::RightMouseUp,
         ] {
-            assert!(!input.on_event(ty, &event));
+            assert_eq!(input.on_event(ty, &event), ty == CGEventType::RightMouseDragged);
+            if ty == CGEventType::RightMouseDragged {
+                assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::MouseMoved);
+            }
         }
         let (
             _,

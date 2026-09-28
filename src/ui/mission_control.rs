@@ -37,6 +37,23 @@ const GAP: f64 = 40.0;
 const CORNER: f64 = 8.0;
 const CAPTION: f64 = 28.0;
 
+/// All layer changes for one input/capture update reach the compositor together.
+/// Nested helpers may create transactions, but only this outer scope flushes.
+struct OverviewTransaction;
+impl OverviewTransaction {
+    fn begin() -> Self {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        Self
+    }
+}
+impl Drop for OverviewTransaction {
+    fn drop(&mut self) {
+        CATransaction::commit();
+        CATransaction::flush();
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub workspace: usize,
@@ -53,6 +70,38 @@ struct WorkspaceProjection {
     source: usize,
     frame: CGRect,
     windows: Vec<WindowProjection>,
+}
+
+fn preview_frame(size: CGSize) -> CGRect {
+    let available_width = (size.width - 12.0).max(1.0);
+    let available_height = (size.height - CAPTION - 6.0).max(1.0);
+    let ratio =
+        (available_width / size.width.max(1.0)).min(available_height / size.height.max(1.0));
+    let width = size.width.max(1.0) * ratio;
+    let height = size.height.max(1.0) * ratio;
+    rect((size.width - width) / 2.0, 6.0, width, height)
+}
+
+fn pixel_aligned(frame: CGRect, scale: f64) -> CGRect {
+    let snap = |value: f64| (value * scale).round() / scale;
+    rect(
+        snap(frame.origin.x),
+        snap(frame.origin.y),
+        snap(frame.size.width),
+        snap(frame.size.height),
+    )
+}
+
+fn heading_frame(frame: CGRect, scale: f64) -> CGRect {
+    pixel_aligned(
+        rect(
+            (frame.size.width - 300.0) / 2.0,
+            frame.origin.y - 26.0,
+            300.0,
+            20.0,
+        ),
+        scale,
+    )
 }
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
@@ -211,6 +260,7 @@ struct WindowCard {
     image: Retained<CALayer>,
     caption: Retained<CALayer>,
     title: Retained<CATextLayer>,
+    icon: Option<Retained<CALayer>>,
 }
 struct WorkspaceView {
     index: usize,
@@ -233,7 +283,7 @@ struct DisplayOverview {
     animate: bool,
     root: Retained<CALayer>,
     // Field order matters: unbind the surface before releasing its CGS window.
-    surface: WindowSurface,
+    _surface: WindowSurface,
     _window: CgsWindow,
 }
 
@@ -323,10 +373,8 @@ impl DisplayOverview {
                     card_visible(self.bounds.size, previous, w.frame)
                         != card_visible(self.bounds.size, ws.frame, w.frame)
                 });
-                view.layer.setFrame(ws.frame);
-                let mut heading = view.heading.frame();
-                heading.origin.y += delta;
-                view.heading.setFrame(heading);
+                view.layer.setFrame(pixel_aligned(ws.frame, self.scale));
+                view.heading.setFrame(heading_frame(ws.frame, self.scale));
             }
         });
         Some(visibility_changed)
@@ -358,13 +406,8 @@ impl DisplayOverview {
         with_disabled_actions(|| {
             for ((view, projected), previous) in self.views.iter().zip(&next).zip(&self.projection)
             {
-                view.layer.setFrame(projected.frame);
-                view.heading.setFrame(rect(
-                    (projected.frame.size.width - 300.0) / 2.0,
-                    projected.frame.origin.y - 24.0,
-                    300.0,
-                    20.0,
-                ));
+                view.layer.setFrame(pixel_aligned(projected.frame, self.scale));
+                view.heading.setFrame(heading_frame(projected.frame, self.scale));
                 for ((card, window), old) in
                     view.cards.iter().zip(&projected.windows).zip(&previous.windows)
                 {
@@ -422,13 +465,8 @@ impl DisplayOverview {
                     .position(|view| view.index == data.index)
                     .map(|pos| old_views.swap_remove(pos));
                 if let Some(view) = existing.as_ref().filter(|view| !view.cards.is_empty()) {
-                    view.layer.setFrame(ws.frame);
-                    view.heading.setFrame(rect(
-                        (ws.frame.size.width - 300.0) / 2.0,
-                        ws.frame.origin.y - 24.0,
-                        300.0,
-                        20.0,
-                    ));
+                    view.layer.setFrame(pixel_aligned(ws.frame, self.scale));
+                    view.heading.setFrame(heading_frame(ws.frame, self.scale));
                     self.views.push(existing.unwrap());
                     continue;
                 }
@@ -439,18 +477,19 @@ impl DisplayOverview {
                     let heading = label(
                         &self.root,
                         &data.name,
-                        rect(
-                            (ws.frame.size.width - 300.0) / 2.0,
-                            ws.frame.origin.y - 24.0,
-                            300.0,
-                            20.0,
-                        ),
+                        heading_frame(ws.frame, self.scale),
                         self.scale,
                     );
                     unsafe {
                         heading.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
                     }
-                    heading.setFontSize(12.0);
+                    let font = unsafe {
+                        NSFont::systemFontOfSize_weight(13.0, objc2_app_kit::NSFontWeightMedium)
+                    };
+                    unsafe {
+                        heading.setFont(Some(&*(Retained::as_ptr(&font) as *const CFType)));
+                    }
+                    heading.setFontSize(13.0);
                     let empty = label(
                         &container,
                         "Empty workspace",
@@ -465,15 +504,10 @@ impl DisplayOverview {
                     empty.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 0.38)));
                     (container, heading, empty)
                 };
-                container.setFrame(ws.frame);
+                container.setFrame(pixel_aligned(ws.frame, self.scale));
                 container.setMasksToBounds(true);
                 empty.setHidden(!data.windows.is_empty());
-                heading.setFrame(rect(
-                    (ws.frame.size.width - 300.0) / 2.0,
-                    ws.frame.origin.y - 24.0,
-                    300.0,
-                    20.0,
-                ));
+                heading.setFrame(heading_frame(ws.frame, self.scale));
                 self.root.addSublayer(&container);
                 self.root.addSublayer(&heading);
                 let mut cards = Vec::new();
@@ -481,20 +515,30 @@ impl DisplayOverview {
                     let data = &data.windows[w.source];
                     if let Some((card, previous)) = old_cards.remove(&data.id) {
                         card.layer.setFrame(w.frame);
-                        let height = (w.frame.size.height - CAPTION).max(1.0);
+                        let image_frame = pixel_aligned(preview_frame(w.frame.size), self.scale);
+                        let height = image_frame.origin.y + image_frame.size.height;
                         card.image.setBorderWidth(0.5);
                         card.image.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
-                        card.image.setFrame(rect(
-                            4.0,
-                            4.0,
-                            (w.frame.size.width - 8.0).max(1.0),
-                            (height - 4.0).max(1.0),
+                        card.image.setFrame(image_frame);
+                        card.caption.setFrame(rect(
+                            image_frame.origin.x,
+                            height,
+                            image_frame.size.width,
+                            CAPTION,
                         ));
-                        card.caption.setFrame(rect(0.0, height, w.frame.size.width, CAPTION));
+                        if let Some(icon) = &card.icon {
+                            icon.setFrame(rect(
+                                (image_frame.size.width - 16.0) / 2.0,
+                                6.0,
+                                16.0,
+                                16.0,
+                            ));
+                        }
+                        card.title.setHidden(true);
                         card.title.setFrame(rect(
                             26.0,
                             5.0,
-                            (w.frame.size.width - 32.0).max(0.0),
+                            (image_frame.size.width - 32.0).max(0.0),
                             20.0,
                         ));
                         container.addSublayer(&card.layer);
@@ -539,16 +583,9 @@ impl DisplayOverview {
                         continue;
                     }
                     let card = layer(w.frame, self.scale);
-                    let height = (w.frame.size.height - CAPTION).max(1.0);
-                    let image = layer(
-                        rect(
-                            4.0,
-                            4.0,
-                            (w.frame.size.width - 8.0).max(1.0),
-                            (height - 4.0).max(1.0),
-                        ),
-                        self.scale,
-                    );
+                    let image_frame = pixel_aligned(preview_frame(w.frame.size), self.scale);
+                    let height = image_frame.origin.y + image_frame.size.height;
+                    let image = layer(image_frame, self.scale);
                     image.setCornerRadius(CORNER);
                     image.setMasksToBounds(true);
                     image.setBorderWidth(0.5);
@@ -568,7 +605,10 @@ impl DisplayOverview {
                         }
                     }
                     card.addSublayer(&image);
-                    let caption = layer(rect(0.0, height, w.frame.size.width, CAPTION), self.scale);
+                    let caption = layer(
+                        rect(image_frame.origin.x, height, image_frame.size.width, CAPTION),
+                        self.scale,
+                    );
                     card.addSublayer(&caption);
                     let icon = self.icons.entry(data.id.pid).or_insert_with(|| {
                         let app = NSRunningApplication::runningApplicationWithProcessIdentifier(
@@ -583,15 +623,21 @@ impl DisplayOverview {
                             )
                         }
                     });
-                    if let Some(icon) = icon {
-                        let icon_layer = layer(rect(4.0, 6.0, 16.0, 16.0), self.scale);
+                    let icon_layer = if let Some(icon) = icon {
+                        let icon_layer = layer(
+                            rect((image_frame.size.width - 16.0) / 2.0, 6.0, 16.0, 16.0),
+                            self.scale,
+                        );
                         unsafe {
                             icon_layer.setContents(Some(
                                 &*(icon.as_ref() as *const CGImage as *const AnyObject),
                             ));
                         }
                         caption.addSublayer(&icon_layer);
-                    }
+                        Some(icon_layer)
+                    } else {
+                        None
+                    };
                     let title = label(
                         &caption,
                         if data.info.title.is_empty() {
@@ -599,9 +645,10 @@ impl DisplayOverview {
                         } else {
                             &data.info.title
                         },
-                        rect(26.0, 5.0, (w.frame.size.width - 32.0).max(0.0), 20.0),
+                        rect(26.0, 5.0, (image_frame.size.width - 32.0).max(0.0), 20.0),
                         self.scale,
                     );
+                    title.setHidden(true);
                     container.addSublayer(&card);
                     cards.push(WindowCard {
                         id: data.id,
@@ -609,6 +656,7 @@ impl DisplayOverview {
                         image,
                         caption,
                         title,
+                        icon: icon_layer,
                     });
                 }
                 self.views.push(WorkspaceView {
@@ -625,7 +673,6 @@ impl DisplayOverview {
             view.heading.removeFromSuperlayer();
         }
         self.animate = false;
-        self.surface.flush();
     }
 }
 
@@ -754,6 +801,7 @@ impl OverviewSession {
         generation: u64,
         remembered: &mut Option<RememberedPreviewCache>,
     ) -> Option<Self> {
+        let _transaction = OverviewTransaction::begin();
         let mut displays = Vec::new();
         let mut active = 0;
         let snapshot: Vec<_> = reactor
@@ -815,7 +863,7 @@ impl OverviewSession {
                 icons: HashMap::default(),
                 animate: false,
                 root,
-                surface,
+                _surface: surface,
                 _window: window,
             };
             view.rebuild(None, remembered.as_ref());
@@ -880,6 +928,7 @@ impl OverviewSession {
     }
 
     pub(crate) fn edge_tick(&mut self, remembered: Option<&RememberedPreviewCache>) {
+        let _transaction = OverviewTransaction::begin();
         let Some(point) = self.drag.as_ref().filter(|drag| drag.started).map(|drag| drag.point)
         else {
             return;
@@ -901,6 +950,7 @@ impl OverviewSession {
         remembered: Option<&RememberedPreviewCache>,
         moved: Option<WindowId>,
     ) {
+        let _transaction = OverviewTransaction::begin();
         self.end_drag();
         let selected = moved.or(self.selection.window);
         for (i, d) in self.displays.iter_mut().enumerate() {
@@ -1002,8 +1052,8 @@ impl OverviewSession {
             ),
             d.scale,
         );
-        let height = (source.layer.frame().size.height - CAPTION).max(1.0);
-        let preview = layer(rect(0.0, 0.0, source.layer.frame().size.width, height), d.scale);
+        let height = source.image.frame().origin.y + source.image.frame().size.height;
+        let preview = layer(source.image.frame(), d.scale);
         unsafe {
             preview.setContents(source.image.contents().as_deref());
             preview.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspect);
@@ -1018,9 +1068,9 @@ impl OverviewSession {
             &card,
             &data.info.title,
             rect(
-                4.0,
-                height + 7.0,
-                (source.layer.frame().size.width - 8.0).max(0.0),
+                source.image.frame().origin.x + 4.0,
+                height + 5.0,
+                (source.image.frame().size.width - 8.0).max(0.0),
                 20.0,
             ),
             d.scale,
@@ -1132,7 +1182,6 @@ impl OverviewSession {
             drag.indicator.setFrame(indicator);
             drag.indicator.setHidden(false);
         });
-        CATransaction::flush();
     }
 
     pub(crate) fn start_previews(
@@ -1141,6 +1190,7 @@ impl OverviewSession {
         enabled: bool,
         remembered: Option<&RememberedPreviewCache>,
     ) {
+        let _transaction = OverviewTransaction::begin();
         if generation != self.generation {
             return;
         }
@@ -1160,7 +1210,21 @@ impl OverviewSession {
                 {
                     if let Some(id) = selection.window {
                         if let Some(card) = ws.cards.iter().find(|c| c.id == id) {
-                            card.image.setBorderWidth(width);
+                            let selected = width > 0.5;
+                            card.title.setHidden(!selected);
+                            if let Some(icon) = &card.icon {
+                                icon.setFrame(rect(
+                                    if selected {
+                                        4.0
+                                    } else {
+                                        (card.caption.bounds().size.width - 16.0) / 2.0
+                                    },
+                                    6.0,
+                                    16.0,
+                                    16.0,
+                                ));
+                            }
+                            card.image.setBorderWidth(if selected { 1.5 } else { 0.5 });
                             let border = if width > 0.5 {
                                 color(0.0, 0.48, 1.0, 1.0)
                             } else {
@@ -1179,7 +1243,6 @@ impl OverviewSession {
                 }
             }
         });
-        CATransaction::flush();
     }
 
     pub(crate) fn input(
@@ -1187,6 +1250,7 @@ impl OverviewSession {
         input: Input,
         remembered: Option<&RememberedPreviewCache>,
     ) -> Option<(String, Selection, Option<WindowServerId>)> {
+        let _transaction = OverviewTransaction::begin();
         match input {
             Input::PointerDown(point) => {
                 self.pressed = Some(point);
@@ -1336,8 +1400,6 @@ impl OverviewSession {
         }
         if old != (self.active, self.selection) || (reprojected && !only_translated) {
             self.highlight(Some(old));
-        } else if reprojected {
-            CATransaction::flush();
         }
         if activate {
             let d = &self.displays[self.active];
@@ -1381,7 +1443,8 @@ impl OverviewSession {
                     if let Some(sys_id) = data.info.sys_id {
                         visible.insert(data.id);
                         if previews.schedule.needs(data.id) {
-                            let (width, height) = capture_size(w.frame.size, display.scale);
+                            let (width, height) =
+                                capture_size(preview_frame(w.frame.size).size, display.scale);
                             previews.schedule.pending.push(PreviewRequest {
                                 id: data.id,
                                 sys_id,
@@ -1444,6 +1507,7 @@ impl OverviewSession {
         current: Option<&crate::model::server::RuntimeWindowData>,
         remembered: &mut Option<RememberedPreviewCache>,
     ) {
+        let _transaction = OverviewTransaction::begin();
         let Some(previews) = &mut self.previews else {
             return;
         };
@@ -1513,7 +1577,6 @@ impl OverviewSession {
         }
         previews.pump(self.generation);
         self.sync_images(remembered.as_ref());
-        CATransaction::flush();
     }
 
     fn sync_images(&self, remembered: Option<&RememberedPreviewCache>) {
@@ -2085,6 +2148,34 @@ mod tests {
             scrolled_horizontal_offset(display, display.size, &workspace(0, vec![]), 0.0, 5000.0),
             0.0
         );
+    }
+
+    #[test]
+    fn preview_geometry_preserves_aspect_ratio_and_caption_space() {
+        for size in [
+            CGSize::new(600.0, 300.0),
+            CGSize::new(180.0, 500.0),
+            CGSize::new(800.0, 100.0),
+        ] {
+            let image = preview_frame(size);
+            assert!(
+                (image.size.width / image.size.height - size.width / size.height).abs() < 1e-10
+            );
+            assert!(image.origin.x >= 6.0);
+            assert!(image.origin.y + image.size.height + CAPTION <= size.height + 1e-10);
+            assert!((image.origin.x * 2.0 + image.size.width - size.width).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn workspace_and_heading_share_backing_pixel_scroll_alignment() {
+        let frame = rect(0.0, 123.27, 1200.0, 360.0);
+        for scale in [1.0, 2.0] {
+            let aligned = pixel_aligned(frame, scale);
+            let heading = heading_frame(frame, scale);
+            assert_eq!(heading.origin.y + 26.0, aligned.origin.y);
+            assert_eq!(aligned.origin.y * scale, (frame.origin.y * scale).round());
+        }
     }
 
     #[test]
