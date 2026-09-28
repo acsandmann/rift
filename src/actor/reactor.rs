@@ -6,6 +6,7 @@
 
 mod animation;
 mod events;
+pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
 mod query;
@@ -216,6 +217,16 @@ pub enum SpaceEventKind {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
+    #[serde(skip)]
+    OverviewSelectWorkspace {
+        display: String,
+        workspace: crate::model::VirtualWorkspaceId,
+    },
+    #[serde(skip)]
+    OverviewDrop {
+        intent: OverviewDrop,
+        reply: std::sync::mpsc::SyncSender<bool>,
+    },
     #[serde(skip)]
     SpaceStateChanged(ForwardedSpaceState),
     #[serde(skip)]
@@ -1876,6 +1887,116 @@ impl Reactor {
                 }
                 return Ok(EventOutcome::no_change());
             }
+            Event::OverviewSelectWorkspace { display, workspace } => {
+                let Some(space) = self
+                    .screen_for_selector(&rift_protocol::DisplaySelector::Uuid(display), None)
+                    .and_then(|s| s.space)
+                else {
+                    return Ok(EventOutcome::no_change());
+                };
+                if !self.is_space_active(space) {
+                    return Ok(EventOutcome::no_change());
+                }
+                let workspaces = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager_mut()
+                    .list_workspaces(space);
+                let Some(index) = workspaces.iter().position(|(id, _)| *id == workspace) else {
+                    return Ok(EventOutcome::no_change());
+                };
+                // Change display context without first focusing its old workspace's window.
+                if let Some(screen) = self.space_state.screen_by_space(space) {
+                    if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
+                        self.space_state.menu_bar_space = Some(space);
+                    }
+                }
+                self.space_state.command_space = Some(space);
+                // Overview selects an identity, never invokes configured back-and-forth.
+                if self.layout_manager.layout_engine.active_workspace(space)
+                    == Some(workspaces[index].0)
+                {
+                    return Ok(EventOutcome::no_change());
+                }
+                let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
+                return command_workflow::handle_command_layout(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    &mut self.workspace_switch_manager,
+                    command_workflow::LayoutCommandPayload {
+                        command: crate::layout_engine::LayoutCommand::SwitchToWorkspace(index),
+                        command_space: Some(space),
+                        visible_spaces,
+                        visible_space_centers,
+                        post_arrange_mouse_warp: None,
+                    },
+                );
+            }
+            Event::OverviewDrop { intent, reply } => {
+                let source = self.state.windows.workspace_info_for_window(intent.window);
+                let destination = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager()
+                    .workspaces
+                    .get(intent.workspace)
+                    .map(|ws| ws.space);
+                let valid = self.state.windows.window(intent.window).is_some_and(|window| {
+                    window.is_admitted() && window.info.is_standard && !window.info.is_minimized
+                }) && source.zip(destination).is_some_and(|(source, destination)| {
+                    [source.space, destination].into_iter().all(|space| {
+                        self.space_state.screen_by_space(space).is_some()
+                            && !self.is_fullscreen_space(space)
+                    })
+                });
+                let changed = valid
+                    && self
+                        .layout_manager
+                        .layout_engine
+                        .relocate_window_with_drop(&mut self.state.windows, &intent);
+                let _ = reply.send(changed);
+                if !changed {
+                    return Ok(EventOutcome::no_change());
+                }
+                let source_space = source.unwrap().space;
+                let destination = destination.unwrap();
+                let mut outcome = EventOutcome::layout_changed(false);
+                outcome = outcome.with_arrange_space_scope(Some(destination));
+                if source_space != destination {
+                    outcome.arrange.secondary_space_scope = Some(source_space);
+                }
+                if source_space != destination {
+                    if let Some(server_id) =
+                        self.state.windows.window(intent.window).and_then(|w| w.info.sys_id)
+                    {
+                        self.state.windows.set_window_server_space(server_id, Some(destination));
+                    }
+                    let frame = intent.frame.unwrap_or_else(|| {
+                        let destination = self
+                            .space_state
+                            .screens
+                            .iter()
+                            .find(|s| s.space == Some(destination))
+                            .unwrap()
+                            .frame;
+                        let source = self
+                            .space_state
+                            .screens
+                            .iter()
+                            .find(|s| s.space == Some(source_space))
+                            .map(|s| s.frame)
+                            .unwrap_or(destination);
+                        let mut frame =
+                            self.state.windows.window(intent.window).unwrap().frame_monotonic;
+                        frame.origin.x += destination.origin.x - source.origin.x;
+                        frame.origin.y += destination.origin.y - source.origin.y;
+                        frame
+                    });
+                    outcome =
+                        outcome.with_pre_layout_window_frame_write(intent.window, frame, true);
+                }
+                return Ok(outcome);
+            }
             Event::MouseUp(button) => {
                 let final_space = self.drag_manager.actor.source().and_then(|source| {
                     let frame_space = || self.best_space_for_frame(&source.last_frame);
@@ -2549,6 +2670,10 @@ impl Reactor {
                     outcome.arrange.space_scope,
                 );
             }
+            if let Some(space) = outcome.arrange.secondary_space_scope {
+                layout_changed |=
+                    self.update_layout_or_warn(outcome.arrange.is_resize, false, Some(space));
+            }
             // Publish the menu state once after all arrange passes have completed.
             self.maybe_send_menu_update();
         }
@@ -2724,6 +2849,7 @@ impl Reactor {
         let bundle_id = app.info.bundle_id.clone();
 
         Some(RuntimeWindowData {
+            layout_frame: None,
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
             is_focused: self.main_window() == Some(window_id),

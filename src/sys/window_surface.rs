@@ -54,6 +54,15 @@ pub struct WindowSurface {
 
 impl WindowSurface {
     pub fn new(window_id: u32, bounds: CGRect, root: &CALayer) -> Result<Self, CgsWindowError> {
+        Self::new_scaled(window_id, bounds, root, 2.0)
+    }
+
+    pub fn new_scaled(
+        window_id: u32,
+        bounds: CGRect,
+        root: &CALayer,
+        scale: f64,
+    ) -> Result<Self, CgsWindowError> {
         let connection = *G_CONNECTION;
         let context = CAContext::with_connection(connection as u32, None)
             .ok_or(CgsWindowError::Surface(CGError(1000)))?;
@@ -93,7 +102,7 @@ impl WindowSurface {
             .map_err(CgsWindowError::Surface)?;
             unsafe { cg_ok(SLSSetSurfaceBounds(connection, window_id, surface_id, bounds)) }
                 .map_err(CgsWindowError::Surface)?;
-            unsafe { cg_ok(SLSSetSurfaceResolution(connection, window_id, surface_id, 2.0)) }
+            unsafe { cg_ok(SLSSetSurfaceResolution(connection, window_id, surface_id, scale)) }
                 .map_err(CgsWindowError::Surface)?;
             unsafe { cg_ok(SLSSetSurfaceOpacity(connection, window_id, surface_id, false)) }
                 .map_err(CgsWindowError::Surface)?;

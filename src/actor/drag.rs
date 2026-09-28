@@ -238,6 +238,7 @@ impl DragActor {
                 previous,
                 &session.unavailable,
                 Some(session.source),
+                None,
             );
             session.target = next.map_or(TargetState::None, TargetState::Candidate);
         }
@@ -272,6 +273,7 @@ impl DragActor {
             None,
             &session.unavailable,
             Some(session.source),
+            None,
         );
         session.target = next.map_or(TargetState::None, TargetState::Candidate);
         !matches!(session.target, TargetState::None)
@@ -455,6 +457,7 @@ impl DragActor {
                 session.target.intent(),
                 &session.unavailable,
                 Some(session.source),
+                None,
             )
         };
         let changed = next != session.target.intent();
@@ -603,7 +606,34 @@ pub fn hit_test(
     center: MouseDropAction,
     previous: Option<DropIntent>,
 ) -> Option<DropIntent> {
-    hit_test_available(scene, point, fraction, center, previous, &[], None)
+    hit_test_available(scene, point, fraction, center, previous, &[], None, None)
+}
+
+/// Projected scenes include the source for presentation; it is not a relative drop target.
+pub fn hit_test_projected(
+    scene: &DragScene,
+    source: WindowId,
+    point: CGPoint,
+) -> Option<DropIntent> {
+    if scene
+        .targets
+        .iter()
+        .find(|target| target.window == source)
+        .and_then(|target| classify_zone(target.frame, point, 0.25))
+        == Some(DropZone::Center)
+    {
+        return None;
+    }
+    hit_test_available(
+        scene,
+        point,
+        0.25,
+        MouseDropAction::Stack,
+        None,
+        &[],
+        None,
+        Some(source),
+    )
 }
 
 fn hit_test_available(
@@ -614,10 +644,14 @@ fn hit_test_available(
     previous: Option<DropIntent>,
     unavailable: &[(WindowId, DropZone, WindowDropAction)],
     source: Option<DragSource>,
+    excluded: Option<WindowId>,
 ) -> Option<DropIntent> {
     if !source.is_some_and(|source| contains(source.origin_frame, point, 0.0))
         && let Some(previous) = previous
-        && let Some(target) = scene.targets.iter().find(|target| target.window == previous.window)
+        && let Some(target) = scene
+            .targets
+            .iter()
+            .find(|target| target.window == previous.window && Some(target.window) != excluded)
     {
         let retained = zone_frame(target.frame, previous.zone, fraction);
         if contains(retained, point, HYSTERESIS_POINTS) {
@@ -642,7 +676,7 @@ fn hit_test_available(
         })
     };
 
-    for target in &scene.targets {
+    for target in scene.targets.iter().filter(|target| Some(target.window) != excluded) {
         if contains(target.frame, point, 0.0)
             && let Some(intent) = intent_for(target, point)
             && !unavailable.contains(&(intent.window, intent.zone, intent.action))
@@ -676,11 +710,11 @@ fn hit_test_available(
         return None;
     }
 
-    let nearest = scene
-        .targets
-        .iter()
-        .enumerate()
-        .filter(|(_, target)| target.frame.size.width > 0.0 && target.frame.size.height > 0.0);
+    let nearest = scene.targets.iter().enumerate().filter(|(_, target)| {
+        Some(target.window) != excluded
+            && target.frame.size.width > 0.0
+            && target.frame.size.height > 0.0
+    });
     if unavailable.is_empty() {
         let (_, target) = nearest.min_by(|(a_order, a), (b_order, b)| {
             distance_to_rect_squared(a.frame, point)

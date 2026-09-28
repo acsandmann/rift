@@ -1275,6 +1275,8 @@ mod layout_library_tests {
         layout: &str,
     ) -> RuntimeWorkspaceData {
         RuntimeWorkspaceData {
+            workspace_id: crate::model::VirtualWorkspaceId::default(),
+            space: crate::sys::screen::SpaceId::new(1),
             id: id.to_owned(),
             index,
             name: name.to_owned(),

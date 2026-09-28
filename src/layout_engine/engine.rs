@@ -225,6 +225,126 @@ impl LayoutEngine {
         )
     }
 
+    /// Validate a prospective drop on a workspace-local tree before touching membership.
+    /// The regular relocation and target-drop primitives perform the committed operation.
+    pub(crate) fn relocate_window_with_drop(
+        &mut self,
+        windows: &mut WindowStore,
+        drop: &crate::layout_engine::WorkspaceDropRequest,
+    ) -> bool {
+        let Some(source_assignment) = windows.workspace_info_for_window(drop.window) else {
+            return false;
+        };
+        let source = source_assignment.workspace_id;
+        let source_space = source_assignment.space;
+        if self
+            .virtual_workspace_manager
+            .workspaces
+            .get(source)
+            .is_none_or(|ws| ws.space != source_space)
+        {
+            return false;
+        }
+        let destination = drop.workspace;
+        let Some(space) =
+            self.virtual_workspace_manager.workspaces.get(destination).map(|ws| ws.space)
+        else {
+            return false;
+        };
+        let floating = self.is_window_floating(drop.window);
+        let Some(layout) = self.workspace_layouts.active(space, destination) else {
+            return false;
+        };
+        let different = source != destination;
+        let prospective = if floating {
+            let Some(frame) = drop.frame else { return false };
+            if ![
+                frame.origin.x,
+                frame.origin.y,
+                frame.size.width,
+                frame.size.height,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+                || frame.size.width <= 0.0
+                || frame.size.height <= 0.0
+            {
+                return false;
+            }
+            if drop.target.is_some()
+                || (!different
+                    && self.get_floating_position(space, destination, drop.window) == Some(frame))
+            {
+                return false;
+            }
+            None
+        } else {
+            if drop.frame.is_some() {
+                return false;
+            }
+
+            if let Some((target, action)) = drop.target {
+                if target == drop.window
+                    || windows.workspace_for_window(space, target) != Some(destination)
+                    || self.is_window_floating(target)
+                {
+                    return false;
+                }
+                let Some(mut tree) = self.workspace_tree(destination).preview_clone() else {
+                    return false;
+                };
+                if different {
+                    tree.add_window_after_selection(layout, drop.window);
+                }
+                let before = tree.window_slot(layout, drop.window);
+                if !tree.apply_window_drop(layout, drop.window, target, action)
+                    || (!different
+                        && before.is_some()
+                        && before == tree.window_slot(layout, drop.window))
+                {
+                    return false;
+                }
+                tree.select_window(layout, drop.window);
+                Some(tree)
+            } else if different {
+                None // Generic relocation already inserts a rendered member.
+            } else {
+                return false;
+            }
+        };
+        // All fallible validation above; assignment cannot fail with these checked IDs.
+        if different
+            && !self.relocate_window_to_workspace(
+                windows,
+                (source_space, source),
+                (space, destination),
+                drop.window,
+                true,
+            )
+        {
+            return false;
+        }
+        if let Some(tree) = prospective {
+            *self.workspace_tree_mut(destination) = tree;
+        }
+        if self.focused_window == Some(drop.window) {
+            self.focused_window = None;
+        }
+        if let Some(frame) = drop.frame {
+            self.store_floating_position(space, destination, drop.window, frame);
+        }
+        self.virtual_workspace_manager.set_last_focused_window(
+            space,
+            destination,
+            Some(drop.window),
+        );
+        self.broadcast_windows_changed(windows, source_space);
+        if space != source_space {
+            self.broadcast_windows_changed(windows, space);
+        }
+        true
+    }
+
     /// Return the visible logical tiles eligible for drag targeting.
     /// Hidden members of stacked/grouped containers are excluded.
     pub(crate) fn drop_scene_windows(&self, space: SpaceId, source: WindowId) -> Vec<WindowId> {
@@ -2663,6 +2783,26 @@ impl LayoutEngine {
         )
     }
 
+    /// Scrolling strips expose their calculated coordinates before native offscreen parking.
+    pub(crate) fn logical_window_frames(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) -> HashMap<WindowId, CGRect> {
+        match (
+            self.workspace_tree(workspace),
+            self.workspace_layouts.active(space, workspace),
+        ) {
+            (LayoutSystemKind::Scrolling(system), Some(layout)) => system
+                .logical_frames(layout, screen, &self.window_layout_constraints, gaps)
+                .into_iter()
+                .collect(),
+            _ => HashMap::default(),
+        }
+    }
+
     pub fn calculate_layout_for_workspace(
         &self,
         window_store: &WindowStore,
@@ -3206,11 +3346,10 @@ impl LayoutEngine {
         self.ensure_workspace_layouts(target_space, target_screen_size);
         if !self.relocate_window_to_workspace(
             window_store,
-            source_space,
-            target_space,
-            source_workspace_id,
-            target_workspace_id,
+            (source_space, source_workspace_id),
+            (target_space, target_workspace_id),
             window_id,
+            false,
         ) {
             return EventResponse::default();
         }
@@ -3294,11 +3433,10 @@ impl LayoutEngine {
             }
             if self.relocate_window_to_workspace(
                 window_store,
-                source_space,
-                target_space,
-                source_workspace_id,
-                target_workspace_id,
+                (source_space, source_workspace_id),
+                (target_space, target_workspace_id),
                 window_id,
+                false,
             ) {
                 moved.push(window_id);
             }
@@ -3344,20 +3482,28 @@ impl LayoutEngine {
     fn relocate_window_to_workspace(
         &mut self,
         window_store: &mut WindowStore,
-        source_space: SpaceId,
-        target_space: SpaceId,
-        source_workspace_id: VirtualWorkspaceId,
-        target_workspace_id: VirtualWorkspaceId,
+        source: (SpaceId, VirtualWorkspaceId),
+        destination: (SpaceId, VirtualWorkspaceId),
         window_id: WindowId,
+        preserve_classification: bool,
     ) -> bool {
-        if matches!(
-            self.workspace_tree(source_workspace_id),
-            LayoutSystemKind::Floating(_)
-        ) || matches!(
-            self.workspace_tree(target_workspace_id),
-            LayoutSystemKind::Floating(_)
-        ) {
+        let (source_space, source_workspace_id) = source;
+        let (target_space, target_workspace_id) = destination;
+        let effective_floating = self.is_window_floating(window_id);
+        if !preserve_classification
+            && (matches!(
+                self.workspace_tree(source_workspace_id),
+                LayoutSystemKind::Floating(_)
+            ) || matches!(
+                self.workspace_tree(target_workspace_id),
+                LayoutSystemKind::Floating(_)
+            ))
+        {
             self.floating.remove_floating(window_id);
+        }
+        if preserve_classification && effective_floating && !self.floating.is_floating(window_id) {
+            self.remove_window_from_all_tiling_trees(window_id);
+            self.floating.add_floating(window_id);
         }
         let was_floating = self.floating.is_floating(window_id);
         if was_floating {
@@ -3383,7 +3529,22 @@ impl LayoutEngine {
         }
         if was_floating {
             self.floating_positions.remove_window(window_id);
-            self.floating.add_active(target_space, window_id.pid, window_id);
+            if preserve_classification
+                && matches!(
+                    self.workspace_tree(target_workspace_id),
+                    LayoutSystemKind::Floating(_)
+                )
+            {
+                self.floating.remove_floating(window_id);
+                if let Some(layout) =
+                    self.workspace_layouts.active(target_space, target_workspace_id)
+                {
+                    self.workspace_tree_mut(target_workspace_id)
+                        .add_window_after_selection(layout, window_id);
+                }
+            } else {
+                self.floating.add_active(target_space, window_id.pid, window_id);
+            }
             self.floating.set_last_focus(Some(window_id));
         } else if let Some(target_layout) =
             self.workspace_layouts.active(target_space, target_workspace_id)
@@ -5208,6 +5369,168 @@ mod tests {
             assert_eq!(engine.is_window_floating(wid), mode == LayoutMode::Floating);
         }
         assert_eq!(engine.active_workspace(space), Some(workspace));
+    }
+
+    fn overview_fixture() -> (LayoutEngine, WindowStore, crate::actor::reactor::OverviewDrop) {
+        let mut engine = test_engine();
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(95);
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::SpaceExposed(space, CGSize::new(1000.0, 800.0)),
+        );
+        let window = WindowId::new(6001, 1);
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::windows_observed(
+                space,
+                window.pid,
+                vec![window_layout_info(window, CGSize::new(500.0, 500.0))],
+                None,
+            ),
+        );
+        let workspaces = engine.virtual_workspace_manager.list_workspaces(space);
+        let drop = crate::actor::reactor::OverviewDrop {
+            window,
+            workspace: workspaces[1].0,
+            target: None,
+            frame: None,
+        };
+        (engine, store, drop)
+    }
+
+    #[test]
+    fn overview_drop_moves_membership_once_without_switching_workspace() {
+        let (mut engine, mut store, drop) = overview_fixture();
+        let active = engine.active_workspace(SpaceId::new(95));
+        assert!(engine.relocate_window_with_drop(&mut store, &drop));
+        assert_eq!(engine.active_workspace(SpaceId::new(95)), active);
+        let destination = store.workspace_for_window(SpaceId::new(95), drop.window).unwrap();
+        assert_eq!(destination, drop.workspace);
+        let layout = engine.workspace_layouts.active(SpaceId::new(95), destination).unwrap();
+        assert_eq!(
+            engine.workspace_tree(destination).selected_window(layout),
+            Some(drop.window)
+        );
+        assert!(
+            !engine.relocate_window_with_drop(&mut store, &drop),
+            "stale source rejects duplicate mouse-up"
+        );
+    }
+
+    #[test]
+    fn overview_invalid_drops_leave_membership_and_layout_unchanged() {
+        let (mut engine, mut store, drop) = overview_fixture();
+        let before = format!("{:?}{:?}", engine.virtual_workspace_manager, store);
+        let mut invalid = drop.clone();
+        invalid.workspace = VirtualWorkspaceId::default();
+        assert!(!engine.relocate_window_with_drop(&mut store, &invalid));
+        invalid = drop.clone();
+        invalid.window = WindowId::new(6001, 99);
+        assert!(!engine.relocate_window_with_drop(&mut store, &invalid));
+        invalid = drop.clone();
+        invalid.target = Some((
+            WindowId::new(6001, 99),
+            crate::layout_engine::WindowDropAction::Stack,
+        ));
+        assert!(!engine.relocate_window_with_drop(&mut store, &invalid));
+        invalid = drop.clone();
+        invalid.frame = Some(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0)));
+        assert!(!engine.relocate_window_with_drop(&mut store, &invalid));
+        assert_eq!(
+            format!("{:?}{:?}", engine.virtual_workspace_manager, store),
+            before
+        );
+    }
+
+    #[test]
+    fn overview_cross_space_drop_preserves_floating_classification_and_frame() {
+        let (mut engine, mut store, mut drop) = overview_fixture();
+        let destination_space = SpaceId::new(96);
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::SpaceExposed(destination_space, CGSize::new(1400.0, 900.0)),
+        );
+        engine.floating.add_floating(drop.window);
+        engine.remove_window_from_all_tiling_trees(drop.window);
+        drop.workspace = engine.active_workspace(destination_space).unwrap();
+        let frame = CGRect::new(CGPoint::new(1100.0, 50.0), CGSize::new(500.0, 400.0));
+        drop.frame = Some(frame);
+        assert!(engine.relocate_window_with_drop(&mut store, &drop));
+        let destination = store.workspace_for_window(destination_space, drop.window).unwrap();
+        assert!(engine.is_window_floating(drop.window));
+        assert_eq!(
+            engine.get_floating_position(destination_space, destination, drop.window),
+            Some(frame)
+        );
+        assert_eq!(store.workspace_for_window(SpaceId::new(95), drop.window), None);
+    }
+
+    #[test]
+    fn overview_tiled_drop_into_floating_layout_keeps_a_rendered_member() {
+        let (mut engine, mut store, drop) = overview_fixture();
+        let space = SpaceId::new(95);
+        engine.switch_workspace_layout_mode(&store, space, drop.workspace, LayoutMode::Floating);
+        assert!(engine.relocate_window_with_drop(&mut store, &drop));
+        let layout = engine.workspace_layouts.active(space, drop.workspace).unwrap();
+        assert!(engine.workspace_tree(drop.workspace).contains_window(layout, drop.window));
+        assert!(engine.is_window_floating(drop.window));
+    }
+
+    #[test]
+    fn overview_floating_drop_into_floating_layout_keeps_a_rendered_member() {
+        let (mut engine, mut store, mut drop) = overview_fixture();
+        let destination = engine.virtual_workspace_manager.list_workspaces(SpaceId::new(95))[1].0;
+        engine.switch_workspace_layout_mode(
+            &store,
+            SpaceId::new(95),
+            destination,
+            LayoutMode::Floating,
+        );
+        engine.floating.add_floating(drop.window);
+        engine.remove_window_from_all_tiling_trees(drop.window);
+        drop.frame = Some(CGRect::new(CGPoint::new(20.0, 30.0), CGSize::new(400.0, 300.0)));
+        assert!(engine.relocate_window_with_drop(&mut store, &drop));
+        let layout = engine.workspace_layouts.active(SpaceId::new(95), destination).unwrap();
+        assert!(engine.workspace_tree(destination).contains_window(layout, drop.window));
+        assert!(engine.is_window_floating(drop.window));
+        assert_eq!(
+            engine.get_floating_position(SpaceId::new(95), destination, drop.window),
+            drop.frame
+        );
+    }
+
+    #[test]
+    fn overview_drop_uses_existing_stack_and_neighbor_semantics() {
+        let (mut engine, mut store, mut drop) = overview_fixture();
+        let target = WindowId::new(6001, 2);
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::windows_observed(
+                SpaceId::new(95),
+                target.pid,
+                vec![
+                    window_layout_info(drop.window, CGSize::new(500.0, 500.0)),
+                    window_layout_info(target, CGSize::new(500.0, 500.0)),
+                ],
+                None,
+            ),
+        );
+        drop.workspace = store.workspace_for_window(SpaceId::new(95), drop.window).unwrap();
+        drop.target = Some((target, crate::layout_engine::WindowDropAction::Stack));
+        assert!(engine.relocate_window_with_drop(&mut store, &drop));
+        let workspace = store.workspace_for_window(SpaceId::new(95), drop.window).unwrap();
+        let layout = engine.workspace_layouts.active(SpaceId::new(95), workspace).unwrap();
+        assert!(engine.workspace_tree(workspace).parent_of_selection_is_stacked(layout));
+        drop.target = Some((
+            target,
+            crate::layout_engine::WindowDropAction::Insert(Direction::Left),
+        ));
+        assert!(engine.relocate_window_with_drop(&mut store, &drop));
+        assert!(
+            !engine.relocate_window_with_drop(&mut store, &drop),
+            "same position is a no-op"
+        );
     }
 
     #[test]

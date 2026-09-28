@@ -15,6 +15,8 @@ use crate::sys::window_server::WindowServerId;
 /// `rift_protocol::WorkspaceData` representation.
 #[derive(Debug, Clone)]
 pub struct RuntimeWorkspaceData {
+    pub workspace_id: crate::model::VirtualWorkspaceId,
+    pub space: SpaceId,
     pub id: String,
     pub index: usize,
     pub name: String,
@@ -26,6 +28,8 @@ pub struct RuntimeWorkspaceData {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeWindowData {
+    /// Unparked layout geometry for presentation; info.frame keeps its existing native semantics.
+    pub layout_frame: Option<objc2_core_foundation::CGRect>,
     pub id: WindowId,
     pub is_floating: bool,
     pub is_focused: bool,
@@ -185,6 +189,7 @@ impl<'de> Deserialize<'de> for RuntimeWindowData {
         };
 
         Ok(RuntimeWindowData {
+            layout_frame: None,
             id: helper.id,
             is_floating: helper.is_floating,
             is_focused: helper.is_focused,
@@ -291,6 +296,7 @@ mod tests {
             ax_subrole: None,
         };
         let data = RuntimeWindowData {
+            layout_frame: None,
             id: WindowId::new(123, 7),
             is_floating: true,
             is_focused: false,

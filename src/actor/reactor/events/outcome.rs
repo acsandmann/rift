@@ -96,6 +96,7 @@ pub(crate) struct ArrangeRequest {
     pub(crate) is_resize: bool,
     pub(crate) window_was_destroyed: bool,
     pub(crate) space_scope: Option<SpaceId>,
+    pub(crate) secondary_space_scope: Option<SpaceId>,
 }
 
 impl EventOutcome {
@@ -147,14 +148,15 @@ impl EventOutcome {
         self.layout_events.append(&mut other.layout_events);
         self.layout_responses.append(&mut other.layout_responses);
         if other.arrange.passes > 0 {
-            self.arrange.space_scope = if self.arrange.passes > 0 {
-                match (self.arrange.space_scope, other.arrange.space_scope) {
-                    (Some(existing), Some(other)) if existing == other => Some(existing),
-                    _ => None,
-                }
-            } else {
-                other.arrange.space_scope
-            };
+            if self.arrange.passes == 0 {
+                self.arrange.space_scope = other.arrange.space_scope;
+                self.arrange.secondary_space_scope = other.arrange.secondary_space_scope;
+            } else if (self.arrange.space_scope, self.arrange.secondary_space_scope)
+                != (other.arrange.space_scope, other.arrange.secondary_space_scope)
+            {
+                self.arrange.space_scope = None;
+                self.arrange.secondary_space_scope = None;
+            }
             self.arrange.passes = self.arrange.passes.saturating_add(other.arrange.passes).max(1);
             self.arrange.is_resize |= other.arrange.is_resize;
             self.arrange.window_was_destroyed |= other.arrange.window_was_destroyed;
@@ -173,6 +175,7 @@ impl EventOutcome {
                 is_resize,
                 window_was_destroyed: false,
                 space_scope: None,
+                secondary_space_scope: None,
             },
             refresh_layout_mode: true,
             ..Self::default()

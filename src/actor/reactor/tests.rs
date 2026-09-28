@@ -6768,3 +6768,159 @@ fn binding_mode_changes_update_query_state_before_broadcast() {
     reactor.handle_loop_event(Event::BindingModeChanged { mode: "resize".into() });
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn overview_drop_rejects_missing_window_workspace_and_display_before_mutation() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let window = WindowId::new(1, 1);
+    let workspaces = reactor.query_workspaces(Some(space));
+    let source = reactor.state.windows.workspace_for_window(space, window).unwrap();
+    let destination = workspaces.iter().find(|ws| ws.workspace_id != source).unwrap();
+    let intent = OverviewDrop {
+        window,
+        workspace: destination.workspace_id,
+        target: None,
+        frame: None,
+    };
+    for (index, mut invalid) in
+        [intent.clone(), intent.clone(), intent.clone()].into_iter().enumerate()
+    {
+        match index {
+            0 => invalid.window = WindowId::new(1, 99),
+            1 => invalid.workspace = crate::model::VirtualWorkspaceId::default(),
+            _ => {
+                invalid.target = Some((
+                    WindowId::new(1, 99),
+                    crate::layout_engine::WindowDropAction::Stack,
+                ))
+            }
+        }
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        let outcome = reactor
+            .dispatch_workflow(Event::OverviewDrop { intent: invalid, reply })
+            .unwrap();
+        assert!(!rx.recv().unwrap());
+        assert_eq!(outcome.arrange.passes, 0);
+        assert!(outcome.pre_layout_window_frame_writes.is_empty());
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(space, window),
+            Some(source)
+        );
+    }
+    let screens = std::mem::take(&mut reactor.space_state.screens);
+    let removed = intent.clone();
+    let (reply, rx) = std::sync::mpsc::sync_channel(1);
+    let outcome = reactor
+        .dispatch_workflow(Event::OverviewDrop { intent: removed, reply })
+        .unwrap();
+    assert!(!rx.recv().unwrap());
+    assert_eq!(outcome.arrange.passes, 0);
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(space, window),
+        Some(source)
+    );
+    let (reply, rx) = std::sync::mpsc::sync_channel(1);
+    reactor.space_state.screens = screens;
+    reactor.handle_event(Event::OverviewDrop { intent, reply });
+    assert!(rx.recv().unwrap());
+    assert_ne!(
+        reactor.state.windows.workspace_for_window(space, window),
+        Some(source)
+    );
+}
+
+#[test]
+fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
+    let (mut apps, mut reactor) = test_context();
+    let source = SpaceId::new(1);
+    let destination = SpaceId::new(2);
+    reactor.handle_event(space_state_event(
+        vec![
+            CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.)),
+            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1200., 900.)),
+            CGRect::new(CGPoint::new(2200., 0.), CGSize::new(1000., 800.)),
+        ],
+        vec![Some(source), Some(destination), Some(SpaceId::new(3))],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let window = WindowId::new(1, 1);
+    let target = reactor.query_workspaces(Some(destination))[1].workspace_id;
+    let intent = OverviewDrop {
+        window,
+        workspace: target.clone(),
+        target: None,
+        frame: None,
+    };
+    let (reply, rx) = std::sync::mpsc::sync_channel(1);
+    let outcome = reactor.dispatch_workflow(Event::OverviewDrop { intent, reply }).unwrap();
+    assert!(rx.recv().unwrap());
+    assert_eq!(outcome.arrange.passes, 1);
+    assert_eq!(outcome.arrange.space_scope, Some(destination));
+    assert_eq!(outcome.arrange.secondary_space_scope, Some(source));
+    assert_eq!(outcome.pre_layout_window_frame_writes.len(), 1);
+    assert!(outcome.pre_layout_window_frame_writes[0].frame.origin.x >= 1000.0);
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(destination, window).unwrap(),
+        target
+    );
+    assert_eq!(reactor.state.windows.workspace_for_window(source, window), None);
+}
+
+#[test]
+fn overview_selects_exact_display_workspace_without_back_and_forth() {
+    let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
+    settings.workspace_auto_back_and_forth = true;
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    reactor.handle_event(space_state_event(
+        vec![
+            CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
+        ],
+        vec![Some(left_space), Some(right_space)],
+    ));
+    let right = reactor.query_workspaces(Some(right_space));
+    let left_active = reactor.layout_manager.layout_engine.active_workspace(left_space);
+    let target = right[1].workspace_id;
+    reactor
+        .dispatch_workflow(Event::OverviewSelectWorkspace {
+            display: "test-display-1".into(),
+            workspace: target.clone(),
+        })
+        .unwrap();
+    let selected = reactor.layout_manager.layout_engine.active_workspace(right_space);
+    assert_ne!(selected, Some(right[0].workspace_id));
+    assert_eq!(selected, Some(target));
+    let repeated = reactor
+        .dispatch_workflow(Event::OverviewSelectWorkspace {
+            display: "test-display-1".into(),
+            workspace: target,
+        })
+        .unwrap();
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        selected
+    );
+    assert_eq!(repeated.arrange.passes, 0);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(left_space),
+        left_active
+    );
+    reactor
+        .dispatch_workflow(Event::OverviewSelectWorkspace {
+            display: "test-display-1".into(),
+            workspace: crate::model::VirtualWorkspaceId::default(),
+        })
+        .unwrap();
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        selected
+    );
+}

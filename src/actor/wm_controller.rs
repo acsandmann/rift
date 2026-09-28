@@ -211,7 +211,7 @@ impl WmController {
         events_tx: reactor::Sender,
         input_tx: input::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
-        mission_control_tx: crate::actor::mission_control::Sender,
+        mission_control_tx: Option<crate::actor::mission_control::Sender>,
         window_tx_store: Option<WindowTxStore>,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
@@ -225,7 +225,7 @@ impl WmController {
             events_tx,
             input_tx,
             stack_line_tx: Some(stack_line_tx),
-            mission_control_tx: Some(mission_control_tx),
+            mission_control_tx,
             window_tx_store,
             receiver,
             sender: sender.clone(),
@@ -249,16 +249,16 @@ impl WmController {
         use self::WmCommand::*;
         use self::WmEvent::*;
 
-        if matches!(
-            event,
-            Command(Wm(crate::actor::wm_controller::WmCmd::NextWorkspace))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::PrevWorkspace))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToWorkspace(_)))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToLastWorkspace))
-                | SpaceStateUpdated(..)
-        ) && let Some(tx) = &self.mission_control_tx
+        let refresh_overview = matches!(
+            &event,
+            Command(Wm(MoveWindowToWorkspace(_)))
+                | Command(ReactorCommand(_))
+                | Command(ConfiguredLayout(_))
+        );
+        if matches!(&event, SpaceStateUpdated(..))
+            && let Some(tx) = &self.mission_control_tx
         {
-            tx.send(mission_control::Event::RefreshCurrentWorkspace);
+            tx.send(mission_control::Event::Dismiss);
         }
 
         match event {
@@ -320,6 +320,15 @@ impl WmController {
                 }
             }
             ConfigUpdated(new_cfg) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::Configure(
+                        new_cfg.settings.ui.mission_control.clone(),
+                    ));
+                }
+                if !new_cfg.settings.ui.mission_control.enabled {
+                    self.mission_control_tx.take();
+                    self.input_tx.send(input::Request::ReleaseMissionControl);
+                }
                 self.config.config = new_cfg;
 
                 _ = self.input_tx.send(input::Request::ConfigUpdated(self.config.config.clone()));
@@ -392,14 +401,10 @@ impl WmController {
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
             }
-            Command(Wm(ShowMissionControlAll)) => {
+            // Deprecated Current spelling forwards to the canonical Overview.
+            Command(Wm(ShowMissionControlAll | ShowMissionControlCurrent)) => {
                 if let Some(tx) = &self.mission_control_tx {
                     let _ = tx.try_send(mission_control::Event::ShowAll);
-                }
-            }
-            Command(Wm(ShowMissionControlCurrent)) => {
-                if let Some(tx) = &self.mission_control_tx {
-                    let _ = tx.try_send(mission_control::Event::ShowCurrent);
                 }
             }
             Command(Wm(DismissMissionControl)) => {
@@ -423,6 +428,9 @@ impl WmController {
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
             }
+        }
+        if refresh_overview && let Some(tx) = &self.mission_control_tx {
+            tx.send(mission_control::Event::RefreshCurrentWorkspace);
         }
     }
 
