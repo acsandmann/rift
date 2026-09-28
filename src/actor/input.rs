@@ -193,7 +193,9 @@ impl Input {
             keyed_disable,
         );
         if self.mission_control_active.get() {
-            mask |= (1u64 << CGEventType::LeftMouseDown.0) | (1u64 << CGEventType::LeftMouseUp.0);
+            mask |= (1u64 << CGEventType::LeftMouseDown.0)
+                | (1u64 << CGEventType::LeftMouseUp.0)
+                | (1u64 << CGEventType::ScrollWheel.0);
         }
         if state.event_processing_enabled && state.mouse_features_enabled {
             if state.mouse_settings.action1 != MouseAction::None {
@@ -615,7 +617,11 @@ impl Input {
     fn on_event(&self, event_type: CGEventType, event: &CGEvent) -> bool {
         match event_type {
             ty if ty.0 == gesture::CGS_EVENT_GESTURE || ty.0 == gesture::CGS_EVENT_DOCK_CONTROL => {
-                self.on_gesture(ty, event)
+                if self.mission_control_active.get() {
+                    false
+                } else {
+                    self.on_gesture(ty, event)
+                }
             }
             CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged => {
                 if event::is_rift_synthetic_event(event) {
@@ -635,6 +641,35 @@ impl Input {
                     }
                 }
                 self.handle_keyboard_event(event_type, event, &mut self.state.borrow_mut())
+            }
+            CGEventType::ScrollWheel if self.mission_control_active.get() => {
+                let continuous = CGEvent::integer_value_field(
+                    Some(event),
+                    CGEventField::ScrollWheelEventIsContinuous,
+                ) != 0;
+                let (x, y, scale) = if continuous {
+                    (
+                        CGEventField::ScrollWheelEventPointDeltaAxis2,
+                        CGEventField::ScrollWheelEventPointDeltaAxis1,
+                        1.0,
+                    )
+                } else {
+                    (
+                        CGEventField::ScrollWheelEventDeltaAxis2,
+                        CGEventField::ScrollWheelEventDeltaAxis1,
+                        16.0,
+                    )
+                };
+                self.send_overview(super::mission_control::Event::Input(
+                    super::mission_control::Input::Scroll {
+                        point: CGEvent::location(Some(event)),
+                        delta: CGPoint::new(
+                            CGEvent::integer_value_field(Some(event), x) as f64 * scale,
+                            CGEvent::integer_value_field(Some(event), y) as f64 * scale,
+                        ),
+                    },
+                ));
+                false
             }
             CGEventType::MouseMoved => self.on_mouse_moved(event, CGEvent::location(Some(event))),
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
@@ -1424,6 +1459,39 @@ mod tests {
     }
 
     #[test]
+    fn overview_consumes_scroll_and_routes_point_deltas() {
+        let (input, _, _) = input();
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        input.mission_control_active.set(true);
+        let event = CGEvent::new_scroll_wheel_event2(
+            None,
+            objc2_core_graphics::CGScrollEventUnit::Pixel,
+            2,
+            -60,
+            12,
+            0,
+        )
+        .unwrap();
+        CGEvent::set_location(Some(&event), CGPoint::new(30.0, 40.0));
+        assert!(!input.on_event(CGEventType::ScrollWheel, &event));
+        let (
+            _,
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::Scroll { point, delta },
+            ),
+        ) = rx.try_recv().unwrap()
+        else {
+            panic!("expected Overview scroll")
+        };
+        assert_eq!(point, CGPoint::new(30.0, 40.0));
+        assert_eq!(delta, CGPoint::new(12.0, -60.0));
+        input.mission_control_active.set(false);
+        assert!(input.on_event(CGEventType::ScrollWheel, &event));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn absent_overview_sender_safely_ignores_commands() {
         let (input, _, _) = input();
         input.mission_control_tx.borrow_mut().take();
@@ -1499,6 +1567,7 @@ mod tests {
         input.state.borrow_mut().mouse_features_enabled = false;
         input.mission_control_active.set(true);
         let mask = input.desired_event_mask();
+        assert_ne!(mask & (1u64 << CGEventType::ScrollWheel.0), 0);
         assert_ne!(mask & (1u64 << CGEventType::KeyDown.0), 0);
         assert_eq!(mask & (1u64 << CGEventType::KeyUp.0), 0);
         assert_eq!(mask & (1u64 << CGEventType::RightMouseDown.0), 0);

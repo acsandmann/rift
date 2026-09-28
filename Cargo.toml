@@ -126,6 +126,7 @@ objc2-core-text = { version = "0.3.2", default-features = false, features = [
 ]}
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
 	"CGColor",
+	"CGBitmapContext",
 	"CGDirectDisplay",
 	"CGError",
 	"CGEvent",
@@ -206,7 +207,6 @@ rift-client = { path = "crates/rift-client" }
 rift-protocol = { path = "crates/rift-protocol" }
 
 [dev-dependencies]
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGBitmapContext"] }
 pretty_assertions = "1.4.0"
 tokio = { version = "1.35.1", features = ["sync", "tokio-macros"] }
 test-log = { version = "0.2.16", default-features = false }

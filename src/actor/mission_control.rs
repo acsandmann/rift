@@ -4,10 +4,12 @@ use objc2_foundation::MainThreadMarker;
 
 use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
-use crate::ui::mission_control::OverviewSession;
+use crate::sys::dispatch::DispatchExt;
+use crate::ui::mission_control::{OverviewSession, RememberedPreviewCache};
 
 #[derive(Debug)]
 pub enum Event {
+    StartPreviews(u64),
     ShowAll,
     ShowCurrent,
     Dismiss,
@@ -28,6 +30,7 @@ pub enum Input {
     Cycle(bool),
     Click(CGPoint),
     Move(CGPoint),
+    Scroll { point: CGPoint, delta: CGPoint },
 }
 
 impl Input {
@@ -55,6 +58,8 @@ pub fn channel_if_enabled(settings: &MissionControlSettings) -> Option<(Sender, 
 pub struct MissionControlActor {
     settings: MissionControlSettings,
     rx: Receiver,
+    tx: Sender,
+    remembered: Option<RememberedPreviewCache>,
     reactor: reactor::ReactorHandle,
     session: Option<OverviewSession>,
     generation: u64,
@@ -66,6 +71,7 @@ impl MissionControlActor {
     pub fn new(
         settings: MissionControlSettings,
         rx: Receiver,
+        tx: Sender,
         reactor: reactor::ReactorHandle,
         mtm: MainThreadMarker,
         input_tx: super::input::Sender,
@@ -73,6 +79,8 @@ impl MissionControlActor {
         Self {
             settings,
             rx,
+            tx,
+            remembered: None,
             reactor,
             session: None,
             generation: 0,
@@ -97,7 +105,7 @@ impl MissionControlActor {
                 } => {
                     if let Some((_, result)) = result {
                         let current = result.window_id().and_then(|id| self.reactor.query_window_info(id));
-                        if let Some(session) = &mut self.session { session.preview_ready(result, current.as_ref()); }
+                        if let Some(session) = &mut self.session { session.preview_ready(result, current.as_ref(), &mut self.remembered); }
                     }
                 }
             }
@@ -112,6 +120,15 @@ impl MissionControlActor {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::StartPreviews(generation) => {
+                if let Some(session) = &mut self.session {
+                    session.start_previews(
+                        generation,
+                        self.settings.window_previews,
+                        self.remembered.as_ref(),
+                    );
+                }
+            }
             Event::ShowAll | Event::ShowCurrent => {
                 if self.session.is_some() {
                     self.close();
@@ -122,7 +139,15 @@ impl MissionControlActor {
                         self.mtm,
                         &self.settings,
                         self.generation,
+                        &mut self.remembered,
                     );
+                    if self.session.is_some() && self.settings.window_previews {
+                        dispatchr::queue::main().after_f_s(
+                            dispatchr::time::Time::NOW,
+                            (self.tx.clone(), self.generation),
+                            |(tx, generation)| tx.send(Event::StartPreviews(generation)),
+                        );
+                    }
                     self.input_tx.send(super::input::Request::SetMissionControlActive(
                         self.session.is_some(),
                     ));
@@ -131,11 +156,17 @@ impl MissionControlActor {
             Event::Dismiss | Event::RefreshCurrentWorkspace => self.close(),
             Event::Configure(settings) => {
                 self.close();
+                if !settings.enabled || !settings.window_previews {
+                    self.remembered = None;
+                }
                 self.settings = settings;
             }
             Event::Input(Input::Dismiss) => self.close(),
             Event::Input(input) => {
-                let action = self.session.as_mut().and_then(|session| session.input(input));
+                let action = self
+                    .session
+                    .as_mut()
+                    .and_then(|session| session.input(input, self.remembered.as_ref()));
                 if let Some((display, selection, sys_id)) = action {
                     self.close();
                     self.reactor.send(reactor::Event::Command(reactor::Command::Reactor(

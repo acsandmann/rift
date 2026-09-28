@@ -324,10 +324,11 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         stack_line_hit_rects.clone(),
     );
 
-    let mission_control = mc_channel.map(|(_tx, rx)| {
+    let mission_control = mc_channel.map(|(tx, rx)| {
         MissionControlActor::new(
             config.settings.ui.mission_control.clone(),
             rx,
+            tx,
             reactor.clone(),
             mtm,
             input_tx.clone(),
