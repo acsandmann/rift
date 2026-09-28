@@ -54,6 +54,7 @@ pub(crate) fn analyze_space_snapshot(
         && current_effective_active_spaces == &effective_active_spaces
         && current.display_space_ids == incoming.display_space_ids
         && current.last_user_space_by_display == incoming.last_user_space_by_display
+        && current.membership_complete == incoming.membership_complete
         && !active_window_membership_changed;
     let invalidates_pending_targets = incoming.display_set_changed
         || incoming.should_force_refresh_layout

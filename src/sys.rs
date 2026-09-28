@@ -12,7 +12,6 @@ mod cocoa;
 
 pub mod cgs_window;
 pub mod dispatch;
-pub mod display_churn;
 pub mod display_link;
 pub mod enhanced_ui;
 pub mod event;

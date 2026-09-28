@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use super::geometry::{CGRectDef, CGSizeDef};
 use crate::actor::app::WindowId;
 #[cfg(test)]
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
@@ -38,6 +38,7 @@ static G_CONNECTION: Lazy<i32> = Lazy::new(|| unsafe { SLSMainConnectionID() });
 static LAST_WINDOWSERVER_ACTIVITY_US: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 thread_local! {
+    static TEST_FAILED_SPACE_QUERIES: RefCell<HashSet<u64>> = RefCell::new(HashSet::default());
     static TEST_SPACE_WINDOW_LIST_OVERRIDE: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
     static TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE: RefCell<HashMap<u64, Vec<u32>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_SPACE_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -735,21 +736,36 @@ pub fn space_window_list_for_connection(
     owner: u32,
     include_minimized: bool,
 ) -> Vec<u32> {
+    try_space_window_list_for_connection(spaces, owner, include_minimized).unwrap_or_default()
+}
+
+/// None means the native query failed, not that the Space contains no windows.
+pub fn try_space_window_list_for_connection(
+    spaces: &[u64],
+    owner: u32,
+    include_minimized: bool,
+) -> Option<Vec<u32>> {
     #[cfg(test)]
     TEST_WINDOW_ORDER_QUERY_COUNT.with(|count| count.set(count.get() + 1));
+    #[cfg(test)]
+    if TEST_FAILED_SPACE_QUERIES
+        .with(|failed| spaces.iter().any(|space| failed.borrow().contains(space)))
+    {
+        return None;
+    }
     #[cfg(test)]
     if spaces.len() == 1
         && let Some(override_ids) = TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE
             .with(|ids| ids.borrow().get(&spaces[0]).cloned())
     {
         let _ = (owner, include_minimized);
-        return override_ids;
+        return Some(override_ids);
     }
 
     #[cfg(test)]
     if let Some(override_ids) = TEST_SPACE_WINDOW_LIST_OVERRIDE.with(|ids| ids.borrow().clone()) {
         let _ = (spaces, owner, include_minimized);
-        return override_ids;
+        return Some(override_ids);
     }
 
     let cf_space_array = cf_array_from_u64s(spaces);
@@ -770,20 +786,18 @@ pub fn space_window_list_for_connection(
     };
 
     if window_list_ref.is_null() {
-        return Vec::new();
+        return None;
     }
 
     let expected = (unsafe { &*window_list_ref }).len() as i32;
     if expected == 0 {
         unsafe { CFRelease(window_list_ref as *mut CFType) };
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     let iterator = WindowIterator::new_from_cfarray(window_list_ref, 0);
     unsafe { CFRelease(window_list_ref as *mut CFType) };
-    let Some(iterator) = iterator else {
-        return Vec::new();
-    };
+    let iterator = iterator?;
 
     let mut windows = Vec::with_capacity(expected as usize);
 
@@ -800,7 +814,7 @@ pub fn space_window_list_for_connection(
         }
     }
 
-    windows
+    Some(windows)
 }
 
 /// Resolve the actual key window on `space` from WindowServer state.
@@ -972,4 +986,15 @@ pub fn window_space_query_count() -> usize {
 #[cfg(test)]
 pub fn window_order_query_count() -> usize {
     TEST_WINDOW_ORDER_QUERY_COUNT.with(|count| count.get())
+}
+
+#[cfg(test)]
+pub fn set_space_membership_query_failed(space: u64, failed: bool) {
+    TEST_FAILED_SPACE_QUERIES.with(|spaces| {
+        if failed {
+            spaces.borrow_mut().insert(space);
+        } else {
+            spaces.borrow_mut().remove(&space);
+        }
+    });
 }

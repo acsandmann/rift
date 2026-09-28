@@ -355,21 +355,14 @@ pub enum Event {
     /// Forwarded by the spaces actor after wake has been observed.
     ///
     /// The spaces actor is the authority for sleep/lock/display lifecycle.
-    /// The reactor uses this only to reopen refresh gating and resubscribe
-    /// WindowServer notifications once the topology authority says wake
-    /// processing has advanced.
+    /// The reactor resubscribes notifications and suppresses synthetic activation;
+    /// topology authority arrives separately in revisioned observations.
     SystemWoke,
-    #[serde(skip)]
-    SystemWillSleep,
-    #[serde(skip)]
-    SessionDidResignActive,
     #[serde(skip)]
     SessionDidBecomeActive,
 
     #[serde(skip)]
-    DisplayChurnBegin,
-    #[serde(skip)]
-    DisplayChurnEnd,
+    TopologyInvalidated(u64),
 
     #[serde(skip)]
     MissionControlNativeEntered,
@@ -438,7 +431,7 @@ pub struct Reactor {
     mission_control_manager: managers::MissionControlManager,
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
-    refresh_quarantine_manager: managers::RefreshQuarantineManager,
+    suppress_auto_workspace_switch_until_input: bool,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     startup_ready: Option<oneshot::Sender<()>>,
@@ -552,7 +545,6 @@ impl Reactor {
                 mission_control_state: MissionControlState::Inactive,
             },
             window_inventory_manager: managers::WindowInventoryManager {
-                topology_revision: 0,
                 next_request_id: 0,
                 in_flight: HashMap::default(),
                 pending: HashSet::default(),
@@ -562,15 +554,7 @@ impl Reactor {
                 stale_cleanup_state: StaleCleanupState::Enabled,
                 refocus_state: RefocusState::None,
             },
-            refresh_quarantine_manager: managers::RefreshQuarantineManager {
-                sleeping: false,
-                session_inactive: false,
-                display_churn_active: false,
-                awaiting_post_wake_snapshot: false,
-                awaiting_post_session_snapshot: false,
-                pending_inventory_refresh: false,
-                suppress_auto_workspace_switch_until_input: false,
-            },
+            suppress_auto_workspace_switch_until_input: false,
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
@@ -596,20 +580,13 @@ impl Reactor {
         self.active_spaces.iter().copied()
     }
 
-    fn advance_window_inventory_revision_if_needed(&mut self, incoming: &ForwardedSpaceState) {
-        let topology_changed = self.space_state.screens != incoming.screens
-            || self.space_state.active_spaces != incoming.active_spaces
-            || self.space_state.display_space_ids != incoming.display_space_ids
-            || self.space_state.active_window_spaces != incoming.active_window_spaces;
-        if !topology_changed {
+    fn invalidate_native_topology(&mut self, revision: u64) {
+        if revision <= self.space_state.revision {
             return;
         }
-
-        self.window_inventory_manager.topology_revision =
-            self.window_inventory_manager.topology_revision.wrapping_add(1);
-        self.window_inventory_manager
-            .pending
-            .extend(self.window_inventory_manager.in_flight.keys().copied());
+        self.space_state.revision = revision;
+        self.space_state.authoritative = false;
+        self.defer_window_inventory_refresh();
     }
 
     fn abandon_window_inventories_from_instability(&mut self) {
@@ -627,7 +604,10 @@ impl Reactor {
     }
 
     fn request_window_inventory(&mut self, pid: pid_t) {
-        if self.refreshes_blocked() || self.window_inventory_manager.in_flight.contains_key(&pid) {
+        if self.refreshes_blocked()
+            || self.pending_space_change_manager.pending_space_change.is_some()
+            || self.window_inventory_manager.in_flight.contains_key(&pid)
+        {
             self.window_inventory_manager.pending.insert(pid);
             return;
         }
@@ -640,7 +620,7 @@ impl Reactor {
             self.window_inventory_manager.next_request_id.wrapping_add(1);
         let token = WindowInventoryToken {
             request_id: self.window_inventory_manager.next_request_id,
-            topology_revision: self.window_inventory_manager.topology_revision,
+            topology_revision: self.space_state.revision,
         };
         if app.handle.send(Request::RefreshWindowInventory(token)).is_ok() {
             self.window_inventory_manager.in_flight.insert(pid, token);
@@ -667,7 +647,8 @@ impl Reactor {
 
         let accepted = successful
             && !self.refreshes_blocked()
-            && token.topology_revision == self.window_inventory_manager.topology_revision;
+            && self.pending_space_change_manager.pending_space_change.is_none()
+            && token.topology_revision == self.space_state.revision;
         if !accepted && successful {
             self.window_inventory_manager.pending.insert(pid);
         }
@@ -810,38 +791,15 @@ impl Reactor {
     }
 
     fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
-        let mut queried = HashMap::default();
-        for space in self.iter_active_spaces() {
-            for wsid in window_server::space_window_list_for_connection(&[space.get()], 0, false)
-                .into_iter()
-                .map(WindowServerId::new)
-            {
-                queried.entry(wsid).or_insert(space);
-            }
-        }
-
-        // A refresh can be partial while WindowServer is waking. Keep the last
-        // forwarded per-space sample in that case, but never use the global
-        // visible-window union as a substitute for querying each active space.
-        let membership = if queried.is_empty() {
-            self.space_state.active_window_spaces.clone()
-        } else {
-            queried
-        };
-
-        let mut membership: Vec<_> = membership
-            .into_iter()
-            .map(|(wsid, space)| (wsid, self.resolve_native_space(wsid, Some(space))))
+        let mut membership: Vec<_> = self
+            .space_state
+            .active_window_spaces
+            .iter()
+            .filter(|(_, space)| self.is_space_active(**space))
+            .map(|(&wsid, &space)| (wsid, Some(space)))
             .collect();
         membership.sort_by_key(|(wsid, _)| *wsid);
         membership
-    }
-
-    fn has_known_windows_for_active_spaces(&self) -> bool {
-        self.state.windows.iter_windows().any(|(wid, _)| {
-            self.authoritative_space_for_window_id(wid)
-                .is_some_and(|space| self.is_space_active(space))
-        })
     }
 
     fn refresh_active_space_window_membership(
@@ -851,12 +809,7 @@ impl Reactor {
         let active_wsids: HashSet<WindowServerId> =
             active_windows.iter().map(|(wsid, _)| *wsid).collect();
 
-        // An empty active-space list is valid, but an empty WS-id result while we
-        // already know about windows assigned to the active space is typically the
-        // transient post-wake race on same-display space switches. Preserve the
-        // existing visibility basis in that case and let the follow-up AX refresh
-        // reconcile instead of blanking the workspace immediately.
-        if active_wsids.is_empty() && self.has_known_windows_for_active_spaces() {
+        if active_wsids.is_empty() && !self.space_state.membership_complete {
             return;
         }
 
@@ -1083,7 +1036,7 @@ impl Reactor {
             return;
         }
         if let Event::MouseMoved(wsid) = &event {
-            self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = false;
+            self.suppress_auto_workspace_switch_until_input = false;
             if let Some(window) = self.state.windows.tracked_window_id(*wsid)
                 && self.main_window() == Some(window)
                 && self.layout_manager.layout_engine.focused_window() == Some(window)
@@ -1099,12 +1052,8 @@ impl Reactor {
                 return;
             }
         }
-        if self.should_quarantine_space_lifecycle_event(&event) {
-            trace!(?event, state = ?self.refresh_quarantine_manager.state(), "quarantined space lifecycle event");
-            return;
-        }
-        if self.should_quarantine_during_display_churn(&event) {
-            trace!(?event, "quarantined during display churn");
+        if self.should_quarantine_unstable_topology(&event) {
+            trace!(?event, "quarantined while native topology is unstable");
             return;
         }
         Self::note_windowserver_activity(&event);
@@ -1165,8 +1114,8 @@ impl Reactor {
         )
     }
 
-    fn should_quarantine_during_display_churn(&self, event: &Event) -> bool {
-        if !crate::sys::display_churn::is_active() {
+    fn should_quarantine_unstable_topology(&self, event: &Event) -> bool {
+        if !self.refreshes_blocked() {
             return false;
         }
 
@@ -1181,59 +1130,29 @@ impl Reactor {
                 | Event::WindowMinimized(..)
                 | Event::WindowDeminiaturized(..)
                 | Event::WindowTitleChanged(..)
-                | Event::WindowsDiscovered { .. }
                 | Event::SpaceCreated(..)
                 | Event::SpaceDestroyed(..)
         )
     }
 
-    fn should_quarantine_space_lifecycle_event(&self, event: &Event) -> bool {
-        self.refreshes_blocked()
-            && matches!(event, Event::SpaceCreated(..) | Event::SpaceDestroyed(..))
-    }
-
-    fn refreshes_blocked(&self) -> bool { self.refresh_quarantine_manager.blocks_refreshes() }
+    fn refreshes_blocked(&self) -> bool { !self.space_state.authoritative }
 
     fn defer_window_inventory_refresh(&mut self) {
-        self.refresh_quarantine_manager.pending_inventory_refresh = true;
+        self.window_inventory_manager
+            .pending
+            .extend(self.app_manager.apps.keys().copied());
     }
 
     fn flush_deferred_window_inventory_refresh(&mut self) {
         if self.refreshes_blocked() {
             return;
         }
-
-        if self.refresh_quarantine_manager.pending_inventory_refresh {
-            self.refresh_quarantine_manager.pending_inventory_refresh = false;
-            self.request_window_inventories();
+        let pending: Vec<_> = self.window_inventory_manager.pending.iter().copied().collect();
+        for pid in pending {
+            if !self.window_inventory_manager.in_flight.contains_key(&pid) {
+                self.request_window_inventory(pid);
+            }
         }
-    }
-
-    // All lifecycle churn is upstreamed through the spaces actor. The reactor
-    // only remembers that one visibility refresh is owed, then flushes it once
-    // every upstream gate is open again.
-    fn request_refresh_when_spaces_actor_stabilizes(&mut self) {
-        self.defer_window_inventory_refresh();
-        self.flush_deferred_window_inventory_refresh();
-    }
-
-    fn release_post_instability_quarantine_after_authoritative_snapshot(&mut self) {
-        let released_wake = self.refresh_quarantine_manager.awaiting_post_wake_snapshot;
-        let released_session = self.refresh_quarantine_manager.awaiting_post_session_snapshot;
-
-        if !released_wake && !released_session {
-            return;
-        }
-
-        self.refresh_quarantine_manager.awaiting_post_wake_snapshot = false;
-        self.refresh_quarantine_manager.awaiting_post_session_snapshot = false;
-        if released_wake {
-            self.refresh_quarantine_manager.sleeping = false;
-        }
-        if released_session {
-            self.refresh_quarantine_manager.session_inactive = false;
-        }
-        self.flush_deferred_window_inventory_refresh();
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -1293,42 +1212,20 @@ impl Reactor {
             event,
             Event::MouseUp(_) | Event::MouseMoved(_) | Event::Command(_)
         ) {
-            self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = false;
+            self.suppress_auto_workspace_switch_until_input = false;
         }
 
         match event {
-            Event::SystemWillSleep => {
-                self.refresh_quarantine_manager.sleeping = true;
-                self.refresh_quarantine_manager.awaiting_post_wake_snapshot = false;
+            Event::TopologyInvalidated(revision) => {
+                self.invalidate_native_topology(revision);
                 return Ok(EventOutcome::default());
             }
             Event::SystemWoke => {
-                self.refresh_quarantine_manager.sleeping = true;
-                self.refresh_quarantine_manager.awaiting_post_wake_snapshot = true;
-                self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = true;
-                let outcome = system_workflow::handle_system_woke()?;
-                self.defer_window_inventory_refresh();
-                return Ok(outcome);
-            }
-            Event::SessionDidResignActive => {
-                self.refresh_quarantine_manager.session_inactive = true;
-                self.refresh_quarantine_manager.awaiting_post_session_snapshot = false;
-                return Ok(EventOutcome::default());
+                self.suppress_auto_workspace_switch_until_input = true;
+                return Ok(system_workflow::handle_system_woke()?);
             }
             Event::SessionDidBecomeActive => {
-                self.refresh_quarantine_manager.session_inactive = true;
-                self.refresh_quarantine_manager.awaiting_post_session_snapshot = true;
-                self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = true;
-                self.defer_window_inventory_refresh();
-                return Ok(EventOutcome::default());
-            }
-            Event::DisplayChurnBegin => {
-                self.refresh_quarantine_manager.display_churn_active = true;
-                return Ok(EventOutcome::default());
-            }
-            Event::DisplayChurnEnd => {
-                self.refresh_quarantine_manager.display_churn_active = false;
-                self.request_refresh_when_spaces_actor_stabilizes();
+                self.suppress_auto_workspace_switch_until_input = true;
                 return Ok(EventOutcome::default());
             }
             _ => {}
@@ -1768,36 +1665,23 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::SpaceStateChanged(space_state) => {
-                self.advance_window_inventory_revision_if_needed(&space_state);
-                let releases_lifecycle_refresh_quarantine =
-                    space_state.releases_lifecycle_refresh_quarantine;
-                // The spaces actor marks every coherent snapshot as an
-                // acknowledgement of the display-churn gate, so releasing it is an
-                // edge and not a level: act only while the gate is actually held,
-                // or the deferred all-app refresh fires on every snapshot.
-                let display_churn_active = self.refresh_quarantine_manager.display_churn_active;
-                let releases_display_churn_refresh_quarantine =
-                    space_state.releases_display_churn_refresh_quarantine && display_churn_active;
-                let releases_instability = (releases_lifecycle_refresh_quarantine
-                    && (self.refresh_quarantine_manager.awaiting_post_wake_snapshot
-                        || self.refresh_quarantine_manager.awaiting_post_session_snapshot))
-                    || releases_display_churn_refresh_quarantine;
-                if releases_instability {
+                if !space_state.authoritative || space_state.revision < self.space_state.revision {
+                    return Ok(EventOutcome::default());
+                }
+                let recovering = !self.space_state.authoritative;
+                let changed = space_state.revision != self.space_state.revision;
+                if recovering {
                     self.abandon_window_inventories_from_instability();
+                } else if changed {
+                    self.window_inventory_manager
+                        .pending
+                        .extend(self.window_inventory_manager.in_flight.keys().copied());
                 }
+                self.space_state.revision = space_state.revision;
+                self.space_state.authoritative = space_state.authoritative;
                 let mut outcome = self.handle_authoritative_space_snapshot(space_state)?;
-                if releases_lifecycle_refresh_quarantine {
-                    self.release_post_instability_quarantine_after_authoritative_snapshot();
-                }
-                if releases_display_churn_refresh_quarantine {
-                    self.refresh_quarantine_manager.display_churn_active = false;
-                    self.request_refresh_when_spaces_actor_stabilizes();
-                }
-                if releases_instability {
-                    // Releasing either recovery gate already flushes the deferred
-                    // all-app refresh. A topology-changing snapshot requests the
-                    // same refresh through its outcome; leave only one request per
-                    // app instead of immediately scheduling a redundant follow-up.
+                if recovering {
+                    self.flush_deferred_window_inventory_refresh();
                     outcome.refresh_window_inventories = false;
                 }
                 return Ok(outcome);
@@ -2898,7 +2782,14 @@ impl Reactor {
 
         let pids: Vec<_> = self.app_manager.apps.keys().copied().collect();
         for pid in pids {
-            self.request_window_inventory(pid);
+            if !self
+                .window_inventory_manager
+                .in_flight
+                .get(&pid)
+                .is_some_and(|token| token.topology_revision == self.space_state.revision)
+            {
+                self.request_window_inventory(pid);
+            }
         }
     }
 
@@ -3165,8 +3056,31 @@ impl Reactor {
 
     fn handle_authoritative_space_snapshot(
         &mut self,
-        space_state: ForwardedSpaceState,
+        mut space_state: ForwardedSpaceState,
     ) -> anyhow::Result<EventOutcome> {
+        if let Some(mut pending) = self.pending_space_change_manager.pending_space_change.take() {
+            // Keep accepted display continuity while the virtual model is deferred.
+            // Geometry and membership always come from the newest revision.
+            if pending.revision == space_state.revision {
+                pending.command_space = space_state.command_space;
+                pending.menu_bar_space = space_state.menu_bar_space;
+                space_state = pending;
+            } else {
+                pending.space_remaps.append(&mut space_state.space_remaps);
+                space_state.space_remaps = pending.space_remaps;
+                pending.resized_spaces.retain(|(space, _)| {
+                    !space_state.resized_spaces.iter().any(|(new_space, _)| space == new_space)
+                });
+                pending.resized_spaces.append(&mut space_state.resized_spaces);
+                space_state.resized_spaces = pending.resized_spaces;
+                space_state.should_force_refresh_layout |= pending.should_force_refresh_layout;
+                space_state.display_set_changed |= pending.display_set_changed;
+            }
+        }
+        if self.is_mission_control_active() {
+            self.pending_space_change_manager.pending_space_change = Some(space_state);
+            return Ok(EventOutcome::default());
+        }
         let mut outcome = EventOutcome::window_membership_changed(false, true);
         let analysis = topology_workflow::analyze_space_snapshot(
             &self.space_state,
@@ -3175,11 +3089,9 @@ impl Reactor {
             self.activation_cfg(),
             &space_state,
         );
-        let pending_space_state = space_state.clone();
         let ForwardedSpaceState {
             screens,
             fullscreen_spaces,
-            has_seen_display_set,
             active_spaces,
             menu_bar_space,
             command_space,
@@ -3188,13 +3100,14 @@ impl Reactor {
             space_remaps,
             display_set_changed,
             should_force_refresh_layout,
-            releases_lifecycle_refresh_quarantine,
+            membership_complete,
             resized_spaces,
             topology_window_delta,
             active_window_spaces,
             ..
         } = space_state;
         self.space_state.active_window_spaces = active_window_spaces;
+        self.space_state.membership_complete = membership_complete;
         let activation_config = self.activation_cfg();
         let topology_workflow::SpaceSnapshotAnalysis {
             spaces,
@@ -3213,12 +3126,13 @@ impl Reactor {
             screens.len(),
         );
 
-        self.space_state.has_seen_display_set = has_seen_display_set;
         self.space_state.fullscreen_spaces = fullscreen_spaces;
         self.space_state.active_spaces = active_spaces;
         if command_space_only_update {
             self.space_state.menu_bar_space = menu_bar_space;
             self.space_state.command_space = command_space;
+            outcome.arrange.passes = 0;
+            self.maybe_send_menu_update();
             return Ok(outcome);
         }
         if display_set_changed {
@@ -3247,10 +3161,6 @@ impl Reactor {
         self.space_state.screens = screens;
         if invalidates_pending_targets {
             self.clear_pending_hidden_window_targets();
-        }
-        if self.is_mission_control_active() {
-            self.pending_space_change_manager.pending_space_change = Some(pending_space_state);
-            return Ok(outcome);
         }
         for (previous_space, space) in space_remaps {
             self.layout_manager.layout_engine.remap_space(
@@ -3285,26 +3195,27 @@ impl Reactor {
             outcome.absorb(self.apply_topology_window_delta(delta));
         }
         let active_windows = self.authoritative_active_space_windows();
-        self.finalize_space_change(&spaces, active_windows, releases_lifecycle_refresh_quarantine);
+        self.finalize_space_change(&spaces, active_windows, !membership_complete);
         self.try_apply_pending_space_change();
         if should_force_refresh_layout {
-            outcome.refresh_window_inventories = true;
             outcome = outcome.with_arrange_passes(1);
         }
         Ok(outcome)
     }
 
     fn try_apply_pending_space_change(&mut self) {
-        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
-            if pending.screens.len() == self.space_state.screens.len() {
-                // During native Mission Control we must preserve the full forwarded snapshot,
-                // not just the raw spaces vector, otherwise command-space and per-display space
-                // metadata can remain stale after exit.
-                if let Ok(outcome) = self.handle_authoritative_space_snapshot(pending) {
-                    self.apply_event_outcome(outcome);
-                }
-            } else {
-                self.pending_space_change_manager.pending_space_change = Some(pending);
+        if self.is_mission_control_active() || self.refreshes_blocked() {
+            return;
+        }
+        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take()
+            && pending.revision == self.space_state.revision
+            && !self.refreshes_blocked()
+        {
+            // During native Mission Control we must preserve the full forwarded snapshot,
+            // not just the raw spaces vector, otherwise command-space and per-display space
+            // metadata can remain stale after exit.
+            if let Ok(outcome) = self.handle_authoritative_space_snapshot(pending) {
+                self.apply_event_outcome(outcome);
             }
         }
     }
@@ -4470,7 +4381,7 @@ impl Reactor {
         pid: pid_t,
         activation_window: Option<WindowId>,
     ) -> EventOutcome {
-        if self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input {
+        if self.suppress_auto_workspace_switch_until_input {
             debug!(
                 pid,
                 "Skipping auto workspace switch for lifecycle-restored activation before user input"
@@ -5112,7 +5023,10 @@ impl Reactor {
         // matching destroy/appear pair for the origin space. Reconcile the active
         // spaces from the same space-aware WS-id list used everywhere else so we do
         // not depend on the global CG on-screen window list during recovery.
-        self.reconcile_authoritative_active_window_snapshot(active_windows, false);
+        self.reconcile_authoritative_active_window_snapshot(
+            active_windows,
+            !self.space_state.membership_complete,
+        );
         self.request_window_inventories();
         self.update_layout_or_warn(false, false, None);
         self.maybe_send_menu_update();
