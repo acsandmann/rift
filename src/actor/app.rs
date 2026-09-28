@@ -535,7 +535,6 @@ struct State {
     events_tx: reactor::Sender,
     windows: HashMap<WindowId, AppWindowState>,
     elem_to_wid: HashMap<AXUIElement, WindowId>,
-    last_window_idx: u32,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
     pending_activation_quiet: Option<(Instant, Quiet)>,
@@ -1815,6 +1814,29 @@ impl State {
         server_info_hint: Option<WindowServerInfo>,
         identity: &mut NativeWindowIdentity,
     ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
+        // Resolve the WindowServer id before building the WindowInfo so that
+        // every id-derived field (sys_id, is_root, min/max size, bundle path)
+        // is computed from the same identity that keys the window.
+        //
+        // An AX window that does not resolve to a WindowServer window cannot be
+        // tracked through any of the WindowServer paths (space membership,
+        // WindowServerDestroyed, transactions) and would bypass every
+        // layer/level filter that keys on the id. System HUDs such as Control
+        // Center's volume bezel report AXWindowCreated with window number 0
+        // before (or without) a backing CG window. A later eligible
+        // WindowServerAppeared for the app requests an inventory refresh;
+        // registration then succeeds if AX exposes the window with a native
+        // id by that point.
+        let Some(window_server_id) = server_info_hint
+            .map(|hint| hint.id)
+            .filter(|id| id.as_nonzero().is_some())
+            .or_else(|| identity.resolve(|| WindowServerId::try_from(&elem).ok()))
+        else {
+            debug!(pid = ?self.pid, ?elem, "Ignoring AX window without a WindowServer id");
+            return None;
+        };
+        let idx = window_server_id.as_nonzero()?;
+
         let Ok((mut info, server_info)) =
             WindowInfo::from_ax_element_with_identity(&elem, server_info_hint, identity)
         else {
@@ -1831,18 +1853,6 @@ impl State {
 
         self.normalize_window_info(&elem, &mut info);
 
-        let window_server_id = info.sys_id.filter(|sid| sid.as_nonzero().is_some()).or_else(|| {
-            identity.resolve(|| {
-                WindowServerId::try_from(&elem)
-                    .map_err(|e| info!("Could not get window server id for {elem:?}: {e}"))
-                    .ok()
-            })
-        });
-
-        let idx = window_server_id.and_then(WindowServerId::as_nonzero).unwrap_or_else(|| {
-            self.last_window_idx += 1;
-            NonZeroU32::new(self.last_window_idx).unwrap()
-        });
         let wid = WindowId { pid: self.pid, idx };
         if self.windows.contains_key(&wid) {
             trace!(?wid, "Window already registered; skipping duplicate");
@@ -1855,14 +1865,14 @@ impl State {
         // unavailable; app-level discovery remains the lifecycle fallback.
         let notifications_registered = self.register_window_notifications(&elem, wid);
         let hidden_by_app = self.is_hidden;
-        let last_seen_txid = self.txid_from_store(window_server_id).unwrap_or_default();
+        let last_seen_txid = self.txid_from_store(Some(window_server_id)).unwrap_or_default();
 
         let old = self.windows.insert(wid, AppWindowState {
             elem: elem.clone(),
             notifications_registered,
             last_seen_txid,
             hidden_by_app,
-            window_server_id,
+            window_server_id: Some(window_server_id),
             title: info.title.clone(),
             is_animating: false,
             last_animation_frame: None,
@@ -2316,7 +2326,6 @@ fn app_thread_main(
         events_tx,
         windows: HashMap::default(),
         elem_to_wid: HashMap::default(),
-        last_window_idx: 0,
         main_window: None,
         last_activated: None,
         pending_activation_quiet: None,

@@ -434,7 +434,8 @@ impl NativeWindowIdentity {
             return Some(id);
         }
         let resolved = query();
-        // Zero still uses a process-local identity and may acquire a native ID later.
+        // Zero is not cached: the element is not registered without a native
+        // id, and a later lookup may still acquire one.
         self.0 = resolved.filter(|id| id.as_nonzero().is_some());
         resolved
     }
