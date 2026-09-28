@@ -25,11 +25,13 @@ pub fn tree_layer() -> impl Layer<Registry> {
         .with_timer(UtcDateTime::default())
 }
 
-type TimingLayer = tracing_timing::TimingLayer<group::ByName, group::ByMessage>;
+type TimingLayer = tracing_timing::TimingLayer<group::ByName, group::ByName>;
 
 fn timing_layer() -> TimingLayer {
     tracing_timing::Builder::default()
-        //.events(group::ByName)
+        // Formatted messages contain changing window IDs, frames, and pointer values.
+        // Histograms persist for the process lifetime, so key them by the fixed call site.
+        .events(group::ByName)
         .layer(|| Histogram::new_with_max(100_000_000, 2).unwrap())
 }
 
