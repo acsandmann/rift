@@ -255,7 +255,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         restore_file: restore_file(),
         config: config.clone(),
     };
-    let (mc_tx, mc_rx) = rift_wm::actor::channel();
+    let mc_channel =
+        rift_wm::actor::mission_control::channel_if_enabled(&config.settings.ui.mission_control);
+    let mc_tx = mc_channel.as_ref().map(|(tx, _)| tx.clone());
     let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
@@ -322,14 +324,15 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         stack_line_hit_rects.clone(),
     );
 
-    let mission_control = MissionControlActor::new(
-        config.clone(),
-        mc_rx,
-        mc_tx.clone(),
-        reactor.clone(),
-        mtm,
-        input_tx.clone(),
-    );
+    let mission_control = mc_channel.map(|(_tx, rx)| {
+        MissionControlActor::new(
+            config.settings.ui.mission_control.clone(),
+            rx,
+            reactor.clone(),
+            mtm,
+            input_tx.clone(),
+        )
+    });
     let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
 
     if config.settings.default_disable {
@@ -348,7 +351,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     // Construct the unified HID tap on its dedicated input CFRunLoop thread.
     let input_config = config.clone();
     let input_wm_sender = wm_controller_sender.clone();
-    let input_mc_tx = mc_tx.clone();
+    let input_mc_tx = mc_tx;
     spawn_supervised("input", move || {
         Input::new(
             input_config,
@@ -380,7 +383,11 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             supervise("stack_line", stack_line.run()),
             supervise("window_notify", wn_actor.run()),
             supervise("mc_native", mission_control_native.run()),
-            supervise("mission_control", mission_control.run()),
+            async move {
+                if let Some(actor) = mission_control {
+                    actor.run().await;
+                }
+            },
             supervise("process_actor", process_actor.run()),
         );
     });

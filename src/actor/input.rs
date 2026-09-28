@@ -56,6 +56,7 @@ pub enum Request {
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
     SetLowPowerMode(bool),
     SetMissionControlActive(bool),
+    ReleaseMissionControl,
 }
 
 pub struct Input {
@@ -82,7 +83,7 @@ pub struct Input {
     hotkeys_active: Cell<bool>,
     wm_sender: wm_controller::Sender,
     stack_line_tx: stack_line::Sender,
-    mission_control_tx: super::mission_control::Sender,
+    mission_control_tx: RefCell<Option<super::mission_control::Sender>>,
     stack_line_hit_rects: stack_line::SharedHitRects,
 }
 
@@ -294,7 +295,7 @@ impl Input {
         requests_rx: Receiver,
         wm_sender: wm_controller::Sender,
         stack_line_tx: stack_line::Sender,
-        mission_control_tx: super::mission_control::Sender,
+        mission_control_tx: Option<super::mission_control::Sender>,
         stack_line_hit_rects: stack_line::SharedHitRects,
         native_motion_active: Arc<AtomicBool>,
     ) -> Self {
@@ -341,7 +342,7 @@ impl Input {
             hotkeys_active: Cell::new(false),
             wm_sender,
             stack_line_tx,
-            mission_control_tx,
+            mission_control_tx: RefCell::new(mission_control_tx),
             stack_line_hit_rects,
         };
         input.install_binding_specs(config.binding_mode_specs);
@@ -399,6 +400,11 @@ impl Input {
         let mut should_rebuild_mask = false;
         let mut state = self.state.borrow_mut();
         match request {
+            Request::ReleaseMissionControl => {
+                self.mission_control_tx.borrow_mut().take();
+                self.mission_control_active.set(false);
+                should_rebuild_mask = true;
+            }
             Request::SetMissionControlActive(active) => {
                 self.mission_control_active.set(active);
                 should_rebuild_mask = true;
@@ -624,7 +630,7 @@ impl Input {
                         keycode,
                         CGEvent::flags(Some(event)),
                     ) {
-                        self.mission_control_tx.send(super::mission_control::Event::Input(input));
+                        self.send_overview(super::mission_control::Event::Input(input));
                         return false;
                     }
                 }
@@ -655,7 +661,7 @@ impl Input {
                     state.show_mouse();
                 }
                 if self.mission_control_active.get() && event_type == CGEventType::LeftMouseDown {
-                    self.mission_control_tx.send(super::mission_control::Event::Input(
+                    self.send_overview(super::mission_control::Event::Input(
                         super::mission_control::Input::Click(CGEvent::location(Some(event))),
                     ));
                     return false;
@@ -720,6 +726,12 @@ impl Input {
         }
     }
 
+    fn send_overview(&self, event: super::mission_control::Event) {
+        if let Some(tx) = &*self.mission_control_tx.borrow() {
+            tx.send(event);
+        }
+    }
+
     /// Handle mouse moves without running the generic mouse/keyboard path.
     ///
     /// Mouse moves are usually the most frequent events delivered to this tap.
@@ -736,7 +748,7 @@ impl Input {
         }
         self.mouse_location.set(loc);
         if self.mission_control_active.get() {
-            self.mission_control_tx.send(super::mission_control::Event::Input(
+            self.send_overview(super::mission_control::Event::Input(
                 super::mission_control::Input::Move(loc),
             ));
             return false;
@@ -1412,6 +1424,14 @@ mod tests {
     }
 
     #[test]
+    fn absent_overview_sender_safely_ignores_commands() {
+        let (input, _, _) = input();
+        input.mission_control_tx.borrow_mut().take();
+        input.send_overview(super::super::mission_control::Event::ShowAll);
+        assert!(!input.mission_control_active.get());
+    }
+
+    #[test]
     fn input_runs_on_cf_run_loop_without_a_tokio_runtime() {
         let (input, _, _) = input();
         // The closed request channel makes the actor exit after polling select.
@@ -1439,7 +1459,7 @@ mod tests {
                 requests_rx,
                 wm_tx,
                 stack_tx,
-                mc_tx,
+                Some(mc_tx),
                 stack_line::new_shared_hit_rects(),
                 Arc::default(),
             ),

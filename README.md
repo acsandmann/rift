@@ -52,6 +52,22 @@ Get up and running via the docs:
 [<kbd><br>quick start<br></kbd>][quick_start]
 <br>
 
+## Overview
+
+Rift's optional Overview shows a vertical stack of workspace ribbons on each
+monitor, including empty workspaces. Both `show_mission_control_all` and
+`show_mission_control_current` open this view. Escape dismisses it, Return or a
+click activates the selection, arrows navigate, and Tab/Shift-Tab cycle windows.
+Navigation changes only the Overview viewport until activation.
+
+Enable it in `[settings.ui.mission_control]` with `enabled = true`, then restart
+Rift. Disabling it on config reload releases its actor and native resources;
+enabling it again requires a restart. Any config reload closes the open view.
+`window_previews = false` is the default and never calls Screen Recording APIs.
+With previews enabled and Screen Recording access already granted, visible cards
+receive one-shot previews; denied or failed captures leave usable fallback cards.
+Closing releases all display surfaces and preview images. There is no idle cache.
+
 ## Community
 
 Join [#rift:matrix.org](https://matrix.to/#/#rift:matrix.org) for discussion, support, and development.

@@ -211,7 +211,7 @@ impl WmController {
         events_tx: reactor::Sender,
         input_tx: input::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
-        mission_control_tx: crate::actor::mission_control::Sender,
+        mission_control_tx: Option<crate::actor::mission_control::Sender>,
         window_tx_store: Option<WindowTxStore>,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
@@ -225,7 +225,7 @@ impl WmController {
             events_tx,
             input_tx,
             stack_line_tx: Some(stack_line_tx),
-            mission_control_tx: Some(mission_control_tx),
+            mission_control_tx,
             window_tx_store,
             receiver,
             sender: sender.clone(),
@@ -320,6 +320,15 @@ impl WmController {
                 }
             }
             ConfigUpdated(new_cfg) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::Configure(
+                        new_cfg.settings.ui.mission_control.clone(),
+                    ));
+                }
+                if !new_cfg.settings.ui.mission_control.enabled {
+                    self.mission_control_tx.take();
+                    self.input_tx.send(input::Request::ReleaseMissionControl);
+                }
                 self.config.config = new_cfg;
 
                 _ = self.input_tx.send(input::Request::ConfigUpdated(self.config.config.clone()));

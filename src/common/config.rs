@@ -794,6 +794,8 @@ pub enum StackLineHoverMode {
 #[serde(deny_unknown_fields)]
 pub struct MissionControlSettings {
     #[serde(default = "no")]
+    pub window_previews: bool,
+    #[serde(default = "no")]
     pub enabled: bool,
     #[serde(default = "no")]
     pub fade_enabled: bool,

@@ -16,5 +16,7 @@
 	<string>APPL</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2025 acsandmann. All rights reserved.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Rift optionally captures window previews while Overview is open.</string>
 </dict>
 </plist>

@@ -80,6 +80,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 	"NSGraphics",
 	"NSGraphicsContext",
 	"NSImage",
+	"NSImageRep",
 	"NSMenu",
 	"NSMenuItem",
 	"NSOpenPanel",
@@ -135,22 +136,6 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 	"libc",
 	"objc2"
 ]}
-objc2-core-media = { version = "0.3.2", default-features = false, features = [
-	"CMSampleBuffer",
-	"objc2-core-video",
-] }
-objc2-core-video = { version = "0.3.2", default-features = false, features = [
-	"CVBuffer",
-	"CVImageBuffer",
-	"CVPixelBuffer",
-	"CVPixelBufferIOSurface",
-	"objc2-io-surface",
-] }
-objc2-io-surface = { version = "0.3.2", default-features = false, features = [
-	"IOSurfaceRef",
-	"objc2",
-	"objc2-core-foundation",
-] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
 	"NSArray",
 	"NSDictionary",
@@ -168,11 +153,11 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
 	"SCScreenshotManager",
 	"SCShareableContent",
+	"libc",
 	"SCStream",
 	"block2",
 	"objc2-core-foundation",
 	"objc2-core-graphics",
-	"objc2-core-media",
 ] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 	"CAAnimation",
@@ -221,6 +206,7 @@ rift-client = { path = "crates/rift-client" }
 rift-protocol = { path = "crates/rift-protocol" }
 
 [dev-dependencies]
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGBitmapContext"] }
 pretty_assertions = "1.4.0"
 tokio = { version = "1.35.1", features = ["sync", "tokio-macros"] }
 test-log = { version = "0.2.16", default-features = false }
