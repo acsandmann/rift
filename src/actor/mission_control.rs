@@ -5,6 +5,7 @@ use objc2_foundation::MainThreadMarker;
 use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
 use crate::sys::dispatch::DispatchExt;
+use crate::sys::timer::Timer;
 use crate::ui::mission_control::{OverviewSession, RememberedPreviewCache};
 
 #[derive(Debug)]
@@ -29,12 +30,23 @@ pub enum Input {
     Activate,
     Cycle(bool),
     Click(CGPoint),
+    PointerDown(CGPoint),
+    PointerDrag(CGPoint),
+    PointerUp(CGPoint),
     Move(CGPoint),
     Scroll { point: CGPoint, delta: CGPoint },
 }
 
 impl Input {
     pub(crate) fn from_keycode(keycode: u16, flags: CGEventFlags) -> Option<Self> {
+        if flags.intersects(
+            CGEventFlags::MaskCommand | CGEventFlags::MaskControl | CGEventFlags::MaskAlternate,
+        ) {
+            return None;
+        }
+        if (123..=126).contains(&keycode) && flags.contains(CGEventFlags::MaskShift) {
+            return None;
+        }
         Some(match keycode {
             53 => Self::Dismiss,
             123 => Self::Left,
@@ -53,6 +65,15 @@ pub type Receiver = actor::Receiver<Event>;
 
 pub fn channel_if_enabled(settings: &MissionControlSettings) -> Option<(Sender, Receiver)> {
     settings.enabled.then(actor::channel)
+}
+
+/// Keep one run-loop timer across input events; dropping it invalidates the native timer.
+fn update_edge_timer(timer: &mut Option<Timer>, active: bool) {
+    if active {
+        timer.get_or_insert_with(|| Timer::sleep(std::time::Duration::from_millis(150)));
+    } else {
+        *timer = None;
+    }
 }
 
 pub struct MissionControlActor {
@@ -90,8 +111,15 @@ impl MissionControlActor {
     }
 
     pub async fn run(mut self) {
+        let mut edge_timer = None;
         loop {
+            let edge_active = self.session.as_ref().is_some_and(OverviewSession::edge_active);
+            update_edge_timer(&mut edge_timer, edge_active);
             tokio::select! {
+                _ = async { if let Some(timer) = &mut edge_timer { timer.await } else { std::future::pending().await } } => {
+                    edge_timer = None;
+                    if let Some(session) = &mut self.session { session.edge_tick(self.remembered.as_ref()); }
+                }
                 event = self.rx.recv() => {
                     let Some((span, event)) = event else { break };
                     let _guard = span.enter();
@@ -153,7 +181,12 @@ impl MissionControlActor {
                     ));
                 }
             }
-            Event::Dismiss | Event::RefreshCurrentWorkspace => self.close(),
+            Event::Dismiss => self.close(),
+            Event::RefreshCurrentWorkspace => {
+                if let Some(session) = &mut self.session {
+                    session.refresh(&self.reactor, self.remembered.as_ref(), None);
+                }
+            }
             Event::Configure(settings) => {
                 self.close();
                 if !settings.enabled || !settings.window_previews {
@@ -167,6 +200,19 @@ impl MissionControlActor {
                     .session
                     .as_mut()
                     .and_then(|session| session.input(input, self.remembered.as_ref()));
+                if let Some(intent) = self.session.as_mut().and_then(OverviewSession::take_drop) {
+                    let window = intent.window;
+                    let (reply, rx) = std::sync::mpsc::sync_channel(1);
+                    self.reactor.send(reactor::Event::OverviewDrop { intent, reply });
+                    let changed = rx.recv().unwrap_or(false);
+                    if let Some(session) = &mut self.session {
+                        session.refresh(
+                            &self.reactor,
+                            self.remembered.as_ref(),
+                            changed.then_some(window),
+                        );
+                    }
+                }
                 if let Some((display, selection, sys_id)) = action {
                     self.close();
                     self.reactor.send(reactor::Event::Command(reactor::Command::Reactor(
@@ -194,6 +240,39 @@ impl MissionControlActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edge_timer_runs_without_tokio_and_input_does_not_restart_it() {
+        // Ordinary test + Rift executor: no Tokio runtime is created or entered.
+        crate::sys::executor::Executor::run(async {
+            let mut timer = None;
+            let mut input_events = 0;
+            loop {
+                update_edge_timer(&mut timer, true);
+                tokio::select! {
+                    _ = timer.as_mut().unwrap() => break,
+                    _ = Timer::sleep(std::time::Duration::from_millis(10)) => {
+                        input_events += 1;
+                        assert!(input_events < 40, "input must not postpone the edge tick");
+                    }
+                }
+            }
+            assert!(input_events > 0);
+            update_edge_timer(&mut timer, false);
+            assert!(timer.is_none());
+        });
+    }
+
+    #[test]
+    fn inactive_edge_scrolling_has_no_timer() {
+        let mut timer = None;
+        update_edge_timer(&mut timer, false);
+        assert!(timer.is_none());
+        update_edge_timer(&mut timer, true);
+        assert!(timer.is_some());
+        update_edge_timer(&mut timer, false);
+        assert!(timer.is_none());
+    }
 
     #[test]
     fn disabled_settings_do_not_create_a_channel() {
@@ -224,6 +303,8 @@ mod tests {
         ));
         for code in [123, 124, 125, 126] {
             assert!(Input::from_keycode(code, CGEventFlags::empty()).is_some());
+            assert!(Input::from_keycode(code, CGEventFlags::MaskControl).is_none());
+            assert!(Input::from_keycode(code, CGEventFlags::MaskShift).is_none());
         }
         assert!(Input::from_keycode(0, CGEventFlags::empty()).is_none());
     }

@@ -195,6 +195,10 @@ impl Input {
         if self.mission_control_active.get() {
             mask |= (1u64 << CGEventType::LeftMouseDown.0)
                 | (1u64 << CGEventType::LeftMouseUp.0)
+                | (1u64 << CGEventType::LeftMouseDragged.0)
+                | (1u64 << CGEventType::RightMouseDown.0)
+                | (1u64 << CGEventType::RightMouseDragged.0)
+                | (1u64 << CGEventType::RightMouseUp.0)
                 | (1u64 << CGEventType::ScrollWheel.0);
         }
         if state.event_processing_enabled && state.mouse_features_enabled {
@@ -673,6 +677,28 @@ impl Input {
             }
             CGEventType::MouseMoved => self.on_mouse_moved(event, CGEvent::location(Some(event))),
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
+                if self.mission_control_active.get() && event_type == CGEventType::LeftMouseDragged
+                {
+                    self.send_overview(super::mission_control::Event::Input(
+                        super::mission_control::Input::PointerDrag(CGEvent::location(Some(event))),
+                    ));
+                    return false;
+                }
+                if self.mission_control_active.get() {
+                    self.send_overview(super::mission_control::Event::Input(
+                        super::mission_control::Input::Scroll {
+                            point: CGEvent::location(Some(event)),
+                            delta: CGPoint::new(
+                                CGEvent::integer_value_field(
+                                    Some(event),
+                                    CGEventField::MouseEventDeltaX,
+                                ) as f64,
+                                0.0,
+                            ),
+                        },
+                    ));
+                    return false;
+                }
                 let button = if event_type == CGEventType::LeftMouseDragged {
                     crate::actor::drag::MouseButton::Left
                 } else {
@@ -697,8 +723,11 @@ impl Input {
                 }
                 if self.mission_control_active.get() && event_type == CGEventType::LeftMouseDown {
                     self.send_overview(super::mission_control::Event::Input(
-                        super::mission_control::Input::Click(CGEvent::location(Some(event))),
+                        super::mission_control::Input::PointerDown(CGEvent::location(Some(event))),
                     ));
+                    return false;
+                }
+                if self.mission_control_active.get() {
                     return false;
                 }
                 let button = if event_type == CGEventType::LeftMouseDown {
@@ -741,6 +770,12 @@ impl Input {
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
                 if event_type == CGEventType::LeftMouseUp && self.mission_control_active.get() {
+                    self.send_overview(super::mission_control::Event::Input(
+                        super::mission_control::Input::PointerUp(CGEvent::location(Some(event))),
+                    ));
+                    return false;
+                }
+                if self.mission_control_active.get() {
                     return false;
                 }
                 let button = if event_type == CGEventType::LeftMouseUp {
@@ -1459,6 +1494,81 @@ mod tests {
     }
 
     #[test]
+    fn overview_pointer_sequence_never_enters_native_drag_path() {
+        let (input, mut wm_rx, mut native_rx) = input();
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        input.mission_control_active.set(true);
+        let event = CGEvent::new(None).unwrap();
+        CGEvent::set_location(Some(&event), CGPoint::new(30.0, 40.0));
+        for ty in [
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseDragged,
+            CGEventType::LeftMouseUp,
+        ] {
+            assert!(!input.on_event(ty, &event));
+        }
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::PointerDown(_)
+            )
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::PointerDrag(_)
+            )
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::PointerUp(_)
+            )
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(native_rx.try_recv().is_err());
+        assert!(wm_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn overview_right_drag_pans_without_native_drag() {
+        let (input, mut wm_rx, mut native_rx) = input();
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        input.mission_control_active.set(true);
+        let event = CGEvent::new_mouse_event(
+            None,
+            CGEventType::RightMouseDragged,
+            CGPoint::new(30.0, 40.0),
+            objc2_core_graphics::CGMouseButton::Right,
+        )
+        .unwrap();
+        CGEvent::set_location(Some(&event), CGPoint::new(30.0, 40.0));
+        CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventDeltaX, 25);
+        for ty in [
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseDragged,
+            CGEventType::RightMouseUp,
+        ] {
+            assert!(!input.on_event(ty, &event));
+        }
+        let (
+            _,
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::Scroll { delta, .. },
+            ),
+        ) = rx.try_recv().unwrap()
+        else {
+            panic!("horizontal Overview pan")
+        };
+        assert_eq!(delta, CGPoint::new(25.0, 0.0));
+        assert!(rx.try_recv().is_err());
+        assert!(native_rx.try_recv().is_err());
+        assert!(wm_rx.try_recv().is_err());
+    }
+
+    #[test]
     fn overview_consumes_scroll_and_routes_point_deltas() {
         let (input, _, _) = input();
         let (tx, mut rx) = actor::channel();
@@ -1570,8 +1680,8 @@ mod tests {
         assert_ne!(mask & (1u64 << CGEventType::ScrollWheel.0), 0);
         assert_ne!(mask & (1u64 << CGEventType::KeyDown.0), 0);
         assert_eq!(mask & (1u64 << CGEventType::KeyUp.0), 0);
-        assert_eq!(mask & (1u64 << CGEventType::RightMouseDown.0), 0);
-        assert_eq!(mask & (1u64 << CGEventType::LeftMouseDragged.0), 0);
+        assert_ne!(mask & (1u64 << CGEventType::RightMouseDown.0), 0);
+        assert_ne!(mask & (1u64 << CGEventType::LeftMouseDragged.0), 0);
         input.mission_control_active.set(false);
         *input.disable_hotkey.borrow_mut() = Some(Hotkey::new(Modifiers::empty(), KeyCode::KeyA));
         assert_ne!(input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0), 0);

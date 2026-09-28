@@ -5,8 +5,8 @@ use block2::RcBlock;
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen};
-use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
+use objc2_app_kit::{NSFont, NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen};
+use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGContext,
     CGDisplayBounds, CGImage, CGImageAlphaInfo, CGPreflightScreenCaptureAccess,
@@ -64,6 +64,27 @@ fn scrolled_workspace_offset(
 ) -> f64 {
     (centered as f64 + offset - delta / stride).clamp(0.0, count.saturating_sub(1) as f64)
         - centered as f64
+}
+
+fn vertical_scroll(delta: CGPoint) -> bool { delta.y.abs() >= delta.x.abs() }
+
+fn scrolled_horizontal_offset(
+    display: CGRect,
+    overview: CGSize,
+    workspace: &RuntimeWorkspaceData,
+    offset: f64,
+    delta: f64,
+) -> f64 {
+    let scale = ((overview.height - 2.0 * GAP) * 0.5).max(1.0) / display.size.height;
+    let base = (overview.width - display.size.width * scale) / 2.0;
+    let (min, max) = workspace.windows.iter().fold((0.0_f64, 0.0_f64), |(min, max), w| {
+        let x = base + (w.info.frame.origin.x - display.origin.x) * scale;
+        (
+            min.min(x - 12.0),
+            max.max(x + w.info.frame.size.width * scale - overview.width + 12.0),
+        )
+    });
+    (offset - delta).clamp(min, max)
 }
 
 fn contains(r: CGRect, p: CGPoint) -> bool {
@@ -196,6 +217,7 @@ struct DisplayOverview {
     projection: Vec<WorkspaceProjection>,
     views: Vec<WorkspaceView>,
     icons: HashMap<i32, Option<Retained<CGImage>>>,
+    animate: bool,
     root: Retained<CALayer>,
     // Field order matters: unbind the surface before releasing its CGS window.
     surface: WindowSurface,
@@ -215,6 +237,11 @@ fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) {
     let l = CATextLayer::layer();
     l.setFrame(frame);
     l.setContentsScale(scale);
+    let font = NSFont::systemFontOfSize(13.0);
+    unsafe {
+        l.setFont(Some(&*(Retained::as_ptr(&font) as *const CFType)));
+        l.setTruncationMode(objc2_quartz_core::kCATruncationEnd);
+    }
     l.setFontSize(13.0);
     l.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 1.0)));
     let text = CFString::from_str(text);
@@ -225,6 +252,30 @@ fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) {
 }
 
 impl DisplayOverview {
+    fn reveal(&mut self, workspace: usize, window: WindowId) -> bool {
+        let Some(w) = self
+            .workspaces
+            .iter()
+            .find(|ws| ws.index == workspace)
+            .and_then(|ws| ws.windows.iter().find(|w| w.id == window))
+        else {
+            return false;
+        };
+        let scale =
+            ((self.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) / self.info.frame.size.height;
+        let base = (self.bounds.size.width - self.info.frame.size.width * scale) / 2.0;
+        let x = base + (w.info.frame.origin.x - self.info.frame.origin.x) * scale;
+        let right = x + w.info.frame.size.width * scale;
+        let offset = self.offsets.entry(workspace).or_default();
+        let previous = *offset;
+        if x - *offset < 12.0 {
+            *offset = x - 12.0;
+        } else if right - *offset > self.bounds.size.width - 12.0 {
+            *offset = right - self.bounds.size.width + 12.0;
+        }
+        *offset != previous
+    }
+
     fn reproject(
         &mut self,
         previews: Option<&PreviewSession>,
@@ -273,26 +324,91 @@ impl DisplayOverview {
             self.workspace_offset,
             &self.offsets,
         );
-        for view in self.views.drain(..) {
-            view.layer.removeFromSuperlayer();
-        }
+        let mut old_views = std::mem::take(&mut self.views);
+        let mut old_cards: HashMap<_, _> = old_views
+            .iter_mut()
+            .flat_map(|view| {
+                let origin = view.layer.frame().origin;
+                view.cards.drain(..).map(move |card| {
+                    let mut frame = card.layer.frame();
+                    frame.origin.x += origin.x;
+                    frame.origin.y += origin.y;
+                    card.layer.removeFromSuperlayer();
+                    (card.id, (card, frame))
+                })
+            })
+            .collect();
         with_disabled_actions(|| {
             for ws in &self.projection {
                 let data = &self.workspaces[ws.source];
-                let container = layer(ws.frame, self.scale);
-                container.setCornerRadius(CORNER);
+                let existing = old_views
+                    .iter()
+                    .position(|view| view.index == data.index)
+                    .map(|pos| old_views.swap_remove(pos));
+                let reused = existing.is_some();
+                let container =
+                    existing.map(|view| view.layer).unwrap_or_else(|| layer(ws.frame, self.scale));
+                container.setFrame(ws.frame);
+                container.setBorderWidth(0.5);
+                container.setCornerRadius(18.0);
                 container.setMasksToBounds(true);
-                container.setBackgroundColor(Some(&color(0.12, 0.13, 0.16, 0.65)));
-                container.setBorderColor(Some(&color(0.48, 0.70, 1.0, 1.0)));
+                container.setBackgroundColor(Some(&color(0.16, 0.16, 0.18, 0.38)));
+                container.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.14)));
                 self.root.addSublayer(&container);
                 let mut cards = Vec::new();
                 for w in &ws.windows {
                     let data = &data.windows[w.source];
+                    if let Some((card, previous)) = old_cards.remove(&data.id) {
+                        card.layer.setFrame(w.frame);
+                        card.layer.setBorderWidth(0.5);
+                        card.layer.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.14)));
+                        card.image.setFrame(rect(
+                            0.0,
+                            0.0,
+                            w.frame.size.width,
+                            w.frame.size.height,
+                        ));
+                        container.addSublayer(&card.layer);
+                        if self.animate {
+                            let animation = CABasicAnimation::animationWithKeyPath(Some(
+                                &objc2_foundation::NSString::from_str("position"),
+                            ));
+                            let from = CGPoint::new(
+                                previous.origin.x - ws.frame.origin.x + previous.size.width / 2.0,
+                                previous.origin.y - ws.frame.origin.y + previous.size.height / 2.0,
+                            );
+                            unsafe {
+                                animation.setFromValue(Some(
+                                    &*objc2_foundation::NSValue::valueWithPoint(from),
+                                ));
+                            }
+                            animation.setDuration(0.16);
+                            card.layer.addAnimation_forKey(&animation, None);
+                            let resize = CABasicAnimation::animationWithKeyPath(Some(
+                                &objc2_foundation::NSString::from_str("bounds"),
+                            ));
+                            unsafe {
+                                resize.setFromValue(Some(
+                                    &*objc2_foundation::NSValue::valueWithRect(rect(
+                                        0.0,
+                                        0.0,
+                                        previous.size.width,
+                                        previous.size.height,
+                                    )),
+                                ));
+                            }
+                            resize.setDuration(0.16);
+                            card.layer.addAnimation_forKey(&resize, None);
+                        }
+                        cards.push(card);
+                        continue;
+                    }
                     let card = layer(w.frame, self.scale);
-                    card.setBorderColor(Some(&color(0.48, 0.70, 1.0, 1.0)));
+                    card.setBorderWidth(0.5);
+                    card.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.14)));
                     card.setCornerRadius(CORNER);
                     card.setMasksToBounds(true);
-                    card.setBackgroundColor(Some(&color(0.19, 0.20, 0.24, 1.0)));
+                    card.setBackgroundColor(Some(&color(0.20, 0.20, 0.22, 1.0)));
                     let image = layer(
                         rect(0.0, 0.0, w.frame.size.width, w.frame.size.height),
                         self.scale,
@@ -312,10 +428,10 @@ impl DisplayOverview {
                     }
                     card.addSublayer(&image);
                     let scrim = layer(
-                        rect(0.0, 0.0, w.frame.size.width, 36.0_f64.min(w.frame.size.height)),
+                        rect(0.0, 0.0, w.frame.size.width, 32.0_f64.min(w.frame.size.height)),
                         self.scale,
                     );
-                    scrim.setBackgroundColor(Some(&color(0.02, 0.02, 0.04, 0.7)));
+                    scrim.setBackgroundColor(Some(&color(0.10, 0.10, 0.11, 0.80)));
                     card.addSublayer(&scrim);
                     let icon = self.icons.entry(data.id.pid).or_insert_with(|| {
                         let app = NSRunningApplication::runningApplicationWithProcessIdentifier(
@@ -331,7 +447,7 @@ impl DisplayOverview {
                         }
                     });
                     if let Some(icon) = icon {
-                        let icon_layer = layer(rect(10.0, 8.0, 18.0, 18.0), self.scale);
+                        let icon_layer = layer(rect(10.0, 8.0, 16.0, 16.0), self.scale);
                         unsafe {
                             icon_layer.setContents(Some(
                                 &*(icon.as_ref() as *const CGImage as *const AnyObject),
@@ -341,12 +457,12 @@ impl DisplayOverview {
                     }
                     label(
                         &card,
-                        &format!(
-                            "{} · {}",
-                            data.app_name.as_deref().unwrap_or("Window"),
-                            data.info.title
-                        ),
-                        rect(34.0, 8.0, (w.frame.size.width - 44.0).max(0.0), 20.0),
+                        if data.info.title.is_empty() {
+                            data.app_name.as_deref().unwrap_or("Window")
+                        } else {
+                            &data.info.title
+                        },
+                        rect(34.0, 7.0, (w.frame.size.width - 44.0).max(0.0), 20.0),
                         self.scale,
                     );
                     container.addSublayer(&card);
@@ -356,12 +472,26 @@ impl DisplayOverview {
                         image,
                     });
                 }
-                label(
-                    &container,
-                    &data.name,
-                    rect(12.0, ws.frame.size.height - 24.0, 200.0, 20.0),
-                    self.scale,
-                );
+                if !reused {
+                    let caption = layer(
+                        rect(
+                            12.0,
+                            ws.frame.size.height - 36.0,
+                            220.0_f64.min(ws.frame.size.width - 24.0),
+                            26.0,
+                        ),
+                        self.scale,
+                    );
+                    caption.setCornerRadius(8.0);
+                    caption.setBackgroundColor(Some(&color(0.08, 0.08, 0.09, 0.82)));
+                    label(
+                        &caption,
+                        &data.name,
+                        rect(10.0, 5.0, caption.frame().size.width - 20.0, 18.0),
+                        self.scale,
+                    );
+                    container.addSublayer(&caption);
+                }
                 self.views.push(WorkspaceView {
                     index: data.index,
                     layer: container,
@@ -369,7 +499,115 @@ impl DisplayOverview {
                 });
             }
         });
+        for view in old_views {
+            view.layer.removeFromSuperlayer();
+        }
+        self.animate = false;
         self.surface.flush();
+    }
+}
+
+struct OverviewDrag {
+    intent: crate::actor::reactor::OverviewDrop,
+    start: CGPoint,
+    point: CGPoint,
+    size: CGSize,
+    started: bool,
+    card: Retained<CALayer>,
+    indicator: Retained<CALayer>,
+}
+
+fn drop_action(
+    frame: CGRect,
+    point: CGPoint,
+    mode: &str,
+) -> crate::layout_engine::WindowDropAction {
+    use crate::layout_engine::{Direction, WindowDropAction};
+    if mode == "stack" {
+        return WindowDropAction::Swap;
+    }
+    let x = (point.x - frame.origin.x) / frame.size.width.max(1.0);
+    if x < 0.25 {
+        WindowDropAction::Insert(Direction::Left)
+    } else if x >= 0.75 {
+        WindowDropAction::Insert(Direction::Right)
+    } else if mode == "scrolling" && point.y < frame.origin.y + frame.size.height / 2.0 {
+        WindowDropAction::Insert(Direction::Up)
+    } else {
+        WindowDropAction::Stack
+    }
+}
+
+fn floating_drop_frame(
+    display: CGRect,
+    ribbon: CGRect,
+    card: CGSize,
+    point: CGPoint,
+    offset: f64,
+) -> CGRect {
+    let scale = ribbon.size.height / display.size.height;
+    let base = (ribbon.size.width - display.size.width * scale) / 2.0;
+    let width = (card.width / scale).min(display.size.width);
+    let height = (card.height / scale).min(display.size.height);
+    let x = (point.x - card.width / 2.0 - base + offset) / scale;
+    let y = (point.y - card.height / 2.0) / scale;
+    rect(
+        display.origin.x + x.clamp(0.0, display.size.width - width),
+        display.origin.y + y.clamp(0.0, display.size.height - height),
+        width,
+        height,
+    )
+}
+
+fn tiled_target<'a>(
+    data: &RuntimeWorkspaceData,
+    ws: &'a WorkspaceProjection,
+    point: CGPoint,
+    source: Option<WindowId>,
+) -> Option<&'a WindowProjection> {
+    let target =
+        ws.windows
+            .iter()
+            .filter(|w| !data.windows[w.source].is_floating)
+            .min_by(|a, b| {
+                let distances = |w: &WindowProjection| {
+                    (
+                        (w.frame.origin.x - point.x)
+                            .max(0.0)
+                            .max(point.x - w.frame.origin.x - w.frame.size.width),
+                        (point.y - w.frame.origin.y - w.frame.size.height / 2.0).abs(),
+                    )
+                };
+                let (ax, ay) = distances(a);
+                let (bx, by) = distances(b);
+                ax.total_cmp(&bx).then(ay.total_cmp(&by))
+            })?;
+    if source == Some(data.windows[target.source].id)
+        && matches!(
+            drop_action(target.frame, point, &data.layout_mode),
+            crate::layout_engine::WindowDropAction::Insert(
+                crate::layout_engine::Direction::Left | crate::layout_engine::Direction::Right
+            )
+        )
+        && let Some(sibling) = ws.windows.iter().find(|w| {
+            data.windows[w.source].id != data.windows[target.source].id
+                && !data.windows[w.source].is_floating
+                && w.frame.origin.x == target.frame.origin.x
+                && w.frame.size.width == target.frame.size.width
+        })
+    {
+        return Some(sibling);
+    }
+    Some(target)
+}
+
+fn edge_direction(height: f64, y: f64) -> f64 {
+    if y < 56.0 {
+        -1.0
+    } else if y > height - 56.0 {
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -379,6 +617,9 @@ pub struct OverviewSession {
     active: usize,
     selection: Selection,
     pub(crate) previews: Option<PreviewSession>,
+    drag: Option<OverviewDrag>,
+    drop: Option<crate::actor::reactor::OverviewDrop>,
+    pressed: Option<CGPoint>,
 }
 
 impl OverviewSession {
@@ -417,12 +658,12 @@ impl OverviewSession {
             let root = layer(rect(0.0, 0.0, bounds.size.width, bounds.size.height), scale);
             root.setGeometryFlipped(true);
             root.setMasksToBounds(true);
-            root.setBackgroundColor(Some(&color(0.025, 0.03, 0.045, 0.6)));
+            root.setBackgroundColor(Some(&color(0.035, 0.035, 0.04, 0.42)));
             let result = (|| {
                 let window = CgsWindow::new_compositor(bounds, 0.0)?;
                 window.set_resolution(scale)?;
                 window.set_level(NSPopUpMenuWindowLevel as i32)?;
-                window.set_blur(30, None)?;
+                window.set_blur(36, None)?;
                 let surface = WindowSurface::new_scaled(window.id(), root.bounds(), &root, scale)?;
                 Ok::<_, crate::sys::cgs_window::CgsWindowError>((window, surface))
             })();
@@ -447,6 +688,7 @@ impl OverviewSession {
                 projection: Vec::new(),
                 views: Vec::new(),
                 icons: HashMap::default(),
+                animate: false,
                 root,
                 surface,
                 _window: window,
@@ -484,10 +726,264 @@ impl OverviewSession {
             active,
             selection,
             previews: None,
+            drag: None,
+            drop: None,
+            pressed: None,
         };
         session.highlight(None);
         // Cached/fallback layers are already visible; fresh capture starts on the next run-loop turn.
         Some(session)
+    }
+
+    pub(crate) fn take_drop(&mut self) -> Option<crate::actor::reactor::OverviewDrop> {
+        self.drop.take()
+    }
+
+    pub(crate) fn edge_active(&self) -> bool {
+        self.drag.as_ref().is_some_and(|drag| {
+            drag.started
+                && self.displays.iter().any(|d| {
+                    contains(d.bounds, drag.point)
+                        && edge_direction(d.bounds.size.height, drag.point.y - d.bounds.origin.y)
+                            != 0.0
+                })
+        })
+    }
+
+    pub(crate) fn edge_tick(&mut self, remembered: Option<&RememberedPreviewCache>) {
+        let Some(point) = self.drag.as_ref().filter(|drag| drag.started).map(|drag| drag.point)
+        else {
+            return;
+        };
+        if let Some(d) = self.displays.iter_mut().find(|d| contains(d.bounds, point)) {
+            let direction = edge_direction(d.bounds.size.height, point.y - d.bounds.origin.y);
+            d.workspace_offset = (d.centered as f64 + d.workspace_offset + direction * 0.2)
+                .clamp(0.0, d.workspaces.len().saturating_sub(1) as f64)
+                - d.centered as f64;
+            d.reproject(self.previews.as_ref(), remembered);
+        }
+        self.move_drag(point);
+        self.request_previews(remembered);
+    }
+
+    pub(crate) fn refresh(
+        &mut self,
+        reactor: &ReactorHandle,
+        remembered: Option<&RememberedPreviewCache>,
+        moved: Option<WindowId>,
+    ) {
+        self.end_drag();
+        let selected = moved.or(self.selection.window);
+        for (i, d) in self.displays.iter_mut().enumerate() {
+            d.workspaces = reactor.query_workspaces(d.info.space);
+            if d.workspaces.is_empty() {
+                continue;
+            }
+            d.centered = d.centered.min(d.workspaces.len() - 1);
+            d.workspace_offset = (d.centered as f64 + d.workspace_offset)
+                .clamp(0.0, (d.workspaces.len() - 1) as f64)
+                - d.centered as f64;
+            if let Some((pos, ws)) = d
+                .workspaces
+                .iter()
+                .enumerate()
+                .find(|(_, ws)| ws.windows.iter().any(|w| Some(w.id) == selected))
+                && (moved.is_some() || (self.active == i && self.selection.workspace != ws.index))
+            {
+                self.active = i;
+                self.selection = Selection {
+                    workspace: ws.index,
+                    window: selected,
+                };
+                d.centered = pos;
+                d.workspace_offset = 0.0;
+            }
+            if self.active == i
+                && let Some(window) = moved
+            {
+                d.reveal(self.selection.workspace, window);
+            }
+            d.animate = true;
+            d.rebuild(self.previews.as_ref(), remembered);
+        }
+        self.highlight(None);
+        self.request_previews(remembered);
+    }
+
+    fn end_drag(&mut self) -> Option<OverviewDrag> {
+        let drag = self.drag.take()?;
+        drag.card.removeFromSuperlayer();
+        drag.indicator.removeFromSuperlayer();
+        for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
+            if card.id == drag.intent.window {
+                card.layer.setHidden(false);
+            }
+        }
+        Some(drag)
+    }
+
+    fn begin_drag(&mut self, point: CGPoint) {
+        self.end_drag();
+        let Some(d) = self.displays.iter().find(|d| contains(d.bounds, point)) else {
+            return;
+        };
+        let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
+        let Some(selected) = hit(&d.workspaces, &d.projection, local) else {
+            return;
+        };
+        let Some(ws) = d.workspaces.iter().find(|ws| ws.index == selected.workspace) else {
+            return;
+        };
+        let Some(data) = ws.windows.iter().find(|w| {
+            Some(w.id) == selected.window
+                && w.info.sys_id.is_some()
+                && w.info.is_standard
+                && !w.info.is_minimized
+        }) else {
+            return;
+        };
+        let Some(view) = d.views.iter().find(|ws| ws.index == selected.workspace) else {
+            return;
+        };
+        let Some(source) = view.cards.iter().find(|c| c.id == data.id) else {
+            return;
+        };
+        let card = layer(
+            rect(
+                0.0,
+                0.0,
+                source.layer.frame().size.width,
+                source.layer.frame().size.height,
+            ),
+            d.scale,
+        );
+        unsafe {
+            card.setContents(source.image.contents().as_deref());
+            card.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
+        }
+        card.setCornerRadius(CORNER);
+        card.setMasksToBounds(true);
+        card.setBackgroundColor(Some(&color(0.20, 0.20, 0.22, 1.0)));
+        card.setBorderColor(Some(&color(0.0, 0.48, 1.0, 1.0)));
+        card.setBorderWidth(2.0);
+        label(
+            &card,
+            &data.info.title,
+            rect(
+                12.0,
+                8.0,
+                (source.layer.frame().size.width - 24.0).max(0.0),
+                20.0,
+            ),
+            d.scale,
+        );
+        let indicator = layer(CGRect::ZERO, d.scale);
+        indicator.setBackgroundColor(Some(&color(0.0, 0.48, 1.0, 0.25)));
+        self.drag = Some(OverviewDrag {
+            intent: crate::actor::reactor::OverviewDrop {
+                window: data.id,
+                server_id: data.info.sys_id,
+                bundle: data.info.bundle_id.clone(),
+                source_space: d.info.space.unwrap(),
+                source_workspace: ws.id.clone(),
+                display: d.info.display_uuid.clone(),
+                space: d.info.space.unwrap(),
+                workspace: ws.id.clone(),
+                floating: data.is_floating,
+                target: None,
+                frame: None,
+            },
+            start: point,
+            point,
+            size: source.layer.frame().size,
+            started: false,
+            card,
+            indicator,
+        });
+    }
+
+    fn move_drag(&mut self, point: CGPoint) {
+        let Some(drag) = &mut self.drag else { return };
+        drag.point = point;
+        if !drag.started && (point.x - drag.start.x).hypot(point.y - drag.start.y) < 5.0 {
+            return;
+        }
+        drag.started = true;
+        drag.intent.workspace.clear();
+        with_disabled_actions(|| {
+            for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
+                if card.id == drag.intent.window {
+                    card.layer.setHidden(true);
+                }
+            }
+            let Some(d) = self.displays.iter().find(|d| contains(d.bounds, point)) else {
+                drag.card.setHidden(true);
+                drag.indicator.setHidden(true);
+                return;
+            };
+            let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
+            d.root.addSublayer(&drag.indicator);
+            d.root.addSublayer(&drag.card);
+            drag.card.setHidden(false);
+            drag.card.setFrame(rect(
+                local.x - drag.size.width / 2.0,
+                local.y - drag.size.height / 2.0,
+                drag.size.width,
+                drag.size.height,
+            ));
+            drag.indicator.setHidden(true);
+            let Some(ws) = d.projection.iter().find(|ws| contains(ws.frame, local)) else {
+                return;
+            };
+            let data = &d.workspaces[ws.source];
+            drag.intent.display.clone_from(&d.info.display_uuid);
+            drag.intent.space = d.info.space.unwrap();
+            drag.intent.workspace.clone_from(&data.id);
+            drag.intent.target = None;
+            drag.intent.frame = None;
+            let p = CGPoint::new(local.x, local.y - ws.frame.origin.y);
+            let mut indicator = ws.frame;
+            if drag.intent.floating {
+                drag.intent.frame = Some(floating_drop_frame(
+                    d.info.frame,
+                    ws.frame,
+                    drag.size,
+                    p,
+                    d.offsets.get(&data.index).copied().unwrap_or(0.0),
+                ));
+                indicator = drag.card.frame();
+            } else if let Some(target) = tiled_target(data, ws, p, Some(drag.intent.window)) {
+                let action = drop_action(target.frame, p, &data.layout_mode);
+                if data.windows[target.source].id == drag.intent.window {
+                    drag.intent.workspace.clear();
+                    return;
+                }
+                drag.intent.target = Some((data.windows[target.source].id, action));
+                indicator = target.frame;
+                indicator.origin.y += ws.frame.origin.y;
+                match action {
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Left,
+                    ) => indicator.size.width = 4.0,
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Right,
+                    ) => {
+                        indicator.origin.x += indicator.size.width - 4.0;
+                        indicator.size.width = 4.0;
+                    }
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Up,
+                    ) => indicator.size.height = 4.0,
+                    _ => {
+                        indicator.origin.y += indicator.size.height - 4.0;
+                        indicator.size.height = 4.0;
+                    }
+                }
+            }
+            drag.indicator.setFrame(indicator);
+            drag.indicator.setHidden(false);
+        });
+        CATransaction::flush();
     }
 
     pub(crate) fn start_previews(
@@ -507,8 +1003,8 @@ impl OverviewSession {
         with_disabled_actions(|| {
             for (display, selection, width) in previous
                 .into_iter()
-                .map(|(d, s)| (d, s, 0.0))
-                .chain(std::iter::once((self.active, self.selection, 3.0)))
+                .map(|(d, s)| (d, s, 0.5))
+                .chain(std::iter::once((self.active, self.selection, 2.0)))
             {
                 if let Some(ws) =
                     self.displays[display].views.iter().find(|w| w.index == selection.workspace)
@@ -516,9 +1012,21 @@ impl OverviewSession {
                     if let Some(id) = selection.window {
                         if let Some(card) = ws.cards.iter().find(|c| c.id == id) {
                             card.layer.setBorderWidth(width);
+                            let border = if width > 0.5 {
+                                color(0.0, 0.48, 1.0, 1.0)
+                            } else {
+                                color(1.0, 1.0, 1.0, 0.14)
+                            };
+                            card.layer.setBorderColor(Some(&border));
                         }
                     } else {
                         ws.layer.setBorderWidth(width);
+                        let border = if width > 0.5 {
+                            color(0.0, 0.48, 1.0, 1.0)
+                        } else {
+                            color(1.0, 1.0, 1.0, 0.14)
+                        };
+                        ws.layer.setBorderColor(Some(&border));
                     }
                 }
             }
@@ -531,6 +1039,34 @@ impl OverviewSession {
         input: Input,
         remembered: Option<&RememberedPreviewCache>,
     ) -> Option<(String, Selection, Option<WindowServerId>)> {
+        match input {
+            Input::PointerDown(point) => {
+                self.pressed = Some(point);
+                self.begin_drag(point);
+                return None;
+            }
+            Input::PointerDrag(point) => {
+                self.move_drag(point);
+                return None;
+            }
+            Input::PointerUp(point) => {
+                self.move_drag(point);
+                let drag = self.end_drag();
+                let pressed = self.pressed.take();
+                if let Some(drag) = drag.filter(|drag| drag.started) {
+                    if !drag.intent.workspace.is_empty() {
+                        self.drop = Some(drag.intent);
+                    }
+                    return None;
+                }
+                if pressed.is_some() {
+                    return self.input(Input::Click(point), remembered);
+                }
+                return None;
+            }
+            Input::Move(_) if self.drag.is_some() => return None,
+            _ => {}
+        }
         let old = (self.active, self.selection);
         let mut reprojected = false;
         let activate = matches!(input, Input::Activate | Input::Click(_));
@@ -550,7 +1086,7 @@ impl OverviewSession {
                 if delta.x == 0.0 && delta.y == 0.0 {
                     return None;
                 }
-                if delta.y.abs() >= delta.x.abs() {
+                if vertical_scroll(delta) {
                     let stride = ((d.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) + GAP;
                     let previous = d.workspace_offset;
                     d.workspace_offset = scrolled_workspace_offset(
@@ -571,27 +1107,24 @@ impl OverviewSession {
                         CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
                     let target = hit(&d.workspaces, &d.projection, local)?;
                     let ws = d.workspaces.iter().find(|w| w.index == target.workspace)?;
-                    let scale = ((d.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0)
-                        / d.info.frame.size.height;
-                    let base = (d.bounds.size.width - d.info.frame.size.width * scale) / 2.0;
-                    let (min, max) = ws.windows.iter().fold((0.0_f64, 0.0_f64), |(min, max), w| {
-                        let x = base + (w.info.frame.origin.x - d.info.frame.origin.x) * scale;
-                        (
-                            min.min(x - 12.0),
-                            max.max(
-                                x + w.info.frame.size.width * scale - d.bounds.size.width + 12.0,
-                            ),
-                        )
-                    });
                     let offset = d.offsets.entry(ws.index).or_default();
                     let previous = *offset;
-                    *offset = (*offset - delta.x).clamp(min, max);
+                    *offset = scrolled_horizontal_offset(
+                        d.info.frame,
+                        d.bounds.size,
+                        ws,
+                        *offset,
+                        delta.x,
+                    );
                     reprojected = *offset != previous;
                     self.selection = target;
                 }
                 if reprojected {
                     d.reproject(self.previews.as_ref(), remembered);
                     self.request_previews(remembered);
+                }
+                if let Some(point) = self.drag.as_ref().map(|drag| drag.point) {
+                    self.move_drag(point);
                 }
             }
             Input::Up | Input::Down => {
@@ -629,19 +1162,7 @@ impl OverviewSession {
                     };
                     let w = &ws.windows[next];
                     self.selection.window = Some(w.id);
-                    let scale = ((d.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0)
-                        / d.info.frame.size.height;
-                    let base = (d.bounds.size.width - d.info.frame.size.width * scale) / 2.0;
-                    let x = base + (w.info.frame.origin.x - d.info.frame.origin.x) * scale;
-                    let right = x + w.info.frame.size.width * scale;
-                    let offset = d.offsets.entry(ws.index).or_default();
-                    let previous = *offset;
-                    if x - *offset < 12.0 {
-                        *offset = x - 12.0;
-                    } else if right - *offset > d.bounds.size.width - 12.0 {
-                        *offset = right - d.bounds.size.width + 12.0;
-                    }
-                    if previous != *offset {
+                    if d.reveal(self.selection.workspace, w.id) {
                         d.reproject(self.previews.as_ref(), remembered);
                         reprojected = true;
                         self.request_previews(remembered);
@@ -673,6 +1194,10 @@ impl OverviewSession {
             return;
         }
         let mut visible = HashSet::default();
+        // The lifted layer shares this image; account for its pixels inside the session cap.
+        if let Some(drag) = &self.drag {
+            visible.insert(drag.intent.window);
+        }
         for i in (0..self.displays.len()).map(|n| (self.active + n) % self.displays.len()) {
             let display = &self.displays[i];
             let viewport = rect(0.0, 0.0, display.bounds.size.width, display.bounds.size.height);
@@ -778,6 +1303,21 @@ impl OverviewSession {
 
     fn sync_images(&self, remembered: Option<&RememberedPreviewCache>) {
         with_disabled_actions(|| {
+            if let Some(drag) = &self.drag {
+                let data = self
+                    .displays
+                    .iter()
+                    .flat_map(|d| &d.workspaces)
+                    .flat_map(|ws| &ws.windows)
+                    .find(|w| w.id == drag.intent.window);
+                let image = data.and_then(|data| {
+                    self.previews
+                        .as_ref()
+                        .and_then(|p| p.images.get(&data.id))
+                        .or_else(|| remembered.and_then(|c| c.get(data)))
+                });
+                set_image(&drag.card, image.map(|i| &**i));
+            }
             for display in &self.displays {
                 for (view, ws) in display.views.iter().zip(&display.projection) {
                     for (card, w) in view.cards.iter().zip(&ws.windows) {
@@ -1194,6 +1734,136 @@ mod tests {
             rect(0.0, 700.0, 1200.0, 300.0),
             rect(0.0, 0.0, 100.0, 100.0)
         ));
+    }
+
+    #[test]
+    fn drop_regions_and_stack_row_use_projected_geometry() {
+        use crate::layout_engine::{Direction, WindowDropAction};
+        let frame = rect(100.0, 50.0, 200.0, 100.0);
+        assert_eq!(
+            drop_action(frame, CGPoint::new(120.0, 100.0), "scrolling"),
+            WindowDropAction::Insert(Direction::Left)
+        );
+        assert_eq!(
+            drop_action(frame, CGPoint::new(280.0, 100.0), "scrolling"),
+            WindowDropAction::Insert(Direction::Right)
+        );
+        assert_eq!(
+            drop_action(frame, CGPoint::new(200.0, 80.0), "scrolling"),
+            WindowDropAction::Insert(Direction::Up)
+        );
+        assert_eq!(
+            drop_action(frame, CGPoint::new(200.0, 120.0), "scrolling"),
+            WindowDropAction::Stack
+        );
+        let data = workspace(0, vec![
+            window(1, rect(0.0, 0.0, 200.0, 100.0), false),
+            window(2, rect(0.0, 100.0, 200.0, 100.0), false),
+        ]);
+        let ws = WorkspaceProjection {
+            source: 0,
+            frame: rect(0.0, 0.0, 600.0, 400.0),
+            windows: vec![
+                WindowProjection {
+                    source: 0,
+                    frame: rect(100.0, 0.0, 200.0, 100.0),
+                },
+                WindowProjection {
+                    source: 1,
+                    frame: rect(100.0, 100.0, 200.0, 100.0),
+                },
+            ],
+        };
+        assert_eq!(
+            tiled_target(&data, &ws, CGPoint::new(110.0, 60.0), Some(data.windows[0].id))
+                .unwrap()
+                .source,
+            1
+        );
+        assert_eq!(
+            tiled_target(&data, &ws, CGPoint::new(200.0, 60.0), None).unwrap().source,
+            0
+        );
+        assert_eq!(
+            tiled_target(&data, &ws, CGPoint::new(200.0, 160.0), None).unwrap().source,
+            1
+        );
+        assert!(
+            tiled_target(
+                &workspace(0, vec![]),
+                &WorkspaceProjection {
+                    source: 0,
+                    frame: ws.frame,
+                    windows: vec![]
+                },
+                CGPoint::new(200.0, 100.0),
+                None
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn floating_drop_inverse_projection_rebases_and_clamps() {
+        let display = rect(1200.0, -200.0, 1200.0, 800.0);
+        let ribbon = rect(0.0, 300.0, 1200.0, 400.0);
+        let size = CGSize::new(200.0, 100.0);
+        assert_eq!(
+            floating_drop_frame(display, ribbon, size, CGPoint::new(600.0, 200.0), 0.0),
+            rect(1600.0, 100.0, 400.0, 200.0)
+        );
+        assert_eq!(
+            floating_drop_frame(display, ribbon, size, CGPoint::new(-100.0, -100.0), 0.0).origin,
+            display.origin
+        );
+        assert_eq!(
+            floating_drop_frame(display, ribbon, size, CGPoint::new(2000.0, 1000.0), 0.0).origin,
+            CGPoint::new(2000.0, 400.0)
+        );
+    }
+
+    #[test]
+    fn drag_edge_scroll_is_bounded_presentation_state() {
+        assert_eq!(edge_direction(800.0, 20.0), -1.0);
+        assert_eq!(edge_direction(800.0, 400.0), 0.0);
+        assert_eq!(edge_direction(800.0, 790.0), 1.0);
+        assert!((scrolled_workspace_offset(1, 0.0, -80.0, 400.0, 5) - 0.2).abs() < 1e-12);
+        assert_eq!(scrolled_workspace_offset(1, 3.0, -80.0, 400.0, 5), 3.0);
+    }
+
+    #[test]
+    fn dominant_axis_and_pointer_workspace_pan_are_independent_and_bounded() {
+        assert!(vertical_scroll(CGPoint::new(10.0, -10.0)));
+        assert!(!vertical_scroll(CGPoint::new(-11.0, 10.0)));
+        let display = rect(0.0, 0.0, 1200.0, 800.0);
+        let workspaces: Vec<_> = (0..3)
+            .map(|index| {
+                workspace(index, vec![window(
+                    index as u32 + 1,
+                    rect(2500.0, 0.0, 400.0, 800.0),
+                    false,
+                )])
+            })
+            .collect();
+        let before = format!("{workspaces:?}");
+        let mut offsets = HashMap::from_iter([(0, 25.0), (2, 50.0)]);
+        let projection = project(display, display.size, &workspaces, 1, 0.0, &offsets);
+        let selected = hit(&workspaces, &projection, CGPoint::new(600.0, 400.0)).unwrap();
+        assert_eq!(selected.workspace, 1);
+        let next = scrolled_horizontal_offset(display, display.size, &workspaces[1], 0.0, -5000.0);
+        assert!(next > 0.0);
+        assert_eq!(
+            next,
+            scrolled_horizontal_offset(display, display.size, &workspaces[1], next, -5000.0)
+        );
+        offsets.insert(selected.workspace, next);
+        assert_eq!(offsets[&0], 25.0);
+        assert_eq!(offsets[&2], 50.0);
+        assert_eq!(format!("{workspaces:?}"), before);
+        assert_eq!(
+            scrolled_horizontal_offset(display, display.size, &workspace(0, vec![]), 0.0, 5000.0),
+            0.0
+        );
     }
 
     #[test]

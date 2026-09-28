@@ -6,6 +6,7 @@
 
 mod animation;
 mod events;
+pub(crate) use events::drag::OverviewDrop;
 mod main_window;
 mod managers;
 mod query;
@@ -216,6 +217,11 @@ pub enum SpaceEventKind {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
+    #[serde(skip)]
+    OverviewDrop {
+        intent: events::drag::OverviewDrop,
+        reply: std::sync::mpsc::SyncSender<bool>,
+    },
     #[serde(skip)]
     SpaceStateChanged(ForwardedSpaceState),
     #[serde(skip)]
@@ -1876,6 +1882,71 @@ impl Reactor {
                 }
                 return Ok(EventOutcome::no_change());
             }
+            Event::OverviewDrop { intent, reply } => {
+                let valid = self.state.windows.window(intent.window).is_some_and(|window| {
+                    window.is_admitted()
+                        && window.info.is_standard
+                        && !window.info.is_minimized
+                        && window.info.sys_id == intent.server_id
+                }) && self
+                    .app_manager
+                    .apps
+                    .get(&intent.window.pid)
+                    .is_some_and(|app| app.info.bundle_id == intent.bundle)
+                    && self.space_state.screens.iter().any(|screen| {
+                        screen.space == Some(intent.space) && screen.display_uuid == intent.display
+                    })
+                    && self
+                        .space_state
+                        .screens
+                        .iter()
+                        .any(|screen| screen.space == Some(intent.source_space))
+                    && !self.is_fullscreen_space(intent.space)
+                    && !self.is_fullscreen_space(intent.source_space);
+                let changed = valid
+                    && self
+                        .layout_manager
+                        .layout_engine
+                        .commit_overview_drop(&mut self.state.windows, &intent);
+                let _ = reply.send(changed);
+                if !changed {
+                    return Ok(EventOutcome::no_change());
+                }
+                let mut outcome = EventOutcome::layout_changed(false);
+                outcome = outcome.with_arrange_space_scope(Some(intent.space));
+                if intent.source_space != intent.space {
+                    outcome.arrange.secondary_space_scope = Some(intent.source_space);
+                }
+                if intent.source_space != intent.space {
+                    if let Some(server_id) = intent.server_id {
+                        self.state.windows.set_window_server_space(server_id, Some(intent.space));
+                    }
+                    let frame = intent.frame.unwrap_or_else(|| {
+                        let destination = self
+                            .space_state
+                            .screens
+                            .iter()
+                            .find(|s| s.space == Some(intent.space))
+                            .unwrap()
+                            .frame;
+                        let source = self
+                            .space_state
+                            .screens
+                            .iter()
+                            .find(|s| s.space == Some(intent.source_space))
+                            .map(|s| s.frame)
+                            .unwrap_or(destination);
+                        let mut frame =
+                            self.state.windows.window(intent.window).unwrap().frame_monotonic;
+                        frame.origin.x += destination.origin.x - source.origin.x;
+                        frame.origin.y += destination.origin.y - source.origin.y;
+                        frame
+                    });
+                    outcome =
+                        outcome.with_pre_layout_window_frame_write(intent.window, frame, true);
+                }
+                return Ok(outcome);
+            }
             Event::MouseUp(button) => {
                 let final_space = self.drag_manager.actor.source().and_then(|source| {
                     let frame_space = || self.best_space_for_frame(&source.last_frame);
@@ -2548,6 +2619,10 @@ impl Reactor {
                     ),
                     outcome.arrange.space_scope,
                 );
+            }
+            if let Some(space) = outcome.arrange.secondary_space_scope {
+                layout_changed |=
+                    self.update_layout_or_warn(outcome.arrange.is_resize, false, Some(space));
             }
             // Publish the menu state once after all arrange passes have completed.
             self.maybe_send_menu_update();

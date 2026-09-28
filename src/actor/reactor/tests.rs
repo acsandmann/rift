@@ -6768,3 +6768,118 @@ fn binding_mode_changes_update_query_state_before_broadcast() {
     reactor.handle_loop_event(Event::BindingModeChanged { mode: "resize".into() });
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn overview_drop_rejects_reused_native_identity_and_removed_display_before_mutation() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let window = WindowId::new(1, 1);
+    let workspaces = reactor.query_workspaces(Some(space));
+    let source = reactor.state.windows.workspace_for_window(space, window).unwrap();
+    let destination = workspaces.iter().find(|ws| ws.id != format!("{source:?}")).unwrap();
+    let intent = OverviewDrop {
+        window,
+        server_id: reactor.state.windows.window(window).unwrap().info.sys_id,
+        bundle: reactor.app_manager.apps[&window.pid].info.bundle_id.clone(),
+        source_space: space,
+        source_workspace: format!("{source:?}"),
+        display: reactor.space_state.screens[0].display_uuid.clone(),
+        space,
+        workspace: destination.id.clone(),
+        floating: false,
+        target: None,
+        frame: None,
+    };
+    for (index, mut invalid) in
+        [intent.clone(), intent.clone(), intent.clone()].into_iter().enumerate()
+    {
+        match index {
+            0 => invalid.server_id = Some(WindowServerId::new(99999)),
+            1 => invalid.bundle = Some("reused.app".into()),
+            _ => invalid.source_workspace = "removed".into(),
+        }
+        let (reply, rx) = std::sync::mpsc::sync_channel(1);
+        let outcome = reactor
+            .dispatch_workflow(Event::OverviewDrop { intent: invalid, reply })
+            .unwrap();
+        assert!(!rx.recv().unwrap());
+        assert_eq!(outcome.arrange.passes, 0);
+        assert!(outcome.pre_layout_window_frame_writes.is_empty());
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(space, window),
+            Some(source)
+        );
+    }
+    let mut removed = intent.clone();
+    removed.display = "removed-monitor".into();
+    let (reply, rx) = std::sync::mpsc::sync_channel(1);
+    let outcome = reactor
+        .dispatch_workflow(Event::OverviewDrop { intent: removed, reply })
+        .unwrap();
+    assert!(!rx.recv().unwrap());
+    assert_eq!(outcome.arrange.passes, 0);
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(space, window),
+        Some(source)
+    );
+    let (reply, rx) = std::sync::mpsc::sync_channel(1);
+    reactor.handle_event(Event::OverviewDrop { intent, reply });
+    assert!(rx.recv().unwrap());
+    assert_ne!(
+        reactor.state.windows.workspace_for_window(space, window),
+        Some(source)
+    );
+}
+
+#[test]
+fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
+    let (mut apps, mut reactor) = test_context();
+    let source = SpaceId::new(1);
+    let destination = SpaceId::new(2);
+    reactor.handle_event(space_state_event(
+        vec![
+            CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.)),
+            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1200., 900.)),
+            CGRect::new(CGPoint::new(2200., 0.), CGSize::new(1000., 800.)),
+        ],
+        vec![Some(source), Some(destination), Some(SpaceId::new(3))],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let window = WindowId::new(1, 1);
+    let source_workspace = reactor.state.windows.workspace_for_window(source, window).unwrap();
+    let target = reactor.query_workspaces(Some(destination))[1].id.clone();
+    let intent = OverviewDrop {
+        window,
+        server_id: reactor.state.windows.window(window).unwrap().info.sys_id,
+        bundle: reactor.app_manager.apps[&window.pid].info.bundle_id.clone(),
+        source_space: source,
+        source_workspace: format!("{source_workspace:?}"),
+        display: reactor.space_state.screens[1].display_uuid.clone(),
+        space: destination,
+        workspace: target.clone(),
+        floating: false,
+        target: None,
+        frame: None,
+    };
+    let (reply, rx) = std::sync::mpsc::sync_channel(1);
+    let outcome = reactor.dispatch_workflow(Event::OverviewDrop { intent, reply }).unwrap();
+    assert!(rx.recv().unwrap());
+    assert_eq!(outcome.arrange.passes, 1);
+    assert_eq!(outcome.arrange.space_scope, Some(destination));
+    assert_eq!(outcome.arrange.secondary_space_scope, Some(source));
+    assert_eq!(outcome.pre_layout_window_frame_writes.len(), 1);
+    assert!(outcome.pre_layout_window_frame_writes[0].frame.origin.x >= 1000.0);
+    assert_eq!(
+        format!(
+            "{:?}",
+            reactor.state.windows.workspace_for_window(destination, window).unwrap()
+        ),
+        target
+    );
+    assert_eq!(reactor.state.windows.workspace_for_window(source, window), None);
+}

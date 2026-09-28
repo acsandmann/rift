@@ -58,7 +58,13 @@ Rift's optional Overview shows a vertical stack of workspace ribbons on each
 monitor, including empty workspaces. Both `show_mission_control_all` and
 `show_mission_control_current` open this view. Escape dismisses it, Return or a
 click activates the selection, arrows navigate, and Tab/Shift-Tab cycle windows.
-Navigation changes only the Overview viewport until activation.
+Scroll vertically through workspaces or horizontally through the ribbon under the
+pointer; right-drag also pans that ribbon. Navigation changes only the Overview
+viewport until activation. Left-drag a card (5 px threshold) to another ribbon or
+monitor. The insertion marker shows the destination; only release commits the
+move. Overview stays open and selects the moved card. Holding a card within
+56 px of the top/bottom scrolls ribbons every 150 ms. Floating cards remain
+floating, and tiled drops use Rift's existing insertion/stack operations.
 
 Enable it in `[settings.ui.mission_control]` with `enabled = true`, then restart
 Rift. Disabling it on config reload releases its actor and native resources;
@@ -66,7 +72,11 @@ enabling it again requires a restart. Any config reload closes the open view.
 `window_previews = false` is the default and never calls Screen Recording APIs.
 With previews enabled and Screen Recording access already granted, visible cards
 receive one-shot previews; denied or failed captures leave usable fallback cards.
-Closing releases all display surfaces and preview images. There is no idle cache.
+Closing releases all display surfaces and full-quality images. Instant reopening
+uses independently downscaled previews (320 px maximum edge), capped at 4 MiB and
+32 windows. Visible full-quality previews are capped at 8 MiB; offscreen images
+are released. Disabling previews or Overview clears the remembered cache. Fresh
+captures start after the first presentation, with at most two requests in flight.
 
 ## Community
 

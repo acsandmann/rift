@@ -249,16 +249,16 @@ impl WmController {
         use self::WmCommand::*;
         use self::WmEvent::*;
 
-        if matches!(
-            event,
-            Command(Wm(crate::actor::wm_controller::WmCmd::NextWorkspace))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::PrevWorkspace))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToWorkspace(_)))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToLastWorkspace))
-                | SpaceStateUpdated(..)
-        ) && let Some(tx) = &self.mission_control_tx
+        let refresh_overview = matches!(
+            &event,
+            Command(Wm(MoveWindowToWorkspace(_)))
+                | Command(ReactorCommand(_))
+                | Command(ConfiguredLayout(_))
+        );
+        if matches!(&event, SpaceStateUpdated(..))
+            && let Some(tx) = &self.mission_control_tx
         {
-            tx.send(mission_control::Event::RefreshCurrentWorkspace);
+            tx.send(mission_control::Event::Dismiss);
         }
 
         match event {
@@ -432,6 +432,9 @@ impl WmController {
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
             }
+        }
+        if refresh_overview && let Some(tx) = &self.mission_control_tx {
+            tx.send(mission_control::Event::RefreshCurrentWorkspace);
         }
     }
 
