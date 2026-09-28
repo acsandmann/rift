@@ -32,7 +32,8 @@ use crate::sys::window_surface::WindowSurface;
 use crate::ui::common::with_disabled_actions;
 
 const GAP: f64 = 28.0;
-const CORNER: f64 = 12.0;
+const CORNER: f64 = 10.0;
+const CAPTION: f64 = 28.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
@@ -200,10 +201,14 @@ struct WindowCard {
     id: WindowId,
     layer: Retained<CALayer>,
     image: Retained<CALayer>,
+    caption: Retained<CALayer>,
+    title: Retained<CATextLayer>,
 }
 struct WorkspaceView {
     index: usize,
     layer: Retained<CALayer>,
+    heading: Retained<CATextLayer>,
+    empty: Retained<CATextLayer>,
     cards: Vec<WindowCard>,
 }
 struct DisplayOverview {
@@ -233,7 +238,7 @@ fn layer(frame: CGRect, scale: f64) -> Retained<CALayer> {
     l.setContentsScale(scale);
     l
 }
-fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) {
+fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) -> Retained<CATextLayer> {
     let l = CATextLayer::layer();
     l.setFrame(frame);
     l.setContentsScale(scale);
@@ -249,6 +254,7 @@ fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) {
         l.setString(Some(&*(text.as_ref() as *const AnyObject)));
     }
     parent.addSublayer(&l);
+    l
 }
 
 impl DisplayOverview {
@@ -302,6 +308,7 @@ impl DisplayOverview {
         with_disabled_actions(|| {
             for (view, projected) in self.views.iter().zip(&next) {
                 view.layer.setFrame(projected.frame);
+                view.heading.setFrame(rect(24.0, projected.frame.origin.y - 24.0, 300.0, 20.0));
                 for (card, window) in view.cards.iter().zip(&projected.windows) {
                     card.layer.setFrame(window.frame);
                 }
@@ -345,28 +352,51 @@ impl DisplayOverview {
                     .iter()
                     .position(|view| view.index == data.index)
                     .map(|pos| old_views.swap_remove(pos));
-                let reused = existing.is_some();
-                let container =
-                    existing.map(|view| view.layer).unwrap_or_else(|| layer(ws.frame, self.scale));
+                let (container, heading, empty) = if let Some(view) = existing {
+                    (view.layer, view.heading, view.empty)
+                } else {
+                    let container = layer(ws.frame, self.scale);
+                    let heading = label(
+                        &self.root,
+                        &format!("{}  ·  {}", data.index + 1, data.name),
+                        rect(24.0, ws.frame.origin.y - 24.0, 300.0, 20.0),
+                        self.scale,
+                    );
+                    let empty = label(
+                        &container,
+                        "Empty workspace",
+                        rect(
+                            (ws.frame.size.width - 180.0) / 2.0,
+                            ws.frame.size.height / 2.0 - 10.0,
+                            180.0,
+                            20.0,
+                        ),
+                        self.scale,
+                    );
+                    empty.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 0.38)));
+                    (container, heading, empty)
+                };
                 container.setFrame(ws.frame);
-                container.setBorderWidth(0.5);
-                container.setCornerRadius(18.0);
                 container.setMasksToBounds(true);
-                container.setBackgroundColor(Some(&color(0.16, 0.16, 0.18, 0.38)));
-                container.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.14)));
+                empty.setHidden(!data.windows.is_empty());
+                heading.setFrame(rect(24.0, ws.frame.origin.y - 24.0, 300.0, 20.0));
                 self.root.addSublayer(&container);
+                self.root.addSublayer(&heading);
                 let mut cards = Vec::new();
                 for w in &ws.windows {
                     let data = &data.windows[w.source];
                     if let Some((card, previous)) = old_cards.remove(&data.id) {
                         card.layer.setFrame(w.frame);
-                        card.layer.setBorderWidth(0.5);
-                        card.layer.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.14)));
-                        card.image.setFrame(rect(
-                            0.0,
-                            0.0,
-                            w.frame.size.width,
-                            w.frame.size.height,
+                        let height = (w.frame.size.height - CAPTION).max(1.0);
+                        card.image.setBorderWidth(0.5);
+                        card.image.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
+                        card.image.setFrame(rect(0.0, 0.0, w.frame.size.width, height));
+                        card.caption.setFrame(rect(0.0, height, w.frame.size.width, CAPTION));
+                        card.title.setFrame(rect(
+                            26.0,
+                            7.0,
+                            (w.frame.size.width - 32.0).max(0.0),
+                            20.0,
                         ));
                         container.addSublayer(&card.layer);
                         if self.animate {
@@ -404,17 +434,15 @@ impl DisplayOverview {
                         continue;
                     }
                     let card = layer(w.frame, self.scale);
-                    card.setBorderWidth(0.5);
-                    card.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.14)));
-                    card.setCornerRadius(CORNER);
-                    card.setMasksToBounds(true);
-                    card.setBackgroundColor(Some(&color(0.20, 0.20, 0.22, 1.0)));
-                    let image = layer(
-                        rect(0.0, 0.0, w.frame.size.width, w.frame.size.height),
-                        self.scale,
-                    );
+                    let height = (w.frame.size.height - CAPTION).max(1.0);
+                    let image = layer(rect(0.0, 0.0, w.frame.size.width, height), self.scale);
+                    image.setCornerRadius(CORNER);
+                    image.setMasksToBounds(true);
+                    image.setBorderWidth(0.5);
+                    image.setBorderColor(Some(&color(1.0, 1.0, 1.0, 0.18)));
+                    image.setBackgroundColor(Some(&color(0.13, 0.13, 0.14, 1.0)));
                     unsafe {
-                        image.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
+                        image.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspect);
                     }
                     if let Some(image_data) = previews
                         .and_then(|p| p.images.get(&data.id))
@@ -427,12 +455,8 @@ impl DisplayOverview {
                         }
                     }
                     card.addSublayer(&image);
-                    let scrim = layer(
-                        rect(0.0, 0.0, w.frame.size.width, 32.0_f64.min(w.frame.size.height)),
-                        self.scale,
-                    );
-                    scrim.setBackgroundColor(Some(&color(0.10, 0.10, 0.11, 0.80)));
-                    card.addSublayer(&scrim);
+                    let caption = layer(rect(0.0, height, w.frame.size.width, CAPTION), self.scale);
+                    card.addSublayer(&caption);
                     let icon = self.icons.entry(data.id.pid).or_insert_with(|| {
                         let app = NSRunningApplication::runningApplicationWithProcessIdentifier(
                             data.id.pid,
@@ -447,22 +471,22 @@ impl DisplayOverview {
                         }
                     });
                     if let Some(icon) = icon {
-                        let icon_layer = layer(rect(10.0, 8.0, 16.0, 16.0), self.scale);
+                        let icon_layer = layer(rect(4.0, 7.0, 16.0, 16.0), self.scale);
                         unsafe {
                             icon_layer.setContents(Some(
                                 &*(icon.as_ref() as *const CGImage as *const AnyObject),
                             ));
                         }
-                        card.addSublayer(&icon_layer);
+                        caption.addSublayer(&icon_layer);
                     }
-                    label(
-                        &card,
+                    let title = label(
+                        &caption,
                         if data.info.title.is_empty() {
                             data.app_name.as_deref().unwrap_or("Window")
                         } else {
                             &data.info.title
                         },
-                        rect(34.0, 7.0, (w.frame.size.width - 44.0).max(0.0), 20.0),
+                        rect(26.0, 7.0, (w.frame.size.width - 32.0).max(0.0), 20.0),
                         self.scale,
                     );
                     container.addSublayer(&card);
@@ -470,37 +494,22 @@ impl DisplayOverview {
                         id: data.id,
                         layer: card,
                         image,
+                        caption,
+                        title,
                     });
-                }
-                if !reused {
-                    let caption = layer(
-                        rect(
-                            12.0,
-                            ws.frame.size.height - 36.0,
-                            220.0_f64.min(ws.frame.size.width - 24.0),
-                            26.0,
-                        ),
-                        self.scale,
-                    );
-                    caption.setCornerRadius(8.0);
-                    caption.setBackgroundColor(Some(&color(0.08, 0.08, 0.09, 0.82)));
-                    label(
-                        &caption,
-                        &data.name,
-                        rect(10.0, 5.0, caption.frame().size.width - 20.0, 18.0),
-                        self.scale,
-                    );
-                    container.addSublayer(&caption);
                 }
                 self.views.push(WorkspaceView {
                     index: data.index,
                     layer: container,
+                    heading,
+                    empty,
                     cards,
                 });
             }
         });
         for view in old_views {
             view.layer.removeFromSuperlayer();
+            view.heading.removeFromSuperlayer();
         }
         self.animate = false;
         self.surface.flush();
@@ -514,6 +523,7 @@ struct OverviewDrag {
     size: CGSize,
     started: bool,
     card: Retained<CALayer>,
+    preview: Retained<CALayer>,
     indicator: Retained<CALayer>,
 }
 
@@ -658,7 +668,7 @@ impl OverviewSession {
             let root = layer(rect(0.0, 0.0, bounds.size.width, bounds.size.height), scale);
             root.setGeometryFlipped(true);
             root.setMasksToBounds(true);
-            root.setBackgroundColor(Some(&color(0.035, 0.035, 0.04, 0.42)));
+            root.setBackgroundColor(Some(&color(0.025, 0.025, 0.03, 0.58)));
             let result = (|| {
                 let window = CgsWindow::new_compositor(bounds, 0.0)?;
                 window.set_resolution(scale)?;
@@ -857,22 +867,25 @@ impl OverviewSession {
             ),
             d.scale,
         );
+        let height = (source.layer.frame().size.height - CAPTION).max(1.0);
+        let preview = layer(rect(0.0, 0.0, source.layer.frame().size.width, height), d.scale);
         unsafe {
-            card.setContents(source.image.contents().as_deref());
-            card.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
+            preview.setContents(source.image.contents().as_deref());
+            preview.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspect);
         }
-        card.setCornerRadius(CORNER);
-        card.setMasksToBounds(true);
-        card.setBackgroundColor(Some(&color(0.20, 0.20, 0.22, 1.0)));
-        card.setBorderColor(Some(&color(0.0, 0.48, 1.0, 1.0)));
-        card.setBorderWidth(2.0);
+        preview.setCornerRadius(CORNER);
+        preview.setMasksToBounds(true);
+        preview.setBackgroundColor(Some(&color(0.13, 0.13, 0.14, 1.0)));
+        preview.setBorderColor(Some(&color(0.0, 0.48, 1.0, 1.0)));
+        preview.setBorderWidth(2.0);
+        card.addSublayer(&preview);
         label(
             &card,
             &data.info.title,
             rect(
-                12.0,
-                8.0,
-                (source.layer.frame().size.width - 24.0).max(0.0),
+                4.0,
+                height + 7.0,
+                (source.layer.frame().size.width - 8.0).max(0.0),
                 20.0,
             ),
             d.scale,
@@ -898,6 +911,7 @@ impl OverviewSession {
             size: source.layer.frame().size,
             started: false,
             card,
+            preview,
             indicator,
         });
     }
@@ -1011,22 +1025,21 @@ impl OverviewSession {
                 {
                     if let Some(id) = selection.window {
                         if let Some(card) = ws.cards.iter().find(|c| c.id == id) {
-                            card.layer.setBorderWidth(width);
+                            card.image.setBorderWidth(width);
                             let border = if width > 0.5 {
                                 color(0.0, 0.48, 1.0, 1.0)
                             } else {
                                 color(1.0, 1.0, 1.0, 0.14)
                             };
-                            card.layer.setBorderColor(Some(&border));
+                            card.image.setBorderColor(Some(&border));
                         }
                     } else {
-                        ws.layer.setBorderWidth(width);
-                        let border = if width > 0.5 {
-                            color(0.0, 0.48, 1.0, 1.0)
+                        let foreground = if width > 0.5 {
+                            color(0.35, 0.70, 1.0, 1.0)
                         } else {
-                            color(1.0, 1.0, 1.0, 0.14)
+                            color(0.94, 0.94, 0.97, 1.0)
                         };
-                        ws.layer.setBorderColor(Some(&border));
+                        ws.heading.setForegroundColor(Some(&foreground));
                     }
                 }
             }
@@ -1316,7 +1329,7 @@ impl OverviewSession {
                         .and_then(|p| p.images.get(&data.id))
                         .or_else(|| remembered.and_then(|c| c.get(data)))
                 });
-                set_image(&drag.card, image.map(|i| &**i));
+                set_image(&drag.preview, image.map(|i| &**i));
             }
             for display in &self.displays {
                 for (view, ws) in display.views.iter().zip(&display.projection) {
