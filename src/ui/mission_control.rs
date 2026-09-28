@@ -12,7 +12,9 @@ use objc2_core_graphics::{
     CGDisplayBounds, CGImage, CGImageAlphaInfo, CGPreflightScreenCaptureAccess,
 };
 use objc2_foundation::{MainThreadMarker, NSError};
-use objc2_quartz_core::{CABasicAnimation, CALayer, CAMediaTiming, CATextLayer, CATransaction};
+use objc2_quartz_core::{
+    CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CATextLayer, CATransaction,
+};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
 };
@@ -31,7 +33,7 @@ use crate::sys::window_server::WindowServerId;
 use crate::sys::window_surface::WindowSurface;
 use crate::ui::common::with_disabled_actions;
 
-const GAP: f64 = 28.0;
+const GAP: f64 = 40.0;
 const CORNER: f64 = 8.0;
 const CAPTION: f64 = 28.0;
 
@@ -65,6 +67,12 @@ fn scrolled_workspace_offset(
 ) -> f64 {
     (centered as f64 + offset - delta / stride).clamp(0.0, count.saturating_sub(1) as f64)
         - centered as f64
+}
+
+fn filter_workspaces(workspaces: &mut Vec<RuntimeWorkspaceData>, show_empty: bool) {
+    if !show_empty {
+        workspaces.retain(|ws| !ws.windows.is_empty());
+    }
 }
 
 fn vertical_scroll(delta: CGPoint) -> bool { delta.y.abs() >= delta.x.abs() }
@@ -242,13 +250,13 @@ fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) -> Retained<CA
     let l = CATextLayer::layer();
     l.setFrame(frame);
     l.setContentsScale(scale);
-    let font = NSFont::systemFontOfSize(13.0);
+    let font = NSFont::systemFontOfSize(12.0);
     unsafe {
         l.setFont(Some(&*(Retained::as_ptr(&font) as *const CFType)));
         l.setTruncationMode(objc2_quartz_core::kCATruncationEnd);
     }
-    l.setFontSize(13.0);
-    l.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 1.0)));
+    l.setFontSize(12.0);
+    l.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 0.86)));
     let text = CFString::from_str(text);
     unsafe {
         l.setString(Some(&*(text.as_ref() as *const AnyObject)));
@@ -280,6 +288,48 @@ impl DisplayOverview {
             *offset = right - self.bounds.size.width + 12.0;
         }
         *offset != previous
+    }
+
+    /// Translate existing ribbons without allocating or projecting their window cards.
+    /// Fall back to reconciliation only when a workspace crosses the overscan boundary.
+    fn translate_vertical(&mut self, previous_offset: f64) -> Option<bool> {
+        let height = ((self.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0);
+        let stride = height + GAP;
+        let overscan = rect(
+            0.0,
+            -stride,
+            self.bounds.size.width,
+            self.bounds.size.height + stride * 2.0,
+        );
+        let delta = (previous_offset - self.workspace_offset) * stride;
+        let included = |source: usize| {
+            let y = self.bounds.size.height / 2.0
+                + (source as f64 - self.centered as f64 - self.workspace_offset) * stride
+                - height / 2.0;
+            intersects(rect(0.0, y, self.bounds.size.width, height), overscan)
+        };
+        if (0..self.workspaces.len())
+            .filter(|&source| included(source))
+            .ne(self.projection.iter().map(|ws| ws.source))
+        {
+            return None;
+        }
+        let mut visibility_changed = false;
+        with_disabled_actions(|| {
+            for (view, ws) in self.views.iter().zip(&mut self.projection) {
+                let previous = ws.frame;
+                ws.frame.origin.y += delta;
+                visibility_changed |= ws.windows.iter().any(|w| {
+                    card_visible(self.bounds.size, previous, w.frame)
+                        != card_visible(self.bounds.size, ws.frame, w.frame)
+                });
+                view.layer.setFrame(ws.frame);
+                let mut heading = view.heading.frame();
+                heading.origin.y += delta;
+                view.heading.setFrame(heading);
+            }
+        });
+        Some(visibility_changed)
     }
 
     fn reproject(
@@ -461,6 +511,9 @@ impl DisplayOverview {
                                     &*objc2_foundation::NSValue::valueWithPoint(from),
                                 ));
                             }
+                            animation.setPreferredFrameRateRange(CAFrameRateRange::new(
+                                60.0, 120.0, 120.0,
+                            ));
                             animation.setDuration(0.16);
                             card.layer.addAnimation_forKey(&animation, None);
                             let resize = CABasicAnimation::animationWithKeyPath(Some(
@@ -476,6 +529,9 @@ impl DisplayOverview {
                                     )),
                                 ));
                             }
+                            resize.setPreferredFrameRateRange(CAFrameRateRange::new(
+                                60.0, 120.0, 120.0,
+                            ));
                             resize.setDuration(0.16);
                             card.layer.addAnimation_forKey(&resize, None);
                         }
@@ -680,6 +736,7 @@ fn edge_direction(height: f64, y: f64) -> f64 {
 
 pub struct OverviewSession {
     generation: u64,
+    show_empty_workspaces: bool,
     displays: Vec<DisplayOverview>,
     active: usize,
     selection: Selection,
@@ -704,7 +761,8 @@ impl OverviewSession {
             .into_iter()
             .filter_map(|display| {
                 let space = display.info.space?;
-                let workspaces = reactor.query_workspaces(Some(space));
+                let mut workspaces = reactor.query_workspaces(Some(space));
+                filter_workspaces(&mut workspaces, settings.show_empty_workspaces);
                 Some((display, workspaces))
             })
             .collect();
@@ -773,6 +831,7 @@ impl OverviewSession {
                     animation.setFromValue(Some(&*objc2_foundation::NSNumber::new_f64(0.0)));
                     animation.setToValue(Some(&*objc2_foundation::NSNumber::new_f64(1.0)));
                 }
+                animation.setPreferredFrameRateRange(CAFrameRateRange::new(60.0, 120.0, 120.0));
                 animation.setDuration(settings.fade_duration_ms.max(0.0) / 1000.0);
                 view.root.addAnimation_forKey(&animation, None);
             }
@@ -789,6 +848,7 @@ impl OverviewSession {
         };
         let session = Self {
             generation,
+            show_empty_workspaces: settings.show_empty_workspaces,
             displays,
             active,
             selection,
@@ -801,6 +861,8 @@ impl OverviewSession {
         // Cached/fallback layers are already visible; fresh capture starts on the next run-loop turn.
         Some(session)
     }
+
+    pub(crate) fn is_empty(&self) -> bool { self.displays.is_empty() }
 
     pub(crate) fn take_drop(&mut self) -> Option<crate::actor::reactor::OverviewDrop> {
         self.drop.take()
@@ -843,6 +905,7 @@ impl OverviewSession {
         let selected = moved.or(self.selection.window);
         for (i, d) in self.displays.iter_mut().enumerate() {
             d.workspaces = reactor.query_workspaces(d.info.space);
+            filter_workspaces(&mut d.workspaces, self.show_empty_workspaces);
             if d.workspaces.is_empty() {
                 continue;
             }
@@ -872,6 +935,21 @@ impl OverviewSession {
             }
             d.animate = true;
             d.rebuild(self.previews.as_ref(), remembered);
+        }
+        let active_uuid = self.displays.get(self.active).map(|d| d.info.display_uuid.clone());
+        self.displays.retain(|d| !d.workspaces.is_empty());
+        self.active = self
+            .displays
+            .iter()
+            .position(|d| Some(&d.info.display_uuid) == active_uuid.as_ref())
+            .unwrap_or(0);
+        if let Some(d) = self.displays.get(self.active)
+            && !d.workspaces.iter().any(|ws| ws.index == self.selection.workspace)
+        {
+            self.selection = Selection {
+                workspace: d.workspaces[d.centered].index,
+                window: None,
+            };
         }
         self.highlight(None);
         self.request_previews(remembered);
@@ -1092,9 +1170,9 @@ impl OverviewSession {
                         }
                     } else {
                         let foreground = if width > 0.5 {
-                            color(0.35, 0.70, 1.0, 1.0)
+                            color(1.0, 1.0, 1.0, 1.0)
                         } else {
-                            color(0.94, 0.94, 0.97, 1.0)
+                            color(0.94, 0.94, 0.97, 0.62)
                         };
                         ws.heading.setForegroundColor(Some(&foreground));
                     }
@@ -1137,8 +1215,12 @@ impl OverviewSession {
             Input::Move(_) if self.drag.is_some() => return None,
             _ => {}
         }
+        if self.displays.is_empty() {
+            return None;
+        }
         let old = (self.active, self.selection);
         let mut reprojected = false;
+        let mut only_translated = false;
         let activate = matches!(input, Input::Activate | Input::Click(_));
         match input {
             Input::Move(point) | Input::Click(point) => {
@@ -1156,6 +1238,8 @@ impl OverviewSession {
                 if delta.x == 0.0 && delta.y == 0.0 {
                     return None;
                 }
+                let mut refresh_previews = true;
+                let mut translated = false;
                 if vertical_scroll(delta) {
                     let stride = ((d.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) + GAP;
                     let previous = d.workspace_offset;
@@ -1167,6 +1251,10 @@ impl OverviewSession {
                         d.workspaces.len(),
                     );
                     reprojected = d.workspace_offset != previous;
+                    if reprojected && let Some(changed) = d.translate_vertical(previous) {
+                        translated = true;
+                        refresh_previews = changed;
+                    }
                     let selected = (d.centered as f64 + d.workspace_offset).round() as usize;
                     self.selection = Selection {
                         workspace: d.workspaces[selected].index,
@@ -1190,8 +1278,13 @@ impl OverviewSession {
                     self.selection = target;
                 }
                 if reprojected {
-                    d.reproject(self.previews.as_ref(), remembered);
-                    self.request_previews(remembered);
+                    only_translated = translated;
+                    if !translated {
+                        d.reproject(self.previews.as_ref(), remembered);
+                    }
+                    if refresh_previews {
+                        self.request_previews(remembered);
+                    }
                 }
                 if let Some(point) = self.drag.as_ref().map(|drag| drag.point) {
                     self.move_drag(point);
@@ -1241,8 +1334,10 @@ impl OverviewSession {
             }
             _ => {}
         }
-        if reprojected || old != (self.active, self.selection) {
+        if old != (self.active, self.selection) || (reprojected && !only_translated) {
             self.highlight(Some(old));
+        } else if reprojected {
+            CATransaction::flush();
         }
         if activate {
             let d = &self.displays[self.active];
@@ -1993,6 +2088,25 @@ mod tests {
     }
 
     #[test]
+    fn empty_workspaces_are_hidden_without_renumbering() {
+        let original = vec![
+            workspace(0, vec![]),
+            workspace(3, vec![window(1, rect(0.0, 0.0, 400.0, 300.0), false)]),
+            workspace(7, vec![]),
+        ];
+        let mut filtered = original.clone();
+        filter_workspaces(&mut filtered, false);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].index, 3);
+        let mut included = original;
+        filter_workspaces(&mut included, true);
+        assert_eq!(included.len(), 3);
+        filtered[0].windows.clear();
+        filter_workspaces(&mut filtered, false);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
     fn wheel_scrolling_moves_ribbons_smoothly_and_clamps_to_workspace_stack() {
         let workspaces: Vec<_> = (0..3).map(|i| workspace(i, vec![])).collect();
         let display = rect(0.0, 0.0, 1200.0, 800.0);
@@ -2006,7 +2120,7 @@ mod tests {
             offset,
             &HashMap::default(),
         );
-        assert_eq!(projection[1].frame.origin.y, 114.0);
+        assert_eq!(projection[1].frame.origin.y, 120.0);
         assert_eq!(scrolled_workspace_offset(1, offset, -10000.0, 400.0, 3), 1.0);
         assert_eq!(scrolled_workspace_offset(1, offset, 10000.0, 400.0, 3), -1.0);
     }
@@ -2021,7 +2135,7 @@ mod tests {
         ];
         let projection = project(display, display.size, &workspaces, 1, 0.0, &HashMap::default());
         assert_eq!(projection.len(), 3);
-        assert_eq!(projection[1].frame, rect(0.0, 214.0, 1200.0, 372.0));
+        assert_eq!(projection[1].frame, rect(0.0, 220.0, 1200.0, 360.0));
         assert_eq!(
             projection[2].frame.origin.y - projection[1].frame.origin.y,
             400.0
@@ -2044,7 +2158,7 @@ mod tests {
         let cards = &projection[0].windows;
         assert_eq!(cards[0].source, 1);
         assert_eq!(cards[1].source, 0);
-        assert_eq!(cards[0].frame, rect(367.5, 46.5, 186.0, 93.0));
+        assert_eq!(cards[0].frame, rect(375.0, 45.0, 180.0, 90.0));
         assert_eq!(
             hit(&workspaces, &projection, CGPoint::new(400.0, 280.0)),
             Some(Selection {

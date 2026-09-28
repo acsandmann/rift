@@ -202,6 +202,8 @@ vertical = 0
 # Enabling requires restarting Rift. Disabling on reload releases Overview resources.
 # Reload closes an open Overview; previews are optional and never request permission.
 [settings.ui.mission_control]
+# Include empty workspaces as navigation and drag destinations.
+show_empty_workspaces = false
 enabled = false
 window_previews = false
 fade_enabled = false

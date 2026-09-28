@@ -60,6 +60,33 @@ impl Input {
     }
 }
 
+/// Collapse queued motion without crossing clicks, direction changes, or display targets.
+fn merge_motion(event: &mut Event, next: Event) -> Result<(), Event> {
+    match (event, next) {
+        (Event::Input(Input::Move(point)), Event::Input(Input::Move(next)))
+        | (Event::Input(Input::PointerDrag(point)), Event::Input(Input::PointerDrag(next))) => {
+            *point = next;
+            Ok(())
+        }
+        (
+            Event::Input(Input::Scroll { point, delta }),
+            Event::Input(Input::Scroll {
+                point: next_point,
+                delta: next_delta,
+            }),
+        ) if *point == next_point
+            && (delta.y.abs() >= delta.x.abs()) == (next_delta.y.abs() >= next_delta.x.abs())
+            && delta.x * next_delta.x >= 0.0
+            && delta.y * next_delta.y >= 0.0 =>
+        {
+            delta.x += next_delta.x;
+            delta.y += next_delta.y;
+            Ok(())
+        }
+        (_, next) => Err(next),
+    }
+}
+
 pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
@@ -112,6 +139,7 @@ impl MissionControlActor {
 
     pub async fn run(mut self) {
         let mut edge_timer = None;
+        let mut pending_event = None;
         loop {
             let edge_active = self.session.as_ref().is_some_and(OverviewSession::edge_active);
             update_edge_timer(&mut edge_timer, edge_active);
@@ -120,8 +148,19 @@ impl MissionControlActor {
                     edge_timer = None;
                     if let Some(session) = &mut self.session { session.edge_tick(self.remembered.as_ref()); }
                 }
-                event = self.rx.recv() => {
-                    let Some((span, event)) = event else { break };
+                event = async {
+                    if pending_event.is_some() { pending_event.take() } else { self.rx.recv().await }
+                } => {
+                    let Some((span, mut event)) = event else { break };
+                    if matches!(event, Event::Input(Input::Scroll { .. } | Input::Move(_) | Input::PointerDrag(_))) {
+                        for _ in 0..32 {
+                            let Ok((next_span, next)) = self.rx.try_recv() else { break };
+                            if let Err(next) = merge_motion(&mut event, next) {
+                                pending_event = Some((next_span, next));
+                                break;
+                            }
+                        }
+                    }
                     let _guard = span.enter();
                     self.handle(event);
                     if !self.settings.enabled { break; }
@@ -185,6 +224,9 @@ impl MissionControlActor {
             Event::RefreshCurrentWorkspace => {
                 if let Some(session) = &mut self.session {
                     session.refresh(&self.reactor, self.remembered.as_ref(), None);
+                }
+                if self.session.as_ref().is_some_and(OverviewSession::is_empty) {
+                    self.close();
                 }
             }
             Event::Configure(settings) => {
@@ -281,6 +323,42 @@ mod tests {
         let settings: MissionControlSettings = toml::from_str("enabled = true").unwrap();
         assert!(channel_if_enabled(&settings).is_some());
         assert!(!settings.window_previews);
+    }
+
+    #[test]
+    fn queued_scroll_preserves_distance_and_input_boundaries() {
+        let point = CGPoint::new(40.0, 50.0);
+        let scroll = |y| {
+            Event::Input(Input::Scroll {
+                point,
+                delta: CGPoint::new(0.0, y),
+            })
+        };
+        let mut event = scroll(-2.5);
+        assert!(merge_motion(&mut event, scroll(-1.25)).is_ok());
+        assert!(matches!(&event, Event::Input(Input::Scroll { delta, .. }) if delta.y == -3.75));
+        assert!(merge_motion(&mut event, scroll(1.0)).is_err());
+        assert!(merge_motion(&mut event, Event::Input(Input::PointerUp(point))).is_err());
+        assert!(merge_motion(&mut event, Event::Dismiss).is_err());
+        assert!(
+            merge_motion(
+                &mut event,
+                Event::Input(Input::Scroll {
+                    point: CGPoint::new(500.0, 50.0),
+                    delta: CGPoint::new(0.0, -1.0)
+                })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_workspace_setting_is_opt_in() {
+        let settings: MissionControlSettings = toml::from_str("enabled = true").unwrap();
+        assert!(!settings.show_empty_workspaces);
+        let settings: MissionControlSettings =
+            toml::from_str("show_empty_workspaces = true").unwrap();
+        assert!(settings.show_empty_workspaces);
     }
 
     #[test]

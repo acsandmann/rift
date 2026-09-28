@@ -162,6 +162,7 @@ objc2-screen-capture-kit = { version = "0.3.2", default-features = false, featur
 ] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 	"CAAnimation",
+	"CAFrameRateRange",
 	"CABase",
 	"CAEAGLLayer",
 	"CAEDRMetadata",
