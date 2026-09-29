@@ -38,6 +38,15 @@ fn recv_wm(rx: &mut actor::Receiver<wm_controller::WmEvent>) -> wm_controller::W
     rx.try_recv().expect("expected wm event").1
 }
 
+fn recv_snapshot(
+    rx: &mut actor::Receiver<wm_controller::WmEvent>,
+) -> (ForwardedSpaceState, CoordinateConverter) {
+    match recv_wm(rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, converter) => (state, converter),
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
 fn recv_reactor(rx: &mut actor::Receiver<reactor::Event>) -> reactor::Event {
     rx.try_recv().expect("expected reactor event").1
 }
@@ -156,7 +165,8 @@ fn confirmed_window_move_forwards_membership_without_space_switch() {
     let wsid = WindowServerId::new(77);
 
     actor.state.screens = vec![make_screen(Some(origin))];
-    actor.state.last_sent_spaces = Some(vec![Some(origin)]);
+    actor.forward_screen_parameters(actor.state.screens.clone(), CoordinateConverter::default());
+    let _ = recv_wm(&mut wm_rx);
     actor.state.visible_window_spaces.insert(wsid, origin);
     crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![destination.get()]));
 
@@ -164,13 +174,9 @@ fn confirmed_window_move_forwards_membership_without_space_switch() {
 
     crate::sys::window_server::set_window_spaces_override(wsid, None);
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert!(state.active_window_spaces.is_empty());
-            assert_eq!(state.screens[0].space, Some(origin));
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert!(state.active_window_spaces.is_empty());
+    assert_eq!(state.screens[0].space, Some(origin));
     assert_no_reactor_event(&mut reactor_rx);
 }
 
@@ -197,15 +203,11 @@ fn active_space_changed_forwards_immediately_when_space_snapshot_changes() {
 
     actor.handle_event(Event::ActiveSpaceChanged);
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(new_space)]
-            );
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(new_space)]
+    );
     assert!(!actor.state.awaiting_space_switch_confirmation);
     assert_no_reactor_event(&mut reactor_rx);
 }
@@ -236,7 +238,7 @@ fn quarantines_window_space_events_during_sleep_before_churn_begins() {
     assert_no_wm_event(&mut wm_rx);
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::SystemWillSleep
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert_no_reactor_event(&mut reactor_rx);
 }
@@ -255,7 +257,7 @@ fn buffers_screen_and_space_updates_until_display_churn_ends() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert_no_wm_event(&mut wm_rx);
 
@@ -265,7 +267,7 @@ fn buffers_screen_and_space_updates_until_display_churn_ends() {
         recv_wm(&mut wm_rx),
         wm_controller::WmEvent::SpaceStateUpdated(state, _)
             if state.screens.iter().map(|s| s.space).collect::<Vec<_>>() == vec![Some(space)]
-                && state.releases_display_churn_refresh_quarantine
+                && state.authoritative
     ));
     assert_no_wm_event(&mut wm_rx);
     assert_no_reactor_event(&mut reactor_rx);
@@ -287,15 +289,11 @@ fn flushes_pending_screen_and_space_updates_as_one_coherent_snapshot() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(state.screens[0].space, Some(current_space));
-            assert!(state.releases_display_churn_refresh_quarantine);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(state.screens[0].space, Some(current_space));
+    assert!(state.authoritative);
     assert_no_wm_event(&mut wm_rx);
 }
 
@@ -320,11 +318,11 @@ fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::SystemWillSleep
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
@@ -334,20 +332,16 @@ fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
 
     actor.handle_event(Event::DisplayChurnEnd);
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(recovered)]
-            );
-            assert!(
-                state.releases_lifecycle_refresh_quarantine,
-                "the first post-wake forwarded snapshot should release the reactor quarantine"
-            );
-            assert!(state.releases_display_churn_refresh_quarantine);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(recovered)]
+    );
+    assert!(
+        state.authoritative,
+        "the first post-wake forwarded snapshot should release the reactor quarantine"
+    );
+    assert!(state.authoritative);
     assert_no_wm_event(&mut wm_rx);
     assert_no_reactor_event(&mut reactor_rx);
 }
@@ -373,7 +367,7 @@ fn session_lock_buffers_space_updates_until_unlock_rescan() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::SessionDidResignActive
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert_no_wm_event(&mut wm_rx);
 
@@ -383,19 +377,15 @@ fn session_lock_buffers_space_updates_until_unlock_rescan() {
         CoordinateConverter::default(),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(unlocked)]
-            );
-            assert!(
-                state.releases_lifecycle_refresh_quarantine,
-                "the first post-unlock forwarded snapshot should release the reactor quarantine"
-            );
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(unlocked)]
+    );
+    assert!(
+        state.authoritative,
+        "the first post-unlock forwarded snapshot should release the reactor quarantine"
+    );
     assert_no_wm_event(&mut wm_rx);
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
@@ -413,8 +403,8 @@ fn duplicate_session_hints_are_idempotent() {
 
     actor.handle_event(Event::SessionDidResignActive);
     assert!(matches!(
-        reactor_rx.try_recv().map(|(_, event)| event),
-        Ok(reactor::Event::SessionDidResignActive)
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::TopologyInvalidated(_)
     ));
 
     actor.handle_event(Event::SessionDidResignActive);
@@ -446,10 +436,10 @@ fn timed_refresh_does_not_forward_while_session_is_inactive() {
     actor.state.screens = vec![make_screen(Some(locked))];
     actor.handle_event(Event::ProcessScreenRefresh { attempt: 0 });
 
-    assert!(actor.state.refresh_deferred_until_stable);
+    assert!(!actor.topology_is_authoritative());
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::SessionDidResignActive
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert_no_wm_event(&mut wm_rx);
 
@@ -459,15 +449,11 @@ fn timed_refresh_does_not_forward_while_session_is_inactive() {
         CoordinateConverter::default(),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(unlocked)]
-            );
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(unlocked)]
+    );
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
         reactor::Event::SessionDidBecomeActive
@@ -493,8 +479,12 @@ fn drops_duplicate_space_snapshots_after_flush() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
+    assert!(
+        matches!(recv_wm(&mut wm_rx), wm_controller::WmEvent::SpaceStateUpdated(state, _) if state.authoritative)
+    );
+    actor.handle_event(Event::SpaceChanged(vec![Some(space)]));
     assert_no_wm_event(&mut wm_rx);
     assert_no_reactor_event(&mut reactor_rx);
 }
@@ -516,17 +506,12 @@ fn retains_only_latest_pending_screen_snapshot_during_churn() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
-    let forwarded = recv_wm(&mut wm_rx);
-    match forwarded {
-        wm_controller::WmEvent::SpaceStateUpdated(state, converter) => {
-            assert_eq!(state.screens[0].space, Some(SpaceId::new(52)));
-            assert_eq!(converter.screen_height(), Some(20.0));
-            assert!(state.releases_display_churn_refresh_quarantine);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, converter) = recv_snapshot(&mut wm_rx);
+    assert_eq!(state.screens[0].space, Some(SpaceId::new(52)));
+    assert_eq!(converter.screen_height(), Some(20.0));
+    assert!(state.authoritative);
 }
 
 #[test]
@@ -540,7 +525,7 @@ fn quarantines_space_lifecycle_events_during_churn_until_snapshot() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert_no_reactor_event(&mut reactor_rx);
 }
@@ -559,7 +544,7 @@ fn display_setting_reconfig_starts_churn() {
     assert!(actor.state.display_churn_active);
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert_no_wm_event(&mut wm_rx);
 }
@@ -590,7 +575,7 @@ fn physical_display_reconfig_starts_churn() {
     assert!(actor.state.display_churn_active);
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert_no_wm_event(&mut wm_rx);
 }
@@ -619,16 +604,11 @@ fn topology_delta_uses_last_forwarded_screens_as_diff_base() {
         CoordinateConverter::from_height(800.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert!(state.display_set_changed);
-            assert!(state.topology_changed);
-            assert!(state.allow_space_remap);
-            assert!(state.should_force_refresh_layout);
-            assert_eq!(state.resized_spaces.len(), 1);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert!(state.display_set_changed);
+    assert!(state.should_force_refresh_layout);
+    assert!(state.space_remaps.is_empty());
+    assert_eq!(state.resized_spaces.len(), 1);
     assert_no_reactor_event(&mut reactor_rx);
 }
 
@@ -694,14 +674,9 @@ fn fullscreen_transition_is_normalized_before_forwarding() {
         CoordinateConverter::from_height(1000.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            let spaces: Vec<Option<SpaceId>> =
-                state.screens.iter().map(|screen| screen.space).collect();
-            assert_eq!(spaces, vec![Some(left_space_1), None]);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    let spaces: Vec<Option<SpaceId>> = state.screens.iter().map(|screen| screen.space).collect();
+    assert_eq!(spaces, vec![Some(left_space_1), None]);
 }
 
 #[test]
@@ -730,13 +705,9 @@ fn topology_change_emits_space_remap_from_display_history() {
         CoordinateConverter::from_height(800.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(state.space_remaps, vec![(original_space, remapped_space)]);
-            assert!(state.allow_space_remap);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(state.space_remaps, vec![(original_space, remapped_space)]);
+    assert!(!state.space_remaps.is_empty());
 }
 
 #[test]
@@ -767,16 +738,12 @@ fn wake_transient_cannot_steal_another_displays_space_history() {
         )],
         CoordinateConverter::from_height(800.0),
     ));
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert!(state.space_remaps.is_empty());
-            assert_eq!(
-                state.last_user_space_by_display.get("external"),
-                Some(&external_space_before_sleep)
-            );
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert!(state.space_remaps.is_empty());
+    assert_eq!(
+        state.last_user_space_by_display.get("external"),
+        Some(&external_space_before_sleep)
+    );
 
     actor.handle_event(Event::ScreenParametersChanged(
         vec![
@@ -785,16 +752,12 @@ fn wake_transient_cannot_steal_another_displays_space_history() {
         ],
         CoordinateConverter::from_height(800.0),
     ));
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(state.space_remaps, vec![(
-                external_space_before_sleep,
-                external_space_after_wake
-            )]);
-            assert!(!state.space_remaps.contains(&(builtin_space, external_space_after_wake)));
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(state.space_remaps, vec![(
+        external_space_before_sleep,
+        external_space_after_wake
+    )]);
+    assert!(!state.space_remaps.contains(&(builtin_space, external_space_after_wake)));
 }
 
 #[test]
@@ -832,26 +795,22 @@ fn sleep_wake_display_reattach_flushes_latest_stable_spaces_only() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::SystemWillSleep
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
         reactor::Event::SystemWoke
     ));
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(left), Some(right)]
-            );
-            assert!(state.releases_display_churn_refresh_quarantine);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(left), Some(right)]
+    );
+    assert!(state.authoritative);
 }
 
 #[test]
@@ -880,41 +839,43 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
         CoordinateConverter::from_height(800.0),
     );
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            let delta = state.topology_window_delta.expect("expected topology window delta");
-            assert_eq!(delta.epoch, 9);
-            assert!(delta.appeared.is_empty());
-            assert_eq!(delta.disappeared, vec![(wsid, space)]);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    let delta = state.topology_window_delta.expect("expected topology window delta");
+    assert_eq!(delta.epoch, 9);
+    assert!(delta.appeared.is_empty());
+    assert_eq!(delta.disappeared, vec![(wsid, space)]);
 }
 
 #[test]
 fn first_empty_post_wake_snapshot_preserves_known_visible_windows() {
-    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let (mut actor, mut wm_rx, _) = build_actor();
     let space = SpaceId::new(302);
     let wsid = WindowServerId::new(79);
-
-    actor.state.screens = vec![make_screen(Some(space))];
     actor.state.visible_window_spaces.insert(wsid, space);
-    actor.state.release_reactor_quarantine_on_next_forward = true;
-    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), Some(vec![]));
-
-    actor.forward_screen_parameters(
-        vec![make_screen(Some(space))],
-        CoordinateConverter::from_height(800.0),
-    );
-
-    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), None);
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(state.active_window_spaces.get(&wsid), Some(&space));
-            assert!(state.releases_lifecycle_refresh_quarantine);
+    window_server::set_space_window_list_for_space_override(space.get(), Some(vec![]));
+    let mut previous_revision = 0;
+    for sample in 0..4 {
+        if sample <= 1 {
+            actor.state.recovering_membership = true;
         }
-        other => panic!("unexpected wm event: {other:?}"),
+        window_server::set_space_membership_query_failed(space.get(), sample == 0);
+        actor.forward_screen_parameters(
+            vec![make_screen(Some(space))],
+            CoordinateConverter::default(),
+        );
+        let (state, _) = recv_snapshot(&mut wm_rx);
+        assert!(state.authoritative);
+        assert_eq!(state.membership_complete, sample >= 2);
+        assert_eq!(
+            state.active_window_spaces.get(&wsid),
+            (sample < 2).then_some(&space)
+        );
+        if sample == 3 {
+            assert_eq!(state.revision, previous_revision);
+        }
+        previous_revision = state.revision;
     }
+    window_server::set_space_window_list_for_space_override(space.get(), None);
 }
 
 #[test]
@@ -943,11 +904,16 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
         new_space.get(),
         Some(vec![wsid.as_u32()]),
     );
+    crate::sys::window_server::set_space_window_list_for_space_override(
+        old_space.get(),
+        Some(vec![]),
+    );
     actor.synthesize_topology_window_delta(10, actor.state.display_churn_flags, &[
         make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
         make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
     ]);
     crate::sys::window_server::set_space_window_list_for_space_override(new_space.get(), None);
+    crate::sys::window_server::set_space_window_list_for_space_override(old_space.get(), None);
     actor.forward_screen_parameters(
         vec![
             make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
@@ -956,14 +922,10 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
         CoordinateConverter::from_height(800.0),
     );
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            let delta = state.topology_window_delta.expect("expected topology window delta");
-            assert_eq!(delta.disappeared, vec![(wsid, old_space)]);
-            assert_eq!(delta.appeared, vec![(wsid, new_space)]);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    let delta = state.topology_window_delta.expect("expected topology window delta");
+    assert_eq!(delta.disappeared, vec![(wsid, old_space)]);
+    assert_eq!(delta.appeared, vec![(wsid, new_space)]);
 }
 
 #[test]
@@ -1106,15 +1068,10 @@ fn display_order_change_is_topology_change_without_display_set_change() {
         CoordinateConverter::from_height(800.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert!(!state.display_set_changed);
-            assert!(state.topology_changed);
-            assert!(state.should_force_refresh_layout);
-            assert!(state.space_remaps.is_empty());
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert!(!state.display_set_changed);
+    assert!(state.should_force_refresh_layout);
+    assert!(state.space_remaps.is_empty());
 }
 
 #[test]
@@ -1141,16 +1098,19 @@ fn duplicate_space_transient_during_wake_is_not_forwarded_when_stable_snapshot_r
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::SystemWillSleep
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
         reactor::Event::SystemWoke
     ));
+    assert!(
+        matches!(recv_wm(&mut wm_rx), wm_controller::WmEvent::SpaceStateUpdated(state, _) if state.authoritative && state.screens.iter().map(|s| s.space).collect::<Vec<_>>() == vec![Some(left), Some(right)])
+    );
     assert_no_wm_event(&mut wm_rx);
 }
 
@@ -1180,16 +1140,12 @@ fn normal_refresh_retries_duplicate_user_space_snapshot_until_valid() {
 
     actor.process_screen_refresh(1, true);
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(left), Some(right)]
-            );
-            assert!(state.releases_display_churn_refresh_quarantine);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(left), Some(right)]
+    );
+    assert!(state.authoritative);
     assert!(
         !actor.state.refresh_pending,
         "refresh should complete once the authoritative snapshot becomes valid"
@@ -1238,15 +1194,11 @@ fn fullscreen_transition_tracks_display_identity_across_reordered_screens() {
         CoordinateConverter::from_height(1000.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(state.screens[0].display_uuid, "display-right");
-            assert_eq!(state.screens[0].space, None);
-            assert_eq!(state.screens[1].display_uuid, "display-left");
-            assert_eq!(state.screens[1].space, Some(left_space_1));
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(state.screens[0].display_uuid, "display-right");
+    assert_eq!(state.screens[0].space, None);
+    assert_eq!(state.screens[1].display_uuid, "display-left");
+    assert_eq!(state.screens[1].space, Some(left_space_1));
 }
 
 #[test]
@@ -1273,14 +1225,9 @@ fn fullscreen_transition_rewrites_cross_display_space_contamination_only() {
         CoordinateConverter::from_height(1000.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            let spaces: Vec<Option<SpaceId>> =
-                state.screens.iter().map(|screen| screen.space).collect();
-            assert_eq!(spaces, vec![Some(left_space), None]);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    let spaces: Vec<Option<SpaceId>> = state.screens.iter().map(|screen| screen.space).collect();
+    assert_eq!(spaces, vec![Some(left_space), None]);
 }
 
 #[test]
@@ -1292,7 +1239,7 @@ fn display_churn_stabilization_rejects_duplicate_space_snapshot_until_valid() {
     actor.handle_event(Event::DisplayChurnBegin);
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnBegin
+        reactor::Event::TopologyInvalidated(_)
     ));
 
     let epoch = actor.state.display_churn_epoch;
@@ -1316,19 +1263,17 @@ fn display_churn_stabilization_rejects_duplicate_space_snapshot_until_valid() {
         make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
     ];
 
+    let before = window_server::window_order_query_count();
     actor.attempt_finish_display_churn(epoch, 4);
     actor.attempt_finish_display_churn(epoch, 5);
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(left), Some(right)]
-            );
-            assert!(state.releases_display_churn_refresh_quarantine);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(left), Some(right)]
+    );
+    assert!(state.authoritative);
+    assert_eq!(window_server::window_order_query_count() - before, 2);
     assert_no_reactor_event(&mut reactor_rx);
 }
 
@@ -1347,15 +1292,11 @@ fn mismatched_space_snapshot_count_falls_back_to_authoritative_screen_state() {
 
     actor.handle_event(Event::SpaceChanged(vec![Some(SpaceId::new(99))]));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(
-                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
-                vec![Some(SpaceId::new(81)), Some(SpaceId::new(82))]
-            );
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(
+        state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+        vec![Some(SpaceId::new(81)), Some(SpaceId::new(82))]
+    );
 }
 
 #[test]
@@ -1382,15 +1323,11 @@ fn duplicate_visible_spaces_disable_remaps_and_layout_forcing() {
         CoordinateConverter::from_height(800.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert!(state.display_set_changed);
-            assert!(state.topology_changed);
-            assert!(!state.allow_space_remap);
-            assert!(state.space_remaps.is_empty());
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert!(state.display_set_changed);
+    assert!(state.should_force_refresh_layout);
+    assert!(state.space_remaps.is_empty());
+    assert!(state.space_remaps.is_empty());
 }
 
 #[test]
@@ -1409,15 +1346,10 @@ fn resize_updates_are_treated_as_topology_changes_and_report_resized_spaces() {
         CoordinateConverter::from_height(800.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert!(!state.display_set_changed);
-            assert!(state.topology_changed);
-            assert!(state.should_force_refresh_layout);
-            assert_eq!(state.resized_spaces, vec![(space, CGSize::new(1200.0, 800.0))]);
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert!(!state.display_set_changed);
+    assert!(state.should_force_refresh_layout);
+    assert_eq!(state.resized_spaces, vec![(space, CGSize::new(1200.0, 800.0))]);
 }
 
 #[test]
@@ -1436,13 +1368,47 @@ fn display_origin_change_is_treated_as_topology_change() {
         CoordinateConverter::from_height(800.0),
     ));
 
-    match recv_wm(&mut wm_rx) {
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert!(!state.display_set_changed);
-            assert!(state.topology_changed);
-            assert!(state.should_force_refresh_layout);
-            assert!(state.resized_spaces.is_empty());
-        }
-        other => panic!("unexpected wm event: {other:?}"),
-    }
+    let (state, _) = recv_snapshot(&mut wm_rx);
+    assert!(!state.display_set_changed);
+    assert!(state.should_force_refresh_layout);
+    assert!(state.resized_spaces.is_empty());
+}
+
+#[test]
+fn wake_and_unlock_share_two_sample_authority_without_poisoning_display_history() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let space = SpaceId::new(1);
+    window_server::set_space_window_list_for_space_override(space.get(), Some(vec![]));
+    actor.forward_screen_parameters(vec![make_screen(Some(space))], CoordinateConverter::default());
+    let wm_controller::WmEvent::SpaceStateUpdated(initial, _) = recv_wm(&mut wm_rx) else {
+        panic!()
+    };
+    actor.handle_event(Event::SystemWillSleep);
+    let reactor::Event::TopologyInvalidated(sleep_revision) = recv_reactor(&mut reactor_rx) else {
+        panic!()
+    };
+    actor.handle_event(Event::SessionDidResignActive);
+    let reactor::Event::TopologyInvalidated(lock_revision) = recv_reactor(&mut reactor_rx) else {
+        panic!()
+    };
+    assert!(lock_revision > sleep_revision && sleep_revision > initial.revision);
+    actor.handle_event(Event::SystemDidWake);
+    actor.process_screen_refresh(0, true);
+    assert_no_wm_event(&mut wm_rx);
+    actor.handle_event(Event::SessionDidBecomeActive);
+    actor.process_screen_refresh(0, true);
+    assert_no_wm_event(&mut wm_rx);
+    assert!(!actor.topology_is_authoritative());
+    assert_eq!(
+        actor.state.last_user_space_by_display.get("display-1"),
+        Some(&space)
+    );
+    actor.process_screen_refresh(1, true);
+    let wm_controller::WmEvent::SpaceStateUpdated(stable, _) = recv_wm(&mut wm_rx) else {
+        panic!()
+    };
+    window_server::set_space_window_list_for_space_override(space.get(), None);
+    assert!(stable.authoritative);
+    assert!(stable.revision >= lock_revision);
+    assert!(actor.topology_is_authoritative());
 }

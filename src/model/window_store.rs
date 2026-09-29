@@ -125,6 +125,17 @@ struct WindowServerRecord {
     pending_native_fullscreen: Option<PendingNativeFullscreenState>,
 }
 
+impl WindowServerRecord {
+    fn is_empty(&self) -> bool {
+        self.window_id.is_none()
+            && !self.visible
+            && !self.observed
+            && self.space.is_none()
+            && self.info.is_none()
+            && self.pending_native_fullscreen.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowWorkspaceInfo {
     pub space: SpaceId,
@@ -149,7 +160,358 @@ pub struct WindowStore {
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
 }
 
+/// Restored native lifecycle facts; placement and actor effects remain external.
+pub(crate) struct NativeFullscreenRestoration {
+    pub(crate) record: NativeFullscreenRecord,
+    pub(crate) window: Option<WindowId>,
+    pub(crate) removed_window: Option<WindowId>,
+}
+
+/// Native facts supplementing a successful AX inventory omission. Unknown
+/// fields carry no negative authority; an omission alone never retires identity.
+#[derive(Debug)]
+pub(crate) struct InventoryWindowObservation {
+    pub(crate) info: Option<WindowServerInfo>,
+    pub(crate) suitable: Option<bool>,
+    pub(crate) ordered_in: Option<bool>,
+}
+
+/// A user-Space departure can be a move, a close, or temporary ordering out.
+#[derive(Debug)]
+pub(crate) enum NativeDeparture {
+    Moved(Option<WindowId>, SpaceId),
+    Closed(WindowId),
+    Hidden {
+        window: Option<WindowId>,
+        remove_projection: bool,
+    },
+}
+
 impl WindowStore {
+    /// Direct topology, live membership, and pending moves have different authority.
+    /// A live conflict can supersede a pending move; otherwise its target wins
+    /// over a stale direct observation. Unknown live membership retains prior facts.
+    pub(crate) fn resolve_native_space(
+        &self,
+        wsid: WindowServerId,
+        observation: Option<SpaceId>,
+        pending: Option<SpaceId>,
+        live: Option<SpaceId>,
+    ) -> Option<SpaceId> {
+        match (observation, pending) {
+            (Some(observed), Some(target)) if observed != target => {
+                Some(if live == Some(observed) {
+                    observed
+                } else {
+                    target
+                })
+            }
+            (Some(observed), _) => Some(observed),
+            (None, _) => live.or(pending).or(self.window_server_space(wsid)),
+        }
+    }
+
+    /// Admission belongs to the catalog; rejecting it also clears stale ownership.
+    pub(crate) fn reconcile_admission(&mut self, wid: WindowId) -> bool {
+        let admitted = self.window(wid).is_some_and(WindowState::is_admitted);
+        if !admitted {
+            self.remove_window_assignment(wid);
+        }
+        admitted
+    }
+
+    pub(crate) fn is_visible_admitted(&self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|record| {
+            record.state.as_ref().is_some_and(WindowState::is_admitted)
+                && record.window_server_id.is_some_and(|wsid| self.is_window_visible(wsid))
+        })
+    }
+
+    /// Restore identity for native presence or a return to the recorded user Space.
+    pub(crate) fn restore_native_identity(
+        &mut self,
+        wsid: Option<WindowServerId>,
+        original: WindowId,
+    ) -> Option<NativeFullscreenRestoration> {
+        let record = wsid
+            .and_then(|wsid| self.restore_window_from_native_fullscreen_by_window_server_id(wsid))
+            .or_else(|| self.restore_window_from_native_fullscreen(original))?;
+        let bound = record.window_server_id.and_then(|id| self.tracked_window_id(id));
+        // A specific appearance follows the record's current AX identity first;
+        // a Space return follows its surviving native binding first.
+        let window = [
+            wsid.map(|_| record.current_window_id),
+            bound,
+            Some(record.current_window_id),
+            wsid.and_then(|id| self.tracked_window_id(id)),
+            wsid.map(|_| original),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|wid| self.contains_window(*wid));
+        let removed_window = window
+            .filter(|wid| *wid != original)
+            .and_then(|_| self.remove_window_assignment(original))
+            .map(|_| original);
+        Some(NativeFullscreenRestoration { record, window, removed_window })
+    }
+
+    /// Native fullscreen suspends admission while retaining identity and ownership.
+    /// Both Space appeared/disappeared observations enforce the same invariant.
+    pub(crate) fn observe_native_fullscreen(
+        &mut self,
+        wsid: WindowServerId,
+        space: SpaceId,
+        fallback_user_space: Option<SpaceId>,
+        pid: Option<i32>,
+    ) -> Option<WindowId> {
+        if let Some(wid) = self.tracked_window_id(wsid) {
+            let assignment = self.workspace_info_for_window(wid);
+            self.suspend_window_to_native_fullscreen(
+                wid,
+                Some(wsid),
+                fallback_user_space,
+                space,
+                NativeFullscreenTransition::Suspended,
+            );
+            assignment
+                .filter(|assignment| Some(assignment.space) == fallback_user_space)
+                .map(|_| wid)
+        } else {
+            if let Some(pid) =
+                pid.or_else(|| self.get_window_server_info(wsid).map(|info| info.pid))
+            {
+                self.suspend_window_server_to_native_fullscreen(
+                    pid,
+                    wsid,
+                    fallback_user_space,
+                    space,
+                    NativeFullscreenTransition::Suspended,
+                );
+            }
+            None
+        }
+    }
+
+    pub(crate) fn observe_native_departure(
+        &mut self,
+        wsid: WindowServerId,
+        reported_space: SpaceId,
+        resolved_space: Option<SpaceId>,
+        active_spaces: &HashSet<SpaceId>,
+        ordered_in: Option<bool>,
+    ) -> NativeDeparture {
+        if let Some(space) = resolved_space.filter(|space| *space != reported_space) {
+            return NativeDeparture::Moved(
+                self.observe_native_space(wsid, space, active_spaces.contains(&space)),
+                space,
+            );
+        }
+        let window = self.tracked_window_id(wsid);
+        if let Some(wid) = window
+            && ordered_in == Some(false)
+        {
+            return NativeDeparture::Closed(wid);
+        }
+        let remove_projection = window
+            .and_then(|wid| self.workspace_info_for_window(wid))
+            .is_some_and(|assignment| assignment.space == reported_space);
+        self.observe_native_space(wsid, reported_space, false);
+        NativeDeparture::Hidden { window, remove_projection }
+    }
+
+    /// Bind a positive AX observation to its stable native identity. Persistent
+    /// membership survives AX replacement; only projection rekeying is external.
+    pub(crate) fn reconcile_ax_identity(
+        &mut self,
+        wid: WindowId,
+        wsid: Option<WindowServerId>,
+        native_space: Option<SpaceId>,
+    ) -> Option<WindowId> {
+        if let Some(old) = self.record(wid).and_then(WindowRecord::window_server_id)
+            && Some(old) != wsid
+        {
+            self.remove_window_server_state(old);
+        }
+        let wsid = wsid?;
+        let previous = self.track_window_server_id(wsid, wid).filter(|old| *old != wid);
+        if let Some(old) = previous {
+            self.transfer_persistent_window_metadata(old, wid);
+            if !self.contains_window(wid) {
+                let state = self.windows.get_mut(&old).and_then(|record| record.state.take());
+                if let Some(state) = state {
+                    self.insert_window(wid, state);
+                }
+            }
+            self.remove_window(old);
+        }
+        self.clear_window_server_observed(wsid);
+        if let (Some(record), Some(space)) =
+            (self.native_fullscreen_record_for_window(wid), native_space)
+            && space != record.fullscreen_space
+            && Some(space)
+                == record
+                    .workspace
+                    .map(|workspace| workspace.space)
+                    .or(record.last_known_user_space)
+        {
+            self.restore_window_from_native_fullscreen(wid);
+        }
+        previous
+    }
+
+    pub(crate) fn observe_native_space(
+        &mut self,
+        wsid: WindowServerId,
+        space: SpaceId,
+        visible: bool,
+    ) -> Option<WindowId> {
+        self.set_window_server_space(wsid, Some(space));
+        self.set_native_visibility(wsid, visible);
+        let wid = self.tracked_window_id(wsid);
+        if wid.is_some() {
+            self.clear_window_server_observed(wsid);
+        }
+        wid
+    }
+
+    /// Enforce the minimized invariant even if the AX flag was already set.
+    /// Every known identity requests projection repair; the projection reports
+    /// whether removal actually changed geometry, so correct duplicates are cheap.
+    pub(crate) fn observe_minimized(&mut self, wid: WindowId) -> bool {
+        let Some(window) = self.window_mut(wid) else {
+            return false;
+        };
+        window.info.is_minimized = true;
+        window.is_manageable = false;
+        if let Some(wsid) = self.record(wid).and_then(WindowRecord::window_server_id) {
+            self.mark_window_hidden(wsid);
+        }
+        self.set_visibility(wid, WindowVisibility::Minimized);
+        self.remove_window_assignment(wid);
+        true
+    }
+
+    /// Hidden is visibility evidence, never destruction. Return the owning PID
+    /// for a targeted, coalesced AX refresh (including pending native identity).
+    pub(crate) fn observe_native_visibility(
+        &mut self,
+        wsid: WindowServerId,
+        visible: bool,
+    ) -> Option<i32> {
+        let pid = self
+            .tracked_window_id(wsid)
+            .map(|wid| wid.pid)
+            .or_else(|| self.get_window_server_info(wsid).map(|info| info.pid));
+        self.set_native_visibility(wsid, visible);
+        pid
+    }
+
+    /// A current successful AX omission is destructive only with native negative evidence.
+    pub(crate) fn reconcile_app_inventory(
+        &mut self,
+        pid: i32,
+        observed: &[WindowId],
+        inactive: &HashSet<WindowId>,
+        mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
+    ) -> Vec<(WindowId, Option<WindowServerId>)> {
+        let observed: HashSet<_> = observed.iter().copied().collect();
+        let retired: Vec<_> = self
+            .window_ids_for_pid(pid)
+            .filter_map(|wid| {
+                let record = self.record(wid)?;
+                if observed.contains(&wid)
+                    || inactive.contains(&wid)
+                    || record.state.as_ref()?.info.is_minimized
+                    || record.placement == WindowPlacement::NativeFullscreen
+                {
+                    return None;
+                }
+                let wsid = record.window_server_id?;
+                let observation = observe(wsid, self.get_window_server_info(wsid));
+                (observation.suitable == Some(false)
+                    || observation.ordered_in == Some(false)
+                    || observation.info.is_some_and(|info| {
+                        info.layer != 0
+                            || info.frame.size.width.abs() < 2.0
+                            || info.frame.size.height.abs() < 2.0
+                    }))
+                .then_some((wid, Some(wsid)))
+            })
+            .collect();
+        for &(wid, _) in &retired {
+            self.remove_window(wid);
+        }
+        retired
+    }
+
+    /// Apply native presence and visibility, returning only affected logical
+    /// ownership requiring location confirmation. Unmapped/inactive windows
+    /// can become hidden without an unnecessary native membership query.
+    pub(crate) fn reconcile_native_snapshot(
+        &mut self,
+        observed: &[(WindowServerId, Option<SpaceId>)],
+        active_spaces: &HashSet<SpaceId>,
+    ) -> HashSet<WindowServerId> {
+        let observed_ids: HashSet<_> = observed.iter().map(|(wsid, _)| *wsid).collect();
+        let hidden: Vec<_> = self
+            .iter_visible_window_server_ids()
+            .filter(|wsid| !observed_ids.contains(wsid))
+            .collect();
+        for wsid in hidden {
+            self.mark_window_hidden(wsid);
+        }
+        for &(wsid, space) in observed {
+            if let Some(space) = space {
+                self.observe_native_space(wsid, space, true);
+            } else {
+                self.mark_window_visible(wsid);
+            }
+        }
+        self.workspace_windows
+            .iter()
+            .filter(|(assignment, _)| active_spaces.contains(&assignment.space))
+            .flat_map(|(_, windows)| windows.iter())
+            .filter_map(|wid| {
+                let record = self.record(*wid)?;
+                let wsid = record.window_server_id?;
+                (record.placement != WindowPlacement::NativeFullscreen
+                    && !observed_ids.contains(&wsid))
+                .then_some(wsid)
+            })
+            .collect()
+    }
+
+    /// Authoritative absence removes admission, not identity. A confirmed move
+    /// retains assignment until the coordinator resolves its target workspace.
+    pub(crate) fn reconcile_native_absence(
+        &mut self,
+        wsid: WindowServerId,
+        active_spaces: &HashSet<SpaceId>,
+        inactive_target: Option<SpaceId>,
+        preserve_assignment: bool,
+    ) -> Option<(WindowId, Option<SpaceId>)> {
+        self.mark_window_hidden(wsid);
+        let wid = self.tracked_window_id(wsid)?;
+        let record = self.record(wid)?;
+        if record.placement == WindowPlacement::NativeFullscreen
+            || !record
+                .workspace
+                .is_some_and(|assignment| active_spaces.contains(&assignment.space))
+        {
+            return None;
+        }
+        if let Some(space) = inactive_target {
+            self.set_window_server_space(wsid, Some(space));
+            return Some((wid, Some(space)));
+        }
+        if preserve_assignment {
+            return None;
+        }
+        self.remove_window_assignment(wid);
+        Some((wid, None))
+    }
+
     fn native_fullscreen_original_window(&self, window_id: WindowId) -> Option<WindowId> {
         if self.native_fullscreen_records_by_original_window.contains_key(&window_id) {
             Some(window_id)
@@ -317,14 +679,8 @@ impl WindowStore {
     }
 
     fn prune_window_server_record(&mut self, wsid: WindowServerId) {
-        let should_remove = self.window_servers.get(&wsid).is_some_and(|record| {
-            record.window_id.is_none()
-                && !record.visible
-                && !record.observed
-                && record.space.is_none()
-                && record.info.is_none()
-                && record.pending_native_fullscreen.is_none()
-        });
+        let should_remove =
+            self.window_servers.get(&wsid).is_some_and(WindowServerRecord::is_empty);
         if should_remove {
             self.window_servers.remove(&wsid);
         }
@@ -339,12 +695,12 @@ impl WindowStore {
         wsid: WindowServerId,
         window_id: WindowId,
     ) -> Option<WindowId> {
-        let (old, pending_record) = {
+        let (old, pending_record, space) = {
             let record = self.server_record_mut(wsid);
             let old = record.window_id;
             record.window_id = Some(window_id);
             let pending = record.pending_native_fullscreen.take();
-            (old, pending)
+            (old, pending, record.space)
         };
         if let Some(old) = old.filter(|old| *old != window_id)
             && let Some(record) = self.windows.get_mut(&old)
@@ -361,7 +717,9 @@ impl WindowStore {
             record.window_id = None;
             self.prune_window_server_record(previous_wsid);
         }
-        self.windows.entry(window_id).or_default().window_server_id = Some(wsid);
+        let window = self.windows.entry(window_id).or_default();
+        window.window_server_id = Some(wsid);
+        window.native_space = space;
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         if let Some(pending_record) = pending_record {
             if pending_record.pid != window_id.pid {
@@ -401,50 +759,57 @@ impl WindowStore {
         self.window_servers.get(&wsid).is_some_and(|record| record.info.is_some())
     }
 
-    pub fn mark_window_visible(&mut self, wsid: WindowServerId) -> bool {
-        let record = self.server_record_mut(wsid);
-        let changed = !record.visible;
-        record.visible = true;
-        if let Some(window_id) = record.window_id {
-            self.windows.entry(window_id).or_default().visibility = WindowVisibility::Visible;
-        }
-        changed
-    }
-
-    pub fn set_visible_windows<I>(&mut self, wsids: I)
-    where I: IntoIterator<Item = WindowServerId> {
-        for wsid in wsids {
-            self.mark_window_visible(wsid);
-        }
-    }
-
-    pub fn clear_visible_windows(&mut self) {
-        let known_wsids: Vec<_> = self.window_servers.keys().copied().collect();
-        for wsid in known_wsids {
-            if let Some(record) = self.window_servers.get_mut(&wsid) {
-                record.visible = false;
-                if let Some(window_id) = record.window_id {
-                    self.windows.entry(window_id).or_default().visibility =
-                        WindowVisibility::Hidden;
-                }
-            }
-            self.prune_window_server_record(wsid);
-        }
-    }
-
-    pub fn mark_window_hidden(&mut self, wsid: WindowServerId) -> bool {
-        let changed = self.window_servers.get(&wsid).is_some_and(|record| record.visible);
-        if let Some(record) = self.window_servers.get_mut(&wsid) {
-            record.visible = false;
-            if let Some(window_id) = record.window_id {
-                self.windows.entry(window_id).or_default().visibility = WindowVisibility::Hidden;
+    fn set_native_visibility(&mut self, wsid: WindowServerId, visible: bool) -> bool {
+        let record = if visible {
+            self.server_record_mut(wsid)
+        } else if let Some(record) = self.window_servers.get_mut(&wsid) {
+            record
+        } else {
+            return false;
+        };
+        let changed = record.visible != visible;
+        record.visible = visible;
+        if let Some(wid) = record.window_id {
+            self.windows.entry(wid).or_default().visibility = if visible {
+                WindowVisibility::Visible
             } else {
-                // An unmapped window that ordered out is no longer awaiting AX registration.
-                record.observed = false;
-            }
+                WindowVisibility::Hidden
+            };
+        } else if !visible {
+            record.observed = false;
         }
         self.prune_window_server_record(wsid);
         changed
+    }
+
+    pub fn mark_window_visible(&mut self, wsid: WindowServerId) -> bool {
+        self.set_native_visibility(wsid, true)
+    }
+
+    pub fn mark_window_hidden(&mut self, wsid: WindowServerId) -> bool {
+        self.set_native_visibility(wsid, false)
+    }
+
+    pub fn clear_visible_windows(&mut self) {
+        for record in self.window_servers.values_mut() {
+            record.visible = false;
+            if let Some(wid) = record.window_id {
+                self.windows.entry(wid).or_default().visibility = WindowVisibility::Hidden;
+            }
+        }
+        self.window_servers.retain(|_, record| !record.is_empty());
+    }
+
+    pub(crate) fn observe_native_window(&mut self, info: WindowServerInfo) -> Option<WindowId> {
+        self.track_window_server_info(info);
+        self.mark_window_visible(info.id);
+        let wid = self.tracked_window_id(info.id)?;
+        self.clear_window_server_observed(info.id);
+        let window = self.window_mut(wid)?;
+        if info.layer == 0 {
+            window.frame_monotonic = info.frame;
+        }
+        Some(wid)
     }
 
     pub fn is_window_visible(&self, wsid: WindowServerId) -> bool {
@@ -848,18 +1213,14 @@ impl WindowStore {
         self.prune_window_record(window_id);
     }
 
-    pub fn remove_window(&mut self, window_id: WindowId) {
-        if let Some(record) = self.windows.remove(&window_id)
-            && let Some(assignment) = record.workspace
-        {
+    pub fn remove_window(&mut self, window_id: WindowId) -> Option<WindowRecord> {
+        let Some(record) = self.windows.remove(&window_id) else {
+            return None;
+        };
+        if let Some(assignment) = record.workspace {
             self.remove_window_from_workspace_index(window_id, assignment);
         }
-        let server_ids: Vec<_> = self
-            .window_servers
-            .iter()
-            .filter_map(|(&wsid, record)| (record.window_id == Some(window_id)).then_some(wsid))
-            .collect();
-        for wsid in server_ids {
+        if let Some(wsid) = record.window_server_id {
             self.remove_window_server_state(wsid);
         }
         if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
@@ -868,6 +1229,7 @@ impl WindowStore {
                 self.app_windows.remove(&window_id.pid);
             }
         }
+        Some(record)
     }
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
@@ -887,15 +1249,15 @@ impl WindowStore {
             let _ = self.remove_native_fullscreen_record_by_original_window(original_window_id);
         }
 
-        let wsids: Vec<_> = self.window_servers.keys().copied().collect();
-        for wsid in wsids {
-            if let Some(record) = self.window_servers.get_mut(&wsid)
-                && record.pending_native_fullscreen.is_some_and(|pending| pending.pid == pid)
-            {
+        self.window_servers.retain(|_, record| {
+            if record.info.is_some_and(|info| info.pid == pid) {
+                return false;
+            }
+            if record.pending_native_fullscreen.is_some_and(|pending| pending.pid == pid) {
                 record.pending_native_fullscreen = None;
             }
-            self.prune_window_server_record(wsid);
-        }
+            !record.is_empty()
+        });
     }
 
     pub fn iter_workspace_assignments(
@@ -954,11 +1316,7 @@ impl WindowStore {
         let wsid = self
             .native_fullscreen_record_for_window(window_id)
             .and_then(|record| record.window_server_id)
-            .or_else(|| {
-                self.window_servers.iter().find_map(|(&wsid, record)| {
-                    (record.window_id == Some(window_id)).then_some(wsid)
-                })
-            })?;
+            .or_else(|| self.record(window_id).and_then(WindowRecord::window_server_id))?;
         self.window_server_space(wsid)
     }
 
@@ -1011,6 +1369,7 @@ impl WindowStore {
             debug_assert!(self.app_windows.get(&wid.pid).is_some_and(|ids| ids.contains(&wid)));
             if let Some(wsid) = record.window_server_id {
                 debug_assert_eq!(self.tracked_window_id(wsid), Some(wid));
+                debug_assert_eq!(record.native_space, self.window_server_space(wsid));
             }
             if let Some(workspace) = record.workspace {
                 let indexed =
@@ -1041,6 +1400,31 @@ impl WindowStore {
 mod tests {
     use super::*;
     use crate::model::virtual_workspace::WorkspaceStore;
+
+    #[test]
+    fn app_termination_clears_stale_pending_fullscreen_without_erasing_another_pid() {
+        let mut store = WindowStore::default();
+        let wsid = WindowServerId::new(42);
+        store.track_window_server_info(WindowServerInfo {
+            id: wsid,
+            pid: 8,
+            layer: 0,
+            frame: Default::default(),
+            min_frame: Default::default(),
+            max_frame: Default::default(),
+        });
+        store.suspend_window_server_to_native_fullscreen(
+            7,
+            wsid,
+            Some(SpaceId::new(1)),
+            SpaceId::new(99),
+            NativeFullscreenTransition::Suspended,
+        );
+        store.remove_windows_for_app(7);
+        assert_eq!(store.get_window_server_info(wsid).unwrap().pid, 8);
+        assert!(store.pending_native_fullscreen_record_for_window_server_id(wsid).is_none());
+        store.debug_assert_invariants();
+    }
 
     #[test]
     fn pending_registration_requires_visible_unmapped_window_for_pid() {

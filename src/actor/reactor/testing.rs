@@ -145,7 +145,7 @@ impl Reactor {
             self.window_inventory_manager.next_request_id += 1;
             let token = crate::actor::app::WindowInventoryToken {
                 request_id: self.window_inventory_manager.next_request_id,
-                topology_revision: self.window_inventory_manager.topology_revision,
+                topology_revision: self.space_state.revision,
             };
             self.window_inventory_manager.in_flight.insert(pid, token);
             token
@@ -316,9 +316,26 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
     let command_space = screens.iter().find_map(|screen| screen.space);
     let active_spaces = screens.iter().filter_map(|screen| screen.space).collect();
     ForwardedSpaceState {
+        revision: next_test_topology_revision(),
+        authoritative: true,
+        // Synthetic screen fixtures do not enumerate the fake AX windows. Tests
+        // supplying authoritative native membership opt in explicitly.
+        membership_complete: false,
+        active_window_spaces: screens
+            .iter()
+            .filter_map(|s| s.space)
+            .flat_map(|space| {
+                crate::sys::window_server::space_window_list_for_connection(
+                    &[space.get()],
+                    0,
+                    false,
+                )
+                .into_iter()
+                .map(move |id| (WindowServerId::new(id), space))
+            })
+            .collect(),
         screens,
         fullscreen_spaces: Default::default(),
-        has_seen_display_set: false,
         active_spaces,
         menu_bar_space: command_space,
         command_space,
@@ -326,15 +343,10 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
         last_user_space_by_display: Default::default(),
         space_remaps: Vec::new(),
         display_set_changed: false,
-        topology_changed: false,
-        allow_space_remap: false,
         should_force_refresh_layout: false,
-        releases_lifecycle_refresh_quarantine: false,
         // Set on every coherent snapshot the spaces actor forwards.
-        releases_display_churn_refresh_quarantine: true,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
-        active_window_spaces: Default::default(),
     }
 }
 
@@ -352,7 +364,6 @@ pub fn fullscreen_startup_space_state(
         name: None,
     }]);
     state.fullscreen_spaces.insert(fullscreen_space);
-    state.has_seen_display_set = true;
     state.active_spaces.clear();
     state.menu_bar_space = None;
     state.command_space = None;
@@ -715,4 +726,14 @@ pub fn test_context_with_workspace_count(count: usize) -> (Apps, Reactor) {
     let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
     settings.default_workspace_count = count;
     (Apps::new(), test_reactor_with_workspace_settings(&settings))
+}
+
+// Fixtures represent observations produced upstream, including their revision.
+thread_local! { static TEST_TOPOLOGY_REVISION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+pub fn next_test_topology_revision() -> u64 {
+    TEST_TOPOLOGY_REVISION.with(|revision| {
+        let next = revision.get() + 1;
+        revision.set(next);
+        next
+    })
 }

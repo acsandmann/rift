@@ -108,11 +108,6 @@ pub struct ResolvedWindow {
     pub(crate) effects: AppRuleEffects,
 }
 
-#[derive(Debug, Default)]
-struct WindowRemovalImpact {
-    active_space: Option<SpaceId>,
-}
-
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LayoutEvent {
@@ -1231,7 +1226,7 @@ impl LayoutEngine {
         window_store: &mut WindowStore,
         wid: WindowId,
         preserve_floating: bool,
-    ) {
+    ) -> bool {
         let removal = self.remove_window_layout_membership(window_store, wid);
 
         if preserve_floating {
@@ -1251,16 +1246,17 @@ impl LayoutEngine {
         }
         self.window_layout_constraints.remove(&wid);
 
-        if let Some(space) = removal.active_space {
+        if let Some(space) = removal {
             self.broadcast_windows_changed(window_store, space);
         }
+        removal.is_some()
     }
 
     fn remove_window_layout_membership(
         &mut self,
         window_store: &WindowStore,
         wid: WindowId,
-    ) -> WindowRemovalImpact {
+    ) -> Option<SpaceId> {
         let active_space = self.space_with_window(wid);
         let tiled_workspaces = window_store.workspaces_for_window(wid);
 
@@ -1268,7 +1264,7 @@ impl LayoutEngine {
             for ws_id in &tiled_workspaces {
                 self.workspaces[*ws_id].layout_system.remove_window(wid);
             }
-            return WindowRemovalImpact { active_space };
+            return active_space;
         }
 
         // The store may already have dropped the record (for example after
@@ -1278,7 +1274,7 @@ impl LayoutEngine {
         for ws_id in ws_ids {
             self.workspaces[ws_id].layout_system.remove_window_and_rebalance_parent(wid);
         }
-        WindowRemovalImpact { active_space }
+        active_space
     }
 
     fn add_window_to_layout(
@@ -1636,11 +1632,14 @@ impl LayoutEngine {
                         window_store,
                         info.window_id,
                         space,
-                        app_bundle_id,
-                        app_name,
-                        info.title.as_deref(),
-                        info.ax_role.as_deref(),
-                        info.ax_subrole.as_deref(),
+                        WindowRuleContext {
+                            app_bundle_id,
+                            app_name,
+                            window_title: info.title.as_deref(),
+                            ax_role: info.ax_role.as_deref(),
+                            ax_subrole: info.ax_subrole.as_deref(),
+                        },
+                        false,
                     ) else {
                         continue;
                     };
@@ -1792,6 +1791,15 @@ impl LayoutEngine {
                 };
             }
             LayoutEvent::AppClosed(pid) => {
+                let changed = self.workspaces.layout_spaces().into_iter().any(|space| {
+                    self.workspaces.active_layout_for_space(space).is_some_and(
+                        |(workspace, layout)| {
+                            self.workspaces[workspace]
+                                .layout_system
+                                .has_windows_for_app(layout, pid)
+                        },
+                    )
+                });
                 if self.focused_window.is_some_and(|wid| wid.pid == pid) {
                     self.focused_window = None;
                 }
@@ -1802,12 +1810,11 @@ impl LayoutEngine {
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
                 self.forget_persisted_app(pid);
 
-                self.workspaces.remove_windows_for_app(window_store, pid);
-                // Process termination is authoritative. Unlike an invalid AX handle,
-                // nothing owned by this pid can be rediscovered and rebound, so remove
-                // the complete window records after detaching their workspace state.
-                window_store.remove_windows_for_app(pid);
                 self.floating_positions.remove_app(pid);
+                return EventResponse {
+                    changed,
+                    ..EventResponse::default()
+                };
             }
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
@@ -1816,10 +1823,16 @@ impl LayoutEngine {
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
-                self.remove_window_internal(window_store, wid, false);
+                return EventResponse {
+                    changed: self.remove_window_internal(window_store, wid, false),
+                    ..EventResponse::default()
+                };
             }
             LayoutEvent::WindowRemovedPreserveFloating(wid) => {
-                self.remove_window_internal(window_store, wid, true);
+                return EventResponse {
+                    changed: self.remove_window_internal(window_store, wid, true),
+                    ..EventResponse::default()
+                };
             }
             LayoutEvent::WindowFocused(space, wid) => {
                 if self.floating.is_floating(wid) {
@@ -2936,64 +2949,12 @@ impl LayoutEngine {
         window_store: &mut WindowStore,
         window_id: WindowId,
         space: SpaceId,
-        app_bundle_id: Option<&str>,
-        app_name: Option<&str>,
-        window_title: Option<&str>,
-        ax_role: Option<&str>,
-        ax_subrole: Option<&str>,
-    ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
-        self.assign_window_with_app_info_policy(
-            window_store,
-            window_id,
-            space,
-            app_bundle_id,
-            app_name,
-            window_title,
-            ax_role,
-            ax_subrole,
-            false,
-        )
-    }
-
-    pub fn reapply_window_with_app_info(
-        &mut self,
-        window_store: &mut WindowStore,
-        window_id: WindowId,
-        space: SpaceId,
-        app_bundle_id: Option<&str>,
-        app_name: Option<&str>,
-        window_title: Option<&str>,
-        ax_role: Option<&str>,
-        ax_subrole: Option<&str>,
-    ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
-        self.assign_window_with_app_info_policy(
-            window_store,
-            window_id,
-            space,
-            app_bundle_id,
-            app_name,
-            window_title,
-            ax_role,
-            ax_subrole,
-            true,
-        )
-    }
-
-    fn assign_window_with_app_info_policy(
-        &mut self,
-        window_store: &mut WindowStore,
-        window_id: WindowId,
-        space: SpaceId,
-        app_bundle_id: Option<&str>,
-        app_name: Option<&str>,
-        window_title: Option<&str>,
-        ax_role: Option<&str>,
-        ax_subrole: Option<&str>,
+        context: WindowRuleContext<'_>,
         reapply_workspace_rule: bool,
     ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
         let observation = window_store.window(window_id).map(|window| {
             (
-                window_title.unwrap_or(&window.info.title).to_owned(),
+                context.window_title.unwrap_or(&window.info.title).to_owned(),
                 window.frame_monotonic.size,
             )
         });
@@ -3004,17 +2965,10 @@ impl LayoutEngine {
                 window_id,
                 Some(&title),
                 size,
-                app_bundle_id,
+                context.app_bundle_id,
             )
         } else {
             false
-        };
-        let context = WindowRuleContext {
-            app_bundle_id,
-            app_name,
-            window_title,
-            ax_role,
-            ax_subrole,
         };
         let mut decision = if reapply_workspace_rule {
             self.app_rules.evaluate_for_title_change(context)
@@ -3335,16 +3289,6 @@ impl LayoutEngine {
 
     pub fn remove_floating_position(&mut self, window: WindowId) {
         self.floating_positions.remove_window(window);
-    }
-
-    pub fn rekey_window_identity(
-        &mut self,
-        window_store: &mut WindowStore,
-        from: WindowId,
-        to: WindowId,
-    ) {
-        window_store.transfer_persistent_window_metadata(from, to);
-        self.transfer_persistent_window_identity(from, to);
     }
 
     pub(crate) fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {

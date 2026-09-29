@@ -23,6 +23,7 @@ pub struct WindowCreatedPayload {
 
 pub fn handle_window_created(
     state: &mut crate::model::RiftState,
+    layout: &mut crate::actor::reactor::managers::LayoutManager,
     transactions: &TransactionManager,
     payload: WindowCreatedPayload,
 ) -> anyhow::Result<EventOutcome> {
@@ -31,16 +32,17 @@ pub fn handle_window_created(
         window,
         window_server_info: ws_info,
     } = payload;
-    if let Some(wsid) = window.sys_id {
-        state.windows.track_window_server_id(wsid, wid);
-        state.windows.clear_window_server_observed(wsid);
+    if let Some(previous) = state.windows.reconcile_ax_identity(wid, window.sys_id, None) {
+        layout.layout_engine.transfer_persistent_window_identity(previous, wid);
     }
     if let Some(info) = ws_info {
         state.windows.clear_window_server_observed(info.id);
         state.windows.track_window_server_info(info);
     }
 
-    let window_state: WindowState = window.into();
+    let rule_override = state.windows.window(wid).and_then(|window| window.manage_override);
+    let mut window_state: WindowState = window.into();
+    window_state.manage_override = rule_override;
     if let Some(wsid) = window_state.info.sys_id {
         transactions.store_txid(
             wsid,
@@ -72,53 +74,42 @@ pub fn handle_window_destroyed(
     transactions: &TransactionManager,
     drag: &mut DragManager,
     payload: WindowDestroyedPayload,
-) -> anyhow::Result<EventOutcome> {
+) -> EventOutcome {
     let wid = payload.window;
-    let window_server_id = match state.windows.record(wid) {
-        Some(record) => record.window_server_id(),
-        None => return Ok(EventOutcome::no_change()),
+    let Some(record) = state.windows.remove_window(wid) else {
+        return EventOutcome::no_change();
     };
+    apply_window_retirement(transactions, drag, (wid, record.window_server_id()))
+}
 
-    if let Some(ws_id) = window_server_id {
-        transactions.remove_for_window(ws_id);
-        state.windows.remove_window_server_state(ws_id);
-    } else {
-        debug!(?wid, "Received WindowDestroyed for unknown window - ignoring");
+pub(crate) fn apply_window_retirement(
+    transactions: &TransactionManager,
+    drag: &mut DragManager,
+    (wid, wsid): (WindowId, Option<crate::sys::window_server::WindowServerId>),
+) -> EventOutcome {
+    if let Some(wsid) = wsid {
+        transactions.remove_for_window(wsid);
     }
-    state.windows.remove_window(wid);
-
     let drag_changed = drag.actor.window_removed(wid);
     drag.sync_preview();
     if drag_changed && drag.externally_controlled_window == Some(wid) {
         drag.externally_controlled_window = None;
     }
-    Ok(EventOutcome::window_membership_changed(true, false)
-        .with_layout_event(LayoutEvent::WindowRemoved(wid)))
+    EventOutcome::window_membership_changed(true, false)
+        .with_arrange_passes(0)
+        .with_layout_event(LayoutEvent::WindowRemoved(wid))
 }
 
 pub fn handle_window_minimized(
     state: &mut crate::model::RiftState,
     wid: WindowId,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
-    let server_id = if let Some(window) = state.windows.window_mut(wid) {
-        if window.info.is_minimized {
-            return Ok(crate::actor::reactor::events::EventOutcome::no_change());
-        }
-        window.info.is_minimized = true;
-        window.info.sys_id
-    } else {
-        debug!(?wid, "Received WindowMinimized for unknown window - ignoring");
-        return Ok(crate::actor::reactor::events::EventOutcome::no_change());
-    };
-    if let Some(ws_id) = server_id {
-        state.windows.mark_window_hidden(ws_id);
+    if !state.windows.observe_minimized(wid) {
+        return Ok(EventOutcome::no_change());
     }
-    state.windows.set_visibility(wid, WindowVisibility::Minimized);
-    let _ = utils::refresh_heuristic(state, wid);
-    Ok(
-        crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
-            .with_layout_event(LayoutEvent::WindowRemoved(wid)),
-    )
+    Ok(EventOutcome::window_membership_changed(false, false)
+        .with_arrange_passes(0)
+        .with_layout_event(LayoutEvent::WindowRemoved(wid)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -359,8 +350,7 @@ pub fn handle_window_frame_changed(
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             if let Some(space) = new_space {
                 if let Some(server) = server_id {
-                    state.windows.set_window_server_space(server, Some(space));
-                    state.windows.mark_window_visible(server);
+                    state.windows.observe_native_space(server, space, true);
                 }
                 if new_space_active
                     && state.windows.window(wid).is_some_and(WindowState::is_admitted)

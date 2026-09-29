@@ -144,7 +144,6 @@ pub struct MissionControlManager {
 
 /// Owns ordering and coalescing for asynchronous AX window inventories.
 pub struct WindowInventoryManager {
-    pub topology_revision: u64,
     pub next_request_id: u64,
     pub in_flight: HashMap<pid_t, WindowInventoryToken>,
     pub pending: HashSet<pid_t>,
@@ -183,43 +182,6 @@ impl WorkspaceSwitchManager {
 pub struct RefocusManager {
     pub stale_cleanup_state: super::StaleCleanupState,
     pub refocus_state: super::RefocusState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshQuarantineState {
-    Ready,
-    Sleeping,
-    SessionInactive,
-    DisplayChurn,
-}
-
-pub struct RefreshQuarantineManager {
-    pub sleeping: bool,
-    pub session_inactive: bool,
-    pub display_churn_active: bool,
-    pub awaiting_post_wake_snapshot: bool,
-    pub awaiting_post_session_snapshot: bool,
-    pub pending_inventory_refresh: bool,
-    /// LoginWindow/AppKit can replay application activations while restoring a
-    /// session. Those activations are not user intent and must not drive a
-    /// virtual-workspace switch. Explicit input clears this latch.
-    pub suppress_auto_workspace_switch_until_input: bool,
-}
-
-impl RefreshQuarantineManager {
-    pub fn state(&self) -> RefreshQuarantineState {
-        if self.sleeping {
-            RefreshQuarantineState::Sleeping
-        } else if self.session_inactive {
-            RefreshQuarantineState::SessionInactive
-        } else if self.display_churn_active {
-            RefreshQuarantineState::DisplayChurn
-        } else {
-            RefreshQuarantineState::Ready
-        }
-    }
-
-    pub fn blocks_refreshes(&self) -> bool { self.state() != RefreshQuarantineState::Ready }
 }
 
 /// Manages communication channels to other actors

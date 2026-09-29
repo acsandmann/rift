@@ -16,7 +16,6 @@ use crate::layout_engine::workspaces::WorkspaceLayoutState;
 use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
 use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleRejection, AppRuleResult};
 use crate::model::{WindowStore, WindowWorkspaceInfo};
-use crate::sys::app::pid_t;
 use crate::sys::screen::SpaceId;
 
 new_key_type! {
@@ -757,19 +756,6 @@ impl WorkspaceStore {
     pub fn remove_window(&mut self, window_store: &mut WindowStore, window_id: WindowId) {
         let _ = window_store.remove_window_assignment(window_id);
         window_store.clear_rule_metadata(window_id);
-    }
-
-    pub fn remove_windows_for_app(&mut self, window_store: &mut WindowStore, pid: pid_t) {
-        let windows_to_remove: Vec<_> = window_store
-            .iter_workspace_assignments()
-            .map(|(window_id, _)| window_id)
-            .filter(|wid| wid.pid == pid)
-            .collect();
-
-        for window_id in windows_to_remove {
-            let _ = window_store.remove_window_assignment(window_id);
-            window_store.clear_rule_metadata(window_id);
-        }
     }
 
     /// Gets all windows in the active virtual workspace for a given native space.
