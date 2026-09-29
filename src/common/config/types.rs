@@ -92,6 +92,22 @@ pub struct VirtualWorkspaceSettings {
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
 }
 
+/// Display a newly created window opens on.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Default, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum NewWindowDisplay {
+    /// Wherever macOS and the app put it.
+    #[default]
+    #[setting(label = "Where macOS puts it")]
+    Default,
+    /// The display that holds keyboard focus when the window appears.
+    #[setting(label = "Focused display")]
+    Focused,
+    /// The display under the mouse cursor when the window appears.
+    #[setting(label = "Display under the pointer")]
+    Cursor,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
@@ -476,6 +492,15 @@ pub struct Settings {
         aliases = "floating startup automatic tiling"
     )]
     pub default_disable: bool,
+    #[serde(default)]
+    /// Which display a newly created window opens on.
+    #[setting(
+        label = "Open new windows on",
+        group = "general",
+        choices,
+        aliases = "display monitor screen cursor pointer focused"
+    )]
+    pub new_window_display: NewWindowDisplay,
     #[serde(default = "yes")]
     /// Move the pointer into the window when focus changes.
     #[setting(
