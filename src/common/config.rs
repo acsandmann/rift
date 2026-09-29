@@ -686,7 +686,7 @@ pub enum WorkspaceDisplayStyle {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MenuBarSettings {
-    #[serde(default = "no")]
+    #[serde(default = "yes")]
     pub enabled: bool,
     #[serde(default = "no")]
     pub show_empty: bool,
