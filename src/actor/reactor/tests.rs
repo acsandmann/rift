@@ -864,6 +864,37 @@ fn focus_display_invalid_or_inactive_target_preserves_context() {
 }
 
 #[test]
+fn commands_follow_a_window_move_node_carried_to_another_display() {
+    let mut reactor = test_reactor();
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let window = WindowId::new(1, 1);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Right));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+    assert_eq!(
+        reactor.space_state.command_space,
+        Some(right_space),
+        "commands follow the window to the display it moved to"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Left));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(left_space),
+        "so the next move-node brings it straight back"
+    );
+}
+
+#[test]
 fn passive_command_space_change_does_not_override_clicked_window_focus() {
     let (mut apps, mut reactor) = test_context();
     let (raise_manager_tx, mut raise_manager_rx) = actor::channel();

@@ -2323,8 +2323,9 @@ impl Reactor {
                 let post_arrange_mouse_warp =
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
+                let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
                 let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
-                return command_workflow::handle_command_layout(
+                let outcome = command_workflow::handle_command_layout(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -2335,7 +2336,11 @@ impl Reactor {
                         visible_space_frames,
                         post_arrange_mouse_warp,
                     },
-                );
+                )?;
+                if is_move_node {
+                    self.follow_focused_window_to_its_display(command_space);
+                }
+                return Ok(outcome);
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
                 selector,
@@ -5290,6 +5295,29 @@ impl Reactor {
         origin.x = (origin.x - frame.size.width / 2.0).clamp(min.x, max_x);
         origin.y = (origin.y - frame.size.height / 2.0).clamp(min.y, max_y);
         CGRect::new(origin, frame.size)
+    }
+
+    /// After a layout command carried the focused window onto another display, make
+    /// that display the command context, as an explicit `focus_display` would. macOS
+    /// moves its active display along with the key window only later, and until then
+    /// the next command would still act on the display the window just left.
+    fn follow_focused_window_to_its_display(&mut self, previous_space: Option<SpaceId>) {
+        let Some(window) = self.layout_manager.layout_engine.focused_window() else {
+            return;
+        };
+        let Some(space) = self.assigned_space_for_window_id(window) else {
+            return;
+        };
+        if Some(space) == previous_space || !self.is_space_active(space) {
+            return;
+        }
+        let Some(display_uuid) = self.display_uuid_for_space(space) else {
+            return;
+        };
+        if crate::sys::screen::set_active_menu_bar_display_uuid(&display_uuid) {
+            self.space_state.menu_bar_space = Some(space);
+        }
+        self.space_state.command_space = Some(space);
     }
 
     fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
