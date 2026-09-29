@@ -104,6 +104,7 @@ impl PersistedLayout {
             broadcast_tx: None,
             space_display_map: self.space_display_map,
             display_last_space: self.display_last_space,
+            space_frames: HashMap::default(),
             persistence: self.persistence,
             startup_restore_pending: false,
         }

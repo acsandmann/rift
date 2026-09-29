@@ -178,6 +178,9 @@ pub struct LayoutEngine {
     broadcast_tx: Option<BroadcastSender>,
     space_display_map: HashMap<SpaceId, Option<String>>,
     display_last_space: HashMap<String, SpaceId>,
+    /// Frame of the display showing each visible native space, refreshed by the
+    /// reactor with every display snapshot. Used for directional display moves.
+    space_frames: HashMap<SpaceId, CGRect>,
     persistence: PersistenceState,
     /// Set only while a master-file startup restore is waiting for the first display snapshot.
     startup_restore_pending: bool,
@@ -1183,6 +1186,82 @@ impl LayoutEngine {
         }
     }
 
+    /// Neighbouring display in `direction` judged by display edges, the way the
+    /// display arrangement shows it: a display qualifies when it lies entirely
+    /// beyond the current display's edge in that direction. Direct neighbours that
+    /// overlap on the other axis win over diagonal ones. Left and right wrap to the
+    /// far end of the row, where a row is the displays overlapping this one
+    /// vertically.
+    ///
+    /// Returns `None` when a display frame is unknown, so callers fall back to
+    /// display centers, and `Some(None)` when there is no display that way.
+    fn next_space_by_display_edges(
+        &self,
+        current_space: SpaceId,
+        direction: Direction,
+        visible_spaces: &[SpaceId],
+    ) -> Option<Option<SpaceId>> {
+        const EDGE_TOLERANCE: f64 = 1.0;
+        let current = *self.space_frames.get(&current_space)?;
+        let mut others = Vec::with_capacity(visible_spaces.len());
+        for &space in visible_spaces {
+            if space != current_space {
+                others.push((space, *self.space_frames.get(&space)?));
+            }
+        }
+        let (cur_min, cur_max) = (current.min(), current.max());
+
+        let mut best: Option<((bool, f64, f64), SpaceId)> = None;
+        for &(space, frame) in &others {
+            let (min, max) = (frame.min(), frame.max());
+            let edge_gap = match direction {
+                Direction::Right => {
+                    (min.x >= cur_max.x - EDGE_TOLERANCE).then_some(min.x - cur_max.x)
+                }
+                Direction::Left => {
+                    (max.x <= cur_min.x + EDGE_TOLERANCE).then_some(cur_min.x - max.x)
+                }
+                Direction::Down => {
+                    (min.y >= cur_max.y - EDGE_TOLERANCE).then_some(min.y - cur_max.y)
+                }
+                Direction::Up => (max.y <= cur_min.y + EDGE_TOLERANCE).then_some(cur_min.y - max.y),
+            };
+            let Some(edge_gap) = edge_gap else {
+                continue;
+            };
+            // Shared extent on the other axis; zero or less for displays that only
+            // touch at a corner or sit diagonally.
+            let overlap = match direction {
+                Direction::Left | Direction::Right => cur_max.y.min(max.y) - cur_min.y.max(min.y),
+                Direction::Up | Direction::Down => cur_max.x.min(max.x) - cur_min.x.max(min.x),
+            };
+            let rank = (overlap <= EDGE_TOLERANCE, edge_gap.max(0.0), -overlap);
+            let better = best.is_none_or(|(best_rank, _)| {
+                rank.partial_cmp(&best_rank).is_some_and(|order| order.is_lt())
+            });
+            if better {
+                best = Some((rank, space));
+            }
+        }
+        if let Some((_, space)) = best {
+            return Some(Some(space));
+        }
+
+        let same_row = |frame: &CGRect| {
+            frame.max().y - cur_min.y > EDGE_TOLERANCE && cur_max.y - frame.min().y > EDGE_TOLERANCE
+        };
+        let row = others.iter().filter(|(_, frame)| same_row(frame));
+        Some(match direction {
+            Direction::Right => {
+                row.min_by(|(_, a), (_, b)| a.min().x.total_cmp(&b.min().x)).map(|(s, _)| *s)
+            }
+            Direction::Left => {
+                row.max_by(|(_, a), (_, b)| a.max().x.total_cmp(&b.max().x)).map(|(s, _)| *s)
+            }
+            Direction::Up | Direction::Down => None,
+        })
+    }
+
     fn next_space_for_direction(
         &self,
         current_space: SpaceId,
@@ -1193,20 +1272,38 @@ impl LayoutEngine {
         if visible_spaces.len() <= 1 {
             return None;
         }
+        if let Some(found) =
+            self.next_space_by_display_edges(current_space, direction, visible_spaces)
+        {
+            return found;
+        }
 
+        // Without display frames, judge direction from display centers alone.
         let current_center = space_centers.get(&current_space)?;
+        // A display lies in `direction` only when that axis dominates the offset
+        // between display centers. Without this, a display stacked above counts as
+        // "right" whenever its center sits a few pixels further right.
+        let offset = |space: SpaceId| {
+            let center = space_centers.get(&space)?;
+            Some((center.x - current_center.x, center.y - current_center.y))
+        };
+        let side_by_side = |(dx, dy): (f64, f64)| dx.abs() >= dy.abs();
+        let on_axis = |delta: (f64, f64)| match direction {
+            Direction::Left | Direction::Right => side_by_side(delta),
+            Direction::Up | Direction::Down => delta.1.abs() >= delta.0.abs(),
+        };
         let mut candidates = Vec::new();
         for &candidate_space in visible_spaces {
             if candidate_space == current_space {
                 continue;
             }
-            if let Some(candidate_center) = space_centers.get(&candidate_space) {
-                if let Some(delta) = (current_center.x, current_center.y)
+            if let Some(candidate_center) = space_centers.get(&candidate_space)
+                && offset(candidate_space).is_some_and(on_axis)
+                && let Some(delta) = (current_center.x, current_center.y)
                     .distance_in_direction((candidate_center.x, candidate_center.y), direction)
                     .filter(|distance| *distance > 0.0)
-                {
-                    candidates.push((candidate_space, delta));
-                }
+            {
+                candidates.push((candidate_space, delta));
             }
         }
 
@@ -1215,13 +1312,26 @@ impl LayoutEngine {
             return Some(candidates[0].0);
         }
 
+        // Wrap around horizontally to the far end of the row, but only across displays
+        // arranged side by side; a display above or below never counts as that end.
+        // Among equally far displays prefer the one most level with this one.
+        let row = visible_spaces.iter().copied().filter_map(|space| {
+            if space == current_space {
+                return None;
+            }
+            offset(space).filter(|delta| side_by_side(*delta)).map(|delta| (space, delta))
+        });
+        let far_end = |(_, (ax, ay)): &(SpaceId, (f64, f64)),
+                       (_, (bx, by)): &(SpaceId, (f64, f64))| {
+            ax.total_cmp(bx).then_with(|| by.abs().total_cmp(&ay.abs()))
+        };
         match direction {
-            Direction::Left => {
-                visible_spaces.iter().rev().copied().find(|&space| space != current_space)
-            }
-            Direction::Right => {
-                visible_spaces.iter().copied().find(|&space| space != current_space)
-            }
+            Direction::Left => row.max_by(far_end).map(|(space, _)| space),
+            Direction::Right => row
+                .min_by(|a, b| {
+                    a.1.0.total_cmp(&b.1.0).then_with(|| a.1.1.abs().total_cmp(&b.1.1.abs()))
+                })
+                .map(|(space, _)| space),
             Direction::Up | Direction::Down => None,
         }
     }
@@ -1477,6 +1587,11 @@ impl LayoutEngine {
         }
     }
 
+    /// Replace the known display frame of every visible native space.
+    pub fn set_space_frames(&mut self, frames: impl IntoIterator<Item = (SpaceId, CGRect)>) {
+        self.space_frames = frames.into_iter().collect();
+    }
+
     pub fn prune_display_state(&mut self, active_display_uuids: &[String]) {
         let active: HashSet<&str> = active_display_uuids.iter().map(|s| s.as_str()).collect();
 
@@ -1508,6 +1623,7 @@ impl LayoutEngine {
             broadcast_tx,
             space_display_map: HashMap::default(),
             display_last_space: HashMap::default(),
+            space_frames: HashMap::default(),
             persistence: PersistenceState::default(),
             startup_restore_pending: false,
             scroll_boundary: None,
@@ -3629,6 +3745,98 @@ mod tests {
             ),
             Some(lower)
         );
+    }
+
+    fn frames_and_centers(
+        frames: &[(SpaceId, CGRect)],
+    ) -> (Vec<SpaceId>, HashMap<SpaceId, CGPoint>) {
+        let spaces = frames.iter().map(|(space, _)| *space).collect();
+        let centers = frames.iter().map(|(space, frame)| (*space, frame.mid())).collect();
+        (spaces, centers)
+    }
+
+    #[test]
+    fn next_space_for_direction_ignores_displays_on_the_other_axis() {
+        // External display stacked above a laptop panel, horizontally offset by a
+        // few pixels, as macOS reports a typical desk arrangement (visible frames).
+        let (panel, external) = (SpaceId::new(1), SpaceId::new(2));
+        let frames = [
+            (
+                panel,
+                CGRect::new(CGPoint::new(0.0, 40.0), CGSize::new(2056.0, 1289.0)),
+            ),
+            (
+                external,
+                CGRect::new(CGPoint::new(81.0, -1049.0), CGSize::new(1920.0, 1049.0)),
+            ),
+        ];
+        let (spaces, centers) = frames_and_centers(&frames);
+        let mut with_frames = test_engine();
+        with_frames.set_space_frames(frames);
+        // Without frames the engine falls back to display centers; both must agree.
+        for engine in [&with_frames, &test_engine()] {
+            for direction in [Direction::Left, Direction::Right, Direction::Down] {
+                assert_eq!(
+                    engine.next_space_for_direction(panel, direction, &spaces, &centers),
+                    None,
+                    "{direction:?} from the panel must not reach the display above"
+                );
+            }
+            assert_eq!(
+                engine.next_space_for_direction(panel, Direction::Up, &spaces, &centers),
+                Some(external)
+            );
+            assert_eq!(
+                engine.next_space_for_direction(external, Direction::Down, &spaces, &centers),
+                Some(panel)
+            );
+            assert_eq!(
+                engine.next_space_for_direction(external, Direction::Right, &spaces, &centers),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn next_space_for_direction_wraps_only_within_a_row() {
+        // Three displays in a row with a fourth sitting above the right one.
+        let (left, middle, right, above) = (
+            SpaceId::new(3),
+            SpaceId::new(4),
+            SpaceId::new(5),
+            SpaceId::new(6),
+        );
+        let frame =
+            |x: f64, y: f64, h: f64| CGRect::new(CGPoint::new(x, y), CGSize::new(2000.0, h));
+        let frames = [
+            (left, frame(0.0, 0.0, 1000.0)),
+            (middle, frame(2000.0, 0.0, 1000.0)),
+            (right, frame(4000.0, 0.0, 1000.0)),
+            (above, frame(4000.0, -1200.0, 1200.0)),
+        ];
+        let (spaces, centers) = frames_and_centers(&frames);
+        let mut engine = test_engine();
+        engine.set_space_frames(frames);
+
+        let next =
+            |from, direction| engine.next_space_for_direction(from, direction, &spaces, &centers);
+        assert_eq!(next(left, Direction::Right), Some(middle));
+        assert_eq!(next(middle, Direction::Right), Some(right));
+        assert_eq!(
+            next(right, Direction::Right),
+            Some(left),
+            "wraps to the far end of the row"
+        );
+        assert_eq!(next(left, Direction::Left), Some(right));
+        assert_eq!(next(right, Direction::Up), Some(above));
+        assert_eq!(next(above, Direction::Down), Some(right));
+        assert_eq!(
+            next(above, Direction::Right),
+            None,
+            "the display above is not part of the row, so there is nothing to wrap to"
+        );
+        // With nothing directly beside it, a diagonal neighbour still counts.
+        assert_eq!(next(above, Direction::Left), Some(middle));
     }
 
     #[test]

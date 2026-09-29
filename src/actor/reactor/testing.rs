@@ -737,3 +737,16 @@ pub fn next_test_topology_revision() -> u64 {
         next
     })
 }
+
+/// A 1000x1000 display at the origin: the left one of two side by side.
+pub fn left_screen() -> CGRect { CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)) }
+
+/// A 1000x1000 display just right of [`left_screen`].
+pub fn right_screen() -> CGRect { CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)) }
+
+/// Deliver the snapshot that follows connecting exactly these displays.
+pub fn connect_displays(reactor: &mut Reactor, frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) {
+    reactor.handle_event(space_state_event_with(frames, spaces, |state| {
+        state.display_set_changed = true
+    }));
+}

@@ -772,6 +772,137 @@ fn focus_display_invalid_or_inactive_target_preserves_context() {
     crate::sys::screen::TEST_ACTIVE_DISPLAY.with(|display| assert!(display.borrow().is_none()));
 }
 
+fn stacked_display_frames() -> (CGRect, CGRect) {
+    // Visible frames of a laptop panel with an external display placed above it,
+    // horizontally offset by a few pixels, as macOS reports a typical desk setup.
+    (
+        CGRect::new(CGPoint::new(0., 40.), CGSize::new(2056., 1289.)),
+        CGRect::new(CGPoint::new(81., -1049.), CGSize::new(1920., 1049.)),
+    )
+}
+
+#[test]
+fn moving_a_window_up_onto_a_display_stacked_above_keeps_it_there() {
+    let mut reactor = test_reactor();
+    let (built_in, external) = stacked_display_frames();
+    let (built_in_space, external_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![built_in, external], vec![
+        Some(built_in_space),
+        Some(external_space),
+    ]);
+    let mut apps = Apps::new();
+    let window = WindowId::new(1, 1);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(built_in_space)
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Right));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(built_in_space),
+        "right has no display beside the panel"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(external_space)
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(external_space, window),
+        reactor
+            .layout_manager
+            .layout_engine
+            .workspaces()
+            .active_workspace(external_space),
+        "the window lands in the workspace the external display shows"
+    );
+    assert_eq!(
+        reactor.space_state.command_space,
+        Some(external_space),
+        "commands follow the window to the display it moved to"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Down));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(built_in_space),
+        "and it can be moved straight back"
+    );
+}
+
+#[test]
+fn move_node_crosses_to_the_display_beside_at_the_layout_edge() {
+    let mut reactor = test_reactor();
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let moved = WindowId::new(1, 2);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(moved));
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Right));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(right_space));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(WindowId::new(1, 1)),
+        Some(left_space)
+    );
+}
+
+#[test]
+fn focus_follows_the_display_arrangement_for_stacked_displays() {
+    let mut reactor = test_reactor();
+    let (built_in, external) = stacked_display_frames();
+    let (built_in_space, external_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![built_in, external], vec![
+        Some(built_in_space),
+        Some(external_space),
+    ]);
+    let mut apps = Apps::new();
+    let mut upper = make_window(2);
+    upper.frame = CGRect::new(CGPoint::new(300., -800.), CGSize::new(400., 400.));
+    let lower = WindowId::new(1, 1);
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        vec![make_window(1), upper],
+        Some(lower),
+    );
+    let upper = WindowId::new(1, 2);
+    assert_eq!(reactor.assigned_space_for_window_id(upper), Some(external_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(lower)
+    );
+
+    for direction in [Direction::Left, Direction::Right] {
+        reactor.handle_test_layout_command(LayoutCommand::MoveFocus(direction));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            reactor.layout_manager.layout_engine.focused_window(),
+            Some(lower),
+            "{direction:?} must not jump to the display above"
+        );
+    }
+    reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Up));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(upper)
+    );
+}
+
 #[test]
 fn passive_command_space_change_does_not_override_clicked_window_focus() {
     let (mut apps, mut reactor) = test_context();
