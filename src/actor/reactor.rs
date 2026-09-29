@@ -2369,19 +2369,9 @@ impl Reactor {
         for (window_server_id, space) in outcome.confirmed_window_spaces {
             self.clear_pending_target_if_confirmed_space(window_server_id, space);
         }
-        for (window_server_id, space, window) in outcome.fullscreen_restorations {
-            let mut nested = EventOutcome::default();
-            if self
-                .restore_fullscreen_window_to_user_space(
-                    window_server_id,
-                    space,
-                    window,
-                    &mut nested,
-                )
-                .is_none()
-            {
-                self.reassign_window_to_authoritative_space(window, space, false);
-            }
+        for (wsid, space, window) in outcome.fullscreen_restorations {
+            let nested =
+                self.reconcile_native_presence(wsid, space, window, false, EventOutcome::default());
             self.apply_event_outcome(nested);
         }
         for reassignment in outcome.topology_reassignments {
@@ -2696,14 +2686,10 @@ impl Reactor {
     }
 
     fn restore_windows_after_fullscreen_exit(&mut self, spaces: &[Option<SpaceId>]) {
-        let refresh_spaces: Vec<SpaceId> = spaces
-            .iter()
-            .copied()
-            .flatten()
-            .filter(|space| !self.is_fullscreen_space(*space))
-            .collect();
-
-        for space in refresh_spaces {
+        for space in spaces.iter().copied().flatten() {
+            if self.is_fullscreen_space(space) {
+                continue;
+            }
             let records: Vec<_> = self
                 .state
                 .windows
@@ -2719,29 +2705,22 @@ impl Reactor {
             }
 
             for record in records {
-                let _ = self
-                    .state
-                    .windows
-                    .restore_window_from_native_fullscreen(record.current_window_id);
-
-                self.request_window_inventory(record.current_window_id.pid);
-
-                let live_window_id = record
-                    .window_server_id
-                    .and_then(|wsid| self.state.windows.tracked_window_id(wsid))
-                    .or_else(|| {
-                        self.state
-                            .windows
-                            .contains_window(record.current_window_id)
-                            .then_some(record.current_window_id)
-                    });
-
+                let Some(restored) =
+                    self.state.windows.restore_native_identity(None, record.current_window_id)
+                else {
+                    continue;
+                };
+                self.request_window_inventory(restored.record.current_window_id.pid);
+                if let Some(previous) = restored.removed_window {
+                    self.send_layout_event(LayoutEvent::WindowRemoved(previous));
+                }
+                let record = restored.record;
                 let target_space = record
                     .workspace
                     .map(|workspace| workspace.space)
                     .or(record.last_known_user_space);
 
-                if let (Some(window_id), Some(target_space)) = (live_window_id, target_space)
+                if let (Some(window_id), Some(target_space)) = (restored.window, target_space)
                     && let Some(source_space) =
                         self.best_space_for_window_id(window_id).or(Some(target_space))
                     && source_space != target_space
@@ -3430,37 +3409,30 @@ impl Reactor {
     fn apply_topology_window_delta(&mut self, delta: TopologyWindowDelta) -> EventOutcome {
         let appeared: HashMap<WindowServerId, SpaceId> = delta.appeared.into_iter().collect();
         let disappeared: HashMap<WindowServerId, SpaceId> = delta.disappeared.into_iter().collect();
-        let window_server_ids: HashSet<WindowServerId> =
+        let wsids: HashSet<WindowServerId> =
             appeared.keys().chain(disappeared.keys()).copied().collect();
         let mut outcome = EventOutcome::default();
 
-        for window_server_id in window_server_ids {
-            let appeared_space = appeared.get(&window_server_id).copied();
-            let disappeared_space = disappeared.get(&window_server_id).copied();
-            let authoritative_space = self.resolve_native_space(window_server_id, appeared_space);
+        for wsid in wsids {
+            let appeared_space = appeared.get(&wsid).copied();
+            let disappeared_space = disappeared.get(&wsid).copied();
+            let authoritative_space = self.resolve_native_space(wsid, appeared_space);
             if let Some(target_space) = authoritative_space {
                 self.state.windows.observe_native_space(
-                    window_server_id,
+                    wsid,
                     target_space,
                     self.is_space_active(target_space),
                 );
                 if appeared_space == Some(target_space) {
-                    self.clear_pending_target_if_confirmed_space(window_server_id, target_space);
+                    self.clear_pending_target_if_confirmed_space(wsid, target_space);
                 }
-                if let Some(window) = self.state.windows.tracked_window_id(window_server_id) {
-                    let restored = self.restore_fullscreen_window_to_user_space(
-                        window_server_id,
-                        target_space,
-                        window,
-                        &mut outcome,
-                    );
-                    if restored.is_none() {
-                        self.reassign_window_to_authoritative_space(window, target_space, true);
-                    }
+                if let Some(window) = self.state.windows.tracked_window_id(wsid) {
+                    outcome =
+                        self.reconcile_native_presence(wsid, target_space, window, true, outcome);
                 }
             } else if let Some(previous_space) = disappeared_space {
-                self.state.windows.observe_native_space(window_server_id, previous_space, false);
-                if let Some(window) = self.state.windows.tracked_window_id(window_server_id)
+                self.state.windows.observe_native_space(wsid, previous_space, false);
+                if let Some(window) = self.state.windows.tracked_window_id(wsid)
                     && self.assigned_space_for_window_id(window) == Some(previous_space)
                     && self.is_space_active(previous_space)
                 {
@@ -3472,22 +3444,26 @@ impl Reactor {
         outcome
     }
 
-    fn restore_fullscreen_window_to_user_space(
+    fn reconcile_native_presence(
         &mut self,
-        window_server_id: WindowServerId,
+        wsid: WindowServerId,
         space: SpaceId,
-        original_window: WindowId,
-        outcome: &mut EventOutcome,
-    ) -> Option<()> {
-        let (owner, remove_original) =
-            self.state.windows.restore_native_identity(window_server_id, original_window)?;
-        if remove_original {
-            *outcome = std::mem::take(outcome)
-                .with_layout_event(LayoutEvent::WindowRemoved(original_window));
+        mut window: WindowId,
+        mut preserve_workspace_ordinal: bool,
+        mut outcome: EventOutcome,
+    ) -> EventOutcome {
+        if let Some(restored) = self.state.windows.restore_native_identity(Some(wsid), window)
+            && let Some(owner) = restored.window
+        {
+            if let Some(previous) = restored.removed_window {
+                outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(previous));
+            }
+            outcome = outcome.with_window_inventory_request(owner.pid);
+            window = owner;
+            preserve_workspace_ordinal = false;
         }
-        *outcome = std::mem::take(outcome).with_window_inventory_request(owner.pid);
-        self.reassign_window_to_authoritative_space(owner, space, false);
-        Some(())
+        self.reassign_window_to_authoritative_space(window, space, preserve_workspace_ordinal);
+        outcome
     }
 
     fn reassign_window_to_authoritative_space(

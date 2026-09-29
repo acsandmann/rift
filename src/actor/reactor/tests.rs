@@ -2370,6 +2370,7 @@ fn fullscreen_restore_uses_live_rekeyed_window_id() {
 
     window_server_appeared(&mut reactor, wsid, fullscreen_space, SpaceEventKind::Fullscreen);
 
+    reactor.state.windows.set_window_server_space(wsid, Some(fullscreen_space));
     rekey_window(&mut reactor, old_wid, new_wid);
 
     assert!(
@@ -2377,6 +2378,7 @@ fn fullscreen_restore_uses_live_rekeyed_window_id() {
         "rekey should retire the old AX window id before fullscreen restore"
     );
 
+    assert!(reactor.state.windows.native_fullscreen_record_for_window(new_wid).is_some());
     window_server_appeared(&mut reactor, wsid, user_space, SpaceEventKind::User);
 
     assert!(has_window_in_layout(&mut reactor, user_space, frame, new_wid));
@@ -5129,31 +5131,31 @@ fn fullscreen_exit_space_restore_does_not_revive_stale_pre_rekey_window() {
     let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
     let new_wid = WindowId::new(old_wid.pid, 99);
 
-    reactor.send_layout_event(LayoutEvent::WindowAdded(user_space, old_wid));
-    assert!(has_window_in_layout(
-        &mut reactor,
-        user_space,
-        full_screen,
-        old_wid
-    ));
-
-    reactor.space_state.fullscreen_spaces.insert(fullscreen_space);
-    let _ = reactor.state.windows.suspend_window_to_native_fullscreen(
-        old_wid,
-        Some(wsid),
-        Some(user_space),
-        fullscreen_space,
-        NativeFullscreenTransition::Suspended,
-    );
-    reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(old_wid));
-
+    window_server_appeared(&mut reactor, wsid, fullscreen_space, SpaceEventKind::Fullscreen);
+    reactor.handle_event(space_state_event(vec![full_screen], vec![None]));
+    reactor.state.windows.set_window_server_space(wsid, Some(fullscreen_space));
     rekey_window(&mut reactor, old_wid, new_wid);
     assert!(
         reactor.state.windows.window(old_wid).is_none(),
         "rekey should retire the old AX id before the fullscreen exit snapshot arrives"
     );
 
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(user_space)]));
+    assert!(reactor.state.windows.native_fullscreen_record_for_window(new_wid).is_some());
+    reactor.handle_event(space_state_event_with(
+        vec![full_screen],
+        vec![Some(user_space)],
+        |snapshot| {
+            snapshot.active_window_spaces.insert(wsid, user_space);
+            snapshot.membership_complete = true;
+        },
+    ));
+    assert!(has_window_in_layout(
+        &mut reactor,
+        user_space,
+        full_screen,
+        new_wid
+    ));
+    assert!(reactor.state.windows.native_fullscreen_record_for_window(new_wid).is_none());
 
     assert!(
         !has_window_in_layout(&mut reactor, user_space, full_screen, old_wid),

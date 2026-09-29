@@ -160,6 +160,13 @@ pub struct WindowStore {
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
 }
 
+/// Restored native lifecycle facts; placement and actor effects remain external.
+pub(crate) struct NativeFullscreenRestoration {
+    pub(crate) record: NativeFullscreenRecord,
+    pub(crate) window: Option<WindowId>,
+    pub(crate) removed_window: Option<WindowId>,
+}
+
 /// Native facts supplementing a successful AX inventory omission. Unknown
 /// fields carry no negative authority; an omission alone never retires identity.
 #[derive(Debug)]
@@ -220,28 +227,33 @@ impl WindowStore {
         })
     }
 
-    /// Restore the catalog's current logical owner, including AX replacement.
-    /// The boolean requests repair of the superseded identity's projection.
+    /// Restore identity for native presence or a return to the recorded user Space.
     pub(crate) fn restore_native_identity(
         &mut self,
-        wsid: WindowServerId,
+        wsid: Option<WindowServerId>,
         original: WindowId,
-    ) -> Option<(WindowId, bool)> {
-        let restored = self
-            .restore_window_from_native_fullscreen_by_window_server_id(wsid)
+    ) -> Option<NativeFullscreenRestoration> {
+        let record = wsid
+            .and_then(|wsid| self.restore_window_from_native_fullscreen_by_window_server_id(wsid))
             .or_else(|| self.restore_window_from_native_fullscreen(original))?;
-        let owner = [
-            Some(restored.current_window_id),
-            restored.window_server_id.and_then(|id| self.tracked_window_id(id)),
-            self.tracked_window_id(wsid),
-            Some(original),
+        let bound = record.window_server_id.and_then(|id| self.tracked_window_id(id));
+        // A specific appearance follows the record's current AX identity first;
+        // a Space return follows its surviving native binding first.
+        let window = [
+            wsid.map(|_| record.current_window_id),
+            bound,
+            Some(record.current_window_id),
+            wsid.and_then(|id| self.tracked_window_id(id)),
+            wsid.map(|_| original),
         ]
         .into_iter()
         .flatten()
-        .find(|wid| self.contains_window(*wid))?;
-        let remove_original =
-            owner != original && self.remove_window_assignment(original).is_some();
-        Some((owner, remove_original))
+        .find(|wid| self.contains_window(*wid));
+        let removed_window = window
+            .filter(|wid| *wid != original)
+            .and_then(|_| self.remove_window_assignment(original))
+            .map(|_| original);
+        Some(NativeFullscreenRestoration { record, window, removed_window })
     }
 
     /// Native fullscreen suspends admission while retaining identity and ownership.
