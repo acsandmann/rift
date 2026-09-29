@@ -256,18 +256,28 @@ impl WindowNotify {
                         ));
                     }
                     CGSEventType::Known(KnownCGSEvent::WindowReordered)
-                    | CGSEventType::Known(KnownCGSEvent::WindowUnhidden)
                     | CGSEventType::Known(
                         KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged,
                     )
                     | CGSEventType::Known(
                         KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged,
                     ) => focus_wake.notify(),
-                    CGSEventType::Known(KnownCGSEvent::WindowHidden) => {
+                    CGSEventType::Known(
+                        KnownCGSEvent::WindowHidden | KnownCGSEvent::WindowUnhidden,
+                    ) => {
                         focus_wake.notify();
                         if let Some(window_id) = evt.window_id {
-                            events_tx
-                                .send(Event::WindowServerHidden(WindowServerId::new(window_id)));
+                            let wsid = WindowServerId::new(window_id);
+                            events_tx.send(
+                                if matches!(
+                                    evt.event_type,
+                                    CGSEventType::Known(KnownCGSEvent::WindowUnhidden)
+                                ) {
+                                    Event::WindowServerUnhidden(wsid)
+                                } else {
+                                    Event::WindowServerHidden(wsid)
+                                },
+                            );
                         }
                     }
                     CGSEventType::Known(KnownCGSEvent::WindowMoved)

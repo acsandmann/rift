@@ -47,11 +47,14 @@ pub fn handle_application_terminated(pid: i32) -> anyhow::Result<EventOutcome> {
 }
 
 pub fn handle_application_thread_terminated(
+    state: &mut crate::model::RiftState,
     apps: &mut AppManager,
     pid: i32,
 ) -> anyhow::Result<EventOutcome> {
+    state.windows.remove_windows_for_app(pid);
     apps.apps.remove(&pid);
     Ok(EventOutcome::window_membership_changed(false, true)
+        .with_arrange_passes(0)
         .with_layout_event(LayoutEvent::AppClosed(pid)))
 }
 

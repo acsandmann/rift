@@ -1,4 +1,4 @@
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 use super::window;
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
@@ -8,40 +8,33 @@ use crate::layout_engine::ResolvedWindow;
 use crate::model::virtual_workspace::WorkspaceError;
 use crate::model::{AppRuleEffects, AppRuleResult};
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server::WindowServerId;
 
 /// Handler for window discovery events, responsible for processing newly discovered windows
 /// and managing the lifecycle of window state in the reactor.
 fn sync_existing_window_state(
     state: &mut crate::model::RiftState,
     wid: WindowId,
-    info: &WindowInfo,
+    mut info: WindowInfo,
     active_space: Option<SpaceId>,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
 
+    let is_minimized = info.is_minimized;
     if let Some(existing) = state.windows.window_mut(wid) {
-        existing.info.title = info.title.clone();
         if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
             existing.frame_monotonic = info.frame;
         }
-        existing.info.is_standard = info.is_standard;
-        existing.info.is_root = info.is_root;
-        existing.info.is_resizable = info.is_resizable;
-        existing.info.min_size = info.min_size;
-        existing.info.max_size = info.max_size;
-        existing.info.sys_id = info.sys_id;
-        existing.info.bundle_id = info.bundle_id.clone();
-        existing.info.path = info.path.clone();
-        existing.info.ax_role = info.ax_role.clone();
-        existing.info.ax_subrole = info.ax_subrole.clone();
+        // Preserve the observed frame and minimize transition until their handlers run.
+        info.frame = existing.info.frame;
+        info.is_minimized = was_minimized;
+        existing.info = info;
     } else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
     }
 
-    let outcome = match (was_minimized, info.is_minimized) {
-        (false, true) => window::handle_window_minimized(state, wid)?,
+    let outcome = match (was_minimized, is_minimized) {
+        (_, true) => window::handle_window_minimized(state, wid)?,
         (true, false) => {
             window::handle_window_deminiaturized(state, window::WindowDeminiaturizedPayload {
                 window: wid,
@@ -49,9 +42,6 @@ fn sync_existing_window_state(
             })?
         }
         _ => {
-            if let Some(existing) = state.windows.window_mut(wid) {
-                existing.info.is_minimized = info.is_minimized;
-            }
             let is_admitted = utils::refresh_heuristic(state, wid)
                 .is_some_and(|transition| transition.is_admitted);
             if was_manageable && !is_admitted {
@@ -63,11 +53,11 @@ fn sync_existing_window_state(
         }
     };
 
-    if was_minimized != info.is_minimized {
+    if was_minimized != is_minimized {
         debug!(
             ?wid,
             was_minimized,
-            is_minimized = info.is_minimized,
+            is_minimized = is_minimized,
             "Window minimize state reconciled from discovery"
         );
     }
@@ -88,204 +78,6 @@ fn should_emit_window_for_space(
         (Some(assigned), Some(active)) => assigned == active,
         _ => true,
     }
-}
-
-fn sync_window_server_id_mapping(
-    state: &mut crate::model::RiftState,
-    layout: &mut crate::actor::reactor::managers::LayoutManager,
-    wid: WindowId,
-    old_sys_id: Option<WindowServerId>,
-    new_sys_id: Option<WindowServerId>,
-    current_native_space: Option<SpaceId>,
-) -> crate::actor::reactor::events::EventOutcome {
-    let mut outcome = crate::actor::reactor::events::EventOutcome::default();
-    if old_sys_id != new_sys_id
-        && let Some(old_wsid) = old_sys_id
-        && state.windows.tracked_window_id(old_wsid) == Some(wid)
-    {
-        state.windows.remove_window_server_state(old_wsid);
-    }
-
-    if let Some(new_wsid) = new_sys_id {
-        if let Some(previous_wid) = state.windows.track_window_server_id(new_wsid, wid)
-            && previous_wid != wid
-        {
-            let previous_state = state.windows.window(previous_wid).cloned();
-            layout
-                .layout_engine
-                .rekey_window_identity(&mut state.windows, previous_wid, wid);
-            if let Some(previous_state) = previous_state
-                && !state.windows.contains_window(wid)
-            {
-                state.windows.insert_window(wid, previous_state);
-            }
-            outcome =
-                outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous_wid));
-            state.windows.remove_window(previous_wid);
-        }
-        state.windows.clear_window_server_observed(new_wsid);
-        if let (Some(record), Some(current_space)) = (
-            state.windows.native_fullscreen_record_for_window(wid),
-            current_native_space,
-        ) {
-            let target_user_space = record
-                .workspace
-                .map(|workspace| workspace.space)
-                .or(record.last_known_user_space);
-            if current_space != record.fullscreen_space && Some(current_space) == target_user_space
-            {
-                let _ = state.windows.restore_window_from_native_fullscreen(wid);
-            }
-        }
-    }
-    outcome
-}
-
-/// Identify windows that should be removed as stale.
-#[derive(Debug)]
-pub(crate) struct StaleCleanupSnapshot {
-    pub(crate) suppressed: bool,
-    pub(crate) mission_control_active: bool,
-    pub(crate) drag_active: bool,
-    pub(crate) inactive_windows: HashSet<WindowId>,
-    pub(crate) server_observations: HashMap<WindowServerId, StaleWindowObservation>,
-}
-
-#[derive(Debug)]
-pub(crate) struct StaleWindowObservation {
-    pub(crate) info: Option<crate::sys::window_server::WindowServerInfo>,
-    pub(crate) suitable: Option<bool>,
-    pub(crate) ordered_in: Option<bool>,
-}
-
-fn stale_cleanup_candidates(
-    state: &crate::model::RiftState,
-    pid: pid_t,
-    known_visible: &[WindowId],
-    snapshot: &StaleCleanupSnapshot,
-) -> Vec<(WindowId, WindowServerId)> {
-    let known_visible_set: HashSet<WindowId> = known_visible.iter().cloned().collect();
-    let skip_stale_cleanup =
-        snapshot.suppressed || snapshot.mission_control_active || snapshot.drag_active;
-
-    if skip_stale_cleanup {
-        return Vec::new();
-    }
-
-    state
-        .windows
-        .iter_windows()
-        .filter_map(|(wid, window_state)| {
-            if wid.pid != pid || known_visible_set.contains(&wid) {
-                return None;
-            }
-
-            if window_state.info.is_minimized {
-                return None;
-            }
-
-            let Some(ws_id) = window_state.info.sys_id else {
-                trace!(
-                    ?wid,
-                    "Skipping stale cleanup for window without window server id"
-                );
-                return None;
-            };
-
-            if snapshot.inactive_windows.contains(&wid) {
-                trace!(
-                    ?wid,
-                    ws_id = ?ws_id,
-                    "Skipping stale cleanup; window is on a known inactive space"
-                );
-                return None;
-            }
-
-            Some((wid, ws_id))
-        })
-        .collect()
-}
-
-/// Obtain fresh native observations only for windows eligible for stale cleanup.
-pub(crate) fn observe_stale_windows(
-    state: &crate::model::RiftState,
-    pid: pid_t,
-    known_visible: &[WindowId],
-    snapshot: &mut StaleCleanupSnapshot,
-    mut observe: impl FnMut(WindowServerId) -> StaleWindowObservation,
-) {
-    snapshot.server_observations = stale_cleanup_candidates(state, pid, known_visible, snapshot)
-        .into_iter()
-        .map(|(_, wsid)| (wsid, observe(wsid)))
-        .collect();
-}
-
-pub(crate) fn identify_stale_windows(
-    state: &crate::model::RiftState,
-    pid: pid_t,
-    known_visible: &[WindowId],
-    snapshot: &StaleCleanupSnapshot,
-) -> Vec<WindowId> {
-    const MIN_REAL_WINDOW_DIMENSION: f64 = 2.0;
-
-    let stale_windows = stale_cleanup_candidates(state, pid, known_visible, snapshot)
-        .into_iter()
-        .filter_map(|(wid, ws_id)| {
-            let observation = snapshot.server_observations.get(&ws_id)?;
-            if matches!(observation.suitable, Some(false))
-                || matches!(observation.ordered_in, Some(false))
-            {
-                return Some(wid);
-            }
-            let info = match observation.info.as_ref() {
-                Some(info) => info,
-                None => {
-                    trace!(
-                        ?wid,
-                        ws_id = ?ws_id,
-                        "Skipping stale cleanup for window without server info"
-                    );
-                    return None;
-                }
-            };
-
-            let width = info.frame.size.width.abs();
-            let height = info.frame.size.height.abs();
-
-            // A failed private WindowServer query is not evidence that a window died.
-            // Only explicit negative observations may retire an AX-omitted window. This also
-            // applies to the first tracked recovery refresh: blanket suppression there leaves
-            // genuine closes that occurred during sleep/display churn as layout ghosts.
-            let invalid_layer = info.layer != 0;
-            let too_small = width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
-            if invalid_layer || too_small {
-                Some(wid)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    stale_windows
-}
-
-/// Remove stale windows and send events.
-pub(crate) fn cleanup_stale_windows(
-    state: &mut crate::model::RiftState,
-    transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
-    drag: &mut crate::actor::reactor::managers::DragManager,
-    stale_windows: Vec<WindowId>,
-) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
-    let mut outcome = crate::actor::reactor::events::EventOutcome::default();
-    for wid in stale_windows {
-        outcome.absorb(window::handle_window_destroyed(
-            state,
-            transactions,
-            drag,
-            window::WindowDestroyedPayload { window: wid },
-        )?);
-    }
-    Ok(outcome)
 }
 
 /// Process new and updated windows, returning lists of new and updated windows.
@@ -315,30 +107,19 @@ pub(crate) fn process_window_list(
             current_native_space,
             active_space,
         } = window;
+        if let Some(previous) =
+            state.windows.reconcile_ax_identity(wid, info.sys_id, current_native_space)
+        {
+            layout.layout_engine.transfer_persistent_window_identity(previous, wid);
+            outcome =
+                outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
+        }
         if state.windows.contains_window(wid) {
-            let old_sys_id = state.windows.window(wid).and_then(|window| window.info.sys_id);
-            outcome.absorb(sync_window_server_id_mapping(
-                state,
-                layout,
-                wid,
-                old_sys_id,
-                info.sys_id,
-                current_native_space,
-            ));
-            if let Ok(existing_outcome) =
-                sync_existing_window_state(state, wid, &info, active_space)
+            if let Ok(existing_outcome) = sync_existing_window_state(state, wid, info, active_space)
             {
                 outcome.absorb(existing_outcome);
             }
         } else {
-            outcome.absorb(sync_window_server_id_mapping(
-                state,
-                layout,
-                wid,
-                None,
-                info.sys_id,
-                current_native_space,
-            ));
             new_windows.push((wid, info));
         }
     }
@@ -439,71 +220,52 @@ pub(crate) fn emit_layout_events(
         focused_window,
     } = payload;
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
-    if !state.windows.iter_windows().any(|(wid, _)| wid.pid == pid) {
+    if state.windows.window_ids_for_pid(pid).next().is_none() {
         return outcome;
     }
 
     let mut app_windows: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
     let mut included: HashSet<WindowId> = HashSet::default();
-    let has_visible_window_server_windows = state
-        .windows
-        .iter_visible_window_server_ids()
-        .filter_map(|wsid| state.windows.tracked_window_id(wsid))
-        .any(|wid| {
-            wid.pid == pid
-                && state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
-        });
-
-    // Collect windows from visible window server IDs
-    for wid in state
+    let visible: Vec<_> = state
         .windows
         .iter_visible_window_server_ids()
         .filter_map(|wsid| state.windows.tracked_window_id(wsid))
         .filter(|wid| wid.pid == pid)
         .filter(|wid| state.windows.window(*wid).is_some_and(WindowState::can_reconcile_admission))
-    {
-        let Some(space) = discovery_spaces.get(&wid).copied() else {
-            continue;
-        };
-        if !should_emit_window_for_space(state, layout, space, wid) {
-            continue;
-        }
-        included.insert(wid);
-        app_windows.entry(space).or_default().push(wid);
-    }
+        .collect();
+    let has_visible_window_server_windows = !visible.is_empty();
 
-    // If we have no visible WSIDs (e.g., SpaceChanged provided empty ws_info),
-    // fall back to the app-reported known_visible list for this pid.
-    for wid in known_visible.iter().copied().filter(|wid| wid.pid == pid) {
+    for (wid, native_visible) in visible.into_iter().map(|wid| (wid, true)).chain(
+        known_visible
+            .iter()
+            .copied()
+            .filter(|wid| wid.pid == pid)
+            .map(|wid| (wid, false)),
+    ) {
         if included.contains(&wid)
             || !state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
         {
             continue;
         }
-        if has_visible_window_server_windows
+        // AX fallback must not resurrect an omitted window via geometry when native
+        // membership already identifies other visible windows of this application.
+        if !native_visible
+            && has_visible_window_server_windows
             && authoritative_spaces
                 .get(&wid)
                 .is_none_or(|space| !active_spaces.contains(space))
         {
-            // Once the active-space snapshot already contains some windows for
-            // this app, do not let AX-only fallback resurrect other windows on
-            // the current desktop via geometry inference alone.
             continue;
         }
-        let Some(_state) = state.windows.window(wid) else {
-            continue;
-        };
         let Some(space) = discovery_spaces.get(&wid).copied() else {
             continue;
         };
-        if !should_emit_window_for_space(state, layout, space, wid) {
-            continue;
+        if should_emit_window_for_space(state, layout, space, wid) {
+            included.insert(wid);
+            app_windows.entry(space).or_default().push(wid);
         }
-        included.insert(wid);
-        app_windows.entry(space).or_default().push(wid);
     }
 
-    let discovered_spaces = active_spaces.iter().copied().collect::<Vec<_>>();
     for (space, mut windows_for_space) in app_windows {
         windows_for_space.sort_unstable();
         for wid in windows_for_space {
@@ -534,7 +296,7 @@ pub(crate) fn emit_layout_events(
     outcome = outcome.with_layout_event(LayoutEvent::WindowDiscoveryCompleted(
         pid,
         app_info.as_ref().and_then(|info| info.bundle_id.clone()),
-        discovered_spaces,
+        active_spaces,
     ));
 
     if let Some((space, main_window)) = focused_window {

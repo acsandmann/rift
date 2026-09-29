@@ -1,6 +1,6 @@
 use tracing::{debug, trace};
 
-use crate::actor::app::{Request, WindowId};
+use crate::actor::app::Request;
 use crate::actor::reactor::events::{EventOutcome, window};
 use crate::actor::reactor::managers::{DragManager, MissionControlManager};
 use crate::actor::reactor::{LayoutEvent, MissionControlState, SpaceEventKind};
@@ -9,7 +9,6 @@ use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
 use crate::model::RiftState;
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
-use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -83,9 +82,7 @@ pub struct WindowServerLifecyclePayload {
 pub struct WindowServerDestroyedObservations {
     pub resolved_space: Option<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
-    pub mission_control_active: bool,
     pub ordered_in: Option<bool>,
-    pub assigned_space: Option<SpaceId>,
     pub last_known_user_space: Option<SpaceId>,
 }
 
@@ -94,7 +91,6 @@ pub struct WindowServerAppearedObservations {
     pub resolved_space: Option<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
     pub mission_control_active: bool,
-    pub assigned_space: Option<SpaceId>,
     pub last_known_user_space: Option<SpaceId>,
     pub window_server_info: Option<crate::sys::window_server::WindowServerInfo>,
     pub app_known: bool,
@@ -116,109 +112,51 @@ pub fn handle_window_server_destroyed(
     let WindowServerDestroyedObservations {
         resolved_space,
         active_spaces,
-        mission_control_active,
         ordered_in,
-        assigned_space,
         last_known_user_space,
     } = observations;
     let mut outcome = EventOutcome::default();
     if matches!(kind, SpaceEventKind::Fullscreen) {
-        let mut layout_changed = false;
-        let (_pid, window_id) = if let Some(wid) = state.windows.tracked_window_id(wsid) {
-            (wid.pid, Some(wid))
-        } else if let Some(info) = state.windows.get_window_server_info(wsid) {
-            (info.pid, None)
-        } else {
-            // We don't know who owned this fullscreen window.
-            return Ok(EventOutcome::default());
-        };
-
-        record_fullscreen_window(
-            state,
-            sid,
-            Some(_pid),
-            window_id,
-            Some(wsid),
-            last_known_user_space,
-        );
-        if let (Some(wid), Some(user_space)) = (window_id, last_known_user_space)
-            && assigned_space == Some(user_space)
+        if let Some(wid) =
+            state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, None)
         {
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
-            layout_changed = active_spaces.contains(&user_space);
         }
-        if layout_changed && !mission_control_active {
-            outcome = outcome.with_arrange_passes(1);
-        }
-
-        if let Some(wid) = window_id {
+        if let Some(wid) = state.windows.tracked_window_id(wsid) {
             outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
         }
 
         return Ok(outcome);
     } else if matches!(kind, SpaceEventKind::User) {
-        if resolved_space.is_some_and(|space| space != sid) {
-            let current_space = resolved_space.expect("checked above");
-            state.windows.set_window_server_space(wsid, Some(current_space));
-            if active_spaces.contains(&current_space) {
-                state.windows.mark_window_visible(wsid);
-            } else {
-                state.windows.mark_window_hidden(wsid);
+        match state.windows.observe_native_departure(
+            wsid,
+            sid,
+            resolved_space,
+            &active_spaces,
+            ordered_in,
+        ) {
+            crate::model::window_store::NativeDeparture::Moved(window, space) => {
+                if let Some(wid) = window {
+                    outcome = outcome.with_topology_reassignment(wid, space, false);
+                }
             }
-            if let Some(wid) = state.windows.tracked_window_id(wsid) {
-                outcome = outcome
-                    .with_topology_reassignment(wid, current_space, false)
-                    .with_arrange_passes((!mission_control_active) as u8);
-            }
-            debug!(
-                ?wsid,
-                reported_space = ?sid,
-                resolved_space = ?current_space,
-                "Resolved user-space disappearance to newer native membership"
-            );
-            return Ok(outcome);
-        }
-
-        if let Some(wid) = state.windows.tracked_window_id(wsid) {
-            if matches!(ordered_in, Some(false)) {
-                // since the connection has dropped it wont be shown in space_windows_list
-                // so ordered in can be authorative because it doesnt consider
-                // ghost windows that sometimes remain
-                debug!(
-                    ?wid,
-                    ?wsid,
-                    reported_space = ?sid,
-                    "Promoting WindowServer disappearance to immediate WindowDestroyed"
-                );
-                if let Ok(destroyed_outcome) = window::handle_window_destroyed(
+            crate::model::window_store::NativeDeparture::Closed(wid) => {
+                outcome.absorb(window::handle_window_destroyed(
                     state,
                     transactions,
                     drag,
                     window::WindowDestroyedPayload { window: wid },
-                ) {
-                    outcome.absorb(destroyed_outcome);
+                ));
+            }
+            crate::model::window_store::NativeDeparture::Hidden { window, remove_projection } => {
+                if let Some(wid) = window {
+                    if remove_projection {
+                        outcome = outcome
+                            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                    }
+                    outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
                 }
-                return Ok(outcome);
             }
-
-            state.windows.set_window_server_space(wsid, Some(sid));
-            state.windows.mark_window_hidden(wsid);
-            let layout_changed = assigned_space == Some(sid);
-            if layout_changed {
-                outcome =
-                    outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
-            }
-            if layout_changed && !mission_control_active {
-                outcome = outcome.with_arrange_passes(1);
-            }
-            outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
-        } else {
-            state.windows.set_window_server_space(wsid, Some(sid));
-            state.windows.mark_window_hidden(wsid);
-            debug!(
-                ?wsid,
-                "Received WindowServerDestroyed for unknown window - ignoring"
-            );
         }
         return Ok(outcome);
     }
@@ -239,7 +177,6 @@ pub fn handle_window_server_appeared(
         resolved_space,
         active_spaces,
         mission_control_active,
-        assigned_space,
         last_known_user_space,
         window_server_info,
         app_known,
@@ -249,16 +186,13 @@ pub fn handle_window_server_appeared(
     if matches!(kind, SpaceEventKind::User) {
         if let Some(resolved_space) = resolved_space {
             if resolved_space != sid {
-                state.windows.set_window_server_space(wsid, Some(resolved_space));
-                if active_spaces.contains(&resolved_space) {
-                    state.windows.mark_window_visible(wsid);
-                } else {
-                    state.windows.mark_window_hidden(wsid);
-                }
+                state.windows.observe_native_space(
+                    wsid,
+                    resolved_space,
+                    active_spaces.contains(&resolved_space),
+                );
                 if let Some(wid) = state.windows.tracked_window_id(wsid) {
-                    outcome = outcome
-                        .with_topology_reassignment(wid, resolved_space, false)
-                        .with_arrange_passes((!mission_control_active) as u8);
+                    outcome = outcome.with_topology_reassignment(wid, resolved_space, false);
                 }
                 debug!(
                     ?wsid,
@@ -269,8 +203,7 @@ pub fn handle_window_server_appeared(
                 return Ok(outcome);
             }
 
-            state.windows.set_window_server_space(wsid, Some(resolved_space));
-            state.windows.mark_window_visible(wsid);
+            state.windows.observe_native_space(wsid, resolved_space, true);
             outcome.confirmed_window_spaces.push((wsid, resolved_space));
         }
     }
@@ -281,7 +214,6 @@ pub fn handle_window_server_appeared(
                 SpaceEventKind::User => {
                     if let Some(wid) = state.windows.tracked_window_id(wsid) {
                         outcome.fullscreen_restorations.push((wsid, sid, wid));
-                        outcome = outcome.with_arrange_passes(1);
                     } else if let Some(pid) =
                         state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
                     {
@@ -289,35 +221,23 @@ pub fn handle_window_server_appeared(
                     }
                 }
                 SpaceEventKind::Fullscreen => {
-                    let mut layout_changed = false;
                     let tracked_window_id = state.windows.tracked_window_id(wsid);
                     let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
                         state.windows.get_window_server_info(wsid).map(|info| info.pid)
                     });
-                    record_fullscreen_window(
-                        state,
+                    if let Some(wid) = state.windows.observe_native_fullscreen(
+                        wsid,
                         sid,
-                        owner_pid,
-                        tracked_window_id,
-                        Some(wsid),
                         last_known_user_space,
-                    );
+                        owner_pid,
+                    ) {
+                        outcome = outcome
+                            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                    }
                     if tracked_window_id.is_none()
                         && let Some(pid) = owner_pid
                     {
                         outcome = outcome.with_window_inventory_request(pid);
-                    }
-                    if let Some(wid) = tracked_window_id {
-                        if let Some(user_space) = last_known_user_space
-                            && assigned_space == Some(user_space)
-                        {
-                            outcome = outcome
-                                .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
-                            layout_changed = active_spaces.contains(&user_space);
-                        }
-                    }
-                    if layout_changed {
-                        outcome = outcome.with_arrange_passes(1);
                     }
                 }
             }
@@ -360,14 +280,11 @@ pub fn handle_window_server_appeared(
         }
 
         if matches!(kind, SpaceEventKind::Fullscreen) {
-            let window_id = state.windows.tracked_window_id(wsid);
-            record_fullscreen_window(
-                state,
+            state.windows.observe_native_fullscreen(
+                wsid,
                 sid,
-                Some(window_server_info.pid),
-                window_id,
-                Some(wsid),
                 last_known_user_space,
+                Some(window_server_info.pid),
             );
             outcome = outcome.with_window_inventory_request(window_server_info.pid);
 
@@ -445,58 +362,4 @@ pub fn handle_space_lifecycle(
         policy.on_space_destroyed(payload.space);
     }
     Ok(EventOutcome::layout_changed(false).with_active_space_recompute())
-}
-pub(crate) fn resolve_last_known_user_space(
-    window_space: Option<SpaceId>,
-    fallback_space: Option<SpaceId>,
-) -> Option<SpaceId> {
-    window_space.or(fallback_space)
-}
-
-fn record_fullscreen_window(
-    state: &mut RiftState,
-    sid: SpaceId,
-    pid: Option<i32>,
-    window_id: Option<WindowId>,
-    window_server_id: Option<WindowServerId>,
-    last_known_user_space: Option<SpaceId>,
-) {
-    let resolved_window_id = window_id
-        .or_else(|| window_server_id.and_then(|wsid| state.windows.tracked_window_id(wsid)));
-    if let Some(window_id) = resolved_window_id {
-        let _ = state.windows.suspend_window_to_native_fullscreen(
-            window_id,
-            window_server_id,
-            last_known_user_space,
-            sid,
-            NativeFullscreenTransition::Suspended,
-        );
-    } else if let (Some(pid), Some(wsid)) = (pid, window_server_id) {
-        let _ = state.windows.suspend_window_server_to_native_fullscreen(
-            pid,
-            wsid,
-            last_known_user_space,
-            sid,
-            NativeFullscreenTransition::Suspended,
-        );
-    }
-}
-
-#[cfg(test)]
-mod workflow_tests {
-    use super::*;
-
-    #[test]
-    fn last_known_user_space_prefers_window_observation() {
-        let observed = SpaceId::new(2);
-        let fallback = SpaceId::new(1);
-        assert_eq!(
-            resolve_last_known_user_space(Some(observed), Some(fallback)),
-            Some(observed)
-        );
-        assert_eq!(
-            resolve_last_known_user_space(None, Some(fallback)),
-            Some(fallback)
-        );
-    }
 }

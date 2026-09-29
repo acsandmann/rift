@@ -318,7 +318,9 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
     ForwardedSpaceState {
         revision: next_test_topology_revision(),
         authoritative: true,
-        membership_complete: true,
+        // Synthetic screen fixtures do not enumerate the fake AX windows. Tests
+        // supplying authoritative native membership opt in explicitly.
+        membership_complete: false,
         active_window_spaces: screens
             .iter()
             .filter_map(|s| s.space)
