@@ -1632,11 +1632,14 @@ impl LayoutEngine {
                         window_store,
                         info.window_id,
                         space,
-                        app_bundle_id,
-                        app_name,
-                        info.title.as_deref(),
-                        info.ax_role.as_deref(),
-                        info.ax_subrole.as_deref(),
+                        WindowRuleContext {
+                            app_bundle_id,
+                            app_name,
+                            window_title: info.title.as_deref(),
+                            ax_role: info.ax_role.as_deref(),
+                            ax_subrole: info.ax_subrole.as_deref(),
+                        },
+                        false,
                     ) else {
                         continue;
                     };
@@ -2946,64 +2949,12 @@ impl LayoutEngine {
         window_store: &mut WindowStore,
         window_id: WindowId,
         space: SpaceId,
-        app_bundle_id: Option<&str>,
-        app_name: Option<&str>,
-        window_title: Option<&str>,
-        ax_role: Option<&str>,
-        ax_subrole: Option<&str>,
-    ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
-        self.assign_window_with_app_info_policy(
-            window_store,
-            window_id,
-            space,
-            app_bundle_id,
-            app_name,
-            window_title,
-            ax_role,
-            ax_subrole,
-            false,
-        )
-    }
-
-    pub fn reapply_window_with_app_info(
-        &mut self,
-        window_store: &mut WindowStore,
-        window_id: WindowId,
-        space: SpaceId,
-        app_bundle_id: Option<&str>,
-        app_name: Option<&str>,
-        window_title: Option<&str>,
-        ax_role: Option<&str>,
-        ax_subrole: Option<&str>,
-    ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
-        self.assign_window_with_app_info_policy(
-            window_store,
-            window_id,
-            space,
-            app_bundle_id,
-            app_name,
-            window_title,
-            ax_role,
-            ax_subrole,
-            true,
-        )
-    }
-
-    fn assign_window_with_app_info_policy(
-        &mut self,
-        window_store: &mut WindowStore,
-        window_id: WindowId,
-        space: SpaceId,
-        app_bundle_id: Option<&str>,
-        app_name: Option<&str>,
-        window_title: Option<&str>,
-        ax_role: Option<&str>,
-        ax_subrole: Option<&str>,
+        context: WindowRuleContext<'_>,
         reapply_workspace_rule: bool,
     ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
         let observation = window_store.window(window_id).map(|window| {
             (
-                window_title.unwrap_or(&window.info.title).to_owned(),
+                context.window_title.unwrap_or(&window.info.title).to_owned(),
                 window.frame_monotonic.size,
             )
         });
@@ -3014,17 +2965,10 @@ impl LayoutEngine {
                 window_id,
                 Some(&title),
                 size,
-                app_bundle_id,
+                context.app_bundle_id,
             )
         } else {
             false
-        };
-        let context = WindowRuleContext {
-            app_bundle_id,
-            app_name,
-            window_title,
-            ax_role,
-            ax_subrole,
         };
         let mut decision = if reapply_workspace_rule {
             self.app_rules.evaluate_for_title_change(context)

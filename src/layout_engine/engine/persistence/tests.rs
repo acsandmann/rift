@@ -142,11 +142,14 @@ fn restored_workspace_is_resolved_before_app_rule_assignment() {
             &mut window_store,
             window,
             space,
-            Some("com.example.terminal"),
-            Some("Terminal"),
-            Some("Restored terminal"),
-            None,
-            None,
+            crate::model::WindowRuleContext {
+                app_bundle_id: Some("com.example.terminal"),
+                app_name: Some("Terminal"),
+                window_title: Some("Restored terminal"),
+                ax_role: None,
+                ax_subrole: None,
+            },
+            false,
         )
         .unwrap();
     let AppRuleResult::Managed(effects) = result else {

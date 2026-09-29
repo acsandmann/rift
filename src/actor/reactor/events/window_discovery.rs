@@ -6,7 +6,7 @@ use crate::actor::reactor::{LayoutEvent, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::layout_engine::ResolvedWindow;
 use crate::model::virtual_workspace::WorkspaceError;
-use crate::model::{AppRuleEffects, AppRuleResult};
+use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
 use crate::sys::screen::SpaceId;
 
 /// Handler for window discovery events, responsible for processing newly discovered windows
@@ -140,67 +140,59 @@ pub(crate) fn update_window_states(
     }
 }
 
-/// Send layout events for discovered windows.
-fn assign_discovered_window_to_space(
+/// Assignment and rejection handling shared by discovery and rule reapplication.
+/// Callers decide whether successful, unchanged membership needs a layout refresh.
+pub(crate) fn assign_window(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
     wid: WindowId,
     space: SpaceId,
-    app_info: &Option<AppInfo>,
-) -> Result<AppRuleResult, WorkspaceError> {
-    let Some(window) = state.windows.window(wid) else {
-        return Err(WorkspaceError::AssignmentFailed);
+    app_info: Option<&AppInfo>,
+    reapply: bool,
+) -> (Option<AppRuleEffects>, Option<LayoutEvent>) {
+    let result = if let Some(window) = state.windows.window(wid) {
+        let (title, role, subrole) = (
+            window.info.title.clone(),
+            window.info.ax_role.clone(),
+            window.info.ax_subrole.clone(),
+        );
+        layout.layout_engine.assign_window_with_app_info(
+            &mut state.windows,
+            wid,
+            space,
+            WindowRuleContext {
+                app_bundle_id: app_info.and_then(|app| app.bundle_id.as_deref()),
+                app_name: app_info.and_then(|app| app.localized_name.as_deref()),
+                window_title: Some(&title),
+                ax_role: role.as_deref(),
+                ax_subrole: subrole.as_deref(),
+            },
+            reapply,
+        )
+    } else {
+        Err(WorkspaceError::AssignmentFailed)
     };
-    let title = window.info.title.clone();
-    let ax_role = window.info.ax_role.clone();
-    let ax_subrole = window.info.ax_subrole.clone();
-
-    layout.layout_engine.assign_window_with_app_info(
-        &mut state.windows,
-        wid,
-        space,
-        app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
-        app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
-        Some(title.as_str()),
-        ax_role.as_deref(),
-        ax_subrole.as_deref(),
-    )
-}
-
-fn apply_assignment_result(
-    state: &mut crate::model::RiftState,
-    layout: &crate::actor::reactor::managers::LayoutManager,
-    wid: WindowId,
-    space: SpaceId,
-    assign_result: Result<AppRuleResult, WorkspaceError>,
-) -> (
-    crate::actor::reactor::events::EventOutcome,
-    Option<AppRuleEffects>,
-) {
-    let mut outcome = crate::actor::reactor::events::EventOutcome::default();
-    let effects = match assign_result {
-        Ok(AppRuleResult::Managed(effects)) => Some(effects),
-        Ok(AppRuleResult::Rejected(_)) => {
-            if utils::rejection_needs_removal(state, layout, wid, space) {
-                outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(wid));
-            }
-            None
-        }
-        Err(e) => {
-            warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
+    match result {
+        Ok(AppRuleResult::Managed(effects)) => (Some(effects), None),
+        Ok(AppRuleResult::Rejected(_)) => (
+            None,
+            utils::rejection_needs_removal(state, layout, wid, space)
+                .then_some(LayoutEvent::WindowRemoved(wid)),
+        ),
+        Err(error) => {
+            warn!(?wid, ?error, "Failed to assign window to workspace");
             utils::clear_rule_admission(state, wid);
-            None
+            (None, None)
         }
-    };
-    (outcome, effects)
+    }
 }
 
 pub(crate) struct EmitLayoutPayload<'a> {
     pub(crate) pid: pid_t,
     pub(crate) known_visible: &'a [WindowId],
     pub(crate) app_info: &'a Option<AppInfo>,
-    pub(crate) discovery_spaces: HashMap<WindowId, SpaceId>,
-    pub(crate) authoritative_spaces: HashMap<WindowId, SpaceId>,
+    // Authoritative ownership and location allowing geometry fallback, respectively.
+    pub(crate) window_spaces: HashMap<WindowId, (Option<SpaceId>, Option<SpaceId>)>,
     pub(crate) active_spaces: Vec<SpaceId>,
     pub(crate) focused_window: Option<(SpaceId, WindowId)>,
 }
@@ -214,8 +206,7 @@ pub(crate) fn emit_layout_events(
         pid,
         known_visible,
         app_info,
-        discovery_spaces,
-        authoritative_spaces,
+        window_spaces,
         active_spaces,
         focused_window,
     } = payload;
@@ -251,13 +242,14 @@ pub(crate) fn emit_layout_events(
         // membership already identifies other visible windows of this application.
         if !native_visible
             && has_visible_window_server_windows
-            && authoritative_spaces
+            && window_spaces
                 .get(&wid)
-                .is_none_or(|space| !active_spaces.contains(space))
+                .and_then(|(native, _)| *native)
+                .is_none_or(|space| !active_spaces.contains(&space))
         {
             continue;
         }
-        let Some(space) = discovery_spaces.get(&wid).copied() else {
+        let Some(space) = window_spaces.get(&wid).and_then(|(_, discovery)| *discovery) else {
             continue;
         };
         if should_emit_window_for_space(state, layout, space, wid) {
@@ -269,10 +261,11 @@ pub(crate) fn emit_layout_events(
     for (space, mut windows_for_space) in app_windows {
         windows_for_space.sort_unstable();
         for wid in windows_for_space {
-            let assignment = assign_discovered_window_to_space(state, layout, wid, space, app_info);
-            let (assignment_outcome, effects) =
-                apply_assignment_result(state, layout, wid, space, assignment);
-            outcome.absorb(assignment_outcome);
+            let (effects, removal) =
+                assign_window(state, layout, wid, space, app_info.as_ref(), false);
+            if let Some(event) = removal {
+                outcome = outcome.with_layout_event(event);
+            }
             let Some(effects) = effects else {
                 continue;
             };

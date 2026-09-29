@@ -94,12 +94,12 @@ use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
+use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::{AppRuleResult, RiftState};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -3131,11 +3131,34 @@ impl Reactor {
     ) {
         let app_info =
             app_info.or_else(|| self.app_manager.apps.get(&pid).map(|app| app.info.clone()));
+        // Resolve each native identity once for this inventory observation.
+        let mut native_spaces = HashMap::default();
+        for wsid in self
+            .state
+            .windows
+            .window_ids_for_pid(pid)
+            .filter_map(|wid| self.state.windows.record(wid)?.window_server_id())
+            .chain(new.iter().filter_map(|(_, info)| info.sys_id))
+        {
+            native_spaces
+                .entry(wsid)
+                .or_insert_with(|| self.resolve_native_space(wsid, None));
+        }
         let inactive_windows = self
             .state
             .windows
             .window_ids_for_pid(pid)
-            .filter(|wid| self.is_window_on_known_inactive_space(*wid))
+            .filter(|wid| {
+                let native = self
+                    .state
+                    .windows
+                    .record(*wid)
+                    .and_then(|record| record.window_server_id())
+                    .and_then(|wsid| native_spaces[&wsid]);
+                native
+                    .or_else(|| self.assigned_space_for_window_id(*wid))
+                    .is_some_and(|space| !self.is_space_active(space))
+            })
             .collect();
         // A returned native identity protects its previous AX key until rekeying.
         let mut observed = known_visible.clone();
@@ -3172,10 +3195,9 @@ impl Reactor {
         let observed_windows = new
             .into_iter()
             .map(|(wid, info)| {
-                let current_native_space =
-                    info.sys_id.and_then(|wsid| self.resolve_native_space(wsid, None));
+                let current_native_space = info.sys_id.and_then(|wsid| native_spaces[&wsid]);
                 let active_space = self
-                    .best_space_for_window(&info.frame, info.sys_id)
+                    .space_for_window_observation(&info.frame, info.sys_id, || current_native_space)
                     .filter(|space| self.is_space_active(*space))
                     .or_else(|| {
                         info.sys_id.is_none().then(|| self.workspace_command_space()).flatten()
@@ -3200,21 +3222,20 @@ impl Reactor {
             .iter()
             .any(|wid| self.state.windows.window(*wid).is_some_and(WindowState::is_admitted));
 
-        let candidate_windows: HashSet<WindowId> = self
+        let window_spaces = self
             .state
             .windows
-            .iter_windows()
-            .filter_map(|(wid, _)| (wid.pid == pid).then_some(wid))
+            .window_ids_for_pid(pid)
+            .filter(|wid| self.state.windows.contains_window(*wid))
             .chain(known_visible.iter().copied().filter(|wid| wid.pid == pid))
-            .collect();
-        let discovery_spaces = candidate_windows
-            .iter()
-            .filter_map(|wid| self.discovery_space_for_window_id(*wid).map(|space| (*wid, space)))
-            .collect();
-        let authoritative_spaces = candidate_windows
-            .iter()
-            .filter_map(|wid| {
-                self.authoritative_space_for_window_id(*wid).map(|space| (*wid, space))
+            .map(|wid| {
+                let native = self
+                    .state
+                    .windows
+                    .record(wid)
+                    .and_then(|record| record.window_server_id())
+                    .and_then(|wsid| native_spaces[&wsid]);
+                (wid, self.discovery_spaces_for_window(wid, native))
             })
             .collect();
         let active_spaces = self
@@ -3225,7 +3246,7 @@ impl Reactor {
             .filter(|space| self.is_space_active(*space))
             .collect();
         let focused_window = self
-            .focused_window_for_discovery(pid)
+            .focused_window_for_discovery(pid, &window_spaces)
             .filter(|(_, wid)| !has_admitted_windows || new_window_ids.contains(wid));
         outcome.absorb(window_discovery::emit_layout_events(
             &mut self.state,
@@ -3234,8 +3255,7 @@ impl Reactor {
                 pid,
                 known_visible: &known_visible,
                 app_info: &app_info,
-                discovery_spaces,
-                authoritative_spaces,
+                window_spaces,
                 active_spaces,
                 focused_window,
             },
@@ -3248,23 +3268,23 @@ impl Reactor {
         frame: &CGRect,
         window_server_id: Option<WindowServerId>,
     ) -> Option<SpaceId> {
-        if let Some(wsid) = window_server_id
-            && self.is_known_fullscreen_window(wsid)
-        {
+        self.space_for_window_observation(frame, window_server_id, || {
+            window_server_id.and_then(|wsid| self.resolve_native_space(wsid, None))
+        })
+    }
+
+    fn space_for_window_observation(
+        &self,
+        frame: &CGRect,
+        wsid: Option<WindowServerId>,
+        native: impl FnOnce() -> Option<SpaceId>,
+    ) -> Option<SpaceId> {
+        if wsid.is_some_and(|wsid| self.is_known_fullscreen_window(wsid)) {
             return None;
         }
-
-        if let Some(wsid) = window_server_id {
-            if let Some(space) = self.resolve_native_space(wsid, None) {
-                return Some(space);
-            }
-        }
-
-        if let Some(space) = self.hidden_assigned_space_for_frame(window_server_id, frame) {
-            return Some(space);
-        }
-
-        self.best_space_for_frame(frame)
+        native()
+            .or_else(|| self.hidden_assigned_space_for_frame(wsid, frame))
+            .or_else(|| self.best_space_for_frame(frame))
     }
 
     fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
@@ -3559,15 +3579,8 @@ impl Reactor {
     }
 
     fn authoritative_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        let reported_space = self.current_reported_space_for_window_id(wid);
-        if let Some(hidden_assigned_space) = self.hidden_assigned_space_for_window_id(wid) {
-            return match reported_space {
-                Some(space) if space != hidden_assigned_space => Some(space),
-                _ => Some(hidden_assigned_space),
-            };
-        }
-
-        reported_space.or_else(|| self.assigned_space_for_window_id(wid))
+        self.current_reported_space_for_window_id(wid)
+            .or_else(|| self.assigned_space_for_window_id(wid))
     }
 
     pub(crate) fn resolve_native_space(
@@ -3603,25 +3616,24 @@ impl Reactor {
         })
     }
 
-    fn is_window_on_known_inactive_space(&self, wid: WindowId) -> bool {
-        self.authoritative_space_for_window_id(wid)
-            .is_some_and(|space| !self.is_space_active(space))
-    }
-
-    fn discovery_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        let window = self.state.windows.window(wid)?;
-        let authoritative = self.authoritative_space_for_window_id(wid);
-        if let Some(space) = authoritative {
-            return Some(space);
-        }
-
-        if let Some(space) = self.best_space_for_frame(&window.frame_monotonic)
-            && self.is_space_active(space)
-        {
-            return Some(space);
-        }
-
-        self.best_space_for_window_id(wid)
+    fn discovery_spaces_for_window(
+        &self,
+        wid: WindowId,
+        native: Option<SpaceId>,
+    ) -> (Option<SpaceId>, Option<SpaceId>) {
+        let authoritative = native.or_else(|| self.assigned_space_for_window_id(wid));
+        let discovery = authoritative.or_else(|| {
+            let window = self.state.windows.window(wid)?;
+            self.best_space_for_frame(&window.frame_monotonic).filter(|space| {
+                self.is_space_active(*space)
+                    || !window.info.sys_id.is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
+            })
+        });
+        // A placeholder assignment supplies ownership but cannot admit an AX window.
+        (
+            authoritative,
+            discovery.filter(|_| self.state.windows.contains_window(wid)),
+        )
     }
 
     pub(crate) fn geometry_space_for_window(
@@ -4035,64 +4047,25 @@ impl Reactor {
                             .is_some_and(|window| window.manage_override == Some(false)),
                     )
                 };
-                let assign_result = {
-                    let window_metadata = self.state.windows.window(*wid).map(|window| {
-                        (
-                            window.info.title.clone(),
-                            window.info.ax_role.clone(),
-                            window.info.ax_subrole.clone(),
-                        )
-                    });
-                    let engine = &mut self.layout_manager.layout_engine;
-                    if reapply_effects {
-                        engine.reapply_window_with_app_info(
-                            &mut self.state.windows,
-                            *wid,
-                            space,
-                            app_info.bundle_id.as_deref(),
-                            app_info.localized_name.as_deref(),
-                            window_metadata.as_ref().map(|metadata| metadata.0.as_str()),
-                            window_metadata.as_ref().and_then(|metadata| metadata.1.as_deref()),
-                            window_metadata.as_ref().and_then(|metadata| metadata.2.as_deref()),
-                        )
-                    } else {
-                        engine.assign_window_with_app_info(
-                            &mut self.state.windows,
-                            *wid,
-                            space,
-                            app_info.bundle_id.as_deref(),
-                            app_info.localized_name.as_deref(),
-                            window_metadata.as_ref().map(|metadata| metadata.0.as_str()),
-                            window_metadata.as_ref().and_then(|metadata| metadata.1.as_deref()),
-                            window_metadata.as_ref().and_then(|metadata| metadata.2.as_deref()),
-                        )
-                    }
-                };
-
-                match assign_result {
-                    Ok(AppRuleResult::Managed(assignment)) => {
-                        let effective_floating = assignment.should_float(was_floating);
-                        let needs_layout_refresh = reapply_effects
-                            || previous_workspace != Some(assignment.workspace_id)
-                            || was_floating != effective_floating
-                            || was_ignored;
-                        if needs_layout_refresh {
-                            windows_needing_layout_refresh.push((*wid, assignment));
-                        }
-                    }
-                    Ok(AppRuleResult::Rejected(_)) => {
-                        if utils::rejection_needs_removal(
-                            &self.state,
-                            &self.layout_manager,
-                            *wid,
-                            space,
-                        ) {
-                            self.send_layout_event(LayoutEvent::WindowRemoved(*wid));
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
-                        utils::clear_rule_admission(&mut self.state, *wid);
+                let (effects, removal) = window_discovery::assign_window(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    *wid,
+                    space,
+                    Some(&app_info),
+                    reapply_effects,
+                );
+                if let Some(event) = removal {
+                    self.send_layout_event(event);
+                }
+                if let Some(assignment) = effects {
+                    let effective_floating = assignment.should_float(was_floating);
+                    if reapply_effects
+                        || previous_workspace != Some(assignment.workspace_id)
+                        || was_floating != effective_floating
+                        || was_ignored
+                    {
+                        windows_needing_layout_refresh.push((*wid, assignment));
                     }
                 }
             }
@@ -4799,9 +4772,19 @@ impl Reactor {
     /// the layout, but it must never replay another application's global main
     /// window. Requiring the command space also prevents a refresh racing an
     /// active-display change from restoring focus on the display being left.
-    fn focused_window_for_discovery(&self, pid: pid_t) -> Option<(SpaceId, WindowId)> {
+    fn focused_window_for_discovery(
+        &self,
+        pid: pid_t,
+        spaces: &HashMap<WindowId, (Option<SpaceId>, Option<SpaceId>)>,
+    ) -> Option<(SpaceId, WindowId)> {
         let window = self.main_window().filter(|window| window.pid == pid)?;
-        let space = self.main_window_space()?;
+        let &(authoritative, discovery) = spaces.get(&window)?;
+        let space = authoritative.or_else(|| {
+            let wsid = self.state.windows.record(window)?.window_server_id();
+            (!wsid.is_some_and(|wsid| self.is_known_fullscreen_window(wsid)))
+                .then_some(discovery)
+                .flatten()
+        })?;
         (self.workspace_command_space() == Some(space)).then_some((space, window))
     }
 

@@ -2037,15 +2037,39 @@ fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_wor
     reactor.track_test_window_server_info(wsid, wid.pid, conflicting_frame);
 
     assert_eq!(
-        reactor.discovery_space_for_window_id(wid),
+        reactor
+            .discovery_spaces_for_window(wid, reactor.current_reported_space_for_window_id(wid))
+            .1,
         Some(space2),
         "discovery should stay in the authoritative native space instead of hopping to another display's geometry"
     );
     assert_ne!(
-        reactor.discovery_space_for_window_id(wid),
+        reactor
+            .discovery_spaces_for_window(wid, reactor.current_reported_space_for_window_id(wid))
+            .1,
         Some(space1),
         "same-index workspaces on other displays must stay isolated"
     );
+}
+
+#[test]
+fn inventory_reuses_one_native_resolution_for_existing_and_replacement_ax_identity() {
+    for replacement in [false, true] {
+        let (mut reactor, wid, wsid, space, _, _) = reactor_with_window_on_space1();
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+        let next = if replacement {
+            WindowId::new(wid.pid, 99)
+        } else {
+            wid
+        };
+        let info = reactor.state.windows.window(wid).unwrap().info.clone();
+        let before = crate::sys::window_server::window_space_query_count();
+        reactor.on_windows_discovered_with_app_info(wid.pid, vec![(next, info)], vec![next], None);
+        assert_eq!(crate::sys::window_server::window_space_query_count() - before, 1);
+        assert_eq!(reactor.state.windows.tracked_window_id(wsid), Some(next));
+        assert_eq!(reactor.assigned_space_for_window_id(next), Some(space));
+        reactor.state.windows.debug_assert_invariants();
+    }
 }
 
 #[test]
@@ -5697,7 +5721,11 @@ fn ax_destruction_removes_window_on_known_inactive_space_outside_churn() {
     assert!(reactor.assign_test_window_to_workspace(inactive_space, wid, inactive_workspace));
     reactor.state.windows.set_window_server_space(wsid, Some(inactive_space));
     reactor.state.windows.mark_window_hidden(wsid);
-    assert!(reactor.is_window_on_known_inactive_space(wid));
+    assert!(
+        reactor
+            .authoritative_space_for_window_id(wid)
+            .is_some_and(|space| !reactor.is_space_active(space))
+    );
 
     crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
     reactor.handle_event(Event::WindowDestroyed(wid));
