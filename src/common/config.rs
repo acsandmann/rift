@@ -52,6 +52,19 @@ pub struct VirtualWorkspaceSettings {
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
 }
 
+/// Display a newly created window opens on.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NewWindowDisplay {
+    /// Wherever macOS and the app put it.
+    #[default]
+    Default,
+    /// The display that holds keyboard focus when the window appears.
+    Focused,
+    /// The display under the mouse cursor when the window appears.
+    Cursor,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
@@ -445,6 +458,9 @@ pub struct Settings {
     pub default_disable: bool,
     #[serde(default = "yes")]
     pub mouse_follows_focus: bool,
+    /// Which display a newly created window opens on.
+    #[serde(default)]
+    pub new_window_display: NewWindowDisplay,
     #[serde(default = "yes")]
     pub mouse_hides_on_focus: bool,
     #[serde(default = "yes")]

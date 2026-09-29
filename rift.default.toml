@@ -26,6 +26,14 @@ animation_fps = 100.0
 focus_follows_mouse = true
 mouse_follows_focus = true
 mouse_hides_on_focus = true
+# Which display a newly created window opens on:
+# - "default": wherever macOS and the app put it
+# - "focused": the display holding keyboard focus when the window appears
+# - "cursor": the display under the mouse cursor when the window appears. Useful
+#   when a launcher activates an app whose other windows live on another display
+#   before asking it for a new window.
+# A window whose app rule names a workspace always goes where the rule says.
+new_window_display = "default"
 # Treat displays stacked in macOS as a horizontal mouse crossing chain when
 # they are physically side-by-side. At a left/right edge, the cursor enters
 # the logical neighbor at the same vertical offset, if that point exists.

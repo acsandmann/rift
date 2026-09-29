@@ -3391,6 +3391,13 @@ impl LayoutEngine {
         self.workspaces.workspace_info(space, workspace_id).map(|ws| ws.name.clone())
     }
 
+    /// Whether an app rule names the workspace for a window with this context.
+    pub fn app_rule_names_workspace(&self, context: WindowRuleContext<'_>) -> bool {
+        self.app_rules
+            .evaluate(context)
+            .is_some_and(|decision| decision.workspace.is_some())
+    }
+
     pub fn is_window_floating(&self, window_id: WindowId) -> bool {
         self.floating.is_floating(window_id)
             || self.workspaces.workspaces.values().any(|ws| {

@@ -3388,6 +3388,151 @@ fn native_focus_race_waits_for_new_window_activation() {
     assert!(raise_rx.try_recv().is_err());
 }
 
+fn reactor_for_new_window_placement(
+    policy: crate::common::config::NewWindowDisplay,
+    settings: crate::common::config::VirtualWorkspaceSettings,
+) -> (Apps, Reactor, SpaceId, SpaceId) {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    reactor.config.settings.new_window_display = policy;
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        make_windows(1),
+        Some(WindowId::new(1, 1)),
+    );
+    (apps, reactor, left_space, right_space)
+}
+
+/// The app opens a new window on the left display, as macOS decided.
+fn open_new_window_on_left(reactor: &mut Reactor, apps: &mut Apps) -> WindowId {
+    let window = WindowId::new(1, 1002);
+    let wsid = WindowServerId::new(10002);
+    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(400., 400.));
+    reactor.handle_event(Event::WindowCreated(
+        window,
+        make_window_info(frame, Some(wsid), "New Window", None),
+        Some(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        }),
+        None,
+    ));
+    apps.simulate_until_quiet(reactor);
+    window
+}
+
+#[test]
+fn new_windows_open_on_the_display_the_setting_names() {
+    use crate::common::config::{NewWindowDisplay, VirtualWorkspaceSettings};
+    let on_right = CGPoint::new(1500., 500.);
+
+    let (mut apps, mut reactor, _left, right_space) = reactor_for_new_window_placement(
+        NewWindowDisplay::Cursor,
+        VirtualWorkspaceSettings::default(),
+    );
+    crate::sys::window_server::set_cursor_location_override(Some(on_right));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    let right_active =
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+    assert_eq!(
+        reactor.test_workspace_for_window(right_space, window),
+        right_active
+    );
+
+    let (mut apps, mut reactor, _left, right_space) = reactor_for_new_window_placement(
+        NewWindowDisplay::Focused,
+        VirtualWorkspaceSettings::default(),
+    );
+    reactor.space_state.command_space = Some(right_space);
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+
+    let (mut apps, mut reactor, left_space, _right) = reactor_for_new_window_placement(
+        NewWindowDisplay::Default,
+        VirtualWorkspaceSettings::default(),
+    );
+    crate::sys::window_server::set_cursor_location_override(Some(on_right));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+}
+
+#[test]
+fn an_app_rule_naming_a_workspace_wins_over_new_window_display() {
+    use crate::common::config::NewWindowDisplay;
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".into()),
+            workspace: Some(WorkspaceSelector::Index(1)),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (mut apps, mut reactor, left_space, _right) =
+        reactor_for_new_window_placement(NewWindowDisplay::Cursor, settings);
+    crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(1500., 500.)));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, window),
+        Some(left_workspaces[1])
+    );
+}
+
+#[test]
+fn a_new_window_placed_on_the_cursor_display_is_not_pulled_back_by_lagging_reports() {
+    use crate::common::config::{NewWindowDisplay, VirtualWorkspaceSettings};
+    let (mut apps, mut reactor, left_space, right_space) = reactor_for_new_window_placement(
+        NewWindowDisplay::Cursor,
+        VirtualWorkspaceSettings::default(),
+    );
+    crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(500., 500.)));
+    let window = WindowId::new(1, 1002);
+    let wsid = WindowServerId::new(10002);
+    let frame = CGRect::new(CGPoint::new(1200., 200.), CGSize::new(400., 400.));
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![right_space.get()]));
+    reactor.handle_event(Event::WindowCreated(
+        window,
+        make_window_info(frame, Some(wsid), "New Window", None),
+        Some(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        }),
+        None,
+    ));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+
+    deliver_lagging_reports(&mut reactor, window, right_space, frame);
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(left_space),
+        "reports of the old display while macOS catches up must not move the window back"
+    );
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+    crate::sys::window_server::set_cursor_location_override(None);
+}
+
 fn pending_activation_context() -> (Apps, Reactor, SpaceId, WindowId, WindowServerInfo) {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);

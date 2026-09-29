@@ -2447,6 +2447,7 @@ impl Reactor {
                 }
                 if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                    self.place_new_window_on_configured_display(window, space);
                 }
             }
         }
@@ -5130,6 +5131,70 @@ impl Reactor {
         origin.x = (origin.x - frame.size.width / 2.0).clamp(min.x, max_x);
         origin.y = (origin.y - frame.size.height / 2.0).clamp(min.y, max_y);
         CGRect::new(origin, frame.size)
+    }
+
+    /// Move a newly created window to the display `settings.new_window_display`
+    /// names when macOS put it on another one. A window whose app rule names a
+    /// workspace stays where the rule put it.
+    fn place_new_window_on_configured_display(&mut self, window: WindowId, space: SpaceId) {
+        use crate::common::config::NewWindowDisplay;
+        let target_space = match self.config.settings.new_window_display {
+            NewWindowDisplay::Default => return,
+            NewWindowDisplay::Focused => self.workspace_command_space(),
+            NewWindowDisplay::Cursor => window_server::current_cursor_location()
+                .ok()
+                .and_then(|point| self.screen_for_point(point))
+                .and_then(|screen| screen.space),
+        };
+        let Some(target_space) =
+            target_space.filter(|target| *target != space && self.is_space_active(*target))
+        else {
+            return;
+        };
+        let Some(state) = self.state.windows.window(window) else {
+            return;
+        };
+        if !state.is_admitted() || !state.info.is_standard {
+            return;
+        }
+        let app_info = self.app_manager.apps.get(&window.pid).map(|app| app.info.clone());
+        let names_workspace = self.layout_manager.layout_engine.app_rule_names_workspace(
+            crate::model::WindowRuleContext {
+                app_bundle_id: app_info.as_ref().and_then(|info| info.bundle_id.as_deref()),
+                app_name: app_info.as_ref().and_then(|info| info.localized_name.as_deref()),
+                window_title: Some(state.info.title.as_str()),
+                ax_role: state.info.ax_role.as_deref(),
+                ax_subrole: state.info.ax_subrole.as_deref(),
+            },
+        );
+        if names_workspace {
+            return;
+        }
+        let Some(target_screen) = self.space_state.screen_by_space(target_space).cloned() else {
+            return;
+        };
+        let window_server_id = state.info.sys_id;
+        let target_frame = Self::center_frame_on_screen(state.frame_monotonic, target_screen.frame);
+        match command_workflow::handle_command_reactor_move_window_to_display(
+            &mut self.state,
+            &mut self.layout_manager,
+            command_workflow::MoveWindowToDisplayPayload {
+                window,
+                window_server_id,
+                source_space: space,
+                target_space,
+                target_screen: target_screen.frame,
+                target_frame,
+            },
+        ) {
+            Ok(outcome) => {
+                self.note_display_move_in_flight(window, target_space);
+                self.apply_event_outcome(outcome);
+            }
+            Err(error) => {
+                warn!(?window, %error, "Could not open new window on the configured display")
+            }
+        }
     }
 
     /// After a layout command carried the focused window onto another display, make
