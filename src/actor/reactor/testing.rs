@@ -66,6 +66,16 @@ impl Reactor {
             .expect("test window should have a WindowServer identity")
     }
 
+    /// Windows of the active workspace on `space`, in layout tree order.
+    pub fn test_workspace_windows_in_layout_order(&self, space: SpaceId) -> Vec<WindowId> {
+        use crate::layout_engine::LayoutSystem;
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        workspaces
+            .active_layout_for_space(space)
+            .map(|(id, layout)| workspaces[id].layout_system.all_windows_in_layout(layout))
+            .unwrap_or_default()
+    }
+
     pub fn test_active_workspace_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.layout_manager
             .layout_engine

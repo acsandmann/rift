@@ -797,6 +797,27 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.select(node);
     }
 
+    fn add_window_entering_from(&mut self, layout: LayoutId, wid: WindowId, direction: Direction) {
+        // A window joining a stack from another display takes the end of the stack
+        // facing the display it came from, rather than landing next to the selected
+        // member in the middle of the stack. Stacks running across the direction of
+        // travel take it at the end.
+        let selection = self.selection(layout);
+        let Some(stack) =
+            selection.ancestors(self.map()).find(|node| self.layout(*node).is_group())
+        else {
+            return self.add_window_after_selection(layout, wid);
+        };
+        let enters_at_start = self.layout(stack).orientation() == direction.orientation()
+            && matches!(direction, Direction::Down | Direction::Right);
+        let node = match stack.first_child(self.map()) {
+            Some(first) if enters_at_start => self.tree.mk_node().insert_before(first),
+            _ => self.tree.mk_node().push_back(stack),
+        };
+        self.tree.data.window.set_window(layout, node, wid);
+        self.select(node);
+    }
+
     fn replace_window(&mut self, from: WindowId, to: WindowId) {
         self.tree.data.window.replace_window(from, to);
     }
@@ -4007,6 +4028,70 @@ mod tests {
         assert_eq!(new_root.first_child(system.map()), Some(right));
         // Once it heads the column, moving further up is an edge.
         assert!(!system.move_node(layout, right, Direction::Up));
+    }
+
+    #[test]
+    fn windows_entering_from_another_display_join_a_stack_at_its_edge() {
+        fn stacked(selected: u32) -> (TraditionalLayoutSystem, LayoutId, NodeId) {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            let root = system.root(layout);
+            system.tree.data.layout.set_kind(root, LayoutKind::VerticalStack);
+            for idx in [401, 402, 403] {
+                system.add_window_after_selection(layout, w(idx));
+            }
+            assert!(system.select_window(layout, w(selected)));
+            (system, layout, root)
+        }
+        let windows = |system: &TraditionalLayoutSystem, parent: NodeId| {
+            parent
+                .children(system.map())
+                .filter_map(|node| system.window_at(node))
+                .collect::<Vec<_>>()
+        };
+
+        // Moving up enters across the bottom edge: the window joins the end.
+        let (mut system, layout, root) = stacked(402);
+        system.add_window_entering_from(layout, w(404), Direction::Up);
+        assert_eq!(windows(&system, root), vec![w(401), w(402), w(403), w(404)]);
+        assert_eq!(system.selected_window(layout), Some(w(404)));
+
+        // Moving down enters across the top edge: the window joins the start.
+        let (mut system, layout, root) = stacked(402);
+        system.add_window_entering_from(layout, w(404), Direction::Down);
+        assert_eq!(windows(&system, root), vec![w(404), w(401), w(402), w(403)]);
+
+        // Entering across the stack's axis appends it.
+        let (mut system, layout, root) = stacked(402);
+        system.add_window_entering_from(layout, w(404), Direction::Right);
+        assert_eq!(windows(&system, root), vec![w(401), w(402), w(403), w(404)]);
+
+        // A stack nested in a split still takes the window at its edge.
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        for idx in [411, 412, 413] {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        let second = system.tree.data.window.node_for(layout, w(412)).unwrap();
+        let third = system.tree.data.window.node_for(layout, w(413)).unwrap();
+        let stack = system.nest_in_container_internal(layout, second, LayoutKind::VerticalStack);
+        third.detach(&mut system.tree).push_back(stack);
+        assert!(system.select_window(layout, w(412)));
+        system.add_window_entering_from(layout, w(414), Direction::Up);
+        assert_eq!(windows(&system, stack), vec![w(412), w(413), w(414)]);
+
+        // Without a stack the regular insertion point applies.
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(421));
+        system.add_window_after_selection(layout, w(422));
+        assert!(system.select_window(layout, w(421)));
+        system.add_window_entering_from(layout, w(423), Direction::Up);
+        assert_eq!(windows(&system, root), vec![w(421), w(423), w(422)]);
     }
 
     #[test]

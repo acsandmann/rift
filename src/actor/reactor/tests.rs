@@ -904,6 +904,55 @@ fn focus_follows_the_display_arrangement_for_stacked_displays() {
 }
 
 #[test]
+fn moving_a_window_up_into_a_stack_on_the_display_above_joins_its_bottom() {
+    let mut reactor = test_reactor();
+    let (built_in, external) = stacked_display_frames();
+    let (built_in_space, external_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![built_in, external], vec![
+        Some(built_in_space),
+        Some(external_space),
+    ]);
+    let mut apps = Apps::new();
+    let upper = |idx: usize, x: f64| {
+        let mut window = make_window(idx);
+        window.frame = CGRect::new(CGPoint::new(x, -800.), CGSize::new(400., 400.));
+        window
+    };
+    let lower = WindowId::new(1, 1);
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        vec![
+            make_window(1),
+            upper(2, 300.),
+            upper(3, 900.),
+            upper(4, 1500.),
+        ],
+        Some(lower),
+    );
+    reactor.space_state.command_space = Some(external_space);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
+    apps.simulate_until_quiet(&mut reactor);
+    let stack_before = reactor.test_workspace_windows_in_layout_order(external_space);
+    assert_eq!(stack_before.len(), 3);
+
+    reactor.space_state.command_space = Some(built_in_space);
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let mut expected = stack_before;
+    expected.push(lower);
+    assert_eq!(
+        reactor.test_workspace_windows_in_layout_order(external_space),
+        expected,
+        "the window joins the bottom of the stack it entered from below, keeping the stack's order"
+    );
+}
+
+#[test]
 fn passive_command_space_change_does_not_override_clicked_window_focus() {
     let (mut apps, mut reactor) = test_context();
     let (raise_manager_tx, mut raise_manager_rx) = actor::channel();

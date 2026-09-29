@@ -190,6 +190,13 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> (Option<WindowId>, Vec<WindowId>);
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId>;
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId);
+    /// Insert a window arriving from another display while moving in `direction`,
+    /// so a window moving `Up` enters across this layout's bottom edge. Layouts
+    /// without a better notion use their regular insertion point.
+    fn add_window_entering_from(&mut self, layout: LayoutId, wid: WindowId, direction: Direction) {
+        let _ = direction;
+        self.add_window_after_selection(layout, wid)
+    }
     /// Replace a window identity in-place without changing its layout position.
     fn replace_window(&mut self, from: WindowId, to: WindowId);
     fn remove_window(&mut self, wid: WindowId);

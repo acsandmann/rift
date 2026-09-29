@@ -2332,7 +2332,7 @@ impl LayoutEngine {
                         let windows = self.workspaces[workspace_id]
                             .layout_system
                             .visible_windows_under_selection(layout);
-                        for wid in windows {
+                        for (index, wid) in windows.into_iter().enumerate() {
                             self.workspaces[workspace_id].layout_system.remove_window(wid);
                             if matches!(
                                 self.workspaces[new_ws_id].layout_system,
@@ -2341,9 +2341,14 @@ impl LayoutEngine {
                             {
                                 self.preserve_scrolling_window_width(window_store, wid);
                             }
-                            self.workspaces[new_ws_id]
-                                .layout_system
-                                .add_window_after_selection(new_layout, wid);
+                            // The first window enters across the edge it crosses; the rest
+                            // of a moved container follow it in order.
+                            let destination = &mut self.workspaces[new_ws_id].layout_system;
+                            if index == 0 {
+                                destination.add_window_entering_from(new_layout, wid, direction);
+                            } else {
+                                destination.add_window_after_selection(new_layout, wid);
+                            }
                             self.workspaces.assign_window_to_workspace(
                                 window_store,
                                 new_space,
