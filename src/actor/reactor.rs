@@ -434,6 +434,9 @@ pub struct Reactor {
     pub animation_tx: Option<AnimationSender>,
     viewport_gesture: Option<gesture::ViewportSession>,
     presentations: HashMap<SpaceId, animation::ViewportHandle>,
+    /// Cross-display moves rift started that macOS may not have caught up with:
+    /// window -> (target space, end of the grace period).
+    in_flight_display_moves: HashMap<WindowServerId, (SpaceId, Instant)>,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
@@ -445,6 +448,11 @@ pub struct Reactor {
 }
 
 impl Reactor {
+    /// How long a window rift moved to another display is held there against reports
+    /// of its old display. Those reports lag the move while macOS and the app catch up,
+    /// and following them makes the window flip back and forth between displays.
+    const DISPLAY_MOVE_GRACE: Duration = Duration::from_secs(2);
+
     pub fn spawn(
         config: Config,
         layout_engine: LayoutEngine,
@@ -571,6 +579,7 @@ impl Reactor {
             animation_tx: None,
             viewport_gesture: None,
             presentations: HashMap::default(),
+            in_flight_display_moves: HashMap::default(),
             #[cfg(test)]
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
@@ -1959,6 +1968,7 @@ impl Reactor {
                     {
                         self.state.windows.set_window_server_space(server_id, Some(destination));
                     }
+                    self.note_display_move_in_flight(intent.window, destination);
                     let frame = intent.frame.unwrap_or_else(|| {
                         let destination = self
                             .space_state
@@ -2324,6 +2334,15 @@ impl Reactor {
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
                 let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
+                // A move-node can carry the windows of the command display elsewhere.
+                let moved_candidates: Vec<WindowId> = match command_space {
+                    Some(space) if is_move_node => self
+                        .layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .windows_in_active_workspace(&self.state.windows, space),
+                    _ => Vec::new(),
+                };
                 let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
                 let outcome = command_workflow::handle_command_layout(
                     &mut self.state,
@@ -2338,6 +2357,13 @@ impl Reactor {
                     },
                 )?;
                 if is_move_node {
+                    for window in moved_candidates {
+                        if let Some(space) = self.assigned_space_for_window_id(window)
+                            && Some(space) != command_space
+                        {
+                            self.note_display_move_in_flight(window, space);
+                        }
+                    }
                     self.follow_focused_window_to_its_display(command_space);
                 }
                 return Ok(outcome);
@@ -2424,7 +2450,7 @@ impl Reactor {
                 // presentation work before the transfer installs its destination frame.
                 self.cancel_window_presentations(vec![window]);
                 let target_frame = Self::center_frame_on_screen(window_frame, target_screen.frame);
-                return command_workflow::handle_command_reactor_move_window_to_display(
+                let outcome = command_workflow::handle_command_reactor_move_window_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
                     command_workflow::MoveWindowToDisplayPayload {
@@ -2435,7 +2461,9 @@ impl Reactor {
                         target_screen: target_screen.frame,
                         target_frame,
                     },
-                );
+                )?;
+                self.note_display_move_in_flight(window, target_space);
+                return Ok(outcome);
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWorkspaceToDisplay {
                 selector,
@@ -2506,7 +2534,9 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 }
 
-                return command_workflow::handle_command_reactor_move_workspace_to_display(
+                let moved: Vec<WindowId> =
+                    moves.iter().map(|window_move| window_move.window).collect();
+                let outcome = command_workflow::handle_command_reactor_move_workspace_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -2516,7 +2546,11 @@ impl Reactor {
                         target_space,
                         target_screen: target_screen.frame,
                     },
-                );
+                )?;
+                for window in moved {
+                    self.note_display_move_in_flight(window, target_space);
+                }
+                return Ok(outcome);
             }
             _ => (),
         }
@@ -3695,7 +3729,36 @@ impl Reactor {
         self.state.windows.workspace_info_for_window(wid).map(|info| info.space)
     }
 
+    /// Record that rift just moved `window` onto `target`'s display.
+    fn note_display_move_in_flight(&mut self, window: WindowId, target: SpaceId) {
+        if self.assigned_space_for_window_id(window) != Some(target) {
+            return;
+        }
+        let Some(wsid) = self.state.windows.window(window).and_then(|state| state.info.sys_id)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        self.in_flight_display_moves.retain(|_, (_, deadline)| *deadline > now);
+        self.in_flight_display_moves
+            .insert(wsid, (target, now + Self::DISPLAY_MOVE_GRACE));
+    }
+
+    /// Target of a cross-display move rift started for `wsid`, while it is still in
+    /// its grace period and the window is still assigned there.
+    fn in_flight_display_move_target(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        let (target, deadline) = *self.in_flight_display_moves.get(&wsid)?;
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let wid = self.state.windows.tracked_window_id(wsid)?;
+        (self.assigned_space_for_window_id(wid) == Some(target)).then_some(target)
+    }
+
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        if let Some(target) = self.in_flight_display_move_target(wsid) {
+            return Some(target);
+        }
         let wid = self.state.windows.tracked_window_id(wsid)?;
         let target_frame = self.transaction_manager.get_target_frame(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
@@ -3867,6 +3930,12 @@ impl Reactor {
         wsid: WindowServerId,
         observation: Option<SpaceId>,
     ) -> Option<SpaceId> {
+        if let Some(target) = self.in_flight_display_move_target(wsid) {
+            // Rift just moved this window to another display. Reports of its old
+            // display, even from a live query, are lag rather than the user moving it.
+            trace!(?wsid, ?observation, ?target, "Holding window on its new display");
+            return Some(target);
+        }
         let pending = self.pending_target_space_for_window_server_id(wsid);
         let live =
             if observation.is_none() || pending.is_some_and(|target| observation != Some(target)) {

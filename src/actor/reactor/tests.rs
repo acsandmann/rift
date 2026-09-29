@@ -2264,6 +2264,59 @@ fn recent_cross_display_move_ignores_conflicting_geometry_space_change() {
     assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space2));
 }
 
+/// The window server still reports the window on `space`, and a reconcile plus a
+/// stale frame report from the app arrive before macOS catches up with the move.
+fn deliver_lagging_reports(reactor: &mut Reactor, window: WindowId, space: SpaceId, frame: CGRect) {
+    let wsid = reactor.test_window_server_id(window);
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space))], false, &[]);
+    reactor.handle_event(Event::WindowFrameChanged(
+        window,
+        frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+}
+
+#[test]
+fn a_window_moved_to_another_display_holds_there_until_macos_catches_up() {
+    let mut reactor = test_reactor();
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let window = WindowId::new(1, 1);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+    let original_frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: None,
+        },
+    )));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+
+    deliver_lagging_reports(&mut reactor, window, left_space, original_frame);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(right_space),
+        "a lagging report of the old display is not the user moving the window"
+    );
+
+    // Once the grace period is over, a real move to the other display is followed.
+    reactor.expire_display_moves_for_test();
+    deliver_lagging_reports(&mut reactor, window, left_space, original_frame);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+    crate::sys::window_server::set_window_spaces_override(
+        reactor.test_window_server_id(window),
+        None,
+    );
+}
+
 #[test]
 fn central_space_resolution_prefers_recent_move_target_over_stale_server_space() {
     let (mut reactor, wid, wsid, space1, space2, moved_frame) =

@@ -66,6 +66,14 @@ impl Reactor {
             .expect("test window should have a WindowServer identity")
     }
 
+    /// End the grace period of every cross-display move rift started.
+    pub fn expire_display_moves_for_test(&mut self) {
+        let expired = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        for (_, deadline) in self.in_flight_display_moves.values_mut() {
+            *deadline = expired;
+        }
+    }
+
     pub fn test_active_workspace_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.layout_manager
             .layout_engine
