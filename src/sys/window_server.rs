@@ -45,6 +45,7 @@ thread_local! {
     static TEST_WINDOW_ORDER_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
+    static TEST_CURSOR_LOCATION_OVERRIDE: std::cell::Cell<Option<CGPoint>> = const { std::cell::Cell::new(None) };
 }
 
 pub const WINDOWSERVER_QUIET_US: u64 = 350_000;
@@ -702,6 +703,10 @@ pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
 }
 
 pub fn current_cursor_location() -> Result<CGPoint, CGError> {
+    #[cfg(test)]
+    if let Some(point) = TEST_CURSOR_LOCATION_OVERRIDE.with(std::cell::Cell::get) {
+        return Ok(point);
+    }
     let mut point = CGPoint::new(0.0, 0.0);
     cg_ok(unsafe { SLSGetCurrentCursorLocation(*G_CONNECTION, &mut point) })?;
     Ok(point)
@@ -874,6 +879,11 @@ pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
 
 /// The space on the display currently holding WindowServer focus.
 pub fn active_space() -> SpaceId { SpaceId::new(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) }
+
+#[cfg(test)]
+pub fn set_cursor_location_override(point: Option<CGPoint>) {
+    TEST_CURSOR_LOCATION_OVERRIDE.with(|location| location.set(point));
+}
 
 #[cfg(test)]
 pub fn set_space_window_list_for_connection_override(ids: Option<Vec<u32>>) {
