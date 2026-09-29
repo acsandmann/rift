@@ -3105,6 +3105,7 @@ impl Reactor {
         if display_set_changed {
             let active_displays: Vec<String> =
                 screens.iter().map(|screen| screen.display_uuid.clone()).collect();
+            self.record_vanished_display_spaces(&screens);
             self.layout_manager.layout_engine.prune_display_state(&active_displays);
         }
         self.space_state.menu_bar_space = menu_bar_space;
@@ -3649,8 +3650,47 @@ impl Reactor {
             })
             .collect();
         for (wid, authoritative_space) in windows {
-            self.reassign_window_to_authoritative_space(wid, authoritative_space, false);
+            let preserve_workspace = self.keeps_workspace_moving_to(wid, authoritative_space);
+            self.reassign_window_to_authoritative_space(
+                wid,
+                authoritative_space,
+                preserve_workspace,
+            );
         }
+    }
+
+    /// Whether a window now on `space` keeps its workspace number instead of joining
+    /// the workspace that display shows. That is the case when macOS moved it off a
+    /// display that disconnected. Windows the user drags between connected displays
+    /// still join the visible workspace.
+    fn keeps_workspace_moving_to(&self, wid: WindowId, space: SpaceId) -> bool {
+        let Some(assigned) = self.assigned_space_for_window_id(wid) else {
+            return false;
+        };
+        assigned != space
+            && self.layout_manager.layout_engine.workspaces().is_vanished_space(assigned)
+    }
+
+    /// Remember the native spaces of displays that just left the display set.
+    fn record_vanished_display_spaces(&mut self, screens: &[ScreenInfo]) {
+        let remaining: HashSet<&str> =
+            screens.iter().map(|screen| screen.display_uuid.as_str()).collect();
+        let on_screen: HashSet<SpaceId> =
+            screens.iter().filter_map(|screen| screen.space).collect();
+        let mut vanished = Vec::new();
+        for screen in &self.space_state.screens {
+            if remaining.contains(screen.display_uuid.as_str()) {
+                continue;
+            }
+            vanished.extend(screen.space);
+            if let Some(spaces) = self.space_state.display_space_ids.get(&screen.display_uuid) {
+                vanished.extend(spaces.iter().copied());
+            }
+        }
+        self.layout_manager
+            .layout_engine
+            .workspaces_mut()
+            .update_vanished_spaces(vanished, &on_screen);
     }
 
     #[cfg(test)]

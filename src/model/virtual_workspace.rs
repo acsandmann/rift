@@ -175,6 +175,10 @@ pub struct WorkspaceStore {
     default_workspace_names: Vec<String>,
     #[serde(skip)]
     default_workspace: usize,
+    /// Native spaces whose display disconnected. Windows macOS moves off them keep
+    /// their workspace number on the display they land on.
+    #[serde(skip)]
+    vanished_spaces: HashSet<SpaceId>,
     #[serde(skip)]
     pub workspace_auto_back_and_forth: bool,
     #[serde(skip)]
@@ -321,6 +325,7 @@ impl WorkspaceStore {
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
             default_workspace,
+            vanished_spaces: HashSet::default(),
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
             prevent_wrapping: config.prevent_wrapping,
             workspace_rules: config.workspace_rules.clone(),
@@ -412,6 +417,21 @@ impl WorkspaceStore {
         if let Some(default_id) = default_id {
             self.active_workspace_per_space.insert(space, (None, default_id));
         }
+    }
+
+    /// Record native spaces whose display disconnected, and forget any that are
+    /// back on a display.
+    pub(crate) fn update_vanished_spaces(
+        &mut self,
+        vanished: impl IntoIterator<Item = SpaceId>,
+        on_screen: &HashSet<SpaceId>,
+    ) {
+        self.vanished_spaces.extend(vanished);
+        self.vanished_spaces.retain(|space| !on_screen.contains(space));
+    }
+
+    pub(crate) fn is_vanished_space(&self, space: SpaceId) -> bool {
+        self.vanished_spaces.contains(&space)
     }
 
     fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
@@ -975,9 +995,21 @@ impl WorkspaceStore {
         window_id: WindowId,
         space: SpaceId,
     ) -> Option<WindowWorkspaceInfo> {
-        window_store
-            .workspace_info_for_window(window_id)
-            .filter(|assignment| assignment.space == space)
+        let assignment = window_store.workspace_info_for_window(window_id)?;
+        if assignment.space == space {
+            return Some(assignment);
+        }
+        // The window's display went away and macOS moved the window here: keep its
+        // workspace number instead of dropping it into whatever this display shows.
+        if !self.vanished_spaces.contains(&assignment.space) {
+            return None;
+        }
+        let index = self
+            .workspace_ids(assignment.space)
+            .iter()
+            .position(|id| *id == assignment.workspace_id)?;
+        let workspace_id = *self.workspace_ids(space).get(index)?;
+        Some(WindowWorkspaceInfo { space, workspace_id })
     }
 
     fn ensure_window_assignment(

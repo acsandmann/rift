@@ -6407,6 +6407,181 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
     );
 }
 
+fn nine_workspace_settings() -> crate::common::config::VirtualWorkspaceSettings {
+    crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 9,
+        ..Default::default()
+    }
+}
+
+/// Two displays with window 1 on the right one, placed in its workspace 9.
+fn window_in_workspace_nine_on_the_right(
+    settings: crate::common::config::VirtualWorkspaceSettings,
+    right_shows_it: bool,
+) -> (Apps, Reactor, WindowId, SpaceId, SpaceId) {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let mut on_right = make_window(1);
+    on_right.frame = CGRect::new(CGPoint::new(1200., 100.), CGSize::new(400., 400.));
+    apps.make_app_and_settle(&mut reactor, 1, vec![on_right, make_window(2)]);
+    let window = WindowId::new(1, 1);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert!(reactor.assign_test_window_to_workspace(right_space, window, right_workspaces[8]));
+    let shown = if right_shows_it {
+        right_workspaces[8]
+    } else {
+        right_workspaces[5]
+    };
+    assert!(reactor.set_test_active_workspace(right_space, shown));
+    apps.simulate_until_quiet(&mut reactor);
+    (apps, reactor, window, left_space, right_space)
+}
+
+/// macOS reports every window on the left space, as after the right display went away.
+fn report_windows_on(reactor: &Reactor, space: SpaceId, windows: &[WindowId]) {
+    let ids: Vec<u32> =
+        windows.iter().map(|wid| reactor.test_window_server_id(*wid).as_u32()).collect();
+    for wid in windows {
+        crate::sys::window_server::set_window_spaces_override(
+            reactor.test_window_server_id(*wid),
+            Some(vec![space.get()]),
+        );
+    }
+    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), Some(ids));
+}
+
+fn clear_window_reports(reactor: &Reactor, spaces: &[SpaceId], windows: &[WindowId]) {
+    for wid in windows {
+        crate::sys::window_server::set_window_spaces_override(
+            reactor.test_window_server_id(*wid),
+            None,
+        );
+    }
+    for space in spaces {
+        crate::sys::window_server::set_space_window_list_for_space_override(space.get(), None);
+    }
+}
+
+fn unplug_right_display(
+    reactor: &mut Reactor,
+    left_space: SpaceId,
+    right_space: SpaceId,
+    delta: bool,
+) {
+    let windows = [WindowId::new(1, 1), WindowId::new(1, 2)];
+    report_windows_on(reactor, left_space, &windows);
+    let moved = reactor.test_window_server_id(windows[0]);
+    let others: Vec<_> = windows.iter().map(|wid| reactor.test_window_server_id(*wid)).collect();
+    reactor.handle_event(space_state_event_with(
+        vec![left_screen()],
+        vec![Some(left_space)],
+        |state| {
+            state.display_set_changed = true;
+            state.should_force_refresh_layout = true;
+            for wsid in &others {
+                state.active_window_spaces.insert(*wsid, left_space);
+            }
+            if delta {
+                state.topology_window_delta = Some(crate::actor::spaces::TopologyWindowDelta {
+                    appeared: vec![(moved, left_space)],
+                    disappeared: vec![(moved, right_space)],
+                    ..Default::default()
+                });
+            }
+        },
+    ));
+}
+
+#[test]
+fn window_from_a_disconnected_display_keeps_its_workspace_number() {
+    for delta in [true, false] {
+        for right_shows_it in [true, false] {
+            let (mut apps, mut reactor, window, left_space, right_space) =
+                window_in_workspace_nine_on_the_right(nine_workspace_settings(), right_shows_it);
+            unplug_right_display(&mut reactor, left_space, right_space, delta);
+            apps.simulate_until_quiet(&mut reactor);
+
+            let left_workspaces = reactor.test_workspace_ids(left_space);
+            assert_eq!(
+                reactor.test_workspace_for_window(left_space, window),
+                Some(left_workspaces[8]),
+                "delta={delta} right_shows_it={right_shows_it}: the window stays in workspace 9"
+            );
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(left_space),
+                Some(left_workspaces[0])
+            );
+            clear_window_reports(&reactor, &[left_space], &[window, WindowId::new(1, 2)]);
+        }
+    }
+}
+
+#[test]
+fn window_from_a_disconnected_display_keeps_its_workspace_through_churn_and_rediscovery() {
+    let (mut apps, mut reactor, window, left_space, right_space) =
+        window_in_workspace_nine_on_the_right(nine_workspace_settings(), true);
+    // The unplug starts display churn; macOS moves the windows while rift waits.
+    reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
+    report_windows_on(&reactor, left_space, &[window, WindowId::new(1, 2)]);
+    reactor.handle_event(space_state_event_with(
+        vec![left_screen()],
+        vec![Some(left_space)],
+        |state| {
+            state.display_set_changed = true;
+            state.should_force_refresh_layout = true;
+        },
+    ));
+    apps.simulate_until_quiet(&mut reactor);
+    // A later snapshot and the rediscovery it triggers leave the workspace alone.
+    reactor.handle_event(space_state_event(vec![left_screen()], vec![Some(left_space)]));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, window),
+        Some(left_workspaces[8])
+    );
+    let _ = right_space;
+    clear_window_reports(&reactor, &[left_space], &[window, WindowId::new(1, 2)]);
+}
+
+#[test]
+fn dragging_a_window_between_connected_displays_joins_the_visible_workspace() {
+    let mut reactor = test_reactor_with_workspace_settings(&nine_workspace_settings());
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let mut on_right = make_window(1);
+    on_right.frame = CGRect::new(CGPoint::new(1200., 100.), CGSize::new(400., 400.));
+    apps.make_app_and_settle(&mut reactor, 1, vec![on_right, make_window(2)]);
+    let window = WindowId::new(1, 1);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert!(reactor.assign_test_window_to_workspace(right_space, window, right_workspaces[3]));
+    assert!(reactor.set_test_active_workspace(right_space, right_workspaces[3]));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // The user drags the window onto the left display; both displays stay connected.
+    let wsid = reactor.test_window_server_id(window);
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(left_space))], false);
+    apps.simulate_until_quiet(&mut reactor);
+
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, window),
+        Some(left_workspaces[0]),
+        "a dragged window joins the workspace the display shows"
+    );
+}
+
 #[test]
 fn closing_focused_window_refocuses_survivor() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
