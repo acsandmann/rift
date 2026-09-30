@@ -3121,20 +3121,55 @@ impl LayoutEngine {
             };
         }
 
+        self.workspaces.ensure_space_initialized(target_space);
+        let Some(target_workspace_id) = self.workspaces.active_workspace(target_space) else {
+            return EventResponse::default();
+        };
+        self.move_window_to_workspace_on_space(
+            window_store,
+            source_space,
+            target_space,
+            target_screen_size,
+            window_id,
+            target_workspace_id,
+            false,
+        )
+    }
+
+    /// Moves one window into a specific workspace on another native space.
+    ///
+    /// Unlike [`Self::move_window_to_space`], the destination workspace is explicit
+    /// and need not be active on the target space. When it is active, or with
+    /// `follow`, the window receives focus there; otherwise focus stays on the
+    /// source display, mirroring `MoveWindowToWorkspace { follow: false }`.
+    pub fn move_window_to_workspace_on_space(
+        &mut self,
+        window_store: &mut WindowStore,
+        source_space: SpaceId,
+        target_space: SpaceId,
+        target_screen_size: CGSize,
+        window_id: WindowId,
+        target_workspace_id: VirtualWorkspaceId,
+        follow: bool,
+    ) -> EventResponse {
+        if source_space == target_space {
+            return EventResponse::default();
+        }
+
         self.workspaces.ensure_space_initialized(source_space);
         self.workspaces.ensure_space_initialized(target_space);
 
         let source_workspace = window_store
             .workspace_for_window(source_space, window_id)
             .or_else(|| self.workspaces.active_workspace(source_space));
-
         let Some(source_workspace_id) = source_workspace else {
             return EventResponse::default();
         };
-
-        let Some(target_workspace_id) = self.workspaces.active_workspace(target_space) else {
+        if self.workspaces.workspaces.get(target_workspace_id).map(|ws| ws.space)
+            != Some(target_space)
+        {
             return EventResponse::default();
-        };
+        }
 
         self.ensure_workspace_layouts(target_space, target_screen_size);
         if !self.relocate_window_to_workspace(
@@ -3147,23 +3182,49 @@ impl LayoutEngine {
             return EventResponse::default();
         }
 
-        if self.focused_window == Some(window_id) {
-            self.focused_window = None;
-        }
-
-        if self.workspaces.active_workspace(source_space) == Some(source_workspace_id) {
+        let source_was_active =
+            self.workspaces.active_workspace(source_space) == Some(source_workspace_id);
+        if source_was_active {
             self.workspaces.set_last_focused_window(source_space, source_workspace_id, None);
         }
         self.workspaces
             .set_last_focused_window(target_space, target_workspace_id, Some(window_id));
-        self.focused_window = Some(window_id);
         self.broadcast_windows_changed(window_store, source_space);
         self.broadcast_windows_changed(window_store, target_space);
 
+        if follow {
+            return self.activate_workspace(
+                window_store,
+                target_space,
+                target_workspace_id,
+                Some(window_id),
+            );
+        }
+        if self.workspaces.active_workspace(target_space) == Some(target_workspace_id) {
+            self.focused_window = Some(window_id);
+            return EventResponse {
+                changed: true,
+                raise_windows: vec![window_id],
+                focus_window: Some(window_id),
+                boundary_hit: None,
+            };
+        }
+
+        if self.focused_window == Some(window_id) {
+            self.focused_window = None;
+        }
+        let focus_window = source_was_active
+            .then(|| {
+                self.workspaces
+                    .windows_in_active_workspace(window_store, source_space)
+                    .into_iter()
+                    .next()
+            })
+            .flatten();
         EventResponse {
             changed: true,
-            raise_windows: vec![window_id],
-            focus_window: Some(window_id),
+            raise_windows: vec![],
+            focus_window,
             boundary_hit: None,
         }
     }

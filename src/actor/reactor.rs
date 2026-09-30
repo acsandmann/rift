@@ -1903,6 +1903,9 @@ impl Reactor {
                 let Some(index) = workspaces.iter().position(|(id, _)| *id == workspace) else {
                     return Ok(EventOutcome::no_change());
                 };
+                if let Some(routed) = self.route_overview_workspace_selection(space, index) {
+                    return routed;
+                }
                 // Change display context without first focusing its old workspace's window.
                 if let Some(screen) = self.space_state.screen_by_space(space) {
                     if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
@@ -2298,6 +2301,9 @@ impl Reactor {
                 return self.focus_display_by_selector(&selector);
             }
             Event::Command(Command::Layout(command)) => {
+                if let Some(routed) = self.route_bound_workspace_command(&command) {
+                    return routed;
+                }
                 let post_arrange_mouse_warp =
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
@@ -2428,6 +2434,8 @@ impl Reactor {
                         target_space,
                         target_screen: target_screen.frame,
                         target_frame,
+                        target_workspace: None,
+                        follow: false,
                     },
                 )?;
                 self.note_display_move_in_flight(window, target_space);
@@ -2472,6 +2480,13 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 if source_space == target_space {
+                    return Ok(EventOutcome::no_change());
+                }
+                if self.bound_workspace_blocks_display_move(source_space, target_space) {
+                    warn!(
+                        ?selector,
+                        "Move workspace to display ignored: the workspace is bound to its display"
+                    );
                     return Ok(EventOutcome::no_change());
                 }
 
@@ -5390,6 +5405,8 @@ impl Reactor {
                 target_space,
                 target_screen: target_screen.frame,
                 target_frame,
+                target_workspace: None,
+                follow: false,
             },
         ) {
             Ok(outcome) => {
