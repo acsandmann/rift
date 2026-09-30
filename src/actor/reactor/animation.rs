@@ -9,6 +9,7 @@ use crate::actor::app::{AppThreadHandle, Request, WindowId, pid_t};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::HashMap;
 use crate::common::config::Config;
+use crate::layout_engine::systems::ViewportRelease;
 use crate::sys::geometry::{Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
@@ -22,6 +23,7 @@ pub type Receiver = mpsc::UnboundedReceiver<Message>;
 pub enum Message {
     Replace(Animation),
     SkipToEnd(Animation),
+    Stop(Vec<WindowId>),
 }
 
 #[derive(Debug, Default)]
@@ -41,6 +43,7 @@ pub struct Animation {
     frames: u32,
     windows: Vec<AnimatedWindow>,
     handled_windows: Vec<WindowId>,
+    gesture_velocity: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -54,7 +57,7 @@ struct AnimatedWindow {
 }
 
 impl AnimatedWindow {
-    fn frame_after(&self, frame: u32, total_frames: u32) -> CGRect {
+    fn frame_after(&self, frame: u32, total_frames: u32, gesture: Option<(f64, f64)>) -> CGRect {
         if frame == 0 {
             return if self.is_focus {
                 CGRect {
@@ -67,11 +70,27 @@ impl AnimatedWindow {
         }
 
         let t = f64::from(frame) / f64::from(total_frames);
-        let mut rect = get_frame(self.start, self.finish, t);
+        let mut rect = self.interpolate(t, gesture);
         if self.is_focus || frame * 2 >= total_frames {
             rect.size = self.finish.size;
         } else {
             rect.size = self.start.size;
+        }
+        rect
+    }
+
+    fn interpolate(&self, t: f64, gesture: Option<(f64, f64)>) -> CGRect {
+        let mut rect = get_frame(self.start, self.finish, t);
+        if let Some((velocity, duration)) = gesture {
+            let distance = self.finish.origin.x - self.start.origin.x;
+            if distance != 0.0 {
+                // Hermite interpolation continues camera velocity (windows move
+                // opposite the camera) and ends at rest without overshooting.
+                let slope = (-velocity * duration / distance).clamp(0.0, 3.0);
+                let progress =
+                    (slope - 2.0) * t.powi(3) + (3.0 - 2.0 * slope) * t.powi(2) + slope * t;
+                rect.origin.x = blend(self.start.origin.x, self.finish.origin.x, progress);
+            }
         }
         rect
     }
@@ -106,6 +125,22 @@ impl AnimationManager {
 
     pub fn handle_message(&mut self, message: Message) -> Option<Duration> {
         match message {
+            Message::Stop(windows) => {
+                if let Some(active) = &mut self.active {
+                    active.animation.windows.retain(|window| {
+                        if windows.contains(&window.wid) {
+                            _ = window.handle.send(Request::EndWindowAnimation(window.wid));
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    if active.animation.is_empty() {
+                        self.active = None;
+                    }
+                }
+                self.active.as_ref().map(|active| active.animation.interval)
+            }
             Message::Replace(animation) => {
                 self.active = match self.active.take() {
                     Some(active) => Some(active.replace_with(animation)),
@@ -146,12 +181,43 @@ impl AnimationManager {
         is_resize: bool,
         skip_wid: Option<WindowId>,
     ) -> bool {
+        Self::animate_layout_inner(reactor, space, layout, is_resize, skip_wid, None, None)
+    }
+
+    pub(super) fn animate_viewport_release(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        release: ViewportRelease,
+        animate: Option<bool>,
+    ) -> bool {
+        Self::animate_layout_inner(reactor, space, layout, false, None, Some(release), animate)
+    }
+
+    fn animate_layout_inner(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        is_resize: bool,
+        skip_wid: Option<WindowId>,
+        release: Option<ViewportRelease>,
+        animate: Option<bool>,
+    ) -> bool {
         let Some(active_ws) =
             reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
         else {
             return false;
         };
-        let mut anim = Animation::new(reactor.config.clone());
+        let mut config = reactor.config.clone();
+        if let Some(release) = release {
+            let distance = release.offset - release.from_offset;
+            if distance * release.velocity > 0.0 && release.velocity.abs() > 100.0 {
+                config.settings.animation_duration =
+                    (2.0 * distance.abs() / release.velocity.abs()).clamp(0.12, 0.65);
+            }
+        }
+        let mut anim = Animation::new(config);
+        anim.gesture_velocity = release.map(|r| r.velocity);
         let mut animated_count = 0;
         let mut any_frame_changed = false;
 
@@ -242,10 +308,10 @@ impl AnimationManager {
 
         if animated_count > 0 {
             let low_power = power::is_low_power_mode_enabled();
-            let layout_animate = reactor
-                .layout_manager
-                .layout_engine
-                .layout_specific_animate_settings(space)
+            let layout_animate = animate
+                .or_else(|| {
+                    reactor.layout_manager.layout_engine.layout_specific_animate_settings(space)
+                })
                 .unwrap_or(reactor.config.settings.animate);
             let skip_anim = is_resize || !layout_animate || low_power;
 
@@ -259,6 +325,7 @@ impl AnimationManager {
                     match err.0 {
                         Message::Replace(animation) => animation.skip_to_end(),
                         Message::SkipToEnd(animation) => animation.skip_to_end(),
+                        Message::Stop(_) => {}
                     }
                 }
             } else {
@@ -454,7 +521,12 @@ impl ActiveAnimation {
         self.animation
             .windows
             .iter()
-            .map(|window| (window.wid, window.frame_after(frame, self.animation.frames)))
+            .map(|window| {
+                (
+                    window.wid,
+                    window.frame_after(frame, self.animation.frames, self.animation.gesture()),
+                )
+            })
             .collect()
     }
 }
@@ -470,6 +542,7 @@ impl Animation {
                 as u32,
             windows: vec![],
             handled_windows: vec![],
+            gesture_velocity: None,
         }
     }
 
@@ -547,10 +620,15 @@ impl Animation {
         }
     }
 
+    fn gesture(&self) -> Option<(f64, f64)> {
+        self.gesture_velocity
+            .map(|v| (v, self.interval.as_secs_f64() * f64::from(self.frames)))
+    }
+
     fn send_frame(&self, frame: u32) {
         let t = f64::from(frame) / f64::from(self.frames);
         for window in &self.windows {
-            let mut rect = get_frame(window.start, window.finish, t);
+            let mut rect = window.interpolate(t, self.gesture());
             let set_size = frame * 2 == self.frames || frame == self.frames;
             if set_size {
                 rect.size = window.finish.size;

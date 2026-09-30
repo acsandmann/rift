@@ -1047,9 +1047,13 @@ pub enum MasterStackNewWindowPlacement {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub struct ScrollingGestureSettings {
-    /// Enable horizontal scroll gestures to switch columns
+    /// Enable continuous horizontal viewport gestures
     #[serde(default = "no")]
     pub enabled: bool,
+    /// Animate gesture release independently of structural layout animations.
+    /// When omitted, inherit the scrolling layout/global animation setting.
+    #[serde(default)]
+    pub animate: Option<bool>,
     /// Invert horizontal direction (swap left/right)
     #[serde(default)]
     pub invert_horizontal: bool,
@@ -1059,13 +1063,13 @@ pub struct ScrollingGestureSettings {
     /// Number of fingers required for scroll gesture
     #[serde(default = "default_swipe_fingers")]
     pub fingers: usize,
-    /// Normalized horizontal distance (0..1) required to fire a scroll step
+    /// Retained for config compatibility; continuous scrolling uses a small intent dead zone
     #[serde(default = "default_distance_pct")]
     pub distance_pct: f64,
     /// If true, scrolling past the end of the strip will trigger a workspace switch
     #[serde(default = "no")]
     pub propagate_to_workspace_swipe: bool,
-    /// Amount of overscroll (in steps) required to trigger a workspace switch
+    /// Overscroll in working-area widths required to trigger one workspace switch
     #[serde(default = "default_overscroll_threshold")]
     pub workspace_switch_threshold: f64,
 }
@@ -1074,6 +1078,7 @@ impl Default for ScrollingGestureSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            animate: None,
             invert_horizontal: false,
             vertical_tolerance: default_swipe_vertical_tolerance(),
             fingers: default_swipe_fingers(),

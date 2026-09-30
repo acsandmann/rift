@@ -6,6 +6,7 @@
 
 mod animation;
 mod events;
+mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
@@ -340,6 +341,8 @@ pub enum Event {
     #[serde(skip)]
     DragMotionPending(crate::actor::drag::DragMotionPublisher),
     #[serde(skip)]
+    Gesture(crate::actor::gesture::Lifecycle),
+    #[serde(skip)]
     DragMotion(crate::actor::drag::DragMotion),
     #[serde(skip)]
     ModifierMouseDown {
@@ -433,6 +436,7 @@ pub struct Reactor {
     active_spaces: HashSet<SpaceId>,
     startup_ready: Option<oneshot::Sender<()>>,
     pub animation_tx: Option<AnimationSender>,
+    viewport_gesture: Option<gesture::ViewportSession>,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
@@ -560,6 +564,7 @@ impl Reactor {
             active_spaces: HashSet::default(),
             startup_ready: None,
             animation_tx: None,
+            viewport_gesture: None,
             #[cfg(test)]
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
@@ -907,24 +912,50 @@ impl Reactor {
     async fn run_reactor_loop(reactor: Rc<RefCell<Reactor>>, mut events: Receiver) {
         const MAX_EVENT_BATCH: usize = 64;
 
-        while let Some((span, event)) = events.recv().await {
-            let _guard = span.enter();
-            Self::handle_thread_event(&reactor, event);
-            // Drain a bounded batch to reduce recv/select overhead.
-            for _ in 1..MAX_EVENT_BATCH {
-                let Ok((span, event)) = events.try_recv() else {
-                    break;
-                };
-                let _guard = span.enter();
-                Self::handle_thread_event(&reactor, event);
+        let mut tick = crate::sys::timer::Timer::manual();
+        loop {
+            let active = reactor.borrow().viewport_gesture.is_some();
+            let refresh =
+                reactor.borrow().viewport_gesture.as_ref().and_then(|s| s.refresh.clone());
+            let display_running = reactor
+                .borrow()
+                .viewport_gesture
+                .as_ref()
+                .and_then(|s| s.display_link.as_ref())
+                .is_some_and(|link| link.is_running());
+            tokio::select! {
+                _ = async { refresh.as_ref().unwrap().notified().await }, if refresh.is_some() => {
+                    reactor.borrow_mut().gesture_tick();
+                }
+                _ = tick.next(), if active && !display_running => {
+                    reactor.borrow_mut().gesture_tick();
+                    if let Some(session) = &reactor.borrow().viewport_gesture { tick.set_next_fire(session.interval); }
+                }
+                next = events.recv() => {
+                    let Some((span, event)) = next else { break; };
+                    let _guard = span.enter();
+                    Self::handle_thread_event(&reactor, event);
+                    for _ in 1..MAX_EVENT_BATCH {
+                        let Ok((span, event)) = events.try_recv() else { break; };
+                        let _guard = span.enter();
+                        Self::handle_thread_event(&reactor, event);
+                    }
+                    if !active && let Some(session) = &reactor.borrow().viewport_gesture { tick.set_next_fire(session.interval); }
+                }
             }
         }
+        reactor.borrow_mut().gesture_event(crate::actor::gesture::Lifecycle::Reset);
     }
 
     fn handle_thread_event(reactor: &Rc<RefCell<Reactor>>, event: Event) {
         match event {
+            Event::Gesture(event) => reactor.borrow_mut().gesture_event(event),
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::MouseFocusPending(publisher) => {
+                if reactor.borrow().viewport_gesture.is_some() {
+                    publisher.take_latest();
+                    return;
+                }
                 if let Some(point) = publisher.take_latest() {
                     // Resolve against WindowServer when processing the latest position,
                     // rather than preserving an ID from an earlier input callback.
@@ -949,6 +980,10 @@ impl Reactor {
     }
 
     fn handle_loop_event(&mut self, event: Event) {
+        if let Event::Gesture(event) = event {
+            self.gesture_event(event);
+            return;
+        }
         if let Event::BindingModeChanged { mode } = event {
             if self.binding_mode != mode {
                 let previous_mode = std::mem::replace(&mut self.binding_mode, mode.clone());
@@ -4656,7 +4691,17 @@ impl Reactor {
                 continue;
             }
 
-            let mode = self.layout_manager.layout_engine.active_layout_mode_at(space);
+            let engine = &self.layout_manager.layout_engine;
+            let mut mode = engine.active_layout_mode_at(space);
+            // This cache routes gesture candidates, not public layout mode. An
+            // empty/fullscreen strip must still permit workspace navigation.
+            if mode == crate::common::config::LayoutMode::Scrolling &&
+                !engine.workspaces().active_layout_for_space(space).is_some_and(|(ws, layout)| {
+                    matches!(&engine.workspaces()[ws].layout_system,
+                        crate::layout_engine::LayoutSystemKind::Scrolling(system) if system.viewport_gesture_available(layout))
+                }) {
+                mode = crate::common::config::LayoutMode::Traditional;
+            }
             if last_modes.get(&space).copied() != Some(mode) {
                 changed = true;
             }

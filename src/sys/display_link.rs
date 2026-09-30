@@ -1,170 +1,112 @@
-use std::ffi::c_void;
-use std::ptr;
+//! Display cadence for a locked screen. AppKit objects stay on the main thread.
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use parking_lot::Mutex;
+use dispatchr::queue;
+use dispatchr::time::Time;
+use objc2::rc::Retained;
+use objc2::{AnyThread, DeclaredClass, MainThreadMarker, define_class, msg_send, sel};
+use objc2_app_kit::NSScreen;
+use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
+use objc2_quartz_core::CADisplayLink;
+use tokio::sync::Notify;
 
-pub type CVReturn = i32;
-pub type CVOptionFlags = u32;
-#[allow(non_camel_case_types)]
-pub type CVDisplayLinkRef = *mut c_void;
+use super::dispatch::DispatchExt;
+use super::screen::{NSScreenExt, ScreenId};
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct CVTimeStamp {
-    pub version: u32,
-    pub video_time_scale: i32,
-    pub video_time: i64,
-    pub host_time: u64,
-    pub rate_scalar: f64,
-    pub video_refresh_period: u64,
-    pub smpte_time: u64,
-    pub flags: u64,
-    pub reserved: u64,
+thread_local! {
+    static LINKS: RefCell<HashMap<u64, Retained<CADisplayLink>>> = RefCell::new(HashMap::new());
+}
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+struct State {
+    notify: Arc<Notify>,
+    cancelled: AtomicBool,
+    running: AtomicBool,
 }
 
-// display_link has bindings in its own file because (1) it is CV not sls (2) i like it to be segmented away
-unsafe extern "C" {
-    fn CVDisplayLinkCreateWithActiveCGDisplays(link: *mut CVDisplayLinkRef) -> CVReturn;
-    fn CVDisplayLinkSetOutputCallback(
-        link: CVDisplayLinkRef,
-        callback: extern "C" fn(
-            CVDisplayLinkRef,
-            *const CVTimeStamp,
-            *const CVTimeStamp,
-            CVOptionFlags,
-            *mut CVOptionFlags,
-            *mut c_void,
-        ) -> CVReturn,
-        user_info: *mut c_void,
-    ) -> CVReturn;
-    fn CVDisplayLinkStart(link: CVDisplayLinkRef) -> CVReturn;
-    fn CVDisplayLinkStop(link: CVDisplayLinkRef) -> CVReturn;
-    fn CVDisplayLinkRelease(link: CVDisplayLinkRef);
-}
+define_class! {
+    // NSObject has no subclassing requirements; the selector matches CADisplayLink's callback.
+    #[unsafe(super(NSObject))]
+    #[ivars = Arc<State>]
+    struct DisplayLinkTarget;
 
-struct CallbackData {
-    callback: Box<dyn FnMut() -> bool + Send>,
-    refresh_rate: Arc<Mutex<Option<f64>>>,
-}
-
-extern "C" fn display_link_callback(
-    link: CVDisplayLinkRef,
-    _now: *const CVTimeStamp,
-    output: *const CVTimeStamp,
-    _flags_in: CVOptionFlags,
-    _flags_out: *mut CVOptionFlags,
-    user_info: *mut c_void,
-) -> CVReturn {
-    if user_info.is_null() {
-        return 0;
-    }
-
-    let data = unsafe { &mut *(user_info as *mut CallbackData) };
-
-    if !output.is_null() {
-        let timestamp = unsafe { &*output };
-        if timestamp.video_refresh_period > 0 && timestamp.video_time_scale > 0 {
-            let refresh_rate =
-                timestamp.video_time_scale as f64 / timestamp.video_refresh_period as f64;
-            let mut rate = data.refresh_rate.lock();
-            *rate = Some(refresh_rate);
+    impl DisplayLinkTarget {
+        #[unsafe(method(tick:))]
+        fn tick(&self, link: &CADisplayLink) {
+            let state = self.ivars();
+            if state.cancelled.load(Ordering::Acquire) {
+                link.invalidate();
+                return;
+            }
+            state.running.store(true, Ordering::Release);
+            state.notify.notify_one(); // One outstanding permit, independent of callback rate.
         }
     }
-
-    let keep_running = (data.callback)();
-    if !keep_running {
-        unsafe { CVDisplayLinkStop(link) };
-    }
-    0
 }
 
+/// Sendable lifetime handle; the retained link and its run-loop operations never leave main.
 pub struct DisplayLink {
-    link: CVDisplayLinkRef,
-    cb_ptr: *mut CallbackData,
-    refresh_rate: Arc<Mutex<Option<f64>>>,
+    id: u64,
+    state: Arc<State>,
 }
 
 impl DisplayLink {
-    pub fn new<F>(callback: F) -> Result<Self, CVReturn>
-    where F: FnMut() -> bool + Send + 'static {
-        let mut link: CVDisplayLinkRef = ptr::null_mut();
-        let status = unsafe { CVDisplayLinkCreateWithActiveCGDisplays(&mut link) };
-        if status != 0 {
-            return Err(status);
-        }
-
-        let refresh_rate = Arc::new(Mutex::new(None));
-        let callback_data = CallbackData {
-            callback: Box::new(callback),
-            refresh_rate: refresh_rate.clone(),
-        };
-        let cb_ptr = Box::into_raw(Box::new(callback_data));
-
-        let status = unsafe {
-            CVDisplayLinkSetOutputCallback(link, display_link_callback, cb_ptr as *mut c_void)
-        };
-        if status != 0 {
-            unsafe {
-                CVDisplayLinkRelease(link);
-                let _ = Box::from_raw(cb_ptr);
-            }
-            return Err(status);
-        }
-
-        Ok(DisplayLink { link, cb_ptr, refresh_rate })
+    pub fn for_display(display: u32, notify: Arc<Notify>) -> Self {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let state = Arc::new(State {
+            notify,
+            cancelled: AtomicBool::new(false),
+            running: AtomicBool::new(false),
+        });
+        queue::main().after_f_s(
+            Time::NOW,
+            (id, display, state.clone()),
+            |(id, display, state)| {
+                if state.cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                let mtm = MainThreadMarker::new().expect("main dispatch queue");
+                let Some(screen) = NSScreen::screens(mtm)
+                    .iter()
+                    .find(|screen| screen.get_number() == Ok(ScreenId::new(display)))
+                else {
+                    return;
+                };
+                // Older macOS releases keep the existing timer fallback.
+                if !screen.respondsToSelector(sel!(displayLinkWithTarget:selector:)) {
+                    return;
+                }
+                let target = DisplayLinkTarget::alloc().set_ivars(state);
+                let target: Retained<DisplayLinkTarget> = unsafe { msg_send![super(target), init] };
+                // The target is retained by the link. It does not retain the link in return.
+                let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
+                unsafe {
+                    link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
+                };
+                LINKS.with(|links| {
+                    links.borrow_mut().insert(id, link);
+                });
+            },
+        );
+        Self { id, state }
     }
 
-    pub fn start(&self) {
-        unsafe {
-            CVDisplayLinkStart(self.link);
-        }
-    }
-
-    pub fn stop(&self) {
-        unsafe {
-            CVDisplayLinkStop(self.link);
-        }
-    }
-
-    /// Get the display's refresh rate in Hz (frames per second).
-    /// Returns None if the refresh rate hasn't been determined yet.
-    /// You may need to start the DisplayLink briefly to get this information.
-    pub fn refresh_rate(&self) -> Option<f64> { *self.refresh_rate.lock() }
-
-    /// Get the display's refresh rate, starting the DisplayLink briefly if needed.
-    /// This is a convenience method that will start the DisplayLink for a short time
-    /// to determine the refresh rate, then stop it.
-    pub fn get_refresh_rate(&self) -> Option<f64> {
-        if let Some(rate) = self.refresh_rate() {
-            return Some(rate);
-        }
-
-        self.start();
-
-        std::thread::sleep(std::time::Duration::from_millis(20));
-
-        let rate = self.refresh_rate();
-        self.stop();
-
-        rate
-    }
+    /// Until the first native callback, the consumer can use its timer fallback.
+    pub fn is_running(&self) -> bool { self.state.running.load(Ordering::Acquire) }
 }
 
 impl Drop for DisplayLink {
     fn drop(&mut self) {
-        unsafe {
-            CVDisplayLinkStop(self.link);
-            CVDisplayLinkRelease(self.link);
-            drop(Box::from_raw(self.cb_ptr));
-        }
+        self.state.cancelled.store(true, Ordering::Release);
+        queue::main().after_f_s(Time::NOW, self.id, |id| {
+            LINKS.with(|links| {
+                if let Some(link) = links.borrow_mut().remove(&id) {
+                    link.invalidate();
+                }
+            });
+        });
     }
-}
-
-/// Get the display's refresh rate in Hz without creating a persistent DisplayLink.
-/// This is a convenience function for one-off refresh rate queries.
-/// Returns None if the refresh rate cannot be determined.
-pub fn get_display_refresh_rate() -> Option<f64> {
-    let link = DisplayLink::new(|| false).ok()?;
-    link.get_refresh_rate()
 }
