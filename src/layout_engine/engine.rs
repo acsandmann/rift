@@ -4005,7 +4005,8 @@ mod tests {
         let mut settings = VirtualWorkspaceSettings::default();
         settings.workspace_rules = vec![WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(0),
-            layout: LayoutMode::Scrolling,
+            layout: Some(LayoutMode::Scrolling),
+            display: None,
         }];
         settings.app_rules = vec![AppWorkspaceRule {
             app_id: Some("com.example.Editor".into()),
@@ -4344,7 +4345,8 @@ mod tests {
         let mut settings = VirtualWorkspaceSettings::default();
         settings.workspace_rules = vec![WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(0),
-            layout: LayoutMode::Scrolling,
+            layout: Some(LayoutMode::Scrolling),
+            display: None,
         }];
         let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
         let mut window_store = WindowStore::default();
@@ -4416,7 +4418,8 @@ mod tests {
         let mut settings = VirtualWorkspaceSettings::default();
         settings.workspace_rules = vec![WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Name(workspace_name),
-            layout: LayoutMode::Scrolling,
+            layout: Some(LayoutMode::Scrolling),
+            display: None,
         }];
 
         engine.update_virtual_workspace_settings(&window_store, &settings);

@@ -9,6 +9,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::AppWorkspaceRule;
 use crate::common::config::{
     LayoutMode, LayoutSettings, MAX_WORKSPACES, VirtualWorkspaceSettings, WorkspaceSelector,
+    default_workspace_name,
 };
 use crate::common::log::trace_misc;
 use crate::layout_engine::systems::LayoutSystemKind;
@@ -399,11 +400,7 @@ impl WorkspaceStore {
         let mut ids = Vec::new();
         let count = self.default_workspace_count.max(1).min(self.max_workspaces);
         for i in 0..count {
-            let name = self
-                .default_workspace_names
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("Workspace {}", i + 1));
+            let name = default_workspace_name(&self.default_workspace_names, i);
 
             let mode = self.resolve_layout_mode_for_workspace(i, &name);
             let ws = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
@@ -437,10 +434,10 @@ impl WorkspaceStore {
     fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
         // Check workspace_rules (last matching rule wins, like app_rules)
         for rule in self.workspace_rules.iter().rev() {
-            match &rule.workspace {
-                WorkspaceSelector::Index(idx) if *idx == index => return rule.layout,
-                WorkspaceSelector::Name(n) if n == name => return rule.layout,
-                _ => continue,
+            if rule.matches(index, name)
+                && let Some(layout) = rule.layout
+            {
+                return layout;
             }
         }
         // Fall back to global default
