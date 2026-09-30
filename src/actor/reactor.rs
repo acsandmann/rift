@@ -2121,44 +2121,7 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
-                let screen = self.screen_for_selector(&selector, None).cloned();
-                let focus_window = screen.as_ref().and_then(|screen| {
-                    let space = screen.space?;
-                    self.last_focused_window_in_space(space).or_else(|| {
-                        self.layout_manager
-                            .layout_engine
-                            .workspaces()
-                            .windows_in_active_workspace(&self.state.windows, space)
-                            .into_iter()
-                            .next()
-                    })
-                });
-                let target_is_active = screen
-                    .as_ref()
-                    .and_then(|screen| screen.space)
-                    .is_none_or(|space| self.is_space_active(space));
-                if target_is_active
-                    && let Some(screen) = screen.as_ref().filter(|screen| screen.space.is_some())
-                {
-                    if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
-                        self.space_state.menu_bar_space = screen.space;
-                    }
-                    // Honor explicit display selection before the native notification arrives,
-                    // even on activation failure. Later spaces-actor updates remain authoritative.
-                    self.space_state.command_space = screen.space;
-                }
-                let focus_window_center = focus_window
-                    .and_then(|wid| self.state.windows.window(wid))
-                    .map(|window| window.frame_monotonic.mid());
-                return command_workflow::handle_focus_display(
-                    &self.app_manager,
-                    command_workflow::DisplayFocusPayload {
-                        screen,
-                        target_is_active,
-                        focus_window,
-                        focus_window_center,
-                    },
-                );
+                return self.focus_display_by_selector(&selector);
             }
             Event::Command(Command::Layout(command)) => {
                 let post_arrange_mouse_warp =
@@ -5218,6 +5181,52 @@ impl Reactor {
             self.space_state.menu_bar_space = Some(space);
         }
         self.space_state.command_space = Some(space);
+    }
+
+    /// Focus the display `selector` names: make it the command and menu-bar
+    /// context and focus its last focused window.
+    fn focus_display_by_selector(
+        &mut self,
+        selector: &DisplaySelector,
+    ) -> anyhow::Result<EventOutcome> {
+        let screen = self.screen_for_selector(selector, None).cloned();
+        let focus_window = screen.as_ref().and_then(|screen| {
+            let space = screen.space?;
+            self.last_focused_window_in_space(space).or_else(|| {
+                self.layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .windows_in_active_workspace(&self.state.windows, space)
+                    .into_iter()
+                    .next()
+            })
+        });
+        let target_is_active = screen
+            .as_ref()
+            .and_then(|screen| screen.space)
+            .is_none_or(|space| self.is_space_active(space));
+        if target_is_active
+            && let Some(screen) = screen.as_ref().filter(|screen| screen.space.is_some())
+        {
+            if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
+                self.space_state.menu_bar_space = screen.space;
+            }
+            // Honor explicit display selection before the native notification arrives,
+            // even on activation failure. Later spaces-actor updates remain authoritative.
+            self.space_state.command_space = screen.space;
+        }
+        let focus_window_center = focus_window
+            .and_then(|wid| self.state.windows.window(wid))
+            .map(|window| window.frame_monotonic.mid());
+        command_workflow::handle_focus_display(
+            &self.app_manager,
+            command_workflow::DisplayFocusPayload {
+                screen,
+                target_is_active,
+                focus_window,
+                focus_window_center,
+            },
+        )
     }
 
     fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
