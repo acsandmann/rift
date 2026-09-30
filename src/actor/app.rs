@@ -301,10 +301,18 @@ pub struct AppThreadHandle {
     interactive_frames: InteractiveFrameQueue,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum FrameSource {
+    #[default]
+    Ordinary,
+    Drag,
+    Viewport,
+}
+
 #[derive(Default)]
 struct InteractiveFrames {
     wake_pending: bool,
-    latest: HashMap<WindowId, (CGRect, bool, TransactionId)>,
+    latest: HashMap<WindowId, (CGRect, bool, TransactionId, FrameSource)>,
 }
 
 #[derive(Clone, Default)]
@@ -324,12 +332,12 @@ impl Debug for InteractiveFrameQueue {
 impl InteractiveFrameQueue {
     pub(crate) fn drain_with(
         &self,
-        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId),
+        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource),
     ) {
         let mut frames = self.0.lock().unwrap();
         frames.wake_pending = false;
-        for (wid, (frame, set_size, txid)) in frames.latest.drain() {
-            consume(wid, frame, set_size, txid);
+        for (wid, (frame, set_size, txid, source)) in frames.latest.drain() {
+            consume(wid, frame, set_size, txid, source);
         }
     }
 }
@@ -347,18 +355,36 @@ mod interactive_frame_tests {
         handle.interactive_frames.0.lock().unwrap().latest.reserve(8);
         let capacity = handle.interactive_frames.0.lock().unwrap().latest.capacity();
 
-        handle.send_interactive_frame(window, first, false, TransactionId::default());
-        handle.send_interactive_frame(window, latest, true, TransactionId::default());
+        handle.send_interactive_frame(
+            window,
+            first,
+            false,
+            TransactionId::default(),
+            FrameSource::Drag,
+        );
+        handle.send_interactive_frame(
+            window,
+            latest,
+            true,
+            TransactionId::default(),
+            FrameSource::Drag,
+        );
         let (_, Request::InteractiveFramesPending(queue)) = rx.try_recv().unwrap() else {
             panic!("expected one interactive frame wake");
         };
         assert!(rx.try_recv().is_err());
         let mut received = Vec::new();
-        queue.drain_with(|wid, frame, set_size, _| received.push((wid, frame, set_size)));
+        queue.drain_with(|wid, frame, set_size, _, _| received.push((wid, frame, set_size)));
         assert_eq!(received, vec![(window, latest, true)]);
         assert_eq!(queue.0.lock().unwrap().latest.capacity(), capacity);
 
-        handle.send_interactive_frame(window, first, false, TransactionId::default());
+        handle.send_interactive_frame(
+            window,
+            first,
+            false,
+            TransactionId::default(),
+            FrameSource::Drag,
+        );
         assert!(matches!(
             rx.try_recv().unwrap().1,
             Request::InteractiveFramesPending(_)
@@ -413,10 +439,11 @@ impl AppThreadHandle {
         frame: CGRect,
         set_size: bool,
         txid: TransactionId,
+        source: FrameSource,
     ) {
         let should_wake = {
             let mut pending = self.interactive_frames.0.lock().unwrap();
-            pending.latest.insert(wid, (frame, set_size, txid));
+            pending.latest.insert(wid, (frame, set_size, txid, source));
             !std::mem::replace(&mut pending.wake_pending, true)
         };
         if should_wake
@@ -555,7 +582,7 @@ struct AppWindowState {
     title: String,
     is_animating: bool,
     last_animation_frame: Option<CGRect>,
-    interactive_frame_write: bool,
+    frame_source: FrameSource,
 }
 
 struct PendingFrame {
@@ -563,7 +590,7 @@ struct PendingFrame {
     frame: CGRect,
     set_size: bool,
     txid: TransactionId,
-    interactive: bool,
+    source: FrameSource,
 }
 
 /// Some AX bridges (notably Qt's) surface menu elements through window discovery.
@@ -795,7 +822,7 @@ impl State {
             frame,
             set_size,
             txid,
-            interactive,
+            source,
         }) = self.pending_frames.remove(&wid)
         else {
             return Ok(());
@@ -803,7 +830,7 @@ impl State {
         let _guard = span.enter();
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
-        window.interactive_frame_write = interactive;
+        window.frame_source = source;
         if set_size {
             window.last_animation_frame = Some(frame);
             let _ = window.elem.set_size(frame.size);
@@ -989,7 +1016,7 @@ impl State {
                 let elem = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
-                        window.interactive_frame_write = false;
+                        window.frame_source = FrameSource::Ordinary;
                         window.elem.clone()
                     }
                     Err(err) => match err {
@@ -1036,17 +1063,17 @@ impl State {
                     frame,
                     set_size,
                     txid,
-                    interactive: false,
+                    source: FrameSource::Ordinary,
                 });
             }
             Request::InteractiveFramesPending(frames) => {
-                frames.drain_with(|wid, frame, set_size, txid| {
+                frames.drain_with(|wid, frame, set_size, txid, source| {
                     self.pending_frames.insert(wid, PendingFrame {
                         span: Span::current(),
                         frame,
                         set_size,
                         txid,
-                        interactive: true,
+                        source,
                     });
                 });
             }
@@ -1054,7 +1081,7 @@ impl State {
                 let elem = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
-                        window.interactive_frame_write = false;
+                        window.frame_source = FrameSource::Ordinary;
                         window.elem.clone()
                     }
                     Err(err) => match err {
@@ -1091,7 +1118,7 @@ impl State {
                     let elem = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
-                            window.interactive_frame_write = false;
+                            window.frame_source = FrameSource::Ordinary;
                             window.elem.clone()
                         }
                         Err(err) => match err {
@@ -1129,7 +1156,7 @@ impl State {
                     let elem = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
-                            window.interactive_frame_write = false;
+                            window.frame_source = FrameSource::Ordinary;
                             window.elem.clone()
                         }
                         Err(err) => match err {
@@ -1183,6 +1210,7 @@ impl State {
                 let (elem, window_server_id, last_seen_txid, last_animation_frame, ended_animation) =
                     match self.window_mut(wid) {
                         Ok(window) => {
+                            window.frame_source = FrameSource::Ordinary;
                             let ended_animation =
                                 std::mem::replace(&mut window.is_animating, false);
                             (
@@ -1316,20 +1344,13 @@ impl State {
                     return;
                 }
 
-                let mouse_state = event::get_mouse_state();
-                let txid = match self.window(wid) {
+                let (txid, source) = match self.window(wid) {
                     Ok(window) => {
-                        if window.is_animating {
-                            trace!(?wid, ?notif, "Ignoring notification during animation");
+                        if window.is_animating || window.frame_source == FrameSource::Viewport {
+                            trace!(?wid, ?notif, "Ignoring notification during owned frame writes");
                             return;
                         }
-                        if window.interactive_frame_write
-                            && mouse_state == Some(event::MouseState::Down)
-                        {
-                            trace!(?wid, ?notif, "Ignoring interactive frame notification");
-                            return;
-                        }
-                        self.txid_for_window_state(window)
+                        (self.txid_for_window_state(window), window.frame_source)
                     }
                     Err(err) => {
                         match err {
@@ -1343,8 +1364,13 @@ impl State {
                         return;
                     }
                 };
+                let mouse_state = event::get_mouse_state();
+                if source == FrameSource::Drag && mouse_state == Some(event::MouseState::Down) {
+                    trace!(?wid, ?notif, "Ignoring interactive drag notification");
+                    return;
+                }
                 if let Some(window) = self.windows.get_mut(&wid) {
-                    window.interactive_frame_write = false;
+                    window.frame_source = FrameSource::Ordinary;
                 }
                 let frame = match elem.frame() {
                     Ok(frame) => frame,
@@ -1876,7 +1902,7 @@ impl State {
             title: info.title.clone(),
             is_animating: false,
             last_animation_frame: None,
-            interactive_frame_write: false,
+            frame_source: FrameSource::Ordinary,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);

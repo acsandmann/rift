@@ -6,7 +6,9 @@ use tokio::sync::Notify;
 
 use super::animation::AnimationManager;
 use super::{Reactor, command_workflow};
+use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::actor::gesture::{Context, Control, Lifecycle, Motion, MotionPublisher};
+use crate::common::collections::HashMap;
 use crate::layout_engine::{
     EventResponse, LayoutCommand, LayoutId, LayoutSystemKind, VirtualWorkspaceId,
 };
@@ -19,6 +21,7 @@ pub(super) struct ViewportSession {
     layout: LayoutId,
     applied: f64,
     timestamp: Duration,
+    updated_windows: HashMap<WindowId, AppThreadHandle>,
     pub(super) interval: Duration,
     pub(super) refresh: Option<Arc<Notify>>,
     pub(super) display_link: Option<crate::sys::display_link::DisplayLink>,
@@ -106,6 +109,7 @@ impl Reactor {
                     });
                 let refresh = link.as_ref().map(|_| notify);
                 self.viewport_gesture = Some(ViewportSession {
+                    updated_windows: HashMap::default(),
                     timestamp: context.started,
                     context,
                     control,
@@ -171,7 +175,15 @@ impl Reactor {
         if moved.is_some_and(|x| x != 0.0) {
             let frames = system.viewport_frames(s.layout);
             let space = s.context.space;
-            self.apply_viewport_frames(space, frames);
+            let frames = self.bound_viewport_frames(space, frames);
+            if AnimationManager::interactive_layout(self, space, &frames) {
+                let session = self.viewport_gesture.as_mut().unwrap();
+                for (wid, _) in frames {
+                    if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+                        session.updated_windows.entry(wid).or_insert_with(|| app.handle.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -186,6 +198,11 @@ impl Reactor {
         let Some(s) = self.viewport_gesture.take() else {
             return;
         };
+        // Flush the last coalesced write and read accepted geometry once, even
+        // when release leaves the camera exactly where the fingers stopped.
+        for (&wid, handle) in &s.updated_windows {
+            let _ = handle.send(Request::EndWindowAnimation(wid));
+        }
         let valid = s.valid(self);
         let visible = valid || s.visible(self);
         if cancelled || !valid {
@@ -357,6 +374,7 @@ mod tests {
     use crate::actor::reactor::testing::*;
     use crate::common::config::{Config, LayoutMode};
     use crate::layout_engine::LayoutSystem;
+    use crate::sys::geometry::SameAs;
     use crate::sys::screen::{CoordinateConverter, SpaceId};
 
     fn setup(propagate: bool) -> (Reactor, Context, Control, MotionPublisher) {
@@ -431,6 +449,113 @@ mod tests {
             motion: motion.clone(),
         });
         (r, context, c, motion)
+    }
+    #[test]
+    fn live_scroll_coalesces_app_writes_and_reconciles_once_at_lift() {
+        for (cancelled, final_x) in [(false, 40.0), (false, 60.0), (true, 40.0)] {
+            let (mut apps, mut r) = test_context();
+            let space = SpaceId::new(1);
+            r.handle_loop_event(space_state_event(
+                vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+                vec![Some(space)],
+            ));
+            r.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode: LayoutMode::Scrolling,
+            });
+            apps.make_app_and_settle(&mut r, 1, make_windows(4));
+            r.send_layout_event(crate::layout_engine::LayoutEvent::WindowFocused(
+                space,
+                WindowId::new(1, 1),
+            ));
+            apps.simulate_until_quiet(&mut r);
+            let initial = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+
+            let mut config = Config::default();
+            config.settings.layout.scrolling.gestures.enabled = true;
+            let settings = Settings::new(&config);
+            let control = Control::new(&config);
+            control.configure(settings, true, Vec::new(), CoordinateConverter::default());
+            let context = Context::new(
+                1,
+                0,
+                space,
+                1000.0,
+                LayoutMode::Scrolling,
+                settings,
+                Duration::ZERO,
+            )
+            .unwrap();
+            let motion = MotionPublisher::default();
+            r.gesture_event(Lifecycle::Begin {
+                context,
+                control,
+                motion: motion.clone(),
+            });
+            for (total_x, time) in [(20.0, 10), (40.0, 20)] {
+                motion.publish(Motion {
+                    session: 1,
+                    total_x,
+                    timestamp: Duration::from_millis(time),
+                });
+                r.gesture_tick();
+            }
+            let mut requests = apps.requests();
+            assert_eq!(
+                requests.len(),
+                1,
+                "live motion must coalesce into one app wake: {requests:?}"
+            );
+            let Request::InteractiveFramesPending(queue) = requests.pop().unwrap() else {
+                panic!("live scrolling must use the interactive transport");
+            };
+            let mut written = crate::common::collections::HashSet::default();
+            queue.drain_with(|wid, frame, set_size, _, source| {
+                assert_eq!(source, crate::actor::app::FrameSource::Viewport);
+                assert!(!set_size, "scrolling must only move windows");
+                assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic));
+                written.insert(wid);
+            });
+            assert_eq!(written.len(), 4);
+            assert!(
+                !initial
+                    .same_as(r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic)
+            );
+
+            // Pause before lift: niri leaves the camera here, so there is no new
+            // layout write to implicitly acknowledge the last interactive frame.
+            r.gesture_event(Lifecycle::End {
+                sample: Motion {
+                    session: 1,
+                    total_x: final_x,
+                    timestamp: Duration::from_millis(200),
+                },
+                cancelled,
+            });
+            let requests = apps.requests();
+            if !cancelled && final_x != 40.0 {
+                assert!(
+                    matches!(requests.first(), Some(Request::InteractiveFramesPending(_))),
+                    "the final motion must be queued before terminal reconciliation: {requests:?}"
+                );
+            }
+            let reconciled: Vec<_> = requests
+                .iter()
+                .filter_map(|request| match request {
+                    Request::EndWindowAnimation(wid) => Some(*wid),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                reconciled.len(),
+                written.len(),
+                "each moved window needs one terminal reconciliation"
+            );
+            assert_eq!(
+                reconciled.into_iter().collect::<crate::common::collections::HashSet<_>>(),
+                written
+            );
+        }
     }
     #[test]
     fn gesture_flushes_final_sample_and_ignores_stale_motion() {

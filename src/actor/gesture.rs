@@ -112,6 +112,15 @@ impl Settings {
 
     pub fn enabled(self) -> bool { self.scroll.is_some() || self.workspace.is_some() }
 
+    fn minimum_contacts(self) -> usize {
+        self.scroll
+            .into_iter()
+            .chain(self.workspace)
+            .map(|a| a.fingers)
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+
     fn action(self, mode: LayoutMode) -> Option<ActionConfig> {
         if mode == LayoutMode::Scrolling && self.scroll.is_some() {
             self.scroll
@@ -174,7 +183,9 @@ pub struct Control {
 }
 #[derive(Debug, Default)]
 struct PendingInput {
-    frame: Option<(multitouch::Device, Vec<multitouch::Contact>)>,
+    frame: Option<(u64, Vec<multitouch::Contact>)>,
+    minimum_contacts: usize,
+    contact_counts: HashMap<u64, usize>,
     removed: Vec<u64>,
 }
 impl Control {
@@ -190,7 +201,10 @@ impl Control {
             })),
             owner: Arc::default(),
             stop: Arc::default(),
-            pending: Arc::default(),
+            pending: Arc::new(Mutex::new(PendingInput {
+                minimum_contacts: Settings::new(config).minimum_contacts(),
+                ..PendingInput::default()
+            })),
             wake_tx,
             wake_rx,
         }
@@ -199,21 +213,38 @@ impl Control {
     fn wake(&self) { let _ = self.wake_tx.try_send(()); }
 
     fn publish(&self, event: multitouch::MonitorEvent<'_>) {
-        let mut pending = self.pending.lock();
-        let evicted = match event {
+        match event {
             multitouch::MonitorEvent::Contacts { device, contacts } => {
-                pending.frame.replace((device, contacts.to_vec()))
+                if let Some(id) = device.device_id() {
+                    self.publish_contacts(id, contacts);
+                }
             }
             multitouch::MonitorEvent::DeviceRemoved(id) => {
+                let mut pending = self.pending.lock();
+                pending.contact_counts.remove(&id);
                 pending.removed.push(id);
-                if pending.frame.as_ref().is_some_and(|(device, _)| device.device_id() == Some(id))
-                {
+                let evicted = if pending.frame.as_ref().is_some_and(|(device, _)| *device == id) {
                     pending.frame.take()
                 } else {
                     None
-                }
+                };
+                drop(pending);
+                self.wake();
+                drop(evicted);
             }
-        };
+        }
+    }
+
+    fn publish_contacts(&self, id: u64, contacts: &[multitouch::Contact]) {
+        let count = contacts.iter().filter(|c| !c.is_palm() && c.state().is_active()).count();
+        let mut pending = self.pending.lock();
+        let previous = pending.contact_counts.insert(id, count);
+        // Unsupported motion needs no recognition or ownership updates. Still
+        // deliver every topology change, including staggered and full lifts.
+        if count < pending.minimum_contacts && previous == Some(count) {
+            return;
+        }
+        let evicted = pending.frame.replace((id, contacts.to_vec()));
         drop(pending);
         self.wake();
         drop(evicted);
@@ -225,7 +256,12 @@ impl Control {
         } else {
             let _ = self.wake_rx.recv();
         }
-        std::mem::take(&mut *self.pending.lock())
+        let mut pending = self.pending.lock();
+        PendingInput {
+            frame: pending.frame.take(),
+            removed: std::mem::take(&mut pending.removed),
+            ..PendingInput::default()
+        }
     }
 
     pub fn ownership_guard(&self) -> parking_lot::MutexGuard<'_, Ownership> { self.owner.lock() }
@@ -269,6 +305,10 @@ impl Control {
         r.screens = screens;
         r.converter = converter;
         drop(r);
+        let mut pending = self.pending.lock();
+        pending.minimum_contacts = settings.minimum_contacts();
+        pending.contact_counts.clear();
+        drop(pending);
         self.wake();
     }
 
@@ -578,10 +618,7 @@ fn run(control: Control, tx: Sender) {
                 }
             }
         }
-        if let Some((device, contacts)) = pending.frame {
-            let Some(id) = device.device_id() else {
-                continue;
-            };
+        if let Some((id, contacts)) = pending.frame {
             let s = match devices.entry(id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
@@ -681,6 +718,44 @@ mod tests {
                 change == "stop",
             );
             thread.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn unsupported_contact_motion_does_not_wake_worker_but_topology_does() {
+        let mut config = Config::default();
+        config.settings.gestures.enabled = true;
+        config.settings.gestures.fingers = 3;
+        config.settings.layout.scrolling.gestures.enabled = false;
+        let control = Control::new(&config);
+        control.publish_contacts(1, &frame(2, 0.1, 0.5));
+        assert_eq!(control.wait(None).frame.unwrap().0, 1);
+        for step in 0..1000 {
+            control.publish_contacts(1, &frame(2, step as f32 / 1000.0, 0.5));
+        }
+        assert!(control.wake_rx.try_recv().is_err());
+        assert!(control.pending.lock().frame.is_none());
+
+        // Adding the configured third finger enables continuous motion. Both
+        // staggered and full lifts must still reach the session's lifecycle.
+        for count in [3, 3, 2, 0] {
+            control.publish_contacts(1, &frame(count, 0.5, 0.5));
+            assert_eq!(control.wait(None).frame.unwrap().1.len(), count);
+        }
+        // A second device and a changed configuration have separate admission.
+        control.publish_contacts(2, &frame(2, 0.2, 0.5));
+        assert_eq!(control.wait(None).frame.unwrap().0, 2);
+        config.settings.gestures.fingers = 2;
+        control.configure(
+            Settings::new(&config),
+            true,
+            Vec::new(),
+            CoordinateConverter::default(),
+        );
+        control.wait(None);
+        for _ in 0..2 {
+            control.publish_contacts(1, &frame(2, 0.5, 0.5));
+            assert_eq!(control.wait(None).frame.unwrap().1.len(), 2);
         }
     }
 

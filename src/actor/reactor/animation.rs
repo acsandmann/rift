@@ -55,6 +55,12 @@ struct AnimatedWindow {
     txid: TransactionId,
 }
 
+enum FrameMode {
+    Full,
+    PositionOnly,
+    Interactive,
+}
+
 impl AnimatedWindow {
     fn frame_after(&self, frame: u32, total_frames: u32, gesture: Option<(f64, f64)>) -> CGRect {
         if frame == 0 {
@@ -344,7 +350,7 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, false)
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, FrameMode::Full)
     }
 
     /// Apply the position-only layout used while switching virtual workspaces.
@@ -358,7 +364,15 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, true)
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, FrameMode::PositionOnly)
+    }
+
+    pub(super) fn interactive_layout(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+    ) -> bool {
+        Self::instant_layout_inner(reactor, space, layout, None, FrameMode::Interactive)
     }
 
     fn instant_layout_inner(
@@ -366,7 +380,7 @@ impl AnimationManager {
         space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
-        position_only: bool,
+        mode: FrameMode,
     ) -> bool {
         let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect, bool)>> = HashMap::default();
         let mut any_frame_changed = false;
@@ -452,7 +466,19 @@ impl AnimationManager {
                 reactor.transaction_manager.update_txid_entries(txid_entries);
             }
 
-            let requests = if position_only {
+            if matches!(mode, FrameMode::Interactive) {
+                for (wid, frame, size_unchanged) in frames {
+                    handle.send_interactive_frame(
+                        wid,
+                        frame,
+                        !size_unchanged,
+                        txid,
+                        crate::actor::app::FrameSource::Viewport,
+                    );
+                }
+                continue;
+            }
+            let requests = if matches!(mode, FrameMode::PositionOnly) {
                 let mut positions = Vec::new();
                 let mut full_frames = Vec::new();
                 for (wid, frame, size_unchanged) in frames {

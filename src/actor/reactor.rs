@@ -2457,6 +2457,7 @@ impl Reactor {
                         write.frame,
                         write.set_size,
                         transaction,
+                        crate::actor::app::FrameSource::Drag,
                     );
                 } else if let Err(error) = app.handle.send(Request::SetWindowFrame(
                     write.window,
