@@ -202,7 +202,7 @@ impl Control {
             owner: Arc::default(),
             stop: Arc::default(),
             pending: Arc::new(Mutex::new(PendingInput {
-                minimum_contacts: Settings::new(config).minimum_contacts(),
+                minimum_contacts: usize::MAX,
                 ..PendingInput::default()
             })),
             wake_tx,
@@ -300,13 +300,20 @@ impl Control {
         converter: CoordinateConverter,
     ) {
         let mut r = self.routing.lock();
+        r.converter = converter;
+        if r.settings == settings && r.enabled == enabled && r.screens == screens {
+            return;
+        }
         r.settings = settings;
         r.enabled = enabled;
         r.screens = screens;
-        r.converter = converter;
         drop(r);
         let mut pending = self.pending.lock();
-        pending.minimum_contacts = settings.minimum_contacts();
+        pending.minimum_contacts = if enabled {
+            settings.minimum_contacts()
+        } else {
+            usize::MAX
+        };
         pending.contact_counts.clear();
         drop(pending);
         self.wake();
@@ -728,6 +735,12 @@ mod tests {
         config.settings.gestures.fingers = 3;
         config.settings.layout.scrolling.gestures.enabled = false;
         let control = Control::new(&config);
+        control.configure(
+            Settings::new(&config),
+            true,
+            Vec::new(),
+            CoordinateConverter::default(),
+        );
         control.publish_contacts(1, &frame(2, 0.1, 0.5));
         assert_eq!(control.wait(None).frame.unwrap().0, 1);
         for step in 0..1000 {
@@ -735,6 +748,17 @@ mod tests {
         }
         assert!(control.wake_rx.try_recv().is_err());
         assert!(control.pending.lock().frame.is_none());
+        control.configure(
+            Settings::new(&config),
+            true,
+            Vec::new(),
+            CoordinateConverter::default(),
+        );
+        control.publish_contacts(1, &frame(2, 0.7, 0.5));
+        assert!(
+            control.wake_rx.try_recv().is_err(),
+            "unchanged routing must keep admission cached"
+        );
 
         // Adding the configured third finger enables continuous motion. Both
         // staggered and full lifts must still reach the session's lifecycle.
@@ -792,28 +816,16 @@ mod tests {
             })
             .collect()
     }
-    fn setup(
-        scrolling: bool,
-    ) -> (
+    type Fixture = (
         DeviceSession,
         Control,
         MotionPublisher,
         Sender,
         crate::actor::Receiver<Event>,
-    ) {
-        setup_settings(scrolling, 3, false)
-    }
-    fn setup_settings(
-        scrolling: bool,
-        workspace_fingers: usize,
-        invert: bool,
-    ) -> (
-        DeviceSession,
-        Control,
-        MotionPublisher,
-        Sender,
-        crate::actor::Receiver<Event>,
-    ) {
+    );
+
+    fn setup(scrolling: bool) -> Fixture { setup_settings(scrolling, 3, false) }
+    fn setup_settings(scrolling: bool, workspace_fingers: usize, invert: bool) -> Fixture {
         let mut config = Config::default();
         config.settings.gestures.enabled = true;
         config.settings.gestures.fingers = workspace_fingers;

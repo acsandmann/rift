@@ -869,51 +869,47 @@ impl ScrollingLayoutSystem {
                 &fallback
             }
         };
-        self.translate_frames(state, g, park)
+        Self::translate_frames(state, g, park).collect()
     }
 
-    fn translate_frames(
-        &self,
-        state: &LayoutState,
-        g: &Geometry,
+    fn translate_frames<'a>(
+        state: &'a LayoutState,
+        g: &'a Geometry,
         park: bool,
-    ) -> Vec<(WindowId, CGRect)> {
+    ) -> impl Iterator<Item = (WindowId, CGRect)> + 'a {
         let offset = state.viewport.offset();
-        g.frames
-            .iter()
-            .map(|&(wid, mut frame)| {
-                frame.origin.x += g.tiling.origin.x - offset;
-                if park {
-                    if frame.max().x <= g.tiling.origin.x {
-                        frame.origin.x = g.screen.origin.x - frame.size.width;
-                    } else if frame.origin.x >= g.tiling.max().x {
-                        frame.origin.x = g.screen.max().x;
-                    }
+        g.frames.iter().map(move |&(wid, mut frame)| {
+            frame.origin.x += g.tiling.origin.x - offset;
+            if park {
+                if frame.max().x <= g.tiling.origin.x {
+                    frame.origin.x = g.screen.origin.x - frame.size.width;
+                } else if frame.origin.x >= g.tiling.max().x {
+                    frame.origin.x = g.screen.max().x;
                 }
-                frame.origin.x = frame.origin.x.round();
-                frame.origin.y = frame.origin.y.round();
-                frame.size.width = frame.size.width.round();
-                frame.size.height = frame.size.height.round();
-                if state.fullscreen.contains(&wid) {
-                    frame = g.screen;
-                } else if state.fullscreen_within_gaps.contains(&wid) {
-                    frame = g.tiling;
-                }
-                (wid, frame)
-            })
-            .collect()
+            }
+            frame.origin.x = frame.origin.x.round();
+            frame.origin.y = frame.origin.y.round();
+            frame.size.width = frame.size.width.round();
+            frame.size.height = frame.size.height.round();
+            if state.fullscreen.contains(&wid) {
+                frame = g.screen;
+            } else if state.fullscreen_within_gaps.contains(&wid) {
+                frame = g.tiling;
+            }
+            (wid, frame)
+        })
     }
 
     /// Cached-geometry fast path; no constraint solving or topology rebuilding.
-    pub fn viewport_frames(&self, layout: LayoutId) -> Vec<(WindowId, CGRect)> {
-        let Some(state) = self.layouts.get(layout) else {
-            return Vec::new();
-        };
-        state
-            .geometry
-            .as_ref()
-            .map(|g| self.translate_frames(state, g, true))
-            .unwrap_or_default()
+    pub fn viewport_frames(
+        &self,
+        layout: LayoutId,
+    ) -> impl Iterator<Item = (WindowId, CGRect)> + '_ {
+        self.layouts
+            .get(layout)
+            .into_iter()
+            .filter_map(|state| Some((state, state.geometry.as_ref()?)))
+            .flat_map(|(state, geometry)| Self::translate_frames(state, geometry, true))
     }
 
     pub(crate) fn logical_frames(
@@ -2258,7 +2254,7 @@ mod tests {
             let layout = system.create_layout();
             system.add_window_after_selection(layout, wid(1));
             system.prepare_layout(layout, f.screen, &f.constraints, &f.gaps);
-            assert_eq!(system.viewport_frames(layout)[0].1.origin.x, single);
+            assert_eq!(system.viewport_frames(layout).next().unwrap().1.origin.x, single);
         }
     }
 
@@ -2441,7 +2437,7 @@ mod tests {
         f.drop(5, 4, WindowDropAction::Stack);
         f.select(1);
         let logical = f.frames();
-        let native = f.system.viewport_frames(f.layout);
+        let native: Vec<_> = f.system.viewport_frames(f.layout).collect();
         for index in 0..3 {
             assert!((logical[index + 1].1.origin.x - logical[index].1.max().x - 17.0).abs() <= 1.0);
         }
@@ -2449,7 +2445,7 @@ mod tests {
         assert!((logical[4].1.origin.y - logical[3].1.max().y - 11.0).abs() <= 1.0);
         assert_eq!(native[3].1.origin.x, f.screen.max().x);
         assert!(logical[3].1.origin.x > native[3].1.origin.x);
-        assert_eq!(f.system.viewport_frames(f.layout), native);
+        assert_eq!(f.system.viewport_frames(f.layout).collect::<Vec<_>>(), native);
     }
 
     #[test]
@@ -2506,13 +2502,13 @@ mod tests {
         let frames = f.frames();
         let clone = f.system.clone_layout(f.layout);
         assert_eq!(f.system.container_tree(clone), tree);
-        assert_eq!(f.system.viewport_frames(clone), frames);
+        assert_eq!(f.system.viewport_frames(clone).collect::<Vec<_>>(), frames);
         let text = ron::to_string(&f.system).unwrap();
         let mut restored: ScrollingLayoutSystem = ron::from_str(&text).unwrap();
         restored.update_settings(&f.system.settings);
         restored.prepare_layout(f.layout, f.screen, &f.constraints, &f.gaps);
         assert_eq!(restored.container_tree(f.layout), tree);
-        assert_eq!(restored.viewport_frames(f.layout), frames);
+        assert_eq!(restored.viewport_frames(f.layout).collect::<Vec<_>>(), frames);
         f.system.select_window(clone, wid(3));
         f.system.center_selected_column(clone);
         let old_x = f
@@ -2565,7 +2561,7 @@ mod tests {
                 f.system.remove_window(wid(index));
             }
             assert_eq!(f.selected(), None);
-            assert!(f.system.viewport_frames(f.layout).is_empty());
+            assert!(f.system.viewport_frames(f.layout).next().is_none());
             assert!(!f.system.begin_viewport_gesture(f.layout));
         }
     }
@@ -2583,7 +2579,10 @@ mod tests {
         system.prepare_layout(layout, screen, &HashMap::default(), &GapSettings::default());
         assert_eq!(system.selected_window(layout), Some(wid(2)));
         assert_eq!(system.container_tree(layout).children[0].node_id, 42);
-        assert_eq!(system.viewport_frames(layout)[0].1.size.width, 600.0);
+        assert_eq!(
+            system.viewport_frames(layout).next().unwrap().1.size.width,
+            600.0
+        );
         system.add_window_after_selection(layout, wid(3));
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }

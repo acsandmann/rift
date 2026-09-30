@@ -13,7 +13,6 @@ use crate::sys::geometry::{Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
 use crate::sys::timer::Timer;
-use crate::sys::window_server::WindowServerId;
 
 pub type Sender = mpsc::UnboundedSender<Message>;
 pub type Receiver = mpsc::UnboundedReceiver<Message>;
@@ -53,12 +52,6 @@ struct AnimatedWindow {
     finish: CGRect,
     is_focus: bool,
     txid: TransactionId,
-}
-
-enum FrameMode {
-    Full,
-    PositionOnly,
-    Interactive,
 }
 
 impl AnimatedWindow {
@@ -350,7 +343,7 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, FrameMode::Full)
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, false)
     }
 
     /// Apply the position-only layout used while switching virtual workspaces.
@@ -364,23 +357,15 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, FrameMode::PositionOnly)
-    }
-
-    pub(super) fn interactive_layout(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-    ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, None, FrameMode::Interactive)
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, true)
     }
 
     fn instant_layout_inner(
         reactor: &mut Reactor,
-        space: SpaceId,
+        _space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
-        mode: FrameMode,
+        position_only: bool,
     ) -> bool {
         let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect, bool)>> = HashMap::default();
         let mut any_frame_changed = false;
@@ -391,11 +376,6 @@ impl AnimationManager {
                 continue;
             }
 
-            let is_hidden = !reactor
-                .layout_manager
-                .layout_engine
-                .workspaces()
-                .is_window_in_active_workspace(&reactor.state.windows, space, wid);
             let window_store = &mut reactor.state.windows;
             let Some(window) = window_store.window_mut(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");
@@ -406,79 +386,48 @@ impl AnimationManager {
             if target_frame.same_as(current_frame) {
                 continue;
             }
-            if let Some(wsid) = window.info.sys_id {
-                if reactor
+            if let Some(wsid) = window.info.sys_id
+                && reactor
                     .transaction_manager
                     .get_target_frame(wsid)
                     .is_some_and(|pending| pending.same_as(target_frame))
-                {
-                    trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
-                    continue;
-                }
+            {
+                trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
+                continue;
             }
             any_frame_changed = true;
             trace!(
                 ?wid,
                 ?current_frame,
                 ?target_frame,
-                hidden = is_hidden,
                 "Instant workspace positioning"
             );
 
             let size_unchanged = current_frame.size.same_as(target_frame.size);
-            per_app.entry(wid.pid).or_default().push((wid, target_frame, size_unchanged));
             window.frame_monotonic = target_frame;
+            per_app.entry(wid.pid).or_default().push((wid, target_frame, size_unchanged));
         }
 
         for (pid, frames) in per_app {
-            if frames.is_empty() {
-                continue;
-            }
-
             let Some(app_state) = reactor.app_manager.apps.get(&pid) else {
                 debug!(?pid, "Skipping layout update for app - app no longer exists");
                 continue;
             };
 
-            let handle = app_state.handle.clone();
+            let handle = &app_state.handle;
 
-            let (first_wid, first_target, _) = frames[0];
-            let mut txid = TransactionId::default();
-            let mut has_txid = false;
-            let mut txid_entries: Vec<(WindowServerId, TransactionId, CGRect)> = Vec::new();
-            if let Some(window) = reactor.state.windows.window_mut(first_wid) {
-                if let Some(wsid) = window.info.sys_id {
-                    txid = reactor.transaction_manager.generate_next_txid(wsid);
-                    has_txid = true;
-                    txid_entries.push((wsid, txid, first_target));
+            let txid = frames
+                .iter()
+                .find_map(|(wid, _, _)| reactor.state.windows.window(*wid)?.info.sys_id)
+                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
+                .unwrap_or_default();
+            for (wid, frame, _) in &frames {
+                if let Some(wsid) = reactor.state.windows.window(*wid).and_then(|w| w.info.sys_id) {
+                    reactor.transaction_manager.store_txid(wsid, txid, *frame);
                 }
             }
 
-            if has_txid {
-                for (wid, frame, _) in frames.iter().skip(1) {
-                    if let Some(w) = reactor.state.windows.window_mut(*wid)
-                        && let Some(wsid) = w.info.sys_id
-                    {
-                        reactor.transaction_manager.set_last_sent_txid(wsid, txid);
-                        txid_entries.push((wsid, txid, *frame));
-                    }
-                }
-                reactor.transaction_manager.update_txid_entries(txid_entries);
-            }
-
-            if matches!(mode, FrameMode::Interactive) {
-                for (wid, frame, size_unchanged) in frames {
-                    handle.send_interactive_frame(
-                        wid,
-                        frame,
-                        !size_unchanged,
-                        txid,
-                        crate::actor::app::FrameSource::Viewport,
-                    );
-                }
-                continue;
-            }
-            let requests = if matches!(mode, FrameMode::PositionOnly) {
+            let requests = if position_only {
                 let mut positions = Vec::new();
                 let mut full_frames = Vec::new();
                 for (wid, frame, size_unchanged) in frames {
@@ -489,22 +438,23 @@ impl AnimationManager {
                     }
                 }
 
-                let mut requests = Vec::with_capacity(2);
-                if !positions.is_empty() {
-                    requests.push(Request::SetWorkspaceSwitchPositions(positions, txid, true));
-                }
-                if !full_frames.is_empty() {
-                    requests.push(Request::SetBatchWindowFrame(full_frames, txid, true));
-                }
-                requests
+                [
+                    (!positions.is_empty())
+                        .then(|| Request::SetWorkspaceSwitchPositions(positions, txid, true)),
+                    (!full_frames.is_empty())
+                        .then(|| Request::SetBatchWindowFrame(full_frames, txid, true)),
+                ]
             } else {
-                vec![Request::SetBatchWindowFrame(
-                    frames.into_iter().map(|(wid, frame, _)| (wid, frame)).collect(),
-                    txid,
-                    true,
-                )]
+                [
+                    Some(Request::SetBatchWindowFrame(
+                        frames.into_iter().map(|(wid, frame, _)| (wid, frame)).collect(),
+                        txid,
+                        true,
+                    )),
+                    None,
+                ]
             };
-            for request in requests {
+            for request in requests.into_iter().flatten() {
                 if let Err(e) = handle.send(request) {
                     debug!(
                         ?pid,
@@ -732,6 +682,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
+    use crate::sys::window_server::WindowServerId;
 
     fn rect(origin_x: f64, origin_y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))

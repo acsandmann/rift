@@ -6,12 +6,13 @@ use tokio::sync::Notify;
 
 use super::animation::AnimationManager;
 use super::{Reactor, command_workflow};
-use crate::actor::app::{AppThreadHandle, Request, WindowId};
+use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId};
 use crate::actor::gesture::{Context, Control, Lifecycle, Motion, MotionPublisher};
 use crate::common::collections::HashMap;
 use crate::layout_engine::{
     EventResponse, LayoutCommand, LayoutId, LayoutSystemKind, VirtualWorkspaceId,
 };
+use crate::sys::geometry::{Round, SameAs};
 
 pub(super) struct ViewportSession {
     context: Context,
@@ -83,7 +84,7 @@ impl Reactor {
                 system.update_viewport_gesture(layout, 0.0, context.started);
                 if let Some(tx) = &self.animation_tx {
                     _ = tx.send(super::animation::Message::Stop(
-                        system.viewport_frames(layout).into_iter().map(|(wid, _)| wid).collect(),
+                        system.viewport_frames(layout).map(|(wid, _)| wid).collect(),
                     ));
                 }
                 let hz = self
@@ -172,18 +173,41 @@ impl Reactor {
             return;
         };
         let moved = system.update_viewport_gesture(s.layout, delta, sample.timestamp);
-        if moved.is_some_and(|x| x != 0.0) {
-            let frames = system.viewport_frames(s.layout);
-            let space = s.context.space;
-            let frames = self.bound_viewport_frames(space, frames);
-            if AnimationManager::interactive_layout(self, space, &frames) {
-                let session = self.viewport_gesture.as_mut().unwrap();
-                for (wid, _) in frames {
-                    if let Some(app) = self.app_manager.apps.get(&wid.pid) {
-                        session.updated_windows.entry(wid).or_insert_with(|| app.handle.clone());
-                    }
-                }
+        if !moved.is_some_and(|x| x != 0.0) {
+            return;
+        }
+        let screen = (self.active_spaces.len() > 1)
+            .then(|| self.space_state.screen_by_space(s.context.space))
+            .flatten();
+        for (wid, frame) in system.viewport_frames(s.layout) {
+            let frame = screen
+                .map_or(frame, |screen| {
+                    super::managers::bound_frame_to_screen(frame, screen.frame)
+                })
+                .round();
+            let Some(window) = self.state.windows.window_mut(wid) else {
+                continue;
+            };
+            if frame.same_as(window.frame_monotonic) {
+                continue;
             }
+            let Some(app) = self.app_manager.apps.get(&wid.pid) else {
+                continue;
+            };
+            let txid = window.info.sys_id.map_or_else(super::TransactionId::default, |wsid| {
+                let txid = self.transaction_manager.generate_next_txid(wsid);
+                self.transaction_manager.store_txid(wsid, txid, frame);
+                txid
+            });
+            app.handle.send_interactive_frame(
+                wid,
+                frame,
+                !frame.size.same_as(window.frame_monotonic.size),
+                txid,
+                FrameSource::Viewport,
+            );
+            window.frame_monotonic = frame;
+            s.updated_windows.entry(wid).or_insert_with(|| app.handle.clone());
         }
     }
 
@@ -248,7 +272,7 @@ impl Reactor {
             )
         };
         if visible {
-            let frames = system.viewport_frames(s.layout);
+            let frames = system.viewport_frames(s.layout).collect();
             if let Some(release) = release {
                 let frames = self.bound_viewport_frames(s.context.space, frames);
                 AnimationManager::animate_viewport_release(
@@ -374,8 +398,15 @@ mod tests {
     use crate::actor::reactor::testing::*;
     use crate::common::config::{Config, LayoutMode};
     use crate::layout_engine::LayoutSystem;
-    use crate::sys::geometry::SameAs;
     use crate::sys::screen::{CoordinateConverter, SpaceId};
+
+    fn sample(session: u64, total_x: f64, millis: u64) -> Motion {
+        Motion {
+            session,
+            total_x,
+            timestamp: Duration::from_millis(millis),
+        }
+    }
 
     fn setup(propagate: bool) -> (Reactor, Context, Control, MotionPublisher) {
         setup_options(propagate, false, false)
@@ -437,8 +468,16 @@ mod tests {
         cfg.settings.layout.scrolling.gestures.workspace_switch_threshold = threshold;
         cfg.settings.gestures.haptics_enabled = false;
         cfg.settings.gestures.skip_empty = skip_empty;
-        let settings = Settings::new(&cfg);
-        let c = Control::new(&cfg);
+        let (context, c, motion) = begin(&mut r, &cfg, space);
+        (r, context, c, motion)
+    }
+    fn begin(
+        r: &mut Reactor,
+        config: &Config,
+        space: SpaceId,
+    ) -> (Context, Control, MotionPublisher) {
+        let settings = Settings::new(config);
+        let c = Control::new(config);
         c.configure(settings, true, Vec::new(), CoordinateConverter::default());
         let context = Context::new(
             1,
@@ -456,8 +495,9 @@ mod tests {
             control: c.clone(),
             motion: motion.clone(),
         });
-        (r, context, c, motion)
+        (context, c, motion)
     }
+
     #[test]
     fn live_scroll_coalesces_app_writes_and_reconciles_once_at_lift() {
         for (cancelled, final_x) in [(false, 40.0), (false, 60.0), (true, 40.0)] {
@@ -481,31 +521,9 @@ mod tests {
 
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
-            let settings = Settings::new(&config);
-            let control = Control::new(&config);
-            control.configure(settings, true, Vec::new(), CoordinateConverter::default());
-            let context = Context::new(
-                1,
-                0,
-                space,
-                1000.0,
-                LayoutMode::Scrolling,
-                settings,
-                Duration::ZERO,
-            )
-            .unwrap();
-            let motion = MotionPublisher::default();
-            r.gesture_event(Lifecycle::Begin {
-                context,
-                control,
-                motion: motion.clone(),
-            });
+            let (_, _, motion) = begin(&mut r, &config, space);
             for (total_x, time) in [(20.0, 10), (40.0, 20)] {
-                motion.publish(Motion {
-                    session: 1,
-                    total_x,
-                    timestamp: Duration::from_millis(time),
-                });
+                motion.publish(sample(1, total_x, time));
                 r.gesture_tick();
             }
             let mut requests = apps.requests();
@@ -533,11 +551,7 @@ mod tests {
             // Pause before lift: niri leaves the camera here, so there is no new
             // layout write to implicitly acknowledge the last interactive frame.
             r.gesture_event(Lifecycle::End {
-                sample: Motion {
-                    session: 1,
-                    total_x: final_x,
-                    timestamp: Duration::from_millis(200),
-                },
+                sample: sample(1, final_x, 200),
                 cancelled,
             });
             let requests = apps.requests();
@@ -579,11 +593,7 @@ mod tests {
             .layout_system
             .selected_window(layout);
         for (total, time) in [(4.0, 10), (9.0, 20), (15.0, 30)] {
-            m.publish(Motion {
-                session: 1,
-                total_x: total,
-                timestamp: Duration::from_millis(time),
-            });
+            m.publish(sample(1, total, time));
         }
         r.gesture_tick();
         assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 15.0);
@@ -593,19 +603,11 @@ mod tests {
                 .selected_window(layout),
             initial
         );
-        m.publish(Motion {
-            session: 99,
-            total_x: 9000.0,
-            timestamp: Duration::from_millis(40),
-        });
+        m.publish(sample(99, 9000.0, 40));
         r.gesture_tick();
         assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 15.0);
         r.gesture_event(Lifecycle::End {
-            sample: Motion {
-                session: 1,
-                total_x: 900.0,
-                timestamp: Duration::from_millis(50),
-            },
+            sample: sample(1, 900.0, 50),
             cancelled: false,
         });
         assert!(r.viewport_gesture.is_none());
@@ -614,11 +616,7 @@ mod tests {
             .selected_window(layout);
         assert_ne!(selected, initial);
         r.gesture_event(Lifecycle::End {
-            sample: Motion {
-                session: 1,
-                total_x: 5000.0,
-                timestamp: Duration::from_millis(60),
-            },
+            sample: sample(1, 5000.0, 60),
             cancelled: false,
         });
         assert_eq!(
@@ -653,11 +651,7 @@ mod tests {
                 (-travel * 0.5, 20),
                 (-travel * 0.8, 30),
             ] {
-                m.publish(Motion {
-                    session: 1,
-                    total_x: total,
-                    timestamp: Duration::from_millis(time),
-                });
+                m.publish(sample(1, total, time));
                 r.gesture_tick();
                 assert_eq!(
                     r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
@@ -667,11 +661,7 @@ mod tests {
             }
             for total in [-travel, -1000.0] {
                 r.gesture_event(Lifecycle::End {
-                    sample: Motion {
-                        session: 1,
-                        total_x: total,
-                        timestamp: Duration::from_millis(40),
-                    },
+                    sample: sample(1, total, 40),
                     cancelled: false,
                 });
                 assert_eq!(
@@ -694,18 +684,10 @@ mod tests {
         ] {
             let (mut r, ctx, _, m) = setup(true);
             let before = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
-            m.publish(Motion {
-                session: 1,
-                total_x: -travel,
-                timestamp: Duration::from_millis(10),
-            });
+            m.publish(sample(1, -travel, 10));
             r.gesture_tick();
             r.gesture_event(Lifecycle::End {
-                sample: Motion {
-                    session: 1,
-                    total_x: if reverse { -travel + 20.0 } else { -travel },
-                    timestamp: Duration::from_millis(20),
-                },
+                sample: sample(1, if reverse { -travel + 20.0 } else { -travel }, 20),
                 cancelled,
             });
             assert_eq!(
@@ -720,11 +702,7 @@ mod tests {
     fn reset_and_workspace_change_retire_camera_without_applying_late_motion() {
         for reset in [true, false] {
             let (mut r, ctx, c, m) = setup(false);
-            m.publish(Motion {
-                session: 1,
-                total_x: 100.0,
-                timestamp: Duration::from_millis(10),
-            });
+            m.publish(sample(1, 100.0, 10));
             r.gesture_tick();
             if reset {
                 let (tx, _) = crate::actor::channel();
@@ -732,11 +710,7 @@ mod tests {
             } else {
                 r.handle_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
             }
-            m.publish(Motion {
-                session: 1,
-                total_x: 9000.0,
-                timestamp: Duration::from_millis(20),
-            });
+            m.publish(sample(1, 9000.0, 20));
             r.gesture_tick();
             assert!(r.viewport_gesture.is_none());
             assert!(c.valid(ctx.epoch) != reset);
@@ -746,11 +720,7 @@ mod tests {
     fn idle_samples_preserve_velocity_for_a_flick_after_a_pause() {
         let (mut r, ctx, _, m) = setup(false);
         for (total, time) in [(0.0, 100), (0.0, 200), (0.0, 290), (200.0, 300)] {
-            m.publish(Motion {
-                session: 1,
-                total_x: total,
-                timestamp: Duration::from_millis(time),
-            });
+            m.publish(sample(1, total, time));
             r.gesture_tick();
         }
         let (ws, layout) = r
@@ -805,11 +775,7 @@ mod tests {
     fn unavailable_boundary_workspace_does_not_cancel_the_camera() {
         let (mut r, ctx, _, m) = setup_options(true, true, false);
         let before = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
-        m.publish(Motion {
-            session: 1,
-            total_x: -300.0,
-            timestamp: Duration::from_millis(10),
-        });
+        m.publish(sample(1, -300.0, 10));
         r.gesture_tick();
         assert_eq!(
             r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
@@ -819,11 +785,7 @@ mod tests {
             r.viewport_gesture.is_some(),
             "an unavailable workspace must not end the camera"
         );
-        m.publish(Motion {
-            session: 1,
-            total_x: 100.0,
-            timestamp: Duration::from_millis(20),
-        });
+        m.publish(sample(1, 100.0, 20));
         r.gesture_tick();
         assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 100.0);
     }
