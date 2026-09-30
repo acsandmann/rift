@@ -192,7 +192,9 @@ impl Control {
             return false;
         }
         let mut owner = self.owner.lock();
-        if owner.session == context.session && owner.owner == Owner::System {
+        if (owner.session == context.session && owner.owner == Owner::System)
+            || (context.settings.consume && owner.dock_owner == Some(Owner::System))
+        {
             return false;
         }
         *owner = Ownership {
@@ -200,6 +202,7 @@ impl Control {
             owner: Owner::Rift,
             consume: context.settings.consume,
             touching: true,
+            dock_owner: owner.dock_owner,
         };
         true
     }
@@ -537,7 +540,9 @@ fn run(control: Control, tx: Sender) {
                 devices.remove(&id);
                 if ui_device == Some(id) {
                     ui_device = None;
-                    control.owner.lock().touching = false;
+                    let mut owner = control.owner.lock();
+                    owner.touching = false;
+                    owner.dock_owner = None;
                 }
                 continue;
             };
@@ -556,6 +561,7 @@ fn run(control: Control, tx: Sender) {
                         owner: s.owner,
                         consume,
                         touching: true,
+                        dock_owner: owner.dock_owner,
                     };
                 }
             }
@@ -792,6 +798,26 @@ mod tests {
             rx.try_recv().unwrap().1,
             Event::Gesture(Lifecycle::End { cancelled: false, .. })
         ));
+    }
+    #[test]
+    fn dock_delivery_prevents_a_late_physical_claim() {
+        for native_owner in [Owner::System, Owner::Rift] {
+            let (mut s, c, m, tx, mut rx) = setup(true);
+            c.ownership_guard().dock_owner = Some(native_owner);
+            s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
+            s.frame(&frame(3, 0.6, 0.5), Duration::from_secs(1), &tx, &c, &m);
+            if native_owner == Owner::System {
+                assert!(
+                    rx.try_recv().is_err(),
+                    "Dock and Rift must not both handle a stroke"
+                );
+            } else {
+                assert!(
+                    matches!(rx.try_recv().unwrap().1, Event::Gesture(Lifecycle::Begin { .. })),
+                    "reserving native delivery must still allow slow physical recognition"
+                );
+            }
+        }
     }
     #[test]
     fn scrolling_scale_tracks_screen_width_and_prior_inversion() {

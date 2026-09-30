@@ -1,4 +1,5 @@
 //! Native delivery arbitration only. Physical recognition belongs to multitouch.
+//! Dock whole-sequence arbitration follows Loop's #1162 fix.
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::CFRetained;
@@ -27,6 +28,8 @@ pub struct Ownership {
     pub owner: Owner,
     pub consume: bool,
     pub touching: bool,
+    /// Dock delivery is irrevocable once its begin has been forwarded.
+    pub dock_owner: Option<Owner>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Sequence {
@@ -51,6 +54,58 @@ struct Arbitration {
     began: Option<Instant>,
 }
 impl Arbitration {
+    fn decide_dock(&mut self, phase: i64, owner: &mut Ownership, now: Instant) -> Decision {
+        if phase == 1 {
+            self.began = Some(now);
+            self.session = owner.session;
+            self.sequence = if owner.touching {
+                if owner.consume && owner.owner != Owner::System {
+                    Sequence::Dropping
+                } else {
+                    Sequence::Passing
+                }
+            } else {
+                Sequence::Holding
+            };
+        }
+        let end = phase & 12 != 0;
+        let decision = match self.sequence {
+            Sequence::Holding if end => Decision::Drop,
+            Sequence::Holding
+                if owner.touching && owner.consume && owner.owner != Owner::System =>
+            {
+                self.sequence = Sequence::Dropping;
+                Decision::Drop
+            }
+            Sequence::Holding
+                if owner.touching
+                    || self
+                        .began
+                        .is_some_and(|t| now.duration_since(t) >= Duration::from_millis(60)) =>
+            {
+                self.sequence = Sequence::Passing;
+                Decision::Replay
+            }
+            Sequence::Holding => Decision::Hold,
+            Sequence::Dropping => Decision::Drop,
+            _ => Decision::Forward,
+        };
+        owner.dock_owner = match self.sequence {
+            Sequence::Passing => Some(Owner::System),
+            Sequence::Dropping => Some(Owner::Rift),
+            _ => None,
+        };
+        if owner.dock_owner == Some(Owner::System) && owner.consume && owner.touching {
+            owner.owner = Owner::System;
+        }
+        if end {
+            self.sequence = Sequence::Passing;
+            self.began = None;
+            owner.dock_owner = None;
+        }
+        decision
+    }
+
     fn decide(&mut self, phase: i64, owner: Ownership, now: Instant) -> Decision {
         if phase == 1 {
             self.session = owner.session;
@@ -124,7 +179,7 @@ impl Arbitration {
 #[derive(Default)]
 struct NativeSequence {
     arbitration: Arbitration,
-    held: Option<CFRetained<CGEvent>>,
+    held: Vec<CFRetained<CGEvent>>,
 }
 #[derive(Default)]
 pub struct Filter {
@@ -135,16 +190,29 @@ pub struct Filter {
 impl Filter {
     /// No copies/allocations on the normal forward/drop path. Sequence state
     /// stays on the tap thread; only Ownership is read from the worker.
-    pub fn forward<O: std::ops::Deref<Target = Ownership>>(
+    pub fn forward<O: std::ops::DerefMut<Target = Ownership>>(
         &mut self,
         ty: CGEventType,
         event: &CGEvent,
         ownership: impl FnOnce() -> O,
+        mut post: impl FnMut(&CGEvent),
     ) -> bool {
+        let mut post = |held: &CGEvent| {
+            CGEvent::set_integer_value_field(Some(held), CGEventField::EventSourceUserData, REPOST);
+            post(held);
+        };
         if CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData) == REPOST {
             return true;
         }
-        let owner;
+        let dock = ty.0 == CGS_EVENT_DOCK_CONTROL;
+        if dock {
+            let pid =
+                CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUnixProcessID);
+            if pid != 0 && pid != i64::from(std::process::id()) {
+                return true;
+            }
+        }
+        let mut owner;
         let (sequence, phase) = if ty == CGEventType::ScrollWheel {
             let phase = CGEvent::integer_value_field(
                 Some(event),
@@ -202,35 +270,48 @@ impl Filter {
                 CGEvent::integer_value_field(Some(event), PHASE),
             )
         };
-        if phase == 1
-            && let Some(began) = sequence.held.take()
-        {
-            repost(&began);
+        if phase == 1 {
+            for held in sequence.held.drain(..) {
+                // A new Dock begin abandons an unfinished held sequence.
+                if !dock {
+                    post(&held);
+                }
+            }
         }
-        match sequence.arbitration.decide(phase, *owner, Instant::now()) {
+        let decision = if dock {
+            sequence.arbitration.decide_dock(phase, &mut owner, Instant::now())
+        } else {
+            sequence.arbitration.decide(phase, *owner, Instant::now())
+        };
+        match decision {
             Decision::Forward => true,
             Decision::Drop => {
                 if sequence.arbitration.sequence != Sequence::Holding {
-                    sequence.held = None;
+                    sequence.held.clear();
+                } else if let Some(copy) = CGEvent::new_copy(Some(event)) {
+                    sequence.held.push(copy);
                 }
                 false
             }
             Decision::Hold => {
-                sequence.held = CGEvent::new_copy(Some(event));
+                if let Some(copy) = CGEvent::new_copy(Some(event)) {
+                    sequence.held.push(copy);
+                } else {
+                    // Never replay a suffix if its begin could not be copied.
+                    sequence.held.clear();
+                    sequence.arbitration.sequence = Sequence::Dropping;
+                }
                 false
             }
             Decision::Replay => {
-                if let Some(began) = sequence.held.take() {
-                    repost(&began);
+                for held in sequence.held.drain(..) {
+                    post(&held);
                 }
-                if let Some(current) = CGEvent::new_copy(Some(event)) {
-                    repost(&current);
-                }
-                false
+                true
             }
             Decision::Cancel => {
                 if let Some(cancel) = cancelled_event(event, ty) {
-                    repost(&cancel);
+                    post(&cancel);
                 }
                 false
             }
@@ -238,7 +319,9 @@ impl Filter {
     }
 
     pub fn hold_deadline(&self) -> Option<Instant> {
-        [&self.dock, &self.app, &self.scroll]
+        // Dock replay needs the current tap proxy; it resolves on the next
+        // event rather than posting an unfinished begin outside a callback.
+        [&self.app, &self.scroll]
             .into_iter()
             .filter(|s| s.arbitration.sequence == Sequence::Holding)
             .filter_map(|s| s.arbitration.began.map(|t| t + Duration::from_millis(60)))
@@ -247,7 +330,7 @@ impl Filter {
 
     pub fn release_expired(&mut self, owner: Ownership) {
         let now = Instant::now();
-        for s in [&mut self.dock, &mut self.app, &mut self.scroll] {
+        for s in [&mut self.app, &mut self.scroll] {
             if s.arbitration.sequence == Sequence::Holding
                 && s.arbitration
                     .began
@@ -257,12 +340,12 @@ impl Filter {
                     && owner.owner == Owner::Rift
                     && owner.consume
                 {
-                    s.held = None;
+                    s.held.clear();
                     s.arbitration.sequence = Sequence::Dropping;
                     continue;
                 }
-                if let Some(began) = s.held.take() {
-                    repost(&began);
+                for held in s.held.drain(..) {
+                    repost(&held);
                 }
                 // Bound native latency without putting a deadline on physical
                 // intent. A later horizontal claim cancels native delivery.
@@ -272,11 +355,18 @@ impl Filter {
     }
 
     pub fn reset(&mut self) {
+        self.dock.held.clear();
+        if self.dock.arbitration.sequence == Sequence::Holding {
+            // Its begin never reached Dock. Suppress the remainder too, even
+            // if a reset/rebuilt tap occurs before the physical stroke ends.
+            self.dock.arbitration.sequence = Sequence::Dropping;
+        }
+        self.dock.arbitration.began = None;
         // A held begin has never reached the system. Releasing it on reset
         // preserves native delivery; subsequent events pass normally.
-        for sequence in [&mut self.dock, &mut self.app, &mut self.scroll] {
-            if let Some(began) = sequence.held.take() {
-                repost(&began);
+        for sequence in [&mut self.app, &mut self.scroll] {
+            for held in sequence.held.drain(..) {
+                repost(&held);
             }
             *sequence = NativeSequence::default();
         }
@@ -317,6 +407,7 @@ mod tests {
             owner: Owner::Undecided,
             consume: true,
             touching: true,
+            dock_owner: None,
         };
         assert_eq!(a.decide(1, o, now), Decision::Hold);
         o.owner = Owner::Rift;
@@ -330,6 +421,7 @@ mod tests {
             owner: Owner::Undecided,
             consume: true,
             touching: true,
+            dock_owner: None,
         };
         assert_eq!(a.decide(2, o, now), Decision::Forward);
         o.owner = Owner::Rift;
@@ -354,6 +446,7 @@ mod tests {
             owner: Owner::Undecided,
             consume: true,
             touching: true,
+            dock_owner: None,
             ..Default::default()
         };
         assert_eq!(a.decide(1, o, now), Decision::Hold);
@@ -373,20 +466,31 @@ mod tests {
             owner: Owner::Rift,
             consume: true,
             touching: true,
+            dock_owner: None,
         };
         for subtype in [11, 17, 18, 19] {
             CGEvent::set_integer_value_field(Some(&event), HID_TYPE, subtype);
-            assert!(f.forward(CGEventType(29), &event, || Box::new(o)));
+            assert!(f.forward(CGEventType(29), &event, || Box::new(o), |_| {}));
         }
         CGEvent::set_integer_value_field(Some(&event), HID_TYPE, 23);
         CGEvent::set_integer_value_field(Some(&event), MOTION, 2);
-        assert!(f.forward(CGEventType(30), &event, || Box::new(o)));
+        assert!(f.forward(CGEventType(30), &event, || Box::new(o), |_| {}));
         CGEvent::set_integer_value_field(Some(&event), MOTION, 1);
         CGEvent::set_integer_value_field(Some(&event), PHASE, 1);
-        assert!(f.forward(CGEventType(30), &event, || Box::new(Ownership::default())));
-        assert!(!f.forward(CGEventType(30), &event, || Box::new(o)));
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::EventSourceUnixProcessID,
+            i64::from(std::process::id()) + 1,
+        );
+        for phase in [1, 2, 4] {
+            CGEvent::set_integer_value_field(Some(&event), PHASE, phase);
+            assert!(f.forward(CGEventType(30), &event, || Box::new(o), |_| {}));
+        }
+        CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUnixProcessID, 0);
+        CGEvent::set_integer_value_field(Some(&event), PHASE, 1);
+        assert!(!f.forward(CGEventType(30), &event, || Box::new(o), |_| {}));
         CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, REPOST);
-        assert!(f.forward(CGEventType(30), &event, || Box::new(o)));
+        assert!(f.forward(CGEventType(30), &event, || Box::new(o), |_| {}));
     }
     #[test]
     fn cancellation_clears_native_velocity_and_scroll_momentum() {
@@ -464,20 +568,27 @@ mod tests {
             owner: Owner::Rift,
             consume: true,
             touching: true,
+            dock_owner: None,
         };
-        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(1), || Box::new(owner)));
-        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(4), || Box::new(owner)));
-        assert!(filter.forward(CGEventType::ScrollWheel, &scroll(0), || Box::new(
-            Ownership::default()
-        )));
+        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(1), || Box::new(owner), |_| {}));
+        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(4), || Box::new(owner), |_| {}));
+        assert!(filter.forward(
+            CGEventType::ScrollWheel,
+            &scroll(0),
+            || Box::new(Ownership::default()),
+            |_| {}
+        ));
         let momentum = scroll(0);
         CGEvent::set_integer_value_field(
             Some(&momentum),
             CGEventField::ScrollWheelEventMomentumPhase,
             2,
         );
-        assert!(!filter.forward(CGEventType::ScrollWheel, &momentum, || Box::new(
-            Ownership::default()
-        )));
+        assert!(!filter.forward(
+            CGEventType::ScrollWheel,
+            &momentum,
+            || Box::new(Ownership::default()),
+            |_| {}
+        ));
     }
 }

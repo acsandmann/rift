@@ -677,10 +677,15 @@ impl Input {
         self.refresh_disable_hotkey_state(&mut self.state.borrow_mut());
     }
 
-    fn on_event(&self, event_type: CGEventType, event: &CGEvent) -> bool {
+    fn on_event(
+        &self,
+        event_type: CGEventType,
+        event: &CGEvent,
+        proxy: Option<CGEventTapProxy>,
+    ) -> bool {
         match event_type {
             ty if ty.0 == gesture::CGS_EVENT_GESTURE || ty.0 == gesture::CGS_EVENT_DOCK_CONTROL => {
-                self.native_gesture_forward(ty, event)
+                self.native_gesture_forward(ty, event, proxy)
             }
             CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged => {
                 if event::is_rift_synthetic_event(event) {
@@ -733,7 +738,7 @@ impl Input {
                 ));
                 false
             }
-            CGEventType::ScrollWheel => self.native_gesture_forward(event_type, event),
+            CGEventType::ScrollWheel => self.native_gesture_forward(event_type, event, proxy),
             CGEventType::MouseMoved => self.on_mouse_moved(event, CGEvent::location(Some(event))),
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 if self.mission_control_active.get() && event_type == CGEventType::LeftMouseDragged
@@ -1130,7 +1135,7 @@ fn overview_scroll_delta(delta: CGPoint, flags: CGEventFlags) -> CGPoint {
 }
 
 unsafe extern "C-unwind" fn input_callback(
-    _proxy: CGEventTapProxy,
+    proxy: CGEventTapProxy,
     event_type: CGEventType,
     event_ref: core::ptr::NonNull<CGEvent>,
     user_info: *mut std::ffi::c_void,
@@ -1166,7 +1171,7 @@ unsafe extern "C-unwind" fn input_callback(
         if let Some(point) = mouse_point {
             this.on_mouse_moved(event, point)
         } else {
-            this.on_event(event_type, event)
+            this.on_event(event_type, event, Some(proxy))
         }
     }));
 
@@ -1445,6 +1450,7 @@ mod tests {
             owner: gesture::Owner::Undecided,
             consume: true,
             touching: true,
+            dock_owner: None,
         };
         let event = |phase| {
             let event = CGEvent::new_scroll_wheel_event2(
@@ -1463,16 +1469,16 @@ mod tests {
             );
             event
         };
-        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(1)));
+        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(1), None));
         std::thread::sleep(Duration::from_millis(70));
-        input.native_gesture_forward(CGEventType::ScrollWheel, &event(2));
+        input.native_gesture_forward(CGEventType::ScrollWheel, &event(2), None);
         assert_eq!(
             input.gesture_control.ownership_guard().owner,
             gesture::Owner::Undecided,
             "native delivery timeout must not impose a minimum recognition speed"
         );
         input.gesture_control.ownership_guard().owner = gesture::Owner::Rift;
-        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(2)));
+        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(2), None));
     }
 
     #[test]
@@ -1666,7 +1672,10 @@ mod tests {
             CGEventType::LeftMouseDragged,
             CGEventType::LeftMouseUp,
         ] {
-            assert_eq!(input.on_event(ty, &event), ty == CGEventType::LeftMouseDragged);
+            assert_eq!(
+                input.on_event(ty, &event, None),
+                ty == CGEventType::LeftMouseDragged
+            );
             if ty == CGEventType::LeftMouseDragged {
                 assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::MouseMoved);
             }
@@ -1714,7 +1723,10 @@ mod tests {
             CGEventType::RightMouseDragged,
             CGEventType::RightMouseUp,
         ] {
-            assert_eq!(input.on_event(ty, &event), ty == CGEventType::RightMouseDragged);
+            assert_eq!(
+                input.on_event(ty, &event, None),
+                ty == CGEventType::RightMouseDragged
+            );
             if ty == CGEventType::RightMouseDragged {
                 assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::MouseMoved);
             }
@@ -1750,7 +1762,7 @@ mod tests {
         )
         .unwrap();
         CGEvent::set_flags(Some(&event), CGEventFlags::MaskShift);
-        assert!(!input.on_event(CGEventType::ScrollWheel, &event));
+        assert!(!input.on_event(CGEventType::ScrollWheel, &event, None));
         assert!(
             matches!(rx.try_recv().unwrap().1, super::super::mission_control::Event::Input(super::super::mission_control::Input::Scroll { delta, .. }) if delta == CGPoint::new(-60.0, 0.0))
         );
@@ -1780,7 +1792,7 @@ mod tests {
         )
         .unwrap();
         CGEvent::set_location(Some(&event), CGPoint::new(30.0, 40.0));
-        assert!(!input.on_event(CGEventType::ScrollWheel, &event));
+        assert!(!input.on_event(CGEventType::ScrollWheel, &event, None));
         let (
             _,
             super::super::mission_control::Event::Input(
@@ -1793,7 +1805,7 @@ mod tests {
         assert_eq!(point, CGPoint::new(30.0, 40.0));
         assert_eq!(delta, CGPoint::new(12.0, -60.0));
         input.mission_control_active.set(false);
-        assert!(input.on_event(CGEventType::ScrollWheel, &event));
+        assert!(input.on_event(CGEventType::ScrollWheel, &event, None));
         assert!(rx.try_recv().is_err());
     }
 
@@ -1915,17 +1927,17 @@ mod tests {
             ]);
         let event = CGEvent::new_keyboard_event(None, 0, true).unwrap();
         CGEvent::set_flags(Some(&event), CGEventFlags::empty());
-        assert!(!input.on_event(CGEventType::KeyDown, &event));
+        assert!(!input.on_event(CGEventType::KeyDown, &event, None));
         assert!(wm_rx.try_recv().unwrap().0.is_none());
         CGEvent::set_integer_value_field(Some(&event), CGEventField::KeyboardEventAutorepeat, 1);
-        assert!(!input.on_event(CGEventType::KeyDown, &event));
+        assert!(!input.on_event(CGEventType::KeyDown, &event, None));
         assert!(wm_rx.try_recv().is_err());
         CGEvent::set_integer_value_field(
             Some(&event),
             CGEventField::EventSourceUserData,
             0x5249_4654,
         );
-        assert!(input.on_event(CGEventType::KeyDown, &event));
+        assert!(input.on_event(CGEventType::KeyDown, &event, None));
         assert!(wm_rx.try_recv().is_err());
     }
 
@@ -1968,22 +1980,22 @@ mod tests {
         input.rebuild_binding_maps();
 
         let b = CGEvent::new_keyboard_event(None, 11, true).unwrap();
-        assert!(!input.on_event(CGEventType::KeyDown, &b));
+        assert!(!input.on_event(CGEventType::KeyDown, &b, None));
         assert_eq!(input.active_mode.get(), 1);
 
         let a = CGEvent::new_keyboard_event(None, 0, true).unwrap();
-        assert!(input.on_event(CGEventType::KeyDown, &a));
+        assert!(input.on_event(CGEventType::KeyDown, &a, None));
         assert!(wm_rx.try_recv().is_err());
 
         CGEvent::set_integer_value_field(Some(&b), CGEventField::KeyboardEventAutorepeat, 1);
-        assert!(input.on_event(CGEventType::KeyDown, &b));
+        assert!(input.on_event(CGEventType::KeyDown, &b, None));
         assert_eq!(input.active_mode.get(), 1);
 
         let escape = CGEvent::new_keyboard_event(None, 53, true).unwrap();
-        assert!(!input.on_event(CGEventType::KeyDown, &escape));
+        assert!(!input.on_event(CGEventType::KeyDown, &escape, None));
         assert_eq!(input.active_mode.get(), 0);
 
-        assert!(!input.on_event(CGEventType::KeyDown, &a));
+        assert!(!input.on_event(CGEventType::KeyDown, &a, None));
         assert!(matches!(
             wm_rx.try_recv().unwrap().1,
             WmEvent::Command(WmCommand::Wm(wm_controller::WmCmd::ReloadConfig))
@@ -2009,7 +2021,7 @@ mod tests {
             .push(WmCommand::Wm(wm_controller::WmCmd::ReloadConfig));
 
         let a = CGEvent::new_keyboard_event(None, 0, true).unwrap();
-        assert!(!input.on_event(CGEventType::KeyDown, &a));
+        assert!(!input.on_event(CGEventType::KeyDown, &a, None));
         assert_eq!(input.active_mode.get(), 1);
         assert!(matches!(
             wm_rx.try_recv().unwrap().1,
@@ -2078,15 +2090,15 @@ mod tests {
             objc2_core_graphics::CGMouseButton::Left,
         )
         .unwrap();
-        assert!(input.on_event(CGEventType::LeftMouseUp, &event));
+        assert!(input.on_event(CGEventType::LeftMouseUp, &event, None));
         assert!(events_rx.try_recv().is_err());
         input.state.borrow_mut().mouse_features_enabled = true;
-        assert!(input.on_event(CGEventType::LeftMouseUp, &event));
+        assert!(input.on_event(CGEventType::LeftMouseUp, &event, None));
         assert!(matches!(
             events_rx.try_recv().unwrap().1,
             Event::MouseUp(crate::actor::drag::MouseButton::Left)
         ));
-        assert!(input.on_event(CGEventType::LeftMouseUp, &event));
+        assert!(input.on_event(CGEventType::LeftMouseUp, &event, None));
         assert!(matches!(
             events_rx.try_recv().unwrap().1,
             Event::MouseUp(crate::actor::drag::MouseButton::Left)
@@ -2108,7 +2120,7 @@ mod tests {
             objc2_core_graphics::CGMouseButton::Right,
         )
         .unwrap();
-        assert!(input.on_event(CGEventType::RightMouseUp, &right_up));
+        assert!(input.on_event(CGEventType::RightMouseUp, &right_up, None));
         assert_eq!(
             input.state.borrow().captured_button,
             Some(crate::actor::drag::MouseButton::Left)
@@ -2154,7 +2166,7 @@ mod tests {
             let target = CGPoint::new(6.0, 920.0);
             // Horizontal warping rewrites the event before the drag publisher sees it.
             CGEvent::set_location(Some(&event), target);
-            assert!(!input.on_event(event_type, &event));
+            assert!(!input.on_event(event_type, &event, None));
             assert_eq!(input.drag_motion_publisher.take_latest().unwrap().point, target);
         }
     }
@@ -2169,11 +2181,11 @@ mod tests {
             objc2_core_graphics::CGMouseButton::Left,
         )
         .unwrap();
-        assert!(input.on_event(CGEventType::LeftMouseDragged, &event));
+        assert!(input.on_event(CGEventType::LeftMouseDragged, &event, None));
         assert!(events_rx.try_recv().is_err());
 
         input.state.borrow_mut().captured_button = Some(crate::actor::drag::MouseButton::Left);
-        assert!(!input.on_event(CGEventType::LeftMouseDragged, &event));
+        assert!(!input.on_event(CGEventType::LeftMouseDragged, &event, None));
         assert!(matches!(
             events_rx.try_recv().unwrap().1,
             Event::DragMotionPending(_)
@@ -2182,7 +2194,7 @@ mod tests {
 
         input.state.borrow_mut().captured_button = None;
         input.native_motion_active.store(true, Ordering::Release);
-        assert!(input.on_event(CGEventType::LeftMouseDragged, &event));
+        assert!(input.on_event(CGEventType::LeftMouseDragged, &event, None));
         assert!(matches!(
             events_rx.try_recv().unwrap().1,
             Event::DragMotionPending(_)
@@ -2204,9 +2216,27 @@ mod tests {
 }
 
 impl Input {
-    fn native_gesture_forward(&self, ty: CGEventType, event: &CGEvent) -> bool {
+    fn native_gesture_forward(
+        &self,
+        ty: CGEventType,
+        event: &CGEvent,
+        proxy: Option<CGEventTapProxy>,
+    ) -> bool {
         let mut filter = self.gesture_filter.borrow_mut();
-        filter.forward(ty, event, || self.gesture_control.ownership_guard())
+        filter.forward(
+            ty,
+            event,
+            || self.gesture_control.ownership_guard(),
+            |held| {
+                if let Some(proxy) = proxy {
+                    // The proxy is valid only during this tap callback. Held events
+                    // must reach downstream taps before the current event returns.
+                    unsafe { CGEvent::tap_post_event(proxy, Some(held)) };
+                } else {
+                    CGEvent::post(CGTapLoc::SessionEventTap, Some(held));
+                }
+            },
+        )
     }
 
     fn reset_gestures(&self) {
