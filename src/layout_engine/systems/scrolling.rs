@@ -1755,11 +1755,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some((col, row)) = state.selected_location() else {
             return;
         };
+        let vertical = orientation == ResizeOrientation::Vertical
+            || (orientation == ResizeOrientation::Smart && state.columns[col].windows.len() > 1);
         state.mutate(&self.settings, |state| {
             let column = &mut state.columns[col];
-            if orientation == ResizeOrientation::Vertical
-                || (orientation == ResizeOrientation::Smart && column.windows.len() > 1)
-            {
+            if vertical {
                 if column.windows.len() > 1 {
                     let total: f64 = column.height_weights.iter().sum();
                     let share = (column.height_weights[row] / total + amount).clamp(0.05, 0.95);
@@ -1781,6 +1781,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 column.width = ColumnWidth::Proportion(clamp_ratio(ratio + amount, &self.settings));
             }
         });
+        if !vertical {
+            state.reveal(&self.settings);
+        }
     }
 }
 
@@ -2047,15 +2050,16 @@ mod tests {
     }
 
     #[test]
-    fn active_resize_preserves_its_left_edge_and_contiguous_strip() {
+    fn resize_preserves_its_left_edge_when_selection_still_fits() {
         let mut f = Fixture::new(3);
         f.select(2);
+        f.system.center_selected_column(f.layout);
         let before = f.frames();
         f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Horizontal);
         assert_eq!(f.frame(1), before[0].1);
         assert_eq!(f.frame(2).origin.x, before[1].1.origin.x);
         assert_eq!(f.frame(2).size.width, 600.0);
-        assert_eq!(f.frame(3).origin.x, 1100.0);
+        assert_eq!(f.frame(3).origin.x, 850.0);
     }
 
     #[test]
