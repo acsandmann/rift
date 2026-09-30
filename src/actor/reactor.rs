@@ -14,6 +14,7 @@ mod query;
 mod replay;
 pub mod transaction_manager;
 mod utils;
+mod workspace_bindings;
 
 #[cfg(test)]
 mod testing;
@@ -1969,13 +1970,17 @@ impl Reactor {
                 return Ok(system_workflow::handle_raise_timeout(sequence_id)?);
             }
             Event::ConfigUpdated(new_cfg) => {
-                return command_workflow::handle_config_updated(
+                let outcome = command_workflow::handle_config_updated(
                     &mut self.config,
                     &mut self.layout_manager,
                     &self.state,
                     &mut self.drag_manager,
                     new_cfg,
-                );
+                )?;
+                // Bindings may have changed.
+                let screens = self.space_state.screens.clone();
+                self.refresh_display_bindings(&screens);
+                return Ok(outcome);
             }
             Event::Command(Command::Metrics(cmd)) => {
                 return command_workflow::handle_command_metrics(cmd);
@@ -3037,6 +3042,9 @@ impl Reactor {
             active_window_spaces,
             ..
         } = space_state;
+        // Before any new native space gets its workspaces: start each display on a
+        // workspace it owns.
+        self.refresh_display_bindings(&screens);
         self.space_state.active_window_spaces = active_window_spaces;
         self.space_state.membership_complete = membership_complete;
         let activation_config = self.activation_cfg();
@@ -5230,16 +5238,7 @@ impl Reactor {
     }
 
     fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
-        let mut screens: Vec<&ScreenInfo> = self.space_state.screens.iter().collect();
-        screens.sort_by(|a, b| {
-            let x_order = a.frame.origin.x.total_cmp(&b.frame.origin.x);
-            if x_order == std::cmp::Ordering::Equal {
-                a.frame.origin.y.total_cmp(&b.frame.origin.y)
-            } else {
-                x_order
-            }
-        });
-        screens
+        workspace_bindings::physical_order(&self.space_state.screens)
     }
 
     fn store_current_floating_positions(&mut self, space: SpaceId) {
