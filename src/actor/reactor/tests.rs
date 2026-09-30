@@ -8271,3 +8271,120 @@ fn topology_snapshot_preserves_workspace_placement_with_incomplete_delta() {
         }
     }
 }
+
+/// Settings with one workspace per entry, named `ws0`, `ws1`, …, each bound as
+/// given by a workspace rule.
+fn bound_workspace_settings(
+    bindings: Vec<Option<DisplaySelector>>,
+) -> crate::common::config::VirtualWorkspaceSettings {
+    use crate::common::config::{VirtualWorkspaceSettings, WorkspaceLayoutRule, WorkspaceSelector};
+    VirtualWorkspaceSettings {
+        default_workspace_count: bindings.len(),
+        workspace_names: (0..bindings.len()).map(|index| format!("ws{index}")).collect(),
+        workspace_rules: bindings
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, display)| {
+                Some(WorkspaceLayoutRule {
+                    workspace: WorkspaceSelector::Index(index),
+                    layout: None,
+                    display: Some(display?),
+                })
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// Workspaces 0 and 1 on the left display, 2 and 3 on the right one.
+fn left_right_bindings() -> Vec<Option<DisplaySelector>> {
+    let left = || Some(DisplaySelector::Uuid("test-display-0".into()));
+    let right = || Some(DisplaySelector::Uuid("test-display-1".into()));
+    vec![left(), left(), right(), right()]
+}
+
+fn bound_reactor(settings: crate::common::config::VirtualWorkspaceSettings) -> Reactor {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    reactor
+}
+
+fn active_workspace_of(
+    reactor: &Reactor,
+    space: SpaceId,
+) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
+    reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
+}
+
+#[test]
+fn displays_start_on_a_workspace_bound_to_them_and_keep_windows_found_there() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    // No display-set change flag: the starting workspace must not depend on the
+    // later display-change pass, which a startup snapshot does not always get.
+    reactor.handle_event(space_state_event(vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+    let mut apps = Apps::new();
+    let mut on_right = make_window(1);
+    on_right.frame = CGRect::new(CGPoint::new(1200., 100.), CGSize::new(400., 400.));
+    apps.make_app_and_settle(&mut reactor, 1, vec![on_right, make_window(2)]);
+
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert_eq!(
+        active_workspace_of(&reactor, left_space),
+        Some(left_workspaces[0])
+    );
+    assert_eq!(
+        active_workspace_of(&reactor, right_space),
+        Some(right_workspaces[2]),
+        "the right display starts on its first bound workspace, not the left's default"
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(right_space, WindowId::new(1, 1)),
+        Some(right_workspaces[2]),
+        "a window found on the right display stays there"
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, WindowId::new(1, 2)),
+        Some(left_workspaces[0])
+    );
+}
+
+#[test]
+fn cycling_and_back_and_forth_skip_workspaces_bound_to_other_displays() {
+    let mut settings = bound_workspace_settings(left_right_bindings());
+    settings.workspace_auto_back_and_forth = true;
+    let mut reactor = bound_reactor(settings);
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let active = |reactor: &Reactor| active_workspace_of(reactor, left_space);
+
+    reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(active(&reactor), Some(left_workspaces[1]));
+    reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(
+        active(&reactor),
+        Some(left_workspaces[0]),
+        "cycling wraps past the right display's workspaces"
+    );
+    reactor.handle_test_layout_command(LayoutCommand::PrevWorkspace(None));
+    assert_eq!(active(&reactor), Some(left_workspaces[1]));
+
+    // A back-and-forth target on the left display that belongs to the right one
+    // is never used; a local one still is.
+    assert!(reactor.set_test_active_workspace(left_space, left_workspaces[2]));
+    assert!(reactor.set_test_active_workspace(left_space, left_workspaces[0]));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToLastWorkspace);
+    assert_eq!(active(&reactor), Some(left_workspaces[0]));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    assert_eq!(active(&reactor), Some(left_workspaces[0]));
+}
