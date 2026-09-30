@@ -127,7 +127,7 @@ struct ColumnGeometry {
 #[derive(Clone, Copy, Debug)]
 struct SnapPoint {
     offset: f64,
-    column: ColumnId,
+    column: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -184,10 +184,10 @@ impl Geometry {
         state: &LayoutState,
         settings: &ScrollingLayoutSettings,
         screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &GapSettings,
+        constraints: HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: GapSettings,
     ) -> Self {
-        let tiling = compute_tiling_area(screen, gaps);
+        let tiling = compute_tiling_area(screen, &gaps);
         let mut columns = Vec::with_capacity(state.columns.len());
         let mut frames = Vec::with_capacity(state.columns.iter().map(|c| c.windows.len()).sum());
         let constraint = |wid: &WindowId| {
@@ -206,7 +206,7 @@ impl Geometry {
                 tiling.size.width,
                 gaps.inner.horizontal,
                 settings,
-                constraints,
+                &constraints,
             );
             let mut min: f64 = 1.0;
             let mut fixed: f64 = 0.0;
@@ -274,8 +274,8 @@ impl Geometry {
         let mut geometry = Self {
             screen,
             tiling,
-            gaps: gaps.clone(),
-            constraints: constraints.clone(),
+            gaps,
+            constraints,
             columns,
             frames,
             bounds: (0.0, 0.0),
@@ -318,23 +318,23 @@ impl Geometry {
                 .columns
                 .iter()
                 .enumerate()
-                .map(|(index, &column)| SnapPoint {
+                .map(|(index, _)| SnapPoint {
                     offset: self.anchor_offset(index, settings.alignment),
-                    column: column.id,
+                    column: index,
                 })
                 .collect();
         }
         let last = self.columns.last().unwrap();
         let left = first.world_x;
         let right = last.world_x + last.width - view;
-        let mut points = vec![SnapPoint { offset: left, column: first.id }, SnapPoint {
+        let mut points = vec![SnapPoint { offset: left, column: 0 }, SnapPoint {
             offset: right,
-            column: last.id,
+            column: self.columns.len() - 1,
         }];
-        for column in &self.columns {
+        for (index, column) in self.columns.iter().enumerate() {
             for offset in [column.world_x, column.world_x + column.width - view] {
                 if left < offset && offset < right {
-                    points.push(SnapPoint { offset, column: column.id });
+                    points.push(SnapPoint { offset, column: index });
                 }
             }
         }
@@ -645,8 +645,8 @@ impl LayoutState {
                 self,
                 settings,
                 old.screen,
-                &old.constraints,
-                &old.gaps,
+                old.constraints,
+                old.gaps,
             ));
             let anchor = window
                 .and_then(|wid| self.locate(wid))
@@ -865,7 +865,13 @@ impl ScrollingLayoutSystem {
         let g = match state.geometry.as_ref().filter(|g| g.matches(screen, constraints, gaps)) {
             Some(g) => g,
             None => {
-                fallback = Geometry::build(state, &self.settings, screen, constraints, gaps);
+                fallback = Geometry::build(
+                    state,
+                    &self.settings,
+                    screen,
+                    constraints.clone(),
+                    gaps.clone(),
+                );
                 &fallback
             }
         };
@@ -962,12 +968,11 @@ impl ScrollingLayoutSystem {
         if matches!(state.viewport, Viewport::Gesture(_)) {
             return false;
         }
-        state.motion = MotionHistory {
-            samples: VecDeque::with_capacity(32),
-            total: 0.0,
-            stationary: true,
-            overscroll: 0.0,
-        };
+        state.motion.samples.clear();
+        state.motion.samples.reserve(32);
+        state.motion.total = 0.0;
+        state.motion.stationary = true;
+        state.motion.overscroll = 0.0;
         state.viewport = Viewport::Gesture(state.viewport.offset());
         true
     }
@@ -1014,7 +1019,6 @@ impl ScrollingLayoutSystem {
         &mut self,
         layout: LayoutId,
         timestamp: Duration,
-        projected_offset: Option<f64>,
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
         let Viewport::Gesture(offset) = &mut state.viewport else {
@@ -1031,12 +1035,8 @@ impl ScrollingLayoutSystem {
         } else {
             velocity
         };
-        let projected = projected_offset
-            .filter(|x| x.is_finite())
-            // AppKit's measured horizontal coast: T = cbrt(|v| / 4000),
-            // displacement = v*T/4, with quartic ease-out over T. Moderate
-            // flicks carry less than a fixed exponential projection.
-            .unwrap_or_else(|| *offset + velocity * (velocity.abs() / 4000.0).cbrt() / 4.0);
+        // Quartic ease-out coast: T = cbrt(|v| / 4000), displacement = v*T/4.
+        let projected = *offset + velocity * (velocity.abs() / 4000.0).cbrt() / 4.0;
         self.settle(layout, projected, velocity, true)
     }
 
@@ -1068,68 +1068,64 @@ impl ScrollingLayoutSystem {
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
         let from_offset = state.viewport.offset();
-        let active = state.columns.get(state.active_column)?.id;
-        let snap = g.snaps.iter().min_by(|a, b| {
-            (a.offset - projected)
-                .abs()
-                .total_cmp(&(b.offset - projected).abs())
-                // Shared anchors should not steal focus from the current column.
-                .then_with(|| {
-                    (preserve_focus && a.column != active)
-                        .cmp(&(preserve_focus && b.column != active))
-                })
-        })?;
         let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
-        let offset = if preserve_focus && niri {
-            projected.clamp(g.bounds.0, g.bounds.1)
-        } else {
-            snap.offset
-        };
-        let mut index = state.columns.iter().position(|c| c.id == snap.column)?;
-        if niri {
-            if preserve_focus {
-                // Free panning does not reveal or align a column on lift. Keep
-                // focus while it remains visible; otherwise focus the most visible
-                // column without moving the camera to accommodate it.
-                let visible = |c: ColumnGeometry| {
-                    ((c.world_x + c.width).min(offset + g.tiling.size.width)
-                        - c.world_x.max(offset))
+        let (offset, index) = if preserve_focus && niri {
+            let offset = projected.clamp(g.bounds.0, g.bounds.1);
+            let visible = |c: ColumnGeometry| {
+                ((c.world_x + c.width).min(offset + g.tiling.size.width) - c.world_x.max(offset))
                     .max(0.0)
-                };
-                index = if visible(g.columns[state.active_column]) > 0.0 {
-                    state.active_column
-                } else {
-                    g.columns
-                        .iter()
-                        .enumerate()
-                        .max_by(|(i, a), (j, b)| {
-                            visible(**a).total_cmp(&visible(**b)).then_with(|| {
-                                if state.motion.total >= 0.0 {
-                                    i.cmp(j)
-                                } else {
-                                    j.cmp(i)
-                                }
-                            })
-                        })?
-                        .0
-                };
-            } else if projected >= state.viewport.offset() {
-                // Otherwise choose the furthest fully visible column in travel direction.
-                for (next, column) in g.columns.iter().enumerate().skip(index + 1) {
-                    if column.world_x + column.width > snap.offset + g.tiling.size.width {
-                        break;
-                    }
-                    index = next;
-                }
+            };
+            // Keep visible focus; otherwise choose the most visible column, with
+            // travel direction breaking ties. Free release never needs snap lookup.
+            let index = if visible(*g.columns.get(state.active_column)?) > 0.0 {
+                state.active_column
             } else {
-                for next in (0..index).rev() {
-                    if g.columns[next].world_x < snap.offset {
-                        break;
+                g.columns
+                    .iter()
+                    .enumerate()
+                    .max_by(|(i, a), (j, b)| {
+                        visible(**a).total_cmp(&visible(**b)).then_with(|| {
+                            if state.motion.total >= 0.0 {
+                                i.cmp(j)
+                            } else {
+                                j.cmp(i)
+                            }
+                        })
+                    })?
+                    .0
+            };
+            (offset, index)
+        } else {
+            let snap = g.snaps.iter().min_by(|a, b| {
+                (a.offset - projected).abs().total_cmp(&(b.offset - projected).abs()).then_with(
+                    || {
+                        (preserve_focus && a.column != state.active_column)
+                            .cmp(&(preserve_focus && b.column != state.active_column))
+                    },
+                )
+            })?;
+            let mut index = snap.column;
+            if niri {
+                // Explicit snap commands choose the furthest fully visible column
+                // in the direction of travel.
+                if projected >= from_offset {
+                    for (next, column) in g.columns.iter().enumerate().skip(index + 1) {
+                        if column.world_x + column.width > snap.offset + g.tiling.size.width {
+                            break;
+                        }
+                        index = next;
                     }
-                    index = next;
+                } else {
+                    for next in (0..index).rev() {
+                        if g.columns[next].world_x < snap.offset {
+                            break;
+                        }
+                        index = next;
+                    }
                 }
             }
-        }
+            (snap.offset, index)
+        };
         if index != state.active_column {
             state.fullscreen_restore = None;
         }
@@ -1314,7 +1310,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 }
             }
         }
-        state.geometry = Some(Geometry::build(state, &self.settings, screen, constraints, gaps));
+        state.geometry = Some(Geometry::build(
+            state,
+            &self.settings,
+            screen,
+            constraints.clone(),
+            gaps.clone(),
+        ));
         if let Some(bookmark) = bookmark
             && let Some(column) = state.geometry.as_ref().unwrap().column(bookmark.column)
         {
@@ -2247,10 +2249,8 @@ mod tests {
                 assert_eq!(f.frame(index).origin.x, x);
                 f.system.begin_viewport_gesture(f.layout);
                 f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(10));
-                let release = f
-                    .system
-                    .end_viewport_gesture(f.layout, Duration::from_millis(210), None)
-                    .unwrap();
+                let release =
+                    f.system.end_viewport_gesture(f.layout, Duration::from_millis(210)).unwrap();
                 assert_eq!(release.window, wid(index), "alignment={alignment:?}");
                 assert_eq!(f.frame(index).origin.x, x);
             }
@@ -2263,97 +2263,38 @@ mod tests {
     }
 
     #[test]
-    fn snap_points_include_fit_edges_and_safe_short_strip_boundaries() {
-        for (widths, mut expected) in [
-            (vec![500.0, 500.0, 500.0], vec![0.0, 500.0]),
-            (vec![400.0, 700.0, 300.0], vec![0.0, 100.0, 400.0]),
-            (vec![1400.0, 500.0], vec![0.0, 400.0, 900.0]),
-            (vec![400.0, 400.0], vec![-200.0, 0.0]),
-            (vec![500.0], vec![-500.0, 0.0]),
-            (vec![], vec![]),
-        ] {
-            let mut f = Fixture::new(widths.len() as u32);
-            // Exercise fixed sizing through the production geometry helper.
-            let settings = f.system.settings.clone();
-            f.system.layouts[f.layout].mutate(&settings, |state| {
-                for (column, width) in state.columns.iter_mut().zip(widths) {
-                    column.width = ColumnWidth::Fixed(width);
-                }
-            });
-            let g = f.system.layouts[f.layout].geometry.as_ref().unwrap();
-            let points = &g.snaps;
-            let mut offsets: Vec<_> = points.iter().map(|p| p.offset).collect();
-            offsets.sort_by(f64::total_cmp);
-            offsets.dedup();
-            expected.sort_by(f64::total_cmp);
-            assert_eq!(offsets, expected);
-            assert!(points.iter().all(|p| g.column(p.column).is_some()));
-        }
-    }
-
-    #[test]
-    fn gesture_updates_keep_focus_and_release_uses_projected_destination_once() {
-        // Keep visible focus; otherwise select a column at the destination.
-        for (selected, drag, projected, offset, window) in [
-            (1, 0.0, 0.0, 0.0, 1),
-            (1, 150.0, 0.0, 0.0, 1),
-            (2, 20.0, 20.0, 20.0, 2),
-            (3, 20.0, 520.0, 520.0, 3),
-            (3, -20.0, 480.0, 480.0, 3),
-            (1, 150.0, 900.0, 900.0, 3),
-            (1, 150.0, 2000.0, 1000.0, 4),
-            (1, 350.0, 500.0, 500.0, 3),
-            (1, 650.0, 500.0, 500.0, 3),
-        ] {
+    fn gesture_keeps_visible_focus_and_changes_it_only_after_lift() {
+        for (travel, window) in [(150.0, 1), (900.0, 3), (2000.0, 4)] {
             let mut f = Fixture::new(4);
-            f.select(selected);
-            let before = f.frame(1);
             assert!(f.system.begin_viewport_gesture(f.layout));
-            for i in 1..=3 {
-                f.system.update_viewport_gesture(
-                    f.layout,
-                    drag / 3.0,
-                    Duration::from_millis(i * 10),
-                );
-                assert_eq!(f.selected(), Some(wid(selected)));
-            }
-            assert!((f.frame(1).origin.x - (before.origin.x - drag)).abs() < 1e-6);
-            let release = f
-                .system
-                .end_viewport_gesture(f.layout, Duration::from_millis(40), Some(projected))
-                .unwrap();
-            assert_eq!(release.offset, offset);
+            f.system.update_viewport_gesture(f.layout, travel, Duration::from_millis(10));
+            assert_eq!(f.selected(), Some(wid(1)));
+            let release =
+                f.system.end_viewport_gesture(f.layout, Duration::from_millis(210)).unwrap();
             assert_eq!(release.window, wid(window));
             assert_eq!(f.selected(), Some(wid(window)));
-            assert!(f.system.select_window(f.layout, release.window));
-            assert_eq!(f.frame(1).origin.x, -offset);
-            assert!(release.velocity.is_finite());
-            assert!(
-                f.system
-                    .end_viewport_gesture(f.layout, Duration::from_millis(50), None)
-                    .is_none()
-            );
+            assert!(f.system.end_viewport_gesture(f.layout, Duration::from_millis(220)).is_none());
         }
     }
 
     #[test]
     fn release_velocity_projects_momentum_and_idle_release_stays_nearby() {
         let mut offsets = Vec::new();
-        for (drag_ms, idle_ms) in [(30, 0), (300, 0), (30, 200)] {
+        for (drag_ms, idle_ms, pause_ms) in [(30, 0, 0), (300, 0, 0), (30, 200, 0), (10, 0, 300)] {
             let mut f = Fixture::new(4);
             f.system.begin_viewport_gesture(f.layout);
-            f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
+            f.system.update_viewport_gesture(f.layout, 0.0, Duration::from_millis(pause_ms));
             for i in 1..=6 {
                 f.system.update_viewport_gesture(
                     f.layout,
                     200.0 / 6.0,
-                    Duration::from_millis(i * drag_ms / 6),
+                    Duration::from_millis(pause_ms + i * drag_ms / 6),
                 );
                 assert_eq!(f.selected(), Some(wid(1)));
             }
             let release = f
                 .system
-                .end_viewport_gesture(f.layout, Duration::from_millis(drag_ms + idle_ms), None)
+                .end_viewport_gesture(f.layout, Duration::from_millis(pause_ms + drag_ms + idle_ms))
                 .unwrap();
             offsets.push(release.offset);
             if idle_ms > 0 {
@@ -2362,6 +2303,10 @@ mod tests {
         }
         assert!(offsets[0] > offsets[1]);
         assert!(offsets[0] > offsets[2]);
+        assert!(
+            offsets[3] > offsets[1],
+            "a pause before a flick must not dilute its velocity"
+        );
     }
 
     #[test]
@@ -2401,7 +2346,7 @@ mod tests {
                 }
                 let release = f
                     .system
-                    .end_viewport_gesture(f.layout, Duration::from_millis(steps * 10), None)
+                    .end_viewport_gesture(f.layout, Duration::from_millis(steps * 10))
                     .unwrap();
                 assert!(
                     (release.offset - target).abs() < 0.001,

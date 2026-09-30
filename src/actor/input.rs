@@ -414,14 +414,11 @@ impl Input {
         recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
     ) {
         let reset_gestures = match &request {
-            Request::SpaceStateUpdated(snapshot, _) => {
-                let next: Vec<_> = snapshot
-                    .screens
-                    .iter()
-                    .filter_map(|s| s.space.map(|space| (s.frame, space)))
-                    .collect();
-                next != self.state.borrow().screen_spaces
-            }
+            Request::SpaceStateUpdated(snapshot, _) => !snapshot
+                .screens
+                .iter()
+                .filter_map(|s| s.space.map(|space| (s.frame, space)))
+                .eq(self.state.borrow().screen_spaces.iter().copied()),
             Request::LayoutModesChanged(modes) => {
                 let state = self.state.borrow();
                 modes.len() != state.layout_mode_by_space.len()
@@ -441,6 +438,8 @@ impl Input {
         if reset_gestures {
             self.reset_gestures();
         }
+        let configure_gestures =
+            reset_gestures || matches!(&request, Request::SpaceStateUpdated(..));
         let mut should_rebuild_mask = false;
         let mut state = self.state.borrow_mut();
         match request {
@@ -620,26 +619,28 @@ impl Input {
                 }
             }
         }
-        self.gesture_control.configure(
-            state.gesture_settings,
-            state.event_processing_enabled && !self.mission_control_active.get(),
-            state
-                .screen_spaces
-                .iter()
-                .map(|&(frame, space)| {
-                    (
-                        frame,
-                        space,
-                        state
-                            .layout_mode_by_space
-                            .get(&space)
-                            .copied()
-                            .unwrap_or(state.default_layout_mode),
-                    )
-                })
-                .collect(),
-            state.converter,
-        );
+        if configure_gestures {
+            self.gesture_control.configure(
+                state.gesture_settings,
+                state.event_processing_enabled && !self.mission_control_active.get(),
+                state
+                    .screen_spaces
+                    .iter()
+                    .map(|&(frame, space)| {
+                        (
+                            frame,
+                            space,
+                            state
+                                .layout_mode_by_space
+                                .get(&space)
+                                .copied()
+                                .unwrap_or(state.default_layout_mode),
+                        )
+                    })
+                    .collect(),
+                state.converter,
+            );
+        }
         drop(state);
 
         if should_rebuild_mask {

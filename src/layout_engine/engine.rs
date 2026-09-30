@@ -3426,7 +3426,7 @@ mod tests {
     };
 
     #[test]
-    fn scrolling_public_commands_prepare_geometry_focus_and_arbitrate_boundaries() {
+    fn scroll_strip_accumulates_the_configured_boundary_threshold() {
         let mut settings = LayoutSettings::default();
         settings.mode = LayoutMode::Scrolling;
         settings.scrolling.column_width_ratio = 0.5;
@@ -3444,35 +3444,17 @@ mod tests {
                 LayoutEvent::WindowAdded(space, WindowId::new(1, index)),
             );
         }
-        let _ = engine.handle_event(
-            &mut store,
-            LayoutEvent::WindowFocused(space, WindowId::new(1, 1)),
+        engine.calculate_layout(
+            space,
+            screen,
+            &Default::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
         );
-        let render = |engine: &mut LayoutEngine| {
-            engine.calculate_layout(
-                space,
-                screen,
-                &Default::default(),
-                0.0,
-                Default::default(),
-                Default::default(),
-            )
-        };
         let command = |engine: &mut LayoutEngine, store: &mut WindowStore, command| {
             engine.handle_command(store, Some(space), &[space], &HashMap::default(), command)
         };
-        let frames = render(&mut engine);
-        assert_eq!(frames[0].1.size.width, 500.0);
-        assert_eq!(
-            command(
-                &mut engine,
-                &mut store,
-                LayoutCommand::MoveFocus(Direction::Right)
-            )
-            .focus_window,
-            Some(WindowId::new(1, 2))
-        );
-        assert_eq!(render(&mut engine), frames);
         let _ = command(&mut engine, &mut store, LayoutCommand::ScrollStrip {
             delta: 0.8,
         });

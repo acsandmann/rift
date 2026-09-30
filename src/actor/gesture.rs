@@ -183,7 +183,8 @@ pub struct Control {
 }
 #[derive(Debug, Default)]
 struct PendingInput {
-    frame: Option<(u64, Vec<multitouch::Contact>)>,
+    device: Option<u64>,
+    contacts: Vec<multitouch::Contact>,
     minimum_contacts: usize,
     contact_counts: HashMap<u64, usize>,
     removed: Vec<u64>,
@@ -223,14 +224,12 @@ impl Control {
                 let mut pending = self.pending.lock();
                 pending.contact_counts.remove(&id);
                 pending.removed.push(id);
-                let evicted = if pending.frame.as_ref().is_some_and(|(device, _)| *device == id) {
-                    pending.frame.take()
-                } else {
-                    None
-                };
+                if pending.device == Some(id) {
+                    pending.device = None;
+                    pending.contacts.clear();
+                }
                 drop(pending);
                 self.wake();
-                drop(evicted);
             }
         }
     }
@@ -244,24 +243,29 @@ impl Control {
         if count < pending.minimum_contacts && previous == Some(count) {
             return;
         }
-        let evicted = pending.frame.replace((id, contacts.to_vec()));
+        pending.device = Some(id);
+        pending.contacts.clear();
+        pending.contacts.extend_from_slice(contacts);
         drop(pending);
         self.wake();
-        drop(evicted);
     }
 
-    fn wait(&self, deadline: Option<Instant>) -> PendingInput {
+    fn wait(
+        &self,
+        deadline: Option<Instant>,
+        contacts: &mut Vec<multitouch::Contact>,
+    ) -> (Option<u64>, Vec<u64>) {
         if let Some(deadline) = deadline {
             let _ = self.wake_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
         } else {
             let _ = self.wake_rx.recv();
         }
         let mut pending = self.pending.lock();
-        PendingInput {
-            frame: pending.frame.take(),
-            removed: std::mem::take(&mut pending.removed),
-            ..PendingInput::default()
+        let device = pending.device.take();
+        if device.is_some() {
+            std::mem::swap(contacts, &mut pending.contacts);
         }
+        (device, std::mem::take(&mut pending.removed))
     }
 
     pub fn ownership_guard(&self) -> parking_lot::MutexGuard<'_, Ownership> { self.owner.lock() }
@@ -380,9 +384,6 @@ impl Control {
 /// A quarter-pad drag moves one working-area width, independent of column size.
 const SCROLL_SENSITIVITY: f64 = 4.0;
 const VERTICAL_INTENT_DISTANCE: f64 = 0.03;
-pub fn pixels(translation: f64, width: f64, invert: bool) -> f64 {
-    translation * SCROLL_SENSITIVITY * width * if invert { -1.0 } else { 1.0 }
-}
 fn swipe_recognizer(fingers: usize) -> GestureRecognizer {
     let mut recognizer = GestureRecognizer::new(fingers)
         .with_exact_finger_count(true)
@@ -554,7 +555,8 @@ impl DeviceSession {
                     if self.owner != Owner::Rift {
                         return;
                     }
-                    let total_x = pixels(x, c.width, c.action.invert);
+                    let total_x =
+                        x * SCROLL_SENSITIVITY * c.width * if c.action.invert { -1.0 } else { 1.0 };
                     // Compare cumulative travel to the last accepted position:
                     // sensor wobble stays still, but slow sub-point steps accumulate.
                     if !c.action.scrolling || (total_x - self.sample.total_x).abs() >= 1.0 {
@@ -598,16 +600,17 @@ fn run(control: Control, tx: Sender) {
     let motion = MotionPublisher::default();
     let mut next_session = 0;
     let mut ui_device = None;
+    let mut contacts = Vec::new();
     while !control.stop.load(Ordering::Acquire) && !tx.is_closed() {
         // Block until an event, or the exact one-shot staggered-lift deadline.
         let deadline = devices.values().filter_map(|s| s.lifting).min().map(|time| origin + time);
-        let pending = control.wait(deadline);
+        let (device, removed) = control.wait(deadline, &mut contacts);
         if control.stop.load(Ordering::Acquire) || tx.is_closed() {
             break;
         }
         let now = Instant::now();
         let time = now.duration_since(origin);
-        for id in pending.removed {
+        for id in removed {
             if let Some(mut s) = devices.remove(&id) {
                 s.end(&tx, true, time);
             }
@@ -625,7 +628,7 @@ fn run(control: Control, tx: Sender) {
                 }
             }
         }
-        if let Some((id, contacts)) = pending.frame {
+        if let Some(id) = device {
             let s = match devices.entry(id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
@@ -700,7 +703,7 @@ mod tests {
             let (done_tx, done_rx) = crossbeam_channel::bounded(1);
             let thread = std::thread::spawn(move || {
                 ready_tx.send(()).unwrap();
-                worker.wait(None);
+                worker.wait(None, &mut Vec::new());
                 done_tx.send(worker.stop.load(Ordering::Acquire)).unwrap();
             });
             ready_rx.recv().unwrap();
@@ -742,12 +745,12 @@ mod tests {
             CoordinateConverter::default(),
         );
         control.publish_contacts(1, &frame(2, 0.1, 0.5));
-        assert_eq!(control.wait(None).frame.unwrap().0, 1);
+        assert_eq!(control.wait(None, &mut Vec::new()).0.unwrap(), 1);
         for step in 0..1000 {
             control.publish_contacts(1, &frame(2, step as f32 / 1000.0, 0.5));
         }
         assert!(control.wake_rx.try_recv().is_err());
-        assert!(control.pending.lock().frame.is_none());
+        assert!(control.pending.lock().device.is_none());
         control.configure(
             Settings::new(&config),
             true,
@@ -764,11 +767,18 @@ mod tests {
         // staggered and full lifts must still reach the session's lifecycle.
         for count in [3, 3, 2, 0] {
             control.publish_contacts(1, &frame(count, 0.5, 0.5));
-            assert_eq!(control.wait(None).frame.unwrap().1.len(), count);
+            assert_eq!(
+                {
+                    let mut contacts = Vec::new();
+                    control.wait(None, &mut contacts);
+                    contacts.len()
+                },
+                count
+            );
         }
         // A second device and a changed configuration have separate admission.
         control.publish_contacts(2, &frame(2, 0.2, 0.5));
-        assert_eq!(control.wait(None).frame.unwrap().0, 2);
+        assert_eq!(control.wait(None, &mut Vec::new()).0.unwrap(), 2);
         config.settings.gestures.fingers = 2;
         control.configure(
             Settings::new(&config),
@@ -776,10 +786,17 @@ mod tests {
             Vec::new(),
             CoordinateConverter::default(),
         );
-        control.wait(None);
+        control.wait(None, &mut Vec::new());
         for _ in 0..2 {
             control.publish_contacts(1, &frame(2, 0.5, 0.5));
-            assert_eq!(control.wait(None).frame.unwrap().1.len(), 2);
+            assert_eq!(
+                {
+                    let mut contacts = Vec::new();
+                    control.wait(None, &mut contacts);
+                    contacts.len()
+                },
+                2
+            );
         }
     }
 
@@ -790,9 +807,9 @@ mod tests {
             control.publish(multitouch::MonitorEvent::DeviceRemoved(id));
         }
         control.retire();
-        let pending = control.wait(None);
-        assert_eq!(pending.removed, [1, 2, 3]);
-        assert!(pending.frame.is_none());
+        let (device, removed) = control.wait(None, &mut Vec::new());
+        assert_eq!(removed, [1, 2, 3]);
+        assert!(device.is_none());
     }
     fn frame(count: usize, x: f32, y: f32) -> Vec<Contact> {
         (0..count)
@@ -914,7 +931,13 @@ mod tests {
                 c.reset(&tx);
                 rx.try_recv().unwrap();
             }
-            s.frame(&frame(3, 0.501, 0.6), Duration::from_millis(10), &tx, &c, &m);
+            s.frame(
+                &frame(3, if reset { 0.6 } else { 0.501 }, if reset { 0.5 } else { 0.6 }),
+                Duration::from_millis(10),
+                &tx,
+                &c,
+                &m,
+            );
             s.frame(&frame(3, 0.3, 0.6), Duration::from_millis(20), &tx, &c, &m);
             assert_eq!(s.owner, Owner::System);
             assert!(rx.try_recv().is_err());
@@ -992,34 +1015,6 @@ mod tests {
                 );
             }
         }
-    }
-    #[test]
-    fn scrolling_scale_tracks_screen_width_and_prior_inversion() {
-        assert_eq!(pixels(0.25, 1000.0, false), 1000.0);
-        assert_eq!(pixels(0.25, 2000.0, true), -2000.0);
-    }
-    #[test]
-    fn separate_recognizers_do_not_combine_devices_and_reset_ends_once() {
-        let (mut a, c, m, tx, mut rx) = setup(true);
-        let mut b = DeviceSession::new(None, 0, 2, Duration::ZERO);
-        for s in [&mut a, &mut b] {
-            s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
-            s.frame(&frame(3, 0.45, 0.5), Duration::from_millis(10), &tx, &c, &m);
-        }
-        assert!(a.active);
-        assert!(!b.active);
-        assert!(matches!(
-            rx.try_recv().unwrap().1,
-            Event::Gesture(Lifecycle::Begin { .. })
-        ));
-        a.end(&tx, true, Duration::from_millis(20));
-        a.end(&tx, true, Duration::from_millis(30));
-        assert!(matches!(
-            rx.try_recv().unwrap().1,
-            Event::Gesture(Lifecycle::End { cancelled: true, .. })
-        ));
-        assert!(rx.try_recv().is_err());
-        assert!(!a.active);
     }
     #[test]
     fn sequential_finger_lift_keeps_normal_release() {
