@@ -209,8 +209,8 @@ impl Reactor {
             s.control.retire_session(s.context.epoch, s.context.session);
         }
         // Like a fluid page swipe, an edge transition remains reversible until
-        // lift. Edge travel has 40% of the strip's gain so merely reaching the
-        // boundary during a fast scroll cannot commit a workspace switch.
+        // lift. Require deliberate travel beyond the boundary, measured directly
+        // in working-area widths, before committing a workspace switch.
         let excess =
             match &self.layout_manager.layout_engine.workspaces()[s.workspace].layout_system {
                 LayoutSystemKind::Scrolling(system) => system.gesture_overscroll(s.layout),
@@ -221,7 +221,7 @@ impl Reactor {
             && valid
             && s.context.action.propagate
             && excess != 0.0
-            && 0.4 * excess.abs() / s.context.width >= s.context.action.boundary_threshold
+            && excess.abs() / s.context.width >= s.context.action.boundary_threshold
             && self.gesture_workspace_available(&s.context, next)
         {
             if let LayoutSystemKind::Scrolling(system) =
@@ -385,6 +385,14 @@ mod tests {
         skip_empty: bool,
         invert: bool,
     ) -> (Reactor, Context, Control, MotionPublisher) {
+        setup_options_threshold(propagate, skip_empty, invert, 0.25)
+    }
+    fn setup_options_threshold(
+        propagate: bool,
+        skip_empty: bool,
+        invert: bool,
+        threshold: f64,
+    ) -> (Reactor, Context, Control, MotionPublisher) {
         let mut r = test_reactor_with_workspace_count(3);
         let space = SpaceId::new(1);
         r.handle_loop_event(space_state_event(
@@ -426,7 +434,7 @@ mod tests {
         cfg.settings.layout.scrolling.gestures.enabled = true;
         cfg.settings.layout.scrolling.gestures.invert_horizontal = invert;
         cfg.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = propagate;
-        cfg.settings.layout.scrolling.gestures.workspace_switch_threshold = 0.1;
+        cfg.settings.layout.scrolling.gestures.workspace_switch_threshold = threshold;
         cfg.settings.gestures.haptics_enabled = false;
         cfg.settings.gestures.skip_empty = skip_empty;
         let settings = Settings::new(&cfg);
@@ -622,8 +630,15 @@ mod tests {
     }
     #[test]
     fn boundary_requires_configured_overscroll_and_propagates_once() {
-        for (enabled, invert) in [(false, false), (true, false), (true, true)] {
-            let (mut r, ctx, _, m) = setup_options(enabled, false, invert);
+        for (enabled, invert, threshold) in [
+            (false, false, 0.25),
+            (true, false, 0.1),
+            (true, false, 0.25),
+            (true, false, 0.5),
+            (true, true, 0.25),
+        ] {
+            let (mut r, ctx, _, m) = setup_options_threshold(enabled, false, invert, threshold);
+            let travel = threshold * ctx.width + 1.0;
             let before = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
             let store = r.layout_manager.layout_engine.workspaces();
             let expected = if !enabled {
@@ -633,7 +648,11 @@ mod tests {
             } else {
                 store.prev_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
             };
-            for (total, time) in [(-50.0, 10), (-120.0, 20), (-300.0, 30)] {
+            for (total, time) in [
+                (-travel * 0.2, 10),
+                (-travel * 0.5, 20),
+                (-travel * 0.8, 30),
+            ] {
                 m.publish(Motion {
                     session: 1,
                     total_x: total,
@@ -646,7 +665,7 @@ mod tests {
                     "edge movement must remain reversible until lift"
                 );
             }
-            for total in [-300.0, -1000.0] {
+            for total in [-travel, -1000.0] {
                 r.gesture_event(Lifecycle::End {
                     sample: Motion {
                         session: 1,
