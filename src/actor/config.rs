@@ -409,7 +409,8 @@ mod tests {
                 s.virtual_workspaces.workspace_names[1] = "Development".into();
                 s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
                     workspace: WorkspaceSelector::Index(1),
-                    layout: LayoutMode::Scrolling,
+                    layout: Some(LayoutMode::Scrolling),
+                    display: None,
                 });
                 s.virtual_workspaces.app_rules.push(AppWorkspaceRule {
                     app_id: Some("com.apple.Safari".into()),
