@@ -12,9 +12,15 @@
 //!   the owning display and switches there; `move_window_to_workspace` sends
 //!   the window to the owning display's copy of the workspace, and
 //!   `move_workspace_to_display` will not take a bound workspace off its display.
+//! - Windows that end up in a bound workspace on another display (an app rule,
+//!   an overview drop, or macOS parking them while the owner was unplugged) move
+//!   to the owner, and after a display change a display showing a workspace
+//!   bound elsewhere switches back to one of its own.
 //!
 //! When the owning display is not connected the workspace behaves like an
 //! unbound one on whatever display the user is on.
+
+use tracing::warn;
 
 use super::{DisplaySelector, EventOutcome, Reactor, ScreenInfo};
 use crate::actor::app::WindowId;
@@ -289,5 +295,143 @@ impl Reactor {
             self.adopt_display_context(&screen);
         }
         Ok(outcome)
+    }
+
+    /// Whether a window sits in a workspace bound to the display now showing `space`.
+    pub(crate) fn window_returns_to_bound_display(&self, wid: WindowId, space: SpaceId) -> bool {
+        let Some(assignment) = self.state.windows.workspace_info_for_window(wid) else {
+            return false;
+        };
+        self.workspace_ordinal(assignment.space, assignment.workspace_id)
+            .and_then(|index| self.bound_space_for_workspace_index(index))
+            == Some(space)
+    }
+
+    /// Re-apply bindings once the current event's outcome has settled.
+    pub(crate) fn check_display_bindings_later(&mut self) {
+        if self.has_workspace_display_bindings() {
+            self.bindings_need_check = true;
+        }
+    }
+
+    /// Re-apply bindings if an event asked for it: displays showing a workspace
+    /// bound elsewhere switch back to one of their own, and windows in a bound
+    /// workspace on another display move to its owner.
+    pub(crate) fn apply_pending_display_bindings(&mut self) {
+        // The moves emit layout events that ask for another check, which finds
+        // everything in place. The bound guards against two displays handing a
+        // window back and forth.
+        for _ in 0..3 {
+            if !self.bindings_need_check {
+                return;
+            }
+            if self.refreshes_blocked() || self.is_in_drag() || self.is_mission_control_active() {
+                // During sleep, wake, lock and display churn window and space data
+                // is transient; moving windows on it fights macOS. The
+                // authoritative snapshot that ends the instability runs this.
+                return;
+            }
+            self.bindings_need_check = false;
+            let mut outcome = EventOutcome::no_change();
+            let normalized = self.normalize_bound_active_workspaces(&mut outcome);
+            let rehomed = self.rehome_bound_windows(&mut outcome);
+            if normalized || rehomed {
+                self.apply_event_outcome(outcome);
+            }
+        }
+    }
+
+    /// Switch displays showing a workspace bound to another connected display
+    /// back to their last own workspace, or the one they start on. When the owner
+    /// shows nothing, it takes the workspace over so the user keeps seeing it.
+    fn normalize_bound_active_workspaces(&mut self, outcome: &mut EventOutcome) -> bool {
+        let mut changed = false;
+        for screen in self.space_state.screens.clone() {
+            let Some(space) = screen.space.filter(|space| self.is_space_active(*space)) else {
+                continue;
+            };
+            let workspaces = self.layout_manager.layout_engine.workspaces();
+            let Some(index) = workspaces
+                .active_workspace(space)
+                .and_then(|active| self.workspace_ordinal(space, active))
+            else {
+                continue;
+            };
+            let Some(owner) =
+                self.bound_space_for_workspace_index(index).filter(|owner| *owner != space)
+            else {
+                continue;
+            };
+            let target = workspaces
+                .last_workspace(space)
+                .and_then(|last| self.workspace_ordinal(space, last))
+                .unwrap_or_else(|| workspaces.starting_workspace(space));
+            if target == index {
+                continue;
+            }
+            let owner_workspaces = self.layout_manager.layout_engine.workspaces_mut();
+            let owner_copy = owner_workspaces.workspace_id_at(owner, Some(index));
+            let owner_active = owner_workspaces.active_workspace(owner);
+            let owner_idle = owner_active.is_none_or(|id| {
+                owner_workspaces.workspace_windows(&self.state.windows, owner, id).is_empty()
+            });
+            if owner_copy.is_some() && owner_active != owner_copy && owner_idle {
+                match self
+                    .dispatch_layout_command_on(LayoutCommand::SwitchToWorkspace(index), owner)
+                {
+                    Ok(switched) => outcome.absorb(switched),
+                    Err(error) => warn!(%error, "failed to show a bound workspace on its display"),
+                }
+            }
+            match self.dispatch_layout_command_on(LayoutCommand::SwitchToWorkspace(target), space) {
+                Ok(switched) => {
+                    outcome.absorb(switched);
+                    changed = true;
+                }
+                Err(error) => warn!(%error, "failed to leave a workspace bound to another display"),
+            }
+        }
+        changed
+    }
+
+    /// Move windows sitting in a bound workspace on another display to its owner.
+    fn rehome_bound_windows(&mut self, outcome: &mut EventOutcome) -> bool {
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let moves: Vec<_> = self
+            .state
+            .windows
+            .iter_workspace_assignments()
+            .filter(|(window, assignment)| {
+                self.is_space_active(assignment.space)
+                    // Visible where it is: a display only keeps showing a workspace
+                    // bound elsewhere when it has none of its own.
+                    && workspaces.active_workspace(assignment.space) != Some(assignment.workspace_id)
+                    && self
+                        .state
+                        .windows
+                        .window(*window)
+                        .is_some_and(|state| state.is_admitted() && state.info.is_standard)
+            })
+            .filter_map(|(window, assignment)| {
+                let index = self.workspace_ordinal(assignment.space, assignment.workspace_id)?;
+                let owner = self
+                    .bound_space_for_workspace_index(index)
+                    .filter(|owner| *owner != assignment.space)?;
+                Some((window, assignment.space, owner, index))
+            })
+            .collect();
+        let mut changed = false;
+        for (window, source, owner, index) in moves {
+            match self.move_window_to_bound_workspace(window, source, owner, index, false) {
+                Ok(moved) => {
+                    changed |= moved.arrange.passes > 0;
+                    outcome.absorb(moved);
+                }
+                Err(error) => {
+                    warn!(?window, %error, "failed to move a window to its workspace's display")
+                }
+            }
+        }
+        changed
     }
 }

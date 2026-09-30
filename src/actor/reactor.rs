@@ -438,6 +438,9 @@ pub struct Reactor {
     /// Cross-display moves rift started that macOS may not have caught up with:
     /// window -> (target space, end of the grace period).
     in_flight_display_moves: HashMap<WindowServerId, (SpaceId, Instant)>,
+    /// Workspace display bindings need re-applying once the current event's
+    /// outcome has settled window membership.
+    bindings_need_check: bool,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
@@ -581,6 +584,7 @@ impl Reactor {
             viewport_gesture: None,
             presentations: HashMap::default(),
             in_flight_display_moves: HashMap::default(),
+            bindings_need_check: false,
             #[cfg(test)]
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
@@ -1207,6 +1211,7 @@ impl Reactor {
                     outcome = outcome.with_focused_window_broadcast(focused_window);
                 }
                 self.apply_event_outcome(outcome);
+                self.apply_pending_display_bindings();
                 if may_make_ready
                     && self.startup_ready.is_some()
                     && let Some(space) = self.default_query_space()
@@ -1959,6 +1964,9 @@ impl Reactor {
                 if !changed {
                     return Ok(EventOutcome::no_change());
                 }
+                // A drop onto a display's copy of a workspace bound elsewhere sends
+                // the window on to that workspace's display.
+                self.check_display_bindings_later();
                 let source_space = source.unwrap().space;
                 let destination = destination.unwrap();
                 let mut outcome = EventOutcome::layout_changed(false);
@@ -2142,6 +2150,7 @@ impl Reactor {
                 // Bindings may have changed.
                 let screens = self.space_state.screens.clone();
                 self.refresh_display_bindings(&screens);
+                self.check_display_bindings_later();
                 return Ok(outcome);
             }
             Event::Command(Command::Metrics(cmd)) => {
@@ -3377,6 +3386,10 @@ impl Reactor {
         if should_force_refresh_layout {
             outcome = outcome.with_arrange_passes(1);
         }
+        if display_set_changed || should_force_refresh_layout {
+            // A display joined, left or moved.
+            self.check_display_bindings_later();
+        }
         Ok(outcome)
     }
 
@@ -3878,9 +3891,12 @@ impl Reactor {
             })
             .collect();
         for (wid, authoritative_space) in windows {
+            // A window keeps its workspace number when its display went away, or when
+            // it is returning to the display its workspace is bound to.
             let preserve_ordinal = self
                 .assigned_space_for_window_id(wid)
-                .is_some_and(|space| invalidated_spaces.contains(&space));
+                .is_some_and(|space| invalidated_spaces.contains(&space))
+                || self.window_returns_to_bound_display(wid, authoritative_space);
             self.reassign_window_to_authoritative_space(wid, authoritative_space, preserve_ordinal);
         }
     }
@@ -4146,6 +4162,15 @@ impl Reactor {
         }
         if focus_desktop && let Some(space) = self.workspace_command_space() {
             self.focus_desktop_if_active_workspace_empty(space);
+        }
+        if matches!(
+            event_clone,
+            LayoutEvent::WindowAdded(..)
+                | LayoutEvent::WindowObserved(..)
+                | LayoutEvent::WindowDiscoveryCompleted(..)
+        ) {
+            // A new or rediscovered window may sit in a workspace bound elsewhere.
+            self.check_display_bindings_later();
         }
         for space in self.space_state.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
