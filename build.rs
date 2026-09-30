@@ -23,15 +23,24 @@ fn main() {
     println!("cargo:rerun-if-changed=assets");
     println!("cargo:rerun-if-changed=crates");
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
-    let release_tag = format!("v{version}");
-    let tagged = git(&["tag", "--points-at", "HEAD"])
-        .is_some_and(|tags| tags.lines().any(|tag| tag == release_tag || tag == version));
-    let dirty = git(&["diff", "HEAD", "--quiet"]).is_none();
-    let display_version = if tagged && !dirty {
-        version
+
+    let display_version = if git(&["rev-parse", "--is-inside-work-tree"]).is_none() {
+        version.clone()
     } else {
-        let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
-        format!("{version}+{commit}{}", if dirty { ".dirty" } else { "" })
+        let release_tag = format!("v{version}");
+        let tagged = git(&["tag", "--points-at", "HEAD"])
+            .is_some_and(|tags| tags.lines().any(|tag| tag == release_tag || tag == version));
+
+        let dirty = git(&["diff", "HEAD", "--quiet"]).is_none();
+
+        if tagged && !dirty {
+            version.clone()
+        } else {
+            let commit =
+                git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
+
+            format!("{version}+{commit}{}", if dirty { ".dirty" } else { "" })
+        }
     };
     println!("cargo:rustc-env=RIFT_VERSION={display_version}");
     println!("cargo:rustc-link-search=framework=/System/Library/PrivateFrameworks");
