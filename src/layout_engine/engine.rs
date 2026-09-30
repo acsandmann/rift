@@ -181,6 +181,8 @@ pub struct LayoutEngine {
     persistence: PersistenceState,
     /// Set only while a master-file startup restore is waiting for the first display snapshot.
     startup_restore_pending: bool,
+    /// Legacy strip commands report boundary excess; workspace arbitration lives here.
+    scroll_boundary: Option<(VirtualWorkspaceId, LayoutId, Direction, f64)>,
 }
 
 pub(crate) struct WorkspaceLayoutQuerySnapshot {
@@ -380,6 +382,7 @@ impl LayoutEngine {
         let mut system = self.workspaces[workspace].layout_system.preview_clone()?;
         let before = system.window_slot(layout, source)?;
         system.apply_window_drop(layout, source, target, action).then_some(())?;
+        system.prepare_layout(layout, screen, &self.window_layout_constraints, &gaps);
         let frame = system
             .calculate_layout(
                 layout,
@@ -1505,6 +1508,7 @@ impl LayoutEngine {
             display_last_space: HashMap::default(),
             persistence: PersistenceState::default(),
             startup_restore_pending: false,
+            scroll_boundary: None,
         }
     }
 
@@ -1909,6 +1913,9 @@ impl LayoutEngine {
         visible_space_centers: &HashMap<SpaceId, CGPoint>,
         command: LayoutCommand,
     ) -> EventResponse {
+        if !matches!(command, LayoutCommand::ScrollStrip { .. }) {
+            self.scroll_boundary = None;
+        }
         if let Some(space) = space {
             if let Some(ws_id) = self.workspaces.active_workspace(space) {
                 if let Some(layout) = self.workspaces.active_layout(space, ws_id) {
@@ -2366,7 +2373,33 @@ impl LayoutEngine {
                 if let LayoutSystemKind::Scrolling(system) =
                     &mut self.workspaces[workspace_id].layout_system
                 {
-                    resp.boundary_hit = system.scroll_by_delta(layout, delta);
+                    if let Some((direction, excess)) = system.scroll_by_delta(layout, delta) {
+                        let accumulated = match self.scroll_boundary {
+                            Some((
+                                previous_workspace,
+                                previous_layout,
+                                previous_direction,
+                                amount,
+                            )) if previous_workspace == workspace_id
+                                && previous_layout == layout
+                                && previous_direction == direction =>
+                            {
+                                amount + excess
+                            }
+                            _ => excess,
+                        };
+                        if accumulated
+                            >= self.layout_settings.scrolling.gestures.workspace_switch_threshold
+                        {
+                            self.scroll_boundary = None;
+                            resp.boundary_hit = Some(direction);
+                        } else {
+                            self.scroll_boundary =
+                                Some((workspace_id, layout, direction, accumulated));
+                        }
+                    } else {
+                        self.scroll_boundary = None;
+                    }
                 }
                 resp
             }
@@ -2403,6 +2436,14 @@ impl LayoutEngine {
         let Some((workspace_id, _)) = self.workspaces.active_layout_for_space(space) else {
             return Vec::new();
         };
+        if let Some(layout) = self.workspaces.active_layout(space, workspace_id) {
+            self.workspaces[workspace_id].layout_system.prepare_layout(
+                layout,
+                screen,
+                &self.window_layout_constraints,
+                gaps,
+            );
+        }
         self.calculate_workspace_layout(
             space,
             workspace_id,
@@ -2476,6 +2517,12 @@ impl LayoutEngine {
                         })
                     });
                 }
+                self.workspaces[active_workspace_id].layout_system.prepare_layout(
+                    layout,
+                    screen,
+                    &self.window_layout_constraints,
+                    gaps,
+                );
                 let tiled_positions =
                     self.workspaces[active_workspace_id].layout_system.calculate_layout(
                         layout,
@@ -3388,6 +3435,112 @@ mod tests {
         VirtualWorkspaceSettings, WorkspaceLayoutRule, WorkspaceSelector,
     };
 
+    #[test]
+    fn scrolling_public_commands_prepare_geometry_focus_and_arbitrate_boundaries() {
+        let mut settings = LayoutSettings::default();
+        settings.mode = LayoutMode::Scrolling;
+        settings.scrolling.column_width_ratio = 0.5;
+        settings.scrolling.preserve_window_sizes = false;
+        settings.scrolling.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.scrolling.gestures.workspace_switch_threshold = 0.5;
+        let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(91);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, screen.size));
+        for index in 1..=3 {
+            let _ = engine.handle_event(
+                &mut store,
+                LayoutEvent::WindowAdded(space, WindowId::new(1, index)),
+            );
+        }
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::WindowFocused(space, WindowId::new(1, 1)),
+        );
+        let render = |engine: &mut LayoutEngine| {
+            engine.calculate_layout(
+                space,
+                screen,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let command = |engine: &mut LayoutEngine, store: &mut WindowStore, command| {
+            engine.handle_command(store, Some(space), &[space], &HashMap::default(), command)
+        };
+        let frames = render(&mut engine);
+        assert_eq!(frames[0].1.size.width, 500.0);
+        assert_eq!(
+            command(
+                &mut engine,
+                &mut store,
+                LayoutCommand::MoveFocus(Direction::Right)
+            )
+            .focus_window,
+            Some(WindowId::new(1, 2))
+        );
+        assert_eq!(render(&mut engine), frames);
+        let _ = command(&mut engine, &mut store, LayoutCommand::ScrollStrip {
+            delta: 0.8,
+        });
+        let snap = command(&mut engine, &mut store, LayoutCommand::SnapStrip);
+        assert_eq!(snap.focus_window, Some(WindowId::new(1, 3)));
+        let _ = command(&mut engine, &mut store, LayoutCommand::CenterSelection);
+        let centered = render(&mut engine)
+            .into_iter()
+            .find(|(w, _)| *w == WindowId::new(1, 3))
+            .unwrap()
+            .1;
+        assert_eq!(centered.origin.x, 250.0);
+        let _ = command(&mut engine, &mut store, LayoutCommand::SnapStrip);
+        for boundary in [None, None, Some(Direction::Right)] {
+            assert_eq!(
+                command(&mut engine, &mut store, LayoutCommand::ScrollStrip {
+                    delta: 0.2
+                })
+                .boundary_hit,
+                boundary
+            );
+        }
+        let _ = command(
+            &mut engine,
+            &mut store,
+            LayoutCommand::ConsumeOrExpelWindow(Direction::Left),
+        );
+        assert_eq!(engine.selected_window(space), Some(WindowId::new(1, 3)));
+        let _ = command(
+            &mut engine,
+            &mut store,
+            LayoutCommand::MoveNode(Direction::Right),
+        );
+        assert_eq!(engine.selected_window(space), Some(WindowId::new(1, 3)));
+        let _ = command(
+            &mut engine,
+            &mut store,
+            LayoutCommand::ResizeWindowGrow(ResizeOrientation::Horizontal),
+        );
+        let resized = render(&mut engine);
+        assert_eq!(
+            resized.iter().find(|(w, _)| *w == WindowId::new(1, 3)).unwrap().1.size.width,
+            550.0
+        );
+        let _ = command(&mut engine, &mut store, LayoutCommand::SnapStrip);
+        let sized = render(&mut engine);
+        let _ = command(
+            &mut engine,
+            &mut store,
+            LayoutCommand::ToggleFullscreenWithinGaps,
+        );
+        let _ = command(
+            &mut engine,
+            &mut store,
+            LayoutCommand::ToggleFullscreenWithinGaps,
+        );
+        assert_eq!(render(&mut engine), sized);
+    }
     #[test]
     fn scrolling_widths_follow_space_displays_and_reload() {
         let mut workspaces = VirtualWorkspaceSettings::default();

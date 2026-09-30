@@ -93,6 +93,7 @@ impl PersistedLayout {
 
     pub(super) fn into_engine(self) -> LayoutEngine {
         LayoutEngine {
+            scroll_boundary: None,
             floating: self.floating,
             floating_positions: self.floating_positions,
             app_rules: AppRuleEngine::default(),
