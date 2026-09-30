@@ -431,6 +431,10 @@ pub struct MoveWindowToDisplayPayload {
     pub target_space: SpaceId,
     pub target_screen: objc2_core_foundation::CGRect,
     pub target_frame: objc2_core_foundation::CGRect,
+    /// Workspace on the target display to move into; its active one when `None`.
+    pub target_workspace: Option<crate::model::VirtualWorkspaceId>,
+    /// Activate the target workspace and focus the window there.
+    pub follow: bool,
 }
 
 pub fn handle_command_reactor_move_window_to_display(
@@ -445,13 +449,24 @@ pub fn handle_command_reactor_move_window_to_display(
         return Ok(EventOutcome::no_change());
     }
 
-    let response = layout.layout_engine.move_window_to_space(
-        &mut state.windows,
-        payload.source_space,
-        payload.target_space,
-        payload.target_screen.size,
-        payload.window,
-    );
+    let response = match payload.target_workspace {
+        None => layout.layout_engine.move_window_to_space(
+            &mut state.windows,
+            payload.source_space,
+            payload.target_space,
+            payload.target_screen.size,
+            payload.window,
+        ),
+        Some(workspace) => layout.layout_engine.move_window_to_workspace_on_space(
+            &mut state.windows,
+            payload.source_space,
+            payload.target_space,
+            payload.target_screen.size,
+            payload.window,
+            workspace,
+            payload.follow,
+        ),
+    };
 
     if state
         .windows
@@ -463,7 +478,7 @@ pub fn handle_command_reactor_move_window_to_display(
     }
 
     Ok(EventOutcome::layout_changed(false)
-        .with_layout_response(response, None)
+        .with_layout_response(response, payload.follow.then_some(payload.target_space))
         .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true))
 }
 

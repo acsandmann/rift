@@ -7862,3 +7862,164 @@ fn cycling_and_back_and_forth_skip_workspaces_bound_to_other_displays() {
     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
     assert_eq!(active(&reactor), Some(left_workspaces[0]));
 }
+
+/// Workspace 1 bound to the right one of two displays, 0 and 2 unbound, with two
+/// windows on the left display.
+fn two_display_reactor_with_bound_workspace() -> (Apps, Reactor, SpaceId, SpaceId) {
+    let mut reactor = bound_reactor(bound_workspace_settings(vec![
+        None,
+        Some(DisplaySelector::Uuid("test-display-1".into())),
+        None,
+    ]));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    (apps, reactor, left_space, right_space)
+}
+
+#[test]
+fn switching_to_a_bound_workspace_routes_to_the_owning_display() {
+    let (mut apps, mut reactor, left_space, right_space) =
+        two_display_reactor_with_bound_workspace();
+    assert_eq!(reactor.space_state.command_space, Some(left_space));
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(
+        workspaces.active_workspace(right_space),
+        Some(right_workspaces[1]),
+        "the bound workspace should activate on its display"
+    );
+    assert_eq!(
+        workspaces.active_workspace(left_space),
+        Some(left_workspaces[0]),
+        "the display the command came from should keep its workspace"
+    );
+    assert_eq!(
+        reactor.space_state.command_space,
+        Some(right_space),
+        "command context should follow the bound display"
+    );
+
+    // Unbound workspaces still switch on the current display.
+    reactor.space_state.command_space = Some(left_space);
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(2));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(workspaces.active_workspace(left_space), Some(left_workspaces[2]));
+    assert_eq!(
+        workspaces.active_workspace(right_space),
+        Some(right_workspaces[1])
+    );
+}
+
+#[test]
+fn moving_a_window_to_a_bound_workspace_relocates_it_to_the_owning_display() {
+    let (mut apps, mut reactor, left_space, right_space) =
+        two_display_reactor_with_bound_workspace();
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    let moved = WindowId::new(1, 2);
+    let stays = WindowId::new(1, 1);
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Name("ws1".into()),
+        follow: false,
+        window_id: Some(2),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(right_space));
+    assert_eq!(
+        reactor.test_workspace_for_window(right_space, moved),
+        Some(right_workspaces[1])
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(stays), Some(left_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
+        Some(right_workspaces[0]),
+        "without follow the owning display keeps its active workspace"
+    );
+    assert_eq!(reactor.space_state.command_space, Some(left_space));
+    let frame = reactor.state.windows.window(moved).unwrap().frame_monotonic;
+    assert!(
+        frame.origin.x >= 1000.,
+        "window frame should be placed on the right display: {frame:?}"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: true,
+        window_id: Some(1),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(reactor.assigned_space_for_window_id(stays), Some(right_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
+        Some(right_workspaces[1]),
+        "follow should activate the bound workspace on its display"
+    );
+    assert_eq!(reactor.space_state.command_space, Some(right_space));
+}
+
+#[test]
+fn selecting_a_foreign_copy_in_the_overview_switches_on_the_owning_display() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+
+    reactor.handle_event(Event::OverviewSelectWorkspace {
+        display: "test-display-1".into(),
+        workspace: right_workspaces[1],
+    });
+
+    assert_eq!(
+        active_workspace_of(&reactor, right_space),
+        Some(right_workspaces[2]),
+        "the right display keeps its own workspace"
+    );
+    assert_eq!(
+        active_workspace_of(&reactor, left_space),
+        Some(left_workspaces[1])
+    );
+    assert_eq!(reactor.space_state.command_space, Some(left_space));
+}
+
+#[test]
+fn moving_a_bound_workspace_to_another_display_is_refused() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        },
+    )));
+
+    for index in 1..=2 {
+        assert_eq!(
+            reactor.assigned_space_for_window_id(WindowId::new(1, index)),
+            Some(left_space)
+        );
+    }
+}
