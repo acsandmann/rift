@@ -26,7 +26,6 @@ pub struct Ownership {
     pub session: u64,
     pub owner: Owner,
     pub consume: bool,
-    pub fingers: usize,
     pub touching: bool,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -314,7 +313,6 @@ mod tests {
             session: 7,
             owner: Owner::Undecided,
             consume: true,
-            fingers: 3,
             touching: true,
         };
         assert_eq!(a.decide(1, o, now), Decision::Hold);
@@ -328,7 +326,6 @@ mod tests {
             session: 8,
             owner: Owner::Undecided,
             consume: true,
-            fingers: 3,
             touching: true,
         };
         assert_eq!(a.decide(2, o, now), Decision::Forward);
@@ -373,7 +370,6 @@ mod tests {
             owner: Owner::Rift,
             consume: true,
             touching: true,
-            fingers: 3,
         };
         for subtype in [11, 17, 18, 19] {
             CGEvent::set_integer_value_field(Some(&event), HID_TYPE, subtype);
@@ -464,7 +460,6 @@ mod tests {
             session: 7,
             owner: Owner::Rift,
             consume: true,
-            fingers: 3,
             touching: true,
         };
         assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(1), owner));

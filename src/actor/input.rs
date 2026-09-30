@@ -625,7 +625,6 @@ impl Input {
         self.gesture_control.configure(
             state.gesture_settings,
             state.event_processing_enabled && !self.mission_control_active.get(),
-            state.default_layout_mode,
             state
                 .screen_spaces
                 .iter()

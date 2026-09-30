@@ -365,6 +365,7 @@ struct MotionHistory {
     samples: VecDeque<(Duration, f64)>,
     total: f64,
     stationary: bool,
+    overscroll: f64,
 }
 impl MotionHistory {
     fn push(&mut self, delta: f64, time: Duration) {
@@ -606,17 +607,6 @@ impl LayoutState {
             ));
         }
         true
-    }
-
-    fn render_offset(&self, g: &Geometry) -> f64 {
-        let raw = self.viewport.offset();
-        if !matches!(self.viewport, Viewport::Gesture(_)) {
-            return raw;
-        }
-        let bounded = raw.clamp(g.bounds.0, g.bounds.1);
-        let excess = raw - bounded;
-        let limit = (g.tiling.size.width * 0.15).max(1.0);
-        bounded + limit * excess / (limit + excess.abs())
     }
 
     fn reveal(&mut self, settings: &ScrollingLayoutSettings) {
@@ -884,7 +874,7 @@ impl ScrollingLayoutSystem {
         g: &Geometry,
         park: bool,
     ) -> Vec<(WindowId, CGRect)> {
-        let offset = state.render_offset(g);
+        let offset = state.viewport.offset();
         g.frames
             .iter()
             .map(|&(wid, mut frame)| {
@@ -968,9 +958,6 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return false;
         };
-        if state.columns.is_empty() || state.geometry.is_none() {
-            return false;
-        }
         state.transient_restore = None;
         if matches!(state.viewport, Viewport::Gesture(_)) {
             return false;
@@ -979,6 +966,7 @@ impl ScrollingLayoutSystem {
             samples: VecDeque::with_capacity(32),
             total: 0.0,
             stationary: true,
+            overscroll: 0.0,
         };
         state.viewport = Viewport::Gesture(state.viewport.offset());
         true
@@ -990,7 +978,7 @@ impl ScrollingLayoutSystem {
         layout: LayoutId,
         delta: f64,
         timestamp: Duration,
-    ) -> Option<Direction> {
+    ) -> Option<f64> {
         if !delta.is_finite() {
             return None;
         }
@@ -998,16 +986,27 @@ impl ScrollingLayoutSystem {
         let Viewport::Gesture(offset) = &mut state.viewport else {
             return None;
         };
-        state.motion.push(delta, timestamp);
-        *offset += delta;
-        let g = state.geometry.as_ref()?;
-        if *offset < g.bounds.0 {
-            Some(Direction::Left)
-        } else if *offset > g.bounds.1 {
-            Some(Direction::Right)
-        } else {
-            None
+        if delta == 0.0 {
+            state.motion.push(0.0, timestamp);
+            return Some(0.0);
         }
+        let g = state.geometry.as_ref()?;
+        let raw = *offset + delta;
+        let bounded = raw.clamp(g.bounds.0, g.bounds.1);
+        let excess = raw - bounded;
+        // Block outward movement, but retain intent for workspace propagation.
+        // A reversal starts at the edge rather than unwinding invisible travel.
+        state.motion.overscroll = if excess == 0.0 {
+            0.0
+        } else if excess.signum() == state.motion.overscroll.signum() {
+            state.motion.overscroll + excess
+        } else {
+            excess
+        };
+        let moved = bounded - *offset;
+        state.motion.push(moved, timestamp);
+        *offset = bounded;
+        Some(moved)
     }
 
     /// Layout owns release velocity and projection. Idle time at lift removes fling.
@@ -1044,14 +1043,7 @@ impl ScrollingLayoutSystem {
     }
 
     pub fn gesture_overscroll(&self, layout: LayoutId) -> f64 {
-        let Some(state) = self.layouts.get(layout) else {
-            return 0.0;
-        };
-        let Some(g) = &state.geometry else {
-            return 0.0;
-        };
-        let x = state.viewport.offset();
-        x - x.clamp(g.bounds.0, g.bounds.1)
+        self.layouts.get(layout).map_or(0.0, |state| state.motion.overscroll)
     }
 
     fn settle(
@@ -1062,7 +1054,7 @@ impl ScrollingLayoutSystem {
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
-        let from_offset = state.render_offset(g);
+        let from_offset = state.viewport.offset();
         let snap = g
             .snap_points(&self.settings)
             .into_iter()
@@ -2461,7 +2453,7 @@ mod tests {
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
     #[test]
-    fn gesture_edges_resist_without_losing_overscroll_or_reverse_motion() {
+    fn gesture_edges_are_noops_and_reverse_immediately() {
         let mut f = Fixture::new(4);
         let before = f.frame(1).origin.x;
         assert!(f.system.begin_viewport_gesture(f.layout));
@@ -2475,12 +2467,11 @@ mod tests {
             .1
             .origin
             .x;
-        assert!(
-            dragged > before && dragged - before < 150.0,
-            "edge motion must remain bounded: {dragged}"
-        );
+        assert_eq!(dragged, before, "outward edge motion must be a no-op");
         assert_eq!(f.system.gesture_overscroll(f.layout), -1000.0);
-        f.system.update_viewport_gesture(f.layout, 1020.0, Duration::from_millis(20));
+        f.system.update_viewport_gesture(f.layout, 0.0, Duration::from_millis(15));
+        assert_eq!(f.system.gesture_overscroll(f.layout), -1000.0);
+        f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(20));
         assert_eq!(f.system.gesture_overscroll(f.layout), 0.0);
         assert_eq!(f.frame(1).origin.x, before - 20.0);
     }

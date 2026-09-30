@@ -956,4 +956,78 @@ mod tests {
         assert!(matches!(requests[2], Request::EndWindowAnimation(req_wid) if req_wid == wid));
         assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
     }
+
+    #[test]
+    fn gesture_release_continues_velocity_and_honors_animation_override() {
+        use crate::actor::reactor::testing::{space_state_event, test_reactor};
+        let mut r = test_reactor();
+        let space = SpaceId::new(1);
+        let wid = WindowId::new(1, 1);
+        let from = rect(0.0, 0.0, 500.0, 500.0);
+        let to = rect(-400.0, 0.0, 500.0, 500.0);
+        r.handle_loop_event(space_state_event(vec![from], vec![Some(space)]));
+        r.add_test_app(1);
+        r.add_test_window(wid, WindowServerId::new(1), Some(space), from);
+        r.send_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(space, wid));
+        let (app_tx, mut app_rx) = crate::actor::channel();
+        r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(app_tx);
+        r.state.windows.window_mut(wid).unwrap().frame_monotonic = from;
+        r.config.settings.animate = false;
+        r.config.settings.animation_fps = 100.0;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        r.animation_tx = Some(tx);
+        let release = ViewportRelease {
+            window: wid,
+            from_offset: 0.0,
+            offset: 400.0,
+            velocity: 2000.0,
+        };
+        AnimationManager::animate_viewport_release(
+            &mut r,
+            space,
+            &[(wid, to)],
+            release,
+            Some(true),
+        );
+        let Message::Replace(anim) = rx.try_recv().unwrap() else {
+            panic!("gesture override must animate");
+        };
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(anim));
+        collect_requests(&mut app_rx);
+        let mut previous = 0.0;
+        let mut previous_step = f64::INFINITY;
+        let mut count = 0;
+        while manager.active.is_some() {
+            manager.tick();
+            for request in collect_requests(&mut app_rx) {
+                if let Request::AnimationFrame { frame, .. } = request {
+                    let step = previous - frame.origin.x;
+                    if count == 0 {
+                        assert!(
+                            (15.0..25.0).contains(&step),
+                            "release must continue at 2000 px/s: {step}"
+                        );
+                    }
+                    assert!(
+                        step >= -1e-8 && step <= previous_step + 1e-8,
+                        "momentum must slow without overshooting"
+                    );
+                    previous = frame.origin.x;
+                    previous_step = step;
+                    count += 1;
+                }
+            }
+        }
+        assert!(count > 10);
+        assert_eq!(previous, -400.0);
+        AnimationManager::animate_viewport_release(
+            &mut r,
+            space,
+            &[(wid, from)],
+            release,
+            Some(false),
+        );
+        assert!(matches!(rx.try_recv().unwrap(), Message::SkipToEnd(_)));
+    }
 }

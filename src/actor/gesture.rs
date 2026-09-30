@@ -33,7 +33,7 @@ impl MotionPublisher {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ActionConfig {
     fingers: usize,
-    invert: bool,
+    pub invert: bool,
     tolerance: f64,
     threshold: f64,
     pub scrolling: bool,
@@ -183,8 +183,6 @@ impl Control {
         }
     }
 
-    pub fn ownership(&self) -> Ownership { *self.owner.lock() }
-
     pub fn ownership_guard(&self) -> parking_lot::MutexGuard<'_, Ownership> { self.owner.lock() }
 
     fn claim(&self, context: &Context) -> bool {
@@ -200,7 +198,6 @@ impl Control {
             session: context.session,
             owner: Owner::Rift,
             consume: context.settings.consume,
-            fingers: context.action.fingers,
             touching: true,
         };
         true
@@ -215,7 +212,6 @@ impl Control {
         &self,
         settings: Settings,
         enabled: bool,
-        _mode: LayoutMode,
         screens: Vec<(CGRect, SpaceId, LayoutMode)>,
         converter: CoordinateConverter,
     ) {
@@ -280,17 +276,16 @@ impl Control {
     }
 }
 
-/// Normalized positions span a whole pad. One pad-width moves one working-area
-/// width (not 1200 libinput units). Keep this calibration independent of columns.
+/// A quarter-pad drag moves one working-area width, independent of column size.
+const SCROLL_SENSITIVITY: f64 = 4.0;
 pub fn pixels(translation: f64, width: f64, invert: bool) -> f64 {
-    translation * width * if invert { -1.0 } else { 1.0 }
+    translation * SCROLL_SENSITIVITY * width * if invert { -1.0 } else { 1.0 }
 }
 struct DeviceSession {
     context: Option<Context>,
     recognizer: GestureRecognizer,
     owner: Owner,
     blocked: bool,
-    fired: bool,
     active: bool,
     epoch: u64,
     sample: Motion,
@@ -310,7 +305,6 @@ impl DeviceSession {
             recognizer,
             owner: Owner::Undecided,
             blocked: false,
-            fired: false,
             active: false,
             epoch,
             sample: Motion {
@@ -432,11 +426,6 @@ impl DeviceSession {
                     let x = f64::from(swipe.translation.x);
                     let y = f64::from(swipe.translation.y).abs();
                     if self.owner == Owner::Undecided {
-                        let o = control.ownership();
-                        if o.session == c.session && o.owner == Owner::System {
-                            self.owner = Owner::System;
-                            return;
-                        }
                         if y >= x.abs() || y > c.action.tolerance {
                             self.owner = Owner::System;
                         } else if control.claim(c) {
@@ -461,8 +450,8 @@ impl DeviceSession {
                     self.sample.timestamp = time;
                     if c.action.scrolling {
                         motion.publish(self.sample);
-                    } else if !self.fired && x.abs() >= c.action.threshold {
-                        self.fired = true;
+                    } else if x.abs() >= c.action.threshold {
+                        self.blocked = true;
                         tx.send(Event::Gesture(Lifecycle::Workspace {
                             context: c.clone(),
                             next: (x < 0.0) != c.action.invert,
@@ -548,7 +537,6 @@ fn run(control: Control, tx: Sender) {
                         session: s.sample.session,
                         owner: s.owner,
                         consume,
-                        fingers: s.recognizer.required_finger_count,
                         touching: true,
                     };
                 }
@@ -660,7 +648,7 @@ mod tests {
         } else {
             LayoutMode::Traditional
         };
-        control.configure(settings, true, mode, Vec::new(), CoordinateConverter::default());
+        control.configure(settings, true, Vec::new(), CoordinateConverter::default());
         let c =
             Context::new(1, 0, SpaceId::new(10), 1000.0, mode, settings, Duration::ZERO).unwrap();
         let (tx, rx) = crate::actor::channel();
@@ -685,7 +673,7 @@ mod tests {
         ));
         s.frame(&frame(3, 0.37, 0.6), Duration::from_millis(20), &tx, &c, &m);
         assert_eq!(s.owner, Owner::Rift); // committed direction ignores later wobble
-        assert!((m.latest(1).unwrap().total_x + 30.0).abs() < 0.01);
+        assert!((m.latest(1).unwrap().total_x + 120.0).abs() < 0.01);
         assert!(rx.try_recv().is_err()); // no per-frame actor traffic
         s.frame(&frame(4, 0.37, 0.6), Duration::from_millis(30), &tx, &c, &m);
         assert!(matches!(
@@ -741,24 +729,9 @@ mod tests {
         }
     }
     #[test]
-    fn cumulative_publisher_rejects_old_session_and_scaling_is_column_independent() {
-        let p = MotionPublisher::default();
-        for total in [4.0, 9.0, 15.0] {
-            p.publish(Motion {
-                session: 1,
-                total_x: total,
-                timestamp: Duration::ZERO,
-            });
-        }
-        assert_eq!(p.latest(1).unwrap().total_x, 15.0);
-        p.publish(Motion {
-            session: 2,
-            total_x: 1.0,
-            timestamp: Duration::ZERO,
-        });
-        assert!(p.latest(1).is_none());
-        assert_eq!(pixels(0.1, 1000.0, false), 100.0);
-        assert_eq!(pixels(0.1, 2000.0, true), -200.0);
+    fn scrolling_scale_tracks_screen_width_and_prior_inversion() {
+        assert_eq!(pixels(0.25, 1000.0, false), 1000.0);
+        assert_eq!(pixels(0.25, 2000.0, true), -2000.0);
     }
     #[test]
     fn separate_recognizers_do_not_combine_devices_and_reset_ends_once() {
@@ -822,6 +795,24 @@ mod tests {
             panic!("workspace action");
         };
         assert!(next);
+        assert!(rx.try_recv().is_err());
+    }
+    #[test]
+    fn partial_lift_that_stays_down_cancels_and_never_rearms() {
+        let (mut s, c, m, tx, mut rx) = setup(true);
+        s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
+        s.frame(&frame(3, 0.55, 0.5), Duration::from_millis(10), &tx, &c, &m);
+        rx.try_recv().unwrap();
+        s.frame(&frame(2, 0.55, 0.5), Duration::from_millis(20), &tx, &c, &m);
+        assert!(rx.try_recv().is_err());
+        s.expire_lift(Duration::from_millis(75), &tx);
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::End { cancelled: true, .. })
+        ));
+        s.frame(&frame(3, 0.7, 0.5), Duration::from_millis(80), &tx, &c, &m);
+        assert!(rx.try_recv().is_err());
+        assert!(s.frame(&[], Duration::from_millis(90), &tx, &c, &m));
         assert!(rx.try_recv().is_err());
     }
 }

@@ -24,6 +24,25 @@ pub(super) struct ViewportSession {
     pub(super) display_link: Option<crate::sys::display_link::DisplayLink>,
     propagated: bool,
 }
+impl ViewportSession {
+    fn visible(&self, r: &Reactor) -> bool {
+        r.is_space_active(self.context.space)
+            && r.layout_manager
+                .layout_engine
+                .workspaces()
+                .active_layout_for_space(self.context.space)
+                == Some((self.workspace, self.layout))
+    }
+
+    fn valid(&self, r: &Reactor) -> bool {
+        self.visible(r)
+            && self.control.valid(self.context.epoch)
+            && matches!(
+                r.mission_control_manager.mission_control_state,
+                super::MissionControlState::Inactive
+            )
+    }
+}
 impl Reactor {
     pub(super) fn gesture_event(&mut self, event: Lifecycle) {
         match event {
@@ -123,19 +142,7 @@ impl Reactor {
         let Some(session) = &self.viewport_gesture else {
             return;
         };
-        if !session.control.valid(session.context.epoch)
-            || !self.is_space_active(session.context.space)
-            || !matches!(
-                self.mission_control_manager.mission_control_state,
-                super::MissionControlState::Inactive
-            )
-            || self
-                .layout_manager
-                .layout_engine
-                .workspaces()
-                .active_layout_for_space(session.context.space)
-                != Some((session.workspace, session.layout))
-        {
+        if !session.valid(self) {
             self.finish_gesture(None, true);
             return;
         }
@@ -163,7 +170,7 @@ impl Reactor {
         else {
             return;
         };
-        system.update_viewport_gesture(s.layout, delta, sample.timestamp);
+        let moved = system.update_viewport_gesture(s.layout, delta, sample.timestamp);
         if delta == 0.0 {
             return;
         }
@@ -171,15 +178,25 @@ impl Reactor {
         let propagate = s.context.action.propagate
             && excess.abs() / s.context.width >= s.context.action.boundary_threshold;
         let context = s.context.clone();
-        if propagate && excess != 0.0 {
+        let (workspace, layout) = (s.workspace, s.layout);
+        let next = (excess > 0.0) != context.action.invert;
+        let frames = if moved.is_some_and(|x| x != 0.0) {
+            system.viewport_frames(layout)
+        } else {
+            Vec::new()
+        };
+        if propagate && excess != 0.0 && self.gesture_workspace_available(&context, next) {
             // Terminate the camera without semantic snapping/focusing before
             // switching workspace. This stroke cannot produce a second action.
-            system.cancel_viewport_gesture(s.layout);
-            s.propagated = true;
-            self.gesture_workspace(&context, excess > 0.0);
-        } else {
-            let frames = system.viewport_frames(s.layout);
-            self.apply_viewport_frames(context.space, frames, false);
+            if let LayoutSystemKind::Scrolling(system) =
+                &mut self.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
+            {
+                system.cancel_viewport_gesture(layout);
+            }
+            self.viewport_gesture.as_mut().unwrap().propagated = true;
+            self.gesture_workspace(&context, next);
+        } else if !frames.is_empty() {
+            self.apply_viewport_frames(context.space, frames);
         }
     }
 
@@ -197,14 +214,8 @@ impl Reactor {
         if s.propagated {
             return;
         }
-        let visible = self.is_space_active(s.context.space)
-            && self
-                .layout_manager
-                .layout_engine
-                .workspaces()
-                .active_layout_for_space(s.context.space)
-                == Some((s.workspace, s.layout));
-        let valid = visible && s.control.valid(s.context.epoch);
+        let visible = s.visible(self);
+        let valid = s.valid(self);
         if cancelled || !valid {
             s.control.retire_session(s.context.epoch, s.context.session);
         }
@@ -242,7 +253,7 @@ impl Reactor {
                     "gesture released"
                 );
             } else {
-                self.apply_viewport_frames(s.context.space, frames, false);
+                self.apply_viewport_frames(s.context.space, frames);
             }
             if let Some(release) = release
                 && self.main_window() != Some(release.window)
@@ -263,14 +274,9 @@ impl Reactor {
         &mut self,
         space: crate::sys::screen::SpaceId,
         frames: Vec<(crate::actor::app::WindowId, objc2_core_foundation::CGRect)>,
-        animate: bool,
     ) {
         let frames = self.bound_viewport_frames(space, frames);
-        if animate {
-            AnimationManager::animate_layout(self, space, &frames, false, None);
-        } else {
-            AnimationManager::workspace_switch_layout(self, space, &frames, None);
-        }
+        AnimationManager::workspace_switch_layout(self, space, &frames, None);
     }
 
     fn bound_viewport_frames(
@@ -288,17 +294,37 @@ impl Reactor {
         frames
     }
 
-    fn gesture_workspace(&mut self, context: &Context, next: bool) {
-        if !self.is_space_active(context.space)
-            || !matches!(
+    fn gesture_workspace_available(&self, context: &Context, next: bool) -> bool {
+        let store = self.layout_manager.layout_engine.workspaces();
+        let Some(current) = store.active_workspace(context.space) else {
+            return false;
+        };
+        let target = if next {
+            store.next_workspace(
+                &self.state.windows,
+                context.space,
+                current,
+                context.settings.skip_empty,
+            )
+        } else {
+            store.prev_workspace(
+                &self.state.windows,
+                context.space,
+                current,
+                context.settings.skip_empty,
+            )
+        };
+        target.is_some_and(|target| target != current)
+            && self.is_space_active(context.space)
+            && matches!(
                 self.mission_control_manager.mission_control_state,
                 super::MissionControlState::Inactive
             )
-        {
+    }
+
+    fn gesture_workspace(&mut self, context: &Context, next: bool) {
+        if !self.gesture_workspace_available(context, next) {
             return;
-        }
-        if let Some(pattern) = context.settings.haptic {
-            let _ = crate::sys::haptics::perform_haptic(pattern);
         }
         let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
         let result = command_workflow::handle_command_layout(
@@ -319,6 +345,9 @@ impl Reactor {
         );
         if let Ok(outcome) = result {
             self.apply_event_outcome(outcome);
+            if let Some(pattern) = context.settings.haptic {
+                let _ = crate::sys::haptics::perform_haptic(pattern);
+            }
         }
     }
 }
@@ -335,6 +364,13 @@ mod tests {
     use crate::sys::screen::{CoordinateConverter, SpaceId};
 
     fn setup(propagate: bool) -> (Reactor, Context, Control, MotionPublisher) {
+        setup_options(propagate, false, false)
+    }
+    fn setup_options(
+        propagate: bool,
+        skip_empty: bool,
+        invert: bool,
+    ) -> (Reactor, Context, Control, MotionPublisher) {
         let mut r = test_reactor_with_workspace_count(3);
         let space = SpaceId::new(1);
         r.handle_loop_event(space_state_event(
@@ -374,19 +410,14 @@ mod tests {
         );
         let mut cfg = Config::default();
         cfg.settings.layout.scrolling.gestures.enabled = true;
+        cfg.settings.layout.scrolling.gestures.invert_horizontal = invert;
         cfg.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = propagate;
         cfg.settings.layout.scrolling.gestures.workspace_switch_threshold = 0.1;
         cfg.settings.gestures.haptics_enabled = false;
-        cfg.settings.gestures.skip_empty = false;
+        cfg.settings.gestures.skip_empty = skip_empty;
         let settings = Settings::new(&cfg);
         let c = Control::new(&cfg);
-        c.configure(
-            settings,
-            true,
-            LayoutMode::Scrolling,
-            Vec::new(),
-            CoordinateConverter::default(),
-        );
+        c.configure(settings, true, Vec::new(), CoordinateConverter::default());
         let context = Context::new(
             1,
             0,
@@ -470,9 +501,17 @@ mod tests {
     }
     #[test]
     fn boundary_requires_configured_overscroll_and_propagates_once() {
-        for enabled in [false, true] {
-            let (mut r, ctx, _, m) = setup(enabled);
+        for (enabled, invert) in [(false, false), (true, false), (true, true)] {
+            let (mut r, ctx, _, m) = setup_options(enabled, false, invert);
             let before = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
+            let store = r.layout_manager.layout_engine.workspaces();
+            let expected = if !enabled {
+                before
+            } else if invert {
+                store.next_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
+            } else {
+                store.prev_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
+            };
             m.publish(Motion {
                 session: 1,
                 total_x: -50.0,
@@ -490,7 +529,7 @@ mod tests {
             });
             r.gesture_tick();
             let after = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
-            assert_eq!(after != before, enabled);
+            assert_eq!(after, expected, "boundary direction must mirror prior inversion");
             m.publish(Motion {
                 session: 1,
                 total_x: -1000.0,
@@ -589,5 +628,31 @@ mod tests {
             r.layout_manager.layout_engine.active_layout_mode_at(ctx.space),
             LayoutMode::Scrolling
         );
+    }
+    #[test]
+    fn unavailable_boundary_workspace_does_not_cancel_the_camera() {
+        let (mut r, ctx, _, m) = setup_options(true, true, false);
+        let before = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
+        m.publish(Motion {
+            session: 1,
+            total_x: -300.0,
+            timestamp: Duration::from_millis(10),
+        });
+        r.gesture_tick();
+        assert_eq!(
+            r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
+            before
+        );
+        assert!(
+            !r.viewport_gesture.as_ref().unwrap().propagated,
+            "an unavailable workspace must not end the camera"
+        );
+        m.publish(Motion {
+            session: 1,
+            total_x: 100.0,
+            timestamp: Duration::from_millis(20),
+        });
+        r.gesture_tick();
+        assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 100.0);
     }
 }
