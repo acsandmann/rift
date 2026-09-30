@@ -168,9 +168,18 @@ pub struct Control {
     routing: Arc<Mutex<Routing>>,
     owner: Arc<Mutex<Ownership>>,
     stop: Arc<AtomicBool>,
+    pending: Arc<Mutex<PendingInput>>,
+    wake_tx: crossbeam_channel::Sender<()>,
+    wake_rx: crossbeam_channel::Receiver<()>,
+}
+#[derive(Debug, Default)]
+struct PendingInput {
+    frame: Option<(multitouch::Device, Vec<multitouch::Contact>)>,
+    removed: Vec<u64>,
 }
 impl Control {
     pub fn new(config: &Config) -> Self {
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         Self {
             routing: Arc::new(Mutex::new(Routing {
                 epoch: 0,
@@ -181,7 +190,42 @@ impl Control {
             })),
             owner: Arc::default(),
             stop: Arc::default(),
+            pending: Arc::default(),
+            wake_tx,
+            wake_rx,
         }
+    }
+
+    fn wake(&self) { let _ = self.wake_tx.try_send(()); }
+
+    fn publish(&self, event: multitouch::MonitorEvent<'_>) {
+        let mut pending = self.pending.lock();
+        let evicted = match event {
+            multitouch::MonitorEvent::Contacts { device, contacts } => {
+                pending.frame.replace((device, contacts.to_vec()))
+            }
+            multitouch::MonitorEvent::DeviceRemoved(id) => {
+                pending.removed.push(id);
+                if pending.frame.as_ref().is_some_and(|(device, _)| device.device_id() == Some(id))
+                {
+                    pending.frame.take()
+                } else {
+                    None
+                }
+            }
+        };
+        drop(pending);
+        self.wake();
+        drop(evicted);
+    }
+
+    fn wait(&self, deadline: Option<Instant>) -> PendingInput {
+        if let Some(deadline) = deadline {
+            let _ = self.wake_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        } else {
+            let _ = self.wake_rx.recv();
+        }
+        std::mem::take(&mut *self.pending.lock())
     }
 
     pub fn ownership_guard(&self) -> parking_lot::MutexGuard<'_, Ownership> { self.owner.lock() }
@@ -224,6 +268,8 @@ impl Control {
         r.enabled = enabled;
         r.screens = screens;
         r.converter = converter;
+        drop(r);
+        self.wake();
     }
 
     pub fn retire_session(&self, epoch: u64, session: u64) {
@@ -232,12 +278,16 @@ impl Control {
         if r.epoch == epoch && o.session == session {
             r.epoch += 1;
             *o = Ownership::default();
+            drop(o);
+            drop(r);
+            self.wake();
         }
     }
 
     pub fn retire(&self) {
         self.routing.lock().epoch += 1;
         *self.owner.lock() = Ownership::default();
+        self.wake();
     }
 
     pub fn reset(&self, tx: &Sender) {
@@ -301,7 +351,6 @@ struct DeviceSession {
     active: bool,
     epoch: u64,
     sample: Motion,
-    last_frame: Instant,
     max_contacts: usize,
     lifting: Option<Duration>,
 }
@@ -319,7 +368,6 @@ impl DeviceSession {
                 total_x: 0.0,
                 timestamp: time,
             },
-            last_frame: Instant::now(),
             max_contacts: 0,
             lifting: None,
         }
@@ -492,30 +540,49 @@ impl DeviceSession {
     }
 }
 fn run(control: Control, tx: Sender) {
-    let monitor = multitouch::Monitor::new();
-    let stream = monitor.contacts();
+    let callback_control = control.clone();
+    let monitor = multitouch::Monitor::with_handler(move |event| callback_control.publish(event));
     if !monitor.start() {
         tracing::warn!("Multitouch monitor unavailable");
         return;
     }
     let origin = Instant::now();
-    let mut devices: HashMap<u64, (multitouch::Device, DeviceSession)> = HashMap::default();
+    let mut devices: HashMap<u64, DeviceSession> = HashMap::default();
     let motion = MotionPublisher::default();
     let mut next_session = 0;
     let mut ui_device = None;
-    let mut last_liveness = Instant::now();
     while !control.stop.load(Ordering::Acquire) && !tx.is_closed() {
-        let wait = if devices.values().any(|(_, s)| s.active || s.lifting.is_some()) {
-            25
-        } else {
-            250
-        };
-        if let Some((device, contacts)) = stream.recv_timeout(Duration::from_millis(wait)) {
+        // Block until an event, or the exact one-shot staggered-lift deadline.
+        let deadline = devices.values().filter_map(|s| s.lifting).min().map(|time| origin + time);
+        let pending = control.wait(deadline);
+        if control.stop.load(Ordering::Acquire) || tx.is_closed() {
+            break;
+        }
+        let now = Instant::now();
+        let time = now.duration_since(origin);
+        for id in pending.removed {
+            if let Some(mut s) = devices.remove(&id) {
+                s.end(&tx, true, time);
+            }
+            if ui_device == Some(id) {
+                ui_device = None;
+                *control.owner.lock() = Ownership::default();
+            }
+        }
+        for (&id, s) in &mut devices {
+            s.expire_lift(time, &tx);
+            if !control.valid(s.epoch) {
+                s.end(&tx, true, time);
+                if ui_device == Some(id) {
+                    control.owner.lock().touching = false;
+                }
+            }
+        }
+        if let Some((device, contacts)) = pending.frame {
             let Some(id) = device.device_id() else {
                 continue;
             };
-            let time = origin.elapsed();
-            let (_, s) = match devices.entry(id) {
+            let s = match devices.entry(id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     if !contacts.iter().any(|c| !c.is_palm() && c.state().is_active()) {
@@ -532,10 +599,9 @@ fn run(control: Control, tx: Sender) {
                     if context.is_some() {
                         ui_device = Some(id);
                     }
-                    entry.insert((device, DeviceSession::new(context, epoch, next_session, time)))
+                    entry.insert(DeviceSession::new(context, epoch, next_session, time))
                 }
             };
-            s.last_frame = Instant::now();
             let Some(count) = s.frame(&contacts, time, &tx, &control, &motion) else {
                 devices.remove(&id);
                 if ui_device == Some(id) {
@@ -566,37 +632,8 @@ fn run(control: Control, tx: Sender) {
                 }
             }
         }
-        if last_liveness.elapsed() < Duration::from_millis(25) {
-            continue;
-        }
-        last_liveness = Instant::now();
-        let time = origin.elapsed();
-        // Incoming frames prove the device is delivering. Driver health queries
-        // issue IOKit requests: only probe silent sources, once per silence period.
-        devices.retain(|id, (source, s)| {
-            s.expire_lift(time, &tx);
-            let valid = control.valid(s.epoch);
-            let silent = s.last_frame.elapsed() >= Duration::from_millis(250);
-            let gone = silent && (!source.is_running() || !source.is_alive());
-            if gone || !valid {
-                s.end(&tx, true, time);
-                if ui_device == Some(*id) {
-                    control.owner.lock().touching = false;
-                }
-            }
-            if silent {
-                s.last_frame = Instant::now();
-            }
-            // A healthy device may stop delivering frames while fingers are
-            // stationary. Silence alone must not release a held gesture.
-            if gone && ui_device == Some(*id) {
-                ui_device = None;
-                *control.owner.lock() = Ownership::default();
-            }
-            !gone
-        });
     }
-    for (_, s) in devices.values_mut() {
+    for s in devices.values_mut() {
         s.end(&tx, true, origin.elapsed());
     }
     monitor.stop();
@@ -608,6 +645,56 @@ mod tests {
     use multitouch::{Contact, ContactState, Finger, Hand, Point, Vector};
 
     use super::*;
+
+    #[test]
+    fn dormant_worker_is_interrupted_by_control_changes() {
+        for change in ["configure", "retire", "stop"] {
+            let config = Config::default();
+            let control = Control::new(&config);
+            let worker = control.clone();
+            let (ready_tx, ready_rx) = crossbeam_channel::bounded(0);
+            let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+            let thread = std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                worker.wait(None);
+                done_tx.send(worker.stop.load(Ordering::Acquire)).unwrap();
+            });
+            ready_rx.recv().unwrap();
+            match change {
+                "configure" => control.configure(
+                    Settings::new(&config),
+                    true,
+                    Vec::new(),
+                    CoordinateConverter::default(),
+                ),
+                "retire" => control.retire(),
+                "stop" => {
+                    let (tx, _rx) = crate::actor::channel();
+                    control.stop(&tx);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                done_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("control change must wake the worker"),
+                change == "stop",
+            );
+            thread.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn coalesced_wakeups_preserve_every_device_removal() {
+        let control = Control::new(&Config::default());
+        for id in [1, 2, 3] {
+            control.publish(multitouch::MonitorEvent::DeviceRemoved(id));
+        }
+        control.retire();
+        let pending = control.wait(None);
+        assert_eq!(pending.removed, [1, 2, 3]);
+        assert!(pending.frame.is_none());
+    }
     fn frame(count: usize, x: f32, y: f32) -> Vec<Contact> {
         (0..count)
             .map(|i| {

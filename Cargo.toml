@@ -208,7 +208,7 @@ embed_plist = "1.2.2"
 rustc-hash = "2.1.1"
 rift-client = { path = "crates/rift-client" }
 rift-protocol = { path = "crates/rift-protocol" }
-multitouch = "0.3.0"
+multitouch = "0.3.1"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"

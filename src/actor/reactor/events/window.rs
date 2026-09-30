@@ -189,6 +189,7 @@ pub fn classify_window_frame_change(
         return FrameChangeDisposition::Handled;
     };
     let server_id = window.info.sys_id;
+    let old_frame = window.frame_monotonic;
 
     if mission_control_active {
         drag.reset();
@@ -229,6 +230,10 @@ pub fn classify_window_frame_change(
         return FrameChangeDisposition::Handled;
     }
 
+    if old_frame.same_as(new_frame) {
+        query_mouse_for_active_drag(drag, mouse_state);
+        return FrameChangeDisposition::Handled;
+    }
     if mouse_state.is_none() {
         *mouse_state = crate::sys::event::get_mouse_state();
     }

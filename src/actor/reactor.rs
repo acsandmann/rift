@@ -949,7 +949,6 @@ impl Reactor {
 
     fn handle_thread_event(reactor: &Rc<RefCell<Reactor>>, event: Event) {
         match event {
-            Event::Gesture(event) => reactor.borrow_mut().gesture_event(event),
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::MouseFocusPending(publisher) => {
                 if reactor.borrow().viewport_gesture.is_some() {
@@ -980,47 +979,52 @@ impl Reactor {
     }
 
     fn handle_loop_event(&mut self, event: Event) {
-        if let Event::Gesture(event) = event {
-            self.gesture_event(event);
-            return;
-        }
-        if let Event::BindingModeChanged { mode } = event {
-            if self.binding_mode != mode {
-                let previous_mode = std::mem::replace(&mut self.binding_mode, mode.clone());
-                let _ = self
-                    .communication_manager
-                    .event_broadcaster
-                    .send(BroadcastEvent::BindingModeChanged { previous_mode, mode });
-            }
-            return;
-        }
-        let high_frequency = matches!(&event, Event::DragMotion(..));
-        if let Event::Query(req) = event {
-            self.handle_query_request(req);
-            return;
-        }
-        if let Event::MouseMoved(wsid) = &event {
-            self.suppress_auto_workspace_switch_until_input = false;
-            if let Some(window) = self.state.windows.tracked_window_id(*wsid)
-                && self.main_window() == Some(window)
-                && self.layout_manager.layout_engine.focused_window() == Some(window)
-            {
-                if let Some(space) = self.assigned_space_for_window_id(window)
-                    && self.is_space_active(space)
-                    && self.space_state.screen_by_space(space).is_some()
-                {
-                    self.space_state.command_space = Some(space);
-                }
-                // Keep hit testing live, but avoid native space/stack queries and
-                // outcome processing when actual focus already matches the hit.
+        let event = match event {
+            Event::Gesture(event) => {
+                self.gesture_event(event);
                 return;
             }
-        }
+            Event::BindingModeChanged { mode } => {
+                if self.binding_mode != mode {
+                    let previous_mode = std::mem::replace(&mut self.binding_mode, mode.clone());
+                    let _ = self
+                        .communication_manager
+                        .event_broadcaster
+                        .send(BroadcastEvent::BindingModeChanged { previous_mode, mode });
+                }
+                return;
+            }
+            Event::Query(req) => {
+                self.handle_query_request(req);
+                return;
+            }
+            Event::MouseMoved(wsid) => {
+                self.suppress_auto_workspace_switch_until_input = false;
+                if let Some(window) = self.state.windows.tracked_window_id(wsid)
+                    && self.main_window() == Some(window)
+                    && self.layout_manager.layout_engine.focused_window() == Some(window)
+                {
+                    if let Some(space) = self.assigned_space_for_window_id(window)
+                        && self.is_space_active(space)
+                        && self.space_state.screen_by_space(space).is_some()
+                    {
+                        self.space_state.command_space = Some(space);
+                    }
+                    // Refresh the command display without native queries or
+                    // outcome processing when focus already matches the hit.
+                    return;
+                }
+                Event::MouseMoved(wsid)
+            }
+            event => event,
+        };
         if self.should_quarantine_unstable_topology(&event) {
             trace!(?event, "quarantined while native topology is unstable");
             return;
         }
         Self::note_windowserver_activity(&event);
+        #[cfg(any(test, debug_assertions))]
+        let high_frequency = matches!(&event, Event::DragMotion(..));
         self.handle_event(event);
         #[cfg(any(test, debug_assertions))]
         if !high_frequency {
@@ -1559,11 +1563,18 @@ impl Reactor {
                 let new_space = self.geometry_space_for_window(&new_frame, server_id);
                 let old_space_active = old_space.is_some_and(|space| self.is_space_active(space));
                 let new_space_active = new_space.is_some_and(|space| self.is_space_active(space));
-                let best_resize_space = self.best_space_for_window(&new_frame, server_id);
-                let active_resize_space =
-                    best_resize_space.filter(|space| self.is_space_active(*space)).or_else(|| {
-                        server_id.is_none().then(|| self.workspace_command_space()).flatten()
-                    });
+                let resized = !old_frame.size.same_as(new_frame.size);
+                // Native space lookup is only needed for a resize. Position
+                // notifications arrive continuously while the viewport scrolls.
+                let active_resize_space = if resized {
+                    self.best_space_for_window(&new_frame, server_id)
+                        .filter(|space| self.is_space_active(*space))
+                        .or_else(|| {
+                            server_id.is_none().then(|| self.workspace_command_space()).flatten()
+                        })
+                } else {
+                    None
+                };
                 let pending_target_space = server_id
                     .and_then(|server| self.pending_target_space_for_window_server_id(server));
                 let assigned_space = self.assigned_space_for_window_id(wid);
@@ -1573,9 +1584,7 @@ impl Reactor {
                         && !self.layout_manager.layout_engine.is_window_floating(wid)
                         && self.state.windows.workspace_for_window(space, wid).is_some()
                 });
-                let screens = if old_frame.size.same_as(new_frame.size) {
-                    Vec::new()
-                } else {
+                let screens = if resized {
                     self.space_state
                         .screens
                         .iter()
@@ -1583,6 +1592,8 @@ impl Reactor {
                             Some((screen.space?, screen.frame, screen.display_uuid_owned()))
                         })
                         .collect()
+                } else {
+                    Vec::new()
                 };
                 let mut outcome = window_workflow::handle_window_frame_changed(
                     &mut self.state,
