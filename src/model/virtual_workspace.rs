@@ -449,6 +449,14 @@ impl WorkspaceStore {
         }
     }
 
+    /// The workspace `space` starts on, by position.
+    pub(crate) fn starting_workspace(&self, space: SpaceId) -> usize {
+        self.preferred_default_workspace
+            .get(&space)
+            .copied()
+            .unwrap_or(self.default_workspace)
+    }
+
     fn is_foreign_workspace(&self, space: SpaceId, index: usize) -> bool {
         self.foreign_workspaces
             .get(&space)
