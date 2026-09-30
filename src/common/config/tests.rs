@@ -77,6 +77,69 @@ fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_al
 }
 
 #[test]
+fn workspace_rules_bind_workspaces_to_displays() {
+    let settings: VirtualWorkspaceSettings = toml::from_str(
+        r#"
+            default_workspace_count = 4
+            workspace_names = ["web", "code"]
+            workspace_rules = [
+                { workspace = "web", display = "37D8832A-2D66-02CA-B9F7-8F30A301B230" },
+                { workspace = 2, display = 1 },
+                { workspace = 2, layout = "bsp" },
+                { workspace = "Workspace 4", display = 0 },
+                { workspace = 3, display = 1 },
+            ]
+        "#,
+    )
+    .unwrap();
+
+    assert!(settings.has_display_bindings());
+    assert!(settings.validate().is_empty());
+    let binding = |index| settings.display_binding_for_workspace(index).cloned();
+    assert_eq!(
+        binding(0),
+        Some(DisplaySelector::Uuid(
+            "37D8832A-2D66-02CA-B9F7-8F30A301B230".into()
+        ))
+    );
+    assert_eq!(binding(1), None);
+    assert_eq!(
+        binding(2),
+        Some(DisplaySelector::Index(1)),
+        "a later rule without a display keeps the binding"
+    );
+    assert_eq!(
+        binding(3),
+        Some(DisplaySelector::Index(1)),
+        "unnamed workspaces match their default name, and the last rule wins"
+    );
+}
+
+#[test]
+fn workspace_rules_report_rules_that_do_nothing_or_name_no_display() {
+    let settings: VirtualWorkspaceSettings = toml::from_str(
+        r#"workspace_rules = [
+            { workspace = 0 },
+            { workspace = 1, display = " " },
+            { workspace = 2, display = "left" },
+        ]"#,
+    )
+    .unwrap();
+    let issues = settings.validate();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue == "Workspace rule 0 sets neither layout nor display")
+    );
+    assert!(issues.iter().any(|issue| issue == "Workspace rule 1 has an empty display UUID"));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue == "Workspace rule 2 must name its display by UUID or index")
+    );
+}
+
+#[test]
 fn app_rules_parse_placement_size_and_focus() {
     let settings: VirtualWorkspaceSettings = toml::from_str(
         r#"
@@ -462,7 +525,8 @@ fn typed_collections_keep_source_aliases_and_inline_commands() {
             });
             source.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
                 workspace: WorkspaceSelector::Index(1),
-                layout: LayoutMode::Scrolling,
+                layout: Some(LayoutMode::Scrolling),
+                display: None,
             });
             source.keys.insert("comb1 + Q".into(), source.keys["Alt + H"].clone());
             source.binding_modes.insert(
@@ -549,11 +613,13 @@ fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
     settings.workspace_rules = vec![
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Name("three".into()),
-            layout: LayoutMode::Stack,
+            layout: Some(LayoutMode::Stack),
+            display: None,
         },
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(0),
-            layout: LayoutMode::Bsp,
+            layout: Some(LayoutMode::Bsp),
+            display: None,
         },
     ];
     settings.app_rules = vec![AppWorkspaceRule {

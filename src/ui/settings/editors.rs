@@ -293,13 +293,19 @@ fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         |s| s.settings.layout.mode,
         move |s, mode| {
             let name = s.virtual_workspaces.workspace_names.get(i).cloned();
-            s.virtual_workspaces
-                .workspace_rules
-                .retain(|r| !selector_matches(&r.workspace, i, name.as_deref()));
+            // Display bindings stay; only the layout moves to the new rule.
+            s.virtual_workspaces.workspace_rules.retain_mut(|r| {
+                if !selector_matches(&r.workspace, i, name.as_deref()) {
+                    return true;
+                }
+                r.layout = None;
+                r.display.is_some()
+            });
             if let Some(layout) = mode {
                 s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
                     workspace: WorkspaceSelector::Index(i),
-                    layout,
+                    layout: Some(layout),
+                    display: None,
                 });
             }
         },
@@ -317,14 +323,15 @@ fn workspace_layout(s: &ConfigSource, i: usize) -> Option<LayoutMode> {
     s.virtual_workspaces
         .workspace_rules
         .iter()
-        .find(|r| {
+        .rev()
+        .filter(|r| {
             selector_matches(
                 &r.workspace,
                 i,
                 s.virtual_workspaces.workspace_names.get(i).map(String::as_str),
             )
         })
-        .map(|r| r.layout)
+        .find_map(|r| r.layout)
 }
 pub(super) fn workspace_name(s: &ConfigSource, i: usize) -> String {
     s.virtual_workspaces

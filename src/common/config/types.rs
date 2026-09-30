@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use regex::RegexBuilder;
-pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
+pub use rift_protocol::{
+    AnimationEasing, ConfigCommand, DisplaySelector, LayoutMode, WorkspaceSelector,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{ConfigEnum, ConfigSchema};
@@ -108,11 +110,35 @@ pub enum NewWindowDisplay {
     Cursor,
 }
 
+/// Settings for one workspace. Where several rules match a workspace, the last
+/// one giving a setting wins.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
     pub workspace: WorkspaceSelector,
-    pub layout: LayoutMode,
+    #[serde(default)]
+    pub layout: Option<LayoutMode>,
+    /// Display this workspace lives on, by UUID (stable across reconnects) or by
+    /// index in physical order. While that display is connected the workspace is
+    /// only shown there.
+    #[serde(default)]
+    pub display: Option<DisplaySelector>,
+}
+
+impl WorkspaceLayoutRule {
+    /// Whether the rule targets workspace `index`, named `name`.
+    pub fn matches(&self, index: usize, name: &str) -> bool {
+        match &self.workspace {
+            WorkspaceSelector::Index(target) => *target == index,
+            WorkspaceSelector::Name(target) => target == name,
+        }
+    }
+}
+
+/// Name of workspace `index` as rift creates it: its entry in `names`, or
+/// "Workspace N".
+pub fn default_workspace_name(names: &[String], index: usize) -> String {
+    names.get(index).cloned().unwrap_or_else(|| format!("Workspace {}", index + 1))
 }
 
 // Allow specifying a workspace by numeric index or by name in the config.
@@ -207,6 +233,23 @@ impl Default for VirtualWorkspaceSettings {
 }
 
 impl VirtualWorkspaceSettings {
+    /// The display `workspace_rules` bind workspace `index` to, if any. Rules
+    /// match by index or by the workspace's name; the last one naming a display
+    /// wins.
+    pub fn display_binding_for_workspace(&self, index: usize) -> Option<&DisplaySelector> {
+        let name = default_workspace_name(&self.workspace_names, index);
+        self.workspace_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.matches(index, &name))
+            .find_map(|rule| rule.display.as_ref())
+    }
+
+    /// Whether any workspace rule binds a workspace to a display.
+    pub fn has_display_bindings(&self) -> bool {
+        self.workspace_rules.iter().any(|rule| rule.display.is_some())
+    }
+
     pub fn resize(&mut self, count: usize) {
         self.default_workspace_count = count;
         // Invalid counts are left for the shared validator, without large allocations.
@@ -250,6 +293,25 @@ impl VirtualWorkspaceSettings {
                 "default_workspace ({}) must be less than default_workspace_count ({})",
                 self.default_workspace, self.default_workspace_count
             ));
+        }
+
+        for (index, rule) in self.workspace_rules.iter().enumerate() {
+            if rule.layout.is_none() && rule.display.is_none() {
+                issues.push(format!(
+                    "Workspace rule {} sets neither layout nor display",
+                    index
+                ));
+            }
+            match &rule.display {
+                Some(DisplaySelector::Uuid(uuid)) if uuid.trim().is_empty() => {
+                    issues.push(format!("Workspace rule {} has an empty display UUID", index));
+                }
+                Some(DisplaySelector::Direction(_)) => issues.push(format!(
+                    "Workspace rule {} must name its display by UUID or index",
+                    index
+                )),
+                _ => {}
+            }
         }
 
         // Validate rules and check duplicates in a single pass
