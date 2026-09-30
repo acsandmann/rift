@@ -834,6 +834,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "multitouch"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdbecd4183fb5ef31cfcc93ed6e41d434a280879e5244fff81fb12df48f3a717"
+dependencies = [
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1349,6 +1358,7 @@ dependencies = [
  "dispatchr",
  "embed_plist",
  "enum_dispatch",
+ "multitouch",
  "nix 0.30.1",
  "notify",
  "notify-debouncer-mini",
