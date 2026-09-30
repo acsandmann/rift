@@ -379,10 +379,8 @@ impl Input {
             let hold_deadline = this.gesture_filter.borrow().hold_deadline();
             tokio::select! {
                 _ = async { crate::sys::timer::Timer::sleep(hold_deadline.unwrap().saturating_duration_since(std::time::Instant::now())).await }, if hold_deadline.is_some() => {
-                    let mut owner = this.gesture_control.ownership_guard();
-                    for session in this.gesture_filter.borrow_mut().release_expired(*owner).into_iter().flatten() {
-                        if owner.session == session && owner.owner == gesture::Owner::Undecided { owner.owner = gesture::Owner::System; }
-                    }
+                    let owner = this.gesture_control.ownership_guard();
+                    this.gesture_filter.borrow_mut().release_expired(*owner);
                 }
 
                 // select evaluates disabled futures too; defer timer creation
@@ -1440,6 +1438,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_hold_timeout_does_not_reject_a_slow_physical_stroke() {
+        let (input, _, _) = input();
+        *input.gesture_control.ownership_guard() = gesture::Ownership {
+            session: 1,
+            owner: gesture::Owner::Undecided,
+            consume: true,
+            touching: true,
+        };
+        let event = |phase| {
+            let event = CGEvent::new_scroll_wheel_event2(
+                None,
+                objc2_core_graphics::CGScrollEventUnit::Pixel,
+                2,
+                0,
+                0,
+                0,
+            )
+            .unwrap();
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::ScrollWheelEventScrollPhase,
+                phase,
+            );
+            event
+        };
+        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(1)));
+        std::thread::sleep(Duration::from_millis(70));
+        input.native_gesture_forward(CGEventType::ScrollWheel, &event(2));
+        assert_eq!(
+            input.gesture_control.ownership_guard().owner,
+            gesture::Owner::Undecided,
+            "native delivery timeout must not impose a minimum recognition speed"
+        );
+        input.gesture_control.ownership_guard().owner = gesture::Owner::Rift;
+        assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(2)));
+    }
+
+    #[test]
     fn horizontal_warp_geometry() {
         let rect =
             |x, y, w, h| CGRect::new(CGPoint::new(x, y), objc2_core_foundation::CGSize::new(w, h));
@@ -2170,15 +2206,7 @@ mod tests {
 impl Input {
     fn native_gesture_forward(&self, ty: CGEventType, event: &CGEvent) -> bool {
         let mut filter = self.gesture_filter.borrow_mut();
-        let mut owner = self.gesture_control.ownership_guard();
-        let forward = filter.forward(ty, event, *owner);
-        if let Some(session) = filter.released_session()
-            && owner.session == session
-            && owner.owner == gesture::Owner::Undecided
-        {
-            owner.owner = gesture::Owner::System;
-        }
-        forward
+        filter.forward(ty, event, || self.gesture_control.ownership_guard())
     }
 
     fn reset_gestures(&self) {

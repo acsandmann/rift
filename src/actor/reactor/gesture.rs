@@ -22,7 +22,6 @@ pub(super) struct ViewportSession {
     pub(super) interval: Duration,
     pub(super) refresh: Option<Arc<Notify>>,
     pub(super) display_link: Option<crate::sys::display_link::DisplayLink>,
-    propagated: bool,
 }
 impl ViewportSession {
     fn visible(&self, r: &Reactor) -> bool {
@@ -117,7 +116,6 @@ impl Reactor {
                     interval: Duration::from_secs_f64(1.0 / hz),
                     refresh,
                     display_link: link,
-                    propagated: false,
                 });
             }
             Lifecycle::End { sample, cancelled } => {
@@ -157,8 +155,7 @@ impl Reactor {
         };
         if !s.control.valid(s.context.epoch)
             || sample.session != s.context.session
-            || sample.timestamp < s.timestamp
-            || s.propagated
+            || sample.timestamp <= s.timestamp
         {
             return;
         }
@@ -171,32 +168,10 @@ impl Reactor {
             return;
         };
         let moved = system.update_viewport_gesture(s.layout, delta, sample.timestamp);
-        if delta == 0.0 {
-            return;
-        }
-        let excess = system.gesture_overscroll(s.layout);
-        let propagate = s.context.action.propagate
-            && excess.abs() / s.context.width >= s.context.action.boundary_threshold;
-        let context = s.context.clone();
-        let (workspace, layout) = (s.workspace, s.layout);
-        let next = (excess > 0.0) != context.action.invert;
-        let frames = if moved.is_some_and(|x| x != 0.0) {
-            system.viewport_frames(layout)
-        } else {
-            Vec::new()
-        };
-        if propagate && excess != 0.0 && self.gesture_workspace_available(&context, next) {
-            // Terminate the camera without semantic snapping/focusing before
-            // switching workspace. This stroke cannot produce a second action.
-            if let LayoutSystemKind::Scrolling(system) =
-                &mut self.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
-            {
-                system.cancel_viewport_gesture(layout);
-            }
-            self.viewport_gesture.as_mut().unwrap().propagated = true;
-            self.gesture_workspace(&context, next);
-        } else if !frames.is_empty() {
-            self.apply_viewport_frames(context.space, frames);
+        if moved.is_some_and(|x| x != 0.0) {
+            let frames = system.viewport_frames(s.layout);
+            let space = s.context.space;
+            self.apply_viewport_frames(space, frames);
         }
     }
 
@@ -211,13 +186,34 @@ impl Reactor {
         let Some(s) = self.viewport_gesture.take() else {
             return;
         };
-        if s.propagated {
-            return;
-        }
-        let visible = s.visible(self);
         let valid = s.valid(self);
+        let visible = valid || s.visible(self);
         if cancelled || !valid {
             s.control.retire_session(s.context.epoch, s.context.session);
+        }
+        // Like a fluid page swipe, an edge transition remains reversible until
+        // lift. Edge travel has 40% of the strip's gain so merely reaching the
+        // boundary during a fast scroll cannot commit a workspace switch.
+        let excess =
+            match &self.layout_manager.layout_engine.workspaces()[s.workspace].layout_system {
+                LayoutSystemKind::Scrolling(system) => system.gesture_overscroll(s.layout),
+                _ => 0.0,
+            };
+        let next = (excess > 0.0) != s.context.action.invert;
+        if !cancelled
+            && valid
+            && s.context.action.propagate
+            && excess != 0.0
+            && 0.4 * excess.abs() / s.context.width >= s.context.action.boundary_threshold
+            && self.gesture_workspace_available(&s.context, next)
+        {
+            if let LayoutSystemKind::Scrolling(system) =
+                &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system
+            {
+                system.cancel_viewport_gesture(s.layout);
+            }
+            self.gesture_workspace(&s.context, next);
+            return;
         }
         let LayoutSystemKind::Scrolling(system) =
             &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system
@@ -234,8 +230,8 @@ impl Reactor {
                 None,
             )
         };
-        let frames = system.viewport_frames(s.layout);
         if visible {
+            let frames = system.viewport_frames(s.layout);
             if let Some(release) = release {
                 let frames = self.bound_viewport_frames(s.context.space, frames);
                 AnimationManager::animate_viewport_release(
@@ -512,35 +508,67 @@ mod tests {
             } else {
                 store.prev_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
             };
+            for (total, time) in [(-50.0, 10), (-120.0, 20), (-300.0, 30)] {
+                m.publish(Motion {
+                    session: 1,
+                    total_x: total,
+                    timestamp: Duration::from_millis(time),
+                });
+                r.gesture_tick();
+                assert_eq!(
+                    r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
+                    before,
+                    "edge movement must remain reversible until lift"
+                );
+            }
+            for total in [-300.0, -1000.0] {
+                r.gesture_event(Lifecycle::End {
+                    sample: Motion {
+                        session: 1,
+                        total_x: total,
+                        timestamp: Duration::from_millis(40),
+                    },
+                    cancelled: false,
+                });
+                assert_eq!(
+                    r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
+                    expected,
+                    "release propagates once and mirrors prior inversion"
+                );
+            }
+            assert!(r.viewport_gesture.is_none());
+        }
+    }
+
+    #[test]
+    fn boundary_release_rejects_brush_reversal_and_cancellation() {
+        for (travel, reverse, cancelled) in [
+            (120.0, false, false),
+            (240.0, false, false),
+            (300.0, true, false),
+            (300.0, false, true),
+        ] {
+            let (mut r, ctx, _, m) = setup(true);
+            let before = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
             m.publish(Motion {
                 session: 1,
-                total_x: -50.0,
+                total_x: -travel,
                 timestamp: Duration::from_millis(10),
             });
             r.gesture_tick();
+            r.gesture_event(Lifecycle::End {
+                sample: Motion {
+                    session: 1,
+                    total_x: if reverse { -travel + 20.0 } else { -travel },
+                    timestamp: Duration::from_millis(20),
+                },
+                cancelled,
+            });
             assert_eq!(
                 r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
-                before
+                before,
+                "an edge brush, inward reversal, or cancellation must not change workspaces"
             );
-            m.publish(Motion {
-                session: 1,
-                total_x: -300.0,
-                timestamp: Duration::from_millis(20),
-            });
-            r.gesture_tick();
-            let after = r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space);
-            assert_eq!(after, expected, "boundary direction must mirror prior inversion");
-            m.publish(Motion {
-                session: 1,
-                total_x: -1000.0,
-                timestamp: Duration::from_millis(30),
-            });
-            r.gesture_tick();
-            assert_eq!(
-                r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
-                after
-            );
-            r.gesture_event(Lifecycle::Reset);
             assert!(r.viewport_gesture.is_none());
         }
     }
@@ -644,7 +672,7 @@ mod tests {
             before
         );
         assert!(
-            !r.viewport_gesture.as_ref().unwrap().propagated,
+            r.viewport_gesture.is_some(),
             "an unavailable workspace must not end the camera"
         );
         m.publish(Motion {

@@ -8,7 +8,6 @@ use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, Request, WindowId, pid_t};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::HashMap;
-use crate::common::config::Config;
 use crate::layout_engine::systems::ViewportRelease;
 use crate::sys::geometry::{Round, SameAs};
 use crate::sys::power;
@@ -84,11 +83,13 @@ impl AnimatedWindow {
         if let Some((velocity, duration)) = gesture {
             let distance = self.finish.origin.x - self.start.origin.x;
             if distance != 0.0 {
-                // Hermite interpolation continues camera velocity (windows move
-                // opposite the camera) and ends at rest without overshooting.
-                let slope = (-velocity * duration / distance).clamp(0.0, 3.0);
-                let progress =
-                    (slope - 2.0) * t.powi(3) + (3.0 - 2.0 * slope) * t.powi(2) + slope * t;
+                // AppKit's quartic coast preserves initial camera velocity and
+                // decelerates to rest. Blend toward a resting snap when release
+                // velocity points away from the destination or duration is capped.
+                let weight = (-velocity * duration / distance / 4.0).clamp(0.0, 1.0);
+                let resting = t * t * (3.0 - 2.0 * t);
+                let coast = 1.0 - (1.0 - t).powi(4);
+                let progress = blend(resting, coast, weight);
                 rect.origin.x = blend(self.start.origin.x, self.finish.origin.x, progress);
             }
         }
@@ -208,15 +209,16 @@ impl AnimationManager {
         else {
             return false;
         };
-        let mut config = reactor.config.clone();
+        let mut duration = reactor.config.settings.animation_duration;
         if let Some(release) = release {
             let distance = release.offset - release.from_offset;
             if distance * release.velocity > 0.0 && release.velocity.abs() > 100.0 {
-                config.settings.animation_duration =
-                    (2.0 * distance.abs() / release.velocity.abs()).clamp(0.12, 0.65);
+                duration =
+                    // Retarget the quartic coast to the layout's snap destination.
+                    (4.0 * distance.abs() / release.velocity.abs()).clamp(0.10, 1.0);
             }
         }
-        let mut anim = Animation::new(config);
+        let mut anim = Animation::new(reactor.config.settings.animation_fps, duration);
         anim.gesture_velocity = release.map(|r| r.velocity);
         let mut animated_count = 0;
         let mut any_frame_changed = false;
@@ -532,14 +534,11 @@ impl ActiveAnimation {
 }
 
 impl Animation {
-    pub fn new(config: Config) -> Self {
-        //const FPS: f64 = 100.0;
-        //const DURATION: f64 = 0.30;
-        let interval = Duration::from_secs_f64(1.0 / config.settings.animation_fps);
+    fn new(fps: f64, duration: f64) -> Self {
+        let interval = Duration::from_secs_f64(1.0 / fps);
         Self {
             interval,
-            frames: (config.settings.animation_duration * config.settings.animation_fps).round()
-                as u32,
+            frames: (duration * fps).round() as u32,
             windows: vec![],
             handled_windows: vec![],
             gesture_velocity: None,
@@ -712,10 +711,13 @@ mod tests {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))
     }
 
-    fn config() -> Config { Config::default() }
+    fn empty_animation() -> Animation {
+        let settings = crate::common::config::Config::default().settings;
+        Animation::new(settings.animation_fps, settings.animation_duration)
+    }
 
     fn animation(handle: &AppThreadHandle, wid: WindowId, from: CGRect, to: CGRect) -> Animation {
-        let mut animation = Animation::new(config());
+        let mut animation = empty_animation();
         animation.add_window(handle, wid, from, to, false, TransactionId::default());
         animation
     }
@@ -828,7 +830,7 @@ mod tests {
         let wid1 = WindowId::new(1, 1);
         let wid2 = WindowId::new(1, 2);
         let wid3 = WindowId::new(1, 3);
-        let mut first = Animation::new(config());
+        let mut first = empty_animation();
         first.add_window(
             &handle,
             wid1,
@@ -845,7 +847,7 @@ mod tests {
             false,
             TransactionId::default(),
         );
-        let mut second = Animation::new(config());
+        let mut second = empty_animation();
         second.add_window(
             &handle,
             wid1,
@@ -891,7 +893,7 @@ mod tests {
         let handle = AppThreadHandle::new_for_test(tx);
         let wid1 = WindowId::new(1, 1);
         let wid2 = WindowId::new(1, 2);
-        let mut first = Animation::new(config());
+        let mut first = empty_animation();
         first.add_window(
             &handle,
             wid1,
@@ -908,7 +910,7 @@ mod tests {
             false,
             TransactionId::default(),
         );
-        let mut second = Animation::new(config());
+        let mut second = empty_animation();
         second.add_window(
             &handle,
             wid1,

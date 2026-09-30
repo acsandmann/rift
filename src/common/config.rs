@@ -952,6 +952,7 @@ pub struct ScrollingLayoutSettings {
     /// Horizontal focus navigation behavior:
     /// - niri: reveal only as needed based on navigation direction.
     /// - anchored: always align focused column to `alignment`.
+    /// Gesture release pans freely in niri mode and snaps to alignment in anchored mode.
     #[serde(default)]
     pub focus_navigation_style: ScrollingFocusNavigationStyle,
     /// Trackpad gestures for scrolling layout
@@ -1064,12 +1065,14 @@ pub struct ScrollingGestureSettings {
     #[serde(default = "default_swipe_fingers")]
     pub fingers: usize,
     /// Retained for config compatibility; continuous scrolling uses a small intent dead zone
+    #[deprecated(since = "0.6.3")]
     #[serde(default = "default_distance_pct")]
     pub distance_pct: f64,
     /// If true, scrolling past the end of the strip will trigger a workspace switch
     #[serde(default = "no")]
     pub propagate_to_workspace_swipe: bool,
-    /// Overscroll in working-area widths required to trigger one workspace switch
+    /// Edge travel in working-area widths required on release for one workspace switch.
+    /// Edge travel uses 40% of the viewport drag gain and resets on inward movement.
     #[serde(default = "default_overscroll_threshold")]
     pub workspace_switch_threshold: f64,
 }

@@ -106,7 +106,7 @@ impl Arbitration {
                         .began
                         .is_some_and(|start| now.duration_since(start) >= Duration::from_millis(60))
                 {
-                    self.sequence = Sequence::Passing;
+                    self.sequence = Sequence::Provisional;
                     Decision::Replay
                 } else {
                     Decision::Drop
@@ -131,15 +131,20 @@ pub struct Filter {
     dock: NativeSequence,
     app: NativeSequence,
     scroll: NativeSequence,
-    released: Option<u64>,
 }
 impl Filter {
     /// No copies/allocations on the normal forward/drop path. Sequence state
     /// stays on the tap thread; only Ownership is read from the worker.
-    pub fn forward(&mut self, ty: CGEventType, event: &CGEvent, owner: Ownership) -> bool {
+    pub fn forward<O: std::ops::Deref<Target = Ownership>>(
+        &mut self,
+        ty: CGEventType,
+        event: &CGEvent,
+        ownership: impl FnOnce() -> O,
+    ) -> bool {
         if CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData) == REPOST {
             return true;
         }
+        let owner;
         let (sequence, phase) = if ty == CGEventType::ScrollWheel {
             let phase = CGEvent::integer_value_field(
                 Some(event),
@@ -160,6 +165,7 @@ impl Filter {
             {
                 return true;
             }
+            owner = ownership();
             // Scroll end precedes native momentum; retain ownership through it.
             let phase = if momentum & 4 != 0
                 || (phase & 4 != 0
@@ -186,6 +192,7 @@ impl Filter {
             {
                 return true;
             }
+            owner = ownership();
             (
                 if ty.0 == CGS_EVENT_DOCK_CONTROL {
                     &mut self.dock
@@ -200,7 +207,7 @@ impl Filter {
         {
             repost(&began);
         }
-        match sequence.arbitration.decide(phase, owner, Instant::now()) {
+        match sequence.arbitration.decide(phase, *owner, Instant::now()) {
             Decision::Forward => true,
             Decision::Drop => {
                 if sequence.arbitration.sequence != Sequence::Holding {
@@ -213,7 +220,6 @@ impl Filter {
                 false
             }
             Decision::Replay => {
-                self.released = Some(sequence.arbitration.session);
                 if let Some(began) = sequence.held.take() {
                     repost(&began);
                 }
@@ -239,9 +245,9 @@ impl Filter {
             .min()
     }
 
-    pub fn release_expired(&mut self, owner: Ownership) -> [Option<u64>; 3] {
+    pub fn release_expired(&mut self, owner: Ownership) {
         let now = Instant::now();
-        [&mut self.dock, &mut self.app, &mut self.scroll].map(|s| {
+        for s in [&mut self.dock, &mut self.app, &mut self.scroll] {
             if s.arbitration.sequence == Sequence::Holding
                 && s.arbitration
                     .began
@@ -253,20 +259,17 @@ impl Filter {
                 {
                     s.held = None;
                     s.arbitration.sequence = Sequence::Dropping;
-                    return None;
+                    continue;
                 }
                 if let Some(began) = s.held.take() {
                     repost(&began);
                 }
-                s.arbitration.sequence = Sequence::Passing;
-                Some(s.arbitration.session)
-            } else {
-                None
+                // Bound native latency without putting a deadline on physical
+                // intent. A later horizontal claim cancels native delivery.
+                s.arbitration.sequence = Sequence::Provisional;
             }
-        })
+        }
     }
-
-    pub fn released_session(&mut self) -> Option<u64> { self.released.take() }
 
     pub fn reset(&mut self) {
         // A held begin has never reached the system. Releasing it on reset
@@ -373,17 +376,17 @@ mod tests {
         };
         for subtype in [11, 17, 18, 19] {
             CGEvent::set_integer_value_field(Some(&event), HID_TYPE, subtype);
-            assert!(f.forward(CGEventType(29), &event, o));
+            assert!(f.forward(CGEventType(29), &event, || Box::new(o)));
         }
         CGEvent::set_integer_value_field(Some(&event), HID_TYPE, 23);
         CGEvent::set_integer_value_field(Some(&event), MOTION, 2);
-        assert!(f.forward(CGEventType(30), &event, o));
+        assert!(f.forward(CGEventType(30), &event, || Box::new(o)));
         CGEvent::set_integer_value_field(Some(&event), MOTION, 1);
         CGEvent::set_integer_value_field(Some(&event), PHASE, 1);
-        assert!(f.forward(CGEventType(30), &event, Ownership::default()));
-        assert!(!f.forward(CGEventType(30), &event, o));
+        assert!(f.forward(CGEventType(30), &event, || Box::new(Ownership::default())));
+        assert!(!f.forward(CGEventType(30), &event, || Box::new(o)));
         CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, REPOST);
-        assert!(f.forward(CGEventType(30), &event, o));
+        assert!(f.forward(CGEventType(30), &event, || Box::new(o)));
     }
     #[test]
     fn cancellation_clears_native_velocity_and_scroll_momentum() {
@@ -462,15 +465,19 @@ mod tests {
             consume: true,
             touching: true,
         };
-        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(1), owner));
-        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(4), owner));
-        assert!(filter.forward(CGEventType::ScrollWheel, &scroll(0), Ownership::default()));
+        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(1), || Box::new(owner)));
+        assert!(!filter.forward(CGEventType::ScrollWheel, &scroll(4), || Box::new(owner)));
+        assert!(filter.forward(CGEventType::ScrollWheel, &scroll(0), || Box::new(
+            Ownership::default()
+        )));
         let momentum = scroll(0);
         CGEvent::set_integer_value_field(
             Some(&momentum),
             CGEventField::ScrollWheelEventMomentumPhase,
             2,
         );
-        assert!(!filter.forward(CGEventType::ScrollWheel, &momentum, Ownership::default()));
+        assert!(!filter.forward(CGEventType::ScrollWheel, &momentum, || Box::new(
+            Ownership::default()
+        )));
     }
 }

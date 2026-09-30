@@ -1,4 +1,5 @@
 //! One recognizer per physical device; semantic lifecycle and latest motion.
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -278,8 +279,16 @@ impl Control {
 
 /// A quarter-pad drag moves one working-area width, independent of column size.
 const SCROLL_SENSITIVITY: f64 = 4.0;
+const VERTICAL_INTENT_DISTANCE: f64 = 0.03;
 pub fn pixels(translation: f64, width: f64, invert: bool) -> f64 {
     translation * SCROLL_SENSITIVITY * width * if invert { -1.0 } else { 1.0 }
+}
+fn swipe_recognizer(fingers: usize) -> GestureRecognizer {
+    let mut recognizer = GestureRecognizer::new(fingers)
+        .with_exact_finger_count(true)
+        .with_gesture_types(GestureTypes::SWIPE);
+    recognizer.minimum_swipe_translation = 0.003;
+    recognizer
 }
 struct DeviceSession {
     context: Option<Context>,
@@ -295,14 +304,9 @@ struct DeviceSession {
 }
 impl DeviceSession {
     fn new(context: Option<Context>, epoch: u64, session: u64, time: Duration) -> Self {
-        let mut recognizer =
-            GestureRecognizer::new(context.as_ref().map_or(3, |c| c.action.fingers))
-                .with_exact_finger_count(true)
-                .with_gesture_types(GestureTypes::SWIPE);
-        recognizer.minimum_swipe_translation = 0.003;
         Self {
+            recognizer: swipe_recognizer(context.as_ref().map_or(3, |c| c.action.fingers)),
             context,
-            recognizer,
             owner: Owner::Undecided,
             blocked: false,
             active: false,
@@ -334,7 +338,7 @@ impl DeviceSession {
         }
     }
 
-    /// Returns true only after all active fingers lift, including after a
+    /// Returns the active count, or None after full lift, including after a
     /// recognizer topology end/timeout. Semantic end is independently idempotent.
     fn frame(
         &mut self,
@@ -343,7 +347,7 @@ impl DeviceSession {
         tx: &Sender,
         control: &Control,
         motion: &MotionPublisher,
-    ) -> bool {
+    ) -> Option<usize> {
         let count = contacts.iter().filter(|c| !c.is_palm() && c.state().is_active()).count();
         if !control.valid(self.epoch) {
             self.end(tx, true, time);
@@ -352,39 +356,36 @@ impl DeviceSession {
         self.expire_lift(time, tx);
         if count == 0 {
             self.end(tx, false, time);
-            return true;
+            return None;
         }
         if self.lifting.is_some() {
             if count >= self.recognizer.required_finger_count {
                 self.end(tx, true, time);
             }
-            return false;
+            return Some(count);
         }
-        if self.blocked {
-            return false;
+        if self.blocked || self.owner == Owner::System || self.context.is_none() {
+            return Some(count);
         }
         if self.active && count < self.recognizer.required_finger_count {
             // Real lifts are staggered. Freeze the last complete frame while
             // waiting briefly for full lift; persistent topology changes cancel.
             self.blocked = true;
             self.lifting = Some(time + Duration::from_millis(50));
-            return false;
+            return Some(count);
         }
         if self.owner == Owner::Undecided {
             if count < self.max_contacts {
                 self.end(tx, true, time);
                 self.owner = Owner::System;
-                return false;
+                return Some(count);
             }
             self.max_contacts = count;
             if let Some(c) = &mut self.context {
                 if let Some(action) = c.settings.action_for(c.mode, count) {
                     if action != c.action {
                         c.action = action;
-                        self.recognizer = GestureRecognizer::new(action.fingers)
-                            .with_exact_finger_count(true)
-                            .with_gesture_types(GestureTypes::SWIPE);
-                        self.recognizer.minimum_swipe_translation = 0.003;
+                        self.recognizer = swipe_recognizer(action.fingers);
                     }
                 } else if count
                     > c.settings
@@ -394,9 +395,13 @@ impl DeviceSession {
                 {
                     self.end(tx, true, time);
                     self.owner = Owner::System;
-                    return false;
+                    return Some(count);
                 }
             }
+        }
+        // Below the configured count, only topology/lift bookkeeping matters.
+        if count < self.recognizer.required_finger_count {
+            return Some(count);
         }
         if let Some(event) = self.recognizer.process(contacts) {
             self.event(event, time, tx, control, motion);
@@ -405,7 +410,7 @@ impl DeviceSession {
             self.end(tx, true, time);
             // Keep owned native delivery suppressed through its actual end.
         }
-        false
+        Some(count)
     }
 
     fn event(
@@ -426,8 +431,13 @@ impl DeviceSession {
                     let x = f64::from(swipe.translation.x);
                     let y = f64::from(swipe.translation.y).abs();
                     if self.owner == Owner::Undecided {
-                        if y >= x.abs() || y > c.action.tolerance {
+                        if y > c.action.tolerance || (y >= VERTICAL_INTENT_DISTANCE && y >= x.abs())
+                        {
                             self.owner = Owner::System;
+                        } else if y >= x.abs() {
+                            // Like the old armed swipe handler, allow initial
+                            // placement noise to resolve into horizontal intent.
+                            return;
                         } else if control.claim(c) {
                             self.owner = Owner::Rift;
                             tracing::debug!(session = c.session, space = ?c.space, scrolling = c.action.scrolling, fingers = c.action.fingers, "gesture claimed");
@@ -446,7 +456,12 @@ impl DeviceSession {
                     if self.owner != Owner::Rift {
                         return;
                     }
-                    self.sample.total_x = pixels(x, c.width, c.action.invert);
+                    let total_x = pixels(x, c.width, c.action.invert);
+                    // Compare cumulative travel to the last accepted position:
+                    // sensor wobble stays still, but slow sub-point steps accumulate.
+                    if !c.action.scrolling || (total_x - self.sample.total_x).abs() >= 1.0 {
+                        self.sample.total_x = total_x;
+                    }
                     self.sample.timestamp = time;
                     if c.action.scrolling {
                         motion.publish(self.sample);
@@ -487,42 +502,45 @@ fn run(control: Control, tx: Sender) {
     let mut ui_device = None;
     let mut last_liveness = Instant::now();
     while !control.stop.load(Ordering::Acquire) && !tx.is_closed() {
-        let wait = if devices.is_empty() { 250 } else { 25 };
+        let wait = if devices.values().any(|(_, s)| s.active || s.lifting.is_some()) {
+            25
+        } else {
+            250
+        };
         if let Some((device, contacts)) = stream.recv_timeout(Duration::from_millis(wait)) {
             let Some(id) = device.device_id() else {
                 continue;
             };
-            // Count via the crate's contact semantics without allocating a filter Vec.
-            let count = contacts.iter().filter(|c| !c.is_palm() && c.state().is_active()).count();
             let time = origin.elapsed();
-            let epoch = control.routing.lock().epoch;
-            if !devices.contains_key(&id) && count > 0 {
-                next_session += 1;
-                let context = if ui_device.is_none() {
-                    control.context(next_session, time)
-                } else {
-                    None
-                };
-                if context.is_some() {
-                    ui_device = Some(id);
+            let (_, s) = match devices.entry(id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    if !contacts.iter().any(|c| !c.is_palm() && c.state().is_active()) {
+                        continue;
+                    }
+                    next_session += 1;
+                    let context = if ui_device.is_none() {
+                        control.context(next_session, time)
+                    } else {
+                        None
+                    };
+                    let epoch =
+                        context.as_ref().map_or_else(|| control.routing.lock().epoch, |c| c.epoch);
+                    if context.is_some() {
+                        ui_device = Some(id);
+                    }
+                    entry.insert((device, DeviceSession::new(context, epoch, next_session, time)))
                 }
-                devices.insert(
-                    id,
-                    (device, DeviceSession::new(context, epoch, next_session, time)),
-                );
-            }
-            let Some((_, s)) = devices.get_mut(&id) else {
-                continue;
             };
             s.last_frame = Instant::now();
-            if s.frame(&contacts, time, &tx, &control, &motion) {
+            let Some(count) = s.frame(&contacts, time, &tx, &control, &motion) else {
                 devices.remove(&id);
                 if ui_device == Some(id) {
                     ui_device = None;
                     control.owner.lock().touching = false;
                 }
                 continue;
-            }
+            };
             if ui_device == Some(id) {
                 let consume = s.context.as_ref().is_some_and(|c| c.settings.consume)
                     && (count == s.recognizer.required_finger_count || s.owner == Owner::Rift);
@@ -547,34 +565,29 @@ fn run(control: Control, tx: Sender) {
         }
         last_liveness = Instant::now();
         let time = origin.elapsed();
-        for (&id, (source, s)) in &mut devices {
+        // Incoming frames prove the device is delivering. Driver health queries
+        // issue IOKit requests: only probe silent sources, once per silence period.
+        devices.retain(|id, (source, s)| {
             s.expire_lift(time, &tx);
-            if s.last_frame.elapsed() >= Duration::from_millis(250)
-                || !control.valid(s.epoch)
-                || !source.is_alive()
-                || !source.is_running()
-            {
-                s.end(
-                    &tx,
-                    !control.valid(s.epoch) || !source.is_alive() || !source.is_running(),
-                    time,
-                );
-                if ui_device == Some(id) {
+            let valid = control.valid(s.epoch);
+            let silent = s.last_frame.elapsed() >= Duration::from_millis(250);
+            let gone = silent && (!source.is_running() || !source.is_alive());
+            if gone || !valid {
+                s.end(&tx, true, time);
+                if ui_device == Some(*id) {
                     control.owner.lock().touching = false;
                 }
             }
-        }
-        // Silence ends semantics but never re-arms a still-down stroke. Only
-        // full lift or actual source removal retires the device's lift gate.
-        devices.retain(|id, (source, _)| {
-            if source.is_alive() && source.is_running() {
-                return true;
+            if silent {
+                s.last_frame = Instant::now();
             }
-            if ui_device == Some(*id) {
+            // A healthy device may stop delivering frames while fingers are
+            // stationary. Silence alone must not release a held gesture.
+            if gone && ui_device == Some(*id) {
                 ui_device = None;
                 *control.owner.lock() = Ownership::default();
             }
-            false
+            !gone
         });
     }
     for (_, s) in devices.values_mut() {
@@ -682,7 +695,7 @@ mod tests {
         ));
         s.frame(&frame(3, 0.2, 0.4), Duration::from_millis(40), &tx, &c, &m);
         assert!(rx.try_recv().is_err());
-        assert!(s.frame(&[], Duration::from_millis(50), &tx, &c, &m));
+        assert!(s.frame(&[], Duration::from_millis(50), &tx, &c, &m).is_none());
         assert!(rx.try_recv().is_err());
     }
     #[test]
@@ -725,8 +738,60 @@ mod tests {
             s.frame(&frame(3, 0.3, 0.6), Duration::from_millis(20), &tx, &c, &m);
             assert_eq!(s.owner, Owner::System);
             assert!(rx.try_recv().is_err());
-            assert!(s.frame(&[], Duration::from_millis(30), &tx, &c, &m));
+            assert!(s.frame(&[], Duration::from_millis(30), &tx, &c, &m).is_none());
         }
+    }
+
+    #[test]
+    fn slow_horizontal_swipe_tolerates_initial_finger_placement_noise() {
+        for scrolling in [false, true] {
+            let (mut s, c, m, tx, mut rx) = setup(scrolling);
+            s.frame(&frame(3, 0.4, 0.4), Duration::ZERO, &tx, &c, &m);
+            s.frame(&frame(3, 0.401, 0.405), Duration::from_millis(100), &tx, &c, &m);
+            assert_eq!(
+                s.owner,
+                Owner::Undecided,
+                "placement noise must not reject the stroke"
+            );
+            s.frame(&frame(3, 0.41, 0.405), Duration::from_millis(500), &tx, &c, &m);
+            s.frame(&frame(3, 0.5, 0.405), Duration::from_secs(5), &tx, &c, &m);
+            assert_eq!(s.owner, Owner::Rift);
+            let event = rx.try_recv().unwrap().1;
+            assert!(
+                matches!(event, Event::Gesture(Lifecycle::Begin { .. })) && scrolling
+                    || matches!(event, Event::Gesture(Lifecycle::Workspace { .. })) && !scrolling
+            );
+            assert!(rx.try_recv().is_err());
+        }
+    }
+    #[test]
+    fn stationary_wobble_is_filtered_without_losing_slow_accumulated_motion() {
+        let (mut s, c, m, tx, mut rx) = setup(true);
+        s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
+        s.frame(&frame(3, 0.55, 0.5), Duration::from_millis(10), &tx, &c, &m);
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::Begin { .. })
+        ));
+        let held = m.latest(1).unwrap().total_x;
+        for (time, x) in [(20, 0.55005), (30, 0.54995), (40, 0.5501), (50, 0.5502)] {
+            s.frame(&frame(3, x, 0.5), Duration::from_millis(time), &tx, &c, &m);
+            let sample = m.latest(1).unwrap();
+            assert_eq!(
+                sample.total_x, held,
+                "stationary fingers must not move the camera"
+            );
+            assert_eq!(sample.timestamp, Duration::from_millis(time));
+        }
+        s.frame(&frame(3, 0.5504, 0.5), Duration::from_secs(1), &tx, &c, &m);
+        assert!((m.latest(1).unwrap().total_x - held - 1.6).abs() < 0.01);
+        assert!(s.active);
+        assert!(rx.try_recv().is_err());
+        s.frame(&[], Duration::from_millis(1010), &tx, &c, &m);
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::End { cancelled: false, .. })
+        ));
     }
     #[test]
     fn scrolling_scale_tracks_screen_width_and_prior_inversion() {
@@ -812,7 +877,7 @@ mod tests {
         ));
         s.frame(&frame(3, 0.7, 0.5), Duration::from_millis(80), &tx, &c, &m);
         assert!(rx.try_recv().is_err());
-        assert!(s.frame(&[], Duration::from_millis(90), &tx, &c, &m));
+        assert!(s.frame(&[], Duration::from_millis(90), &tx, &c, &m).is_none());
         assert!(rx.try_recv().is_err());
     }
 }
