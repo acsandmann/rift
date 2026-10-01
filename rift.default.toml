@@ -139,8 +139,7 @@ alignment = "center"
 # 			(disrespects alignment setting above)
 # - "anchored": always align focused column according to `alignment`
 focus_navigation_style = "niri"
-# the scrolling layout tends to function better without animations,
-# so you can disable them if you like
+# animations can be disabled in this layout if you like
 # animate = false
 
 [settings.layout.scrolling.gestures]

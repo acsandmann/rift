@@ -968,7 +968,7 @@ impl Default for ScrollingLayoutSettings {
     fn default() -> Self {
         Self {
             base: BaseLayoutSettings::default(),
-            animate: None,
+            animate: Some(true),
             column_width_ratio: default_scrolling_column_width_ratio(),
             preset_column_widths: default_scrolling_preset_column_widths(),
             preserve_window_sizes: true,
