@@ -1752,15 +1752,19 @@ impl PreviewEvent {
     }
 }
 
-/// Callbacks transfer retained native results to the main queue before sending to this
-/// local channel. It never crosses the input thread and needs no unsafe Send wrapper.
+/// Framework results are retained before transfer and only inspected on main.
+/// Keep this explicit unsafe handoff local: the native types do not implement Send.
 fn deliver(tx: actor::Sender<PreviewEvent>, result: PreviewEvent) {
     if tx.is_closed() {
         return;
     }
-    dispatchr::queue::main().after_f_s(dispatchr::time::Time::NOW, (tx, result), |(tx, result)| {
-        tx.send(result)
-    });
+    extern "C" fn send(ctx: *mut std::ffi::c_void) {
+        let (tx, result) =
+            *unsafe { Box::from_raw(ctx.cast::<(actor::Sender<PreviewEvent>, PreviewEvent)>()) };
+        tx.send(result);
+    }
+    let ctx = Box::into_raw(Box::new((tx, result))).cast();
+    unsafe { dispatchr::queue::main().after_f(dispatchr::time::Time::NOW, ctx, send) };
 }
 
 // Framework captures may finish after a session closes. Bound jobs across all sessions.
@@ -1877,16 +1881,24 @@ impl PreviewSession {
                     Some(PreviewEvent::Image(generation, request.clone(), image))
                 };
                 // One main-thread handoff for both completion and scheduling the next capture.
-                dispatchr::queue::main().after_f_s(
-                    dispatchr::time::Time::NOW,
-                    (tx.clone(), wake.clone(), result),
-                    |(tx, wake, result)| {
-                        wake.send(crate::actor::mission_control::Event::PumpPreviews);
-                        if let Some(result) = result {
-                            tx.send(result);
-                        }
-                    },
-                );
+                extern "C" fn complete(ctx: *mut std::ffi::c_void) {
+                    let (tx, wake, result) = *unsafe {
+                        Box::from_raw(ctx.cast::<(
+                            actor::Sender<PreviewEvent>,
+                            crate::actor::mission_control::Sender,
+                            Option<PreviewEvent>,
+                        )>())
+                    };
+                    wake.send(crate::actor::mission_control::Event::PumpPreviews);
+                    if let Some(result) = result {
+                        tx.send(result);
+                    }
+                }
+                // The retained image and local preview channel are consumed on main.
+                let ctx = Box::into_raw(Box::new((tx.clone(), wake.clone(), result))).cast();
+                unsafe {
+                    dispatchr::queue::main().after_f(dispatchr::time::Time::NOW, ctx, complete)
+                };
             });
             unsafe {
                 SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(

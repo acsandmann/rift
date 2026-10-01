@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    GapSettings, ScrollingAlignment, ScrollingFocusNavigationStyle, ScrollingLayoutSettings,
-    WindowInsertionPoint,
+    GapSettings, ScrollingAlignment, ScrollingFocusNavigationStyle, ScrollingGestureReleaseMode,
+    ScrollingLayoutSettings, WindowInsertionPoint,
 };
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{
@@ -1063,20 +1063,22 @@ impl ScrollingLayoutSystem {
         layout: LayoutId,
         projected: f64,
         velocity: f64,
-        preserve_focus: bool,
+        gesture_release: bool,
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
         let from_offset = state.viewport.offset();
         let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
-        let (offset, index) = if preserve_focus && niri {
+        let (offset, index) = if gesture_release
+            && self.settings.gestures.release_mode == ScrollingGestureReleaseMode::Free
+        {
             let offset = projected.clamp(g.bounds.0, g.bounds.1);
             let visible = |c: ColumnGeometry| {
                 ((c.world_x + c.width).min(offset + g.tiling.size.width) - c.world_x.max(offset))
                     .max(0.0)
             };
             // Keep visible focus; otherwise choose the most visible column, with
-            // travel direction breaking ties. Free release never needs snap lookup.
+            // travel direction breaking ties in the optional free release mode.
             let index = if visible(*g.columns.get(state.active_column)?) > 0.0 {
                 state.active_column
             } else {
@@ -1099,14 +1101,19 @@ impl ScrollingLayoutSystem {
             let snap = g.snaps.iter().min_by(|a, b| {
                 (a.offset - projected).abs().total_cmp(&(b.offset - projected).abs()).then_with(
                     || {
-                        (preserve_focus && a.column != state.active_column)
-                            .cmp(&(preserve_focus && b.column != state.active_column))
+                        if niri {
+                            // Niri sorts snaps by position before nearest-point selection.
+                            a.offset.total_cmp(&b.offset)
+                        } else {
+                            (gesture_release && a.column != state.active_column)
+                                .cmp(&(gesture_release && b.column != state.active_column))
+                        }
                     },
                 )
             })?;
             let mut index = snap.column;
             if niri {
-                // Explicit snap commands choose the furthest fully visible column
+                // Choose the furthest fully visible column
                 // in the direction of travel.
                 if projected >= from_offset {
                     for (next, column) in g.columns.iter().enumerate().skip(index + 1) {
@@ -2263,14 +2270,22 @@ mod tests {
     }
 
     #[test]
-    fn gesture_keeps_visible_focus_and_changes_it_only_after_lift() {
-        for (travel, window) in [(150.0, 1), (900.0, 3), (2000.0, 4)] {
+    fn gesture_changes_focus_only_once_after_lift() {
+        for (start, travel, target, window) in [
+            (1, 150.0, 0.0, 2),
+            (2, 250.0, 0.0, 2), // Equidistant snaps choose the earlier position, even with active focus.
+            (1, 900.0, 1000.0, 4),
+            (1, 2000.0, 1000.0, 4),
+        ] {
             let mut f = Fixture::new(4);
+            f.select(start);
+            f.prepare();
             assert!(f.system.begin_viewport_gesture(f.layout));
             f.system.update_viewport_gesture(f.layout, travel, Duration::from_millis(10));
-            assert_eq!(f.selected(), Some(wid(1)));
+            assert_eq!(f.selected(), Some(wid(start)));
             let release =
                 f.system.end_viewport_gesture(f.layout, Duration::from_millis(210)).unwrap();
+            assert_eq!(release.offset, target);
             assert_eq!(release.window, wid(window));
             assert_eq!(f.selected(), Some(wid(window)));
             assert!(f.system.end_viewport_gesture(f.layout, Duration::from_millis(220)).is_none());
@@ -2299,6 +2314,7 @@ mod tests {
             offsets.push(release.offset);
             if idle_ms > 0 {
                 assert_eq!(release.velocity, 0.0);
+                assert_eq!(release.offset, 0.0);
             }
         }
         assert!(offsets[0] > offsets[1]);
@@ -2311,11 +2327,14 @@ mod tests {
 
     #[test]
     fn release_respects_navigation_style_and_preserves_flick_momentum() {
-        for (style, targets) in [
-            (ScrollingFocusNavigationStyle::Niri, [
+        for (style, mode, targets) in [
+            (ScrollingFocusNavigationStyle::Niri, "", [
+                0.0, 500.0, 0.0, 500.0, 500.0, 1000.0,
+            ]),
+            (ScrollingFocusNavigationStyle::Niri, "release_mode = 'free'", [
                 240.0, 300.0, 240.0, 300.0, 657.4901, 921.4202,
             ]),
-            (ScrollingFocusNavigationStyle::Anchored, [
+            (ScrollingFocusNavigationStyle::Anchored, "", [
                 0.0, 500.0, 0.0, 500.0, 500.0, 1000.0,
             ]),
         ] {
@@ -2333,6 +2352,7 @@ mod tests {
                 let mut f = Fixture::new(4);
                 let mut settings = f.system.settings.clone();
                 settings.focus_navigation_style = style;
+                settings.gestures = toml::from_str(mode).unwrap();
                 f.system.update_settings(&settings);
                 f.system.begin_viewport_gesture(f.layout);
                 f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
@@ -2361,6 +2381,53 @@ mod tests {
     }
 
     #[test]
+    fn niri_release_snaps_variable_width_columns_and_both_oversized_edges() {
+        for (widths, travel, target, selected) in [
+            ([300.0, 700.0, 400.0], 260.0, 300.0, 2),
+            ([300.0, 700.0, 400.0], 370.0, 400.0, 3),
+            ([500.0, 1400.0, 500.0], 540.0, 500.0, 2),
+            ([500.0, 1400.0, 500.0], 860.0, 900.0, 2),
+        ] {
+            let mut f = Fixture::new(3);
+            for (i, width) in widths.into_iter().enumerate() {
+                f.constraints.insert(wid(i as u32 + 1), WindowLayoutConstraints {
+                    locked_width: width,
+                    ..Default::default()
+                });
+            }
+            f.prepare();
+            assert!(f.system.begin_viewport_gesture(f.layout));
+            f.system.update_viewport_gesture(f.layout, travel, Duration::from_millis(10));
+            assert_eq!(f.selected(), Some(wid(1)));
+            let release =
+                f.system.end_viewport_gesture(f.layout, Duration::from_millis(210)).unwrap();
+            assert_eq!(release.from_offset, travel);
+            assert_eq!(release.offset, target);
+            assert_eq!(release.window, wid(selected));
+        }
+    }
+
+    #[test]
+    fn niri_flick_selects_the_furthest_visible_column_in_each_direction() {
+        for (start, delta, target, selected) in [(1, 20.0, 500.0, 3), (4, -20.0, 500.0, 2)] {
+            let mut f = Fixture::new(4);
+            f.select(start);
+            f.prepare();
+            assert!(f.system.begin_viewport_gesture(f.layout));
+            f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
+            for i in 1..=6 {
+                f.system.update_viewport_gesture(f.layout, delta, Duration::from_millis(i * 10));
+                assert_eq!(f.selected(), Some(wid(start)));
+            }
+            let release =
+                f.system.end_viewport_gesture(f.layout, Duration::from_millis(60)).unwrap();
+            assert_eq!(release.offset, target);
+            assert_eq!(release.window, wid(selected));
+            assert_eq!(release.velocity.signum(), delta.signum());
+        }
+    }
+
+    #[test]
     fn structural_edits_rebase_an_ongoing_gesture_without_changing_focus() {
         let mut f = Fixture::new(4);
         f.select(3);
@@ -2373,6 +2440,11 @@ mod tests {
         f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(20));
         assert_eq!(f.frame(3).origin.x, x - 20.0);
         assert_eq!(f.selected(), Some(wid(3)));
+        let release = f.system.end_viewport_gesture(f.layout, Duration::from_millis(220)).unwrap();
+        assert_eq!(release.from_offset, 50.0);
+        assert_eq!(release.offset, 0.0);
+        assert_eq!(release.window, wid(3));
+        assert_eq!(f.frame(3).origin.x, 500.0);
     }
 
     #[test]

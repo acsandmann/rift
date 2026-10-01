@@ -467,7 +467,7 @@ impl Debug for AppThreadHandle {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, strum_macros::IntoStaticStr)]
 pub enum Request {
     Terminate,
     RefreshWindowInventory(WindowInventoryToken),
@@ -744,16 +744,16 @@ impl State {
         mut requests_rx: actor::Receiver<Request>,
         mut notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
     ) {
+        let mut batch = Vec::new();
         loop {
-            let batch = select! {
+            select! {
                 biased;
                 req = requests_rx.recv() => {
                     let Some(req) = req else { break };
-                    let mut batch = vec![req];
+                    batch.push(req);
                     while let Ok(req) = requests_rx.try_recv() {
                         batch.push(req);
                     }
-                    batch
                 }
                 notif = notifications_rx.recv() => {
                     let Some((_, (elem, notif, hinted_wid))) = notif else { break };
@@ -761,13 +761,13 @@ impl State {
                     continue;
                 }
             };
-            if Self::handle_request_batch(this, batch) {
+            if Self::handle_request_batch(this, &mut batch) {
                 break;
             }
         }
     }
 
-    fn handle_request_batch(this: &RefCell<Self>, batch: Vec<(Span, Request)>) -> bool {
+    fn handle_request_batch(this: &RefCell<Self>, batch: &mut Vec<(Span, Request)>) -> bool {
         // All requests in this actor target the same application. Coalesce EUI
         // suppression across the entire drained burst instead of toggling the
         // app-level attribute once per window/request. Animation leases nest
@@ -780,11 +780,11 @@ impl State {
         }
 
         let mut should_terminate = false;
-        for (span, request) in batch {
+        for (span, request) in batch.drain(..) {
             let mut state = this.borrow_mut();
             let _guard = span.enter();
             debug!(?state.bundle_id, ?state.pid, ?request, "Got request");
-            let request_dbg = format!("{request:?}");
+            let request_kind: &'static str = (&request).into();
             match state.handle_request(request) {
                 Ok(true) => {
                     should_terminate = true;
@@ -798,7 +798,7 @@ impl State {
                     break;
                 }
                 Err(err) => {
-                    warn!(?state.bundle_id, ?state.pid, request = %request_dbg, "Error handling request: {:?}", err);
+                    warn!(?state.bundle_id, ?state.pid, request = request_kind, "Error handling request: {:?}", err);
                 }
             }
         }

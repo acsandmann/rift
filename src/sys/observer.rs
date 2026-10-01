@@ -197,11 +197,15 @@ impl Observer {
                 notification,
                 callback_ctx,
             });
-            queue::main().after_f(
-                Time::NOW.new_after(10_000_000),
-                Box::into_raw(ctx) as *mut c_void,
-                add_notif_retry,
-            );
+            // The retained AX objects and subscription context survive the retry;
+            // the retry passes the callback pointer without accessing its thread-local data.
+            unsafe {
+                queue::main().after_f(
+                    Time::NOW.new_after(10_000_000),
+                    Box::into_raw(ctx) as *mut c_void,
+                    add_notif_retry,
+                )
+            };
             return Ok(());
         }
         make_result(first)

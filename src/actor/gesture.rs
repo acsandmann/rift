@@ -111,6 +111,15 @@ impl Settings {
 
     pub fn enabled(self) -> bool { self.scroll.is_some() || self.workspace.is_some() }
 
+    fn minimum_contacts(self) -> usize {
+        self.scroll
+            .into_iter()
+            .chain(self.workspace)
+            .map(|a| a.fingers)
+            .min()
+            .unwrap_or(usize::MAX)
+    }
+
     fn action(self, mode: LayoutMode) -> Option<ActionConfig> {
         if mode == LayoutMode::Scrolling && self.scroll.is_some() {
             self.scroll
@@ -263,7 +272,7 @@ impl Control {
         if !self.routing.lock().enabled {
             return None;
         }
-        // Exactly one cursor lookup per physical stroke, outside state locks.
+        // Exactly one cursor lookup per candidate stroke, outside state locks.
         let event = CGEvent::new(None)?;
         let point = CGEvent::location(Some(&event));
         let r = self.routing.lock();
@@ -564,7 +573,7 @@ impl DeviceInput {
                 }
                 let count =
                     contacts.iter().filter(|c| !c.is_palm() && c.state().is_active()).count();
-                // Ordinary two-finger scrolling needs only contact counting.
+                // Contacts below the configured minimum need only counting.
                 // Topology changes always reach the session; no motion is copied.
                 if count == input.last_count
                     && input.session.as_ref().is_some_and(|s| {
@@ -580,6 +589,9 @@ impl DeviceInput {
                     return;
                 }
                 if input.session.is_none() {
+                    if count < input.control.routing.lock().settings.minimum_contacts() {
+                        return;
+                    }
                     let control = input.control.clone();
                     drop(input);
                     let session = control.begin(time);
@@ -714,6 +726,77 @@ mod tests {
         assert!(!control.owner.lock().touching);
         assert_eq!(control.routing.lock().ui_session, 0);
         DeviceInput::deliver(&input, multitouch::ContactEvent::Stopped);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ordinary_contacts_do_not_reserve_routing_before_a_gesture_candidate() {
+        let (_, control, motion, tx, mut rx) = setup_settings(true, 4, false);
+        let settings = control.routing.lock().settings;
+        control.configure(
+            settings,
+            true,
+            vec![(
+                CGRect::new(
+                    objc2_core_foundation::CGPoint::new(-1e9, -1e9),
+                    objc2_core_foundation::CGSize::new(2e9, 2e9),
+                ),
+                SpaceId::new(10),
+                LayoutMode::Scrolling,
+            )],
+            CoordinateConverter::default(),
+        );
+        let device = || {
+            Arc::new(Mutex::new(DeviceInput {
+                session: None,
+                control: control.clone(),
+                motion: motion.clone(),
+                tx: tx.clone(),
+                origin: Instant::now(),
+                last_count: 0,
+            }))
+        };
+        let a = device();
+        let b = device();
+        DeviceInput::deliver(&a, multitouch::ContactEvent::Frame(&frame(1, 0.5, 0.5)));
+        assert!(a.lock().session.is_none());
+        {
+            let routing = control.routing.lock();
+            assert_eq!(routing.ui_session, 0);
+            assert_eq!(routing.next_session, 0);
+        }
+        for x in [0.5, 0.4] {
+            DeviceInput::deliver(&b, multitouch::ContactEvent::Frame(&frame(3, x, 0.5)));
+        }
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::Begin { .. })
+        ));
+        assert_eq!(control.owner.lock().owner, Owner::Rift);
+        assert!(motion.latest(control.routing.lock().ui_session).unwrap().total_x < 0.0);
+        DeviceInput::deliver(&b, multitouch::ContactEvent::Frame(&[]));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::End { cancelled: false, .. })
+        ));
+        DeviceInput::deliver(&a, multitouch::ContactEvent::Frame(&frame(2, 0.5, 0.5)));
+        assert!(a.lock().session.is_none());
+        assert_eq!(control.routing.lock().ui_session, 0);
+        DeviceInput::deliver(&a, multitouch::ContactEvent::Frame(&frame(3, 0.5, 0.5)));
+        {
+            let input = a.lock();
+            let session = input.session.as_ref().unwrap();
+            assert!(session.context.is_some());
+            assert_eq!(control.routing.lock().ui_session, session.sample.session);
+        }
+        for x in [0.5, 0.4] {
+            DeviceInput::deliver(&a, multitouch::ContactEvent::Frame(&frame(4, x, 0.5)));
+        }
+        let Event::Gesture(Lifecycle::Workspace { context, .. }) = rx.try_recv().unwrap().1 else {
+            panic!("four-finger workspace action");
+        };
+        assert_eq!(context.action.fingers, 4);
+        assert!(!context.action.scrolling);
         assert!(rx.try_recv().is_err());
     }
 

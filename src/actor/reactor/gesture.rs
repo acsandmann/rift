@@ -523,8 +523,8 @@ mod tests {
                     .same_as(r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic)
             );
 
-            // Pause before lift: niri leaves the camera here, so there is no new
-            // layout write to implicitly acknowledge the last interactive frame.
+            // Reconcile the last interactive frame before the release snap (or
+            // cancellation), even if no additional under-finger motion arrived.
             r.gesture_event(Lifecycle::End {
                 sample: sample(1, final_x, 200),
                 cancelled,
