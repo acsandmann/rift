@@ -835,9 +835,9 @@ dependencies = [
 
 [[package]]
 name = "multitouch"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42bade2c3e552471d363d424851df53af79a7be5078c5acc44be27e90675fa8e"
+checksum = "62f941afce817b0c3a8ac770c6f5e4026b581b49cd4092a8f9b10beae1110a1a"
 dependencies = [
  "objc2-core-foundation",
 ]
