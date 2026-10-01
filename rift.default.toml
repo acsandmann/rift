@@ -139,8 +139,6 @@ alignment = "center"
 # 			(disrespects alignment setting above)
 # - "anchored": always align focused column according to `alignment`
 focus_navigation_style = "niri"
-# animations can be disabled in this layout if you like
-# animate = false
 
 [settings.layout.scrolling.gestures]
 # Enable horizontal scroll gestures to switch columns

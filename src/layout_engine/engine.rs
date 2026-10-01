@@ -776,7 +776,9 @@ impl LayoutEngine {
     pub fn layout_specific_animate_settings(&self, space: SpaceId) -> Option<bool> {
         if let Some(ws_id) = self.workspaces.active_workspace(space) {
             match &self.workspaces[ws_id].layout_system {
-                LayoutSystemKind::Scrolling(_) => self.layout_settings.scrolling.animate,
+                LayoutSystemKind::Scrolling(_) => {
+                    Some(self.layout_settings.scrolling.animate.unwrap_or(true))
+                }
                 _ => None,
             }
         } else {

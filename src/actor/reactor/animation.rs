@@ -298,12 +298,12 @@ impl AnimationManager {
         }
 
         if animated_count > 0 {
-            let low_power = power::is_low_power_mode_enabled();
-            let layout_animate = animate
-                .or_else(|| {
-                    reactor.layout_manager.layout_engine.layout_specific_animate_settings(space)
-                })
-                .unwrap_or(reactor.config.settings.animate);
+            // Scrolling transitions preserve spatial continuity even in Low Power Mode.
+            let layout_setting =
+                reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
+            let low_power = layout_setting.is_none() && power::is_low_power_mode_enabled();
+            let layout_animate =
+                animate.or(layout_setting).unwrap_or(reactor.config.settings.animate);
             let skip_anim = is_resize || !layout_animate || low_power;
 
             if let Some(tx) = &reactor.animation_tx {

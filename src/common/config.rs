@@ -929,7 +929,8 @@ pub struct LayoutSettings {
 pub struct ScrollingLayoutSettings {
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
-    /// Whether to animate window transitions in this layout.
+    /// Whether to animate windows moving in the scrolling layout
+    /// HIGHLY RECOMMENDED to leave this enabled.
     #[serde(default)]
     pub animate: Option<bool>,
     /// Default width of the active column, as a fraction of the screen width.
