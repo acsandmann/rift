@@ -1012,14 +1012,6 @@ pub enum ScrollingFocusNavigationStyle {
     Anchored,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ScrollingGestureReleaseMode {
-    #[default]
-    Snap,
-    Free,
-}
-
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MasterStackSettings {
@@ -1063,9 +1055,6 @@ pub struct ScrollingGestureSettings {
     /// When omitted, inherit the scrolling layout/global animation setting.
     #[serde(default)]
     pub animate: Option<bool>,
-    /// Snap to semantic column boundaries, or coast to a free viewport offset.
-    #[serde(default)]
-    pub release_mode: ScrollingGestureReleaseMode,
     /// Invert horizontal direction (swap left/right)
     #[serde(default)]
     pub invert_horizontal: bool,
@@ -1089,11 +1078,11 @@ pub struct ScrollingGestureSettings {
 }
 
 impl Default for ScrollingGestureSettings {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             enabled: false,
             animate: None,
-            release_mode: ScrollingGestureReleaseMode::default(),
             invert_horizontal: false,
             vertical_tolerance: default_swipe_vertical_tolerance(),
             fingers: default_swipe_fingers(),

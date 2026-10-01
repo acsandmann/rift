@@ -146,9 +146,6 @@ focus_navigation_style = "niri"
 [settings.layout.scrolling.gestures]
 # Enable horizontal scroll gestures to switch columns
 enabled = false
-# Release at column-edge snaps; "free" keeps projected arbitrary viewport offsets
-# independently of focus_navigation_style.
-release_mode = "snap"
 # Invert horizontal direction (swap left/right)
 invert_horizontal = false
 # Number of fingers required for gesture

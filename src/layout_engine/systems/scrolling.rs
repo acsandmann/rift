@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    GapSettings, ScrollingAlignment, ScrollingFocusNavigationStyle, ScrollingGestureReleaseMode,
-    ScrollingLayoutSettings, WindowInsertionPoint,
+    GapSettings, ScrollingAlignment, ScrollingFocusNavigationStyle, ScrollingLayoutSettings,
+    WindowInsertionPoint,
 };
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{
@@ -108,7 +108,7 @@ impl From<f64> for Viewport {
     fn from(offset: f64) -> Self { Self::Static(if offset.is_finite() { offset } else { 0.0 }) }
 }
 
-/// Future input/animation callers can carry release velocity into their settling animation.
+/// Semantic snap destination and momentum for the reactor's release animation.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewportRelease {
     pub window: WindowId,
@@ -1042,15 +1042,13 @@ impl ScrollingLayoutSystem {
 
     /// Settle where cancellation occurred, with no artificial fling or focus change.
     pub fn cancel_viewport_gesture(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.get_mut(layout) {
-            if let Viewport::Gesture(offset) = state.viewport {
-                let offset = state
-                    .geometry
-                    .as_ref()
-                    .map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1));
-                state.viewport = Viewport::Static(offset);
-                state.motion = MotionHistory::default();
-            }
+        if let Some(state) = self.layouts.get_mut(layout)
+            && let Viewport::Gesture(offset) = state.viewport
+        {
+            let offset =
+                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1));
+            state.viewport = Viewport::Static(offset);
+            state.motion = MotionHistory::default();
         }
     }
 
@@ -1069,70 +1067,41 @@ impl ScrollingLayoutSystem {
         let g = state.geometry.as_ref()?;
         let from_offset = state.viewport.offset();
         let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
-        let (offset, index) = if gesture_release
-            && self.settings.gestures.release_mode == ScrollingGestureReleaseMode::Free
-        {
-            let offset = projected.clamp(g.bounds.0, g.bounds.1);
-            let visible = |c: ColumnGeometry| {
-                ((c.world_x + c.width).min(offset + g.tiling.size.width) - c.world_x.max(offset))
-                    .max(0.0)
-            };
-            // Keep visible focus; otherwise choose the most visible column, with
-            // travel direction breaking ties in the optional free release mode.
-            let index = if visible(*g.columns.get(state.active_column)?) > 0.0 {
-                state.active_column
+        let snap = g.snaps.iter().min_by(|a, b| {
+            (a.offset - projected)
+                .abs()
+                .total_cmp(&(b.offset - projected).abs())
+                .then_with(|| {
+                    if niri {
+                        // Niri sorts snaps by position before nearest-point selection.
+                        a.offset.total_cmp(&b.offset)
+                    } else {
+                        (gesture_release && a.column != state.active_column)
+                            .cmp(&(gesture_release && b.column != state.active_column))
+                    }
+                })
+        })?;
+        let mut index = snap.column;
+        if niri {
+            // Choose the furthest fully visible column
+            // in the direction of travel.
+            if projected >= from_offset {
+                for (next, column) in g.columns.iter().enumerate().skip(index + 1) {
+                    if column.world_x + column.width > snap.offset + g.tiling.size.width {
+                        break;
+                    }
+                    index = next;
+                }
             } else {
-                g.columns
-                    .iter()
-                    .enumerate()
-                    .max_by(|(i, a), (j, b)| {
-                        visible(**a).total_cmp(&visible(**b)).then_with(|| {
-                            if state.motion.total >= 0.0 {
-                                i.cmp(j)
-                            } else {
-                                j.cmp(i)
-                            }
-                        })
-                    })?
-                    .0
-            };
-            (offset, index)
-        } else {
-            let snap = g.snaps.iter().min_by(|a, b| {
-                (a.offset - projected).abs().total_cmp(&(b.offset - projected).abs()).then_with(
-                    || {
-                        if niri {
-                            // Niri sorts snaps by position before nearest-point selection.
-                            a.offset.total_cmp(&b.offset)
-                        } else {
-                            (gesture_release && a.column != state.active_column)
-                                .cmp(&(gesture_release && b.column != state.active_column))
-                        }
-                    },
-                )
-            })?;
-            let mut index = snap.column;
-            if niri {
-                // Choose the furthest fully visible column
-                // in the direction of travel.
-                if projected >= from_offset {
-                    for (next, column) in g.columns.iter().enumerate().skip(index + 1) {
-                        if column.world_x + column.width > snap.offset + g.tiling.size.width {
-                            break;
-                        }
-                        index = next;
+                for next in (0..index).rev() {
+                    if g.columns[next].world_x < snap.offset {
+                        break;
                     }
-                } else {
-                    for next in (0..index).rev() {
-                        if g.columns[next].world_x < snap.offset {
-                            break;
-                        }
-                        index = next;
-                    }
+                    index = next;
                 }
             }
-            (snap.offset, index)
-        };
+        }
+        let offset = snap.offset;
         if index != state.active_column {
             state.fullscreen_restore = None;
         }
@@ -2327,16 +2296,9 @@ mod tests {
 
     #[test]
     fn release_respects_navigation_style_and_preserves_flick_momentum() {
-        for (style, mode, targets) in [
-            (ScrollingFocusNavigationStyle::Niri, "", [
-                0.0, 500.0, 0.0, 500.0, 500.0, 1000.0,
-            ]),
-            (ScrollingFocusNavigationStyle::Niri, "release_mode = 'free'", [
-                240.0, 300.0, 240.0, 300.0, 657.4901, 921.4202,
-            ]),
-            (ScrollingFocusNavigationStyle::Anchored, "", [
-                0.0, 500.0, 0.0, 500.0, 500.0, 1000.0,
-            ]),
+        for style in [
+            ScrollingFocusNavigationStyle::Niri,
+            ScrollingFocusNavigationStyle::Anchored,
         ] {
             for ((distance, speed), target) in [
                 (240.0, 75.0),
@@ -2347,12 +2309,11 @@ mod tests {
                 (240.0, 3000.0),
             ]
             .into_iter()
-            .zip(targets)
+            .zip([0.0, 500.0, 0.0, 500.0, 500.0, 1000.0])
             {
                 let mut f = Fixture::new(4);
                 let mut settings = f.system.settings.clone();
                 settings.focus_navigation_style = style;
-                settings.gestures = toml::from_str(mode).unwrap();
                 f.system.update_settings(&settings);
                 f.system.begin_viewport_gesture(f.layout);
                 f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);

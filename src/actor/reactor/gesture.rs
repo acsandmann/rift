@@ -133,8 +133,7 @@ impl Reactor {
                 }
             }
             Lifecycle::Workspace { context, next, control } => {
-                if control.valid(context.epoch) && self.gesture_workspace_available(&context, next)
-                {
+                if control.valid(context.epoch) {
                     self.gesture_workspace(&context, next);
                 }
             }
@@ -213,22 +212,17 @@ impl Reactor {
     }
 
     fn finish_gesture(&mut self, final_sample: Option<Motion>, cancelled: bool) {
-        if let Some(sample) = final_sample {
-            self.apply_gesture_sample(sample);
-        } else if let Some(s) = &self.viewport_gesture
-            && let Some(sample) = s.motion.latest(s.context.session)
-        {
+        let Some(s) = &self.viewport_gesture else { return };
+        let valid = s.valid(self);
+        if valid && let Some(sample) = final_sample.or_else(|| s.motion.latest(s.context.session)) {
             self.apply_gesture_sample(sample);
         }
-        let Some(s) = self.viewport_gesture.take() else {
-            return;
-        };
+        let s = self.viewport_gesture.take().unwrap();
         // Flush the last coalesced write and read accepted geometry once, even
         // when release leaves the camera exactly where the fingers stopped.
         for (&wid, handle) in &s.updated_windows {
             let _ = handle.send(Request::EndWindowAnimation(wid));
         }
-        let valid = s.valid(self);
         let visible = valid || s.visible(self);
         if cancelled || !valid {
             s.control.retire_session(s.context.epoch, s.context.session);
@@ -242,35 +236,35 @@ impl Reactor {
                 _ => 0.0,
             };
         let next = (excess > 0.0) != s.context.action.invert;
-        if !cancelled
+        let handoff = !cancelled
             && valid
             && s.context.action.propagate
             && excess != 0.0
             && excess.abs() / s.context.width >= s.context.action.boundary_threshold
-            && self.gesture_workspace_available(&s.context, next)
-        {
-            if let LayoutSystemKind::Scrolling(system) =
-                &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system
-            {
-                system.cancel_viewport_gesture(s.layout);
-            }
-            self.gesture_workspace(&s.context, next);
-            return;
-        }
+            && self.gesture_workspace(&s.context, next);
         let LayoutSystemKind::Scrolling(system) =
             &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system
         else {
             return;
         };
-        let release = if cancelled || !valid {
+        let release = if cancelled || !valid || handoff {
             system.cancel_viewport_gesture(s.layout);
             None
         } else {
-            system.end_viewport_gesture(s.layout, final_sample.map_or(s.timestamp, |m| m.timestamp))
+            system.end_viewport_gesture(s.layout, s.timestamp)
         };
+        if handoff {
+            return;
+        }
         if visible {
-            let frames = system.viewport_frames(s.layout).collect();
-            let frames = self.bound_viewport_frames(s.context.space, frames);
+            let mut frames: Vec<_> = system.viewport_frames(s.layout).collect();
+            if self.active_spaces.len() > 1
+                && let Some(screen) = self.space_state.screen_by_space(s.context.space)
+            {
+                for (_, frame) in &mut frames {
+                    *frame = super::managers::bound_frame_to_screen(*frame, screen.frame);
+                }
+            }
             if let Some(release) = release {
                 AnimationManager::animate_viewport_release(
                     self,
@@ -304,50 +298,15 @@ impl Reactor {
         }
     }
 
-    fn bound_viewport_frames(
-        &self,
-        space: crate::sys::screen::SpaceId,
-        mut frames: Vec<(crate::actor::app::WindowId, objc2_core_foundation::CGRect)>,
-    ) -> Vec<(crate::actor::app::WindowId, objc2_core_foundation::CGRect)> {
-        if self.active_spaces.len() > 1
-            && let Some(screen) = self.space_state.screen_by_space(space)
-        {
-            for (_, frame) in &mut frames {
-                *frame = super::managers::bound_frame_to_screen(*frame, screen.frame);
-            }
-        }
-        frames
-    }
-
-    fn gesture_workspace_available(&self, context: &Context, next: bool) -> bool {
-        let store = self.layout_manager.layout_engine.workspaces();
-        let Some(current) = store.active_workspace(context.space) else {
-            return false;
-        };
-        let target = if next {
-            store.next_workspace(
-                &self.state.windows,
-                context.space,
-                current,
-                context.settings.skip_empty,
-            )
-        } else {
-            store.prev_workspace(
-                &self.state.windows,
-                context.space,
-                current,
-                context.settings.skip_empty,
-            )
-        };
-        target.is_some_and(|target| target != current)
-            && self.is_space_active(context.space)
-            && matches!(
+    fn gesture_workspace(&mut self, context: &Context, next: bool) -> bool {
+        if !self.is_space_active(context.space)
+            || !matches!(
                 self.mission_control_manager.mission_control_state,
                 super::MissionControlState::Inactive
             )
-    }
-
-    fn gesture_workspace(&mut self, context: &Context, next: bool) {
+        {
+            return false;
+        }
         let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
         let result = command_workflow::handle_command_layout(
             &mut self.state,
@@ -355,9 +314,9 @@ impl Reactor {
             &mut self.workspace_switch_manager,
             command_workflow::LayoutCommandPayload {
                 command: if next {
-                    LayoutCommand::NextWorkspace(context.settings.skip_empty)
+                    LayoutCommand::NextWorkspace(context.skip_empty)
                 } else {
-                    LayoutCommand::PrevWorkspace(context.settings.skip_empty)
+                    LayoutCommand::PrevWorkspace(context.skip_empty)
                 },
                 command_space: Some(context.space),
                 visible_spaces,
@@ -365,12 +324,15 @@ impl Reactor {
                 post_arrange_mouse_warp: None,
             },
         );
-        if let Ok(outcome) = result {
-            self.apply_event_outcome(outcome);
-            if let Some(pattern) = context.settings.haptic {
-                let _ = crate::sys::haptics::perform_haptic(pattern);
-            }
+        let Ok(outcome) = result else { return false };
+        if !outcome.layout_responses.iter().any(|(response, _)| response.changed) {
+            return false;
         }
+        self.apply_event_outcome(outcome);
+        if let Some(pattern) = context.haptic {
+            let _ = crate::sys::haptics::perform_haptic(pattern);
+        }
+        true
     }
 }
 
@@ -459,7 +421,10 @@ mod tests {
             0,
             space,
             1000.0,
-            LayoutMode::Scrolling,
+            (
+                LayoutMode::Scrolling,
+                config.settings.layout.scrolling.gestures.fingers,
+            ),
             settings,
             Duration::ZERO,
         )
@@ -661,6 +626,17 @@ mod tests {
             let (mut r, ctx, c, m) = setup_options_threshold(false, false, false, 0.25);
             m.publish(sample(1, 100.0, 10));
             r.gesture_tick();
+            let session = r.viewport_gesture.as_ref().unwrap();
+            let (workspace, layout) = (session.workspace, session.layout);
+            let frames = |r: &Reactor| {
+                let LayoutSystemKind::Scrolling(system) =
+                    &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+                else {
+                    panic!("scrolling layout");
+                };
+                system.viewport_frames(layout).collect::<Vec<_>>()
+            };
+            let before = frames(&r);
             if reset {
                 let (tx, _) = crate::actor::channel();
                 c.reset(&tx);
@@ -670,6 +646,11 @@ mod tests {
             m.publish(sample(1, 9000.0, 20));
             r.gesture_tick();
             assert!(r.viewport_gesture.is_none());
+            assert_eq!(
+                frames(&r),
+                before,
+                "late motion must not move an invalid viewport"
+            );
             assert!(c.valid(ctx.epoch) != reset);
         }
     }

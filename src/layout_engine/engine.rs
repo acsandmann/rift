@@ -2733,29 +2733,17 @@ impl LayoutEngine {
         command: &LayoutCommand,
     ) -> EventResponse {
         match command {
-            LayoutCommand::NextWorkspace(skip_empty) => {
-                if let Some(current_workspace) = self.workspaces.active_workspace(space) {
-                    if let Some(next_workspace) = self.workspaces.next_workspace(
-                        window_store,
-                        space,
-                        current_workspace,
-                        *skip_empty,
-                    ) {
-                        return self.activate_workspace(window_store, space, next_workspace, None);
-                    }
-                }
-                EventResponse::default()
-            }
-            LayoutCommand::PrevWorkspace(skip_empty) => {
-                if let Some(current_workspace) = self.workspaces.active_workspace(space) {
-                    if let Some(prev_workspace) = self.workspaces.prev_workspace(
-                        window_store,
-                        space,
-                        current_workspace,
-                        *skip_empty,
-                    ) {
-                        return self.activate_workspace(window_store, space, prev_workspace, None);
-                    }
+            LayoutCommand::NextWorkspace(skip_empty) | LayoutCommand::PrevWorkspace(skip_empty) => {
+                let Some(current) = self.workspaces.active_workspace(space) else {
+                    return EventResponse::default();
+                };
+                let target = if matches!(command, LayoutCommand::NextWorkspace(_)) {
+                    self.workspaces.next_workspace(window_store, space, current, *skip_empty)
+                } else {
+                    self.workspaces.prev_workspace(window_store, space, current, *skip_empty)
+                };
+                if let Some(target) = target.filter(|&target| target != current) {
+                    return self.activate_workspace(window_store, space, target, None);
                 }
                 EventResponse::default()
             }
@@ -4282,6 +4270,25 @@ mod tests {
             &LayoutCommand::NextWorkspace(Some(true)),
         );
         assert!(!no_eligible_workspace.changed);
+
+        // Wrapping back to the only workspace is also a no-op. Gesture
+        // handoff and haptics rely on the same changed result as commands.
+        settings.prevent_wrapping = false;
+        settings.default_workspace_count = 1;
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let current = engine.workspaces_mut().list_workspaces(space)[0].0;
+        assert!(engine.workspaces_mut().set_active_workspace(space, current));
+        let last = engine.workspaces().last_workspace(space);
+        for command in [
+            LayoutCommand::NextWorkspace(None),
+            LayoutCommand::PrevWorkspace(None),
+        ] {
+            let response =
+                engine.handle_virtual_workspace_command(&mut window_store, space, &command);
+            assert!(!response.changed);
+            assert_eq!(engine.workspaces().active_workspace(space), Some(current));
+            assert_eq!(engine.workspaces().last_workspace(space), last);
+        }
     }
 
     #[test]
