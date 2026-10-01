@@ -2368,59 +2368,47 @@ impl LayoutEngine {
                 }
                 EventResponse::default()
             }
-            LayoutCommand::ScrollStrip { delta } => {
-                let mut resp = EventResponse::default();
-                if let LayoutSystemKind::Scrolling(system) =
+            LayoutCommand::ScrollStrip { .. }
+            | LayoutCommand::SnapStrip
+            | LayoutCommand::SwitchPresetColumnWidth { .. }
+            | LayoutCommand::CenterSelection => {
+                let LayoutSystemKind::Scrolling(system) =
                     &mut self.workspaces[workspace_id].layout_system
-                {
-                    if let Some((direction, excess)) = system.scroll_by_delta(layout, delta) {
-                        let key = (workspace_id, layout, direction);
-                        let accumulated = self
-                            .scroll_boundary
-                            .filter(|(previous, _)| *previous == key)
-                            .map_or(excess, |(_, amount)| amount + excess);
-                        if accumulated
-                            >= self.layout_settings.scrolling.gestures.workspace_switch_threshold
-                        {
-                            self.scroll_boundary = None;
-                            resp.boundary_hit = Some(direction);
-                        } else {
-                            self.scroll_boundary = Some((key, accumulated));
-                        }
-                    } else {
-                        self.scroll_boundary = None;
-                    }
-                }
-                resp
-            }
-            LayoutCommand::SnapStrip => {
-                let mut response = EventResponse::default();
-                if let LayoutSystemKind::Scrolling(system) =
-                    &mut self.workspaces[workspace_id].layout_system
-                {
-                    response.focus_window = system.snap_to_nearest_column(layout);
-                    response.changed = response.focus_window.is_some();
-                }
-                response
-            }
-            LayoutCommand::SwitchPresetColumnWidth { backwards } => {
-                let mut response = EventResponse::default();
-                response.changed = if let LayoutSystemKind::Scrolling(system) =
-                    &mut self.workspaces[workspace_id].layout_system
-                {
-                    system.switch_preset_column_width(layout, backwards)
-                } else {
-                    false
+                else {
+                    return EventResponse::default();
                 };
-                response
-            }
-            LayoutCommand::CenterSelection => {
-                if let LayoutSystemKind::Scrolling(system) =
-                    &mut self.workspaces[workspace_id].layout_system
-                {
-                    system.center_selected_column(layout);
+                let mut response = EventResponse::default();
+                match command {
+                    LayoutCommand::ScrollStrip { delta } => {
+                        if let Some((direction, excess)) = system.scroll_by_delta(layout, delta) {
+                            let key = (workspace_id, layout, direction);
+                            let accumulated = self
+                                .scroll_boundary
+                                .filter(|(previous, _)| *previous == key)
+                                .map_or(excess, |(_, amount)| amount + excess);
+                            let boundary = accumulated
+                                >= self
+                                    .layout_settings
+                                    .scrolling
+                                    .gestures
+                                    .workspace_switch_threshold;
+                            self.scroll_boundary = (!boundary).then_some((key, accumulated));
+                            response.boundary_hit = boundary.then_some(direction);
+                        } else {
+                            self.scroll_boundary = None;
+                        }
+                    }
+                    LayoutCommand::SnapStrip => {
+                        response.focus_window = system.snap_to_nearest_column(layout);
+                        response.changed = response.focus_window.is_some();
+                    }
+                    LayoutCommand::SwitchPresetColumnWidth { backwards } => {
+                        response.changed = system.switch_preset_column_width(layout, backwards);
+                    }
+                    LayoutCommand::CenterSelection => system.center_selected_column(layout),
+                    _ => unreachable!(),
                 }
-                EventResponse::default()
+                response
             }
         }
     }
@@ -2434,17 +2422,15 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let Some((workspace_id, _)) = self.workspaces.active_layout_for_space(space) else {
+        let Some((workspace_id, layout)) = self.workspaces.active_layout_for_space(space) else {
             return Vec::new();
         };
-        if let Some(layout) = self.workspaces.active_layout(space, workspace_id) {
-            self.workspaces[workspace_id].layout_system.prepare_layout(
-                layout,
-                screen,
-                &self.window_layout_constraints,
-                gaps,
-            );
-        }
+        self.workspaces[workspace_id].layout_system.prepare_layout(
+            layout,
+            screen,
+            &self.window_layout_constraints,
+            gaps,
+        );
         self.calculate_workspace_layout(
             space,
             workspace_id,
@@ -2688,7 +2674,7 @@ impl LayoutEngine {
             self.workspaces.active_layout(space, workspace),
         ) {
             (LayoutSystemKind::Scrolling(system), Some(layout)) => system
-                .logical_frames(layout, screen, &self.window_layout_constraints, gaps)
+                .calculate_frames(layout, screen, &self.window_layout_constraints, gaps, false)
                 .into_iter()
                 .collect(),
             _ => HashMap::default(),

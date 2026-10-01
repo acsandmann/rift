@@ -125,18 +125,16 @@ impl Arbitration {
         }
         let owns = owner.session == self.session && owner.consume && owner.owner == Owner::Rift;
         let decision = match self.sequence {
-            Sequence::Passing => {
-                // Native begin can precede physical acquisition. Late ownership
-                // cancels delivery instead of leaving Dock with a partial stroke.
-                if owner.touching && owner.consume && owner.owner != Owner::System {
-                    self.session = owner.session;
-                    self.sequence = Sequence::Provisional;
-                    if owner.owner == Owner::Rift {
-                        self.sequence = Sequence::Dropping;
-                        Decision::Cancel
-                    } else {
-                        Decision::Forward
-                    }
+            // Native begin can precede physical acquisition. Late ownership
+            // cancels delivery instead of leaving Dock with a partial stroke.
+            Sequence::Passing
+                if owner.touching && owner.consume && owner.owner != Owner::System =>
+            {
+                self.session = owner.session;
+                self.sequence = Sequence::Provisional;
+                if owner.owner == Owner::Rift {
+                    self.sequence = Sequence::Dropping;
+                    Decision::Cancel
                 } else {
                     Decision::Forward
                 }
@@ -146,7 +144,7 @@ impl Arbitration {
                 self.sequence = Sequence::Dropping;
                 Decision::Cancel
             }
-            Sequence::Provisional => Decision::Forward,
+            Sequence::Passing | Sequence::Provisional => Decision::Forward,
             Sequence::Holding if owns => {
                 self.sequence = Sequence::Dropping;
                 Decision::Drop

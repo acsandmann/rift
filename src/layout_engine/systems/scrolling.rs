@@ -19,6 +19,7 @@ use crate::layout_engine::systems::{
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAction};
+use crate::sys::geometry::Round;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(transparent)]
@@ -165,14 +166,7 @@ fn fit_offset(current: f64, view: f64, column: ColumnGeometry) -> f64 {
     if column.width >= view {
         return left;
     }
-    let right = left + column.width - view;
-    if current <= left && right <= current {
-        current
-    } else if (current - left).abs() <= (current - right).abs() {
-        left
-    } else {
-        right
-    }
+    current.clamp(left + column.width - view, left)
 }
 
 fn centered_offset(view: f64, column: ColumnGeometry) -> f64 {
@@ -454,8 +448,9 @@ impl Serialize for LayoutState {
     }
 }
 
-// Read old snapshots at the persistence boundary; obsolete fields never enter
-// the live model. Current snapshots use the same flat representation.
+// Released snapshots on main store selected, column_width_ratio, node_id,
+// width_offset and width_overridden. Keep their migration at this boundary;
+// current snapshots use the same flat representation.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct StoredLayoutState {
@@ -569,21 +564,13 @@ impl LayoutState {
         true
     }
 
-    fn active_column_fullscreen(&self) -> bool {
-        self.columns.get(self.active_column).is_some_and(|column| {
+    fn restore_fullscreen_view(&mut self) -> bool {
+        let fullscreen = self.columns.get(self.active_column).is_some_and(|column| {
             column.windows.iter().any(|wid| {
                 self.fullscreen.contains(wid) || self.fullscreen_within_gaps.contains(wid)
             })
-        })
-    }
-
-    fn restore_fullscreen_view(&mut self) -> bool {
-        if !self.active_column_fullscreen()
-            && let Some(bookmark) = self.fullscreen_restore.take()
-        {
-            return self.restore(bookmark);
-        }
-        false
+        });
+        !fullscreen && self.fullscreen_restore.take().is_some_and(|bookmark| self.restore(bookmark))
     }
 
     fn bookmark(&self) -> Option<ViewBookmark> {
@@ -732,24 +719,6 @@ impl LayoutState {
         self.activate(source);
         true
     }
-
-    fn extract(&mut self, direction: Direction) -> bool {
-        let Some((col, _)) = self.selected_location() else {
-            return false;
-        };
-        if self.columns[col].windows.len() < 2 {
-            return false;
-        }
-        let wid = self.selected().unwrap();
-        let (width, weight) = self.detach(wid).unwrap();
-        self.new_column(
-            col + usize::from(direction == Direction::Right),
-            wid,
-            width,
-            weight,
-        );
-        true
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -760,6 +729,15 @@ pub struct ScrollingLayoutSystem {
 }
 
 impl ScrollingLayoutSystem {
+    fn selected_mut(
+        layouts: &mut slotmap::SlotMap<LayoutId, LayoutState>,
+        layout: LayoutId,
+    ) -> Option<(&mut LayoutState, usize, usize)> {
+        let state = layouts.get_mut(layout)?;
+        let (column, row) = state.selected_location()?;
+        Some((state, column, row))
+    }
+
     pub fn new(settings: &ScrollingLayoutSettings) -> Self {
         let mut system = Self::default();
         system.update_settings(settings);
@@ -850,7 +828,7 @@ impl ScrollingLayoutSystem {
         }
     }
 
-    fn calculate_frames(
+    pub(crate) fn calculate_frames(
         &self,
         layout: LayoutId,
         screen: CGRect,
@@ -893,10 +871,7 @@ impl ScrollingLayoutSystem {
                     frame.origin.x = g.screen.max().x;
                 }
             }
-            frame.origin.x = frame.origin.x.round();
-            frame.origin.y = frame.origin.y.round();
-            frame.size.width = frame.size.width.round();
-            frame.size.height = frame.size.height.round();
+            frame = frame.round();
             if state.fullscreen.contains(&wid) {
                 frame = g.screen;
             } else if state.fullscreen_within_gaps.contains(&wid) {
@@ -916,16 +891,6 @@ impl ScrollingLayoutSystem {
             .into_iter()
             .filter_map(|state| Some((state, state.geometry.as_ref()?)))
             .flat_map(|(state, geometry)| Self::translate_frames(state, geometry, true))
-    }
-
-    pub(crate) fn logical_frames(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &GapSettings,
-    ) -> Vec<(WindowId, CGRect)> {
-        self.calculate_frames(layout, screen, constraints, gaps, false)
     }
 
     /// Legacy normalized strip delta; boundary recognition is owned by the caller.
@@ -961,9 +926,7 @@ impl ScrollingLayoutSystem {
         if !self.viewport_gesture_available(layout) {
             return false;
         }
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return false;
-        };
+        let state = &mut self.layouts[layout];
         state.transient_restore = None;
         if matches!(state.viewport, Viewport::Gesture(_)) {
             return false;
@@ -1085,21 +1048,23 @@ impl ScrollingLayoutSystem {
         if niri {
             // Choose the furthest fully visible column
             // in the direction of travel.
-            if projected >= from_offset {
-                for (next, column) in g.columns.iter().enumerate().skip(index + 1) {
-                    if column.world_x + column.width > snap.offset + g.tiling.size.width {
-                        break;
-                    }
-                    index = next;
-                }
+            index = if projected >= from_offset {
+                g.columns
+                    .iter()
+                    .enumerate()
+                    .skip(index + 1)
+                    .take_while(|(_, column)| {
+                        column.world_x + column.width <= snap.offset + g.tiling.size.width
+                    })
+                    .last()
+                    .map_or(index, |(next, _)| next)
             } else {
-                for next in (0..index).rev() {
-                    if g.columns[next].world_x < snap.offset {
-                        break;
-                    }
-                    index = next;
-                }
-            }
+                (0..index)
+                    .rev()
+                    .take_while(|&next| g.columns[next].world_x >= snap.offset)
+                    .last()
+                    .unwrap_or(index)
+            };
         }
         let offset = snap.offset;
         if index != state.active_column {
@@ -1133,10 +1098,7 @@ impl ScrollingLayoutSystem {
     }
 
     pub fn switch_preset_column_width(&mut self, layout: LayoutId, backwards: bool) -> bool {
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return false;
-        };
-        let Some((col, _)) = state.selected_location() else {
+        let Some((state, col, _)) = Self::selected_mut(&mut self.layouts, layout) else {
             return false;
         };
         let presets = self
@@ -1268,48 +1230,28 @@ impl LayoutSystem for ScrollingLayoutSystem {
                             .rotate_left(1)
                             | 1,
                         node_type: rift_protocol::ContainerNodeType::Window,
-                        frame: Default::default(),
-                        layout_kind: None,
                         weight: Some(column.height_weights.get(index).copied().unwrap_or(1.0)),
                         window_id: Some(window.into()),
                         is_selected: state.selected() == Some(window),
                         is_fullscreen: state.fullscreen.contains(&window),
                         is_fullscreen_within_gaps: state.fullscreen_within_gaps.contains(&window),
-                        role: None,
-                        pending_split: None,
-                        children: Vec::new(),
+                        ..Default::default()
                     })
                     .collect();
                 rift_protocol::ContainerTreeNode {
                     node_id: column.id.0,
-                    node_type: rift_protocol::ContainerNodeType::Container,
-                    frame: Default::default(),
                     layout_kind: Some(rift_protocol::LayoutKind::Vertical),
-                    weight: None,
-                    window_id: None,
-                    is_selected: false,
-                    is_fullscreen: false,
-                    is_fullscreen_within_gaps: false,
                     role: Some("column".to_owned()),
-                    pending_split: None,
                     children: windows,
+                    ..Default::default()
                 }
             })
             .collect();
 
         rift_protocol::ContainerTreeNode {
-            node_id: 0,
-            node_type: rift_protocol::ContainerNodeType::Container,
-            frame: Default::default(),
             layout_kind: Some(rift_protocol::LayoutKind::Horizontal),
-            weight: None,
-            window_id: None,
-            is_selected: false,
-            is_fullscreen: false,
-            is_fullscreen_within_gaps: false,
-            role: None,
-            pending_split: None,
             children,
+            ..Default::default()
         }
     }
 
@@ -1559,10 +1501,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return false;
         };
-        let Some((ac, ar)) = state.locate(a) else {
-            return false;
-        };
-        let Some((bc, br)) = state.locate(b) else {
+        let (Some((ac, ar)), Some((bc, br))) = (state.locate(a), state.locate(b)) else {
             return false;
         };
         state.mutate(&self.settings, |state| {
@@ -1611,7 +1550,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
             };
             let horizontal = matches!(direction, Direction::Left | Direction::Right);
             if horizontal && state.columns[col].windows.len() > 1 {
-                return state.extract(direction);
+                let wid = state.selected().unwrap();
+                let (width, weight) = state.detach(wid).unwrap();
+                state.new_column(
+                    col + usize::from(direction == Direction::Right),
+                    wid,
+                    width,
+                    weight,
+                );
+                return true;
             }
             let (index, len) = if horizontal {
                 (col, state.columns.len())
@@ -1716,10 +1663,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         layout: LayoutId,
         _orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return Vec::new();
-        };
-        let Some((col, _)) = state.selected_location() else {
+        let Some((state, col, _)) = Self::selected_mut(&mut self.layouts, layout) else {
             return Vec::new();
         };
         let target = if col + 1 < state.columns.len() {
@@ -1747,10 +1691,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         layout: LayoutId,
         _orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return Vec::new();
-        };
-        let Some((col, _)) = state.selected_location() else {
+        let Some((state, col, _)) = Self::selected_mut(&mut self.layouts, layout) else {
             return Vec::new();
         };
         let selected = state.selected().unwrap();
@@ -1789,10 +1730,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if !amount.is_finite() {
             return;
         }
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return;
-        };
-        let Some((col, row)) = state.selected_location() else {
+        let Some((state, col, row)) = Self::selected_mut(&mut self.layouts, layout) else {
             return;
         };
         let vertical = orientation == ResizeOrientation::Vertical
@@ -1895,8 +1833,13 @@ mod tests {
 
         fn frames(&mut self) -> Vec<(WindowId, CGRect)> {
             self.prepare();
-            self.system
-                .logical_frames(self.layout, self.screen, &self.constraints, &self.gaps)
+            self.system.calculate_frames(
+                self.layout,
+                self.screen,
+                &self.constraints,
+                &self.gaps,
+                false,
+            )
         }
 
         fn frame(&mut self, index: u32) -> CGRect {
@@ -2664,7 +2607,7 @@ mod tests {
         f.system.center_selected_column(clone);
         let old_x = f
             .system
-            .logical_frames(clone, f.screen, &f.constraints, &f.gaps)
+            .calculate_frames(clone, f.screen, &f.constraints, &f.gaps, false)
             .into_iter()
             .find(|(w, _)| *w == wid(3))
             .unwrap()
@@ -2677,7 +2620,7 @@ mod tests {
         let wider = CGRect::new(CGPoint::ZERO, CGSize::new(1600.0, 800.0));
         resized_restore.prepare_layout(clone, wider, &f.constraints, &f.gaps);
         let new_x = resized_restore
-            .logical_frames(clone, wider, &f.constraints, &f.gaps)
+            .calculate_frames(clone, wider, &f.constraints, &f.gaps, false)
             .into_iter()
             .find(|(w, _)| *w == wid(3))
             .unwrap()

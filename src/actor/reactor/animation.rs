@@ -55,6 +55,15 @@ struct AnimatedWindow {
 }
 
 impl AnimatedWindow {
+    fn send_frame(&self, frame: CGRect, set_size: bool) {
+        _ = self.handle.send(Request::AnimationFrame {
+            wid: self.wid,
+            frame,
+            set_size,
+            txid: self.txid,
+        });
+    }
+
     fn frame_after(&self, frame: u32, total_frames: u32, gesture: Option<(f64, f64)>) -> CGRect {
         if frame == 0 {
             return if self.is_focus {
@@ -180,29 +189,10 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         is_resize: bool,
         skip_wid: Option<WindowId>,
+        gesture: Option<(ViewportRelease, Option<bool>)>,
     ) -> bool {
-        Self::animate_layout_inner(reactor, space, layout, is_resize, skip_wid, None, None)
-    }
-
-    pub(super) fn animate_viewport_release(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        release: ViewportRelease,
-        animate: Option<bool>,
-    ) -> bool {
-        Self::animate_layout_inner(reactor, space, layout, false, None, Some(release), animate)
-    }
-
-    fn animate_layout_inner(
-        reactor: &mut Reactor,
-        space: SpaceId,
-        layout: &[(WindowId, CGRect)],
-        is_resize: bool,
-        skip_wid: Option<WindowId>,
-        release: Option<ViewportRelease>,
-        animate: Option<bool>,
-    ) -> bool {
+        let (release, animate) =
+            gesture.map_or((None, None), |(release, animate)| (Some(release), animate));
         let Some(active_ws) =
             reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
         else {
@@ -573,24 +563,14 @@ impl Animation {
                     origin: window.start.origin,
                     size: window.finish.size,
                 };
-                _ = window.handle.send(Request::AnimationFrame {
-                    wid: window.wid,
-                    frame,
-                    set_size: true,
-                    txid: window.txid,
-                });
+                window.send_frame(frame, true);
             }
         }
     }
 
     fn finish_all(&self) {
         for window in &self.windows {
-            _ = window.handle.send(Request::AnimationFrame {
-                wid: window.wid,
-                frame: window.finish,
-                set_size: true,
-                txid: window.txid,
-            });
+            window.send_frame(window.finish, true);
             _ = window.handle.send(Request::EndWindowAnimation(window.wid));
         }
     }
@@ -608,12 +588,7 @@ impl Animation {
             if set_size {
                 rect.size = window.finish.size;
             }
-            _ = window.handle.send(Request::AnimationFrame {
-                wid: window.wid,
-                frame: rect,
-                set_size,
-                txid: window.txid,
-            });
+            window.send_frame(rect, set_size);
         }
     }
 
@@ -961,12 +936,13 @@ mod tests {
             offset: 400.0,
             velocity: 2000.0,
         };
-        AnimationManager::animate_viewport_release(
+        AnimationManager::animate_layout(
             &mut r,
             space,
             &[(wid, to)],
-            release,
-            Some(true),
+            false,
+            None,
+            Some((release, Some(true))),
         );
         let Message::Replace(anim) = rx.try_recv().unwrap() else {
             panic!("gesture override must animate");
@@ -1000,12 +976,13 @@ mod tests {
         }
         assert!(count > 10);
         assert_eq!(previous, -400.0);
-        AnimationManager::animate_viewport_release(
+        AnimationManager::animate_layout(
             &mut r,
             space,
             &[(wid, from)],
-            release,
-            Some(false),
+            false,
+            None,
+            Some((release, Some(false))),
         );
         assert!(matches!(rx.try_recv().unwrap(), Message::SkipToEnd(_)));
     }

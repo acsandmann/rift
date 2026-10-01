@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 use super::animation::AnimationManager;
 use super::{Reactor, command_workflow};
 use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId};
-use crate::actor::gesture::{Context, Control, Lifecycle, Motion, MotionPublisher};
+use crate::actor::gesture::{Context, Control, Lifecycle, Motion};
 use crate::common::collections::HashMap;
 use crate::layout_engine::{
     EventResponse, LayoutCommand, LayoutId, LayoutSystemKind, VirtualWorkspaceId,
@@ -17,7 +17,6 @@ use crate::sys::geometry::{Round, SameAs};
 pub(super) struct ViewportSession {
     context: Context,
     control: Control,
-    motion: MotionPublisher,
     workspace: VirtualWorkspaceId,
     layout: LayoutId,
     applied: f64,
@@ -40,16 +39,21 @@ impl ViewportSession {
     fn valid(&self, r: &Reactor) -> bool {
         self.visible(r)
             && self.control.valid(self.context.epoch)
-            && matches!(
-                r.mission_control_manager.mission_control_state,
-                super::MissionControlState::Inactive
-            )
+            && r.gesture_space_active(self.context.space)
     }
 }
 impl Reactor {
+    fn gesture_space_active(&self, space: crate::sys::screen::SpaceId) -> bool {
+        self.is_space_active(space)
+            && matches!(
+                self.mission_control_manager.mission_control_state,
+                super::MissionControlState::Inactive
+            )
+    }
+
     pub(super) fn gesture_event(&mut self, event: Lifecycle) {
         match event {
-            Lifecycle::Begin { context, motion, control } => {
+            Lifecycle::Begin { context, control } => {
                 if self
                     .viewport_gesture
                     .as_ref()
@@ -58,13 +62,7 @@ impl Reactor {
                     return;
                 }
                 self.finish_gesture(None, true);
-                if !control.valid(context.epoch)
-                    || !self.is_space_active(context.space)
-                    || !matches!(
-                        self.mission_control_manager.mission_control_state,
-                        super::MissionControlState::Inactive
-                    )
-                {
+                if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
                     return;
                 }
                 let engine = &mut self.layout_manager.layout_engine;
@@ -87,34 +85,27 @@ impl Reactor {
                         system.viewport_frames(layout).map(|(wid, _)| wid).collect(),
                     ));
                 }
-                let hz = self
-                    .space_state
-                    .screen_by_space(context.space)
+                let screen = self.space_state.screen_by_space(context.space);
+                let hz = screen
                     .and_then(|s| objc2_core_graphics::CGDisplayCopyDisplayMode(s.id.as_u32()))
                     .map(|mode| objc2_core_graphics::CGDisplayMode::refresh_rate(Some(&mode)))
                     .filter(|hz| hz.is_finite() && *hz > 0.0)
                     .unwrap_or(120.0)
                     .clamp(30.0, 240.0);
-                let notify = Arc::new(Notify::new());
-                // A display callback is useful only once the native animation
-                // actor is installed; otherwise the timer can drive the model.
-                let link = self
-                    .space_state
-                    .screen_by_space(context.space)
-                    .filter(|_| self.animation_tx.is_some())
-                    .map(|screen| {
-                        crate::sys::display_link::DisplayLink::for_display(
-                            screen.id.as_u32(),
-                            notify.clone(),
-                        )
-                    });
-                let refresh = link.as_ref().map(|_| notify);
+                // Without a native animation actor, the timer drives the model.
+                let refresh =
+                    screen.filter(|_| self.animation_tx.is_some()).map(|_| Arc::new(Notify::new()));
+                let link = screen.zip(refresh.as_ref()).map(|(screen, notify)| {
+                    crate::sys::display_link::DisplayLink::for_display(
+                        screen.id.as_u32(),
+                        notify.clone(),
+                    )
+                });
                 self.viewport_gesture = Some(ViewportSession {
                     updated_windows: HashMap::default(),
                     timestamp: context.started,
                     context,
                     control,
-                    motion,
                     workspace,
                     layout,
                     applied: 0.0,
@@ -149,7 +140,7 @@ impl Reactor {
             self.finish_gesture(None, true);
             return;
         }
-        if let Some(sample) = session.motion.latest(session.context.session) {
+        if let Some(sample) = session.control.latest(session.context.session) {
             self.apply_gesture_sample(sample);
         }
     }
@@ -214,7 +205,8 @@ impl Reactor {
     fn finish_gesture(&mut self, final_sample: Option<Motion>, cancelled: bool) {
         let Some(s) = &self.viewport_gesture else { return };
         let valid = s.valid(self);
-        if valid && let Some(sample) = final_sample.or_else(|| s.motion.latest(s.context.session)) {
+        if valid && let Some(sample) = final_sample.or_else(|| s.control.latest(s.context.session))
+        {
             self.apply_gesture_sample(sample);
         }
         let s = self.viewport_gesture.take().unwrap();
@@ -224,7 +216,8 @@ impl Reactor {
             let _ = handle.send(Request::EndWindowAnimation(wid));
         }
         let visible = valid || s.visible(self);
-        if cancelled || !valid {
+        let cancelled = cancelled || !valid;
+        if cancelled {
             s.control.retire_session(s.context.epoch, s.context.session);
         }
         // Like a fluid page swipe, an edge transition remains reversible until
@@ -237,7 +230,6 @@ impl Reactor {
             };
         let next = (excess > 0.0) != s.context.action.invert;
         let handoff = !cancelled
-            && valid
             && s.context.action.propagate
             && excess != 0.0
             && excess.abs() / s.context.width >= s.context.action.boundary_threshold
@@ -247,7 +239,7 @@ impl Reactor {
         else {
             return;
         };
-        let release = if cancelled || !valid || handoff {
+        let release = if cancelled || handoff {
             system.cancel_viewport_gesture(s.layout);
             None
         } else {
@@ -266,12 +258,13 @@ impl Reactor {
                 }
             }
             if let Some(release) = release {
-                AnimationManager::animate_viewport_release(
+                AnimationManager::animate_layout(
                     self,
                     s.context.space,
                     &frames,
-                    release,
-                    s.context.action.animate,
+                    false,
+                    None,
+                    Some((release, s.context.action.animate)),
                 );
                 tracing::debug!(
                     session = s.context.session,
@@ -299,12 +292,7 @@ impl Reactor {
     }
 
     fn gesture_workspace(&mut self, context: &Context, next: bool) -> bool {
-        if !self.is_space_active(context.space)
-            || !matches!(
-                self.mission_control_manager.mission_control_state,
-                super::MissionControlState::Inactive
-            )
-        {
+        if !self.gesture_space_active(context.space) {
             return false;
         }
         let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
@@ -360,7 +348,7 @@ mod tests {
         skip_empty: bool,
         invert: bool,
         threshold: f64,
-    ) -> (Reactor, Context, Control, MotionPublisher) {
+    ) -> (Reactor, Context, Control, Control) {
         let mut r = test_reactor_with_workspace_count(3);
         let space = SpaceId::new(1);
         r.handle_loop_event(space_state_event(
@@ -408,11 +396,7 @@ mod tests {
         let (context, c, motion) = begin(&mut r, &cfg, space);
         (r, context, c, motion)
     }
-    fn begin(
-        r: &mut Reactor,
-        config: &Config,
-        space: SpaceId,
-    ) -> (Context, Control, MotionPublisher) {
+    fn begin(r: &mut Reactor, config: &Config, space: SpaceId) -> (Context, Control, Control) {
         let settings = Settings::new(config);
         let c = Control::new(config);
         c.configure(settings, true, Vec::new(), CoordinateConverter::default());
@@ -429,11 +413,10 @@ mod tests {
             Duration::ZERO,
         )
         .unwrap();
-        let motion = MotionPublisher::default();
+        let motion = c.clone();
         r.gesture_event(Lifecycle::Begin {
             context: context.clone(),
             control: c.clone(),
-            motion: motion.clone(),
         });
         (context, c, motion)
     }
