@@ -59,6 +59,10 @@ pub enum LayoutCommand {
         delta: f64,
     },
     SnapStrip,
+    SwitchPresetColumnWidth {
+        #[serde(default)]
+        backwards: bool,
+    },
     CenterSelection,
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),

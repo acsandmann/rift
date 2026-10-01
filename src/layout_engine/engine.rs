@@ -2403,6 +2403,17 @@ impl LayoutEngine {
                 }
                 response
             }
+            LayoutCommand::SwitchPresetColumnWidth { backwards } => {
+                let mut response = EventResponse::default();
+                response.changed = if let LayoutSystemKind::Scrolling(system) =
+                    &mut self.workspaces[workspace_id].layout_system
+                {
+                    system.switch_preset_column_width(layout, backwards)
+                } else {
+                    false
+                };
+                response
+            }
             LayoutCommand::CenterSelection => {
                 if let LayoutSystemKind::Scrolling(system) =
                     &mut self.workspaces[workspace_id].layout_system
@@ -3443,6 +3454,17 @@ mod tests {
         let command = |engine: &mut LayoutEngine, store: &mut WindowStore, command| {
             engine.handle_command(store, Some(space), &[space], &HashMap::default(), command)
         };
+        for _ in 0..3 {
+            assert_eq!(
+                command(&mut engine, &mut store, LayoutCommand::SwitchPresetColumnWidth {
+                    backwards: false
+                }),
+                EventResponse {
+                    changed: true,
+                    ..Default::default()
+                }
+            );
+        }
         let _ = command(&mut engine, &mut store, LayoutCommand::ScrollStrip {
             delta: 0.8,
         });
@@ -3457,6 +3479,19 @@ mod tests {
                 boundary
             );
         }
+        let workspace = engine.workspaces.active_workspace(space).unwrap();
+        assert!(engine.switch_workspace_layout_mode(
+            &store,
+            space,
+            workspace,
+            LayoutMode::Traditional
+        ));
+        assert_eq!(
+            command(&mut engine, &mut store, LayoutCommand::SwitchPresetColumnWidth {
+                backwards: false
+            }),
+            EventResponse::default()
+        );
     }
     #[test]
     fn scrolling_widths_follow_space_displays_and_reload() {

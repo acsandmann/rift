@@ -1132,6 +1132,68 @@ impl ScrollingLayoutSystem {
         }
     }
 
+    pub fn switch_preset_column_width(&mut self, layout: LayoutId, backwards: bool) -> bool {
+        let Some(state) = self.layouts.get_mut(layout) else {
+            return false;
+        };
+        let Some((col, _)) = state.selected_location() else {
+            return false;
+        };
+        let presets = self
+            .settings
+            .preset_column_widths
+            .iter()
+            .copied()
+            .filter(|r| r.is_finite() && *r > 0.0);
+        let Some(first) = presets.clone().next() else {
+            return false;
+        };
+        // The requested proportion remembers the preset even when geometry is constrained.
+        let known = match state.columns[col].width {
+            ColumnWidth::Proportion(ratio) => {
+                presets.clone().position(|preset| (ratio - preset).abs() <= 1e-6)
+            }
+            _ => None,
+        };
+        let target = if let Some(index) = known {
+            let len = presets.clone().count();
+            let next = (index + if backwards { len - 1 } else { 1 }) % len;
+            presets.clone().nth(next).unwrap()
+        } else {
+            let Some(g) = &state.geometry else {
+                return false;
+            };
+            let Some(column) = g.columns.get(col) else {
+                return false;
+            };
+            let resolved = |ratio| {
+                proportional_width(
+                    g.tiling.size.width,
+                    g.gaps.inner.horizontal,
+                    clamp_ratio(ratio, &self.settings),
+                )
+            };
+            // One logical pixel of allowance, separate from semantic ratio matching.
+            if backwards {
+                presets
+                    .clone()
+                    .rev()
+                    .find(|&r| resolved(r) + 1.0 < column.width)
+                    .unwrap_or_else(|| presets.clone().next_back().unwrap())
+            } else {
+                presets.clone().find(|&r| column.width + 1.0 < resolved(r)).unwrap_or(first)
+            }
+        };
+        if matches!(state.columns[col].width, ColumnWidth::Proportion(r) if r == target) {
+            return false;
+        }
+        state.mutate(&self.settings, |state| {
+            state.columns[col].width = ColumnWidth::Proportion(target);
+        });
+        state.reveal(&self.settings);
+        true
+    }
+
     fn toggle_fullscreen(&mut self, layout: LayoutId, within_gaps: bool) -> Vec<WindowId> {
         let Some(state) = self.layouts.get_mut(layout) else {
             return Vec::new();
@@ -1854,6 +1916,113 @@ mod tests {
         fn drop(&mut self, source: u32, target: u32, action: WindowDropAction) {
             assert!(self.system.apply_window_drop(self.layout, wid(source), wid(target), action));
         }
+    }
+
+    #[test]
+    fn preset_width_cycles_and_effective_width_search() {
+        for (width, backwards, expected) in [
+            (
+                ColumnWidth::Proportion(1.0 / 3.0),
+                false,
+                &[500.0, 667.0, 333.0][..],
+            ),
+            (ColumnWidth::Default, false, &[667.0][..]),
+            (ColumnWidth::Proportion(0.25), false, &[333.0][..]),
+            (ColumnWidth::Proportion(0.42), false, &[500.0][..]),
+            (ColumnWidth::Proportion(0.60), false, &[667.0][..]),
+            (ColumnWidth::Fixed(420.0), false, &[500.0][..]),
+            (ColumnWidth::Fixed(800.0), false, &[333.0][..]),
+            (ColumnWidth::Fixed(499.5), false, &[667.0][..]),
+            (ColumnWidth::Fixed(498.9), false, &[500.0][..]),
+            (
+                ColumnWidth::Proportion(1.0 / 3.0),
+                true,
+                &[667.0, 500.0, 333.0][..],
+            ),
+            (ColumnWidth::Fixed(420.0), true, &[333.0][..]),
+            (ColumnWidth::Fixed(200.0), true, &[667.0][..]),
+        ] {
+            let mut f = Fixture::new(1);
+            f.system.layouts[f.layout].mutate(&f.system.settings, |s| s.columns[0].width = width);
+            for &pixels in expected {
+                assert!(f.system.switch_preset_column_width(f.layout, backwards));
+                assert_eq!(f.frame(1).size.width, pixels);
+            }
+        }
+        let mut f = Fixture::new(1);
+        f.system.settings.preset_column_widths = vec![0.7, f64::NAN, 0.3, 0.5, 0.0];
+        for pixels in [700.0, 300.0, 500.0] {
+            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert_eq!(f.frame(1).size.width, pixels);
+        }
+        f.system.settings.preset_column_widths = vec![0.33333, 0.66667];
+        for pixels in [667.0, 333.0, 667.0, 333.0] {
+            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert_eq!(f.frame(1).size.width, pixels);
+        }
+        f.system.settings.preset_column_widths = vec![-1.0, f64::INFINITY];
+        assert!(!f.system.switch_preset_column_width(f.layout, false));
+    }
+
+    #[test]
+    fn semantic_presets_advance_despite_constrained_geometry() {
+        let mut f = Fixture::new(1);
+        f.constraints.insert(wid(1), WindowLayoutConstraints {
+            is_resizable: true,
+            max_width: 450.0,
+            ..Default::default()
+        });
+        f.system.resize_selection_by(f.layout, -0.08, ResizeOrientation::Horizontal);
+        f.prepare();
+        for ratio in [0.5, 2.0 / 3.0] {
+            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(matches!(f.system.layouts[f.layout].columns[0].width,
+                ColumnWidth::Proportion(r) if (r - ratio).abs() < 1e-6));
+            assert_eq!(f.frame(1).size.width, 450.0);
+        }
+        for (start, target) in [(0.5000005, 2.0 / 3.0), (0.500002, 0.5)] {
+            f.system.layouts[f.layout].mutate(&f.system.settings, |s| {
+                s.columns[0].width = ColumnWidth::Proportion(start);
+            });
+            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert!(matches!(f.system.layouts[f.layout].columns[0].width,
+                ColumnWidth::Proportion(r) if (r - target).abs() < 1e-6));
+        }
+    }
+
+    #[test]
+    fn preset_width_preserves_stack_selection_and_fullscreen_restore() {
+        let mut f = Fixture::new(2);
+        f.drop(2, 1, WindowDropAction::Stack);
+        f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Vertical);
+        f.gaps.inner.horizontal = 20.0;
+        let before = f.frames();
+        let weights = f.system.layouts[f.layout].columns[0].height_weights.clone();
+        for _ in 0..3 {
+            assert!(f.system.switch_preset_column_width(f.layout, false));
+        }
+        assert_eq!(f.frames(), before); // Same membership, row heights and gap-aware half width.
+        assert_eq!(f.frame(1).size.width, 490.0);
+        assert_eq!(f.selected(), Some(wid(2)));
+        assert_eq!(f.system.layouts[f.layout].columns[0].height_weights, weights);
+        for within_gaps in [false, true] {
+            f.system.toggle_fullscreen(f.layout, within_gaps);
+            assert!(f.system.switch_preset_column_width(f.layout, false));
+            assert_eq!(f.frame(2), f.screen);
+            f.system.toggle_fullscreen(f.layout, within_gaps);
+            assert_eq!(f.frame(2).size.width, 660.0);
+            assert_eq!(f.selected(), Some(wid(2)));
+            for _ in 0..2 {
+                assert!(f.system.switch_preset_column_width(f.layout, false));
+            }
+        }
+        assert!(f.system.begin_viewport_gesture(f.layout));
+        assert!(f.system.switch_preset_column_width(f.layout, false));
+        assert_eq!(f.selected(), Some(wid(2)));
+        assert_eq!(
+            f.system.update_viewport_gesture(f.layout, 10.0, Duration::ZERO),
+            None
+        );
     }
 
     #[test]

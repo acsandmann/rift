@@ -345,6 +345,11 @@ enum LayoutCommands {
     ScrollStrip { delta: f64 },
     /// Snap the strip to the nearest column boundary (scrolling layout only)
     SnapStrip,
+    /// Switch to the next preset column width (scrolling layout only).
+    SwitchPresetColumnWidth {
+        #[arg(long)]
+        backwards: bool,
+    },
     /// Toggle centering of the selected column in scrolling layout.
     /// If invoked again on the same selection, centering is removed.
     CenterSelection,
@@ -997,6 +1002,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
         LayoutCommands::SnapStrip => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::SnapStrip)))
         }
+        LayoutCommands::SwitchPresetColumnWidth { backwards } => Ok(CliCommand::Reactor(
+            reactor::Command::Layout(LC::SwitchPresetColumnWidth { backwards }),
+        )),
         LayoutCommands::CenterSelection => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::CenterSelection,
         ))),

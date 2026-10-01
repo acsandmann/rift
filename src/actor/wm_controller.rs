@@ -73,6 +73,7 @@ pub enum WmCommand {
 #[serde(rename_all = "snake_case")]
 pub enum ConfiguredLayoutCommand {
     ToggleWindowFloating(rift_protocol::ToggleWindowFloatingOptions),
+    SwitchPresetColumnWidth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, strum_macros::VariantNames)]
@@ -423,6 +424,11 @@ impl WmController {
             Command(ConfiguredLayout(ConfiguredLayoutCommand::ToggleWindowFloating(options))) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::ToggleWindowFloatingWithOptions(options),
+                )));
+            }
+            Command(ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth)) => {
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::SwitchPresetColumnWidth { backwards: false },
                 )));
             }
             Command(ReactorCommand(cmd)) => {

@@ -817,6 +817,7 @@ fn default_master_stack_ratio() -> f64 { 0.6 }
 fn default_master_stack_count() -> usize { 1 }
 
 fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
+fn default_scrolling_preset_column_widths() -> Vec<f64> { vec![1.0 / 3.0, 0.5, 2.0 / 3.0] }
 fn default_true() -> bool { true }
 
 fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
@@ -934,6 +935,9 @@ pub struct ScrollingLayoutSettings {
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
     pub column_width_ratio: f64,
+    /// Proportional column widths cycled in configured order.
+    #[serde(default = "default_scrolling_preset_column_widths")]
+    pub preset_column_widths: Vec<f64>,
     /// Keep a window's existing column width when it enters scrolling layout.
     #[serde(default = "default_true")]
     pub preserve_window_sizes: bool,
@@ -966,6 +970,7 @@ impl Default for ScrollingLayoutSettings {
             base: BaseLayoutSettings::default(),
             animate: None,
             column_width_ratio: default_scrolling_column_width_ratio(),
+            preset_column_widths: default_scrolling_preset_column_widths(),
             preserve_window_sizes: true,
             min_column_width_ratio: default_scrolling_min_column_width_ratio(),
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
@@ -1920,6 +1925,7 @@ mod tests {
             "#,
         )
         .unwrap();
+        assert_eq!(settings.preset_column_widths, vec![1.0 / 3.0, 0.5, 2.0 / 3.0]);
         assert_eq!(settings.widths_for_display(Some("display-a")), (0.5, 0.3, 0.9));
         assert_eq!(settings.widths_for_display(Some("other")), (0.7, 0.3, 0.9));
         assert_eq!(settings.widths_for_display(None), (0.7, 0.3, 0.9));
