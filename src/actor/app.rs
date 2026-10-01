@@ -582,7 +582,41 @@ struct AppWindowState {
     title: String,
     is_animating: bool,
     last_animation_frame: Option<CGRect>,
+    // Latest observed or intended geometry; only a hint for AX write ordering.
+    last_known_frame: CGRect,
     frame_source: FrameSource,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FrameWriteOrder {
+    SizeThenPosition,
+    PositionThenSize,
+}
+
+fn frame_write_order(current: Option<CGRect>, target: CGRect) -> FrameWriteOrder {
+    let Some(current) = current else {
+        return FrameWriteOrder::SizeThenPosition;
+    };
+    if target.size.width > current.size.width + 0.5
+        || target.size.height > current.size.height + 0.5
+    {
+        FrameWriteOrder::PositionThenSize
+    } else {
+        FrameWriteOrder::SizeThenPosition
+    }
+}
+
+fn write_frame(elem: &AXUIElement, current: Option<CGRect>, target: CGRect) {
+    match frame_write_order(current, target) {
+        FrameWriteOrder::SizeThenPosition => {
+            let _ = elem.set_size(target.size);
+            let _ = elem.set_position(target.origin);
+        }
+        FrameWriteOrder::PositionThenSize => {
+            let _ = elem.set_position(target.origin);
+            let _ = elem.set_size(target.size);
+        }
+    }
 }
 
 struct PendingFrame {
@@ -836,11 +870,11 @@ impl State {
         // Release reapplies this frame, including position-only viewport writes.
         window.last_animation_frame = Some(frame);
         if set_size {
-            let _ = window.elem.set_size(frame.size);
-            let _ = window.elem.set_position(frame.origin);
-            let _ = window.elem.set_size(frame.size);
+            write_frame(&window.elem, Some(window.last_known_frame), frame);
+            window.last_known_frame = frame;
         } else {
             let _ = window.elem.set_position(frame.origin);
+            window.last_known_frame.origin = frame.origin;
         }
         Ok(())
     }
@@ -1034,10 +1068,14 @@ impl State {
                 };
 
                 let _ = elem.set_position(pos);
+                self.window_mut(wid)?.last_known_frame.origin = pos;
 
                 let mut frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame,
+                        Some(frame) => {
+                            self.window_mut(wid)?.last_known_frame = frame;
+                            frame
+                        }
                         None => return Ok(false),
                     };
 
@@ -1047,7 +1085,10 @@ impl State {
                     let _ = elem.set_position(pos);
                     frame =
                         match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                            Some(frame) => frame,
+                            Some(frame) => {
+                                self.window_mut(wid)?.last_known_frame = frame;
+                                frame
+                            }
                             None => return Ok(false),
                         };
                 }
@@ -1098,13 +1139,16 @@ impl State {
                     },
                 };
 
-                let _ = elem.set_size(desired.size);
-                let _ = elem.set_position(desired.origin);
-                let _ = elem.set_size(desired.size);
+                let window = self.window_mut(wid)?;
+                write_frame(&elem, Some(window.last_known_frame), desired);
+                window.last_known_frame = desired;
 
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame,
+                        Some(frame) => {
+                            self.window_mut(wid)?.last_known_frame = frame;
+                            frame
+                        }
                         None => return Ok(false),
                     };
 
@@ -1135,13 +1179,16 @@ impl State {
                         },
                     };
 
-                    let _ = elem.set_size(desired.size);
-                    let _ = elem.set_position(desired.origin);
-                    let _ = elem.set_size(desired.size);
+                    let window = self.window_mut(wid)?;
+                    write_frame(&elem, Some(window.last_known_frame), desired);
+                    window.last_known_frame = desired;
 
                     let frame =
                         match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                            Some(frame) => frame,
+                            Some(frame) => {
+                                self.window_mut(wid)?.last_known_frame = frame;
+                                frame
+                            }
                             None => continue,
                         };
 
@@ -1174,13 +1221,17 @@ impl State {
                     };
 
                     let _ = elem.set_position(position);
+                    self.window_mut(wid)?.last_known_frame.origin = position;
 
                     // Preserve the existing per-window acknowledgement semantics. In
                     // particular, report the frame AX actually accepted rather than the
                     // requested position combined with a cached size.
                     let frame =
                         match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                            Some(frame) => frame,
+                            Some(frame) => {
+                                self.window_mut(wid)?.last_known_frame = frame;
+                                frame
+                            }
                             None => continue,
                         };
 
@@ -1238,9 +1289,9 @@ impl State {
                     .txid_from_store(window_server_id)
                     .or_else(|| Self::some_txid(last_seen_txid));
                 if let Some(frame) = last_animation_frame {
-                    let _ = elem.set_size(frame.size);
-                    let _ = elem.set_position(frame.origin);
-                    let _ = elem.set_size(frame.size);
+                    let window = self.window_mut(wid)?;
+                    write_frame(&elem, Some(window.last_known_frame), frame);
+                    window.last_known_frame = frame;
                 }
                 if ended_animation {
                     let app = self.app.clone();
@@ -1249,7 +1300,10 @@ impl State {
                 self.restart_notifications_after_animation(&elem);
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame,
+                        Some(frame) => {
+                            self.window_mut(wid)?.last_known_frame = frame;
+                            frame
+                        }
                         None => return Ok(false),
                     };
                 self.send_event(Event::WindowFrameChanged(
@@ -1397,6 +1451,9 @@ impl State {
                         return;
                     }
                 };
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.last_known_frame = frame;
+                }
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
@@ -1905,6 +1962,7 @@ impl State {
             title: info.title.clone(),
             is_animating: false,
             last_animation_frame: None,
+            last_known_frame: info.frame,
             frame_source: FrameSource::Ordinary,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
@@ -1950,6 +2008,7 @@ impl State {
             return;
         };
         if old_elem == elem {
+            self.windows.get_mut(&wid).unwrap().last_known_frame = info.frame;
             return;
         }
 
@@ -1974,6 +2033,7 @@ impl State {
         self.elem_to_wid.insert(elem.clone(), wid);
         if let Some(window) = self.windows.get_mut(&wid) {
             window.elem = elem;
+            window.last_known_frame = info.frame;
             window.notifications_registered = notifications_registered;
             window.window_server_id = info.sys_id.or(window.window_server_id);
             window.title = info.title.clone();
