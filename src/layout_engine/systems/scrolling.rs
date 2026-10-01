@@ -381,10 +381,11 @@ impl Geometry {
     }
 }
 
-/// Recent physical deltas in camera pixels, independent of viewport rebasing.
+/// Recent camera deltas in pixels, independent of viewport rebasing.
 #[derive(Clone, Debug, Default)]
 struct MotionHistory {
     samples: VecDeque<(Duration, f64)>,
+    overscroll: f64,
 }
 impl MotionHistory {
     fn push(&mut self, delta: f64, time: Duration) -> bool {
@@ -972,6 +973,7 @@ impl ScrollingLayoutSystem {
         if matches!(state.viewport, Viewport::Gesture(_)) {
             return false;
         }
+        state.motion.overscroll = 0.0;
         state.motion.samples.clear();
         state.motion.samples.reserve(64);
         Self::advance_camera(state, now);
@@ -993,11 +995,27 @@ impl ScrollingLayoutSystem {
         let Viewport::Gesture(offset) = &mut state.viewport else {
             return None;
         };
-        if !state.motion.push(delta, timestamp) {
+        let g = state.geometry.as_ref()?;
+        let raw = *offset + delta;
+        let bounded = raw.clamp(g.bounds.0, g.bounds.1);
+        let moved = bounded - *offset;
+        if !state.motion.push(moved, timestamp) {
             return None;
         }
-        *offset += delta;
-        Some(delta)
+        if delta != 0.0 {
+            let excess = raw - bounded;
+            // Keep the strip at its edge while accumulating workspace intent.
+            // Reversing moves inward immediately and clears the edge intent.
+            state.motion.overscroll = if excess == 0.0 {
+                0.0
+            } else if excess.signum() == state.motion.overscroll.signum() {
+                state.motion.overscroll + excess
+            } else {
+                excess
+            };
+        }
+        *offset = bounded;
+        Some(moved)
     }
 
     /// Normalize only at the layout boundary, using cached working geometry.
@@ -1044,7 +1062,11 @@ impl ScrollingLayoutSystem {
         let Viewport::Animation(spring) = &mut state.viewport else {
             return None;
         };
-        if spring.sample(now) {
+        let complete = spring.sample(now);
+        if let Some(g) = &state.geometry {
+            spring.current = spring.current.clamp(g.bounds.0, g.bounds.1);
+        }
+        if complete {
             state.viewport = Viewport::Static(spring.target);
             Some(false)
         } else {
@@ -1075,8 +1097,7 @@ impl ScrollingLayoutSystem {
             .get(layout)
             .and_then(|state| {
                 let g = state.geometry.as_ref()?;
-                let raw = state.viewport.offset();
-                Some((raw - raw.clamp(g.bounds.0, g.bounds.1)) / g.tiling.size.width)
+                Some(state.motion.overscroll / g.tiling.size.width)
             })
             .unwrap_or(0.0)
     }
@@ -2775,7 +2796,7 @@ mod tests {
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
     #[test]
-    fn gesture_edges_follow_raw_camera_and_reversal_unwinds_overscroll() {
+    fn gesture_edges_stay_bounded_and_reverse_immediately() {
         for direction in [-1.0, 1.0] {
             let mut f = Fixture::new(4);
             let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
@@ -2783,30 +2804,64 @@ mod tests {
             f.system.layouts[f.layout].viewport = Viewport::Static(edge);
             assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
             let before = f.frame(1).origin.x;
+            for (time, delta, excess) in [(10, 200.0, 0.2), (15, 0.0, 0.2), (20, 100.0, 0.3)] {
+                f.system.update_viewport_gesture(
+                    f.layout,
+                    direction * delta,
+                    Duration::from_millis(time),
+                );
+                assert_eq!(
+                    f.frame(1).origin.x,
+                    before,
+                    "outward motion keeps the strip at its edge"
+                );
+                assert!((f.system.gesture_overscroll(f.layout) - direction * excess).abs() < 1e-9);
+            }
+            let release = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(20), true)
+                .unwrap();
+            assert_eq!(
+                release.velocity, 0.0,
+                "blocked edge travel cannot fling the camera"
+            );
+            assert_eq!(release.from_offset, edge);
+            assert_eq!(release.offset, edge);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
             f.system.update_viewport_gesture(
                 f.layout,
                 direction * 200.0,
-                Duration::from_millis(10),
+                Duration::from_millis(30),
             );
-            assert_eq!(f.frame(1).origin.x, before - direction * 200.0);
-            assert!((f.system.gesture_overscroll(f.layout) - direction * 0.2).abs() < 1e-9);
             f.system.update_viewport_gesture(
                 f.layout,
                 -direction * 75.0,
-                Duration::from_millis(20),
+                Duration::from_millis(40),
             );
-            assert_eq!(f.frame(1).origin.x, before - direction * 125.0);
-            assert!((f.system.gesture_overscroll(f.layout) - direction * 0.125).abs() < 1e-9);
+            assert_eq!(f.frame(1).origin.x, before + direction * 75.0);
+            assert_eq!(
+                f.system.gesture_overscroll(f.layout),
+                0.0,
+                "reversal cancels workspace intent immediately"
+            );
+            f.system.cancel_viewport_gesture(f.layout);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
+            f.system.update_viewport_gesture(f.layout, 0.0, Duration::from_millis(40));
+            f.system
+                .update_viewport_gesture(f.layout, direction * 75.0, Duration::from_millis(50));
             let release = f
                 .system
-                .end_viewport_gesture(f.layout, Duration::from_millis(220), true)
+                .end_viewport_gesture(f.layout, Duration::from_millis(50), true)
                 .unwrap();
-            assert_eq!(release.from_offset, edge + direction * 125.0);
             assert_eq!(release.offset, edge);
-            assert_eq!(f.frame(1).origin.x, before - direction * 125.0);
+            assert_eq!(release.velocity.signum(), direction);
             f.system
-                .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(2));
-            assert_eq!(f.system.layouts[f.layout].viewport.offset(), edge);
+                .advance_viewport_animation(f.layout, Instant::now() + Duration::from_millis(10));
+            assert_eq!(
+                f.frame(1).origin.x,
+                before,
+                "release cannot bounce past the workspace edge"
+            );
         }
     }
     #[test]
@@ -2891,7 +2946,7 @@ mod tests {
         assert_eq!(
             f.system
                 .update_viewport_gesture_normalized(f.layout, 0.25, Duration::from_millis(20)),
-            Some(212.5)
+            Some(0.0)
         );
         assert_eq!(
             f.system.gesture_overscroll(f.layout),
@@ -2989,7 +3044,7 @@ mod tests {
         for edit in [0, 1, 2] {
             let mut f = Fixture::new(4);
             f.system.begin_viewport_gesture(f.layout, Instant::now());
-            f.system.update_viewport_gesture(f.layout, -200.0, Duration::from_millis(10));
+            f.system.update_viewport_gesture(f.layout, 200.0, Duration::from_millis(10));
             f.system
                 .end_viewport_gesture(f.layout, Duration::from_millis(210), true)
                 .unwrap();
@@ -3018,11 +3073,11 @@ mod tests {
         }
     }
     #[test]
-    fn saving_transient_overscroll_restores_a_bounded_static_camera() {
+    fn saving_interactive_camera_restores_current_static_position() {
         for released in [false, true] {
             let mut f = Fixture::new(4);
             f.system.begin_viewport_gesture(f.layout, Instant::now());
-            f.system.update_viewport_gesture(f.layout, -200.0, Duration::from_millis(10));
+            f.system.update_viewport_gesture(f.layout, 200.0, Duration::from_millis(10));
             if released {
                 f.system
                     .end_viewport_gesture(f.layout, Duration::from_millis(210), true)
@@ -3033,7 +3088,7 @@ mod tests {
             f.system = serde_json::from_str(&snapshot).unwrap();
             f.system.update_settings(&settings);
             f.prepare();
-            assert_eq!(f.system.layouts[f.layout].viewport.offset(), 0.0);
+            assert_eq!(f.system.layouts[f.layout].viewport.offset(), 200.0);
             assert!(matches!(
                 f.system.layouts[f.layout].viewport,
                 Viewport::Static(_)
