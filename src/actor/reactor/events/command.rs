@@ -92,9 +92,7 @@ pub fn handle_command_layout(
     } else {
         None
     };
-    if is_workspace_switch {
-        workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
-    } else {
+    if !is_workspace_switch {
         workspace_switch.mark_workspace_switch_inactive();
     }
 
@@ -142,7 +140,16 @@ pub fn handle_command_layout(
     };
 
     if is_virtual_workspace_command && !response.changed {
+        if is_workspace_switch {
+            workspace_switch.mark_workspace_switch_inactive();
+            workspace_switch.active_workspace_switch = None;
+        }
         return Ok(EventOutcome::no_change());
+    }
+
+    // Only begin the switch lifecycle once a real transition has been produced.
+    if is_workspace_switch {
+        workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
     }
 
     let selection_changed = is_selection_command && response.changed;

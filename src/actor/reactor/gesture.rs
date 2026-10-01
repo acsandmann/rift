@@ -439,6 +439,43 @@ mod tests {
     }
 
     #[test]
+    fn workspace_gesture_with_one_workspace_leaves_switch_inactive() {
+        for next in [true, false] {
+            let settings = crate::common::config::VirtualWorkspaceSettings {
+                default_workspace_count: 1,
+                prevent_wrapping: false,
+                ..Default::default()
+            };
+            let mut r = test_reactor_with_workspace_settings(&settings);
+            let space = SpaceId::new(1);
+            r.handle_loop_event(space_state_event(
+                vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+                vec![Some(space)],
+            ));
+            let workspace = r.layout_manager.layout_engine.workspaces().active_workspace(space);
+            assert!(workspace.is_some());
+            let mut config = Config::default();
+            config.settings.layout.scrolling.gestures.enabled = true;
+            config.settings.gestures.haptics_enabled = false;
+            config.settings.gestures.skip_empty = false;
+            let (context, _, _) = begin(&mut r, &config, space);
+
+            assert!(!r.gesture_workspace(&context, next));
+            assert_eq!(
+                r.layout_manager.layout_engine.workspaces().active_workspace(space),
+                workspace
+            );
+            assert_eq!(
+                r.workspace_switch_manager.workspace_switch_state,
+                super::super::WorkspaceSwitchState::Inactive
+            );
+            assert_eq!(r.workspace_switch_manager.pending_workspace_switch_origin, None);
+            assert_eq!(r.workspace_switch_manager.active_workspace_switch, None);
+            assert!(!r.workspace_switch_manager.manual_switch_in_progress());
+        }
+    }
+
+    #[test]
     fn live_scroll_coalesces_app_writes_and_reconciles_once_at_lift() {
         for (cancelled, final_x) in [(false, 40.0), (false, 60.0), (true, 40.0)] {
             let (mut apps, mut r) = test_context();
