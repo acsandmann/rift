@@ -833,8 +833,9 @@ impl State {
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
         window.frame_source = source;
+        // Release reapplies this frame, including position-only viewport writes.
+        window.last_animation_frame = Some(frame);
         if set_size {
-            window.last_animation_frame = Some(frame);
             let _ = window.elem.set_size(frame.size);
             let _ = window.elem.set_position(frame.origin);
             let _ = window.elem.set_size(frame.size);
