@@ -783,7 +783,9 @@ impl State {
         for (span, request) in batch.drain(..) {
             let mut state = this.borrow_mut();
             let _guard = span.enter();
-            debug!(?state.bundle_id, ?state.pid, ?request, "Got request");
+            if !matches!(&request, Request::InteractiveFramesPending(_)) {
+                debug!(?state.bundle_id, ?state.pid, ?request, "Got request");
+            }
             let request_kind: &'static str = (&request).into();
             match state.handle_request(request) {
                 Ok(true) => {
