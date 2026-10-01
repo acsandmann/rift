@@ -8,7 +8,6 @@ use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, Request, WindowId, pid_t};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::HashMap;
-use crate::layout_engine::systems::ViewportRelease;
 use crate::sys::geometry::{Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
@@ -41,7 +40,6 @@ pub struct Animation {
     frames: u32,
     windows: Vec<AnimatedWindow>,
     handled_windows: Vec<WindowId>,
-    gesture_velocity: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -64,7 +62,7 @@ impl AnimatedWindow {
         });
     }
 
-    fn frame_after(&self, frame: u32, total_frames: u32, gesture: Option<(f64, f64)>) -> CGRect {
+    fn frame_after(&self, frame: u32, total_frames: u32) -> CGRect {
         if frame == 0 {
             return if self.is_focus {
                 CGRect {
@@ -77,29 +75,11 @@ impl AnimatedWindow {
         }
 
         let t = f64::from(frame) / f64::from(total_frames);
-        let mut rect = self.interpolate(t, gesture);
+        let mut rect = get_frame(self.start, self.finish, t);
         if self.is_focus || frame * 2 >= total_frames {
             rect.size = self.finish.size;
         } else {
             rect.size = self.start.size;
-        }
-        rect
-    }
-
-    fn interpolate(&self, t: f64, gesture: Option<(f64, f64)>) -> CGRect {
-        let mut rect = get_frame(self.start, self.finish, t);
-        if let Some((velocity, duration)) = gesture {
-            let distance = self.finish.origin.x - self.start.origin.x;
-            if distance != 0.0 {
-                // AppKit's quartic coast preserves initial camera velocity and
-                // decelerates to rest. Blend toward a resting snap when release
-                // velocity points away from the destination or duration is capped.
-                let weight = (-velocity * duration / distance / 4.0).clamp(0.0, 1.0);
-                let resting = t * t * (3.0 - 2.0 * t);
-                let coast = 1.0 - (1.0 - t).powi(4);
-                let progress = blend(resting, coast, weight);
-                rect.origin.x = blend(self.start.origin.x, self.finish.origin.x, progress);
-            }
         }
         rect
     }
@@ -189,26 +169,16 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         is_resize: bool,
         skip_wid: Option<WindowId>,
-        gesture: Option<(ViewportRelease, Option<bool>)>,
     ) -> bool {
-        let (release, animate) =
-            gesture.map_or((None, None), |(release, animate)| (Some(release), animate));
         let Some(active_ws) =
             reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
         else {
             return false;
         };
-        let mut duration = reactor.config.settings.animation_duration;
-        if let Some(release) = release {
-            let distance = release.offset - release.from_offset;
-            if distance * release.velocity > 0.0 && release.velocity.abs() > 100.0 {
-                duration =
-                    // Retarget the quartic coast to the layout's snap destination.
-                    (4.0 * distance.abs() / release.velocity.abs()).clamp(0.10, 1.0);
-            }
-        }
-        let mut anim = Animation::new(reactor.config.settings.animation_fps, duration);
-        anim.gesture_velocity = release.map(|r| r.velocity);
+        let mut anim = Animation::new(
+            reactor.config.settings.animation_fps,
+            reactor.config.settings.animation_duration,
+        );
         let mut animated_count = 0;
         let mut any_frame_changed = false;
 
@@ -302,8 +272,7 @@ impl AnimationManager {
             let layout_setting =
                 reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
             let low_power = layout_setting.is_none() && power::is_low_power_mode_enabled();
-            let layout_animate =
-                animate.or(layout_setting).unwrap_or(reactor.config.settings.animate);
+            let layout_animate = layout_setting.unwrap_or(reactor.config.settings.animate);
             let skip_anim = is_resize || !layout_animate || low_power;
 
             if let Some(tx) = &reactor.animation_tx {
@@ -489,12 +458,7 @@ impl ActiveAnimation {
         self.animation
             .windows
             .iter()
-            .map(|window| {
-                (
-                    window.wid,
-                    window.frame_after(frame, self.animation.frames, self.animation.gesture()),
-                )
-            })
+            .map(|window| (window.wid, window.frame_after(frame, self.animation.frames)))
             .collect()
     }
 }
@@ -507,7 +471,6 @@ impl Animation {
             frames: (duration * fps).round() as u32,
             windows: vec![],
             handled_windows: vec![],
-            gesture_velocity: None,
         }
     }
 
@@ -575,15 +538,10 @@ impl Animation {
         }
     }
 
-    fn gesture(&self) -> Option<(f64, f64)> {
-        self.gesture_velocity
-            .map(|v| (v, self.interval.as_secs_f64() * f64::from(self.frames)))
-    }
-
     fn send_frame(&self, frame: u32) {
         let t = f64::from(frame) / f64::from(self.frames);
         for window in &self.windows {
-            let mut rect = window.interpolate(t, self.gesture());
+            let mut rect = get_frame(window.start, window.finish, t);
             let set_size = frame * 2 == self.frames || frame == self.frames;
             if set_size {
                 rect.size = window.finish.size;
@@ -657,7 +615,6 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
-    use crate::sys::window_server::WindowServerId;
 
     fn rect(origin_x: f64, origin_y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))
@@ -909,81 +866,5 @@ mod tests {
         assert_animation_frame(&requests[1], wid, rect(50.0, 60.0, 10.0, 10.0));
         assert!(matches!(requests[2], Request::EndWindowAnimation(req_wid) if req_wid == wid));
         assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
-    }
-
-    #[test]
-    fn gesture_release_continues_velocity_and_honors_animation_override() {
-        use crate::actor::reactor::testing::{space_state_event, test_reactor};
-        let mut r = test_reactor();
-        let space = SpaceId::new(1);
-        let wid = WindowId::new(1, 1);
-        let from = rect(0.0, 0.0, 500.0, 500.0);
-        let to = rect(-400.0, 0.0, 500.0, 500.0);
-        r.handle_loop_event(space_state_event(vec![from], vec![Some(space)]));
-        r.add_test_app(1);
-        r.add_test_window(wid, WindowServerId::new(1), Some(space), from);
-        r.send_layout_event(crate::layout_engine::LayoutEvent::WindowAdded(space, wid));
-        let (app_tx, mut app_rx) = crate::actor::channel();
-        r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(app_tx);
-        r.state.windows.window_mut(wid).unwrap().frame_monotonic = from;
-        r.config.settings.animate = false;
-        r.config.settings.animation_fps = 100.0;
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        r.animation_tx = Some(tx);
-        let release = ViewportRelease {
-            window: wid,
-            from_offset: 0.0,
-            offset: 400.0,
-            velocity: 2000.0,
-        };
-        AnimationManager::animate_layout(
-            &mut r,
-            space,
-            &[(wid, to)],
-            false,
-            None,
-            Some((release, Some(true))),
-        );
-        let Message::Replace(anim) = rx.try_recv().unwrap() else {
-            panic!("gesture override must animate");
-        };
-        let mut manager = AnimationManager::new();
-        manager.handle_message(Message::Replace(anim));
-        collect_requests(&mut app_rx);
-        let mut previous = 0.0;
-        let mut previous_step = f64::INFINITY;
-        let mut count = 0;
-        while manager.active.is_some() {
-            manager.tick();
-            for request in collect_requests(&mut app_rx) {
-                if let Request::AnimationFrame { frame, .. } = request {
-                    let step = previous - frame.origin.x;
-                    if count == 0 {
-                        assert!(
-                            (15.0..25.0).contains(&step),
-                            "release must continue at 2000 px/s: {step}"
-                        );
-                    }
-                    assert!(
-                        step >= -1e-8 && step <= previous_step + 1e-8,
-                        "momentum must slow without overshooting"
-                    );
-                    previous = frame.origin.x;
-                    previous_step = step;
-                    count += 1;
-                }
-            }
-        }
-        assert!(count > 10);
-        assert_eq!(previous, -400.0);
-        AnimationManager::animate_layout(
-            &mut r,
-            space,
-            &[(wid, from)],
-            false,
-            None,
-            Some((release, Some(false))),
-        );
-        assert!(matches!(rx.try_recv().unwrap(), Message::SkipToEnd(_)));
     }
 }

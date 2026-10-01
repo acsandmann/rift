@@ -1,8 +1,8 @@
 //! A strip of persistent columns in world coordinates, translated by one camera.
-//! View targets follow niri's fit/center and gesture snap semantics. Native frame
-//! animation remains in the reactor; this module owns the semantic destination.
+//! View targets follow niri's fit/center and gesture snap semantics. Ordinary layout
+//! animation remains in the reactor; touchpad release belongs to the camera.
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,7 @@ enum Viewport {
     Uninitialized,
     Static(f64),
     Gesture(f64),
+    Animation(CameraSpring),
 }
 
 impl Viewport {
@@ -88,6 +89,7 @@ impl Viewport {
         match self {
             Self::Uninitialized => 0.0,
             Self::Static(offset) | Self::Gesture(offset) => *offset,
+            Self::Animation(spring) => spring.current,
         }
     }
 
@@ -95,21 +97,43 @@ impl Viewport {
         match self {
             Self::Uninitialized => {}
             Self::Static(offset) | Self::Gesture(offset) => *offset += delta,
+            Self::Animation(spring) => {
+                spring.from += delta;
+                spring.target += delta;
+                spring.current += delta;
+            }
         }
     }
 }
 
-// Persist the camera, not an in-progress input session.
-impl Serialize for Viewport {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.offset().serialize(serializer)
+/// Niri's default horizontal-view-movement: mass 1, critical damping, stiffness 800.
+#[derive(Clone, Debug)]
+struct CameraSpring {
+    from: f64,
+    target: f64,
+    velocity: f64,
+    current: f64,
+    started: Instant,
+}
+impl CameraSpring {
+    fn sample(&mut self, now: Instant) -> bool {
+        let t = now.saturating_duration_since(self.started).as_secs_f64();
+        let omega = 800.0_f64.sqrt();
+        let x0 = self.from - self.target;
+        let b = omega * x0 + self.velocity;
+        let envelope = (-omega * t).exp();
+        self.current = self.target + envelope * (x0 + b * t);
+        let velocity = envelope * (self.velocity - omega * b * t);
+        // Check both position and speed so crossing the target cannot finish early.
+        (self.current - self.target).abs() <= 0.0001 && velocity.abs() <= 0.0001
     }
 }
+
 impl From<f64> for Viewport {
     fn from(offset: f64) -> Self { Self::Static(if offset.is_finite() { offset } else { 0.0 }) }
 }
 
-/// Semantic snap destination and momentum for the reactor's release animation.
+/// Semantic release result; animation, when enabled, belongs to the viewport.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewportRelease {
     pub window: WindowId,
@@ -357,50 +381,49 @@ impl Geometry {
     }
 }
 
-/// Recent cumulative pixel motion, independent of viewport rebasing.
+/// Recent physical deltas in camera pixels, independent of viewport rebasing.
 #[derive(Clone, Debug, Default)]
 struct MotionHistory {
     samples: VecDeque<(Duration, f64)>,
-    total: f64,
-    stationary: bool,
-    overscroll: f64,
 }
 impl MotionHistory {
-    fn push(&mut self, delta: f64, time: Duration) {
+    fn push(&mut self, delta: f64, time: Duration) -> bool {
         if self.samples.back().is_some_and(|(last, _)| time < *last) {
-            return;
+            return false;
         }
-        self.total += delta;
-        // A pause needs one fresh anchor, not 120 identical positions that
-        // dilute the next short flick with stationary time.
+        // macOS reports stationary contacts continuously; retain one fresh idle
+        // anchor so that a pause before a new flick does not dilute that flick.
         if delta == 0.0
-            && self.stationary
-            && let Some(last) = self.samples.back_mut()
+            && let Some((last, 0.0)) = self.samples.back_mut()
         {
-            *last = (time, self.total);
+            *last = time;
         } else {
-            if self.samples.len() == 32 {
+            if self.samples.len() == 64 {
                 self.samples.pop_front();
             }
-            self.samples.push_back((time, self.total));
+            self.samples.push_back((time, delta));
         }
-        self.stationary = delta == 0.0;
         while self
             .samples
             .front()
-            .is_some_and(|(first, _)| time.saturating_sub(*first) > Duration::from_millis(80))
+            .is_some_and(|(first, _)| time.saturating_sub(*first) > Duration::from_millis(150))
         {
             self.samples.pop_front();
         }
+        true
     }
 
     fn velocity(&self) -> f64 {
-        let (Some(&(first, a)), Some(&(last, b))) = (self.samples.front(), self.samples.back())
+        let (Some(&(first, _)), Some(&(last, _))) = (self.samples.front(), self.samples.back())
         else {
             return 0.0;
         };
         let dt = last.saturating_sub(first).as_secs_f64();
-        if dt > 0.0 { (b - a) / dt } else { 0.0 }
+        if dt > 0.0 {
+            self.samples.iter().map(|(_, delta)| delta).sum::<f64>() / dt
+        } else {
+            0.0
+        }
     }
 }
 
@@ -435,11 +458,20 @@ impl Serialize for LayoutState {
         stored.serialize_field("columns", &self.columns)?;
         stored.serialize_field("active_column", &self.active_column)?;
         stored.serialize_field("next_column_id", &self.next_column_id)?;
-        stored.serialize_field("viewport", &self.viewport)?;
-        stored.serialize_field(
-            "view_anchor",
-            &self.bookmark().or_else(|| self.restored_view.clone()),
-        )?;
+        let current = self.viewport.offset();
+        let offset = if matches!(self.viewport, Viewport::Gesture(_) | Viewport::Animation(_)) {
+            self.geometry
+                .as_ref()
+                .map_or(current, |g| current.clamp(g.bounds.0, g.bounds.1))
+        } else {
+            current
+        };
+        stored.serialize_field("viewport", &offset)?;
+        let anchor = self.bookmark().or_else(|| self.restored_view.clone()).map(|mut anchor| {
+            anchor.relative_offset += offset - current;
+            anchor
+        });
+        stored.serialize_field("view_anchor", &anchor)?;
         stored.serialize_field("transient_restore", &self.transient_restore)?;
         stored.serialize_field("fullscreen_restore", &self.fullscreen_restore)?;
         stored.serialize_field("fullscreen", &self.fullscreen)?;
@@ -623,6 +655,10 @@ impl LayoutState {
         settings: &ScrollingLayoutSettings,
         edit: impl FnOnce(&mut Self) -> R,
     ) -> R {
+        let interrupted = matches!(self.viewport, Viewport::Animation(_));
+        if interrupted {
+            self.viewport = Viewport::Static(self.viewport.offset());
+        }
         let window = self.selected();
         let id = self.columns.get(self.active_column).map(|c| c.id);
         let old_x = id.and_then(|id| self.geometry.as_ref()?.column(id)).map(|c| c.world_x);
@@ -644,6 +680,11 @@ impl LayoutState {
             {
                 self.viewport.rebase(new.world_x - old_x);
             }
+        }
+        if interrupted
+            && let (Viewport::Static(offset), Some(g)) = (&mut self.viewport, &self.geometry)
+        {
+            *offset = offset.clamp(g.bounds.0, g.bounds.1);
         }
         if self.columns.is_empty() {
             self.viewport = Viewport::Static(0.0);
@@ -922,7 +963,7 @@ impl ScrollingLayoutSystem {
         })
     }
 
-    pub fn begin_viewport_gesture(&mut self, layout: LayoutId) -> bool {
+    pub fn begin_viewport_gesture(&mut self, layout: LayoutId, now: Instant) -> bool {
         if !self.viewport_gesture_available(layout) {
             return false;
         }
@@ -932,10 +973,8 @@ impl ScrollingLayoutSystem {
             return false;
         }
         state.motion.samples.clear();
-        state.motion.samples.reserve(32);
-        state.motion.total = 0.0;
-        state.motion.stationary = true;
-        state.motion.overscroll = 0.0;
+        state.motion.samples.reserve(64);
+        Self::advance_camera(state, now);
         state.viewport = Viewport::Gesture(state.viewport.offset());
         true
     }
@@ -954,60 +993,75 @@ impl ScrollingLayoutSystem {
         let Viewport::Gesture(offset) = &mut state.viewport else {
             return None;
         };
-        if delta == 0.0 {
-            state.motion.push(0.0, timestamp);
-            return Some(0.0);
+        if !state.motion.push(delta, timestamp) {
+            return None;
         }
-        let g = state.geometry.as_ref()?;
-        let raw = *offset + delta;
-        let bounded = raw.clamp(g.bounds.0, g.bounds.1);
-        let excess = raw - bounded;
-        // Block outward movement, but retain intent for workspace propagation.
-        // A reversal starts at the edge rather than unwinding invisible travel.
-        state.motion.overscroll = if excess == 0.0 {
-            0.0
-        } else if excess.signum() == state.motion.overscroll.signum() {
-            state.motion.overscroll + excess
-        } else {
-            excess
-        };
-        let moved = bounded - *offset;
-        state.motion.push(moved, timestamp);
-        *offset = bounded;
-        Some(moved)
+        *offset += delta;
+        Some(delta)
     }
 
-    /// Layout owns release velocity and projection. Idle time at lift removes fling.
+    /// Normalize only at the layout boundary, using cached working geometry.
+    pub fn update_viewport_gesture_normalized(
+        &mut self,
+        layout: LayoutId,
+        delta: f64,
+        timestamp: Duration,
+    ) -> Option<f64> {
+        let width = self.layouts.get(layout)?.geometry.as_ref()?.tiling.size.width;
+        self.update_viewport_gesture(layout, delta * width, timestamp)
+    }
+
+    /// Release projection is niri's exponential touchpad deceleration, in camera pixels.
     pub fn end_viewport_gesture(
         &mut self,
         layout: LayoutId,
         timestamp: Duration,
+        animate: bool,
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
-        let Viewport::Gesture(offset) = &mut state.viewport else {
+        let Viewport::Gesture(offset) = state.viewport else {
             return None;
         };
-        state.motion.push(0.0, timestamp);
+        if !state.motion.push(0.0, timestamp) {
+            return None;
+        }
         let velocity = state.motion.velocity();
-        // Below half a working-area width per second, settle by position.
-        // Scaling the cutoff with the viewport keeps physical flick intent
-        // consistent across displays and with the normalized input gain.
-        let fling_threshold = state.geometry.as_ref()?.tiling.size.width * 0.5;
-        let velocity = if velocity.abs() < fling_threshold {
-            0.0
-        } else {
-            velocity
+        let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
+        let release = self.settle(layout, projected, velocity, true)?;
+        if animate {
+            self.layouts[layout].viewport = Viewport::Animation(CameraSpring {
+                from: release.from_offset,
+                target: release.offset,
+                velocity: release.velocity,
+                current: release.from_offset,
+                started: Instant::now(),
+            });
+        }
+        Some(release)
+    }
+
+    fn advance_camera(state: &mut LayoutState, now: Instant) -> Option<bool> {
+        let Viewport::Animation(spring) = &mut state.viewport else {
+            return None;
         };
-        // Quartic ease-out coast: T = cbrt(|v| / 4000), displacement = v*T/4.
-        let projected = *offset + velocity * (velocity.abs() / 4000.0).cbrt() / 4.0;
-        self.settle(layout, projected, velocity, true)
+        if spring.sample(now) {
+            state.viewport = Viewport::Static(spring.target);
+            Some(false)
+        } else {
+            Some(true)
+        }
+    }
+
+    pub fn advance_viewport_animation(&mut self, layout: LayoutId, now: Instant) -> Option<bool> {
+        self.layouts.get_mut(layout).and_then(|state| Self::advance_camera(state, now))
     }
 
     /// Settle where cancellation occurred, with no artificial fling or focus change.
     pub fn cancel_viewport_gesture(&mut self, layout: LayoutId) {
         if let Some(state) = self.layouts.get_mut(layout)
-            && let Viewport::Gesture(offset) = state.viewport
+            && matches!(state.viewport, Viewport::Gesture(_) | Viewport::Animation(_))
         {
+            let offset = state.viewport.offset();
             let offset =
                 state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1));
             state.viewport = Viewport::Static(offset);
@@ -1015,8 +1069,16 @@ impl ScrollingLayoutSystem {
         }
     }
 
+    /// Signed travel beyond resting bounds, in working-area widths.
     pub fn gesture_overscroll(&self, layout: LayoutId) -> f64 {
-        self.layouts.get(layout).map_or(0.0, |state| state.motion.overscroll)
+        self.layouts
+            .get(layout)
+            .and_then(|state| {
+                let g = state.geometry.as_ref()?;
+                let raw = state.viewport.offset();
+                Some((raw - raw.clamp(g.bounds.0, g.bounds.1)) / g.tiling.size.width)
+            })
+            .unwrap_or(0.0)
     }
 
     fn settle(
@@ -1193,7 +1255,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
     fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        self.layouts.insert(self.layouts.get(layout).cloned().unwrap_or_default())
+        let mut state = self.layouts.get(layout).cloned().unwrap_or_default();
+        if matches!(state.viewport, Viewport::Animation(_)) {
+            let offset = state.viewport.offset();
+            state.viewport = Viewport::Static(
+                state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1)),
+            );
+        }
+        self.layouts.insert(state)
     }
 
     fn remove_layout(&mut self, layout: LayoutId) { self.layouts.remove(layout); }
@@ -1269,6 +1338,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if state.geometry.as_ref().is_some_and(|g| g.matches(screen, constraints, gaps)) {
             return;
         }
+        let interrupted = matches!(state.viewport, Viewport::Animation(_));
+        if interrupted {
+            state.viewport = Viewport::Static(state.viewport.offset());
+        }
         let bookmark = state.restored_view.take().or_else(|| state.bookmark());
         let initial = matches!(state.viewport, Viewport::Uninitialized);
         if self.settings.preserve_window_sizes {
@@ -1302,6 +1375,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         {
             let old = state.viewport.offset();
             state.viewport.rebase(column.world_x + bookmark.relative_offset - old);
+        }
+        if interrupted && let Viewport::Static(offset) = &mut state.viewport {
+            let g = state.geometry.as_ref().unwrap();
+            *offset = offset.clamp(g.bounds.0, g.bounds.1);
         }
         if initial {
             state.viewport = Viewport::Static(0.0);
@@ -1959,7 +2036,7 @@ mod tests {
                 assert!(f.system.switch_preset_column_width(f.layout, false));
             }
         }
-        assert!(f.system.begin_viewport_gesture(f.layout));
+        assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
         assert!(f.system.switch_preset_column_width(f.layout, false));
         assert_eq!(f.selected(), Some(wid(2)));
         assert_eq!(
@@ -2335,10 +2412,12 @@ mod tests {
             for (index, x) in [(2, middle), (3, 500.0), (1, 0.0)] {
                 f.select(index);
                 assert_eq!(f.frame(index).origin.x, x);
-                f.system.begin_viewport_gesture(f.layout);
+                f.system.begin_viewport_gesture(f.layout, Instant::now());
                 f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(10));
-                let release =
-                    f.system.end_viewport_gesture(f.layout, Duration::from_millis(210)).unwrap();
+                let release = f
+                    .system
+                    .end_viewport_gesture(f.layout, Duration::from_millis(210), false)
+                    .unwrap();
                 assert_eq!(release.window, wid(index), "alignment={alignment:?}");
                 assert_eq!(f.frame(index).origin.x, x);
             }
@@ -2361,15 +2440,21 @@ mod tests {
             let mut f = Fixture::new(4);
             f.select(start);
             f.prepare();
-            assert!(f.system.begin_viewport_gesture(f.layout));
+            assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
             f.system.update_viewport_gesture(f.layout, travel, Duration::from_millis(10));
             assert_eq!(f.selected(), Some(wid(start)));
-            let release =
-                f.system.end_viewport_gesture(f.layout, Duration::from_millis(210)).unwrap();
+            let release = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(210), false)
+                .unwrap();
             assert_eq!(release.offset, target);
             assert_eq!(release.window, wid(window));
             assert_eq!(f.selected(), Some(wid(window)));
-            assert!(f.system.end_viewport_gesture(f.layout, Duration::from_millis(220)).is_none());
+            assert!(
+                f.system
+                    .end_viewport_gesture(f.layout, Duration::from_millis(220), false)
+                    .is_none()
+            );
         }
     }
 
@@ -2378,7 +2463,7 @@ mod tests {
         let mut offsets = Vec::new();
         for (drag_ms, idle_ms, pause_ms) in [(30, 0, 0), (300, 0, 0), (30, 200, 0), (10, 0, 300)] {
             let mut f = Fixture::new(4);
-            f.system.begin_viewport_gesture(f.layout);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
             f.system.update_viewport_gesture(f.layout, 0.0, Duration::from_millis(pause_ms));
             for i in 1..=6 {
                 f.system.update_viewport_gesture(
@@ -2390,7 +2475,11 @@ mod tests {
             }
             let release = f
                 .system
-                .end_viewport_gesture(f.layout, Duration::from_millis(pause_ms + drag_ms + idle_ms))
+                .end_viewport_gesture(
+                    f.layout,
+                    Duration::from_millis(pause_ms + drag_ms + idle_ms),
+                    false,
+                )
                 .unwrap();
             offsets.push(release.offset);
             if idle_ms > 0 {
@@ -2421,13 +2510,13 @@ mod tests {
                 (240.0, 3000.0),
             ]
             .into_iter()
-            .zip([0.0, 500.0, 0.0, 500.0, 500.0, 1000.0])
+            .zip([500.0, 500.0, 500.0, 500.0, 1000.0, 1000.0])
             {
                 let mut f = Fixture::new(4);
                 let mut settings = f.system.settings.clone();
                 settings.focus_navigation_style = style;
                 f.system.update_settings(&settings);
-                f.system.begin_viewport_gesture(f.layout);
+                f.system.begin_viewport_gesture(f.layout, Instant::now());
                 f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
                 let steps = (distance / (speed * 0.01)) as u64;
                 for i in 1..=steps {
@@ -2439,16 +2528,14 @@ mod tests {
                 }
                 let release = f
                     .system
-                    .end_viewport_gesture(f.layout, Duration::from_millis(steps * 10))
+                    .end_viewport_gesture(f.layout, Duration::from_millis(steps * 10), false)
                     .unwrap();
                 assert!(
                     (release.offset - target).abs() < 0.001,
                     "style={style:?}, distance={distance}, speed={speed}, offset={}",
                     release.offset
                 );
-                if speed < 500.0 {
-                    assert_eq!(release.velocity, 0.0);
-                }
+                assert!(release.velocity > 0.0, "slow release must not discard velocity");
             }
         }
     }
@@ -2469,11 +2556,13 @@ mod tests {
                 });
             }
             f.prepare();
-            assert!(f.system.begin_viewport_gesture(f.layout));
+            assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
             f.system.update_viewport_gesture(f.layout, travel, Duration::from_millis(10));
             assert_eq!(f.selected(), Some(wid(1)));
-            let release =
-                f.system.end_viewport_gesture(f.layout, Duration::from_millis(210)).unwrap();
+            let release = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(210), false)
+                .unwrap();
             assert_eq!(release.from_offset, travel);
             assert_eq!(release.offset, target);
             assert_eq!(release.window, wid(selected));
@@ -2482,18 +2571,20 @@ mod tests {
 
     #[test]
     fn niri_flick_selects_the_furthest_visible_column_in_each_direction() {
-        for (start, delta, target, selected) in [(1, 20.0, 500.0, 3), (4, -20.0, 500.0, 2)] {
+        for (start, delta, target, selected) in [(1, 20.0, 1000.0, 4), (4, -20.0, 0.0, 1)] {
             let mut f = Fixture::new(4);
             f.select(start);
             f.prepare();
-            assert!(f.system.begin_viewport_gesture(f.layout));
+            assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
             f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
             for i in 1..=6 {
                 f.system.update_viewport_gesture(f.layout, delta, Duration::from_millis(i * 10));
                 assert_eq!(f.selected(), Some(wid(start)));
             }
-            let release =
-                f.system.end_viewport_gesture(f.layout, Duration::from_millis(60)).unwrap();
+            let release = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(60), false)
+                .unwrap();
             assert_eq!(release.offset, target);
             assert_eq!(release.window, wid(selected));
             assert_eq!(release.velocity.signum(), delta.signum());
@@ -2504,7 +2595,7 @@ mod tests {
     fn structural_edits_rebase_an_ongoing_gesture_without_changing_focus() {
         let mut f = Fixture::new(4);
         f.select(3);
-        f.system.begin_viewport_gesture(f.layout);
+        f.system.begin_viewport_gesture(f.layout, Instant::now());
         f.system.update_viewport_gesture(f.layout, 30.0, Duration::from_millis(10));
         let x = f.frame(3).origin.x;
         f.system.remove_window(wid(1));
@@ -2513,7 +2604,10 @@ mod tests {
         f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(20));
         assert_eq!(f.frame(3).origin.x, x - 20.0);
         assert_eq!(f.selected(), Some(wid(3)));
-        let release = f.system.end_viewport_gesture(f.layout, Duration::from_millis(220)).unwrap();
+        let release = f
+            .system
+            .end_viewport_gesture(f.layout, Duration::from_millis(220), false)
+            .unwrap();
         assert_eq!(release.from_offset, 50.0);
         assert_eq!(release.offset, 0.0);
         assert_eq!(release.window, wid(3));
@@ -2656,7 +2750,7 @@ mod tests {
             }
             assert_eq!(f.selected(), None);
             assert!(f.system.viewport_frames(f.layout).next().is_none());
-            assert!(!f.system.begin_viewport_gesture(f.layout));
+            assert!(!f.system.begin_viewport_gesture(f.layout, Instant::now()));
         }
     }
     #[test]
@@ -2681,26 +2775,269 @@ mod tests {
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
     #[test]
-    fn gesture_edges_are_noops_and_reverse_immediately() {
+    fn gesture_edges_follow_raw_camera_and_reversal_unwinds_overscroll() {
+        for direction in [-1.0, 1.0] {
+            let mut f = Fixture::new(4);
+            let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
+            let edge = if direction < 0.0 { bounds.0 } else { bounds.1 };
+            f.system.layouts[f.layout].viewport = Viewport::Static(edge);
+            assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
+            let before = f.frame(1).origin.x;
+            f.system.update_viewport_gesture(
+                f.layout,
+                direction * 200.0,
+                Duration::from_millis(10),
+            );
+            assert_eq!(f.frame(1).origin.x, before - direction * 200.0);
+            assert!((f.system.gesture_overscroll(f.layout) - direction * 0.2).abs() < 1e-9);
+            f.system.update_viewport_gesture(
+                f.layout,
+                -direction * 75.0,
+                Duration::from_millis(20),
+            );
+            assert_eq!(f.frame(1).origin.x, before - direction * 125.0);
+            assert!((f.system.gesture_overscroll(f.layout) - direction * 0.125).abs() < 1e-9);
+            let release = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(220), true)
+                .unwrap();
+            assert_eq!(release.from_offset, edge + direction * 125.0);
+            assert_eq!(release.offset, edge);
+            assert_eq!(f.frame(1).origin.x, before - direction * 125.0);
+            f.system
+                .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(2));
+            assert_eq!(f.system.layouts[f.layout].viewport.offset(), edge);
+        }
+    }
+    #[test]
+    fn niri_projection_selects_near_medium_and_far_snaps_in_both_directions() {
+        for direction in [-1.0, 1.0] {
+            for (speed, extra) in [(75.0_f64, 0.0), (400.0, 500.0), (2000.0, 1000.0)] {
+                let mut f = Fixture::new(8);
+                f.system.layouts[f.layout].viewport = Viewport::Static(1500.0);
+                f.system.begin_viewport_gesture(f.layout, Instant::now());
+                f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
+                let steps = (200.0 / (speed * 0.01)).ceil() as u64;
+                for i in 1..=steps {
+                    f.system.update_viewport_gesture(
+                        f.layout,
+                        direction * 200.0 / steps as f64,
+                        Duration::from_millis(i * 10),
+                    );
+                }
+                let release = f
+                    .system
+                    .end_viewport_gesture(f.layout, Duration::from_millis(steps * 10), false)
+                    .unwrap();
+                assert_eq!(release.offset, 1500.0 + direction * extra);
+                assert_eq!(release.velocity.signum(), direction);
+                assert!((release.from_offset - (1500.0 + direction * 200.0)).abs() < 1e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn recent_motion_discards_idle_time_and_rejects_backwards_timestamps() {
+        let mut history = MotionHistory::default();
+        history.push(0.0, Duration::ZERO);
+        history.push(10.0, Duration::from_millis(10));
+        history.push(10.0, Duration::from_millis(20));
+        assert_eq!(history.velocity(), 1000.0);
+        assert!(!history.push(900.0, Duration::from_millis(19)));
+        assert_eq!(history.velocity(), 1000.0);
+        history.push(0.0, Duration::from_millis(171));
+        assert_eq!(history.velocity(), 0.0);
+        for i in 18..=30 {
+            history.push(0.0, Duration::from_millis(i * 10));
+        }
+        history.push(10.0, Duration::from_millis(310));
+        history.push(10.0, Duration::from_millis(320));
+        history.push(0.0, Duration::from_millis(320));
+        assert_eq!(
+            history.velocity(),
+            1000.0,
+            "fresh flick excludes preceding stationary time"
+        );
+
         let mut f = Fixture::new(4);
-        let before = f.frame(1).origin.x;
-        assert!(f.system.begin_viewport_gesture(f.layout));
-        f.system.update_viewport_gesture(f.layout, -1000.0, Duration::from_millis(10));
-        let dragged = f
-            .system
-            .viewport_frames(f.layout)
-            .into_iter()
-            .find(|(w, _)| *w == wid(1))
-            .unwrap()
-            .1
-            .origin
-            .x;
-        assert_eq!(dragged, before, "outward edge motion must be a no-op");
-        assert_eq!(f.system.gesture_overscroll(f.layout), -1000.0);
-        f.system.update_viewport_gesture(f.layout, 0.0, Duration::from_millis(15));
-        assert_eq!(f.system.gesture_overscroll(f.layout), -1000.0);
+        f.system.begin_viewport_gesture(f.layout, Instant::now());
         f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(20));
-        assert_eq!(f.system.gesture_overscroll(f.layout), 0.0);
-        assert_eq!(f.frame(1).origin.x, before - 20.0);
+        assert!(
+            f.system
+                .update_viewport_gesture(f.layout, 900.0, Duration::from_millis(19))
+                .is_none()
+        );
+        assert_eq!(f.system.layouts[f.layout].viewport.offset(), 20.0);
+    }
+
+    #[test]
+    fn normalized_motion_and_overscroll_use_working_width_with_outer_gaps() {
+        let mut f = Fixture::new(4);
+        f.gaps.outer.left = 100.0;
+        f.gaps.outer.right = 50.0;
+        f.prepare();
+        f.system.begin_viewport_gesture(f.layout, Instant::now());
+        let from = f.system.layouts[f.layout].viewport.offset();
+        // The input actor applies sensitivity 4 to quarter-pad travel.
+        assert_eq!(
+            f.system.update_viewport_gesture_normalized(
+                f.layout,
+                0.25 * 4.0,
+                Duration::from_millis(10)
+            ),
+            Some(850.0)
+        );
+        assert_eq!(f.system.layouts[f.layout].viewport.offset(), from + 850.0);
+        assert_eq!(
+            f.system
+                .update_viewport_gesture_normalized(f.layout, 0.25, Duration::from_millis(20)),
+            Some(212.5)
+        );
+        assert_eq!(
+            f.system.gesture_overscroll(f.layout),
+            0.25,
+            "workspace handoff uses working widths even with outer gaps"
+        );
+    }
+
+    #[test]
+    fn release_camera_spring_interrupts_continuously_and_finishes_exactly() {
+        for (animate, direction) in [(false, -1.0), (false, 1.0), (true, -1.0), (true, 1.0)] {
+            let mut f = Fixture::new(8);
+            let from = if direction > 0.0 { 0.0 } else { 3000.0 };
+            f.system.layouts[f.layout].viewport = Viewport::Static(from);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
+            f.system.update_viewport_gesture(f.layout, 0.0, Duration::ZERO);
+            f.system.update_viewport_gesture(
+                f.layout,
+                direction * 150.0,
+                Duration::from_millis(50),
+            );
+            f.system.update_viewport_gesture(
+                f.layout,
+                direction * 150.0,
+                Duration::from_millis(100),
+            );
+            let release = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(100), animate)
+                .unwrap();
+            assert_eq!(release.offset, 1500.0);
+            if !animate {
+                assert_eq!(f.system.layouts[f.layout].viewport.offset(), 1500.0);
+                assert_eq!(
+                    f.system.advance_viewport_animation(f.layout, Instant::now()),
+                    None
+                );
+                continue;
+            }
+            assert_eq!(
+                f.system.layouts[f.layout].viewport.offset(),
+                from + direction * 300.0
+            );
+            let Viewport::Animation(spring) = &f.system.layouts[f.layout].viewport else {
+                panic!("release spring")
+            };
+            let started = spring.started;
+            let mut previous = from + direction * 300.0;
+            for ms in [1, 10, 40, 80] {
+                assert_eq!(
+                    f.system
+                        .advance_viewport_animation(f.layout, started + Duration::from_millis(ms)),
+                    Some(true)
+                );
+                let current = f.system.layouts[f.layout].viewport.offset();
+                assert!(
+                    (current - previous) * direction > 0.0
+                        && (release.offset - current) * direction > 0.0
+                );
+                if ms == 1 {
+                    assert!((current - previous - direction * 3.0).abs() < 0.5);
+                }
+                previous = current;
+            }
+            let now = started + Duration::from_millis(80);
+            f.system.begin_viewport_gesture(f.layout, now);
+            assert_eq!(f.system.layouts[f.layout].viewport.offset(), previous);
+            f.system.update_viewport_gesture(
+                f.layout,
+                direction * 20.0,
+                Duration::from_millis(110),
+            );
+            assert_eq!(
+                f.system.layouts[f.layout].viewport.offset(),
+                previous + direction * 20.0
+            );
+            let second = f
+                .system
+                .end_viewport_gesture(f.layout, Duration::from_millis(310), true)
+                .unwrap();
+            assert_eq!(second.from_offset, previous + direction * 20.0);
+            assert_eq!(
+                f.system
+                    .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(2)),
+                Some(false)
+            );
+            assert!(
+                matches!(f.system.layouts[f.layout].viewport, Viewport::Static(x) if x == second.offset)
+            );
+        }
+    }
+
+    #[test]
+    fn structural_and_environmental_changes_cancel_release_without_stale_frames() {
+        for edit in [0, 1, 2] {
+            let mut f = Fixture::new(4);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
+            f.system.update_viewport_gesture(f.layout, -200.0, Duration::from_millis(10));
+            f.system
+                .end_viewport_gesture(f.layout, Duration::from_millis(210), true)
+                .unwrap();
+            match edit {
+                0 => f.system.remove_window(wid(4)),
+                1 => {
+                    f.gaps.outer.left = 30.0;
+                    f.prepare();
+                }
+                _ => {
+                    f.layout = f.system.clone_layout(f.layout);
+                }
+            }
+            let frames = f.frames();
+            assert_eq!(
+                f.system
+                    .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(1)),
+                None
+            );
+            assert_eq!(f.frames(), frames);
+            let state = &f.system.layouts[f.layout];
+            let g = state.geometry.as_ref().unwrap();
+            assert!(
+                matches!(state.viewport, Viewport::Static(x) if (g.bounds.0..=g.bounds.1).contains(&x))
+            );
+        }
+    }
+    #[test]
+    fn saving_transient_overscroll_restores_a_bounded_static_camera() {
+        for released in [false, true] {
+            let mut f = Fixture::new(4);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
+            f.system.update_viewport_gesture(f.layout, -200.0, Duration::from_millis(10));
+            if released {
+                f.system
+                    .end_viewport_gesture(f.layout, Duration::from_millis(210), true)
+                    .unwrap();
+            }
+            let snapshot = serde_json::to_string(&f.system).unwrap();
+            let settings = f.system.settings.clone();
+            f.system = serde_json::from_str(&snapshot).unwrap();
+            f.system.update_settings(&settings);
+            f.prepare();
+            assert_eq!(f.system.layouts[f.layout].viewport.offset(), 0.0);
+            assert!(matches!(
+                f.system.layouts[f.layout].viewport,
+                Viewport::Static(_)
+            ));
+        }
     }
 }

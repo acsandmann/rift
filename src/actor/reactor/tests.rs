@@ -4207,7 +4207,6 @@ fn animated_layout_handles_windows_without_server_ids() {
         &[(WindowId::new(1, 1), target)],
         true,
         None,
-        None,
     ));
 
     let requests = apps.requests();

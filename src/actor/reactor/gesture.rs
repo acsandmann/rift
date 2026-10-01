@@ -1,10 +1,9 @@
 //! Paced consumption of cumulative physical motion; no layout preparation here.
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
-use super::animation::AnimationManager;
 use super::{Reactor, command_workflow};
 use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId};
 use crate::actor::gesture::{Context, Control, Lifecycle, Motion};
@@ -19,6 +18,7 @@ pub(super) struct ViewportSession {
     control: Control,
     workspace: VirtualWorkspaceId,
     layout: LayoutId,
+    pub(super) released: bool,
     applied: f64,
     timestamp: Duration,
     updated_windows: HashMap<WindowId, AppThreadHandle>,
@@ -61,7 +61,8 @@ impl Reactor {
                 {
                     return;
                 }
-                self.finish_gesture(None, true);
+                let cancel = self.viewport_gesture.as_ref().is_some_and(|s| !s.released);
+                self.finish_gesture(None, cancel);
                 if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
                     return;
                 }
@@ -76,7 +77,7 @@ impl Reactor {
                 else {
                     return;
                 };
-                if !system.begin_viewport_gesture(layout) {
+                if !system.begin_viewport_gesture(layout, Instant::now()) {
                     return;
                 }
                 system.update_viewport_gesture(layout, 0.0, context.started);
@@ -108,6 +109,7 @@ impl Reactor {
                     control,
                     workspace,
                     layout,
+                    released: false,
                     applied: 0.0,
                     interval: Duration::from_secs_f64(1.0 / hz),
                     refresh,
@@ -118,7 +120,7 @@ impl Reactor {
                 if self
                     .viewport_gesture
                     .as_ref()
-                    .is_some_and(|s| s.context.session == sample.session)
+                    .is_some_and(|s| !s.released && s.context.session == sample.session)
                 {
                     self.finish_gesture(Some(sample), cancelled);
                 }
@@ -140,7 +142,22 @@ impl Reactor {
             self.finish_gesture(None, true);
             return;
         }
-        if let Some(sample) = session.control.latest(session.context.session) {
+        if session.released {
+            let (workspace, layout) = (session.workspace, session.layout);
+            let LayoutSystemKind::Scrolling(system) =
+                &mut self.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
+            else {
+                self.retire_viewport_session();
+                return;
+            };
+            let ongoing = system.advance_viewport_animation(layout, Instant::now());
+            if ongoing.is_some() {
+                self.apply_viewport_frames();
+            }
+            if ongoing != Some(true) {
+                self.retire_viewport_session();
+            }
+        } else if let Some(sample) = session.control.latest(session.context.session) {
             self.apply_gesture_sample(sample);
         }
     }
@@ -163,10 +180,22 @@ impl Reactor {
         else {
             return;
         };
-        let moved = system.update_viewport_gesture(s.layout, delta, sample.timestamp);
+        let moved = system.update_viewport_gesture_normalized(s.layout, delta, sample.timestamp);
         if !moved.is_some_and(|x| x != 0.0) {
             return;
         }
+        self.apply_viewport_frames();
+    }
+
+    fn apply_viewport_frames(&mut self) {
+        let Some(s) = self.viewport_gesture.as_mut() else {
+            return;
+        };
+        let LayoutSystemKind::Scrolling(system) =
+            &self.layout_manager.layout_engine.workspaces()[s.workspace].layout_system
+        else {
+            return;
+        };
         let screen = (self.active_spaces.len() > 1)
             .then(|| self.space_state.screen_by_space(s.context.space))
             .flatten();
@@ -204,17 +233,38 @@ impl Reactor {
 
     fn finish_gesture(&mut self, final_sample: Option<Motion>, cancelled: bool) {
         let Some(s) = &self.viewport_gesture else { return };
+        if !self
+            .layout_manager
+            .layout_engine
+            .workspaces()
+            .workspaces
+            .get(s.workspace)
+            .is_some_and(|ws| matches!(ws.layout_system, LayoutSystemKind::Scrolling(_)))
+        {
+            self.retire_viewport_session();
+            return;
+        }
+        if s.released {
+            if cancelled {
+                let (workspace, layout) = (s.workspace, s.layout);
+                if let LayoutSystemKind::Scrolling(system) =
+                    &mut self.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
+                {
+                    system.cancel_viewport_gesture(layout);
+                }
+                if s.visible(self) {
+                    self.apply_viewport_frames();
+                }
+            }
+            self.retire_viewport_session();
+            return;
+        }
         let valid = s.valid(self);
         if valid && let Some(sample) = final_sample.or_else(|| s.control.latest(s.context.session))
         {
             self.apply_gesture_sample(sample);
         }
         let s = self.viewport_gesture.take().unwrap();
-        // Flush the last coalesced write and read accepted geometry once, even
-        // when release leaves the camera exactly where the fingers stopped.
-        for (&wid, handle) in &s.updated_windows {
-            let _ = handle.send(Request::EndWindowAnimation(wid));
-        }
         let visible = valid || s.visible(self);
         let cancelled = cancelled || !valid;
         if cancelled {
@@ -232,8 +282,17 @@ impl Reactor {
         let handoff = !cancelled
             && s.context.action.propagate
             && excess != 0.0
-            && excess.abs() / s.context.width >= s.context.action.boundary_threshold
+            && excess.abs() >= s.context.action.boundary_threshold
             && self.gesture_workspace(&s.context, next);
+        let animate = s
+            .context
+            .action
+            .animate
+            .or(self
+                .layout_manager
+                .layout_engine
+                .layout_specific_animate_settings(s.context.space))
+            .unwrap_or(self.config.settings.animate);
         let LayoutSystemKind::Scrolling(system) =
             &mut self.layout_manager.layout_engine.workspaces_mut()[s.workspace].layout_system
         else {
@@ -243,50 +302,41 @@ impl Reactor {
             system.cancel_viewport_gesture(s.layout);
             None
         } else {
-            system.end_viewport_gesture(s.layout, s.timestamp)
+            system.end_viewport_gesture(s.layout, s.timestamp, animate)
         };
-        if handoff {
+        if handoff || !visible {
+            self.viewport_gesture = Some(s);
+            self.retire_viewport_session();
             return;
         }
-        if visible {
-            let mut frames: Vec<_> = system.viewport_frames(s.layout).collect();
-            if self.active_spaces.len() > 1
-                && let Some(screen) = self.space_state.screen_by_space(s.context.space)
-            {
-                for (_, frame) in &mut frames {
-                    *frame = super::managers::bound_frame_to_screen(*frame, screen.frame);
-                }
+        if let Some(release) = release {
+            let space = s.context.space;
+            self.viewport_gesture = Some(ViewportSession { released: true, ..s });
+            self.apply_viewport_frames();
+            if !animate {
+                self.retire_viewport_session();
             }
-            if let Some(release) = release {
-                AnimationManager::animate_layout(
-                    self,
-                    s.context.space,
-                    &frames,
-                    false,
-                    None,
-                    Some((release, s.context.action.animate)),
-                );
-                tracing::debug!(
-                    session = s.context.session,
-                    velocity = release.velocity,
-                    from = release.from_offset,
-                    target = release.offset,
-                    "gesture released"
-                );
-            } else {
-                AnimationManager::workspace_switch_layout(self, s.context.space, &frames, None);
-            }
-            if let Some(release) = release
-                && self.main_window() != Some(release.window)
-            {
+            if self.main_window() != Some(release.window) {
                 self.handle_layout_response(
                     EventResponse {
                         changed: true,
                         focus_window: Some(release.window),
                         ..Default::default()
                     },
-                    Some(s.context.space),
+                    Some(space),
                 );
+            }
+        } else {
+            self.viewport_gesture = Some(s);
+            self.apply_viewport_frames();
+            self.retire_viewport_session();
+        }
+    }
+
+    fn retire_viewport_session(&mut self) {
+        if let Some(s) = self.viewport_gesture.take() {
+            for (wid, handle) in s.updated_windows {
+                let _ = handle.send(Request::EndWindowAnimation(wid));
             }
         }
     }
@@ -338,7 +388,7 @@ mod tests {
     fn sample(session: u64, total_x: f64, millis: u64) -> Motion {
         Motion {
             session,
-            total_x,
+            total_x: total_x / 1000.0,
             timestamp: Duration::from_millis(millis),
         }
     }
@@ -388,6 +438,7 @@ mod tests {
         );
         let mut cfg = Config::default();
         cfg.settings.layout.scrolling.gestures.enabled = true;
+        cfg.settings.layout.scrolling.gestures.animate = Some(false);
         cfg.settings.layout.scrolling.gestures.invert_horizontal = invert;
         cfg.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = propagate;
         cfg.settings.layout.scrolling.gestures.workspace_switch_threshold = threshold;
@@ -404,7 +455,6 @@ mod tests {
             1,
             0,
             space,
-            1000.0,
             (
                 LayoutMode::Scrolling,
                 config.settings.layout.scrolling.gestures.fingers,
@@ -439,6 +489,7 @@ mod tests {
             assert!(workspace.is_some());
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
+            config.settings.layout.scrolling.gestures.animate = Some(false);
             config.settings.gestures.haptics_enabled = false;
             config.settings.gestures.skip_empty = false;
             let (context, _, _) = begin(&mut r, &config, space);
@@ -481,6 +532,7 @@ mod tests {
 
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
+            config.settings.layout.scrolling.gestures.animate = Some(false);
             let (_, _, motion) = begin(&mut r, &config, space);
             for (total_x, time) in [(20.0, 10), (40.0, 20)] {
                 motion.publish(sample(1, total_x, time));
@@ -556,7 +608,7 @@ mod tests {
             m.publish(sample(1, total, time));
         }
         r.gesture_tick();
-        assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 15.0);
+        assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 0.015);
         assert_eq!(
             r.layout_manager.layout_engine.workspaces()[workspace]
                 .layout_system
@@ -565,7 +617,7 @@ mod tests {
         );
         m.publish(sample(99, 9000.0, 40));
         r.gesture_tick();
-        assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 15.0);
+        assert_eq!(r.viewport_gesture.as_ref().unwrap().applied, 0.015);
         r.gesture_event(Lifecycle::End {
             sample: sample(1, 900.0, 50),
             cancelled: false,
@@ -605,7 +657,7 @@ mod tests {
             ] {
                 let (mut r, ctx, _, m) =
                     setup_options_threshold(enabled, skip_empty, invert, threshold);
-                let travel = threshold * ctx.width * fraction;
+                let travel = threshold * fraction;
                 let store = r.layout_manager.layout_engine.workspaces();
                 let before = store.active_workspace(ctx.space);
                 let expected = if !enabled || skip_empty || fraction < 1.0 || reverse || cancelled {
@@ -616,7 +668,7 @@ mod tests {
                     store.prev_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
                 };
                 for (total, time) in [(-travel * 0.2, 10), (-travel * 0.5, 20), (-travel, 30)] {
-                    m.publish(sample(1, total, time));
+                    m.publish(sample(1, total * 1000.0, time));
                     r.gesture_tick();
                     assert_eq!(
                         r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
@@ -624,9 +676,16 @@ mod tests {
                         "edge movement must remain reversible until lift"
                     );
                 }
-                for total in [if reverse { -travel + 20.0 } else { -travel }, -1000.0] {
+                for total in [
+                    if reverse {
+                        -travel + threshold * 0.5
+                    } else {
+                        -travel
+                    },
+                    -1000.0,
+                ] {
                     r.gesture_event(Lifecycle::End {
-                        sample: sample(1, total, 40),
+                        sample: sample(1, total * 1000.0, 40),
                         cancelled,
                     });
                     assert_eq!(
@@ -700,5 +759,110 @@ mod tests {
             r.layout_manager.layout_engine.active_layout_mode_at(ctx.space),
             LayoutMode::Scrolling
         );
+    }
+    #[test]
+    fn release_uses_coalesced_viewport_transport_and_invalidation_retires_it() {
+        for invalidate in [false, true] {
+            let (mut r, ctx, control, motion) = setup_options_threshold(false, false, false, 0.25);
+            r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(true);
+            r.config.settings.animate = false;
+            let (workspace, layout) = {
+                let s = r.viewport_gesture.as_ref().unwrap();
+                (s.workspace, s.layout)
+            };
+            let LayoutSystemKind::Scrolling(system) =
+                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+            else {
+                panic!("scrolling")
+            };
+            let initial: Vec<_> = system.viewport_frames(layout).collect();
+            r.add_test_app(1);
+            let (app_tx, mut app_rx) = crate::actor::channel();
+            r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(app_tx);
+            for (wid, frame) in initial {
+                r.insert_test_window_state(wid, frame, None, true);
+            }
+            let (animation_tx, mut animation_rx) = tokio::sync::mpsc::unbounded_channel();
+            r.animation_tx = Some(animation_tx);
+            motion.publish(sample(1, 300.0, 100));
+            r.gesture_tick();
+            let before = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            r.gesture_event(Lifecycle::End {
+                sample: sample(1, 300.0, 100),
+                cancelled: false,
+            });
+            assert!(
+                r.viewport_gesture.as_ref().unwrap().released,
+                "gesture override must animate even with global animation disabled"
+            );
+            assert_eq!(
+                r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic,
+                before
+            );
+            assert!(
+                animation_rx.try_recv().is_err(),
+                "camera release must not start generic window animation"
+            );
+            // Duplicate lift and late physical samples cannot retarget the release.
+            r.gesture_event(Lifecycle::End {
+                sample: sample(1, 900.0, 110),
+                cancelled: false,
+            });
+            motion.publish(sample(1, 900.0, 120));
+            let LayoutSystemKind::Scrolling(system) =
+                &mut r.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
+            else {
+                panic!("scrolling")
+            };
+            if invalidate {
+                system.remove_window(WindowId::new(1, 4));
+                // Drain the preceding gesture wake before checking for stale release writes.
+                while let Ok((_, request)) = app_rx.try_recv() {
+                    if let Request::InteractiveFramesPending(queue) = request {
+                        queue.drain_with(|_, _, _, _, _| {});
+                    }
+                }
+                r.gesture_tick();
+                assert!(r.viewport_gesture.is_none());
+                while let Ok((_, request)) = app_rx.try_recv() {
+                    assert!(
+                        !matches!(request, Request::InteractiveFramesPending(_)),
+                        "invalidated release must not overwrite structural layout frames"
+                    );
+                }
+            } else {
+                assert_eq!(
+                    system.advance_viewport_animation(
+                        layout,
+                        Instant::now() + Duration::from_millis(50)
+                    ),
+                    Some(true)
+                );
+                r.apply_viewport_frames();
+                let mut moved = 0;
+                while let Ok((_, request)) = app_rx.try_recv() {
+                    if let Request::InteractiveFramesPending(queue) = request {
+                        queue.drain_with(|wid, frame, set_size, _, source| {
+                            assert_eq!(source, FrameSource::Viewport);
+                            assert!(!set_size);
+                            assert!(
+                                frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic)
+                            );
+                            moved += 1;
+                        });
+                    }
+                }
+                assert!(moved > 0);
+                // Epoch invalidation also stops a released camera; lift alone doesn't invalidate it.
+                let (tx, _) = crate::actor::channel();
+                control.reset(&tx);
+                r.gesture_tick();
+                assert!(r.viewport_gesture.is_none());
+            }
+            assert_eq!(
+                r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
+                Some(workspace)
+            );
+        }
     }
 }

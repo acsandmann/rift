@@ -18,6 +18,7 @@ use crate::sys::screen::{CoordinateConverter, SpaceId};
 #[derive(Clone, Copy, Debug)]
 pub struct Motion {
     pub session: u64,
+    /// Cumulative working-area widths (normalized touch travel times sensitivity).
     pub total_x: f64,
     pub timestamp: Duration,
 }
@@ -92,7 +93,6 @@ pub struct Context {
     pub session: u64,
     pub epoch: u64,
     pub space: SpaceId,
-    pub width: f64,
     pub action: ActionConfig,
     pub consume: bool,
     pub skip_empty: Option<bool>,
@@ -239,7 +239,7 @@ impl Control {
             return None;
         }
         let point = r.converter.convert_point(point).unwrap_or(point);
-        let &(frame, space, mode) = r.screens.iter().find(|(frame, _, _)| frame.contains(point))?;
+        let &(_, space, mode) = r.screens.iter().find(|(frame, _, _)| frame.contains(point))?;
         let settings = r.settings;
         let action = settings.action_for(mode, fingers)?;
         r.next_session += 1;
@@ -249,7 +249,6 @@ impl Control {
                 session: r.next_session,
                 epoch,
                 space,
-                width: frame.size.width,
                 action,
                 consume: settings.consume,
                 skip_empty: settings.skip_empty,
@@ -299,6 +298,7 @@ struct DeviceSession {
     owner: Owner,
     blocked: bool,
     active: bool,
+    claim_x: f64,
     sample: Motion,
     max_contacts: usize,
     lifting: Option<Duration>,
@@ -328,6 +328,7 @@ impl DeviceSession {
             owner: Owner::Undecided,
             blocked: false,
             active: false,
+            claim_x: 0.0,
             max_contacts: 0,
             lifting: None,
         }
@@ -418,9 +419,12 @@ impl DeviceSession {
                             self.owner = Owner::Rift;
                             tracing::debug!(session = c.session, space = ?c.space, scrolling = c.action.scrolling, fingers = c.action.fingers, "gesture claimed");
                             if c.action.scrolling {
+                                self.claim_x = x;
                                 self.active = true;
+                                let mut context = c.clone();
+                                context.started = time;
                                 tx.send(Event::Gesture(Lifecycle::Begin {
-                                    context: c.clone(),
+                                    context,
                                     control: control.clone(),
                                 }));
                             }
@@ -431,11 +435,15 @@ impl DeviceSession {
                     if self.owner != Owner::Rift {
                         return;
                     }
-                    let total_x =
-                        x * SCROLL_SENSITIVITY * c.width * if c.action.invert { -1.0 } else { 1.0 };
+                    let total_x = (x - if c.action.scrolling {
+                        self.claim_x
+                    } else {
+                        0.0
+                    }) * SCROLL_SENSITIVITY
+                        * if c.action.invert { -1.0 } else { 1.0 };
                     // Compare cumulative travel to the last accepted position:
                     // sensor wobble stays still, but slow sub-point steps accumulate.
-                    if !c.action.scrolling || (total_x - self.sample.total_x).abs() >= 1.0 {
+                    if !c.action.scrolling || (total_x - self.sample.total_x).abs() >= 0.001 {
                         self.sample.total_x = total_x;
                     }
                     self.sample.timestamp = time;
@@ -601,7 +609,6 @@ mod tests {
             session: u64,
             epoch: u64,
             space: SpaceId,
-            width: f64,
             candidate: (LayoutMode, usize),
             settings: Settings,
             started: Duration,
@@ -610,7 +617,6 @@ mod tests {
                 session,
                 epoch,
                 space,
-                width,
                 action: settings.action_for(candidate.0, candidate.1)?,
                 consume: settings.consume,
                 skip_empty: settings.skip_empty,
@@ -707,7 +713,10 @@ mod tests {
             Event::Gesture(Lifecycle::Begin { .. })
         ));
         assert_eq!(control.owner.lock().owner, Owner::Rift);
-        assert!(control.latest(control.routing.lock().ui_session).unwrap().total_x < 0.0);
+        assert_eq!(
+            control.latest(control.routing.lock().ui_session).unwrap().total_x,
+            0.0
+        );
         DeviceInput::deliver(&b, multitouch::ContactEvent::Frame(&[]));
         assert!(matches!(
             rx.try_recv().unwrap().1,
@@ -903,7 +912,6 @@ mod tests {
             1,
             0,
             SpaceId::new(10),
-            1000.0,
             (mode, if scrolling { 3 } else { workspace_fingers }),
             settings,
             Duration::ZERO,
@@ -925,7 +933,7 @@ mod tests {
         ));
         s.frame(&frame(3, 0.37, 0.6), 3, Duration::from_millis(20), &tx, &c);
         assert_eq!(s.owner, Owner::Rift); // committed direction ignores later wobble
-        assert!((c.latest(1).unwrap().total_x + 120.0).abs() < 0.01);
+        assert!((c.latest(1).unwrap().total_x + 0.08).abs() < 1e-6);
         assert!(rx.try_recv().is_err()); // no per-frame actor traffic
         s.frame(&frame(4, 0.37, 0.6), 4, Duration::from_millis(30), &tx, &c);
         assert!(matches!(
@@ -1019,6 +1027,7 @@ mod tests {
             Event::Gesture(Lifecycle::Begin { .. })
         ));
         let held = c.latest(1).unwrap().total_x;
+        assert_eq!(held, 0.0, "intent-recognition travel must be invisible");
         for (time, x) in [(20, 0.55005), (30, 0.54995), (40, 0.5501), (50, 0.5502)] {
             s.frame(&frame(3, x, 0.5), 3, Duration::from_millis(time), &tx, &c);
             let sample = c.latest(1).unwrap();
@@ -1029,7 +1038,7 @@ mod tests {
             assert_eq!(sample.timestamp, Duration::from_millis(time));
         }
         s.frame(&frame(3, 0.5504, 0.5), 3, Duration::from_secs(1), &tx, &c);
-        assert!((c.latest(1).unwrap().total_x - held - 1.6).abs() < 0.01);
+        assert!((c.latest(1).unwrap().total_x - held - 0.0016).abs() < 1e-6);
         assert!(s.active);
         assert!(rx.try_recv().is_err());
         s.frame(&[], 0, Duration::from_millis(1010), &tx, &c);

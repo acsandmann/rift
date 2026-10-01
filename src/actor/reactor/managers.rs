@@ -450,9 +450,8 @@ impl LayoutManager {
                 any_frame_changed |=
                     AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
             } else {
-                any_frame_changed |= AnimationManager::animate_layout(
-                    reactor, space, &layout, is_resize, skip_wid, None,
-                );
+                any_frame_changed |=
+                    AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
             }
         }
 

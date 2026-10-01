@@ -951,7 +951,7 @@ impl Reactor {
         match event {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::MouseFocusPending(publisher) => {
-                if reactor.borrow().viewport_gesture.is_some() {
+                if reactor.borrow().viewport_gesture.as_ref().is_some_and(|s| !s.released) {
                     publisher.take_latest();
                     return;
                 }
