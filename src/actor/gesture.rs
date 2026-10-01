@@ -1,5 +1,4 @@
 //! One recognizer per physical device; semantic lifecycle and latest motion.
-use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -10,8 +9,8 @@ use objc2_core_graphics::CGEvent;
 use parking_lot::Mutex;
 
 use crate::actor::reactor::{Event, Sender};
-use crate::common::collections::HashMap;
 use crate::common::config::{Config, HapticPattern, LayoutMode};
+use crate::sys::dispatch::{DispatchExt, gesture_deadline_queue};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::gesture::{Owner, Ownership};
 use crate::sys::screen::{CoordinateConverter, SpaceId};
@@ -112,15 +111,6 @@ impl Settings {
 
     pub fn enabled(self) -> bool { self.scroll.is_some() || self.workspace.is_some() }
 
-    fn minimum_contacts(self) -> usize {
-        self.scroll
-            .into_iter()
-            .chain(self.workspace)
-            .map(|a| a.fingers)
-            .min()
-            .unwrap_or(usize::MAX)
-    }
-
     fn action(self, mode: LayoutMode) -> Option<ActionConfig> {
         if mode == LayoutMode::Scrolling && self.scroll.is_some() {
             self.scroll
@@ -167,6 +157,8 @@ pub enum Lifecycle {
 #[derive(Debug)]
 struct Routing {
     epoch: u64,
+    next_session: u64,
+    ui_session: u64,
     settings: Settings,
     enabled: bool,
     screens: Vec<(CGRect, SpaceId, LayoutMode)>,
@@ -177,24 +169,14 @@ pub struct Control {
     routing: Arc<Mutex<Routing>>,
     owner: Arc<Mutex<Ownership>>,
     stop: Arc<AtomicBool>,
-    pending: Arc<Mutex<PendingInput>>,
-    wake_tx: crossbeam_channel::Sender<()>,
-    wake_rx: crossbeam_channel::Receiver<()>,
-}
-#[derive(Debug, Default)]
-struct PendingInput {
-    device: Option<u64>,
-    contacts: Vec<multitouch::Contact>,
-    minimum_contacts: usize,
-    contact_counts: HashMap<u64, usize>,
-    removed: Vec<u64>,
 }
 impl Control {
     pub fn new(config: &Config) -> Self {
-        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         Self {
             routing: Arc::new(Mutex::new(Routing {
                 epoch: 0,
+                next_session: 0,
+                ui_session: 0,
                 settings: Settings::new(config),
                 enabled: false,
                 screens: Vec::new(),
@@ -202,70 +184,7 @@ impl Control {
             })),
             owner: Arc::default(),
             stop: Arc::default(),
-            pending: Arc::new(Mutex::new(PendingInput {
-                minimum_contacts: usize::MAX,
-                ..PendingInput::default()
-            })),
-            wake_tx,
-            wake_rx,
         }
-    }
-
-    fn wake(&self) { let _ = self.wake_tx.try_send(()); }
-
-    fn publish(&self, event: multitouch::MonitorEvent<'_>) {
-        match event {
-            multitouch::MonitorEvent::Contacts { device, contacts } => {
-                if let Some(id) = device.device_id() {
-                    self.publish_contacts(id, contacts);
-                }
-            }
-            multitouch::MonitorEvent::DeviceRemoved(id) => {
-                let mut pending = self.pending.lock();
-                pending.contact_counts.remove(&id);
-                pending.removed.push(id);
-                if pending.device == Some(id) {
-                    pending.device = None;
-                    pending.contacts.clear();
-                }
-                drop(pending);
-                self.wake();
-            }
-        }
-    }
-
-    fn publish_contacts(&self, id: u64, contacts: &[multitouch::Contact]) {
-        let count = contacts.iter().filter(|c| !c.is_palm() && c.state().is_active()).count();
-        let mut pending = self.pending.lock();
-        let previous = pending.contact_counts.insert(id, count);
-        // Unsupported motion needs no recognition or ownership updates. Still
-        // deliver every topology change, including staggered and full lifts.
-        if count < pending.minimum_contacts && previous == Some(count) {
-            return;
-        }
-        pending.device = Some(id);
-        pending.contacts.clear();
-        pending.contacts.extend_from_slice(contacts);
-        drop(pending);
-        self.wake();
-    }
-
-    fn wait(
-        &self,
-        deadline: Option<Instant>,
-        contacts: &mut Vec<multitouch::Contact>,
-    ) -> (Option<u64>, Vec<u64>) {
-        if let Some(deadline) = deadline {
-            let _ = self.wake_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
-        } else {
-            let _ = self.wake_rx.recv();
-        }
-        let mut pending = self.pending.lock();
-        let device = pending.device.take();
-        if device.is_some() {
-            std::mem::swap(contacts, &mut pending.contacts);
-        }
-        (device, std::mem::take(&mut pending.removed))
     }
 
     pub fn ownership_guard(&self) -> parking_lot::MutexGuard<'_, Ownership> { self.owner.lock() }
@@ -311,16 +230,6 @@ impl Control {
         r.settings = settings;
         r.enabled = enabled;
         r.screens = screens;
-        drop(r);
-        let mut pending = self.pending.lock();
-        pending.minimum_contacts = if enabled {
-            settings.minimum_contacts()
-        } else {
-            usize::MAX
-        };
-        pending.contact_counts.clear();
-        drop(pending);
-        self.wake();
     }
 
     pub fn retire_session(&self, epoch: u64, session: u64) {
@@ -329,16 +238,15 @@ impl Control {
         if r.epoch == epoch && o.session == session {
             r.epoch += 1;
             *o = Ownership::default();
-            drop(o);
-            drop(r);
-            self.wake();
+            r.ui_session = 0;
         }
     }
 
     pub fn retire(&self) {
-        self.routing.lock().epoch += 1;
+        let mut routing = self.routing.lock();
+        routing.epoch += 1;
         *self.owner.lock() = Ownership::default();
-        self.wake();
+        routing.ui_session = 0;
     }
 
     pub fn reset(&self, tx: &Sender) {
@@ -351,14 +259,17 @@ impl Control {
         self.reset(tx);
     }
 
-    fn context(&self, session: u64, started: Duration) -> Option<Context> {
-        let r = self.routing.lock();
-        if !r.enabled {
+    fn context(&self, session: u64, epoch: u64, started: Duration) -> Option<Context> {
+        if !self.routing.lock().enabled {
             return None;
         }
-        // Exactly one cursor lookup per physical stroke, never per motion frame.
+        // Exactly one cursor lookup per physical stroke, outside state locks.
         let event = CGEvent::new(None)?;
         let point = CGEvent::location(Some(&event));
+        let r = self.routing.lock();
+        if !r.enabled || r.epoch != epoch || r.ui_session != session {
+            return None;
+        }
         let point = r.converter.convert_point(point).unwrap_or(point);
         let &(frame, space, mode) = r.screens.iter().find(|(frame, _, _)| frame.contains(point))?;
         Context::new(
@@ -372,12 +283,45 @@ impl Control {
         )
     }
 
-    pub fn start(&self, tx: Sender) {
+    fn begin(&self, time: Duration) -> DeviceSession {
+        let (session, epoch, available) = {
+            let mut r = self.routing.lock();
+            r.next_session += 1;
+            let available = r.enabled && r.ui_session == 0;
+            if available {
+                r.ui_session = r.next_session;
+            }
+            (r.next_session, r.epoch, available)
+        };
+        let context = available.then(|| self.context(session, epoch, time)).flatten();
+        if context.is_none() {
+            let mut r = self.routing.lock();
+            if r.ui_session == session {
+                r.ui_session = 0;
+            }
+        }
+        DeviceSession::new(context, epoch, session, time)
+    }
+
+    pub fn start(&self, tx: Sender) -> multitouch::Monitor {
         let control = self.clone();
-        std::thread::Builder::new()
-            .name("multitouch".into())
-            .spawn(move || run(control, tx))
-            .expect("start multitouch worker");
+        let origin = Instant::now();
+        let motion = MotionPublisher::default();
+        let monitor = multitouch::Monitor::with_device_handler(move |_| {
+            let state = Arc::new(Mutex::new(DeviceInput {
+                session: None,
+                control: control.clone(),
+                tx: tx.clone(),
+                motion: motion.clone(),
+                origin,
+                last_count: 0,
+            }));
+            move |event| DeviceInput::deliver(&state, event)
+        });
+        if !monitor.start() {
+            tracing::warn!("Multitouch monitor unavailable");
+        }
+        monitor
     }
 }
 
@@ -442,12 +386,12 @@ impl DeviceSession {
     fn frame(
         &mut self,
         contacts: &[multitouch::Contact],
+        count: usize,
         time: Duration,
         tx: &Sender,
         control: &Control,
         motion: &MotionPublisher,
     ) -> Option<usize> {
-        let count = contacts.iter().filter(|c| !c.is_palm() && c.state().is_active()).count();
         if !control.valid(self.epoch) {
             self.end(tx, true, time);
             self.owner = Owner::System;
@@ -588,103 +532,139 @@ impl DeviceSession {
         }
     }
 }
-fn run(control: Control, tx: Sender) {
-    let callback_control = control.clone();
-    let monitor = multitouch::Monitor::with_handler(move |event| callback_control.publish(event));
-    if !monitor.start() {
-        tracing::warn!("Multitouch monitor unavailable");
-        return;
+/// One state per physical device. The native subscription serializes contact
+/// deliveries; this lock also synchronizes the single delayed lift callback.
+/// CGEventTap only reads `Control::owner`, never this state or the recognizer.
+struct DeviceInput {
+    session: Option<DeviceSession>,
+    control: Control,
+    tx: Sender,
+    motion: MotionPublisher,
+    origin: Instant,
+    last_count: usize,
+}
+impl DeviceInput {
+    fn deliver(state: &Arc<Mutex<Self>>, event: multitouch::ContactEvent<'_>) {
+        let mut input = state.lock();
+        let time = input.origin.elapsed();
+        match event {
+            multitouch::ContactEvent::Stopped => input.finish(true, time),
+            multitouch::ContactEvent::Reset => {
+                let Self { session, control, tx, .. } = &mut *input;
+                if let Some(s) = session {
+                    s.end(tx, true, time);
+                    s.owner = Owner::System;
+                    control.retire_session(s.epoch, s.sample.session);
+                }
+            }
+            multitouch::ContactEvent::Frame(contacts) => {
+                if input.control.stop.load(Ordering::Acquire) || input.tx.is_closed() {
+                    input.finish(true, time);
+                    return;
+                }
+                let count =
+                    contacts.iter().filter(|c| !c.is_palm() && c.state().is_active()).count();
+                // Ordinary two-finger scrolling needs only contact counting.
+                // Topology changes always reach the session; no motion is copied.
+                if count == input.last_count
+                    && input.session.as_ref().is_some_and(|s| {
+                        s.context.is_none()
+                            || (!s.active && count < s.recognizer.required_finger_count)
+                    })
+                {
+                    return;
+                }
+                input.last_count = count;
+                if count == 0 {
+                    input.finish(false, time);
+                    return;
+                }
+                if input.session.is_none() {
+                    let control = input.control.clone();
+                    drop(input);
+                    let session = control.begin(time);
+                    input = state.lock();
+                    input.session = Some(session);
+                }
+                let Self {
+                    session, tx, control, motion, ..
+                } = &mut *input;
+                let s = session.as_mut().unwrap();
+                let prior_lift = s.lifting;
+                s.frame(contacts, count, time, tx, control, motion);
+                {
+                    let routing = control.routing.lock();
+                    if routing.ui_session == s.sample.session
+                        && routing.epoch == s.epoch
+                        && routing.enabled
+                    {
+                        let consume = s.context.as_ref().is_some_and(|c| c.settings.consume)
+                            && (count == s.recognizer.required_finger_count
+                                || s.owner == Owner::Rift);
+                        let mut owner = control.owner.lock();
+                        if owner.session == s.sample.session && owner.owner == Owner::System {
+                            s.owner = Owner::System;
+                        }
+                        *owner = Ownership {
+                            session: s.sample.session,
+                            owner: s.owner,
+                            consume,
+                            touching: true,
+                            dock_owner: owner.dock_owner,
+                        };
+                    }
+                }
+                if prior_lift != s.lifting
+                    && let Some(deadline) = s.lifting
+                {
+                    let weak = Arc::downgrade(state);
+                    let session = s.sample.session;
+                    let delay = deadline.saturating_sub(time).as_nanos() as i64;
+                    gesture_deadline_queue().after_f_s(
+                        dispatchr::time::Time::new_after(dispatchr::time::Time::NOW, delay),
+                        (weak, session, deadline),
+                        |(state, session, deadline)| {
+                            if let Some(state) = state.upgrade() {
+                                state.lock().expire_lift(session, deadline);
+                            }
+                        },
+                    );
+                }
+            }
+        }
     }
-    let origin = Instant::now();
-    let mut devices: HashMap<u64, DeviceSession> = HashMap::default();
-    let motion = MotionPublisher::default();
-    let mut next_session = 0;
-    let mut ui_device = None;
-    let mut contacts = Vec::new();
-    while !control.stop.load(Ordering::Acquire) && !tx.is_closed() {
-        // Block until an event, or the exact one-shot staggered-lift deadline.
-        let deadline = devices.values().filter_map(|s| s.lifting).min().map(|time| origin + time);
-        let (device, removed) = control.wait(deadline, &mut contacts);
-        if control.stop.load(Ordering::Acquire) || tx.is_closed() {
-            break;
+
+    fn expire_lift(&mut self, session: u64, deadline: Duration) {
+        let Some(s) = &mut self.session else { return };
+        if s.sample.session != session || s.lifting != Some(deadline) {
+            return;
         }
-        let now = Instant::now();
-        let time = now.duration_since(origin);
-        for id in removed {
-            if let Some(mut s) = devices.remove(&id) {
-                s.end(&tx, true, time);
-            }
-            if ui_device == Some(id) {
-                ui_device = None;
-                *control.owner.lock() = Ownership::default();
-            }
+        let time = self.origin.elapsed();
+        if self.control.valid(s.epoch) {
+            s.expire_lift(time, &self.tx);
+        } else {
+            s.end(&self.tx, true, time);
         }
-        for (&id, s) in &mut devices {
-            s.expire_lift(time, &tx);
-            if !control.valid(s.epoch) {
-                s.end(&tx, true, time);
-                if ui_device == Some(id) {
-                    control.owner.lock().touching = false;
-                }
-            }
-        }
-        if let Some(id) = device {
-            let s = match devices.entry(id) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    if !contacts.iter().any(|c| !c.is_palm() && c.state().is_active()) {
-                        continue;
-                    }
-                    next_session += 1;
-                    let context = if ui_device.is_none() {
-                        control.context(next_session, time)
-                    } else {
-                        None
-                    };
-                    let epoch =
-                        context.as_ref().map_or_else(|| control.routing.lock().epoch, |c| c.epoch);
-                    if context.is_some() {
-                        ui_device = Some(id);
-                    }
-                    entry.insert(DeviceSession::new(context, epoch, next_session, time))
-                }
-            };
-            let Some(count) = s.frame(&contacts, time, &tx, &control, &motion) else {
-                devices.remove(&id);
-                if ui_device == Some(id) {
-                    ui_device = None;
-                    let mut owner = control.owner.lock();
+    }
+
+    fn finish(&mut self, cancelled: bool, time: Duration) {
+        if let Some(mut s) = self.session.take() {
+            s.expire_lift(time, &self.tx);
+            s.end(&self.tx, cancelled, time);
+            let mut routing = self.control.routing.lock();
+            if routing.ui_session == s.sample.session {
+                routing.ui_session = 0;
+                let mut owner = self.control.owner.lock();
+                if cancelled {
+                    *owner = Ownership::default();
+                } else {
                     owner.touching = false;
                     owner.dock_owner = None;
                 }
-                continue;
-            };
-            if ui_device == Some(id) {
-                let consume = s.context.as_ref().is_some_and(|c| c.settings.consume)
-                    && (count == s.recognizer.required_finger_count || s.owner == Owner::Rift);
-                let routing = control.routing.lock();
-                // Consistent lock order: routing, then the tiny ownership snapshot.
-                if routing.epoch == s.epoch && routing.enabled {
-                    let mut owner = control.owner.lock();
-                    if owner.session == s.sample.session && owner.owner == Owner::System {
-                        s.owner = Owner::System;
-                    }
-                    *owner = Ownership {
-                        session: s.sample.session,
-                        owner: s.owner,
-                        consume,
-                        touching: true,
-                        dock_owner: owner.dock_owner,
-                    };
-                }
             }
         }
+        self.last_count = 0;
     }
-    for s in devices.values_mut() {
-        s.end(&tx, true, origin.elapsed());
-    }
-    monitor.stop();
-    *control.owner.lock() = Ownership::default();
 }
 
 #[cfg(test)]
@@ -694,123 +674,129 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dormant_worker_is_interrupted_by_control_changes() {
-        for change in ["configure", "retire", "stop"] {
-            let config = Config::default();
-            let control = Control::new(&config);
-            let worker = control.clone();
-            let (ready_tx, ready_rx) = crossbeam_channel::bounded(0);
-            let (done_tx, done_rx) = crossbeam_channel::bounded(1);
-            let thread = std::thread::spawn(move || {
-                ready_tx.send(()).unwrap();
-                worker.wait(None, &mut Vec::new());
-                done_tx.send(worker.stop.load(Ordering::Acquire)).unwrap();
-            });
-            ready_rx.recv().unwrap();
-            match change {
-                "configure" => control.configure(
-                    Settings::new(&config),
-                    true,
-                    Vec::new(),
-                    CoordinateConverter::default(),
-                ),
-                "retire" => control.retire(),
-                "stop" => {
-                    let (tx, _rx) = crate::actor::channel();
-                    control.stop(&tx);
-                }
-                _ => unreachable!(),
+    fn inline_delivery_keeps_devices_isolated_and_removal_cancels_only_the_owner() {
+        let (session, control, motion, tx, mut rx) = setup(true);
+        control.routing.lock().ui_session = 1;
+        let input = Arc::new(Mutex::new(DeviceInput {
+            session: Some(session),
+            control: control.clone(),
+            motion: motion.clone(),
+            tx: tx.clone(),
+            origin: Instant::now(),
+            last_count: 0,
+        }));
+        let other = Arc::new(Mutex::new(DeviceInput {
+            session: Some(DeviceSession::new(None, 0, 2, Duration::ZERO)),
+            control: control.clone(),
+            motion: motion.clone(),
+            tx: tx.clone(),
+            origin: Instant::now(),
+            last_count: 0,
+        }));
+        DeviceInput::deliver(&input, multitouch::ContactEvent::Frame(&frame(3, 0.5, 0.5)));
+        DeviceInput::deliver(&input, multitouch::ContactEvent::Frame(&frame(3, 0.6, 0.5)));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::Begin { .. })
+        ));
+        for _ in 0..100 {
+            DeviceInput::deliver(&other, multitouch::ContactEvent::Frame(&frame(2, 0.1, 0.5)));
+        }
+        DeviceInput::deliver(&other, multitouch::ContactEvent::Stopped);
+        assert_eq!(control.owner.lock().owner, Owner::Rift);
+        assert!(control.owner.lock().touching);
+        assert!(rx.try_recv().is_err());
+        DeviceInput::deliver(&input, multitouch::ContactEvent::Stopped);
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::End { cancelled: true, .. })
+        ));
+        assert!(!control.owner.lock().touching);
+        assert_eq!(control.routing.lock().ui_session, 0);
+        DeviceInput::deliver(&input, multitouch::ContactEvent::Stopped);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn partial_lift_deadline_cancels_without_another_contact_frame() {
+        let (session, control, motion, tx, mut rx) = setup(true);
+        control.routing.lock().ui_session = 1;
+        let input = Arc::new(Mutex::new(DeviceInput {
+            session: Some(session),
+            control,
+            motion,
+            tx,
+            origin: Instant::now(),
+            last_count: 0,
+        }));
+        for (count, x) in [(3, 0.5), (3, 0.6), (2, 0.6)] {
+            DeviceInput::deliver(&input, multitouch::ContactEvent::Frame(&frame(count, x, 0.5)));
+        }
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            Event::Gesture(Lifecycle::Begin { .. })
+        ));
+        let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+        let receiver = std::thread::spawn(move || {
+            ended_tx.send(rx.blocking_recv().unwrap().1).unwrap();
+            rx
+        });
+        let event = ended_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            event,
+            Event::Gesture(Lifecycle::End { cancelled: true, .. })
+        ));
+        let mut rx = receiver.join().unwrap();
+        DeviceInput::deliver(&input, multitouch::ContactEvent::Frame(&[]));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn delayed_lift_is_stale_safe_and_reset_requires_a_full_lift() {
+        for full_lift in [false, true] {
+            let (mut session, control, motion, tx, mut rx) = setup(true);
+            // A deadline from the prior stroke cannot cancel this active session.
+            session.active = true;
+            session.lifting = Some(Duration::from_millis(50));
+            control.routing.lock().ui_session = 1;
+            control.owner.lock().session = 1;
+            let input = Arc::new(Mutex::new(DeviceInput {
+                session: Some(session),
+                control: control.clone(),
+                motion,
+                tx,
+                origin: Instant::now() - Duration::from_millis(60),
+                last_count: 2,
+            }));
+            input.lock().expire_lift(99, Duration::from_millis(50));
+            input.lock().expire_lift(1, Duration::from_millis(49));
+            assert!(rx.try_recv().is_err());
+            if full_lift {
+                DeviceInput::deliver(&input, multitouch::ContactEvent::Frame(&[]));
+            } else {
+                input.lock().expire_lift(1, Duration::from_millis(50));
             }
-            assert_eq!(
-                done_rx
-                    .recv_timeout(Duration::from_secs(1))
-                    .expect("control change must wake the worker"),
-                change == "stop",
-            );
-            thread.join().unwrap();
+            assert!(matches!(
+                rx.try_recv().unwrap().1,
+                Event::Gesture(Lifecycle::End { cancelled: true, .. })
+            ));
+            input.lock().expire_lift(1, Duration::from_millis(50));
+            if full_lift {
+                assert!(input.lock().session.is_none());
+                assert!(rx.try_recv().is_err());
+                continue;
+            }
+            DeviceInput::deliver(&input, multitouch::ContactEvent::Reset);
+            for x in [0.5, 0.6, 0.7] {
+                DeviceInput::deliver(&input, multitouch::ContactEvent::Frame(&frame(3, x, 0.5)));
+            }
+            assert!(rx.try_recv().is_err());
+            assert_eq!(control.owner.lock().owner, Owner::System);
+            DeviceInput::deliver(&input, multitouch::ContactEvent::Frame(&[]));
+            assert!(input.lock().session.is_none());
         }
     }
 
-    #[test]
-    fn unsupported_contact_motion_does_not_wake_worker_but_topology_does() {
-        let mut config = Config::default();
-        config.settings.gestures.enabled = true;
-        config.settings.gestures.fingers = 3;
-        config.settings.layout.scrolling.gestures.enabled = false;
-        let control = Control::new(&config);
-        control.configure(
-            Settings::new(&config),
-            true,
-            Vec::new(),
-            CoordinateConverter::default(),
-        );
-        control.publish_contacts(1, &frame(2, 0.1, 0.5));
-        assert_eq!(control.wait(None, &mut Vec::new()).0.unwrap(), 1);
-        for step in 0..1000 {
-            control.publish_contacts(1, &frame(2, step as f32 / 1000.0, 0.5));
-        }
-        assert!(control.wake_rx.try_recv().is_err());
-        assert!(control.pending.lock().device.is_none());
-        control.configure(
-            Settings::new(&config),
-            true,
-            Vec::new(),
-            CoordinateConverter::default(),
-        );
-        control.publish_contacts(1, &frame(2, 0.7, 0.5));
-        assert!(
-            control.wake_rx.try_recv().is_err(),
-            "unchanged routing must keep admission cached"
-        );
-
-        // Adding the configured third finger enables continuous motion. Both
-        // staggered and full lifts must still reach the session's lifecycle.
-        for count in [3, 3, 2, 0] {
-            control.publish_contacts(1, &frame(count, 0.5, 0.5));
-            assert_eq!(
-                {
-                    let mut contacts = Vec::new();
-                    control.wait(None, &mut contacts);
-                    contacts.len()
-                },
-                count
-            );
-        }
-        // A second device and a changed configuration have separate admission.
-        control.publish_contacts(2, &frame(2, 0.2, 0.5));
-        assert_eq!(control.wait(None, &mut Vec::new()).0.unwrap(), 2);
-        config.settings.gestures.fingers = 2;
-        control.configure(
-            Settings::new(&config),
-            true,
-            Vec::new(),
-            CoordinateConverter::default(),
-        );
-        control.wait(None, &mut Vec::new());
-        for _ in 0..2 {
-            control.publish_contacts(1, &frame(2, 0.5, 0.5));
-            assert_eq!(
-                {
-                    let mut contacts = Vec::new();
-                    control.wait(None, &mut contacts);
-                    contacts.len()
-                },
-                2
-            );
-        }
-    }
-
-    #[test]
-    fn coalesced_wakeups_preserve_every_device_removal() {
-        let control = Control::new(&Config::default());
-        for id in [1, 2, 3] {
-            control.publish(multitouch::MonitorEvent::DeviceRemoved(id));
-        }
-        control.retire();
-        let (device, removed) = control.wait(None, &mut Vec::new());
-        assert_eq!(removed, [1, 2, 3]);
-        assert!(device.is_none());
-    }
     fn frame(count: usize, x: f32, y: f32) -> Vec<Contact> {
         (0..count)
             .map(|i| {
@@ -873,26 +859,26 @@ mod tests {
     #[test]
     fn continuous_motion_commits_once_and_topology_requires_full_lift() {
         let (mut s, c, m, tx, mut rx) = setup(true);
-        s.frame(&frame(2, 0.4, 0.4), Duration::ZERO, &tx, &c, &m);
+        s.frame(&frame(2, 0.4, 0.4), 2, Duration::ZERO, &tx, &c, &m);
         assert!(rx.try_recv().is_err());
-        s.frame(&frame(3, 0.4, 0.4), Duration::ZERO, &tx, &c, &m);
-        s.frame(&frame(3, 0.39, 0.401), Duration::from_millis(10), &tx, &c, &m);
+        s.frame(&frame(3, 0.4, 0.4), 3, Duration::ZERO, &tx, &c, &m);
+        s.frame(&frame(3, 0.39, 0.401), 3, Duration::from_millis(10), &tx, &c, &m);
         assert!(matches!(
             rx.try_recv().unwrap().1,
             Event::Gesture(Lifecycle::Begin { .. })
         ));
-        s.frame(&frame(3, 0.37, 0.6), Duration::from_millis(20), &tx, &c, &m);
+        s.frame(&frame(3, 0.37, 0.6), 3, Duration::from_millis(20), &tx, &c, &m);
         assert_eq!(s.owner, Owner::Rift); // committed direction ignores later wobble
         assert!((m.latest(1).unwrap().total_x + 120.0).abs() < 0.01);
         assert!(rx.try_recv().is_err()); // no per-frame actor traffic
-        s.frame(&frame(4, 0.37, 0.6), Duration::from_millis(30), &tx, &c, &m);
+        s.frame(&frame(4, 0.37, 0.6), 4, Duration::from_millis(30), &tx, &c, &m);
         assert!(matches!(
             rx.try_recv().unwrap().1,
             Event::Gesture(Lifecycle::End { cancelled: true, .. })
         ));
-        s.frame(&frame(3, 0.2, 0.4), Duration::from_millis(40), &tx, &c, &m);
+        s.frame(&frame(3, 0.2, 0.4), 3, Duration::from_millis(40), &tx, &c, &m);
         assert!(rx.try_recv().is_err());
-        assert!(s.frame(&[], Duration::from_millis(50), &tx, &c, &m).is_none());
+        assert!(s.frame(&[], 0, Duration::from_millis(50), &tx, &c, &m).is_none());
         assert!(rx.try_recv().is_err());
     }
     #[test]
@@ -902,6 +888,7 @@ mod tests {
             for (i, x) in [0.5, 0.49, 0.45, 0.4, 0.3].into_iter().enumerate() {
                 s.frame(
                     &frame(3, x, 0.5),
+                    3,
                     Duration::from_millis(i as u64 * 10),
                     &tx,
                     &c,
@@ -926,22 +913,23 @@ mod tests {
     fn vertical_release_and_config_reset_do_not_rearm() {
         for reset in [false, true] {
             let (mut s, c, m, tx, mut rx) = setup(true);
-            s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
+            s.frame(&frame(3, 0.5, 0.5), 3, Duration::ZERO, &tx, &c, &m);
             if reset {
                 c.reset(&tx);
                 rx.try_recv().unwrap();
             }
             s.frame(
                 &frame(3, if reset { 0.6 } else { 0.501 }, if reset { 0.5 } else { 0.6 }),
+                3,
                 Duration::from_millis(10),
                 &tx,
                 &c,
                 &m,
             );
-            s.frame(&frame(3, 0.3, 0.6), Duration::from_millis(20), &tx, &c, &m);
+            s.frame(&frame(3, 0.3, 0.6), 3, Duration::from_millis(20), &tx, &c, &m);
             assert_eq!(s.owner, Owner::System);
             assert!(rx.try_recv().is_err());
-            assert!(s.frame(&[], Duration::from_millis(30), &tx, &c, &m).is_none());
+            assert!(s.frame(&[], 0, Duration::from_millis(30), &tx, &c, &m).is_none());
         }
     }
 
@@ -949,15 +937,29 @@ mod tests {
     fn slow_horizontal_swipe_tolerates_initial_finger_placement_noise() {
         for scrolling in [false, true] {
             let (mut s, c, m, tx, mut rx) = setup(scrolling);
-            s.frame(&frame(3, 0.4, 0.4), Duration::ZERO, &tx, &c, &m);
-            s.frame(&frame(3, 0.401, 0.405), Duration::from_millis(100), &tx, &c, &m);
+            s.frame(&frame(3, 0.4, 0.4), 3, Duration::ZERO, &tx, &c, &m);
+            s.frame(
+                &frame(3, 0.401, 0.405),
+                3,
+                Duration::from_millis(100),
+                &tx,
+                &c,
+                &m,
+            );
             assert_eq!(
                 s.owner,
                 Owner::Undecided,
                 "placement noise must not reject the stroke"
             );
-            s.frame(&frame(3, 0.41, 0.405), Duration::from_millis(500), &tx, &c, &m);
-            s.frame(&frame(3, 0.5, 0.405), Duration::from_secs(5), &tx, &c, &m);
+            s.frame(
+                &frame(3, 0.41, 0.405),
+                3,
+                Duration::from_millis(500),
+                &tx,
+                &c,
+                &m,
+            );
+            s.frame(&frame(3, 0.5, 0.405), 3, Duration::from_secs(5), &tx, &c, &m);
             assert_eq!(s.owner, Owner::Rift);
             let event = rx.try_recv().unwrap().1;
             assert!(
@@ -970,15 +972,15 @@ mod tests {
     #[test]
     fn stationary_wobble_is_filtered_without_losing_slow_accumulated_motion() {
         let (mut s, c, m, tx, mut rx) = setup(true);
-        s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
-        s.frame(&frame(3, 0.55, 0.5), Duration::from_millis(10), &tx, &c, &m);
+        s.frame(&frame(3, 0.5, 0.5), 3, Duration::ZERO, &tx, &c, &m);
+        s.frame(&frame(3, 0.55, 0.5), 3, Duration::from_millis(10), &tx, &c, &m);
         assert!(matches!(
             rx.try_recv().unwrap().1,
             Event::Gesture(Lifecycle::Begin { .. })
         ));
         let held = m.latest(1).unwrap().total_x;
         for (time, x) in [(20, 0.55005), (30, 0.54995), (40, 0.5501), (50, 0.5502)] {
-            s.frame(&frame(3, x, 0.5), Duration::from_millis(time), &tx, &c, &m);
+            s.frame(&frame(3, x, 0.5), 3, Duration::from_millis(time), &tx, &c, &m);
             let sample = m.latest(1).unwrap();
             assert_eq!(
                 sample.total_x, held,
@@ -986,11 +988,11 @@ mod tests {
             );
             assert_eq!(sample.timestamp, Duration::from_millis(time));
         }
-        s.frame(&frame(3, 0.5504, 0.5), Duration::from_secs(1), &tx, &c, &m);
+        s.frame(&frame(3, 0.5504, 0.5), 3, Duration::from_secs(1), &tx, &c, &m);
         assert!((m.latest(1).unwrap().total_x - held - 1.6).abs() < 0.01);
         assert!(s.active);
         assert!(rx.try_recv().is_err());
-        s.frame(&[], Duration::from_millis(1010), &tx, &c, &m);
+        s.frame(&[], 0, Duration::from_millis(1010), &tx, &c, &m);
         assert!(matches!(
             rx.try_recv().unwrap().1,
             Event::Gesture(Lifecycle::End { cancelled: false, .. })
@@ -1001,8 +1003,8 @@ mod tests {
         for native_owner in [Owner::System, Owner::Rift] {
             let (mut s, c, m, tx, mut rx) = setup(true);
             c.ownership_guard().dock_owner = Some(native_owner);
-            s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
-            s.frame(&frame(3, 0.6, 0.5), Duration::from_secs(1), &tx, &c, &m);
+            s.frame(&frame(3, 0.5, 0.5), 3, Duration::ZERO, &tx, &c, &m);
+            s.frame(&frame(3, 0.6, 0.5), 3, Duration::from_secs(1), &tx, &c, &m);
             if native_owner == Owner::System {
                 assert!(
                     rx.try_recv().is_err(),
@@ -1026,7 +1028,14 @@ mod tests {
             (25, 2, 0.55),
             (30, 0, 0.55),
         ] {
-            s.frame(&frame(count, x, 0.5), Duration::from_millis(time), &tx, &c, &m);
+            s.frame(
+                &frame(count, x, 0.5),
+                count,
+                Duration::from_millis(time),
+                &tx,
+                &c,
+                &m,
+            );
         }
         assert!(matches!(
             rx.try_recv().unwrap().1,
@@ -1047,7 +1056,14 @@ mod tests {
     fn scrolling_and_workspace_swipes_can_use_distinct_finger_counts() {
         let (mut s, c, m, tx, mut rx) = setup_settings(true, 4, false);
         for (time, count, x) in [(0, 1, 0.5), (5, 3, 0.5), (10, 4, 0.5), (20, 4, 0.4)] {
-            s.frame(&frame(count, x, 0.5), Duration::from_millis(time), &tx, &c, &m);
+            s.frame(
+                &frame(count, x, 0.5),
+                count,
+                Duration::from_millis(time),
+                &tx,
+                &c,
+                &m,
+            );
         }
         let Event::Gesture(Lifecycle::Workspace { next, .. }) =
             rx.try_recv().expect("four-finger workspace swipe").1
@@ -1060,19 +1076,19 @@ mod tests {
     #[test]
     fn partial_lift_that_stays_down_cancels_and_never_rearms() {
         let (mut s, c, m, tx, mut rx) = setup(true);
-        s.frame(&frame(3, 0.5, 0.5), Duration::ZERO, &tx, &c, &m);
-        s.frame(&frame(3, 0.55, 0.5), Duration::from_millis(10), &tx, &c, &m);
+        s.frame(&frame(3, 0.5, 0.5), 3, Duration::ZERO, &tx, &c, &m);
+        s.frame(&frame(3, 0.55, 0.5), 3, Duration::from_millis(10), &tx, &c, &m);
         rx.try_recv().unwrap();
-        s.frame(&frame(2, 0.55, 0.5), Duration::from_millis(20), &tx, &c, &m);
+        s.frame(&frame(2, 0.55, 0.5), 2, Duration::from_millis(20), &tx, &c, &m);
         assert!(rx.try_recv().is_err());
         s.expire_lift(Duration::from_millis(75), &tx);
         assert!(matches!(
             rx.try_recv().unwrap().1,
             Event::Gesture(Lifecycle::End { cancelled: true, .. })
         ));
-        s.frame(&frame(3, 0.7, 0.5), Duration::from_millis(80), &tx, &c, &m);
+        s.frame(&frame(3, 0.7, 0.5), 3, Duration::from_millis(80), &tx, &c, &m);
         assert!(rx.try_recv().is_err());
-        assert!(s.frame(&[], Duration::from_millis(90), &tx, &c, &m).is_none());
+        assert!(s.frame(&[], 0, Duration::from_millis(90), &tx, &c, &m).is_none());
         assert!(rx.try_recv().is_err());
     }
 }

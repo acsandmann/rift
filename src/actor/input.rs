@@ -364,7 +364,7 @@ impl Input {
         let this = Box::new(self);
 
         this.rebuild_event_tap_mask_if_needed(&recovery_tx);
-        this.gesture_control.start(this.events_tx.clone());
+        let _gesture_monitor = this.gesture_control.start(this.events_tx.clone());
 
         if this.state.borrow().mouse_hides_on_focus {
             if let Err(e) = window_server::allow_hide_mouse() {

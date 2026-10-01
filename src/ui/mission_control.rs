@@ -1869,20 +1869,23 @@ impl PreviewSession {
             let wake = self.wake.clone();
             let callback = RcBlock::new(move |image: *mut CGImage, _: *mut NSError| {
                 CAPTURE_JOBS.fetch_sub(1, Ordering::AcqRel);
+                let result = if tx.is_closed() {
+                    None
+                } else {
+                    let image =
+                        NonNull::new(image).map(|image| unsafe { CFRetained::retain(image) });
+                    Some(PreviewEvent::Image(generation, request.clone(), image))
+                };
+                // One main-thread handoff for both completion and scheduling the next capture.
                 dispatchr::queue::main().after_f_s(
                     dispatchr::time::Time::NOW,
-                    wake.clone(),
-                    |wake| {
+                    (tx.clone(), wake.clone(), result),
+                    |(tx, wake, result)| {
                         wake.send(crate::actor::mission_control::Event::PumpPreviews);
+                        if let Some(result) = result {
+                            tx.send(result);
+                        }
                     },
-                );
-                if tx.is_closed() {
-                    return;
-                }
-                let image = NonNull::new(image).map(|image| unsafe { CFRetained::retain(image) });
-                deliver(
-                    tx.clone(),
-                    PreviewEvent::Image(generation, request.clone(), image),
                 );
             });
             unsafe {
