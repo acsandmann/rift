@@ -365,7 +365,7 @@ mod tests {
     use crate::actor::reactor::testing::*;
     use crate::common::config::{Config, LayoutMode};
     use crate::layout_engine::LayoutSystem;
-    use crate::sys::screen::{CoordinateConverter, SpaceId};
+    use crate::sys::screen::SpaceId;
 
     fn sample(session: u64, total_x: f64, millis: u64) -> Motion {
         Motion {
@@ -432,7 +432,7 @@ mod tests {
     fn begin(r: &mut Reactor, config: &Config, space: SpaceId) -> (Context, Control, Control) {
         let settings = Settings::new(config);
         let c = Control::new(config);
-        c.configure(settings, true, Vec::new(), CoordinateConverter::default());
+        c.configure(settings, true, Vec::new());
         let context = Context::new(
             1,
             0,

@@ -1353,28 +1353,34 @@ impl State {
                 // A newer target may already be in the shared store. Report the
                 // transaction actually written by this actor, including on normal end.
                 let txid = Self::some_txid(last_seen_txid);
-                if let Some(frame) = last_animation_frame {
-                    let window = self.window_mut(wid)?;
-                    if window.last_known_frame.size.same_as(frame.size) {
-                        let _ = elem.set_position(frame.origin);
-                    } else {
-                        write_frame(&elem, Some(window.last_known_frame), frame);
-                    }
-                    window.last_known_frame = frame;
-                }
                 if ended_animation {
                     let app = self.app.clone();
                     self.enhanced_ui.release(&app);
                 }
                 self.restart_notifications_after_animation(&elem);
-                let frame =
+                let mut frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => {
-                            self.window_mut(wid)?.last_known_frame = frame;
-                            frame
-                        }
+                        Some(frame) => frame,
                         None => return Ok(false),
                     };
+                // Intermediate AX writes can be clamped while a growing column
+                // still overlaps the screen edge. The intended-frame cache is
+                // only a hint: repair against observed geometry once motion ends.
+                if let Some(target) = last_animation_frame
+                    && !frame.same_as(target)
+                {
+                    if frame.size.same_as(target.size) {
+                        let _ = elem.set_position(target.origin);
+                    } else {
+                        write_frame(&elem, Some(frame), target);
+                    }
+                    frame =
+                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
+                            Some(frame) => frame,
+                            None => return Ok(false),
+                        };
+                }
+                self.window_mut(wid)?.last_known_frame = frame;
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
