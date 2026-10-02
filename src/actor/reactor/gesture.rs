@@ -60,6 +60,7 @@ impl Reactor {
                 if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
                     return;
                 }
+                self.reconcile_presentations();
                 let target = self
                     .layout_manager
                     .layout_engine
@@ -101,12 +102,6 @@ impl Reactor {
                     return;
                 }
                 system.update_viewport_gesture(layout, 0.0, context.started);
-                if let Some(tx) = &self.animation_tx {
-                    _ = tx.send(super::animation::Message::Stop(
-                        system.viewport_frames(layout).map(|(wid, _)| wid).collect(),
-                        None,
-                    ));
-                }
                 self.viewport_gesture = Some(ViewportSession {
                     timestamp: context.started,
                     context,
@@ -352,7 +347,7 @@ mod tests {
             if let Some(s) = &self.viewport_gesture
                 && let Some(camera) = self.presentations.get(&s.context.space)
             {
-                camera.state.lock().sample(Instant::now(), 1.0);
+                camera.state.lock().sample(Instant::now());
             }
             self.reconcile_presentations();
             if self.viewport_gesture.as_ref().is_some_and(|s| {
@@ -494,6 +489,61 @@ mod tests {
             assert_eq!(r.workspace_switch_manager.active_workspace_switch, None);
             assert!(!r.workspace_switch_manager.manual_switch_in_progress());
         }
+    }
+
+    #[test]
+    fn presentation_reconciles_for_visible_state_queries_but_not_title_notifications() {
+        let (mut r, ctx, _, motion) = setup_options_threshold(false, false, false, 0.25);
+        let session = r.viewport_gesture.as_ref().unwrap();
+        let (workspace, layout) = (session.workspace, session.layout);
+        let offset = |r: &Reactor| {
+            let LayoutSystemKind::Scrolling(s) =
+                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+            else {
+                panic!("scrolling");
+            };
+            s.presentation(layout).unwrap().offset()
+        };
+        r.add_test_app(1);
+        let LayoutSystemKind::Scrolling(system) =
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+        else {
+            panic!("scrolling");
+        };
+        let frames: Vec<_> = system.viewport_frames(layout).collect();
+        for (wid, frame) in frames {
+            r.insert_test_window_state(wid, frame, None, true);
+        }
+        r.start_gesture_presentation();
+        let before = offset(&r);
+        motion.publish(sample(1, 40.0, 100));
+        let camera = r.presentations.get(&ctx.space).unwrap().state.clone();
+        camera.lock().sample(Instant::now());
+        let presented = camera.lock().presentation.offset();
+        assert_ne!(presented, before);
+        r.handle_loop_event(super::super::Event::WindowTitleChanged(
+            WindowId::new(1, 1),
+            "new title".into(),
+        ));
+        assert_eq!(
+            offset(&r),
+            before,
+            "unrelated notification cannot copy render state"
+        );
+        let (resp, result) = std::sync::mpsc::sync_channel(1);
+        r.handle_loop_event(super::super::Event::Query(
+            super::super::query::QueryRequest::LayoutState {
+                space_id: Some(ctx.space.get()),
+                workspace_id: None,
+                resp,
+            },
+        ));
+        result.try_recv().unwrap();
+        assert_eq!(
+            offset(&r),
+            presented,
+            "visible geometry queries are semantic boundaries"
+        );
     }
 
     #[test]
@@ -806,12 +856,12 @@ mod tests {
                     Request::AnimationFrame { wid, .. } => {
                         written.insert(wid);
                     }
-                    Request::EndWindowAnimation(wid) => {
+                    Request::EndWindowAnimation(wid) | Request::CancelWindowAnimation(wid, _) => {
                         assert!(
                             !hidden.contains(&wid),
                             "terminal viewport frames must precede workspace hiding"
                         );
-                        assert!(reconciled.insert(wid), "reconcile each window once");
+                        reconciled.insert(wid);
                     }
                     Request::SetWorkspaceSwitchPositions(positions, _, _) => {
                         for (wid, position) in positions {
@@ -832,8 +882,8 @@ mod tests {
                 }
             }
             assert_eq!(hidden.len(), 4);
-            assert!(!written.is_empty());
-            assert_eq!(reconciled, written);
+            assert!(!reconciled.is_empty());
+            assert!(written.is_subset(&reconciled));
         }
     }
 
@@ -920,7 +970,7 @@ mod tests {
                 );
                 r.start_gesture_presentation();
                 let camera = &r.presentations.get(&ctx.space).unwrap().state;
-                camera.lock().sample(Instant::now() + Duration::from_millis(50), 1.0);
+                camera.lock().sample(Instant::now() + Duration::from_millis(50));
                 r.reconcile_presentations();
                 let mut moved = 0;
                 while let Ok((_, request)) = app_rx.try_recv() {

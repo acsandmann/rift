@@ -254,6 +254,7 @@ impl<'de> Deserialize<'de> for RuntimeDisplayData {
 
         let helper = DisplayDataDe::deserialize(deserializer)?;
         let info = ScreenInfo {
+            backing_scale: 1.0,
             id: ScreenId::new(helper.screen_id),
             frame: helper.frame,
             display_uuid: helper.uuid,
@@ -323,6 +324,7 @@ mod tests {
     #[test]
     fn display_data_serializes_with_legacy_shape() {
         let info = ScreenInfo {
+            backing_scale: 1.0,
             id: ScreenId::new(7),
             frame: CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(300.0, 400.0)),
             display_uuid: "display-uuid".to_string(),

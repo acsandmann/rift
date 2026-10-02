@@ -408,6 +408,17 @@ mod interactive_frame_tests {
                 "old cancellation must preserve this newer frame"
             );
         });
+        drop(rx);
+        handle.send_interactive_frame(
+            window,
+            first,
+            false,
+            TransactionId::default(),
+            FrameSource::Viewport,
+        );
+        let pending = handle.interactive_frames.0.lock().unwrap();
+        assert!(!pending.wake_pending);
+        assert!(pending.latest.is_empty(), "shutdown must discard pending frames");
     }
 }
 
@@ -1316,39 +1327,39 @@ impl State {
                 {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
-                let (elem, window_server_id, last_seen_txid, last_animation_frame, ended_animation) =
-                    match self.window_mut(wid) {
-                        Ok(window) => {
-                            window.frame_source = FrameSource::Ordinary;
-                            let ended_animation =
-                                std::mem::replace(&mut window.is_animating, false);
-                            (
-                                window.elem.clone(),
-                                window.window_server_id,
-                                window.last_seen_txid,
-                                window.last_animation_frame.take(),
-                                ended_animation,
-                            )
-                        }
-                        Err(err) => match err {
-                            AxError::Ax(code) => {
-                                if self.handle_ax_error(wid, &code) {
-                                    return Ok(false);
-                                }
-                                return Err(AxError::Ax(code));
+                let (elem, last_seen_txid, last_animation_frame, ended_animation) = match self
+                    .window_mut(wid)
+                {
+                    Ok(window) => {
+                        window.frame_source = FrameSource::Ordinary;
+                        let ended_animation = std::mem::replace(&mut window.is_animating, false);
+                        (
+                            window.elem.clone(),
+                            window.last_seen_txid,
+                            window.last_animation_frame.take(),
+                            ended_animation,
+                        )
+                    }
+                    Err(err) => match err {
+                        AxError::Ax(code) => {
+                            if self.handle_ax_error(wid, &code) {
+                                return Ok(false);
                             }
-                            AxError::NotFound => return Ok(false),
-                        },
-                    };
-                let txid = if through.is_some() {
-                    Self::some_txid(last_seen_txid)
-                } else {
-                    self.txid_from_store(window_server_id)
-                        .or_else(|| Self::some_txid(last_seen_txid))
+                            return Err(AxError::Ax(code));
+                        }
+                        AxError::NotFound => return Ok(false),
+                    },
                 };
+                // A newer target may already be in the shared store. Report the
+                // transaction actually written by this actor, including on normal end.
+                let txid = Self::some_txid(last_seen_txid);
                 if let Some(frame) = last_animation_frame {
                     let window = self.window_mut(wid)?;
-                    write_frame(&elem, Some(window.last_known_frame), frame);
+                    if window.last_known_frame.size.same_as(frame.size) {
+                        let _ = elem.set_position(frame.origin);
+                    } else {
+                        write_frame(&elem, Some(window.last_known_frame), frame);
+                    }
                     window.last_known_frame = frame;
                 }
                 if ended_animation {

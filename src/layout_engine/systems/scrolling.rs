@@ -93,11 +93,11 @@ impl Viewport {
         }
     }
 
-    fn sample(&mut self, bounds: (f64, f64), now: Instant) -> Option<bool> {
+    fn sample(&mut self, bounds: (f64, f64), now: Instant, scale: f64) -> Option<bool> {
         let Self::Animation(spring) = self else {
             return None;
         };
-        if spring.sample(now) {
+        if spring.sample(now, scale) {
             *self = Self::Static(spring.target);
             Some(false)
         } else {
@@ -153,13 +153,14 @@ impl CameraSpring {
         )
     }
 
-    fn sample(&mut self, now: Instant) -> bool {
+    fn sample(&mut self, now: Instant, scale: f64) -> bool {
         let now = now.max(self.sampled);
         let (position, velocity) = self.position_velocity(now);
         self.current = position;
         self.sampled = now;
         // Check both position and speed so crossing the target cannot finish early.
-        (self.current - self.target).abs() <= 0.0001 && velocity.abs() <= 0.0001
+        (self.current - self.target).abs() <= 0.25 / scale
+            && velocity.abs() / 800.0_f64.sqrt() <= 0.25 / scale
     }
 }
 
@@ -256,8 +257,8 @@ impl ViewportPresentation {
         }
     }
 
-    pub fn sample(&mut self, now: Instant) -> bool {
-        self.viewport.sample(self.bounds, now).unwrap_or(self.gesturing())
+    pub fn sample(&mut self, now: Instant, scale: f64) -> bool {
+        self.viewport.sample(self.bounds, now, scale).unwrap_or(self.gesturing())
     }
 
     pub fn frame(&self, mut frame: CGRect, fixed: bool, scale: f64) -> CGRect {
@@ -808,7 +809,7 @@ impl LayoutState {
         if let (Viewport::Animation(spring), Some(g)) = (&mut self.viewport, &self.geometry) {
             let target = spring.target.clamp(g.bounds.0, g.bounds.1);
             if target != spring.target {
-                let now = Instant::now();
+                let now = Instant::now().max(spring.sampled);
                 let (_, velocity) = spring.position_velocity(now);
                 spring.from = spring.current;
                 spring.velocity = velocity;
@@ -1135,7 +1136,7 @@ impl ScrollingLayoutSystem {
         let state = self.layouts.get(layout)?;
         let g = state.geometry.as_ref()?;
         let mut motion = state.motion.clone();
-        motion.samples.reserve(64);
+        motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
         Some(ViewportPresentation {
             viewport: state.viewport.clone(),
             motion,
@@ -1272,7 +1273,7 @@ impl ScrollingLayoutSystem {
     fn advance_camera(state: &mut LayoutState, now: Instant) -> Option<bool> {
         let bounds =
             state.geometry.as_ref().map_or((f64::NEG_INFINITY, f64::INFINITY), |g| g.bounds);
-        state.viewport.sample(bounds, now)
+        state.viewport.sample(bounds, now, 1.0)
     }
 
     pub fn advance_viewport_animation(&mut self, layout: LayoutId, now: Instant) -> Option<bool> {
@@ -3208,7 +3209,7 @@ mod tests {
         p.viewport = Viewport::Static(800.0);
         p.retarget(100.0, 150.0, start);
         let now = start + Duration::from_millis(30);
-        p.sample(now);
+        p.sample(now, 1.0);
         let (position, velocity) = p.position_velocity(now);
         assert!(velocity > 0.0);
         p.viewport = Viewport::Static(900.0);
@@ -3231,8 +3232,57 @@ mod tests {
         let (rebased_position, rebased_velocity) = spring.position_velocity(now);
         assert!((rebased_position - position - 40.0).abs() < 1e-9);
         assert!((rebased_velocity - velocity).abs() < 1e-9);
-        assert!(!p.sample(now + Duration::from_secs(2)));
+        assert!(!p.sample(now + Duration::from_secs(2), 1.0));
         assert_eq!(p.offset(), 940.0);
+    }
+
+    #[test]
+    fn bounds_retarget_preserves_presented_position_and_velocity() {
+        let mut f = Fixture::new(4);
+        let state = &mut f.system.layouts[f.layout];
+        let start = Instant::now();
+        let mut spring = CameraSpring::new(100.0, 1000.0, 200.0, start);
+        let sampled = start + Duration::from_millis(30);
+        assert!(!spring.sample(sampled, 2.0));
+        let position = spring.current;
+        let (_, velocity) = spring.position_velocity(sampled);
+        state.viewport = Viewport::Animation(spring);
+        state.geometry.as_mut().unwrap().bounds = (0.0, 300.0);
+        state.reconcile_camera_bounds();
+        let Viewport::Animation(spring) = &state.viewport else {
+            panic!("spring");
+        };
+        assert_eq!(spring.target, 300.0);
+        assert_eq!(spring.current, position);
+        assert!((spring.velocity - velocity).abs() < 1e-8);
+        assert_eq!(spring.position_velocity(sampled), (position, velocity));
+    }
+
+    #[test]
+    fn spring_finishes_at_pixel_precision_and_snaps_to_exact_target() {
+        for scale in [1.0, 2.0] {
+            let f = Fixture::new(4);
+            let mut p = f.system.presentation(f.layout).unwrap();
+            let start = Instant::now();
+            p.viewport = Viewport::Static(700.0);
+            p.retarget(100.0, 250.0, start);
+            let mut finished = None;
+            for tick in 1..120 {
+                let now = start + Duration::from_secs_f64(tick as f64 / 120.0);
+                let (position, velocity) = p.position_velocity(now);
+                if !p.sample(now, scale) {
+                    assert!((position - 700.0).abs() * scale <= 0.25);
+                    assert!(velocity.abs() / 800.0_f64.sqrt() * scale <= 0.25);
+                    assert_eq!(p.offset(), 700.0);
+                    finished = Some(tick);
+                    break;
+                }
+            }
+            assert!(
+                finished.is_some_and(|tick| tick < 60),
+                "no invisible one-second spring tail"
+            );
+        }
     }
 
     #[test]
@@ -3249,7 +3299,7 @@ mod tests {
 
     #[test]
     fn structural_and_environmental_changes_preserve_release_but_clones_are_static() {
-        for edit in [0, 1, 2] {
+        for edit in [0, 1, 2, 3, 4] {
             let mut f = Fixture::new(4);
             f.system.begin_viewport_gesture(f.layout, Instant::now());
             f.system.update_viewport_gesture(f.layout, 200.0, Duration::from_millis(10));
@@ -3262,16 +3312,23 @@ mod tests {
                     f.gaps.outer.left = 30.0;
                     f.prepare();
                 }
+                3 => f.system.remove_window(f.system.layouts[f.layout].selected().unwrap()),
+                4 => f.system.add_window_after_selection(f.layout, wid(5)),
                 _ => {
                     f.layout = f.system.clone_layout(f.layout);
                 }
             }
             let frames = f.frames();
-            assert_eq!(
-                f.system
-                    .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(1)),
-                if edit == 2 { None } else { Some(false) }
-            );
+            let ongoing = f
+                .system
+                .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(1));
+            assert_ne!(ongoing, Some(true), "edit {edit} must settle");
+            if edit <= 1 {
+                assert_eq!(ongoing, Some(false), "non-focus edits preserve release");
+            }
+            if edit == 2 {
+                assert_eq!(ongoing, None, "clones remain static");
+            }
             if edit == 2 {
                 assert_eq!(f.frames(), frames);
             }

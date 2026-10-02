@@ -980,7 +980,15 @@ impl Reactor {
                 return;
             }
             Event::Query(req) => {
-                self.reconcile_presentations();
+                if matches!(
+                    req,
+                    query::QueryRequest::Workspaces { .. }
+                        | query::QueryRequest::Windows { .. }
+                        | query::QueryRequest::WindowInfo { .. }
+                        | query::QueryRequest::LayoutState { .. }
+                ) {
+                    self.reconcile_presentations();
+                }
                 self.handle_query_request(req);
                 return;
             }
@@ -1187,13 +1195,29 @@ impl Reactor {
             }
             Event::MissionControlNativeEntered
             | Event::TopologyInvalidated(_)
-            | Event::SpaceStateChanged(_) => {
+            | Event::SpaceStateChanged(_)
+            | Event::SystemWoke => {
                 let windows = self.state.windows.iter_windows().map(|(wid, _)| wid).collect();
                 self.cancel_window_presentations(windows);
             }
             _ => {}
         }
-        if !matches!(event, Event::WindowFrameChanged(_, _, _, Requested(true), _)) {
+        // These notifications neither inspect camera position nor edit geometry.
+        if !matches!(
+            event,
+            Event::WindowFrameChanged(_, _, _, Requested(true), _)
+                | Event::WindowTitleChanged(..)
+                | Event::MenuOpened(_)
+                | Event::MenuClosed(_)
+                | Event::WindowInventoryRefreshRequested(_)
+                | Event::RaiseCompleted { .. }
+                | Event::RaiseTimeout { .. }
+                | Event::ApplicationDeactivated(_)
+                | Event::ApplicationGloballyDeactivated(_)
+                | Event::SessionDidBecomeActive
+                | Event::ActiveDisplayChanged { .. }
+                | Event::SpaceCreated(_)
+        ) {
             self.reconcile_presentations();
         }
         self.log_event(&event);

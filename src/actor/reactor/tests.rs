@@ -4759,6 +4759,7 @@ fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
     let display_uuid = "11111111-1111-1111-1111-111111111111".to_string();
     let screens_for = |space: SpaceId| -> Vec<ScreenInfo> {
         vec![ScreenInfo {
+            backing_scale: 1.0,
             id: crate::sys::screen::ScreenId::new(0),
             frame,
             space: Some(space),
@@ -4880,6 +4881,7 @@ fn fullscreen_screen_params_preserves_window_layout() {
     // with the fullscreen space id.
     reactor.space_state.fullscreen_spaces.insert(fullscreen_space);
     reactor.handle_event(space_state_event_from_screens(vec![ScreenInfo {
+        backing_scale: 1.0,
         id: crate::sys::screen::ScreenId::new(0),
         frame: full_screen,
         space: None,
