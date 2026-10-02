@@ -88,6 +88,7 @@ pub fn handle_mouse_up(
             action: target.intent.action,
         }) {
             needs_layout = true;
+            outcome.drop_haptic = drag.haptics_enabled;
         }
     }
 

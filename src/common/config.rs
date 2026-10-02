@@ -620,6 +620,9 @@ pub enum MouseDropAction {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(deny_unknown_fields)]
 pub struct DragDropSettings {
+    /// Enable trackpad feedback after a successful window drop.
+    #[serde(default = "yes")]
+    pub haptics_enabled: bool,
     /// Enables native drag targeting and modifier mouse actions.
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -649,6 +652,7 @@ impl Default for DragDropSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            haptics_enabled: true,
             modifier: MouseModifier::Fn,
             action1: MouseAction::Move,
             action2: MouseAction::None,

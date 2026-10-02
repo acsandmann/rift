@@ -70,6 +70,7 @@ pub(crate) struct EventOutcome {
     pub(crate) make_key_windows: Vec<(pid_t, WindowServerId)>,
     pub(crate) mouse_warps: Vec<CGPoint>,
     pub(crate) post_arrange_mouse_warp: Option<WindowId>,
+    pub(crate) drop_haptic: bool,
     pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
     pub(crate) interactive_window_frame_write: Option<WindowFrameWriteRequest>,
     pub(crate) dispatch_mouse_up: bool,
@@ -122,6 +123,7 @@ impl EventOutcome {
         self.raise_requests.append(&mut other.raise_requests);
         self.make_key_windows.append(&mut other.make_key_windows);
         self.mouse_warps.append(&mut other.mouse_warps);
+        self.drop_haptic |= other.drop_haptic;
         self.post_arrange_mouse_warp =
             other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
         if !other.pre_layout_window_frame_writes.is_empty()

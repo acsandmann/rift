@@ -520,6 +520,7 @@ impl Reactor {
                 preview_enabled: config.settings.drag_drop.enabled
                     && config.settings.drag_drop.preview,
                 preview_suppressed: false,
+                haptics_enabled: config.settings.drag_drop.haptics_enabled,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
@@ -2567,6 +2568,11 @@ impl Reactor {
             }
             // Publish the menu state once after all arrange passes have completed.
             self.maybe_send_menu_update();
+        }
+        if layout_changed && outcome.drop_haptic && !cfg!(test) {
+            let _ = crate::sys::haptics::perform_haptic(
+                crate::common::config::HapticPattern::LevelChange,
+            );
         }
         if layout_changed
             && let Some(window) = outcome.post_arrange_mouse_warp
