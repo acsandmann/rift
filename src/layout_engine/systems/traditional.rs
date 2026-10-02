@@ -290,18 +290,26 @@ impl TraditionalLayoutSystem {
                 self.tree.data.layout.recompute_total(&self.tree.map, parent);
             }
         } else {
-            let container = self.tree.mk_node().insert_before(target_anchor);
-            self.tree.data.layout.assume_size_of(container, target_anchor, &self.tree.map);
-            self.set_layout(container, match direction.orientation() {
+            let kind = match direction.orientation() {
                 Orientation::Horizontal => LayoutKind::Horizontal,
                 Orientation::Vertical => LayoutKind::Vertical,
-            });
-            for node in if before {
-                [source_node, target_anchor]
+            };
+            let container = if target_anchor.parent(self.map()).is_none() {
+                // A root stack needs a new layout root, rather than a sibling.
+                self.nest_in_container_internal(layout, target_anchor, kind)
             } else {
-                [target_anchor, source_node]
-            } {
-                node.detach(&mut self.tree).push_back(container);
+                let container = self.tree.mk_node().insert_before(target_anchor);
+                self.tree.data.layout.assume_size_of(container, target_anchor, &self.tree.map);
+                self.set_layout(container, kind);
+                container
+            };
+            // Attach the stack first: extracting the source can collapse a
+            // two-window stack and invalidate target_anchor after reattachment.
+            target_anchor.detach(&mut self.tree).push_back(container);
+            if before {
+                source_node.detach(&mut self.tree).insert_before(target_anchor);
+            } else {
+                source_node.detach(&mut self.tree).push_back(container);
             }
         }
         self.select(source_node);
@@ -3999,6 +4007,76 @@ mod tests {
                 assert_eq!(system.tree.data.layout.info[node].size, size);
             }
             assert_eq!(system.tree.data.layout.info[root].total, 8.0);
+        }
+    }
+
+    #[test]
+    fn dragging_out_of_a_stack_splits_in_the_drop_direction() {
+        for nested in [false, true] {
+            for count in [2, 3] {
+                for stack_kind in [LayoutKind::HorizontalStack, LayoutKind::VerticalStack] {
+                    for direction in [
+                        Direction::Left,
+                        Direction::Right,
+                        Direction::Up,
+                        Direction::Down,
+                    ] {
+                        let mut system = TraditionalLayoutSystem::default();
+                        let layout = system.create_layout();
+                        let root = system.root(layout);
+                        let stack = if nested {
+                            system.add_window_after_selection(layout, w(4));
+                            let stack = system.tree.mk_node().push_back(root);
+                            system.set_layout(stack, stack_kind);
+                            stack
+                        } else {
+                            system.set_layout(root, stack_kind);
+                            root
+                        };
+                        for id in 1..=count {
+                            system.add_window_under(layout, stack, w(id));
+                        }
+
+                        assert!(system.apply_window_drop(
+                            layout,
+                            w(1),
+                            w(2),
+                            crate::layout_engine::WindowDropAction::Insert(direction),
+                        ));
+                        let source = system.window_node(layout, w(1)).unwrap();
+                        let target = system.window_node(layout, w(2)).unwrap();
+                        let remaining = if count == 3 {
+                            let third = system.window_node(layout, w(3)).unwrap();
+                            let group = target.parent(system.map()).unwrap();
+                            assert_eq!(third.parent(system.map()), Some(group));
+                            assert_eq!(system.layout(group), stack_kind);
+                            group
+                        } else {
+                            target
+                        };
+                        let split = source.parent(system.map()).unwrap();
+                        assert_eq!(remaining.parent(system.map()), Some(split));
+                        assert!(!system.layout(split).is_group());
+                        assert_eq!(system.layout(split).orientation(), direction.orientation());
+                        let expected = if matches!(direction, Direction::Left | Direction::Up) {
+                            vec![source, remaining]
+                        } else {
+                            vec![remaining, source]
+                        };
+                        // A matching outer split also contains the unrelated window.
+                        let actual: Vec<_> = split
+                            .children(system.map())
+                            .filter(|node| *node == source || *node == remaining)
+                            .collect();
+                        assert_eq!(actual, expected);
+                        assert_eq!(
+                            system.all_windows_in_layout(layout).len(),
+                            count as usize + usize::from(nested)
+                        );
+                        assert_eq!(system.selection(layout), source);
+                    }
+                }
+            }
         }
     }
 
