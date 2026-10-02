@@ -4208,8 +4208,8 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     let space = SpaceId::new(1);
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
     apps.requests();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    reactor.animation_tx = Some(tx);
+    let (tx, rx) = crossbeam_channel::unbounded();
+    reactor.animation_tx = Some(tx.into());
     reactor.config.settings.animate = true;
     let mut manager = super::animation::AnimationManager::new();
     let left = WindowId::new(1, 1);
@@ -4252,11 +4252,20 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     ));
     manager.handle_message(rx.try_recv().unwrap());
     apps.requests();
-    while manager.tick().is_some() {}
+    manager.tick_at(std::time::Instant::now() + std::time::Duration::from_secs(1));
     let final_frame = apps
         .requests()
         .into_iter()
         .filter_map(|request| match request {
+            Request::InteractiveFramesPending(queue) => {
+                let mut target = None;
+                queue.drain_with(|wid, frame, _, _, _, _| {
+                    if wid == right {
+                        target = Some(frame);
+                    }
+                });
+                target
+            }
             Request::AnimationFrame { wid, frame, .. } if wid == right => Some(frame),
             _ => None,
         })

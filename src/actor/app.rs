@@ -32,6 +32,7 @@ use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AXUIElement, Error as 
 use crate::sys::enhanced_ui::EnhancedUi;
 use crate::sys::event;
 use crate::sys::executor::Executor;
+use crate::sys::geometry::SameAs;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
 use crate::sys::timer::Timer;
@@ -312,7 +313,8 @@ pub(crate) enum FrameSource {
 #[derive(Default)]
 struct InteractiveFrames {
     wake_pending: bool,
-    latest: HashMap<WindowId, (CGRect, bool, TransactionId, FrameSource)>,
+    sequence: u64,
+    latest: HashMap<WindowId, (CGRect, bool, TransactionId, FrameSource, u64)>,
 }
 
 #[derive(Clone, Default)]
@@ -332,12 +334,12 @@ impl Debug for InteractiveFrameQueue {
 impl InteractiveFrameQueue {
     pub(crate) fn drain_with(
         &self,
-        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource),
+        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource, u64),
     ) {
         let mut frames = self.0.lock().unwrap();
         frames.wake_pending = false;
-        for (wid, (frame, set_size, txid, source)) in frames.latest.drain() {
-            consume(wid, frame, set_size, txid, source);
+        for (wid, (frame, set_size, txid, source, sequence)) in frames.latest.drain() {
+            consume(wid, frame, set_size, txid, source, sequence);
         }
     }
 }
@@ -358,14 +360,14 @@ mod interactive_frame_tests {
         handle.send_interactive_frame(
             window,
             first,
-            false,
+            true,
             TransactionId::default(),
             FrameSource::Drag,
         );
         handle.send_interactive_frame(
             window,
             latest,
-            true,
+            false,
             TransactionId::default(),
             FrameSource::Drag,
         );
@@ -374,7 +376,7 @@ mod interactive_frame_tests {
         };
         assert!(rx.try_recv().is_err());
         let mut received = Vec::new();
-        queue.drain_with(|wid, frame, set_size, _, _| received.push((wid, frame, set_size)));
+        queue.drain_with(|wid, frame, set_size, _, _, _| received.push((wid, frame, set_size)));
         assert_eq!(received, vec![(window, latest, true)]);
         assert_eq!(queue.0.lock().unwrap().latest.capacity(), capacity);
 
@@ -385,10 +387,27 @@ mod interactive_frame_tests {
             TransactionId::default(),
             FrameSource::Drag,
         );
-        assert!(matches!(
-            rx.try_recv().unwrap().1,
-            Request::InteractiveFramesPending(_)
-        ));
+        let (_, Request::InteractiveFramesPending(old_wake)) = rx.try_recv().unwrap() else {
+            panic!("wake");
+        };
+        let through = handle.cancel_interactive_frame(window);
+        handle.send_interactive_frame(
+            window,
+            latest,
+            false,
+            TransactionId::default(),
+            FrameSource::Viewport,
+        );
+        assert!(rx.try_recv().is_err(), "reuse the outstanding wake");
+        old_wake.drain_with(|wid, frame, _, _, source, sequence| {
+            assert_eq!(wid, window);
+            assert_eq!(frame, latest);
+            assert_eq!(source, FrameSource::Viewport);
+            assert!(
+                sequence > through,
+                "old cancellation must preserve this newer frame"
+            );
+        });
     }
 }
 
@@ -431,6 +450,12 @@ impl AppThreadHandle {
         Ok(())
     }
 
+    pub(crate) fn cancel_interactive_frame(&self, wid: WindowId) -> u64 {
+        let mut frames = self.interactive_frames.0.lock().unwrap();
+        frames.latest.remove(&wid);
+        frames.sequence
+    }
+
     /// Publish a high-frequency interactive frame without growing the actor queue.
     /// Only the newest frame for each window is retained until the app actor drains it.
     pub(crate) fn send_interactive_frame(
@@ -443,7 +468,14 @@ impl AppThreadHandle {
     ) {
         let should_wake = {
             let mut pending = self.interactive_frames.0.lock().unwrap();
-            pending.latest.insert(wid, (frame, set_size, txid, source));
+            let set_size = set_size
+                || pending
+                    .latest
+                    .get(&wid)
+                    .is_some_and(|(_, size, _, old, _)| *size && *old == source);
+            pending.sequence = pending.sequence.wrapping_add(1);
+            let sequence = pending.sequence;
+            pending.latest.insert(wid, (frame, set_size, txid, source, sequence));
             !std::mem::replace(&mut pending.wake_pending, true)
         };
         if should_wake
@@ -495,6 +527,7 @@ pub enum Request {
 
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
+    CancelWindowAnimation(WindowId, u64),
 
     /// Raise the windows within a single space, in the given order. All windows must be
     /// in the same space, or they will not be raised correctly.
@@ -625,6 +658,7 @@ struct PendingFrame {
     set_size: bool,
     txid: TransactionId,
     source: FrameSource,
+    sequence: u64,
 }
 
 /// Some AX bridges (notably Qt's) surface menu elements through window discovery.
@@ -859,6 +893,7 @@ impl State {
             set_size,
             txid,
             source,
+            ..
         }) = self.pending_frames.remove(&wid)
         else {
             return Ok(());
@@ -869,7 +904,9 @@ impl State {
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
         window.last_animation_frame = Some(frame);
-        if set_size {
+        if set_size
+            || (source != FrameSource::Drag && !window.last_known_frame.size.same_as(frame.size))
+        {
             write_frame(&window.elem, Some(window.last_known_frame), frame);
             window.last_known_frame = frame;
         } else {
@@ -1108,16 +1145,18 @@ impl State {
                     set_size,
                     txid,
                     source: FrameSource::Ordinary,
+                    sequence: 0,
                 });
             }
             Request::InteractiveFramesPending(frames) => {
-                frames.drain_with(|wid, frame, set_size, txid, source| {
+                frames.drain_with(|wid, frame, set_size, txid, source, sequence| {
                     self.pending_frames.insert(wid, PendingFrame {
                         span: Span::current(),
                         frame,
                         set_size,
                         txid,
                         source,
+                        sequence,
                     });
                 });
             }
@@ -1257,8 +1296,24 @@ impl State {
                 }
                 self.stop_notifications_for_animation(&elem);
             }
-            Request::EndWindowAnimation(wid) => {
-                if let Err(err) = self.flush_frames(wid) {
+            request @ (Request::EndWindowAnimation(_) | Request::CancelWindowAnimation(..)) => {
+                let (wid, through) = match request {
+                    Request::EndWindowAnimation(wid) => (wid, None),
+                    Request::CancelWindowAnimation(wid, through) => (wid, Some(through)),
+                    _ => unreachable!(),
+                };
+                if let Some(through) = through {
+                    if self.pending_frames.get(&wid).is_some_and(|frame| frame.sequence <= through)
+                    {
+                        self.pending_frames.remove(&wid);
+                    }
+                    if let Ok(window) = self.window_mut(wid) {
+                        window.last_animation_frame = None;
+                    }
+                }
+                if through.is_none()
+                    && let Err(err) = self.flush_frames(wid)
+                {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
                 let (elem, window_server_id, last_seen_txid, last_animation_frame, ended_animation) =
@@ -1285,9 +1340,12 @@ impl State {
                             AxError::NotFound => return Ok(false),
                         },
                     };
-                let txid = self
-                    .txid_from_store(window_server_id)
-                    .or_else(|| Self::some_txid(last_seen_txid));
+                let txid = if through.is_some() {
+                    Self::some_txid(last_seen_txid)
+                } else {
+                    self.txid_from_store(window_server_id)
+                        .or_else(|| Self::some_txid(last_seen_txid))
+                };
                 if let Some(frame) = last_animation_frame {
                     let window = self.window_mut(wid)?;
                     write_frame(&elem, Some(window.last_known_frame), frame);

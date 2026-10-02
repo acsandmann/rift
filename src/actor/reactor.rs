@@ -67,7 +67,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use animation::Sender as AnimationSender;
+use animation::AnimationSender;
 use events::{
     CloseWindowRequest, EventOutcome, app as application_workflow, command as command_workflow,
     drag as interaction_workflow, focus as focus_service, space as topology_workflow,
@@ -437,6 +437,7 @@ pub struct Reactor {
     startup_ready: Option<oneshot::Sender<()>>,
     pub animation_tx: Option<AnimationSender>,
     viewport_gesture: Option<gesture::ViewportSession>,
+    presentations: HashMap<SpaceId, animation::PreparedCamera>,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
@@ -565,6 +566,7 @@ impl Reactor {
             startup_ready: None,
             animation_tx: None,
             viewport_gesture: None,
+            presentations: HashMap::default(),
             #[cfg(test)]
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
@@ -895,53 +897,36 @@ impl Reactor {
 
     async fn run(reactor: Reactor, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
-        let (animation_tx, animation_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (animation_tx, animation_rx) = crossbeam_channel::unbounded();
         let reactor = Rc::new(RefCell::new(reactor));
         let input_tx = {
             let mut reactor = reactor.borrow_mut();
             reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
-            reactor.animation_tx = Some(animation_tx);
+            reactor.animation_tx = Some(animation_tx.into());
             reactor.communication_manager.input_tx.clone()
         };
         let reactor_task = Self::run_reactor_loop(reactor, events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, input_tx);
-        let animation_task = animation::AnimationManager::run(animation_rx);
-        let _ = tokio::join!(reactor_task, raise_manager_task, animation_task);
+        let presenter = std::thread::Builder::new()
+            .name("rift-presenter".into())
+            .spawn(move || animation::AnimationManager::run(animation_rx))
+            .expect("presentation thread");
+        let _ = tokio::join!(reactor_task, raise_manager_task);
+        let _ = presenter.join();
     }
 
     async fn run_reactor_loop(reactor: Rc<RefCell<Reactor>>, mut events: Receiver) {
         const MAX_EVENT_BATCH: usize = 64;
 
-        let mut tick = crate::sys::timer::Timer::manual();
-        loop {
-            let active = reactor.borrow().viewport_gesture.is_some();
-            let refresh =
-                reactor.borrow().viewport_gesture.as_ref().and_then(|s| s.refresh.clone());
-            let display_running = reactor
-                .borrow()
-                .viewport_gesture
-                .as_ref()
-                .and_then(|s| s.display_link.as_ref())
-                .is_some_and(|link| link.is_running());
-            tokio::select! {
-                _ = async { refresh.as_ref().unwrap().notified().await }, if refresh.is_some() => {
-                    reactor.borrow_mut().gesture_tick();
-                }
-                _ = tick.next(), if active && !display_running => {
-                    reactor.borrow_mut().gesture_tick();
-                    if let Some(session) = &reactor.borrow().viewport_gesture { tick.set_next_fire(session.interval); }
-                }
-                next = events.recv() => {
-                    let Some((span, event)) = next else { break; };
-                    let _guard = span.enter();
-                    Self::handle_thread_event(&reactor, event);
-                    for _ in 1..MAX_EVENT_BATCH {
-                        let Ok((span, event)) = events.try_recv() else { break; };
-                        let _guard = span.enter();
-                        Self::handle_thread_event(&reactor, event);
-                    }
-                    if !active && let Some(session) = &reactor.borrow().viewport_gesture { tick.set_next_fire(session.interval); }
-                }
+        while let Some((span, event)) = events.recv().await {
+            let _guard = span.enter();
+            Self::handle_thread_event(&reactor, event);
+            for _ in 1..MAX_EVENT_BATCH {
+                let Ok((span, event)) = events.try_recv() else {
+                    break;
+                };
+                let _guard = span.enter();
+                Self::handle_thread_event(&reactor, event);
             }
         }
         reactor.borrow_mut().gesture_event(crate::actor::gesture::Lifecycle::Reset);
@@ -995,6 +980,7 @@ impl Reactor {
                 return;
             }
             Event::Query(req) => {
+                self.reconcile_presentations();
                 self.handle_query_request(req);
                 return;
             }
@@ -1161,6 +1147,7 @@ impl Reactor {
             }
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
+        self.retire_presentations();
         self.drag_manager.sync_motion_gate();
     }
 
@@ -1170,6 +1157,44 @@ impl Reactor {
                 return Ok(EventOutcome::no_change());
             }
             event = Event::ApplicationThreadTerminated(*pid);
+        }
+        match &event {
+            Event::WindowDestroyed(wid)
+            | Event::WindowInvalidated(wid, _)
+            | Event::WindowFrameChanged(
+                wid,
+                _,
+                _,
+                Requested(false),
+                Some(crate::sys::event::MouseState::Down),
+            ) => {
+                self.cancel_window_presentations(vec![*wid]);
+            }
+            Event::WindowClosed(wsid) => {
+                if let Some(wid) = self.state.windows.tracked_window_id(*wsid) {
+                    self.cancel_window_presentations(vec![wid]);
+                }
+            }
+            Event::ApplicationTerminated(pid) | Event::ApplicationThreadTerminated(pid) => {
+                let windows = self
+                    .state
+                    .windows
+                    .iter_windows()
+                    .filter(|(wid, _)| wid.pid == *pid)
+                    .map(|(wid, _)| wid)
+                    .collect();
+                self.cancel_window_presentations(windows);
+            }
+            Event::MissionControlNativeEntered
+            | Event::TopologyInvalidated(_)
+            | Event::SpaceStateChanged(_) => {
+                let windows = self.state.windows.iter_windows().map(|(wid, _)| wid).collect();
+                self.cancel_window_presentations(windows);
+            }
+            _ => {}
+        }
+        if !matches!(event, Event::WindowFrameChanged(_, _, _, Requested(true), _)) {
+            self.reconcile_presentations();
         }
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
@@ -1707,6 +1732,7 @@ impl Reactor {
                     );
                     return Ok(EventOutcome::no_change());
                 };
+                self.cancel_window_presentations(vec![window]);
                 let space = self.best_space_for_window(&frame, server_id);
                 let tiled = !self.layout_manager.layout_engine.is_window_floating(window);
                 let scene = if tiled && action == crate::common::config::MouseAction::Move {

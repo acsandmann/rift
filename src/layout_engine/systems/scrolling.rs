@@ -93,6 +93,19 @@ impl Viewport {
         }
     }
 
+    fn sample(&mut self, bounds: (f64, f64), now: Instant) -> Option<bool> {
+        let Self::Animation(spring) = self else {
+            return None;
+        };
+        if spring.sample(now) {
+            *self = Self::Static(spring.target);
+            Some(false)
+        } else {
+            spring.current = spring.current.clamp(bounds.0, bounds.1);
+            Some(true)
+        }
+    }
+
     fn rebase(&mut self, delta: f64) {
         match self {
             Self::Uninitialized => {}
@@ -108,22 +121,43 @@ impl Viewport {
 
 /// Niri's default horizontal-view-movement: mass 1, critical damping, stiffness 800.
 #[derive(Clone, Debug)]
-struct CameraSpring {
+pub(crate) struct CameraSpring {
     from: f64,
     target: f64,
     velocity: f64,
     current: f64,
     started: Instant,
+    sampled: Instant,
 }
 impl CameraSpring {
-    fn sample(&mut self, now: Instant) -> bool {
+    fn new(from: f64, target: f64, velocity: f64, started: Instant) -> Self {
+        Self {
+            from,
+            target,
+            velocity,
+            current: from,
+            started,
+            sampled: started,
+        }
+    }
+
+    pub(crate) fn position_velocity(&self, now: Instant) -> (f64, f64) {
         let t = now.saturating_duration_since(self.started).as_secs_f64();
         let omega = 800.0_f64.sqrt();
         let x0 = self.from - self.target;
         let b = omega * x0 + self.velocity;
         let envelope = (-omega * t).exp();
-        self.current = self.target + envelope * (x0 + b * t);
-        let velocity = envelope * (self.velocity - omega * b * t);
+        (
+            self.target + envelope * (x0 + b * t),
+            envelope * (self.velocity - omega * b * t),
+        )
+    }
+
+    fn sample(&mut self, now: Instant) -> bool {
+        let now = now.max(self.sampled);
+        let (position, velocity) = self.position_velocity(now);
+        self.current = position;
+        self.sampled = now;
         // Check both position and speed so crossing the target cannot finish early.
         (self.current - self.target).abs() <= 0.0001 && velocity.abs() <= 0.0001
     }
@@ -165,6 +199,93 @@ struct Geometry {
     frames: Vec<(WindowId, CGRect)>,
     bounds: (f64, f64),
     snaps: Vec<SnapPoint>,
+}
+
+/// Prepared world frames and temporary camera motion. Built only at semantic
+/// boundaries; sampling does not enter the layout engine.
+#[derive(Clone, Debug)]
+pub(crate) struct ViewportPresentation {
+    viewport: Viewport,
+    motion: MotionHistory,
+    bounds: (f64, f64),
+    width: f64,
+    tiling: CGRect,
+    screen: CGRect,
+    // Fullscreen frames stay fixed; all other frames are world coordinates.
+    pub frames: Vec<(WindowId, CGRect, bool)>,
+}
+
+impl ViewportPresentation {
+    pub fn offset(&self) -> f64 { self.viewport.offset() }
+
+    pub fn gesturing(&self) -> bool { matches!(self.viewport, Viewport::Gesture(_)) }
+
+    pub fn animated(&self) -> bool { matches!(self.viewport, Viewport::Animation(_)) }
+
+    pub fn finish(&mut self) {
+        if let Viewport::Animation(spring) = &self.viewport {
+            self.viewport = Viewport::Static(spring.target);
+        }
+    }
+
+    pub fn target(&self) -> f64 {
+        match &self.viewport {
+            Viewport::Animation(s) => s.target,
+            _ => self.offset(),
+        }
+    }
+
+    pub fn retarget(&mut self, from: f64, velocity: f64, now: Instant) {
+        let target = self.target();
+        self.viewport = Viewport::Animation(CameraSpring::new(from, target, velocity, now));
+    }
+
+    pub fn position_velocity(&self, now: Instant) -> (f64, f64) {
+        match &self.viewport {
+            Viewport::Animation(s) => {
+                let (position, velocity) = s.position_velocity(s.sampled.max(now));
+                (position.clamp(self.bounds.0, self.bounds.1), velocity)
+            }
+            _ => (self.offset(), 0.0),
+        }
+    }
+
+    pub fn update(&mut self, delta: f64, time: Duration) {
+        if let Viewport::Gesture(offset) = &mut self.viewport {
+            self.motion.update(offset, self.bounds, delta * self.width, time);
+        }
+    }
+
+    pub fn sample(&mut self, now: Instant) -> bool {
+        self.viewport.sample(self.bounds, now).unwrap_or(self.gesturing())
+    }
+
+    pub fn frame(&self, mut frame: CGRect, fixed: bool, scale: f64) -> CGRect {
+        if !fixed {
+            frame = translate_frame(frame, self.offset(), self.tiling, self.screen, true);
+        }
+        frame.origin.x = (frame.origin.x * scale).round() / scale;
+        frame.origin.y = (frame.origin.y * scale).round() / scale;
+        frame
+    }
+}
+
+fn translate_frame(
+    mut frame: CGRect,
+    offset: f64,
+    tiling: CGRect,
+    screen: CGRect,
+    park: bool,
+) -> CGRect {
+    frame.origin.x += tiling.origin.x - offset;
+    if park {
+        if frame.max().x <= tiling.origin.x {
+            frame.origin.x = screen.origin.x - frame.size.width;
+        } else if frame.origin.x >= tiling.max().x {
+            frame.origin.x = screen.max().x;
+        }
+    }
+    frame
 }
 
 fn proportional_width(view: f64, gap: f64, ratio: f64) -> f64 {
@@ -414,6 +535,27 @@ impl MotionHistory {
         true
     }
 
+    fn update(
+        &mut self,
+        offset: &mut f64,
+        bounds: (f64, f64),
+        delta: f64,
+        time: Duration,
+    ) -> Option<f64> {
+        if !delta.is_finite() {
+            return None;
+        }
+        let raw = *offset + self.overscroll + delta;
+        let bounded = raw.clamp(bounds.0, bounds.1);
+        let moved = bounded - *offset;
+        if !self.push(moved, time) {
+            return None;
+        }
+        self.overscroll = raw - bounded;
+        *offset = bounded;
+        Some(moved)
+    }
+
     fn velocity(&self) -> f64 {
         let (Some(&(first, _)), Some(&(last, _))) = (self.samples.front(), self.samples.back())
         else {
@@ -616,10 +758,6 @@ impl LayoutState {
         if self.geometry.as_ref().is_some_and(|g| g.matches(screen, constraints, gaps)) {
             return;
         }
-        let interrupted = matches!(self.viewport, Viewport::Animation(_));
-        if interrupted {
-            self.viewport = Viewport::Static(self.viewport.offset());
-        }
         let bookmark = self.restored_view.take().or_else(|| self.bookmark());
         let initial = matches!(self.viewport, Viewport::Uninitialized);
         if settings.preserve_window_sizes {
@@ -654,10 +792,7 @@ impl LayoutState {
             let old = self.viewport.offset();
             self.viewport.rebase(column.world_x + bookmark.relative_offset - old);
         }
-        if interrupted && let Viewport::Static(offset) = &mut self.viewport {
-            let g = self.geometry.as_ref().unwrap();
-            *offset = offset.clamp(g.bounds.0, g.bounds.1);
-        }
+        self.reconcile_camera_bounds();
         if initial {
             self.viewport = Viewport::Static(0.0);
             if self.columns.len() == 1 {
@@ -665,6 +800,21 @@ impl LayoutState {
                 self.viewport = Viewport::Static(g.anchor_offset(0, settings.alignment));
             } else {
                 self.reveal(settings);
+            }
+        }
+    }
+
+    fn reconcile_camera_bounds(&mut self) {
+        if let (Viewport::Animation(spring), Some(g)) = (&mut self.viewport, &self.geometry) {
+            let target = spring.target.clamp(g.bounds.0, g.bounds.1);
+            if target != spring.target {
+                let now = Instant::now();
+                let (_, velocity) = spring.position_velocity(now);
+                spring.from = spring.current;
+                spring.velocity = velocity;
+                spring.target = target;
+                spring.started = now;
+                spring.sampled = now;
             }
         }
     }
@@ -706,8 +856,15 @@ impl LayoutState {
         let offset = if settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored {
             g.anchor_offset(self.active_column, settings.alignment)
         } else {
-            fit_offset(self.viewport.offset(), g.tiling.size.width, column)
+            let target = match &self.viewport {
+                Viewport::Animation(s) => s.target,
+                _ => self.viewport.offset(),
+            };
+            fit_offset(target, g.tiling.size.width, column)
         };
+        if matches!(&self.viewport, Viewport::Animation(s) if s.target == offset) {
+            return;
+        }
         self.viewport = Viewport::Static(offset);
     }
 
@@ -719,10 +876,6 @@ impl LayoutState {
         settings: &ScrollingLayoutSettings,
         edit: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let interrupted = matches!(self.viewport, Viewport::Animation(_));
-        if interrupted {
-            self.viewport = Viewport::Static(self.viewport.offset());
-        }
         let window = self.selected();
         let id = self.columns.get(self.active_column).map(|c| c.id);
         let old_x = id.and_then(|id| self.geometry.as_ref()?.column(id)).map(|c| c.world_x);
@@ -745,11 +898,7 @@ impl LayoutState {
                 self.viewport.rebase(new.world_x - old_x);
             }
         }
-        if interrupted
-            && let (Viewport::Static(offset), Some(g)) = (&mut self.viewport, &self.geometry)
-        {
-            *offset = offset.clamp(g.bounds.0, g.bounds.1);
-        }
+        self.reconcile_camera_bounds();
         if self.columns.is_empty() {
             self.viewport = Viewport::Static(0.0);
         }
@@ -959,14 +1108,7 @@ impl ScrollingLayoutSystem {
     ) -> impl Iterator<Item = (WindowId, CGRect)> + 'a {
         let offset = state.viewport.offset();
         g.frames.iter().map(move |&(wid, mut frame)| {
-            frame.origin.x += g.tiling.origin.x - offset;
-            if park {
-                if frame.max().x <= g.tiling.origin.x {
-                    frame.origin.x = g.screen.origin.x - frame.size.width;
-                } else if frame.origin.x >= g.tiling.max().x {
-                    frame.origin.x = g.screen.max().x;
-                }
-            }
+            frame = translate_frame(frame, offset, g.tiling, g.screen, park);
             frame = frame.round();
             if state.fullscreen.contains(&wid) {
                 frame = g.screen;
@@ -987,6 +1129,41 @@ impl ScrollingLayoutSystem {
             .into_iter()
             .filter_map(|state| Some((state, state.geometry.as_ref()?)))
             .flat_map(|(state, geometry)| Self::translate_frames(state, geometry, true))
+    }
+
+    pub(crate) fn presentation(&self, layout: LayoutId) -> Option<ViewportPresentation> {
+        let state = self.layouts.get(layout)?;
+        let g = state.geometry.as_ref()?;
+        let mut motion = state.motion.clone();
+        motion.samples.reserve(64);
+        Some(ViewportPresentation {
+            viewport: state.viewport.clone(),
+            motion,
+            bounds: g.bounds,
+            width: g.tiling.size.width,
+            tiling: g.tiling,
+            screen: g.screen,
+            frames: g
+                .frames
+                .iter()
+                .map(|&(wid, frame)| {
+                    if state.fullscreen.contains(&wid) {
+                        (wid, g.screen, true)
+                    } else if state.fullscreen_within_gaps.contains(&wid) {
+                        (wid, g.tiling, true)
+                    } else {
+                        (wid, frame.round(), false)
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    pub(crate) fn reconcile_presentation(&mut self, layout: LayoutId, p: &ViewportPresentation) {
+        if let Some(state) = self.layouts.get_mut(layout) {
+            state.viewport = p.viewport.clone();
+            state.motion = p.motion.clone();
+        }
     }
 
     /// Legacy normalized strip delta; boundary recognition is owned by the caller.
@@ -1050,16 +1227,7 @@ impl ScrollingLayoutSystem {
             return None;
         };
         let g = state.geometry.as_ref()?;
-        // Hidden edge travel unwinds before the camera moves back into bounds.
-        let raw = *offset + state.motion.overscroll + delta;
-        let bounded = raw.clamp(g.bounds.0, g.bounds.1);
-        let moved = bounded - *offset;
-        if !state.motion.push(moved, timestamp) {
-            return None;
-        }
-        state.motion.overscroll = raw - bounded;
-        *offset = bounded;
-        Some(moved)
+        state.motion.update(offset, g.bounds, delta, timestamp)
     }
 
     /// Normalize only at the layout boundary, using cached working geometry.
@@ -1091,31 +1259,20 @@ impl ScrollingLayoutSystem {
         let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
         let release = self.settle(layout, projected, velocity, true)?;
         if animate {
-            self.layouts[layout].viewport = Viewport::Animation(CameraSpring {
-                from: release.from_offset,
-                target: release.offset,
-                velocity: release.velocity,
-                current: release.from_offset,
-                started: Instant::now(),
-            });
+            self.layouts[layout].viewport = Viewport::Animation(CameraSpring::new(
+                release.from_offset,
+                release.offset,
+                release.velocity,
+                Instant::now(),
+            ));
         }
         Some(release)
     }
 
     fn advance_camera(state: &mut LayoutState, now: Instant) -> Option<bool> {
-        let Viewport::Animation(spring) = &mut state.viewport else {
-            return None;
-        };
-        let complete = spring.sample(now);
-        if let Some(g) = &state.geometry {
-            spring.current = spring.current.clamp(g.bounds.0, g.bounds.1);
-        }
-        if complete {
-            state.viewport = Viewport::Static(spring.target);
-            Some(false)
-        } else {
-            Some(true)
-        }
+        let bounds =
+            state.geometry.as_ref().map_or((f64::NEG_INFINITY, f64::INFINITY), |g| g.bounds);
+        state.viewport.sample(bounds, now)
     }
 
     pub fn advance_viewport_animation(&mut self, layout: LayoutId, now: Instant) -> Option<bool> {
@@ -3030,7 +3187,68 @@ mod tests {
     }
 
     #[test]
-    fn structural_and_environmental_changes_cancel_release_without_stale_frames() {
+    fn focus_during_camera_motion_uses_the_semantic_target() {
+        let mut f = Fixture::new(4);
+        let state = &mut f.system.layouts[f.layout];
+        state.activate(wid(3));
+        state.viewport = Viewport::Animation(CameraSpring::new(0.0, 500.0, 0.0, Instant::now()));
+        f.system.select_window(f.layout, wid(2));
+        let state = &f.system.layouts[f.layout];
+        assert_eq!(state.selected(), Some(wid(2)));
+        assert!(matches!(&state.viewport, Viewport::Animation(s) if s.target == 500.0));
+        f.system.finish_viewport_animation(f.layout);
+        assert_eq!(f.system.layouts[f.layout].viewport.offset(), 500.0);
+    }
+
+    #[test]
+    fn camera_retarget_and_rebase_preserve_position_and_velocity() {
+        let f = Fixture::new(4);
+        let mut p = f.system.presentation(f.layout).unwrap();
+        let start = Instant::now();
+        p.viewport = Viewport::Static(800.0);
+        p.retarget(100.0, 150.0, start);
+        let now = start + Duration::from_millis(30);
+        p.sample(now);
+        let (position, velocity) = p.position_velocity(now);
+        assert!(velocity > 0.0);
+        p.viewport = Viewport::Static(900.0);
+        p.retarget(position, velocity, now);
+        let Viewport::Animation(spring) = &p.viewport else {
+            panic!("spring")
+        };
+        let (next_position, next_velocity) = spring.position_velocity(now);
+        assert!((position - next_position).abs() < 1e-9);
+        assert!((velocity - next_velocity).abs() < 1e-9);
+        let (_, world, fixed) = p.frames[0];
+        let before_rebase = p.frame(world, fixed, 2.0);
+        p.viewport.rebase(40.0);
+        let mut rebased_world = world;
+        rebased_world.origin.x += 40.0;
+        assert_eq!(p.frame(rebased_world, fixed, 2.0), before_rebase);
+        let Viewport::Animation(spring) = &p.viewport else {
+            panic!("spring")
+        };
+        let (rebased_position, rebased_velocity) = spring.position_velocity(now);
+        assert!((rebased_position - position - 40.0).abs() < 1e-9);
+        assert!((rebased_velocity - velocity).abs() < 1e-9);
+        assert!(!p.sample(now + Duration::from_secs(2)));
+        assert_eq!(p.offset(), 940.0);
+    }
+
+    #[test]
+    fn viewport_presentation_aligns_to_physical_pixels_without_changing_sizes() {
+        let f = Fixture::new(4);
+        let mut p = f.system.presentation(f.layout).unwrap();
+        p.viewport = Viewport::Static(0.6);
+        let (_, world, fixed) = p.frames[0];
+        let retina = p.frame(world, fixed, 2.0);
+        assert_eq!(retina.origin.x.fract().abs(), 0.5);
+        assert_eq!(retina.size, world.size);
+        assert_eq!(p.frame(world, fixed, 1.0).origin.x.fract(), 0.0);
+    }
+
+    #[test]
+    fn structural_and_environmental_changes_preserve_release_but_clones_are_static() {
         for edit in [0, 1, 2] {
             let mut f = Fixture::new(4);
             f.system.begin_viewport_gesture(f.layout, Instant::now());
@@ -3052,9 +3270,11 @@ mod tests {
             assert_eq!(
                 f.system
                     .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(1)),
-                None
+                if edit == 2 { None } else { Some(false) }
             );
-            assert_eq!(f.frames(), frames);
+            if edit == 2 {
+                assert_eq!(f.frames(), frames);
+            }
             let state = &f.system.layouts[f.layout];
             let g = state.geometry.as_ref().unwrap();
             assert!(

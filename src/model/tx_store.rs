@@ -43,21 +43,18 @@ impl WindowTxStore {
         }
     }
 
-    pub fn next_txid(&self, id: WindowServerId) -> TransactionId {
-        let new_txid = match self.0.entry(id) {
-            Entry::Occupied(mut entry) => {
-                let record = entry.get_mut();
-                let new_txid = record.txid.next();
-                *record = TxRecord { txid: new_txid, target: None };
-                new_txid
-            }
-            Entry::Vacant(entry) => {
-                let txid = TransactionId::default().next();
-                entry.insert(TxRecord { txid, target: None });
-                txid
-            }
-        };
-        new_txid
+    /// Publish a presentation frame and its transaction in one entry update.
+    pub fn next_frame(&self, id: WindowServerId, target: CGRect) -> TransactionId {
+        self.advance(id, Some(target))
+    }
+
+    pub fn next_txid(&self, id: WindowServerId) -> TransactionId { self.advance(id, None) }
+
+    fn advance(&self, id: WindowServerId, target: Option<CGRect>) -> TransactionId {
+        let mut record = self.0.entry(id).or_default();
+        record.txid = record.txid.next();
+        record.target = target;
+        record.txid
     }
 
     pub fn set_last_txid(&self, id: WindowServerId, txid: TransactionId) {
@@ -88,9 +85,10 @@ mod tests {
     fn clear_target_keeps_last_txid() {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
-        let txid = store.next_txid(wsid);
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
-        store.insert(wsid, txid, target);
+        let txid = store.next_frame(wsid, target);
+        assert_eq!(txid, TransactionId::default().next());
+        assert_eq!(store.get(&wsid).unwrap().target, Some(target));
 
         store.clear_target(&wsid);
 

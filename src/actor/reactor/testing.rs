@@ -677,7 +677,7 @@ impl Apps {
                     }
                 }
                 Request::InteractiveFramesPending(frames) => {
-                    frames.drain_with(|wid, frame, set_size, txid, _| {
+                    frames.drain_with(|wid, frame, set_size, txid, _, _| {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;
@@ -699,6 +699,9 @@ impl Apps {
                 }
                 Request::BeginWindowAnimation(wid) => {
                     self.windows.entry(wid).or_default().animating = true;
+                }
+                Request::CancelWindowAnimation(wid, _) => {
+                    self.windows.entry(wid).or_default().animating = false;
                 }
                 Request::EndWindowAnimation(wid) => {
                     let window = self.windows.entry(wid).or_default();
