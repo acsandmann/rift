@@ -9,6 +9,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::AppWorkspaceRule;
 use crate::common::config::{
     LayoutMode, LayoutSettings, MAX_WORKSPACES, VirtualWorkspaceSettings, WorkspaceSelector,
+    default_workspace_name,
 };
 use crate::common::log::trace_misc;
 use crate::layout_engine::systems::LayoutSystemKind;
@@ -175,6 +176,17 @@ pub struct WorkspaceStore {
     default_workspace_names: Vec<String>,
     #[serde(skip)]
     default_workspace: usize,
+    /// Workspace display bindings, per native space on screen: the workspace the
+    /// space starts on when first initialized, and the workspaces (by position)
+    /// bound to another connected display, which cycling and back-and-forth skip.
+    #[serde(skip)]
+    preferred_default_workspace: HashMap<SpaceId, usize>,
+    #[serde(skip)]
+    foreign_workspaces: HashMap<SpaceId, HashSet<usize>>,
+    /// Native spaces whose display disconnected. Windows macOS moves off them keep
+    /// their workspace number on the display they land on.
+    #[serde(skip)]
+    vanished_spaces: HashSet<SpaceId>,
     #[serde(skip)]
     pub workspace_auto_back_and_forth: bool,
     #[serde(skip)]
@@ -321,6 +333,9 @@ impl WorkspaceStore {
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
             default_workspace,
+            preferred_default_workspace: HashMap::default(),
+            foreign_workspaces: HashMap::default(),
+            vanished_spaces: HashSet::default(),
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
             prevent_wrapping: config.prevent_wrapping,
             workspace_rules: config.workspace_rules.clone(),
@@ -394,18 +409,19 @@ impl WorkspaceStore {
         let mut ids = Vec::new();
         let count = self.default_workspace_count.max(1).min(self.max_workspaces);
         for i in 0..count {
-            let name = self
-                .default_workspace_names
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("Workspace {}", i + 1));
+            let name = default_workspace_name(&self.default_workspace_names, i);
 
             let mode = self.resolve_layout_mode_for_workspace(i, &name);
             let ws = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
             let id = self.workspaces.insert(ws);
             ids.push(id);
         }
-        let default_id = ids.get(self.default_workspace.min(ids.len() - 1)).copied();
+        let default_index = self
+            .preferred_default_workspace
+            .get(&space)
+            .copied()
+            .unwrap_or(self.default_workspace);
+        let default_id = ids.get(default_index.min(ids.len() - 1)).copied();
         ids.sort_unstable();
         self.workspaces_by_space.insert(space, ids);
 
@@ -414,13 +430,61 @@ impl WorkspaceStore {
         }
     }
 
+    /// Replace the workspace display bindings with `spaces`: for each native
+    /// space on screen, the workspace it starts on and the workspaces bound to
+    /// another connected display.
+    pub(crate) fn set_display_bindings(
+        &mut self,
+        spaces: impl IntoIterator<Item = (SpaceId, Option<usize>, HashSet<usize>)>,
+    ) {
+        self.preferred_default_workspace.clear();
+        self.foreign_workspaces.clear();
+        for (space, default, foreign) in spaces {
+            if let Some(default) = default {
+                self.preferred_default_workspace.insert(space, default);
+            }
+            if !foreign.is_empty() {
+                self.foreign_workspaces.insert(space, foreign);
+            }
+        }
+    }
+
+    /// The workspace `space` starts on, by position.
+    pub(crate) fn starting_workspace(&self, space: SpaceId) -> usize {
+        self.preferred_default_workspace
+            .get(&space)
+            .copied()
+            .unwrap_or(self.default_workspace)
+    }
+
+    fn is_foreign_workspace(&self, space: SpaceId, index: usize) -> bool {
+        self.foreign_workspaces
+            .get(&space)
+            .is_some_and(|foreign| foreign.contains(&index))
+    }
+
+    /// Record native spaces whose display disconnected, and forget any that are
+    /// back on a display.
+    pub(crate) fn update_vanished_spaces(
+        &mut self,
+        vanished: impl IntoIterator<Item = SpaceId>,
+        on_screen: &HashSet<SpaceId>,
+    ) {
+        self.vanished_spaces.extend(vanished);
+        self.vanished_spaces.retain(|space| !on_screen.contains(space));
+    }
+
+    pub(crate) fn is_vanished_space(&self, space: SpaceId) -> bool {
+        self.vanished_spaces.contains(&space)
+    }
+
     fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
         // Check workspace_rules (last matching rule wins, like app_rules)
         for rule in self.workspace_rules.iter().rev() {
-            match &rule.workspace {
-                WorkspaceSelector::Index(idx) if *idx == index => return rule.layout,
-                WorkspaceSelector::Name(n) if n == name => return rule.layout,
-                _ => continue,
+            if rule.matches(index, name)
+                && let Some(layout) = rule.layout
+            {
+                return layout;
             }
         }
         // Fall back to global default
@@ -598,8 +662,11 @@ impl WorkspaceStore {
         Ok(workspace_id)
     }
 
+    /// The back-and-forth target of `space`, unless it lives on another display.
     pub fn last_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
-        self.active_workspace_per_space.get(&space)?.0
+        let last = self.active_workspace_per_space.get(&space)?.0?;
+        let index = self.workspace_ids(space).iter().position(|id| *id == last);
+        (!index.is_some_and(|index| self.is_foreign_workspace(space, index))).then_some(last)
     }
 
     pub fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
@@ -664,6 +731,9 @@ impl WorkspaceStore {
                 _ => return None,
             };
 
+            if self.is_foreign_workspace(space, index) {
+                continue;
+            }
             let id = ids[index];
             if !require_non_empty || !self.workspace_windows(window_store, space, id).is_empty() {
                 return Some(id);
@@ -975,9 +1045,21 @@ impl WorkspaceStore {
         window_id: WindowId,
         space: SpaceId,
     ) -> Option<WindowWorkspaceInfo> {
-        window_store
-            .workspace_info_for_window(window_id)
-            .filter(|assignment| assignment.space == space)
+        let assignment = window_store.workspace_info_for_window(window_id)?;
+        if assignment.space == space {
+            return Some(assignment);
+        }
+        // The window's display went away and macOS moved the window here: keep its
+        // workspace number instead of dropping it into whatever this display shows.
+        if !self.vanished_spaces.contains(&assignment.space) {
+            return None;
+        }
+        let index = self
+            .workspace_ids(assignment.space)
+            .iter()
+            .position(|id| *id == assignment.workspace_id)?;
+        let workspace_id = *self.workspace_ids(space).get(index)?;
+        Some(WindowWorkspaceInfo { space, workspace_id })
     }
 
     fn ensure_window_assignment(

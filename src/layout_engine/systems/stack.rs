@@ -208,6 +208,11 @@ impl LayoutSystem for StackLayoutSystem {
         self.windows_in_layout_preorder(layout)
     }
 
+    fn add_window_entering_from(&mut self, layout: LayoutId, wid: WindowId, direction: Direction) {
+        self.normalize_layout(layout);
+        self.inner.add_window_entering_from(layout, wid, direction);
+    }
+
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         self.normalize_layout(layout);
         if self.window_insertion_point == WindowInsertionPoint::NextToSelection {

@@ -3,7 +3,9 @@ use std::str::FromStr;
 
 use anyhow::bail;
 use regex::RegexBuilder;
-pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
+pub use rift_protocol::{
+    AnimationEasing, ConfigCommand, DisplaySelector, LayoutMode, WorkspaceSelector,
+};
 use serde::{Deserialize, Serialize};
 
 use super::collections::{HashMap, HashSet};
@@ -52,13 +54,50 @@ pub struct VirtualWorkspaceSettings {
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
 }
 
+/// Display a newly created window opens on.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NewWindowDisplay {
+    /// Wherever macOS and the app put it.
+    #[default]
+    Default,
+    /// The display that holds keyboard focus when the window appears.
+    Focused,
+    /// The display under the mouse cursor when the window appears.
+    Cursor,
+}
+
+/// Settings for one workspace. Where several rules match a workspace, the last
+/// one giving a setting wins.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
     /// Target workspace by index or name
     pub workspace: WorkspaceSelector,
     /// Layout mode to use for this workspace
-    pub layout: LayoutMode,
+    #[serde(default)]
+    pub layout: Option<LayoutMode>,
+    /// Display this workspace lives on, by UUID (stable across reconnects) or by
+    /// index in physical order. While that display is connected the workspace is
+    /// only shown there.
+    #[serde(default)]
+    pub display: Option<DisplaySelector>,
+}
+
+impl WorkspaceLayoutRule {
+    /// Whether the rule targets workspace `index`, named `name`.
+    pub fn matches(&self, index: usize, name: &str) -> bool {
+        match &self.workspace {
+            WorkspaceSelector::Index(target) => *target == index,
+            WorkspaceSelector::Name(target) => target == name,
+        }
+    }
+}
+
+/// Name of workspace `index` as rift creates it: its entry in `names`, or
+/// "Workspace N".
+pub fn default_workspace_name(names: &[String], index: usize) -> String {
+    names.get(index).cloned().unwrap_or_else(|| format!("Workspace {}", index + 1))
 }
 
 // Allow specifying a workspace by numeric index or by name in the config.
@@ -144,6 +183,23 @@ impl Default for VirtualWorkspaceSettings {
 }
 
 impl VirtualWorkspaceSettings {
+    /// The display `workspace_rules` bind workspace `index` to, if any. Rules
+    /// match by index or by the workspace's name; the last one naming a display
+    /// wins.
+    pub fn display_binding_for_workspace(&self, index: usize) -> Option<&DisplaySelector> {
+        let name = default_workspace_name(&self.workspace_names, index);
+        self.workspace_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.matches(index, &name))
+            .find_map(|rule| rule.display.as_ref())
+    }
+
+    /// Whether any workspace rule binds a workspace to a display.
+    pub fn has_display_bindings(&self) -> bool {
+        self.workspace_rules.iter().any(|rule| rule.display.is_some())
+    }
+
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -166,6 +222,25 @@ impl VirtualWorkspaceSettings {
                 "default_workspace ({}) must be less than default_workspace_count ({})",
                 self.default_workspace, self.default_workspace_count
             ));
+        }
+
+        for (index, rule) in self.workspace_rules.iter().enumerate() {
+            if rule.layout.is_none() && rule.display.is_none() {
+                issues.push(format!(
+                    "Workspace rule {} sets neither layout nor display",
+                    index
+                ));
+            }
+            match &rule.display {
+                Some(DisplaySelector::Uuid(uuid)) if uuid.trim().is_empty() => {
+                    issues.push(format!("Workspace rule {} has an empty display UUID", index));
+                }
+                Some(DisplaySelector::Direction(_)) => issues.push(format!(
+                    "Workspace rule {} must name its display by UUID or index",
+                    index
+                )),
+                _ => {}
+            }
         }
 
         // Validate rules and check duplicates in a single pass
@@ -445,6 +520,9 @@ pub struct Settings {
     pub default_disable: bool,
     #[serde(default = "yes")]
     pub mouse_follows_focus: bool,
+    /// Which display a newly created window opens on.
+    #[serde(default)]
+    pub new_window_display: NewWindowDisplay,
     #[serde(default = "yes")]
     pub mouse_hides_on_focus: bool,
     #[serde(default = "yes")]
@@ -1981,6 +2059,69 @@ mod tests {
         let settings: VirtualWorkspaceSettings =
             toml::from_str("prevent_wrapping_around = true").unwrap();
         assert!(settings.prevent_wrapping);
+    }
+
+    #[test]
+    fn workspace_rules_bind_workspaces_to_displays() {
+        let settings: VirtualWorkspaceSettings = toml::from_str(
+            r#"
+                default_workspace_count = 4
+                workspace_names = ["web", "code"]
+                workspace_rules = [
+                    { workspace = "web", display = "37D8832A-2D66-02CA-B9F7-8F30A301B230" },
+                    { workspace = 2, display = 1 },
+                    { workspace = 2, layout = "bsp" },
+                    { workspace = "Workspace 4", display = 0 },
+                    { workspace = 3, display = 1 },
+                ]
+            "#,
+        )
+        .unwrap();
+
+        assert!(settings.has_display_bindings());
+        assert!(settings.validate().is_empty());
+        let binding = |index| settings.display_binding_for_workspace(index).cloned();
+        assert_eq!(
+            binding(0),
+            Some(DisplaySelector::Uuid(
+                "37D8832A-2D66-02CA-B9F7-8F30A301B230".into()
+            ))
+        );
+        assert_eq!(binding(1), None);
+        assert_eq!(
+            binding(2),
+            Some(DisplaySelector::Index(1)),
+            "a later rule without a display keeps the binding"
+        );
+        assert_eq!(
+            binding(3),
+            Some(DisplaySelector::Index(1)),
+            "unnamed workspaces match their default name, and the last rule wins"
+        );
+    }
+
+    #[test]
+    fn workspace_rules_report_rules_that_do_nothing_or_name_no_display() {
+        let settings: VirtualWorkspaceSettings = toml::from_str(
+            r#"workspace_rules = [
+                { workspace = 0 },
+                { workspace = 1, display = " " },
+                { workspace = 2, display = "left" },
+            ]"#,
+        )
+        .unwrap();
+        let issues = settings.validate();
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue == "Workspace rule 0 sets neither layout nor display")
+        );
+        assert!(issues.iter().any(|issue| issue == "Workspace rule 1 has an empty display UUID"));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue == "Workspace rule 2 must name its display by UUID or index")
+        );
     }
 
     #[test]

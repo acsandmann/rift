@@ -772,6 +772,186 @@ fn focus_display_invalid_or_inactive_target_preserves_context() {
     crate::sys::screen::TEST_ACTIVE_DISPLAY.with(|display| assert!(display.borrow().is_none()));
 }
 
+fn stacked_display_frames() -> (CGRect, CGRect) {
+    // Visible frames of a laptop panel with an external display placed above it,
+    // horizontally offset by a few pixels, as macOS reports a typical desk setup.
+    (
+        CGRect::new(CGPoint::new(0., 40.), CGSize::new(2056., 1289.)),
+        CGRect::new(CGPoint::new(81., -1049.), CGSize::new(1920., 1049.)),
+    )
+}
+
+#[test]
+fn moving_a_window_up_onto_a_display_stacked_above_keeps_it_there() {
+    let mut reactor = test_reactor();
+    let (built_in, external) = stacked_display_frames();
+    let (built_in_space, external_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![built_in, external], vec![
+        Some(built_in_space),
+        Some(external_space),
+    ]);
+    let mut apps = Apps::new();
+    let window = WindowId::new(1, 1);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(built_in_space)
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Right));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(built_in_space),
+        "right has no display beside the panel"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(external_space)
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(external_space, window),
+        reactor
+            .layout_manager
+            .layout_engine
+            .workspaces()
+            .active_workspace(external_space),
+        "the window lands in the workspace the external display shows"
+    );
+    assert_eq!(
+        reactor.space_state.command_space,
+        Some(external_space),
+        "commands follow the window to the display it moved to"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Down));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(built_in_space),
+        "and it can be moved straight back"
+    );
+}
+
+#[test]
+fn move_node_crosses_to_the_display_beside_at_the_layout_edge() {
+    let mut reactor = test_reactor();
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let moved = WindowId::new(1, 2);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(moved));
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Right));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(right_space));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(WindowId::new(1, 1)),
+        Some(left_space)
+    );
+}
+
+#[test]
+fn focus_follows_the_display_arrangement_for_stacked_displays() {
+    let mut reactor = test_reactor();
+    let (built_in, external) = stacked_display_frames();
+    let (built_in_space, external_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![built_in, external], vec![
+        Some(built_in_space),
+        Some(external_space),
+    ]);
+    let mut apps = Apps::new();
+    let mut upper = make_window(2);
+    upper.frame = CGRect::new(CGPoint::new(300., -800.), CGSize::new(400., 400.));
+    let lower = WindowId::new(1, 1);
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        vec![make_window(1), upper],
+        Some(lower),
+    );
+    let upper = WindowId::new(1, 2);
+    assert_eq!(reactor.assigned_space_for_window_id(upper), Some(external_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(lower)
+    );
+
+    for direction in [Direction::Left, Direction::Right] {
+        reactor.handle_test_layout_command(LayoutCommand::MoveFocus(direction));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            reactor.layout_manager.layout_engine.focused_window(),
+            Some(lower),
+            "{direction:?} must not jump to the display above"
+        );
+    }
+    reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Up));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(upper)
+    );
+}
+
+#[test]
+fn moving_a_window_up_into_a_stack_on_the_display_above_joins_its_bottom() {
+    let mut reactor = test_reactor();
+    let (built_in, external) = stacked_display_frames();
+    let (built_in_space, external_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![built_in, external], vec![
+        Some(built_in_space),
+        Some(external_space),
+    ]);
+    let mut apps = Apps::new();
+    let upper = |idx: usize, x: f64| {
+        let mut window = make_window(idx);
+        window.frame = CGRect::new(CGPoint::new(x, -800.), CGSize::new(400., 400.));
+        window
+    };
+    let lower = WindowId::new(1, 1);
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        vec![
+            make_window(1),
+            upper(2, 300.),
+            upper(3, 900.),
+            upper(4, 1500.),
+        ],
+        Some(lower),
+    );
+    reactor.space_state.command_space = Some(external_space);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
+    apps.simulate_until_quiet(&mut reactor);
+    let stack_before = reactor.test_workspace_windows_in_layout_order(external_space);
+    assert_eq!(stack_before.len(), 3);
+
+    reactor.space_state.command_space = Some(built_in_space);
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let mut expected = stack_before;
+    expected.push(lower);
+    assert_eq!(
+        reactor.test_workspace_windows_in_layout_order(external_space),
+        expected,
+        "the window joins the bottom of the stack it entered from below, keeping the stack's order"
+    );
+}
+
 #[test]
 fn passive_command_space_change_does_not_override_clicked_window_focus() {
     let (mut apps, mut reactor) = test_context();
@@ -2112,6 +2292,59 @@ fn recent_cross_display_move_ignores_conflicting_geometry_space_change() {
     assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space2));
 }
 
+/// The window server still reports the window on `space`, and a reconcile plus a
+/// stale frame report from the app arrive before macOS catches up with the move.
+fn deliver_lagging_reports(reactor: &mut Reactor, window: WindowId, space: SpaceId, frame: CGRect) {
+    let wsid = reactor.test_window_server_id(window);
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space))], false);
+    reactor.handle_event(Event::WindowFrameChanged(
+        window,
+        frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+}
+
+#[test]
+fn a_window_moved_to_another_display_holds_there_until_macos_catches_up() {
+    let mut reactor = test_reactor();
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let window = WindowId::new(1, 1);
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+    let original_frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: None,
+        },
+    )));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+
+    deliver_lagging_reports(&mut reactor, window, left_space, original_frame);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(right_space),
+        "a lagging report of the old display is not the user moving the window"
+    );
+
+    // Once the grace period is over, a real move to the other display is followed.
+    reactor.expire_display_moves_for_test();
+    deliver_lagging_reports(&mut reactor, window, left_space, original_frame);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+    crate::sys::window_server::set_window_spaces_override(
+        reactor.test_window_server_id(window),
+        None,
+    );
+}
+
 #[test]
 fn central_space_resolution_prefers_recent_move_target_over_stale_server_space() {
     let (mut reactor, wid, wsid, space1, space2, moved_frame) =
@@ -3153,6 +3386,151 @@ fn native_focus_race_waits_for_new_window_activation() {
     );
     assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(new));
     assert!(raise_rx.try_recv().is_err());
+}
+
+fn reactor_for_new_window_placement(
+    policy: crate::common::config::NewWindowDisplay,
+    settings: crate::common::config::VirtualWorkspaceSettings,
+) -> (Apps, Reactor, SpaceId, SpaceId) {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    reactor.config.settings.new_window_display = policy;
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        make_windows(1),
+        Some(WindowId::new(1, 1)),
+    );
+    (apps, reactor, left_space, right_space)
+}
+
+/// The app opens a new window on the left display, as macOS decided.
+fn open_new_window_on_left(reactor: &mut Reactor, apps: &mut Apps) -> WindowId {
+    let window = WindowId::new(1, 1002);
+    let wsid = WindowServerId::new(10002);
+    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(400., 400.));
+    reactor.handle_event(Event::WindowCreated(
+        window,
+        make_window_info(frame, Some(wsid), "New Window", None),
+        Some(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        }),
+        None,
+    ));
+    apps.simulate_until_quiet(reactor);
+    window
+}
+
+#[test]
+fn new_windows_open_on_the_display_the_setting_names() {
+    use crate::common::config::{NewWindowDisplay, VirtualWorkspaceSettings};
+    let on_right = CGPoint::new(1500., 500.);
+
+    let (mut apps, mut reactor, _left, right_space) = reactor_for_new_window_placement(
+        NewWindowDisplay::Cursor,
+        VirtualWorkspaceSettings::default(),
+    );
+    crate::sys::window_server::set_cursor_location_override(Some(on_right));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    let right_active =
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+    assert_eq!(
+        reactor.test_workspace_for_window(right_space, window),
+        right_active
+    );
+
+    let (mut apps, mut reactor, _left, right_space) = reactor_for_new_window_placement(
+        NewWindowDisplay::Focused,
+        VirtualWorkspaceSettings::default(),
+    );
+    reactor.space_state.command_space = Some(right_space);
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+
+    let (mut apps, mut reactor, left_space, _right) = reactor_for_new_window_placement(
+        NewWindowDisplay::Default,
+        VirtualWorkspaceSettings::default(),
+    );
+    crate::sys::window_server::set_cursor_location_override(Some(on_right));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+}
+
+#[test]
+fn an_app_rule_naming_a_workspace_wins_over_new_window_display() {
+    use crate::common::config::NewWindowDisplay;
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".into()),
+            workspace: Some(WorkspaceSelector::Index(1)),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (mut apps, mut reactor, left_space, _right) =
+        reactor_for_new_window_placement(NewWindowDisplay::Cursor, settings);
+    crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(1500., 500.)));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, window),
+        Some(left_workspaces[1])
+    );
+}
+
+#[test]
+fn a_new_window_placed_on_the_cursor_display_is_not_pulled_back_by_lagging_reports() {
+    use crate::common::config::{NewWindowDisplay, VirtualWorkspaceSettings};
+    let (mut apps, mut reactor, left_space, right_space) = reactor_for_new_window_placement(
+        NewWindowDisplay::Cursor,
+        VirtualWorkspaceSettings::default(),
+    );
+    crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(500., 500.)));
+    let window = WindowId::new(1, 1002);
+    let wsid = WindowServerId::new(10002);
+    let frame = CGRect::new(CGPoint::new(1200., 200.), CGSize::new(400., 400.));
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![right_space.get()]));
+    reactor.handle_event(Event::WindowCreated(
+        window,
+        make_window_info(frame, Some(wsid), "New Window", None),
+        Some(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        }),
+        None,
+    ));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+
+    deliver_lagging_reports(&mut reactor, window, right_space, frame);
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(left_space),
+        "reports of the old display while macOS catches up must not move the window back"
+    );
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+    crate::sys::window_server::set_cursor_location_override(None);
 }
 
 fn pending_activation_context() -> (Apps, Reactor, SpaceId, WindowId, WindowServerInfo) {
@@ -6174,6 +6552,181 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
     );
 }
 
+fn nine_workspace_settings() -> crate::common::config::VirtualWorkspaceSettings {
+    crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 9,
+        ..Default::default()
+    }
+}
+
+/// Two displays with window 1 on the right one, placed in its workspace 9.
+fn window_in_workspace_nine_on_the_right(
+    settings: crate::common::config::VirtualWorkspaceSettings,
+    right_shows_it: bool,
+) -> (Apps, Reactor, WindowId, SpaceId, SpaceId) {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let mut on_right = make_window(1);
+    on_right.frame = CGRect::new(CGPoint::new(1200., 100.), CGSize::new(400., 400.));
+    apps.make_app_and_settle(&mut reactor, 1, vec![on_right, make_window(2)]);
+    let window = WindowId::new(1, 1);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert!(reactor.assign_test_window_to_workspace(right_space, window, right_workspaces[8]));
+    let shown = if right_shows_it {
+        right_workspaces[8]
+    } else {
+        right_workspaces[5]
+    };
+    assert!(reactor.set_test_active_workspace(right_space, shown));
+    apps.simulate_until_quiet(&mut reactor);
+    (apps, reactor, window, left_space, right_space)
+}
+
+/// macOS reports every window on the left space, as after the right display went away.
+fn report_windows_on(reactor: &Reactor, space: SpaceId, windows: &[WindowId]) {
+    let ids: Vec<u32> =
+        windows.iter().map(|wid| reactor.test_window_server_id(*wid).as_u32()).collect();
+    for wid in windows {
+        crate::sys::window_server::set_window_spaces_override(
+            reactor.test_window_server_id(*wid),
+            Some(vec![space.get()]),
+        );
+    }
+    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), Some(ids));
+}
+
+fn clear_window_reports(reactor: &Reactor, spaces: &[SpaceId], windows: &[WindowId]) {
+    for wid in windows {
+        crate::sys::window_server::set_window_spaces_override(
+            reactor.test_window_server_id(*wid),
+            None,
+        );
+    }
+    for space in spaces {
+        crate::sys::window_server::set_space_window_list_for_space_override(space.get(), None);
+    }
+}
+
+fn unplug_right_display(
+    reactor: &mut Reactor,
+    left_space: SpaceId,
+    right_space: SpaceId,
+    delta: bool,
+) {
+    let windows = [WindowId::new(1, 1), WindowId::new(1, 2)];
+    report_windows_on(reactor, left_space, &windows);
+    let moved = reactor.test_window_server_id(windows[0]);
+    let others: Vec<_> = windows.iter().map(|wid| reactor.test_window_server_id(*wid)).collect();
+    reactor.handle_event(space_state_event_with(
+        vec![left_screen()],
+        vec![Some(left_space)],
+        |state| {
+            state.display_set_changed = true;
+            state.should_force_refresh_layout = true;
+            for wsid in &others {
+                state.active_window_spaces.insert(*wsid, left_space);
+            }
+            if delta {
+                state.topology_window_delta = Some(crate::actor::spaces::TopologyWindowDelta {
+                    appeared: vec![(moved, left_space)],
+                    disappeared: vec![(moved, right_space)],
+                    ..Default::default()
+                });
+            }
+        },
+    ));
+}
+
+#[test]
+fn window_from_a_disconnected_display_keeps_its_workspace_number() {
+    for delta in [true, false] {
+        for right_shows_it in [true, false] {
+            let (mut apps, mut reactor, window, left_space, right_space) =
+                window_in_workspace_nine_on_the_right(nine_workspace_settings(), right_shows_it);
+            unplug_right_display(&mut reactor, left_space, right_space, delta);
+            apps.simulate_until_quiet(&mut reactor);
+
+            let left_workspaces = reactor.test_workspace_ids(left_space);
+            assert_eq!(
+                reactor.test_workspace_for_window(left_space, window),
+                Some(left_workspaces[8]),
+                "delta={delta} right_shows_it={right_shows_it}: the window stays in workspace 9"
+            );
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(left_space),
+                Some(left_workspaces[0])
+            );
+            clear_window_reports(&reactor, &[left_space], &[window, WindowId::new(1, 2)]);
+        }
+    }
+}
+
+#[test]
+fn window_from_a_disconnected_display_keeps_its_workspace_through_churn_and_rediscovery() {
+    let (mut apps, mut reactor, window, left_space, right_space) =
+        window_in_workspace_nine_on_the_right(nine_workspace_settings(), true);
+    // The unplug starts display churn; macOS moves the windows while rift waits.
+    reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
+    report_windows_on(&reactor, left_space, &[window, WindowId::new(1, 2)]);
+    reactor.handle_event(space_state_event_with(
+        vec![left_screen()],
+        vec![Some(left_space)],
+        |state| {
+            state.display_set_changed = true;
+            state.should_force_refresh_layout = true;
+        },
+    ));
+    apps.simulate_until_quiet(&mut reactor);
+    // A later snapshot and the rediscovery it triggers leave the workspace alone.
+    reactor.handle_event(space_state_event(vec![left_screen()], vec![Some(left_space)]));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, window),
+        Some(left_workspaces[8])
+    );
+    let _ = right_space;
+    clear_window_reports(&reactor, &[left_space], &[window, WindowId::new(1, 2)]);
+}
+
+#[test]
+fn dragging_a_window_between_connected_displays_joins_the_visible_workspace() {
+    let mut reactor = test_reactor_with_workspace_settings(&nine_workspace_settings());
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    let mut on_right = make_window(1);
+    on_right.frame = CGRect::new(CGPoint::new(1200., 100.), CGSize::new(400., 400.));
+    apps.make_app_and_settle(&mut reactor, 1, vec![on_right, make_window(2)]);
+    let window = WindowId::new(1, 1);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert!(reactor.assign_test_window_to_workspace(right_space, window, right_workspaces[3]));
+    assert!(reactor.set_test_active_workspace(right_space, right_workspaces[3]));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // The user drags the window onto the left display; both displays stay connected.
+    let wsid = reactor.test_window_server_id(window);
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(left_space))], false);
+    apps.simulate_until_quiet(&mut reactor);
+
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, window),
+        Some(left_workspaces[0]),
+        "a dragged window joins the workspace the display shows"
+    );
+}
+
 #[test]
 fn closing_focused_window_refocuses_survivor() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
@@ -7191,4 +7744,461 @@ fn inventory_observes_only_eligible_omitted_windows() {
     assert_eq!(observed, vec![omitted_wsid]);
     assert_eq!(retired, vec![(windows[1], Some(omitted_wsid))]);
     reactor.state.windows.debug_assert_invariants();
+}
+
+/// Settings with one workspace per entry, named `ws0`, `ws1`, …, each bound as
+/// given by a workspace rule.
+fn bound_workspace_settings(
+    bindings: Vec<Option<DisplaySelector>>,
+) -> crate::common::config::VirtualWorkspaceSettings {
+    use crate::common::config::{VirtualWorkspaceSettings, WorkspaceLayoutRule, WorkspaceSelector};
+    VirtualWorkspaceSettings {
+        default_workspace_count: bindings.len(),
+        workspace_names: (0..bindings.len()).map(|index| format!("ws{index}")).collect(),
+        workspace_rules: bindings
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, display)| {
+                Some(WorkspaceLayoutRule {
+                    workspace: WorkspaceSelector::Index(index),
+                    layout: None,
+                    display: Some(display?),
+                })
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// Workspaces 0 and 1 on the left display, 2 and 3 on the right one.
+fn left_right_bindings() -> Vec<Option<DisplaySelector>> {
+    let left = || Some(DisplaySelector::Uuid("test-display-0".into()));
+    let right = || Some(DisplaySelector::Uuid("test-display-1".into()));
+    vec![left(), left(), right(), right()]
+}
+
+fn bound_reactor(settings: crate::common::config::VirtualWorkspaceSettings) -> Reactor {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    reactor
+}
+
+fn active_workspace_of(
+    reactor: &Reactor,
+    space: SpaceId,
+) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
+    reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
+}
+
+#[test]
+fn displays_start_on_a_workspace_bound_to_them_and_keep_windows_found_there() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    // No display-set change flag: the starting workspace must not depend on the
+    // later display-change pass, which a startup snapshot does not always get.
+    reactor.handle_event(space_state_event(vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+    let mut apps = Apps::new();
+    let mut on_right = make_window(1);
+    on_right.frame = CGRect::new(CGPoint::new(1200., 100.), CGSize::new(400., 400.));
+    apps.make_app_and_settle(&mut reactor, 1, vec![on_right, make_window(2)]);
+
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert_eq!(
+        active_workspace_of(&reactor, left_space),
+        Some(left_workspaces[0])
+    );
+    assert_eq!(
+        active_workspace_of(&reactor, right_space),
+        Some(right_workspaces[2]),
+        "the right display starts on its first bound workspace, not the left's default"
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(right_space, WindowId::new(1, 1)),
+        Some(right_workspaces[2]),
+        "a window found on the right display stays there"
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, WindowId::new(1, 2)),
+        Some(left_workspaces[0])
+    );
+}
+
+#[test]
+fn cycling_and_back_and_forth_skip_workspaces_bound_to_other_displays() {
+    let mut settings = bound_workspace_settings(left_right_bindings());
+    settings.workspace_auto_back_and_forth = true;
+    let mut reactor = bound_reactor(settings);
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let active = |reactor: &Reactor| active_workspace_of(reactor, left_space);
+
+    reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(active(&reactor), Some(left_workspaces[1]));
+    reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(
+        active(&reactor),
+        Some(left_workspaces[0]),
+        "cycling wraps past the right display's workspaces"
+    );
+    reactor.handle_test_layout_command(LayoutCommand::PrevWorkspace(None));
+    assert_eq!(active(&reactor), Some(left_workspaces[1]));
+
+    // A back-and-forth target on the left display that belongs to the right one
+    // is never used; a local one still is.
+    assert!(reactor.set_test_active_workspace(left_space, left_workspaces[2]));
+    assert!(reactor.set_test_active_workspace(left_space, left_workspaces[0]));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToLastWorkspace);
+    assert_eq!(active(&reactor), Some(left_workspaces[0]));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    assert_eq!(active(&reactor), Some(left_workspaces[0]));
+}
+
+/// Workspace 1 bound to the right one of two displays, 0 and 2 unbound, with two
+/// windows on the left display.
+fn two_display_reactor_with_bound_workspace() -> (Apps, Reactor, SpaceId, SpaceId) {
+    let mut reactor = bound_reactor(bound_workspace_settings(vec![
+        None,
+        Some(DisplaySelector::Uuid("test-display-1".into())),
+        None,
+    ]));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    (apps, reactor, left_space, right_space)
+}
+
+#[test]
+fn switching_to_a_bound_workspace_routes_to_the_owning_display() {
+    let (mut apps, mut reactor, left_space, right_space) =
+        two_display_reactor_with_bound_workspace();
+    assert_eq!(reactor.space_state.command_space, Some(left_space));
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(
+        workspaces.active_workspace(right_space),
+        Some(right_workspaces[1]),
+        "the bound workspace should activate on its display"
+    );
+    assert_eq!(
+        workspaces.active_workspace(left_space),
+        Some(left_workspaces[0]),
+        "the display the command came from should keep its workspace"
+    );
+    assert_eq!(
+        reactor.space_state.command_space,
+        Some(right_space),
+        "command context should follow the bound display"
+    );
+
+    // Unbound workspaces still switch on the current display.
+    reactor.space_state.command_space = Some(left_space);
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(2));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(workspaces.active_workspace(left_space), Some(left_workspaces[2]));
+    assert_eq!(
+        workspaces.active_workspace(right_space),
+        Some(right_workspaces[1])
+    );
+}
+
+#[test]
+fn moving_a_window_to_a_bound_workspace_relocates_it_to_the_owning_display() {
+    let (mut apps, mut reactor, left_space, right_space) =
+        two_display_reactor_with_bound_workspace();
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    let moved = WindowId::new(1, 2);
+    let stays = WindowId::new(1, 1);
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Name("ws1".into()),
+        follow: false,
+        window_id: Some(2),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(right_space));
+    assert_eq!(
+        reactor.test_workspace_for_window(right_space, moved),
+        Some(right_workspaces[1])
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(stays), Some(left_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
+        Some(right_workspaces[0]),
+        "without follow the owning display keeps its active workspace"
+    );
+    assert_eq!(reactor.space_state.command_space, Some(left_space));
+    let frame = reactor.state.windows.window(moved).unwrap().frame_monotonic;
+    assert!(
+        frame.origin.x >= 1000.,
+        "window frame should be placed on the right display: {frame:?}"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: true,
+        window_id: Some(1),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(reactor.assigned_space_for_window_id(stays), Some(right_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space),
+        Some(right_workspaces[1]),
+        "follow should activate the bound workspace on its display"
+    );
+    assert_eq!(reactor.space_state.command_space, Some(right_space));
+}
+
+#[test]
+fn selecting_a_foreign_copy_in_the_overview_switches_on_the_owning_display() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+
+    reactor.handle_event(Event::OverviewSelectWorkspace {
+        display: "test-display-1".into(),
+        workspace: right_workspaces[1],
+    });
+
+    assert_eq!(
+        active_workspace_of(&reactor, right_space),
+        Some(right_workspaces[2]),
+        "the right display keeps its own workspace"
+    );
+    assert_eq!(
+        active_workspace_of(&reactor, left_space),
+        Some(left_workspaces[1])
+    );
+    assert_eq!(reactor.space_state.command_space, Some(left_space));
+}
+
+#[test]
+fn moving_a_bound_workspace_to_another_display_is_refused() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        },
+    )));
+
+    for index in 1..=2 {
+        assert_eq!(
+            reactor.assigned_space_for_window_id(WindowId::new(1, index)),
+            Some(left_space)
+        );
+    }
+}
+
+/// Nine workspaces: 1-5 bound to the left display, 6-9 to the right one.
+fn nine_bound_workspace_settings() -> crate::common::config::VirtualWorkspaceSettings {
+    let left = || Some(DisplaySelector::Uuid("test-display-0".into()));
+    let right = || Some(DisplaySelector::Uuid("test-display-1".into()));
+    bound_workspace_settings(vec![
+        left(),
+        left(),
+        left(),
+        left(),
+        left(),
+        right(),
+        right(),
+        right(),
+        right(),
+    ])
+}
+
+#[test]
+fn bound_window_returns_to_its_display_after_unplug_and_replug() {
+    // On replug either rift moves the window home, or macOS puts it back on the
+    // returning display first and rift only learns where it went. That display
+    // shows workspace 6, so joining the workspace it shows would be wrong.
+    for macos_moves_it_back in [false, true] {
+        let (mut apps, mut reactor, window, left_space, right_space) =
+            window_in_workspace_nine_on_the_right(nine_bound_workspace_settings(), false);
+        unplug_right_display(&mut reactor, left_space, right_space, false);
+        apps.simulate_until_quiet(&mut reactor);
+        let left_workspaces = reactor.test_workspace_ids(left_space);
+        assert_eq!(
+            reactor.test_workspace_for_window(left_space, window),
+            Some(left_workspaces[8])
+        );
+
+        let other = WindowId::new(1, 2);
+        clear_window_reports(&reactor, &[left_space], &[window, other]);
+        let wsid = reactor.test_window_server_id(window);
+        if macos_moves_it_back {
+            report_windows_on(&reactor, right_space, &[window]);
+            report_windows_on(&reactor, left_space, &[other]);
+        }
+        reactor.handle_event(space_state_event_with(
+            vec![left_screen(), right_screen()],
+            vec![Some(left_space), Some(right_space)],
+            |state| {
+                state.display_set_changed = true;
+                state.should_force_refresh_layout = true;
+                if macos_moves_it_back {
+                    state.active_window_spaces.insert(wsid, right_space);
+                }
+            },
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+
+        let right_workspaces = reactor.test_workspace_ids(right_space);
+        assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+        assert_eq!(
+            reactor.test_workspace_for_window(right_space, window),
+            Some(right_workspaces[8]),
+            "macos_moves_it_back={macos_moves_it_back}: the window is back in workspace 9"
+        );
+        clear_window_reports(&reactor, &[left_space, right_space], &[window, other]);
+    }
+}
+
+#[test]
+fn reconnecting_a_display_takes_back_its_workspace_and_windows() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen()], vec![Some(left_space)]);
+    // With the right display absent its workspaces fall back to the left one.
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(3));
+    let mut apps = Apps::new();
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    let left_workspaces = reactor.test_workspace_ids(left_space);
+    assert_eq!(
+        active_workspace_of(&reactor, left_space),
+        Some(left_workspaces[3])
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(left_space, WindowId::new(1, 1)),
+        Some(left_workspaces[3])
+    );
+
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    // Applied as part of the reconnect snapshot, before any window is rediscovered.
+
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert_eq!(
+        active_workspace_of(&reactor, left_space),
+        Some(left_workspaces[0]),
+        "the left display goes back to its own workspace"
+    );
+    assert_eq!(
+        active_workspace_of(&reactor, right_space),
+        Some(right_workspaces[3]),
+        "the workspace the user was on moves to its display"
+    );
+    for index in 1..=2 {
+        let window = WindowId::new(1, index);
+        assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+        assert_eq!(
+            reactor.test_workspace_for_window(right_space, window),
+            Some(right_workspaces[3])
+        );
+    }
+}
+
+#[test]
+fn app_rule_targeting_a_bound_workspace_places_new_windows_on_the_owning_display() {
+    let mut settings =
+        bound_workspace_settings(vec![None, Some(DisplaySelector::Uuid("test-display-1".into()))]);
+    settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+        app_id: Some("com.testapp1".into()),
+        workspace: Some(WorkspaceSelector::Name("ws1".into())),
+        ..Default::default()
+    }];
+    let mut reactor = bound_reactor(settings);
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+    let mut apps = Apps::new();
+    let window = WindowId::new(1, 1);
+
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+
+    let right_workspaces = reactor.test_workspace_ids(right_space);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+    assert_eq!(
+        reactor.test_workspace_for_window(right_space, window),
+        Some(right_workspaces[1])
+    );
+    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    assert!(
+        frame.origin.x >= 1000.,
+        "window should be placed on the right display: {frame:?}"
+    );
+}
+
+#[test]
+fn binding_work_waits_while_the_native_topology_is_invalidated() {
+    let mut reactor = bound_reactor(bound_workspace_settings(left_right_bindings()));
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    let both = || vec![left_screen(), right_screen()];
+    connect_displays(&mut reactor, both(), vec![Some(left_space), Some(right_space)]);
+    let mut apps = Apps::new();
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+    let window = WindowId::new(1, 1);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+
+    // Sleep or display churn invalidates the native topology, and meanwhile the
+    // window turns up in the left display's copy of a workspace bound right.
+    reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
+    let bound_right = reactor.test_workspace(left_space, 3);
+    assert!(reactor.assign_test_window_to_workspace(left_space, window, bound_right));
+    reactor.check_display_bindings_later();
+    reactor.apply_pending_display_bindings();
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(left_space),
+        "nothing moves on window and space data from an unsettled system"
+    );
+
+    reactor.handle_event(space_state_event(both(), vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(right_space),
+        "the authoritative snapshot that ends the instability runs the queued work"
+    );
 }
