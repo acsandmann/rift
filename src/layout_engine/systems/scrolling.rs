@@ -996,26 +996,14 @@ impl ScrollingLayoutSystem {
             return None;
         };
         let g = state.geometry.as_ref()?;
-        // Once an edge swipe starts, keep its direction and camera fixed until lift.
-        // Opposite movement neither reverses the strip nor cancels accumulated intent.
-        let edge_swipe = state.motion.overscroll != 0.0;
-        let raw = *offset + delta;
-        let bounded = if edge_swipe {
-            *offset
-        } else {
-            raw.clamp(g.bounds.0, g.bounds.1)
-        };
+        // Hidden edge travel unwinds before the camera moves back into bounds.
+        let raw = *offset + state.motion.overscroll + delta;
+        let bounded = raw.clamp(g.bounds.0, g.bounds.1);
         let moved = bounded - *offset;
         if !state.motion.push(moved, timestamp) {
             return None;
         }
-        if edge_swipe {
-            if delta.signum() == state.motion.overscroll.signum() {
-                state.motion.overscroll += delta;
-            }
-        } else {
-            state.motion.overscroll = raw - bounded;
-        }
+        state.motion.overscroll = raw - bounded;
         *offset = bounded;
         Some(moved)
     }
@@ -1078,6 +1066,15 @@ impl ScrollingLayoutSystem {
 
     pub fn advance_viewport_animation(&mut self, layout: LayoutId, now: Instant) -> Option<bool> {
         self.layouts.get_mut(layout).and_then(|state| Self::advance_camera(state, now))
+    }
+
+    /// Resolve an abandoned release to its already-selected target.
+    pub fn finish_viewport_animation(&mut self, layout: LayoutId) {
+        if let Some(state) = self.layouts.get_mut(layout)
+            && let Viewport::Animation(spring) = &state.viewport
+        {
+            state.viewport = Viewport::Static(spring.target);
+        }
     }
 
     /// Settle where cancellation occurred, with no artificial fling or focus change.
@@ -2798,7 +2795,7 @@ mod tests {
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
     #[test]
-    fn gesture_edges_latch_direction_until_lift() {
+    fn gesture_edges_reverse_while_remaining_bounded() {
         for direction in [-1.0, 1.0] {
             let mut f = Fixture::new(4);
             let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
@@ -2806,76 +2803,30 @@ mod tests {
             f.system.layouts[f.layout].viewport = Viewport::Static(edge);
             assert!(f.system.begin_viewport_gesture(f.layout, Instant::now()));
             let before = f.frame(1).origin.x;
-            for (time, delta, excess) in [(10, 200.0, 0.2), (15, 0.0, 0.2), (20, 100.0, 0.3)] {
+            for (time, delta, excess) in [(10, 200.0, 0.2), (20, -75.0, 0.125), (30, -125.0, 0.0)] {
+                assert_eq!(
+                    f.system.update_viewport_gesture(
+                        f.layout,
+                        direction * delta,
+                        Duration::from_millis(time),
+                    ),
+                    Some(0.0)
+                );
+                assert_eq!(f.frame(1).origin.x, before);
+                assert!((f.system.gesture_overscroll(f.layout) - direction * excess).abs() < 1e-9);
+                assert_eq!(f.system.layouts[f.layout].motion.velocity(), 0.0);
+            }
+            assert_eq!(
                 f.system.update_viewport_gesture(
                     f.layout,
-                    direction * delta,
-                    Duration::from_millis(time),
-                );
-                assert_eq!(
-                    f.frame(1).origin.x,
-                    before,
-                    "outward motion keeps the strip at its edge"
-                );
-                assert!((f.system.gesture_overscroll(f.layout) - direction * excess).abs() < 1e-9);
-            }
-            let release = f
-                .system
-                .end_viewport_gesture(f.layout, Duration::from_millis(20), true)
-                .unwrap();
-            assert_eq!(
-                release.velocity, 0.0,
-                "blocked edge travel cannot fling the camera"
+                    -direction * 40.0,
+                    Duration::from_millis(40),
+                ),
+                Some(-direction * 40.0)
             );
-            assert_eq!(release.from_offset, edge);
-            assert_eq!(release.offset, edge);
-            f.system.begin_viewport_gesture(f.layout, Instant::now());
-            f.system.update_viewport_gesture(
-                f.layout,
-                direction * 200.0,
-                Duration::from_millis(30),
-            );
-            f.system.update_viewport_gesture(
-                f.layout,
-                -direction * 75.0,
-                Duration::from_millis(40),
-            );
-            assert_eq!(f.frame(1).origin.x, before);
-            assert_eq!(
-                f.system.gesture_overscroll(f.layout),
-                direction * 0.2,
-                "opposite movement cannot reverse an edge swipe"
-            );
-            f.system.cancel_viewport_gesture(f.layout);
-            f.system.begin_viewport_gesture(f.layout, Instant::now());
-            f.system.update_viewport_gesture(
-                f.layout,
-                -direction * 75.0,
-                Duration::from_millis(30),
-            );
-            assert_eq!(
-                f.frame(1).origin.x,
-                before + direction * 75.0,
-                "lifting releases the edge direction for the next gesture"
-            );
-            f.system.cancel_viewport_gesture(f.layout);
-            f.system.begin_viewport_gesture(f.layout, Instant::now());
-            f.system.update_viewport_gesture(f.layout, 0.0, Duration::from_millis(40));
-            f.system
-                .update_viewport_gesture(f.layout, direction * 75.0, Duration::from_millis(50));
-            let release = f
-                .system
-                .end_viewport_gesture(f.layout, Duration::from_millis(50), true)
-                .unwrap();
-            assert_eq!(release.offset, edge);
-            assert_eq!(release.velocity.signum(), direction);
-            f.system
-                .advance_viewport_animation(f.layout, Instant::now() + Duration::from_millis(10));
-            assert_eq!(
-                f.frame(1).origin.x,
-                before,
-                "release cannot bounce past the workspace edge"
-            );
+            assert_eq!(f.frame(1).origin.x, before + direction * 40.0);
+            assert_eq!(f.system.gesture_overscroll(f.layout), 0.0);
+            assert_eq!(f.system.layouts[f.layout].motion.velocity().signum(), -direction);
         }
     }
     #[test]

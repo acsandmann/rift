@@ -931,7 +931,7 @@ pub struct ScrollingLayoutSettings {
     pub base: BaseLayoutSettings,
     /// Whether to animate windows moving in the scrolling layout
     /// HIGHLY RECOMMENDED to leave this enabled.
-    #[serde(default)]
+    #[serde(default = "default_scrolling_animate")]
     pub animate: Option<bool>,
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
@@ -964,6 +964,8 @@ pub struct ScrollingLayoutSettings {
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
 }
+
+fn default_scrolling_animate() -> Option<bool> { Some(true) }
 
 impl Default for ScrollingLayoutSettings {
     fn default() -> Self {

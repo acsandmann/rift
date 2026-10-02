@@ -61,6 +61,30 @@ impl Reactor {
                 {
                     return;
                 }
+                let target = self
+                    .layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .active_layout_for_space(context.space);
+                if let Some(s) = &self.viewport_gesture
+                    && s.released
+                    && target != Some((s.workspace, s.layout))
+                {
+                    let (workspace, layout, visible) = (s.workspace, s.layout, s.visible(self));
+                    if let Some(ws) = self
+                        .layout_manager
+                        .layout_engine
+                        .workspaces_mut()
+                        .workspaces
+                        .get_mut(workspace)
+                        && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
+                    {
+                        system.finish_viewport_animation(layout);
+                    }
+                    if visible {
+                        self.apply_viewport_frames();
+                    }
+                }
                 let cancel = self.viewport_gesture.as_ref().is_some_and(|s| !s.released);
                 self.finish_gesture(None, cancel);
                 if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
@@ -660,7 +684,7 @@ mod tests {
                 let travel = threshold * fraction;
                 let store = r.layout_manager.layout_engine.workspaces();
                 let before = store.active_workspace(ctx.space);
-                let expected = if !enabled || skip_empty || fraction < 1.0 || cancelled {
+                let expected = if !enabled || skip_empty || fraction < 1.0 || reverse || cancelled {
                     before
                 } else if invert {
                     store.next_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
