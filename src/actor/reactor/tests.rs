@@ -2976,6 +2976,67 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
 }
 
 #[test]
+fn pending_removal_refocus_during_auto_switch_uses_workspace_selection() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+    let window = WindowId::new(1, 1);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, window));
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.refocus_manager.refocus_state = RefocusState::Pending(space);
+    reactor
+        .workspace_switch_manager
+        .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
+
+    reactor.handle_layout_response(layout::EventResponse::default(), None);
+
+    let (_, request) = raise_rx.try_recv().expect("pending removal must refocus the survivor");
+    let raise_manager::Event::RaiseRequest(request) = request else {
+        panic!("expected focus request")
+    };
+    assert_eq!(request.focus_window.map(|(wid, _)| wid), Some(window));
+    assert!(raise_rx.try_recv().is_err());
+}
+
+#[test]
+fn empty_layout_response_during_auto_switch_does_not_refocus_cursor() {
+    let mut reactor = test_reactor();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
+        vec![Some(space)],
+    ));
+    let (input_tx, mut input_rx) = actor::channel();
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.config.settings.mouse_follows_focus = true;
+    reactor
+        .workspace_switch_manager
+        .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
+
+    reactor.handle_layout_response(layout::EventResponse::default(), None);
+
+    assert!(
+        input_rx.try_recv().is_err(),
+        "an observational response must not warp the cursor"
+    );
+    assert!(
+        raise_rx.try_recv().is_err(),
+        "an observational response must not steal focus"
+    );
+    assert_eq!(
+        reactor.workspace_switch_manager.workspace_switch_state,
+        WorkspaceSwitchState::Active
+    );
+}
+
+#[test]
 fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsewhere() {
     let (mut apps, mut reactor) = test_context();
     let (raise_manager_tx, mut raise_manager_rx) = actor::channel();

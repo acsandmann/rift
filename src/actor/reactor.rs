@@ -4372,10 +4372,14 @@ impl Reactor {
         let focus_quiet = workspace_switch_space.map_or(Quiet::No, |_| Quiet::Yes);
 
         let handled_without_raise = if raise_windows.is_empty() && focus_window.is_none() {
-            if matches!(
-                self.workspace_switch_manager.workspace_switch_state,
-                WorkspaceSwitchState::Active
-            ) && !self.is_in_drag()
+            // An active switch alone is not a focus request. Only its explicit
+            // response may choose fallback focus; later observations must not
+            // reactivate the window beneath the old cursor.
+            if let Some(space) = workspace_switch_space
+                && matches!(
+                    self.workspace_switch_manager.workspace_switch_state,
+                    WorkspaceSwitchState::Active
+                )
             {
                 if let Some(wid) = self.window_id_under_cursor() {
                     // Avoid duplicate focus events for the already focused window.
@@ -4383,24 +4387,16 @@ impl Reactor {
                         focus_window = Some(wid);
                     }
                     false
+                } else if self
+                    .layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .windows_in_active_workspace(&self.state.windows, space)
+                    .is_empty()
+                {
+                    self.focus_desktop_if_active_workspace_empty(space)
                 } else {
-                    let skip_center_warp = workspace_switch_space
-                        .map(|space| {
-                            self.layout_manager
-                                .layout_engine
-                                .workspaces()
-                                .windows_in_active_workspace(&self.state.windows, space)
-                                .is_empty()
-                        })
-                        .unwrap_or(false);
-                    if skip_center_warp {
-                        workspace_switch_space.is_some_and(|space| {
-                            self.focus_desktop_if_active_workspace_empty(space)
-                        })
-                    } else {
-                        let space = workspace_switch_space.or_else(|| self.command_context_space());
-                        self.try_focus_or_warp_without_raise(space, &mut focus_window)
-                    }
+                    self.try_focus_or_warp_without_raise(Some(space), &mut focus_window)
                 }
             } else if let Some(space) = pending_refocus_space.take() {
                 if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, None) {
@@ -4436,25 +4432,18 @@ impl Reactor {
             }
         }
 
+        if let Some(space) = pending_refocus_space {
+            // Preserve a removal refocus that an explicit focus request superseded.
+            if matches!(self.refocus_manager.refocus_state, RefocusState::None) {
+                self.refocus_manager.refocus_state = RefocusState::Pending(space);
+            }
+        }
+
         if raise_windows.is_empty() && focus_window.is_none() {
             if handled_without_raise {
                 self.workspace_switch_manager.mark_workspace_switch_inactive();
             }
-            if handled_without_raise
-                || matches!(
-                    self.workspace_switch_manager.workspace_switch_state,
-                    WorkspaceSwitchState::Inactive
-                )
-            {
-                return;
-            }
-        }
-
-        if let Some(space) = pending_refocus_space {
-            // Preserve the pending refocus request if it was not consumed above.
-            if matches!(self.refocus_manager.refocus_state, RefocusState::None) {
-                self.refocus_manager.refocus_state = RefocusState::Pending(space);
-            }
+            return;
         }
 
         let mut app_handles = HashMap::default();
