@@ -2096,6 +2096,11 @@ impl Reactor {
                     command_workflow::ToggleSpacePayload { config, space, display_uuid },
                 );
             }
+            Event::Command(Command::Reactor(ReactorCommand::BindingMode(mode))) => {
+                if let Some(input_tx) = &self.communication_manager.input_tx {
+                    input_tx.send(input::Request::SetBindingMode(mode));
+                }
+            }
             Event::Command(Command::Reactor(ReactorCommand::ShowMissionControlAll)) => {
                 return command_workflow::handle_mission_control_command(
                     crate::actor::wm_controller::WmCmd::ShowMissionControlAll,

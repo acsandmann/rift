@@ -118,6 +118,8 @@ enum QueryCommands {
 
 #[derive(Subcommand)]
 enum ExecuteCommands {
+    /// Switch to a configured binding mode (use default to reset)
+    BindingMode { mode: String },
     /// Window management commands
     Window {
         #[command(subcommand)]
@@ -682,6 +684,9 @@ fn build_subscribe_request(sub: SubscribeCommands) -> Result<RiftRequest, String
 
 fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String> {
     let rift_command = match execute {
+        ExecuteCommands::BindingMode { mode } => CliCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::BindingMode(mode),
+        )),
         ExecuteCommands::Window { window_cmd } => map_window_command(window_cmd)?,
         ExecuteCommands::Workspace { workspace_cmd } => map_workspace_command(workspace_cmd)?,
         ExecuteCommands::Layout { layout_cmd } => map_layout_command(layout_cmd)?,
