@@ -414,8 +414,15 @@ comb1 = "Alt + Shift"
 # - Key values map to commands (see list below)
 
 # Commands
+# Available in [keys] and [binding_modes.*].
+# Unit commands use a string; commands with arguments use an inline table.
+# Workspace/display indices are zero-based.
 # - toggle_space_activated
 # - reload_config
+# - binding_mode = "default"|"<mode_name>"
+# - save_layout = { path = "/path/to/layout.json" }
+# - restore_layout = { path = "/path/to/layout.json", scope = "workspace"|"space", source = "saved_active_space"|"current_space" }
+#   (source is optional; defaults to "saved_active_space")
 # - next_workspace / prev_workspace
 # - next_workspace = true|false (optional skip-empty override)
 # - prev_workspace = true|false (optional skip-empty override)
@@ -435,14 +442,18 @@ comb1 = "Alt + Shift"
 # - consume_or_expel_window = "left"|"right"|"up"|"down"
 # - toggle_stack / toggle_orientation / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
+# - toggle_window_floating = { center = true|false, size = { w = 640, h = 480 }|"smart" }
+#   (center and size are optional)
 # - resize_window_grow / resize_window_shrink (without param, horizontal is default)
 # - resize_window_grow = "horizontal"|"vertical"|"smart"
 # - resize_window_shrink = "horizontal"|"vertical"|"smart"
-# - swap_windows = [123, 456]
+# - resize_window_by = { amount = 0.05 }
 # - exec = "command" | exec = ["cmd", "arg1", "..."]
+# - focus_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
 # - move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
 # - move_window_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", window_id = 123 }
-# - move_workspace_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", wrap_around = true }
+# - move_workspace_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", wrap_around = true|false }
+#   (window_id is optional for move_window_to_display; wrap_around defaults to false)
 # - close_window / close_window = { window_server_id = 123 } (optional window id)
 # - focus_window = { window_id = 123, window_server_id = 456 }
 # - show_mission_control_all / dismiss_mission_control (this is rift's own mission control, not macOS's)
@@ -451,12 +462,14 @@ comb1 = "Alt + Shift"
 # "Alt + R" = { binding_mode = "resize" }
 
 # the following commands *only* work when the master stack layout is active
-# - adjust_master_ratio = 0.05 / adjust_master_count = 1
+# - adjust_master_ratio = 0.05 / adjust_master_count = { delta = 1 }
 # - promote_to_master / swap_master_stack
 
 # the following commands *only* work when the scrolling layout is active
 # - scroll_strip = { delta = 0.5 }
 # - snap_strip / center_selection
+# - switch_preset_column_width (cycle forward)
+# - switch_preset_column_width = { backwards = true|false }
 
 "Alt + Z" = "toggle_space_activated"
 
