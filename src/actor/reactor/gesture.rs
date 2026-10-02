@@ -61,6 +61,9 @@ impl Reactor {
                 {
                     return;
                 }
+                if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
+                    return;
+                }
                 let target = self
                     .layout_manager
                     .layout_engine
@@ -87,9 +90,6 @@ impl Reactor {
                 }
                 let cancel = self.viewport_gesture.as_ref().is_some_and(|s| !s.released);
                 self.finish_gesture(None, cancel);
-                if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
-                    return;
-                }
                 let engine = &mut self.layout_manager.layout_engine;
                 let Some((workspace, layout)) =
                     engine.workspaces().active_layout_for_space(context.space)
