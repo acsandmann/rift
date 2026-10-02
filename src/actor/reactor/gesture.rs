@@ -288,7 +288,7 @@ impl Reactor {
         {
             self.apply_gesture_sample(sample);
         }
-        let s = self.viewport_gesture.take().unwrap();
+        let s = self.viewport_gesture.as_ref().unwrap();
         let visible = valid || s.visible(self);
         let cancelled = cancelled || !valid;
         if cancelled {
@@ -303,11 +303,17 @@ impl Reactor {
                 _ => 0.0,
             };
         let next = (excess > 0.0) != s.context.action.invert;
-        let handoff = !cancelled
+        if !cancelled
             && s.context.action.propagate
             && excess != 0.0
             && excess.abs() >= s.context.action.boundary_threshold
-            && self.gesture_workspace(&s.context, next);
+        {
+            let context = s.context.clone();
+            if self.gesture_workspace(&context, next) {
+                return;
+            }
+        }
+        let s = self.viewport_gesture.take().unwrap();
         let animate = s
             .context
             .action
@@ -322,13 +328,13 @@ impl Reactor {
         else {
             return;
         };
-        let release = if cancelled || handoff {
+        let release = if cancelled {
             system.cancel_viewport_gesture(s.layout);
             None
         } else {
             system.end_viewport_gesture(s.layout, s.timestamp, animate)
         };
-        if handoff || !visible {
+        if !visible {
             self.viewport_gesture = Some(s);
             self.retire_viewport_session();
             return;
@@ -390,6 +396,9 @@ impl Reactor {
         if !outcome.layout_responses.iter().any(|(response, _)| response.changed) {
             return false;
         }
+        // Reconcile cached viewport frames before the switch parks outgoing windows.
+        // A late EndWindowAnimation would otherwise reapply the old visible frame.
+        self.finish_gesture(None, true);
         self.apply_event_outcome(outcome);
         if let Some(pattern) = context.haptic {
             let _ = crate::sys::haptics::perform_haptic(pattern);
@@ -784,6 +793,92 @@ mod tests {
             LayoutMode::Scrolling
         );
     }
+    #[test]
+    fn workspace_swipes_reconcile_viewport_before_hiding_outgoing_windows() {
+        for (released, final_x) in [(false, -400.0), (false, 4000.0), (true, 300.0)] {
+            let (mut r, ctx, control, motion) = setup_options_threshold(true, false, false, 0.25);
+            let (workspace, layout) = {
+                let s = r.viewport_gesture.as_ref().unwrap();
+                (s.workspace, s.layout)
+            };
+            let LayoutSystemKind::Scrolling(system) =
+                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+            else {
+                panic!("scrolling")
+            };
+            let initial: Vec<_> = system.viewport_frames(layout).collect();
+            r.add_test_app(1);
+            let (tx, mut rx) = crate::actor::channel();
+            r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(tx);
+            for (wid, frame) in initial {
+                r.insert_test_window_state(wid, frame, None, true);
+            }
+            r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(released);
+            motion.publish(sample(1, 300.0, 100));
+            r.gesture_tick();
+            if released {
+                r.gesture_event(Lifecycle::End {
+                    sample: sample(1, 300.0, 100),
+                    cancelled: false,
+                });
+                assert!(r.viewport_gesture.as_ref().unwrap().released);
+                r.gesture_event(Lifecycle::Workspace {
+                    context: ctx.clone(),
+                    next: true,
+                    control,
+                });
+            } else {
+                r.gesture_event(Lifecycle::End {
+                    sample: sample(1, final_x, 200),
+                    cancelled: false,
+                });
+            }
+            assert_ne!(
+                r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
+                Some(workspace)
+            );
+            assert!(r.viewport_gesture.is_none());
+            let mut written = crate::common::collections::HashSet::default();
+            let mut reconciled = crate::common::collections::HashSet::default();
+            let mut hidden = crate::common::collections::HashSet::default();
+            while let Ok((_, request)) = rx.try_recv() {
+                match request {
+                    Request::InteractiveFramesPending(queue) => {
+                        queue.drain_with(|wid, _, _, _, _| {
+                            written.insert(wid);
+                        });
+                    }
+                    Request::EndWindowAnimation(wid) => {
+                        assert!(
+                            !hidden.contains(&wid),
+                            "terminal viewport frames must precede workspace hiding"
+                        );
+                        assert!(reconciled.insert(wid), "reconcile each window once");
+                    }
+                    Request::SetWorkspaceSwitchPositions(positions, _, _) => {
+                        for (wid, position) in positions {
+                            if written.contains(&wid) {
+                                assert!(
+                                    reconciled.contains(&wid),
+                                    "flush viewport frames before parking"
+                                );
+                            }
+                            assert_eq!(
+                                position,
+                                r.state.windows.window(wid).unwrap().frame_monotonic.origin
+                            );
+                            hidden.insert(wid);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(hidden.len(), 4);
+            assert!(!written.is_empty());
+            assert_eq!(reconciled, written);
+        }
+    }
+
     #[test]
     fn release_uses_coalesced_viewport_transport_and_invalidation_retires_it() {
         for invalidate in [false, true] {
