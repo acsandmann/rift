@@ -1859,9 +1859,11 @@ impl LayoutEngine {
                     let _ = self.workspaces[ws_id].layout_system.select_window(layout, wid);
                     self.workspaces.set_last_focused_window(space, ws_id, Some(wid));
                     return EventResponse {
-                        changed: self.active_layout_mode_at(space) == LayoutMode::Scrolling
-                            || (selection_changed
-                                && self.active_layout_mode_at(space) == LayoutMode::Floating),
+                        changed: selection_changed
+                            && matches!(
+                                self.active_layout_mode_at(space),
+                                LayoutMode::Scrolling | LayoutMode::Floating
+                            ),
                         ..EventResponse::default()
                     };
                 } else {
@@ -4117,6 +4119,44 @@ mod tests {
             result.is_ok(),
             "cross-space move focus should not panic when adjacent space is not initialized"
         );
+    }
+
+    #[test]
+    fn scrolling_repeated_native_focus_does_not_rearrange_the_strip() {
+        let mut settings = LayoutSettings::default();
+        settings.mode = LayoutMode::Scrolling;
+        let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(99);
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::SpaceExposed(space, CGSize::new(1000., 800.)),
+        );
+        let windows = [
+            WindowId::new(99, 1),
+            WindowId::new(99, 2),
+            WindowId::new(99, 3),
+        ];
+        for window in windows {
+            let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, window));
+        }
+        // A click can change selection and reveal a different column. Subsequent
+        // mouse releases on that same window must not request another arrange.
+        let selected = engine.focused_window();
+        let window = windows.into_iter().find(|window| Some(*window) != selected).unwrap();
+        assert!(
+            engine
+                .handle_event(&mut store, LayoutEvent::WindowFocused(space, window))
+                .changed
+        );
+        for _ in 0..3 {
+            assert!(
+                !engine
+                    .handle_event(&mut store, LayoutEvent::WindowFocused(space, window))
+                    .changed,
+                "unchanged native focus must not restart camera presentation"
+            );
+        }
     }
 
     #[test]

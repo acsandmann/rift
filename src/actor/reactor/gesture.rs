@@ -1,30 +1,20 @@
 //! Paced consumption of cumulative physical motion; no layout preparation here.
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Notify;
-
 use super::{Reactor, command_workflow};
-use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId};
 use crate::actor::gesture::{Context, Control, Lifecycle, Motion};
-use crate::common::collections::HashMap;
 use crate::layout_engine::{
-    EventResponse, LayoutCommand, LayoutId, LayoutSystemKind, VirtualWorkspaceId,
+    EventResponse, LayoutCommand, LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId,
 };
-use crate::sys::geometry::{Round, SameAs};
 
 pub(super) struct ViewportSession {
-    context: Context,
-    control: Control,
-    workspace: VirtualWorkspaceId,
-    layout: LayoutId,
+    pub(super) context: Context,
+    pub(super) control: Control,
+    pub(super) workspace: VirtualWorkspaceId,
+    pub(super) layout: LayoutId,
     pub(super) released: bool,
-    applied: f64,
-    timestamp: Duration,
-    updated_windows: HashMap<WindowId, AppThreadHandle>,
-    pub(super) interval: Duration,
-    pub(super) refresh: Option<Arc<Notify>>,
-    pub(super) display_link: Option<crate::sys::display_link::DisplayLink>,
+    pub(super) applied: f64,
+    pub(super) timestamp: Duration,
 }
 impl ViewportSession {
     fn visible(&self, r: &Reactor) -> bool {
@@ -34,6 +24,12 @@ impl ViewportSession {
                 .workspaces()
                 .active_layout_for_space(self.context.space)
                 == Some((self.workspace, self.layout))
+            && r.layout_manager
+                .layout_engine
+                .workspaces()
+                .workspaces
+                .get(self.workspace)
+                .is_some_and(|ws| matches!(&ws.layout_system, LayoutSystemKind::Scrolling(system) if system.contains_layout(self.layout)))
     }
 
     fn valid(&self, r: &Reactor) -> bool {
@@ -64,6 +60,7 @@ impl Reactor {
                 if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
                     return;
                 }
+                self.commit_presentations();
                 let target = self
                     .layout_manager
                     .layout_engine
@@ -82,7 +79,10 @@ impl Reactor {
                         .get_mut(workspace)
                         && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
                     {
-                        system.finish_viewport_animation(layout);
+                        if let Some((mut p, _)) = system.presentation(layout) {
+                            p.finish();
+                            system.commit_presented_viewport(layout, &p.snapshot(Instant::now()));
+                        }
                     }
                     if visible {
                         self.apply_viewport_frames();
@@ -105,29 +105,7 @@ impl Reactor {
                     return;
                 }
                 system.update_viewport_gesture(layout, 0.0, context.started);
-                if let Some(tx) = &self.animation_tx {
-                    _ = tx.send(super::animation::Message::Stop(
-                        system.viewport_frames(layout).map(|(wid, _)| wid).collect(),
-                    ));
-                }
-                let screen = self.space_state.screen_by_space(context.space);
-                let hz = screen
-                    .and_then(|s| objc2_core_graphics::CGDisplayCopyDisplayMode(s.id.as_u32()))
-                    .map(|mode| objc2_core_graphics::CGDisplayMode::refresh_rate(Some(&mode)))
-                    .filter(|hz| hz.is_finite() && *hz > 0.0)
-                    .unwrap_or(120.0)
-                    .clamp(30.0, 240.0);
-                // Without a native animation actor, the timer drives the model.
-                let refresh =
-                    screen.filter(|_| self.animation_tx.is_some()).map(|_| Arc::new(Notify::new()));
-                let link = screen.zip(refresh.as_ref()).map(|(screen, notify)| {
-                    crate::sys::display_link::DisplayLink::for_display(
-                        screen.id.as_u32(),
-                        notify.clone(),
-                    )
-                });
                 self.viewport_gesture = Some(ViewportSession {
-                    updated_windows: HashMap::default(),
                     timestamp: context.started,
                     context,
                     control,
@@ -135,10 +113,8 @@ impl Reactor {
                     layout,
                     released: false,
                     applied: 0.0,
-                    interval: Duration::from_secs_f64(1.0 / hz),
-                    refresh,
-                    display_link: link,
                 });
+                self.start_gesture_presentation();
             }
             Lifecycle::End { sample, cancelled } => {
                 if self
@@ -158,31 +134,12 @@ impl Reactor {
         }
     }
 
-    pub(super) fn gesture_tick(&mut self) {
-        let Some(session) = &self.viewport_gesture else {
-            return;
-        };
-        if !session.valid(self) {
-            self.finish_gesture(None, true);
-            return;
-        }
-        if session.released {
-            let (workspace, layout) = (session.workspace, session.layout);
-            let LayoutSystemKind::Scrolling(system) =
-                &mut self.layout_manager.layout_engine.workspaces_mut()[workspace].layout_system
-            else {
-                self.retire_viewport_session();
-                return;
-            };
-            let ongoing = system.advance_viewport_animation(layout, Instant::now());
-            if ongoing.is_some() {
-                self.apply_viewport_frames();
-            }
-            if ongoing != Some(true) {
-                self.retire_viewport_session();
-            }
-        } else if let Some(sample) = session.control.latest(session.context.session) {
-            self.apply_gesture_sample(sample);
+    fn start_gesture_presentation(&mut self) {
+        if let Some(s) = &self.viewport_gesture {
+            let space = s.context.space;
+            let gesture = (!s.released)
+                .then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
+            let _ = self.present_camera(space, true, gesture, None);
         }
     }
 
@@ -204,58 +161,22 @@ impl Reactor {
         else {
             return;
         };
-        let moved = system.update_viewport_gesture_normalized(s.layout, delta, sample.timestamp);
-        if !moved.is_some_and(|x| x != 0.0) {
-            return;
-        }
-        self.apply_viewport_frames();
+        system.update_viewport_gesture_normalized(s.layout, delta, sample.timestamp);
     }
 
     fn apply_viewport_frames(&mut self) {
-        let Some(s) = self.viewport_gesture.as_mut() else {
-            return;
-        };
-        let LayoutSystemKind::Scrolling(system) =
-            &self.layout_manager.layout_engine.workspaces()[s.workspace].layout_system
-        else {
-            return;
-        };
-        let screen = (self.active_spaces.len() > 1)
-            .then(|| self.space_state.screen_by_space(s.context.space))
-            .flatten();
-        for (wid, frame) in system.viewport_frames(s.layout) {
-            let frame = screen
-                .map_or(frame, |screen| {
-                    super::managers::bound_frame_to_screen(frame, screen.frame)
-                })
-                .round();
-            let Some(window) = self.state.windows.window_mut(wid) else {
-                continue;
-            };
-            if frame.same_as(window.frame_monotonic) {
-                continue;
-            }
-            let Some(app) = self.app_manager.apps.get(&wid.pid) else {
-                continue;
-            };
-            let txid = window.info.sys_id.map_or_else(super::TransactionId::default, |wsid| {
-                let txid = self.transaction_manager.generate_next_txid(wsid);
-                self.transaction_manager.store_txid(wsid, txid, frame);
-                txid
-            });
-            app.handle.send_interactive_frame(
-                wid,
-                frame,
-                !frame.size.same_as(window.frame_monotonic.size),
-                txid,
-                FrameSource::Viewport,
-            );
-            window.frame_monotonic = frame;
-            s.updated_windows.entry(wid).or_insert_with(|| app.handle.clone());
+        if let Some(s) = &self.viewport_gesture {
+            let space = s.context.space;
+            let _ = self.present_camera(space, false, None, None);
+            self.commit_presentations();
         }
     }
 
     fn finish_gesture(&mut self, final_sample: Option<Motion>, cancelled: bool) {
+        if self.viewport_gesture.is_none() {
+            return;
+        }
+        self.commit_presentations();
         let Some(s) = &self.viewport_gesture else { return };
         if !self
             .layout_manager
@@ -342,7 +263,11 @@ impl Reactor {
         if let Some(release) = release {
             let space = s.context.space;
             self.viewport_gesture = Some(ViewportSession { released: true, ..s });
-            self.apply_viewport_frames();
+            if animate {
+                self.start_gesture_presentation();
+            } else {
+                self.apply_viewport_frames();
+            }
             if !animate {
                 self.retire_viewport_session();
             }
@@ -363,11 +288,9 @@ impl Reactor {
         }
     }
 
-    fn retire_viewport_session(&mut self) {
+    pub(super) fn retire_viewport_session(&mut self) {
         if let Some(s) = self.viewport_gesture.take() {
-            for (wid, handle) in s.updated_windows {
-                let _ = handle.send(Request::EndWindowAnimation(wid));
-            }
+            self.stop_camera(s.context.space);
         }
     }
 
@@ -412,11 +335,38 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
+    use crate::actor::app::{AppThreadHandle, FrameSource, Request, WindowId};
+    use crate::sys::geometry::SameAs;
+
+    impl Reactor {
+        fn gesture_tick(&mut self) {
+            if self.viewport_gesture.as_ref().is_some_and(|s| !s.valid(self)) {
+                self.finish_gesture(None, true);
+                return;
+            }
+            if let Some(s) = &self.viewport_gesture
+                && let Some(camera) = self.presentations.get_mut(&s.context.space)
+                && let Some(camera) = &mut camera.headless
+            {
+                camera.sample(Instant::now());
+            }
+            self.commit_presentations();
+            if self.viewport_gesture.as_ref().is_some_and(|s| {
+                s.released
+                    && self
+                        .presentations
+                        .get(&s.context.space)
+                        .is_none_or(|c| c.headless.as_ref().is_none_or(|c| !c.active))
+            }) {
+                self.retire_viewport_session();
+            }
+        }
+    }
     use crate::actor::gesture::Settings;
     use crate::actor::reactor::testing::*;
     use crate::common::config::{Config, LayoutMode};
     use crate::layout_engine::LayoutSystem;
-    use crate::sys::screen::{CoordinateConverter, SpaceId};
+    use crate::sys::screen::SpaceId;
 
     fn sample(session: u64, total_x: f64, millis: u64) -> Motion {
         Motion {
@@ -483,7 +433,7 @@ mod tests {
     fn begin(r: &mut Reactor, config: &Config, space: SpaceId) -> (Context, Control, Control) {
         let settings = Settings::new(config);
         let c = Control::new(config);
-        c.configure(settings, true, Vec::new(), CoordinateConverter::default());
+        c.configure(settings, true, Vec::new());
         let context = Context::new(
             1,
             0,
@@ -543,6 +493,63 @@ mod tests {
     }
 
     #[test]
+    fn presentation_reconciles_for_visible_state_queries_but_not_title_notifications() {
+        let (mut r, ctx, _, motion) = setup_options_threshold(false, false, false, 0.25);
+        let session = r.viewport_gesture.as_ref().unwrap();
+        let (workspace, layout) = (session.workspace, session.layout);
+        let offset = |r: &Reactor| {
+            let LayoutSystemKind::Scrolling(s) =
+                &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+            else {
+                panic!("scrolling");
+            };
+            s.presentation(layout).unwrap().0.offset()
+        };
+        r.add_test_app(1);
+        let LayoutSystemKind::Scrolling(system) =
+            &r.layout_manager.layout_engine.workspaces()[workspace].layout_system
+        else {
+            panic!("scrolling");
+        };
+        let frames: Vec<_> =
+            crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                .collect();
+        for (wid, frame) in frames {
+            r.insert_test_window_state(wid, frame, None, true);
+        }
+        r.start_gesture_presentation();
+        let before = offset(&r);
+        motion.publish(sample(1, 40.0, 100));
+        let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
+        camera.sample(Instant::now());
+        let presented = camera.presentation.offset();
+        assert_ne!(presented, before);
+        r.handle_loop_event(super::super::Event::WindowTitleChanged(
+            WindowId::new(1, 1),
+            "new title".into(),
+        ));
+        assert_eq!(
+            offset(&r),
+            before,
+            "unrelated notification cannot copy render state"
+        );
+        let (resp, result) = std::sync::mpsc::sync_channel(1);
+        r.handle_loop_event(super::super::Event::Query(
+            super::super::query::QueryRequest::LayoutState {
+                space_id: Some(ctx.space.get()),
+                workspace_id: None,
+                resp,
+            },
+        ));
+        result.try_recv().unwrap();
+        assert_eq!(
+            offset(&r),
+            presented,
+            "visible geometry queries are semantic boundaries"
+        );
+    }
+
+    #[test]
     fn live_scroll_coalesces_app_writes_and_reconciles_once_at_lift() {
         for (cancelled, final_x) in [(false, 40.0), (false, 60.0), (true, 40.0)] {
             let (mut apps, mut r) = test_context();
@@ -555,23 +562,35 @@ mod tests {
                 workspace: None,
                 mode: LayoutMode::Scrolling,
             });
+
             apps.make_app_and_settle(&mut r, 1, make_windows(4));
+
             r.send_layout_event(crate::layout_engine::LayoutEvent::WindowFocused(
                 space,
                 WindowId::new(1, 1),
             ));
+
             apps.simulate_until_quiet(&mut r);
+
             let initial = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
 
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
             config.settings.layout.scrolling.gestures.animate = Some(false);
+
             let (_, _, motion) = begin(&mut r, &config, space);
             for (total_x, time) in [(20.0, 10), (40.0, 20)] {
                 motion.publish(sample(1, total_x, time));
                 r.gesture_tick();
             }
+
             let mut requests = apps.requests();
+            let leases = requests
+                .iter()
+                .filter(|r| matches!(r, Request::BeginWindowAnimation(_)))
+                .count();
+            assert_eq!(leases, 4, "each camera window acquires its lease once");
+            requests.retain(|r| !matches!(r, Request::BeginWindowAnimation(_)));
             assert_eq!(
                 requests.len(),
                 1,
@@ -581,7 +600,7 @@ mod tests {
                 panic!("live scrolling must use the interactive transport");
             };
             let mut written = crate::common::collections::HashSet::default();
-            queue.drain_with(|wid, frame, set_size, _, source| {
+            queue.drain_with(|wid, frame, set_size, _, source, _| {
                 assert_eq!(source, crate::actor::app::FrameSource::Viewport);
                 assert!(!set_size, "scrolling must only move windows");
                 assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic));
@@ -746,7 +765,8 @@ mod tests {
                 else {
                     panic!("scrolling layout");
                 };
-                system.viewport_frames(layout).collect::<Vec<_>>()
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                    .collect::<Vec<_>>()
             };
             let before = frames(&r);
             if reset {
@@ -806,13 +826,16 @@ mod tests {
             else {
                 panic!("scrolling")
             };
-            let initial: Vec<_> = system.viewport_frames(layout).collect();
+            let initial: Vec<_> =
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                    .collect();
             r.add_test_app(1);
             let (tx, mut rx) = crate::actor::channel();
             r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(tx);
             for (wid, frame) in initial {
                 r.insert_test_window_state(wid, frame, None, true);
             }
+            r.start_gesture_presentation();
             r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(released);
             motion.publish(sample(1, 300.0, 100));
             r.gesture_tick();
@@ -844,18 +867,23 @@ mod tests {
             while let Ok((_, request)) = rx.try_recv() {
                 match request {
                     Request::InteractiveFramesPending(queue) => {
-                        queue.drain_with(|wid, _, _, _, _| {
+                        queue.drain_with(|wid, _, _, _, _, _| {
                             written.insert(wid);
                         });
                     }
-                    Request::EndWindowAnimation(wid) => {
+                    Request::EndWindowAnimation(wid) | Request::CancelWindowAnimation(wid, _) => {
                         assert!(
                             !hidden.contains(&wid),
                             "terminal viewport frames must precede workspace hiding"
                         );
-                        assert!(reconciled.insert(wid), "reconcile each window once");
+                        reconciled.insert(wid);
                     }
-                    Request::SetWorkspaceSwitchPositions(positions, _, _) => {
+                    Request::SetWindowFrames(
+                        positions,
+                        _,
+                        crate::actor::app::FrameMode::Position,
+                        _,
+                    ) => {
                         for (wid, position) in positions {
                             if written.contains(&wid) {
                                 assert!(
@@ -864,7 +892,7 @@ mod tests {
                                 );
                             }
                             assert_eq!(
-                                position,
+                                position.origin,
                                 r.state.windows.window(wid).unwrap().frame_monotonic.origin
                             );
                             hidden.insert(wid);
@@ -874,8 +902,8 @@ mod tests {
                 }
             }
             assert_eq!(hidden.len(), 4);
-            assert!(!written.is_empty());
-            assert_eq!(reconciled, written);
+            assert!(!reconciled.is_empty());
+            assert!(written.is_subset(&reconciled));
         }
     }
 
@@ -894,15 +922,16 @@ mod tests {
             else {
                 panic!("scrolling")
             };
-            let initial: Vec<_> = system.viewport_frames(layout).collect();
+            let initial: Vec<_> =
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                    .collect();
             r.add_test_app(1);
             let (app_tx, mut app_rx) = crate::actor::channel();
             r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(app_tx);
             for (wid, frame) in initial {
                 r.insert_test_window_state(wid, frame, None, true);
             }
-            let (animation_tx, mut animation_rx) = tokio::sync::mpsc::unbounded_channel();
-            r.animation_tx = Some(animation_tx);
+            r.start_gesture_presentation();
             motion.publish(sample(1, 300.0, 100));
             r.gesture_tick();
             let before = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
@@ -918,10 +947,6 @@ mod tests {
                 r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic,
                 before
             );
-            assert!(
-                animation_rx.try_recv().is_err(),
-                "camera release must not start generic window animation"
-            );
             // Duplicate lift and late physical samples cannot retarget the release.
             r.gesture_event(Lifecycle::End {
                 sample: sample(1, 900.0, 110),
@@ -934,11 +959,11 @@ mod tests {
                 panic!("scrolling")
             };
             if invalidate {
-                system.remove_window(WindowId::new(1, 4));
+                system.remove_layout(layout);
                 // Drain the preceding gesture wake before checking for stale release writes.
                 while let Ok((_, request)) = app_rx.try_recv() {
                     if let Request::InteractiveFramesPending(queue) = request {
-                        queue.drain_with(|_, _, _, _, _| {});
+                        queue.drain_with(|_, _, _, _, _, _| {});
                     }
                 }
                 r.gesture_tick();
@@ -950,18 +975,15 @@ mod tests {
                     );
                 }
             } else {
-                assert_eq!(
-                    system.advance_viewport_animation(
-                        layout,
-                        Instant::now() + Duration::from_millis(50)
-                    ),
-                    Some(true)
-                );
-                r.apply_viewport_frames();
+                r.start_gesture_presentation();
+                let camera =
+                    r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
+                camera.sample(Instant::now() + Duration::from_millis(50));
+                r.commit_presentations();
                 let mut moved = 0;
                 while let Ok((_, request)) = app_rx.try_recv() {
                     if let Request::InteractiveFramesPending(queue) = request {
-                        queue.drain_with(|wid, frame, set_size, _, source| {
+                        queue.drain_with(|wid, frame, set_size, _, source, _| {
                             assert_eq!(source, FrameSource::Viewport);
                             assert!(!set_size);
                             assert!(

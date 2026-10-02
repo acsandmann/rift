@@ -285,6 +285,7 @@ pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) 
         .zip(spaces.into_iter())
         .enumerate()
         .map(|(idx, (frame, space))| ScreenInfo {
+            backing_scale: 1.0,
             id: crate::sys::screen::ScreenId::new(idx as u32),
             frame,
             space,
@@ -357,6 +358,7 @@ pub fn fullscreen_startup_space_state(
     fullscreen_space: SpaceId,
 ) -> Event {
     let mut state = forwarded_space_state(vec![ScreenInfo {
+        backing_scale: 1.0,
         id: crate::sys::screen::ScreenId::new(0),
         frame: screen,
         space: None,
@@ -593,44 +595,16 @@ impl Apps {
                 Request::ApplicationGloballyActivated(pid) => {
                     events.push(Event::ApplicationActivated(pid, Quiet::No));
                 }
-                Request::SetWindowFrame(wid, frame, txid, _) => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    window.frame = frame;
-                    if !window.animating && !old_frame.same_as(frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
-                    }
-                }
-                Request::SetBatchWindowFrame(frames, txid, _) => {
+                Request::SetWindowFrames(frames, txid, mode, _) => {
                     for (wid, frame) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;
-                        window.frame = frame;
-                        if !window.animating && !old_frame.same_as(frame) {
-                            events.push(Event::WindowFrameChanged(
-                                wid,
-                                frame,
-                                Some(txid),
-                                Requested(true),
-                                None,
-                            ));
+                        if mode == crate::actor::app::FrameMode::Position {
+                            window.frame.origin = frame.origin;
+                        } else {
+                            window.frame = frame;
                         }
-                    }
-                }
-                Request::SetWorkspaceSwitchPositions(positions, txid, _) => {
-                    for (wid, position) in positions {
-                        let window = self.windows.entry(wid).or_default();
-                        window.last_seen_txid = txid;
-                        let old_frame = window.frame;
-                        window.frame.origin = position;
                         if !window.animating && !old_frame.same_as(window.frame) {
                             events.push(Event::WindowFrameChanged(
                                 wid,
@@ -642,42 +616,8 @@ impl Apps {
                         }
                     }
                 }
-                Request::SetWindowPos(wid, pos, txid, _) => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    window.frame.origin = pos;
-                    if !window.animating && !old_frame.same_as(window.frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            window.frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
-                    }
-                }
-                Request::AnimationFrame { wid, frame, set_size, txid } => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    if set_size {
-                        window.frame = frame;
-                    } else {
-                        window.frame.origin = frame.origin;
-                    }
-                    if !window.animating && !old_frame.same_as(window.frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            window.frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
-                    }
-                }
                 Request::InteractiveFramesPending(frames) => {
-                    frames.drain_with(|wid, frame, set_size, txid, _| {
+                    frames.drain_with(|wid, frame, set_size, txid, _, _| {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;
@@ -699,6 +639,9 @@ impl Apps {
                 }
                 Request::BeginWindowAnimation(wid) => {
                     self.windows.entry(wid).or_default().animating = true;
+                }
+                Request::CancelWindowAnimation(wid, _) => {
+                    self.windows.entry(wid).or_default().animating = false;
                 }
                 Request::EndWindowAnimation(wid) => {
                     let window = self.windows.entry(wid).or_default();

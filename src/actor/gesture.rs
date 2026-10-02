@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use multitouch::{GestureEndReason, GestureEvent, GesturePhase, GestureRecognizer, GestureTypes};
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::CGEvent;
 use parking_lot::Mutex;
 
@@ -13,7 +13,7 @@ use crate::common::config::{Config, HapticPattern, LayoutMode};
 use crate::sys::dispatch::{DispatchExt, gesture_deadline_queue};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::gesture::{Owner, Ownership};
-use crate::sys::screen::{CoordinateConverter, SpaceId};
+use crate::sys::screen::SpaceId;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Motion {
@@ -124,7 +124,6 @@ struct Routing {
     settings: Settings,
     enabled: bool,
     screens: Vec<(CGRect, SpaceId, LayoutMode)>,
-    converter: CoordinateConverter,
 }
 #[derive(Clone, Debug)]
 pub struct Control {
@@ -149,7 +148,6 @@ impl Control {
                 settings: Settings::new(config),
                 enabled: false,
                 screens: Vec::new(),
-                converter: CoordinateConverter::default(),
             })),
             motion: Arc::default(),
             owner: Arc::default(),
@@ -190,10 +188,8 @@ impl Control {
         settings: Settings,
         enabled: bool,
         screens: Vec<(CGRect, SpaceId, LayoutMode)>,
-        converter: CoordinateConverter,
     ) {
         let mut r = self.routing.lock();
-        r.converter = converter;
         r.settings = settings;
         r.enabled = enabled;
         r.screens = screens;
@@ -233,12 +229,21 @@ impl Control {
         };
         // Exactly one cursor lookup per candidate count, outside the routing lock.
         let event = CGEvent::new(None)?;
-        let point = CGEvent::location(Some(&event));
+        self.begin_at(time, fingers, CGEvent::location(Some(&event)), epoch)
+    }
+
+    fn begin_at(
+        &self,
+        time: Duration,
+        fingers: usize,
+        point: CGPoint,
+        epoch: u64,
+    ) -> Option<DeviceSession> {
         let mut r = self.routing.lock();
         if !r.enabled || r.ui_session != 0 || r.epoch != epoch {
             return None;
         }
-        let point = r.converter.convert_point(point).unwrap_or(point);
+        // CGEvent locations and ScreenInfo frames both use Quartz coordinates.
         let &(_, space, mode) = r.screens.iter().find(|(frame, _, _)| frame.contains(point))?;
         let settings = r.settings;
         let action = settings.action_for(mode, fingers)?;
@@ -671,22 +676,48 @@ mod tests {
     }
 
     #[test]
+    fn gesture_routes_to_external_display_in_quartz_coordinates() {
+        // The external display is above the built-in display in Quartz space.
+        // Cocoa conversion would reject or misroute these cursor positions.
+        for (point, expected_space) in [
+            (CGPoint::new(400.0, -400.0), 20),
+            (CGPoint::new(400.0, 400.0), 10),
+        ] {
+            let (_, control, _, _) = setup(true);
+            let settings = control.routing.lock().settings;
+            control.configure(settings, true, vec![
+                (
+                    CGRect::new(CGPoint::ZERO, objc2_core_foundation::CGSize::new(1440.0, 900.0)),
+                    SpaceId::new(10),
+                    LayoutMode::Scrolling,
+                ),
+                (
+                    CGRect::new(
+                        CGPoint::new(0.0, -1080.0),
+                        objc2_core_foundation::CGSize::new(1920.0, 1080.0),
+                    ),
+                    SpaceId::new(20),
+                    LayoutMode::Scrolling,
+                ),
+            ]);
+            let session = control.begin_at(Duration::ZERO, 3, point, 0).unwrap();
+            assert_eq!(session.context.space, SpaceId::new(expected_space));
+            assert!(session.context.action.scrolling);
+        }
+    }
+
+    #[test]
     fn ordinary_contacts_do_not_reserve_routing_before_a_gesture_candidate() {
         let (_, control, tx, mut rx) = setup_settings(true, 4, false);
         let settings = control.routing.lock().settings;
-        control.configure(
-            settings,
-            true,
-            vec![(
-                CGRect::new(
-                    objc2_core_foundation::CGPoint::new(-1e9, -1e9),
-                    objc2_core_foundation::CGSize::new(2e9, 2e9),
-                ),
-                SpaceId::new(10),
-                LayoutMode::Scrolling,
-            )],
-            CoordinateConverter::default(),
-        );
+        control.configure(settings, true, vec![(
+            CGRect::new(
+                objc2_core_foundation::CGPoint::new(-1e9, -1e9),
+                objc2_core_foundation::CGSize::new(2e9, 2e9),
+            ),
+            SpaceId::new(10),
+            LayoutMode::Scrolling,
+        )]);
         let device = || {
             Arc::new(Mutex::new(DeviceInput {
                 session: None,
@@ -907,7 +938,7 @@ mod tests {
         } else {
             LayoutMode::Traditional
         };
-        control.configure(settings, true, Vec::new(), CoordinateConverter::default());
+        control.configure(settings, true, Vec::new());
         let c = Context::new(
             1,
             0,

@@ -638,7 +638,6 @@ impl Input {
                         )
                     })
                     .collect(),
-                state.converter,
             );
         }
         drop(state);

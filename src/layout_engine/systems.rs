@@ -387,7 +387,7 @@ pub(crate) mod constraints;
 pub use bsp::BspLayoutSystem;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
-mod scrolling;
+pub(crate) mod scrolling;
 pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 
 #[cfg(test)]

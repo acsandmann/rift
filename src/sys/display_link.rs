@@ -3,7 +3,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
+use crossbeam_channel::Sender;
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2::rc::Retained;
@@ -11,7 +13,7 @@ use objc2::{AnyThread, DeclaredClass, MainThreadMarker, define_class, msg_send, 
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
-use tokio::sync::Notify;
+use parking_lot::Mutex;
 
 use super::dispatch::DispatchExt;
 use super::screen::{NSScreenExt, ScreenId};
@@ -21,10 +23,29 @@ thread_local! {
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// One replaceable tick, never a queue. CA and Rust monotonic clocks are bridged
+/// on the presenter, so the main-thread callback only publishes native timing.
+#[derive(Clone, Copy, Debug)]
+pub struct DisplayTick {
+    pub timestamp: f64,
+    pub target_timestamp: f64,
+}
+
+#[derive(Default)]
+struct LatestTick(Option<DisplayTick>);
+impl LatestTick {
+    fn publish(&mut self, timestamp: f64, target_timestamp: f64) {
+        self.0 = Some(DisplayTick { timestamp, target_timestamp });
+    }
+
+    fn take(&mut self) -> Option<DisplayTick> { self.0.take() }
+}
+
 struct State {
-    notify: Arc<Notify>,
+    wake: Sender<()>,
+    latest: Mutex<LatestTick>,
     cancelled: AtomicBool,
-    running: AtomicBool,
+    paused: AtomicBool,
 }
 
 define_class! {
@@ -41,8 +62,11 @@ define_class! {
                 link.invalidate();
                 return;
             }
-            state.running.store(true, Ordering::Release);
-            state.notify.notify_one(); // One outstanding permit, independent of callback rate.
+            let timestamp = link.timestamp();
+            let target_timestamp = link.targetTimestamp();
+            if state.paused.load(Ordering::Acquire) { return; }
+            state.latest.lock().publish(timestamp, target_timestamp);
+            let _ = state.wake.try_send(());
         }
     }
 }
@@ -54,12 +78,13 @@ pub struct DisplayLink {
 }
 
 impl DisplayLink {
-    pub fn for_display(display: u32, notify: Arc<Notify>) -> Self {
+    pub fn for_display(display: u32, wake: Sender<()>) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let state = Arc::new(State {
-            notify,
+            wake,
+            latest: Mutex::default(),
             cancelled: AtomicBool::new(false),
-            running: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
         });
         queue::main().after_f_s(
             Time::NOW,
@@ -75,14 +100,16 @@ impl DisplayLink {
                 else {
                     return;
                 };
-                // Older macOS releases keep the existing timer fallback.
+                // Older macOS releases keep the same sampler with a timer clock.
                 if !screen.respondsToSelector(sel!(displayLinkWithTarget:selector:)) {
                     return;
                 }
+                let paused = state.paused.load(Ordering::Acquire);
                 let target = DisplayLinkTarget::alloc().set_ivars(state);
                 let target: Retained<DisplayLinkTarget> = unsafe { msg_send![super(target), init] };
                 // The target is retained by the link. It does not retain the link in return.
                 let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
+                link.setPaused(paused);
                 unsafe {
                     link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
                 };
@@ -94,8 +121,37 @@ impl DisplayLink {
         Self { id, state }
     }
 
-    /// Until the first native callback, the consumer can use its timer fallback.
-    pub fn is_running(&self) -> bool { self.state.running.load(Ordering::Acquire) }
+    pub fn set_paused(&self, paused: bool) {
+        if self.state.paused.swap(paused, Ordering::AcqRel) == paused {
+            return;
+        }
+        self.state.latest.lock().take();
+        let state = self.state.clone();
+        queue::main().after_f_s(Time::NOW, (self.id, state), |(id, state)| {
+            LINKS.with(|links| {
+                if let Some(link) = links.borrow().get(&id) {
+                    link.setPaused(state.paused.load(Ordering::Acquire));
+                }
+            });
+        });
+    }
+
+    pub fn latest(&self) -> Option<(DisplayTick, Instant)> {
+        let tick = self.state.latest.lock().take()?;
+        let now = Instant::now();
+        let delta = tick.target_timestamp - objc2_quartz_core::CACurrentMediaTime();
+        let target = if delta.is_finite() && delta.abs() < 1.0 {
+            let duration = std::time::Duration::from_secs_f64(delta.abs());
+            if delta >= 0.0 {
+                now + duration
+            } else {
+                now - duration
+            }
+        } else {
+            now
+        };
+        Some((tick, target))
+    }
 }
 
 impl Drop for DisplayLink {
@@ -108,5 +164,26 @@ impl Drop for DisplayLink {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_replaces_stale_ticks_and_never_replays_a_sample() {
+        let mut ticks = LatestTick::default();
+        assert!(ticks.take().is_none());
+        for timestamp in [1.0, 2.0, 3.0] {
+            ticks.publish(timestamp, timestamp + 0.008);
+        }
+        let newest = ticks.take().unwrap();
+        assert_eq!(newest.timestamp, 3.0);
+        assert_eq!(newest.target_timestamp, 3.008);
+        assert!(ticks.take().is_none());
+        ticks.publish(4.0, 4.008);
+        assert_eq!(ticks.take().unwrap().timestamp, 4.0);
+        assert!(ticks.take().is_none());
     }
 }

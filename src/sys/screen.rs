@@ -63,10 +63,14 @@ pub struct ScreenInfo {
     pub id: ScreenId,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
+    #[serde(default = "unit_scale")]
+    pub backing_scale: f64,
     pub display_uuid: String,
     pub name: Option<String>,
     pub space: Option<SpaceId>,
 }
+
+fn unit_scale() -> f64 { 1.0 }
 
 impl ScreenInfo {
     pub fn display_uuid_opt(&self) -> Option<&str> {
@@ -209,6 +213,10 @@ impl<S: System> ScreenCache<S> {
                 ScreenInfo {
                     id: cg_id,
                     frame,
+                    backing_scale: ns_screens
+                        .iter()
+                        .find(|s| s.cg_id == cg_id)
+                        .map_or(1.0, |s| s.backing_scale),
                     display_uuid,
                     name: ns_screens.iter().find(|s| s.cg_id == cg_id).and_then(|s| s.name.clone()),
                     space: None,
@@ -439,6 +447,7 @@ struct CGScreenInfo {
 struct NSScreenInfo {
     frame: CGRect,
     visible_frame: CGRect,
+    backing_scale: f64,
     cg_id: ScreenId,
     name: Option<String>,
 }
@@ -512,6 +521,7 @@ impl System for Actual {
                 Some(NSScreenInfo {
                     frame: s.frame(),
                     visible_frame: s.visibleFrame(),
+                    backing_scale: s.backingScaleFactor(),
                     cg_id: s.get_number().ok()?,
                     name: Some(name),
                 })
@@ -860,6 +870,7 @@ mod test {
                 NSScreenInfo {
                     cg_id: ScreenId(3),
                     frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3840.0, 2160.0)),
+                    backing_scale: 1.0,
                     visible_frame: CGRect::new(
                         CGPoint::new(0.0, 76.0),
                         CGSize::new(3840.0, 2059.0),
@@ -869,6 +880,7 @@ mod test {
                 NSScreenInfo {
                     cg_id: ScreenId(1),
                     frame: CGRect::new(CGPoint::new(3840.0, 98.0), CGSize::new(1512.0, 982.0)),
+                    backing_scale: 2.0,
                     visible_frame: CGRect::new(
                         CGPoint::new(3840.0, 98.0),
                         CGSize::new(1512.0, 950.0),
@@ -881,6 +893,7 @@ mod test {
         let (screens, _) = sc.refresh().unwrap();
 
         let secondary = screens.iter().find(|screen| screen.id == ScreenId(1)).unwrap();
+        assert_eq!(secondary.backing_scale, 2.0);
         assert_eq!(
             secondary.frame,
             super::constrain_display_bounds(
@@ -913,6 +926,7 @@ mod test {
                     cg_id: ScreenId(1),
                     frame: bounds,
                     visible_frame,
+                    backing_scale: 1.0,
                     name: None,
                 }],
                 vec![],
