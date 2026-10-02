@@ -1080,7 +1080,7 @@ pub struct ScrollingGestureSettings {
     #[serde(default = "no")]
     pub propagate_to_workspace_swipe: bool,
     /// Edge travel in working-area widths required on release for one workspace switch.
-    /// Measured directly as a fraction of the working-area width; edge direction locks until lift.
+    /// Measured directly as a fraction of the working-area width.
     #[serde(default = "default_overscroll_threshold")]
     pub workspace_switch_threshold: f64,
 }
