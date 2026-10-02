@@ -21,7 +21,10 @@ fn pattern_index(pattern: HapticPattern) -> FeedbackPattern {
 }
 
 pub fn perform_haptic(pattern: HapticPattern) -> bool {
-    actuators().iter().any(|actuator| {
-        (actuator.is_open() || actuator.open()) && actuator.actuate(pattern_index(pattern), 1.0)
-    })
+    let mut succeeded = false;
+    for actuator in actuators() {
+        succeeded |= (actuator.is_open() || actuator.open())
+            && actuator.actuate(pattern_index(pattern), 1.0);
+    }
+    succeeded
 }
