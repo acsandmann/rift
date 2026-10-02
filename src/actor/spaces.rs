@@ -500,8 +500,11 @@ impl SpacesActor {
         }
     }
 
+    // Sleep and session inactivity end only on wake or unlock; churn clears itself.
+    fn lifecycle_quarantined(&self) -> bool { self.state.sleeping || self.state.session_inactive }
+
     fn should_buffer_topology_updates(&self) -> bool {
-        self.state.sleeping || self.state.session_inactive || self.state.display_churn_active
+        self.lifecycle_quarantined() || self.state.display_churn_active
     }
 
     fn topology_is_authoritative(&self) -> bool {
@@ -1412,6 +1415,12 @@ impl SpacesActor {
 
     fn attempt_finish_display_churn(&mut self, expected_epoch: u64, attempt: u8) {
         if expected_epoch != self.state.display_churn_epoch || !self.state.display_churn_active {
+            return;
+        }
+
+        // A topology seen while sleeping/locked cannot establish authority.
+        // Wake/unlock already schedules a fresh stabilization check.
+        if self.lifecycle_quarantined() {
             return;
         }
 
