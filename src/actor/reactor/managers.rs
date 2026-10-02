@@ -206,7 +206,7 @@ pub struct LayoutManager {
 
 pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
 
-fn bound_frame_to_screen(frame: CGRect, screen: CGRect) -> CGRect {
+pub(super) fn bound_frame_to_screen(frame: CGRect, screen: CGRect) -> CGRect {
     const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
     let screen_left = screen.origin.x;

@@ -141,13 +141,13 @@ pub fn handle_window_deminiaturized(
     let _ = utils::refresh_heuristic(state, wid);
     state.windows.set_visibility(wid, WindowVisibility::Visible);
 
-    let mut outcome = crate::actor::reactor::events::EventOutcome::no_change();
-    if state.windows.window(wid).is_some_and(WindowState::is_admitted)
-        && let Some(space) = active_space
-    {
-        outcome =
-            crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
-                .with_layout_event(LayoutEvent::WindowAdded(space, wid));
+    // Minimized AX snapshots can have stale admission metadata. Refresh them
+    // even when the cached snapshot cannot currently be admitted.
+    let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
+    if active_space.is_some() {
+        // Minimizing clears workspace membership; reconcile app rules before
+        // projecting the restored window, just as for a newly created window.
+        outcome = outcome.with_created_window_finalization(wid);
     }
     Ok(outcome)
 }
@@ -189,6 +189,7 @@ pub fn classify_window_frame_change(
         return FrameChangeDisposition::Handled;
     };
     let server_id = window.info.sys_id;
+    let old_frame = window.frame_monotonic;
 
     if mission_control_active {
         drag.reset();
@@ -229,6 +230,10 @@ pub fn classify_window_frame_change(
         return FrameChangeDisposition::Handled;
     }
 
+    if old_frame.same_as(new_frame) {
+        query_mouse_for_active_drag(drag, mouse_state);
+        return FrameChangeDisposition::Handled;
+    }
     if mouse_state.is_none() {
         *mouse_state = crate::sys::event::get_mouse_state();
     }

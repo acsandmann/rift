@@ -677,7 +677,7 @@ impl Apps {
                     }
                 }
                 Request::InteractiveFramesPending(frames) => {
-                    frames.drain_with(|wid, frame, set_size, txid| {
+                    frames.drain_with(|wid, frame, set_size, txid, _| {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;

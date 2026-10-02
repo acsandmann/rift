@@ -148,6 +148,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 	"NSNotification",
 	"NSError",
 	"NSProcessInfo",
+	"NSRunLoop",
 	"NSURL",
 	"NSValue"
 ]}
@@ -162,6 +163,7 @@ objc2-screen-capture-kit = { version = "0.3.2", default-features = false, featur
 ] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 	"CAAnimation",
+	"CADisplayLink",
 	"CAFrameRateRange",
 	"CABase",
 	"CAEAGLLayer",
@@ -206,6 +208,7 @@ embed_plist = "1.2.2"
 rustc-hash = "2.1.1"
 rift-client = { path = "crates/rift-client" }
 rift-protocol = { path = "crates/rift-protocol" }
+multitouch = "0.3.2"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"

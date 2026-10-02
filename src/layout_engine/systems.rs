@@ -8,7 +8,7 @@ use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowLayoutConstraints {
     pub is_resizable: bool,
     pub locked_width: f64,
@@ -141,6 +141,17 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn draw_tree(&self, layout: LayoutId) -> String;
     /// Return a stable, platform-neutral view of the layout topology for IPC consumers.
     fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode;
+
+    /// Reconcile screen/constraint changes before reading frames. Layouts with
+    /// cached world geometry can keep viewport-only updates independent of sizing.
+    fn prepare_layout(
+        &mut self,
+        _layout: LayoutId,
+        _screen: CGRect,
+        _constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        _gaps: &crate::common::config::GapSettings,
+    ) {
+    }
 
     fn calculate_layout(
         &self,
@@ -377,7 +388,7 @@ pub use bsp::BspLayoutSystem;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
 mod scrolling;
-pub use scrolling::ScrollingLayoutSystem;
+pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 
 #[cfg(test)]
 mod tests {

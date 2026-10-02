@@ -178,9 +178,10 @@ pub struct LayoutStateData {
 }
 
 /// The type of a node in Rift's normalized layout topology.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContainerNodeType {
+    #[default]
     Container,
     Window,
     /// An empty slot retained by a layout engine, such as an empty BSP root.
@@ -188,7 +189,7 @@ pub enum ContainerNodeType {
 }
 
 /// A platform-neutral view of one node in a tiled layout.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ContainerTreeNode {
     /// Stable identity for this node for as long as it exists in the workspace.
     pub node_id: u64,

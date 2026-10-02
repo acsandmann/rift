@@ -181,6 +181,8 @@ pub struct LayoutEngine {
     persistence: PersistenceState,
     /// Set only while a master-file startup restore is waiting for the first display snapshot.
     startup_restore_pending: bool,
+    /// Legacy strip commands report boundary excess; workspace arbitration lives here.
+    scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
 }
 
 pub(crate) struct WorkspaceLayoutQuerySnapshot {
@@ -380,6 +382,7 @@ impl LayoutEngine {
         let mut system = self.workspaces[workspace].layout_system.preview_clone()?;
         let before = system.window_slot(layout, source)?;
         system.apply_window_drop(layout, source, target, action).then_some(())?;
+        system.prepare_layout(layout, screen, &self.window_layout_constraints, &gaps);
         let frame = system
             .calculate_layout(
                 layout,
@@ -773,7 +776,9 @@ impl LayoutEngine {
     pub fn layout_specific_animate_settings(&self, space: SpaceId) -> Option<bool> {
         if let Some(ws_id) = self.workspaces.active_workspace(space) {
             match &self.workspaces[ws_id].layout_system {
-                LayoutSystemKind::Scrolling(_) => self.layout_settings.scrolling.animate,
+                LayoutSystemKind::Scrolling(_) => {
+                    Some(self.layout_settings.scrolling.animate.unwrap_or(true))
+                }
                 _ => None,
             }
         } else {
@@ -1505,6 +1510,7 @@ impl LayoutEngine {
             display_last_space: HashMap::default(),
             persistence: PersistenceState::default(),
             startup_restore_pending: false,
+            scroll_boundary: None,
         }
     }
 
@@ -1909,6 +1915,9 @@ impl LayoutEngine {
         visible_space_centers: &HashMap<SpaceId, CGPoint>,
         command: LayoutCommand,
     ) -> EventResponse {
+        if !matches!(command, LayoutCommand::ScrollStrip { .. }) {
+            self.scroll_boundary = None;
+        }
         if let Some(space) = space {
             if let Some(ws_id) = self.workspaces.active_workspace(space) {
                 if let Some(layout) = self.workspaces.active_layout(space, ws_id) {
@@ -2361,32 +2370,47 @@ impl LayoutEngine {
                 }
                 EventResponse::default()
             }
-            LayoutCommand::ScrollStrip { delta } => {
-                let mut resp = EventResponse::default();
-                if let LayoutSystemKind::Scrolling(system) =
+            LayoutCommand::ScrollStrip { .. }
+            | LayoutCommand::SnapStrip
+            | LayoutCommand::SwitchPresetColumnWidth { .. }
+            | LayoutCommand::CenterSelection => {
+                let LayoutSystemKind::Scrolling(system) =
                     &mut self.workspaces[workspace_id].layout_system
-                {
-                    resp.boundary_hit = system.scroll_by_delta(layout, delta);
-                }
-                resp
-            }
-            LayoutCommand::SnapStrip => {
+                else {
+                    return EventResponse::default();
+                };
                 let mut response = EventResponse::default();
-                if let LayoutSystemKind::Scrolling(system) =
-                    &mut self.workspaces[workspace_id].layout_system
-                {
-                    response.focus_window = system.snap_to_nearest_column(layout);
-                    response.changed = response.focus_window.is_some();
+                match command {
+                    LayoutCommand::ScrollStrip { delta } => {
+                        if let Some((direction, excess)) = system.scroll_by_delta(layout, delta) {
+                            let key = (workspace_id, layout, direction);
+                            let accumulated = self
+                                .scroll_boundary
+                                .filter(|(previous, _)| *previous == key)
+                                .map_or(excess, |(_, amount)| amount + excess);
+                            let boundary = accumulated
+                                >= self
+                                    .layout_settings
+                                    .scrolling
+                                    .gestures
+                                    .workspace_switch_threshold;
+                            self.scroll_boundary = (!boundary).then_some((key, accumulated));
+                            response.boundary_hit = boundary.then_some(direction);
+                        } else {
+                            self.scroll_boundary = None;
+                        }
+                    }
+                    LayoutCommand::SnapStrip => {
+                        response.focus_window = system.snap_to_nearest_column(layout);
+                        response.changed = response.focus_window.is_some();
+                    }
+                    LayoutCommand::SwitchPresetColumnWidth { backwards } => {
+                        response.changed = system.switch_preset_column_width(layout, backwards);
+                    }
+                    LayoutCommand::CenterSelection => system.center_selected_column(layout),
+                    _ => unreachable!(),
                 }
                 response
-            }
-            LayoutCommand::CenterSelection => {
-                if let LayoutSystemKind::Scrolling(system) =
-                    &mut self.workspaces[workspace_id].layout_system
-                {
-                    system.center_selected_column(layout);
-                }
-                EventResponse::default()
             }
         }
     }
@@ -2400,9 +2424,15 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let Some((workspace_id, _)) = self.workspaces.active_layout_for_space(space) else {
+        let Some((workspace_id, layout)) = self.workspaces.active_layout_for_space(space) else {
             return Vec::new();
         };
+        self.workspaces[workspace_id].layout_system.prepare_layout(
+            layout,
+            screen,
+            &self.window_layout_constraints,
+            gaps,
+        );
         self.calculate_workspace_layout(
             space,
             workspace_id,
@@ -2476,6 +2506,12 @@ impl LayoutEngine {
                         })
                     });
                 }
+                self.workspaces[active_workspace_id].layout_system.prepare_layout(
+                    layout,
+                    screen,
+                    &self.window_layout_constraints,
+                    gaps,
+                );
                 let tiled_positions =
                     self.workspaces[active_workspace_id].layout_system.calculate_layout(
                         layout,
@@ -2640,7 +2676,7 @@ impl LayoutEngine {
             self.workspaces.active_layout(space, workspace),
         ) {
             (LayoutSystemKind::Scrolling(system), Some(layout)) => system
-                .logical_frames(layout, screen, &self.window_layout_constraints, gaps)
+                .calculate_frames(layout, screen, &self.window_layout_constraints, gaps, false)
                 .into_iter()
                 .collect(),
             _ => HashMap::default(),
@@ -2696,29 +2732,17 @@ impl LayoutEngine {
         command: &LayoutCommand,
     ) -> EventResponse {
         match command {
-            LayoutCommand::NextWorkspace(skip_empty) => {
-                if let Some(current_workspace) = self.workspaces.active_workspace(space) {
-                    if let Some(next_workspace) = self.workspaces.next_workspace(
-                        window_store,
-                        space,
-                        current_workspace,
-                        *skip_empty,
-                    ) {
-                        return self.activate_workspace(window_store, space, next_workspace, None);
-                    }
-                }
-                EventResponse::default()
-            }
-            LayoutCommand::PrevWorkspace(skip_empty) => {
-                if let Some(current_workspace) = self.workspaces.active_workspace(space) {
-                    if let Some(prev_workspace) = self.workspaces.prev_workspace(
-                        window_store,
-                        space,
-                        current_workspace,
-                        *skip_empty,
-                    ) {
-                        return self.activate_workspace(window_store, space, prev_workspace, None);
-                    }
+            LayoutCommand::NextWorkspace(skip_empty) | LayoutCommand::PrevWorkspace(skip_empty) => {
+                let Some(current) = self.workspaces.active_workspace(space) else {
+                    return EventResponse::default();
+                };
+                let target = if matches!(command, LayoutCommand::NextWorkspace(_)) {
+                    self.workspaces.next_workspace(window_store, space, current, *skip_empty)
+                } else {
+                    self.workspaces.prev_workspace(window_store, space, current, *skip_empty)
+                };
+                if let Some(target) = target.filter(|&target| target != current) {
+                    return self.activate_workspace(window_store, space, target, None);
                 }
                 EventResponse::default()
             }
@@ -3388,6 +3412,75 @@ mod tests {
         VirtualWorkspaceSettings, WorkspaceLayoutRule, WorkspaceSelector,
     };
 
+    #[test]
+    fn scroll_strip_accumulates_the_configured_boundary_threshold() {
+        let mut settings = LayoutSettings::default();
+        settings.mode = LayoutMode::Scrolling;
+        settings.scrolling.column_width_ratio = 0.5;
+        settings.scrolling.preserve_window_sizes = false;
+        settings.scrolling.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.scrolling.gestures.workspace_switch_threshold = 0.5;
+        let mut engine = LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(91);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, screen.size));
+        for index in 1..=3 {
+            let _ = engine.handle_event(
+                &mut store,
+                LayoutEvent::WindowAdded(space, WindowId::new(1, index)),
+            );
+        }
+        engine.calculate_layout(
+            space,
+            screen,
+            &Default::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let command = |engine: &mut LayoutEngine, store: &mut WindowStore, command| {
+            engine.handle_command(store, Some(space), &[space], &HashMap::default(), command)
+        };
+        for _ in 0..3 {
+            assert_eq!(
+                command(&mut engine, &mut store, LayoutCommand::SwitchPresetColumnWidth {
+                    backwards: false
+                }),
+                EventResponse {
+                    changed: true,
+                    ..Default::default()
+                }
+            );
+        }
+        let _ = command(&mut engine, &mut store, LayoutCommand::ScrollStrip {
+            delta: 0.8,
+        });
+        let snap = command(&mut engine, &mut store, LayoutCommand::SnapStrip);
+        assert_eq!(snap.focus_window, Some(WindowId::new(1, 3)));
+        for boundary in [None, None, Some(Direction::Right)] {
+            assert_eq!(
+                command(&mut engine, &mut store, LayoutCommand::ScrollStrip {
+                    delta: 0.2
+                })
+                .boundary_hit,
+                boundary
+            );
+        }
+        let workspace = engine.workspaces.active_workspace(space).unwrap();
+        assert!(engine.switch_workspace_layout_mode(
+            &store,
+            space,
+            workspace,
+            LayoutMode::Traditional
+        ));
+        assert_eq!(
+            command(&mut engine, &mut store, LayoutCommand::SwitchPresetColumnWidth {
+                backwards: false
+            }),
+            EventResponse::default()
+        );
+    }
     #[test]
     fn scrolling_widths_follow_space_displays_and_reload() {
         let mut workspaces = VirtualWorkspaceSettings::default();
@@ -4200,6 +4293,25 @@ mod tests {
             &LayoutCommand::NextWorkspace(Some(true)),
         );
         assert!(!no_eligible_workspace.changed);
+
+        // Wrapping back to the only workspace is also a no-op. Gesture
+        // handoff and haptics rely on the same changed result as commands.
+        settings.prevent_wrapping = false;
+        settings.default_workspace_count = 1;
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let current = engine.workspaces_mut().list_workspaces(space)[0].0;
+        assert!(engine.workspaces_mut().set_active_workspace(space, current));
+        let last = engine.workspaces().last_workspace(space);
+        for command in [
+            LayoutCommand::NextWorkspace(None),
+            LayoutCommand::PrevWorkspace(None),
+        ] {
+            let response =
+                engine.handle_virtual_workspace_command(&mut window_store, space, &command);
+            assert!(!response.changed);
+            assert_eq!(engine.workspaces().active_workspace(space), Some(current));
+            assert_eq!(engine.workspaces().last_workspace(space), last);
+        }
     }
 
     #[test]

@@ -817,6 +817,7 @@ fn default_master_stack_ratio() -> f64 { 0.6 }
 fn default_master_stack_count() -> usize { 1 }
 
 fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
+fn default_scrolling_preset_column_widths() -> Vec<f64> { vec![1.0 / 3.0, 0.5, 2.0 / 3.0] }
 fn default_true() -> bool { true }
 
 fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
@@ -928,12 +929,16 @@ pub struct LayoutSettings {
 pub struct ScrollingLayoutSettings {
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
-    /// Whether to animate window transitions in this layout.
-    #[serde(default)]
+    /// Whether to animate windows moving in the scrolling layout
+    /// HIGHLY RECOMMENDED to leave this enabled.
+    #[serde(default = "default_scrolling_animate")]
     pub animate: Option<bool>,
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
     pub column_width_ratio: f64,
+    /// Proportional column widths cycled in configured order.
+    #[serde(default = "default_scrolling_preset_column_widths")]
+    pub preset_column_widths: Vec<f64>,
     /// Keep a window's existing column width when it enters scrolling layout.
     #[serde(default = "default_true")]
     pub preserve_window_sizes: bool,
@@ -952,6 +957,7 @@ pub struct ScrollingLayoutSettings {
     /// Horizontal focus navigation behavior:
     /// - niri: reveal only as needed based on navigation direction.
     /// - anchored: always align focused column to `alignment`.
+    /// Gesture release pans freely in niri mode and snaps to alignment in anchored mode.
     #[serde(default)]
     pub focus_navigation_style: ScrollingFocusNavigationStyle,
     /// Trackpad gestures for scrolling layout
@@ -959,12 +965,15 @@ pub struct ScrollingLayoutSettings {
     pub gestures: ScrollingGestureSettings,
 }
 
+fn default_scrolling_animate() -> Option<bool> { Some(true) }
+
 impl Default for ScrollingLayoutSettings {
     fn default() -> Self {
         Self {
             base: BaseLayoutSettings::default(),
-            animate: None,
+            animate: Some(true),
             column_width_ratio: default_scrolling_column_width_ratio(),
+            preset_column_widths: default_scrolling_preset_column_widths(),
             preserve_window_sizes: true,
             min_column_width_ratio: default_scrolling_min_column_width_ratio(),
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
@@ -1047,9 +1056,13 @@ pub enum MasterStackNewWindowPlacement {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub struct ScrollingGestureSettings {
-    /// Enable horizontal scroll gestures to switch columns
+    /// Enable continuous horizontal viewport gestures
     #[serde(default = "no")]
     pub enabled: bool,
+    /// Animate gesture release independently of structural layout animations.
+    /// When omitted, inherit the scrolling layout/global animation setting.
+    #[serde(default)]
+    pub animate: Option<bool>,
     /// Invert horizontal direction (swap left/right)
     #[serde(default)]
     pub invert_horizontal: bool,
@@ -1059,21 +1072,25 @@ pub struct ScrollingGestureSettings {
     /// Number of fingers required for scroll gesture
     #[serde(default = "default_swipe_fingers")]
     pub fingers: usize,
-    /// Normalized horizontal distance (0..1) required to fire a scroll step
+    /// Retained for config compatibility; continuous scrolling uses a small intent dead zone
+    #[deprecated(since = "0.6.3")]
     #[serde(default = "default_distance_pct")]
     pub distance_pct: f64,
     /// If true, scrolling past the end of the strip will trigger a workspace switch
     #[serde(default = "no")]
     pub propagate_to_workspace_swipe: bool,
-    /// Amount of overscroll (in steps) required to trigger a workspace switch
+    /// Edge travel in working-area widths required on release for one workspace switch.
+    /// Measured directly as a fraction of the working-area width.
     #[serde(default = "default_overscroll_threshold")]
     pub workspace_switch_threshold: f64,
 }
 
 impl Default for ScrollingGestureSettings {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             enabled: false,
+            animate: None,
             invert_horizontal: false,
             vertical_tolerance: default_swipe_vertical_tolerance(),
             fingers: default_swipe_fingers(),
@@ -1519,7 +1536,7 @@ fn default_workspace_names() -> Vec<String> {
 fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
 fn default_swipe_fingers() -> usize { 3 }
 fn default_distance_pct() -> f64 { 0.08 }
-fn default_overscroll_threshold() -> f64 { 0.15 }
+fn default_overscroll_threshold() -> f64 { 0.55 }
 
 fn default_stack_line_spacing() -> f64 { 1.0 }
 fn default_stack_line_thickness() -> f64 { 20.0 }
@@ -1911,6 +1928,7 @@ mod tests {
             "#,
         )
         .unwrap();
+        assert_eq!(settings.preset_column_widths, vec![1.0 / 3.0, 0.5, 2.0 / 3.0]);
         assert_eq!(settings.widths_for_display(Some("display-a")), (0.5, 0.3, 0.9));
         assert_eq!(settings.widths_for_display(Some("other")), (0.7, 0.3, 0.9));
         assert_eq!(settings.widths_for_display(None), (0.7, 0.3, 0.9));
