@@ -606,6 +606,69 @@ impl LayoutState {
         !fullscreen && self.fullscreen_restore.take().is_some_and(|bookmark| self.restore(bookmark))
     }
 
+    fn prepare_geometry(
+        &mut self,
+        settings: &ScrollingLayoutSettings,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &GapSettings,
+    ) {
+        if self.geometry.as_ref().is_some_and(|g| g.matches(screen, constraints, gaps)) {
+            return;
+        }
+        let interrupted = matches!(self.viewport, Viewport::Animation(_));
+        if interrupted {
+            self.viewport = Viewport::Static(self.viewport.offset());
+        }
+        let bookmark = self.restored_view.take().or_else(|| self.bookmark());
+        let initial = matches!(self.viewport, Viewport::Uninitialized);
+        if settings.preserve_window_sizes {
+            let tiling = compute_tiling_area(screen, gaps);
+            for column in &mut self.columns {
+                if matches!(column.width, ColumnWidth::Default)
+                    && column.windows.len() == 1
+                    && constraints
+                        .get(&column.windows[0])
+                        .map(|c| c.locked_width)
+                        .is_some_and(|w| w.is_finite() && w > 0.0)
+                {
+                    column.width = ColumnWidth::Fixed(column.resolved_width(
+                        tiling.size.width,
+                        gaps.inner.horizontal,
+                        settings,
+                        constraints,
+                    ));
+                }
+            }
+        }
+        self.geometry = Some(Geometry::build(
+            self,
+            settings,
+            screen,
+            constraints.clone(),
+            gaps.clone(),
+        ));
+        if let Some(bookmark) = bookmark
+            && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
+        {
+            let old = self.viewport.offset();
+            self.viewport.rebase(column.world_x + bookmark.relative_offset - old);
+        }
+        if interrupted && let Viewport::Static(offset) = &mut self.viewport {
+            let g = self.geometry.as_ref().unwrap();
+            *offset = offset.clamp(g.bounds.0, g.bounds.1);
+        }
+        if initial {
+            self.viewport = Viewport::Static(0.0);
+            if self.columns.len() == 1 {
+                let g = self.geometry.as_ref().unwrap();
+                self.viewport = Viewport::Static(g.anchor_offset(0, settings.alignment));
+            } else {
+                self.reveal(settings);
+            }
+        }
+    }
+
     fn bookmark(&self) -> Option<ViewBookmark> {
         let id = self.columns.get(self.active_column)?.id;
         let x = self.geometry.as_ref()?.column(id)?.world_x;
@@ -881,21 +944,12 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get(layout) else {
             return Vec::new();
         };
-        let fallback;
-        let g = match state.geometry.as_ref().filter(|g| g.matches(screen, constraints, gaps)) {
-            Some(g) => g,
-            None => {
-                fallback = Geometry::build(
-                    state,
-                    &self.settings,
-                    screen,
-                    constraints.clone(),
-                    gaps.clone(),
-                );
-                &fallback
-            }
-        };
-        Self::translate_frames(state, g, park).collect()
+        if let Some(g) = state.geometry.as_ref().filter(|g| g.matches(screen, constraints, gaps)) {
+            return Self::translate_frames(state, g, park).collect();
+        }
+        let mut fallback = state.clone();
+        fallback.prepare_geometry(&self.settings, screen, constraints, gaps);
+        Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park).collect()
     }
 
     fn translate_frames<'a>(
@@ -1355,60 +1409,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return;
         };
-        if state.geometry.as_ref().is_some_and(|g| g.matches(screen, constraints, gaps)) {
-            return;
-        }
-        let interrupted = matches!(state.viewport, Viewport::Animation(_));
-        if interrupted {
-            state.viewport = Viewport::Static(state.viewport.offset());
-        }
-        let bookmark = state.restored_view.take().or_else(|| state.bookmark());
-        let initial = matches!(state.viewport, Viewport::Uninitialized);
-        if self.settings.preserve_window_sizes {
-            let tiling = compute_tiling_area(screen, gaps);
-            for column in &mut state.columns {
-                if matches!(column.width, ColumnWidth::Default)
-                    && column.windows.len() == 1
-                    && constraints
-                        .get(&column.windows[0])
-                        .map(|c| c.locked_width)
-                        .is_some_and(|w| w.is_finite() && w > 0.0)
-                {
-                    column.width = ColumnWidth::Fixed(column.resolved_width(
-                        tiling.size.width,
-                        gaps.inner.horizontal,
-                        &self.settings,
-                        constraints,
-                    ));
-                }
-            }
-        }
-        state.geometry = Some(Geometry::build(
-            state,
-            &self.settings,
-            screen,
-            constraints.clone(),
-            gaps.clone(),
-        ));
-        if let Some(bookmark) = bookmark
-            && let Some(column) = state.geometry.as_ref().unwrap().column(bookmark.column)
-        {
-            let old = state.viewport.offset();
-            state.viewport.rebase(column.world_x + bookmark.relative_offset - old);
-        }
-        if interrupted && let Viewport::Static(offset) = &mut state.viewport {
-            let g = state.geometry.as_ref().unwrap();
-            *offset = offset.clamp(g.bounds.0, g.bounds.1);
-        }
-        if initial {
-            state.viewport = Viewport::Static(0.0);
-            if state.columns.len() == 1 {
-                let g = state.geometry.as_ref().unwrap();
-                state.viewport = Viewport::Static(g.anchor_offset(0, self.settings.alignment));
-            } else {
-                state.reveal(&self.settings);
-            }
-        }
+        state.prepare_geometry(&self.settings, screen, constraints, gaps);
     }
 
     fn calculate_layout(
@@ -1956,6 +1957,30 @@ mod tests {
         fn drop(&mut self, source: u32, target: u32, action: WindowDropAction) {
             assert!(self.system.apply_window_drop(self.layout, wid(source), wid(target), action));
         }
+    }
+
+    #[test]
+    fn unarranged_frame_queries_reveal_selection_without_moving_on_activation() {
+        let mut f = Fixture::new(0);
+        f.layout = f.system.create_layout();
+        for index in 1..=4 {
+            f.system.add_window_after_selection(f.layout, wid(index));
+        }
+        let query = |f: &Fixture| {
+            f.system.calculate_frames(f.layout, f.screen, &f.constraints, &f.gaps, false)
+        };
+        let before = query(&f);
+        let selected = before.iter().find(|(w, _)| *w == wid(4)).unwrap().1;
+        assert!(selected.origin.x >= 0.0 && selected.max().x <= 1000.0);
+        assert_eq!(query(&f), before);
+        f.prepare();
+        assert_eq!(query(&f), before);
+
+        let wider = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1400.0, 800.0));
+        f.screen = wider;
+        let resized = query(&f);
+        f.prepare();
+        assert_eq!(query(&f), resized);
     }
 
     #[test]
