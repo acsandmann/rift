@@ -439,7 +439,7 @@ pub struct Reactor {
     startup_ready: Option<oneshot::Sender<()>>,
     pub animation_tx: Option<AnimationSender>,
     viewport_gesture: Option<gesture::ViewportSession>,
-    presentations: HashMap<SpaceId, animation::CameraRegistration>,
+    presentations: HashMap<SpaceId, animation::ViewportHandle>,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
@@ -899,12 +899,12 @@ impl Reactor {
 
     async fn run(reactor: Reactor, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
-        let (animation_tx, animation_rx) = crossbeam_channel::unbounded();
+        let (animation_tx, animation_rx) = AnimationSender::channel();
         let reactor = Rc::new(RefCell::new(reactor));
         let input_tx = {
             let mut reactor = reactor.borrow_mut();
             reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
-            reactor.animation_tx = Some(animation_tx.into());
+            reactor.animation_tx = Some(animation_tx);
             reactor.communication_manager.input_tx.clone()
         };
         let reactor_task = Self::run_reactor_loop(reactor, events);
@@ -982,7 +982,7 @@ impl Reactor {
                 return;
             }
             Event::CameraFinished => {
-                self.reconcile_presentations();
+                self.commit_presentations();
                 return;
             }
             Event::Query(req) => {
@@ -993,7 +993,7 @@ impl Reactor {
                         | query::QueryRequest::WindowInfo { .. }
                         | query::QueryRequest::LayoutState { .. }
                 ) {
-                    self.reconcile_presentations();
+                    self.commit_presentations();
                 }
                 self.handle_query_request(req);
                 return;
@@ -1224,7 +1224,7 @@ impl Reactor {
                 | Event::ActiveDisplayChanged { .. }
                 | Event::SpaceCreated(_)
         ) {
-            self.reconcile_presentations();
+            self.commit_presentations();
         }
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
@@ -2515,7 +2515,7 @@ impl Reactor {
                         transaction,
                         crate::actor::app::FrameSource::Drag,
                     );
-                } else if let Err(error) = app.handle.send(Request::SetWindowFrame(
+                } else if let Err(error) = app.handle.send(Request::set_window_frame(
                     write.window,
                     write.frame,
                     transaction,
@@ -3120,6 +3120,11 @@ impl Reactor {
             return Ok(outcome);
         }
         if display_set_changed {
+            if let Some(tx) = &self.animation_tx {
+                let _ = tx.send(animation::Message::Displays(
+                    screens.iter().map(|s| s.id.as_u32()).collect(),
+                ));
+            }
             let active_displays: Vec<String> =
                 screens.iter().map(|screen| screen.display_uuid.clone()).collect();
             self.layout_manager.layout_engine.prune_display_state(&active_displays);
@@ -3938,7 +3943,7 @@ impl Reactor {
                 TransactionId::default()
             };
             if let Some(app) = self.app_manager.apps.get(&placement.window.pid)
-                && let Err(error) = app.handle.send(Request::SetWindowFrame(
+                && let Err(error) = app.handle.send(Request::set_window_frame(
                     placement.window,
                     frame,
                     transaction,

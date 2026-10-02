@@ -595,44 +595,16 @@ impl Apps {
                 Request::ApplicationGloballyActivated(pid) => {
                     events.push(Event::ApplicationActivated(pid, Quiet::No));
                 }
-                Request::SetWindowFrame(wid, frame, txid, _) => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    window.frame = frame;
-                    if !window.animating && !old_frame.same_as(frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
-                    }
-                }
-                Request::SetBatchWindowFrame(frames, txid, _) => {
+                Request::SetWindowFrames(frames, txid, mode, _) => {
                     for (wid, frame) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;
-                        window.frame = frame;
-                        if !window.animating && !old_frame.same_as(frame) {
-                            events.push(Event::WindowFrameChanged(
-                                wid,
-                                frame,
-                                Some(txid),
-                                Requested(true),
-                                None,
-                            ));
+                        if mode == crate::actor::app::FrameMode::Position {
+                            window.frame.origin = frame.origin;
+                        } else {
+                            window.frame = frame;
                         }
-                    }
-                }
-                Request::SetWorkspaceSwitchPositions(positions, txid, _) => {
-                    for (wid, position) in positions {
-                        let window = self.windows.entry(wid).or_default();
-                        window.last_seen_txid = txid;
-                        let old_frame = window.frame;
-                        window.frame.origin = position;
                         if !window.animating && !old_frame.same_as(window.frame) {
                             events.push(Event::WindowFrameChanged(
                                 wid,
@@ -642,21 +614,6 @@ impl Apps {
                                 None,
                             ));
                         }
-                    }
-                }
-                Request::SetWindowPos(wid, pos, txid, _) => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    window.frame.origin = pos;
-                    if !window.animating && !old_frame.same_as(window.frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            window.frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
                     }
                 }
                 Request::InteractiveFramesPending(frames) => {

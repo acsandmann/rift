@@ -2821,7 +2821,7 @@ fn workspace_switch_batches_all_window_positions_with_eui_enabled() {
         requests.iter().any(|req| {
             matches!(
                 req,
-                Request::SetWorkspaceSwitchPositions(positions, _, true)
+                Request::SetWindowFrames(positions, _, crate::actor::app::FrameMode::Position, true)
                     if positions.iter().any(|(wid, _)| *wid == WindowId::new(1, 1))
             )
         }),
@@ -2851,15 +2851,16 @@ fn non_workspace_instant_layout_keeps_full_frame_batch() {
     assert!(
         requests.iter().any(|request| matches!(
             request,
-            Request::SetBatchWindowFrame(frames, _, true)
+            Request::SetWindowFrames(frames, _, crate::actor::app::FrameMode::Full, true)
                 if frames.as_slice() == [(wid, target)]
         )),
         "ordinary instant layouts must retain full-frame writes: {requests:?}"
     );
     assert!(
-        requests
-            .iter()
-            .all(|request| !matches!(request, Request::SetWorkspaceSwitchPositions(..))),
+        requests.iter().all(|request| !matches!(
+            request,
+            Request::SetWindowFrames(_, _, crate::actor::app::FrameMode::Position, _)
+        )),
         "the workspace-switch-only request escaped into an ordinary instant layout: {requests:?}"
     );
 }
@@ -2886,15 +2887,16 @@ fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
     assert!(
         requests.iter().any(|request| matches!(
             request,
-            Request::SetBatchWindowFrame(frames, _, true)
+            Request::SetWindowFrames(frames, _, crate::actor::app::FrameMode::Full, true)
                 if frames.as_slice() == [(wid, target)]
         )),
         "workspace layouts with size changes must retain full-frame writes: {requests:?}"
     );
     assert!(
-        requests
-            .iter()
-            .all(|request| !matches!(request, Request::SetWorkspaceSwitchPositions(..))),
+        requests.iter().all(|request| !matches!(
+            request,
+            Request::SetWindowFrames(_, _, crate::actor::app::FrameMode::Position, _)
+        )),
         "a size-changing workspace layout must not use position-only writes: {requests:?}"
     );
 }
@@ -2964,10 +2966,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     assert!(
         requests.iter().any(|req| {
             matches!(req,
-                Request::SetWindowFrame(req_wid, frame, _, true)
-                    if *req_wid == wid && frame.same_as(hidden_target)
-            ) || matches!(req,
-                Request::SetBatchWindowFrame(frames, _, true)
+                Request::SetWindowFrames(frames, _, crate::actor::app::FrameMode::Full, true)
                     if frames.iter().any(|(req_wid, frame)| *req_wid == wid && frame.same_as(hidden_target))
             )
         }),
@@ -3117,13 +3116,8 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
     let requests = apps.requests();
     assert!(
         requests.iter().any(|request| match request {
-            Request::SetWindowFrame(wid, _, _, _) => *wid == activated,
-            Request::SetBatchWindowFrame(frames, _, _) => {
-                frames.iter().any(|(wid, _)| *wid == activated)
-            }
-            Request::SetWorkspaceSwitchPositions(positions, _, _) => {
-                positions.iter().any(|(wid, _)| *wid == activated)
-            }
+            Request::SetWindowFrames(frames, _, _, _) =>
+                frames.iter().any(|(wid, _)| *wid == activated),
             _ => false,
         }),
         "auto workspace switch should arrange the activated window immediately: {requests:?}"
@@ -4269,8 +4263,8 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
     let space = SpaceId::new(1);
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
     apps.requests();
-    let (tx, rx) = crossbeam_channel::unbounded();
-    reactor.animation_tx = Some(tx.into());
+    let (tx, rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(tx);
     reactor.config.settings.animate = true;
     let mut manager = super::animation::AnimationManager::new();
     let left = WindowId::new(1, 1);
@@ -4284,7 +4278,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         false,
         None,
     ));
-    manager.handle_message(rx.try_recv().unwrap());
+    manager.handle_message(rx.commands.try_recv().unwrap());
     let wsid = reactor.state.windows.window(right).unwrap().info.sys_id.unwrap();
     let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
     // An intermediate AX frame can coincide with the next layout's target.
@@ -4311,7 +4305,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         false,
         None,
     ));
-    manager.handle_message(rx.try_recv().unwrap());
+    manager.handle_message(rx.commands.try_recv().unwrap());
     apps.requests();
     manager.tick_at(std::time::Instant::now() + std::time::Duration::from_secs(1));
     let final_frame = apps
@@ -4370,10 +4364,7 @@ fn animated_layout_handles_windows_without_server_ids() {
 
     let requests = apps.requests();
     assert!(
-        requests.iter().any(|request| matches!(
-            request,
-            Request::SetWindowFrame(..) | Request::SetBatchWindowFrame(..)
-        )),
+        requests.iter().any(|request| matches!(request, Request::SetWindowFrames(..))),
         "expected layout to still request a frame update without a server id: {requests:?}"
     );
 }
@@ -4418,8 +4409,7 @@ fn moving_tiled_window_to_display_applies_destination_layout_after_transfer_fram
         .requests()
         .into_iter()
         .flat_map(|request| match request {
-            Request::SetWindowFrame(wid, frame, _, _) if wid == moved => vec![frame],
-            Request::SetBatchWindowFrame(frames, _, _) => frames
+            Request::SetWindowFrames(frames, _, _, _) => frames
                 .into_iter()
                 .filter_map(|(wid, frame)| (wid == moved).then_some(frame))
                 .collect(),

@@ -24,7 +24,7 @@ thread_local! {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// One replaceable tick, never a queue. CA and Rust monotonic clocks are bridged
-/// at the callback, so sleep/wake cannot stale the bridge.
+/// on the presenter, so the main-thread callback only publishes native timing.
 #[derive(Clone, Copy, Debug)]
 pub struct DisplayTick {
     pub timestamp: f64,
@@ -32,19 +32,20 @@ pub struct DisplayTick {
 }
 
 #[derive(Default)]
-struct LatestTick(Option<(DisplayTick, Instant)>);
+struct LatestTick(Option<DisplayTick>);
 impl LatestTick {
-    fn publish(&mut self, timestamp: f64, target_timestamp: f64, target: Instant) {
-        self.0 = Some((DisplayTick { timestamp, target_timestamp }, target));
+    fn publish(&mut self, timestamp: f64, target_timestamp: f64) {
+        self.0 = Some(DisplayTick { timestamp, target_timestamp });
     }
 
-    fn take(&mut self) -> Option<(DisplayTick, Instant)> { self.0.take() }
+    fn take(&mut self) -> Option<DisplayTick> { self.0.take() }
 }
 
 struct State {
     wake: Sender<()>,
     latest: Mutex<LatestTick>,
     cancelled: AtomicBool,
+    paused: AtomicBool,
 }
 
 define_class! {
@@ -63,14 +64,8 @@ define_class! {
             }
             let timestamp = link.timestamp();
             let target_timestamp = link.targetTimestamp();
-            let now = Instant::now();
-            let delta = target_timestamp - objc2_quartz_core::CACurrentMediaTime();
-            // Bound malformed/runtime timing without losing valid past targets.
-            let target = if delta.is_finite() && delta.abs() < 1.0 {
-                let duration = std::time::Duration::from_secs_f64(delta.abs());
-                if delta >= 0.0 { now + duration } else { now - duration }
-            } else { now };
-            state.latest.lock().publish(timestamp, target_timestamp, target);
+            if state.paused.load(Ordering::Acquire) { return; }
+            state.latest.lock().publish(timestamp, target_timestamp);
             let _ = state.wake.try_send(());
         }
     }
@@ -89,6 +84,7 @@ impl DisplayLink {
             wake,
             latest: Mutex::default(),
             cancelled: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
         });
         queue::main().after_f_s(
             Time::NOW,
@@ -108,10 +104,12 @@ impl DisplayLink {
                 if !screen.respondsToSelector(sel!(displayLinkWithTarget:selector:)) {
                     return;
                 }
+                let paused = state.paused.load(Ordering::Acquire);
                 let target = DisplayLinkTarget::alloc().set_ivars(state);
                 let target: Retained<DisplayLinkTarget> = unsafe { msg_send![super(target), init] };
                 // The target is retained by the link. It does not retain the link in return.
                 let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
+                link.setPaused(paused);
                 unsafe {
                     link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
                 };
@@ -123,7 +121,37 @@ impl DisplayLink {
         Self { id, state }
     }
 
-    pub fn latest(&self) -> Option<(DisplayTick, Instant)> { self.state.latest.lock().take() }
+    pub fn set_paused(&self, paused: bool) {
+        if self.state.paused.swap(paused, Ordering::AcqRel) == paused {
+            return;
+        }
+        self.state.latest.lock().take();
+        let state = self.state.clone();
+        queue::main().after_f_s(Time::NOW, (self.id, state), |(id, state)| {
+            LINKS.with(|links| {
+                if let Some(link) = links.borrow().get(&id) {
+                    link.setPaused(state.paused.load(Ordering::Acquire));
+                }
+            });
+        });
+    }
+
+    pub fn latest(&self) -> Option<(DisplayTick, Instant)> {
+        let tick = self.state.latest.lock().take()?;
+        let now = Instant::now();
+        let delta = tick.target_timestamp - objc2_quartz_core::CACurrentMediaTime();
+        let target = if delta.is_finite() && delta.abs() < 1.0 {
+            let duration = std::time::Duration::from_secs_f64(delta.abs());
+            if delta >= 0.0 {
+                now + duration
+            } else {
+                now - duration
+            }
+        } else {
+            now
+        };
+        Some((tick, target))
+    }
 }
 
 impl Drop for DisplayLink {
@@ -148,14 +176,14 @@ mod tests {
         let mut ticks = LatestTick::default();
         assert!(ticks.take().is_none());
         for timestamp in [1.0, 2.0, 3.0] {
-            ticks.publish(timestamp, timestamp + 0.008, Instant::now());
+            ticks.publish(timestamp, timestamp + 0.008);
         }
-        let (newest, _) = ticks.take().unwrap();
+        let newest = ticks.take().unwrap();
         assert_eq!(newest.timestamp, 3.0);
         assert_eq!(newest.target_timestamp, 3.008);
         assert!(ticks.take().is_none());
-        ticks.publish(4.0, 4.008, Instant::now());
-        assert_eq!(ticks.take().unwrap().0.timestamp, 4.0);
+        ticks.publish(4.0, 4.008);
+        assert_eq!(ticks.take().unwrap().timestamp, 4.0);
         assert!(ticks.take().is_none());
     }
 }

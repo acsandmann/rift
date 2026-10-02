@@ -2,9 +2,11 @@
 //! View targets follow niri's fit/center and gesture snap semantics. Ordinary layout
 //! animation remains in the reactor; touchpad release belongs to the camera.
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -126,6 +128,7 @@ pub(crate) struct CameraSpring {
     target: f64,
     velocity: f64,
     current: f64,
+    current_velocity: f64,
     started: Instant,
     sampled: Instant,
 }
@@ -136,6 +139,7 @@ impl CameraSpring {
             target,
             velocity,
             current: from,
+            current_velocity: velocity,
             started,
             sampled: started,
         }
@@ -157,6 +161,7 @@ impl CameraSpring {
         let now = now.max(self.sampled);
         let (position, velocity) = self.position_velocity(now);
         self.current = position;
+        self.current_velocity = velocity;
         self.sampled = now;
         // Check both position and speed so crossing the target cannot finish early.
         (self.current - self.target).abs() <= 0.25 / scale
@@ -204,14 +209,27 @@ struct Geometry {
 
 /// Prepared world frames and temporary camera motion. Built only at semantic
 /// boundaries; sampling does not enter the layout engine.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct ViewportPresentation {
     viewport: Viewport,
-    motion: MotionHistory,
+    motion: Arc<Mutex<MotionHistory>>,
     bounds: (f64, f64),
     width: f64,
     tiling: CGRect,
     screen: CGRect,
+}
+
+/// Rendered scalar state, read only at semantic boundaries. Motion samples stay
+/// shared so release keeps the exact touchpad velocity history without cloning
+/// a camera or copying history on each display refresh.
+#[derive(Clone, Debug)]
+pub(crate) struct PresentedViewport {
+    pub offset: f64,
+    pub velocity: f64,
+    pub target: f64,
+    pub gesturing: bool,
+    pub timestamp: Instant,
+    motion: Arc<Mutex<MotionHistory>>,
 }
 
 impl ViewportPresentation {
@@ -251,7 +269,7 @@ impl ViewportPresentation {
 
     pub fn update(&mut self, delta: f64, time: Duration) {
         if let Viewport::Gesture(offset) = &mut self.viewport {
-            self.motion.update(offset, self.bounds, delta * self.width, time);
+            self.motion.lock().update(offset, self.bounds, delta * self.width, time);
         }
     }
 
@@ -264,9 +282,33 @@ impl ViewportPresentation {
             .then_some(world.origin.x + self.tiling.origin.x - presented.origin.x)
     }
 
-    pub fn frame(&self, mut frame: CGRect, fixed: bool, scale: f64) -> CGRect {
+    pub fn snapshot(&self, now: Instant) -> PresentedViewport {
+        PresentedViewport {
+            offset: self.offset(),
+            velocity: match &self.viewport {
+                Viewport::Animation(s) => s.current_velocity,
+                _ => 0.0,
+            },
+            target: self.target(),
+            gesturing: self.gesturing(),
+            timestamp: now,
+            motion: self.motion.clone(),
+        }
+    }
+
+    pub fn target_frame(&self, frame: CGRect, fixed: bool, scale: f64) -> CGRect {
+        self.frame_at_offset(frame, fixed, scale, self.target())
+    }
+
+    pub fn frame_at_offset(
+        &self,
+        mut frame: CGRect,
+        fixed: bool,
+        scale: f64,
+        offset: f64,
+    ) -> CGRect {
         if !fixed {
-            frame = translate_frame(frame, self.offset(), self.tiling, self.screen, true);
+            frame = translate_frame(frame, offset, self.tiling, self.screen, true);
         }
         frame.origin.x = (frame.origin.x * scale).round() / scale;
         frame.origin.y = (frame.origin.y * scale).round() / scale;
@@ -1133,7 +1175,7 @@ impl ScrollingLayoutSystem {
         motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
         let camera = ViewportPresentation {
             viewport: state.viewport.clone(),
-            motion,
+            motion: Arc::new(Mutex::new(motion)),
             bounds: g.bounds,
             width: g.tiling.size.width,
             tiling: g.tiling,
@@ -1155,10 +1197,16 @@ impl ScrollingLayoutSystem {
         Some((camera, frames))
     }
 
-    pub(crate) fn reconcile_presentation(&mut self, layout: LayoutId, p: &ViewportPresentation) {
+    pub(crate) fn commit_presented_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
         if let Some(state) = self.layouts.get_mut(layout) {
-            state.viewport = p.viewport.clone();
-            state.motion = p.motion.clone();
+            state.viewport = if p.gesturing {
+                Viewport::Gesture(p.offset)
+            } else if p.offset != p.target {
+                Viewport::Animation(CameraSpring::new(p.offset, p.target, p.velocity, p.timestamp))
+            } else {
+                Viewport::Static(p.offset)
+            };
+            state.motion = p.motion.lock().clone();
         }
     }
 
@@ -2027,7 +2075,9 @@ pub(crate) mod tests {
             .map(|(camera, frames)| {
                 frames
                     .into_iter()
-                    .map(|(wid, frame, fixed)| (wid, camera.frame(frame, fixed, 1.0)))
+                    .map(|(wid, frame, fixed)| {
+                        (wid, camera.frame_at_offset(frame, fixed, 1.0, camera.offset()))
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
@@ -3150,7 +3200,7 @@ pub(crate) mod tests {
                 previous = current;
             }
             let now = started + Duration::from_millis(80);
-            f.system.reconcile_presentation(f.layout, &p);
+            f.system.commit_presented_viewport(f.layout, &p.snapshot(now));
             f.system.begin_viewport_gesture(f.layout, now);
             assert_eq!(f.system.layouts[f.layout].viewport.offset(), previous);
             f.system.update_viewport_gesture(
@@ -3169,7 +3219,7 @@ pub(crate) mod tests {
             assert_eq!(second.from_offset, previous + direction * 20.0);
             let (mut p, _) = f.system.presentation(f.layout).unwrap();
             assert!(!p.sample(Instant::now() + Duration::from_secs(2), 1.0));
-            f.system.reconcile_presentation(f.layout, &p);
+            f.system.commit_presented_viewport(f.layout, &p.snapshot(Instant::now()));
             assert!(
                 matches!(f.system.layouts[f.layout].viewport, Viewport::Static(x) if x == second.offset)
             );
@@ -3188,7 +3238,7 @@ pub(crate) mod tests {
         assert!(matches!(&state.viewport, Viewport::Animation(s) if s.target == 500.0));
         let (mut p, _) = f.system.presentation(f.layout).unwrap();
         p.finish();
-        f.system.reconcile_presentation(f.layout, &p);
+        f.system.commit_presented_viewport(f.layout, &p.snapshot(Instant::now()));
         assert_eq!(f.system.layouts[f.layout].viewport.offset(), 500.0);
     }
 
@@ -3212,11 +3262,14 @@ pub(crate) mod tests {
         assert!((position - next_position).abs() < 1e-9);
         assert!((velocity - next_velocity).abs() < 1e-9);
         let (_, world, fixed) = frames[0];
-        let before_rebase = p.frame(world, fixed, 2.0);
+        let before_rebase = p.frame_at_offset(world, fixed, 2.0, p.offset());
         p.viewport.rebase(40.0);
         let mut rebased_world = world;
         rebased_world.origin.x += 40.0;
-        assert_eq!(p.frame(rebased_world, fixed, 2.0), before_rebase);
+        assert_eq!(
+            p.frame_at_offset(rebased_world, fixed, 2.0, p.offset()),
+            before_rebase
+        );
         let Viewport::Animation(spring) = &p.viewport else {
             panic!("spring")
         };
@@ -3282,10 +3335,13 @@ pub(crate) mod tests {
         let (mut p, frames) = f.system.presentation(f.layout).unwrap();
         p.viewport = Viewport::Static(0.6);
         let (_, world, fixed) = frames[0];
-        let retina = p.frame(world, fixed, 2.0);
+        let retina = p.frame_at_offset(world, fixed, 2.0, p.offset());
         assert_eq!(retina.origin.x.fract().abs(), 0.5);
         assert_eq!(retina.size, world.size);
-        assert_eq!(p.frame(world, fixed, 1.0).origin.x.fract(), 0.0);
+        assert_eq!(
+            p.frame_at_offset(world, fixed, 1.0, p.offset()).origin.x.fract(),
+            0.0
+        );
     }
 
     #[test]
@@ -3321,7 +3377,7 @@ pub(crate) mod tests {
                 !p.sample(Instant::now() + Duration::from_secs(1), 1.0),
                 "edit {edit} must settle"
             );
-            f.system.reconcile_presentation(f.layout, &p);
+            f.system.commit_presented_viewport(f.layout, &p.snapshot(Instant::now()));
             if edit == 2 {
                 assert_eq!(f.frames(), frames);
             }

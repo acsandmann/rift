@@ -60,7 +60,7 @@ impl Reactor {
                 if !control.valid(context.epoch) || !self.gesture_space_active(context.space) {
                     return;
                 }
-                self.reconcile_presentations();
+                self.commit_presentations();
                 let target = self
                     .layout_manager
                     .layout_engine
@@ -81,7 +81,7 @@ impl Reactor {
                     {
                         if let Some((mut p, _)) = system.presentation(layout) {
                             p.finish();
-                            system.reconcile_presentation(layout, &p);
+                            system.commit_presented_viewport(layout, &p.snapshot(Instant::now()));
                         }
                     }
                     if visible {
@@ -168,20 +168,15 @@ impl Reactor {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
             let _ = self.present_camera(space, false, None, None);
-            self.reconcile_presentations();
+            self.commit_presentations();
         }
     }
 
     fn finish_gesture(&mut self, final_sample: Option<Motion>, cancelled: bool) {
-        let Some(s) = &self.viewport_gesture else { return };
-        let space = s.context.space;
-        if let Some(camera) = self.freeze_camera(space) {
-            self.reconcile_camera(&camera);
-            if let Some(prepared) = self.presentations.get_mut(&space) {
-                prepared.frozen = Some(camera);
-            }
+        if self.viewport_gesture.is_none() {
+            return;
         }
-        self.reconcile_presentations();
+        self.commit_presentations();
         let Some(s) = &self.viewport_gesture else { return };
         if !self
             .layout_manager
@@ -351,17 +346,17 @@ mod tests {
             }
             if let Some(s) = &self.viewport_gesture
                 && let Some(camera) = self.presentations.get_mut(&s.context.space)
-                && let Some(camera) = &mut camera.frozen
+                && let Some(camera) = &mut camera.headless
             {
                 camera.sample(Instant::now());
             }
-            self.reconcile_presentations();
+            self.commit_presentations();
             if self.viewport_gesture.as_ref().is_some_and(|s| {
                 s.released
                     && self
                         .presentations
                         .get(&s.context.space)
-                        .is_none_or(|c| c.frozen.as_ref().is_none_or(|c| !c.active))
+                        .is_none_or(|c| c.headless.as_ref().is_none_or(|c| !c.active))
             }) {
                 self.retire_viewport_session();
             }
@@ -525,7 +520,7 @@ mod tests {
         r.start_gesture_presentation();
         let before = offset(&r);
         motion.publish(sample(1, 40.0, 100));
-        let camera = r.presentations.get_mut(&ctx.space).unwrap().frozen.as_mut().unwrap();
+        let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
         camera.sample(Instant::now());
         let presented = camera.presentation.offset();
         assert_ne!(presented, before);
@@ -883,7 +878,12 @@ mod tests {
                         );
                         reconciled.insert(wid);
                     }
-                    Request::SetWorkspaceSwitchPositions(positions, _, _) => {
+                    Request::SetWindowFrames(
+                        positions,
+                        _,
+                        crate::actor::app::FrameMode::Position,
+                        _,
+                    ) => {
                         for (wid, position) in positions {
                             if written.contains(&wid) {
                                 assert!(
@@ -892,7 +892,7 @@ mod tests {
                                 );
                             }
                             assert_eq!(
-                                position,
+                                position.origin,
                                 r.state.windows.window(wid).unwrap().frame_monotonic.origin
                             );
                             hidden.insert(wid);
@@ -976,9 +976,10 @@ mod tests {
                 }
             } else {
                 r.start_gesture_presentation();
-                let camera = r.presentations.get_mut(&ctx.space).unwrap().frozen.as_mut().unwrap();
+                let camera =
+                    r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
                 camera.sample(Instant::now() + Duration::from_millis(50));
-                r.reconcile_presentations();
+                r.commit_presentations();
                 let mut moved = 0;
                 while let Ok((_, request)) = app_rx.try_recv() {
                     if let Request::InteractiveFramesPending(queue) = request {

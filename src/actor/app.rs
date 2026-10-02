@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::AXError;
-use objc2_core_foundation::{CGPoint, CGRect};
+#[cfg(test)]
+use objc2_core_foundation::CGPoint;
+use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::oneshot;
@@ -482,15 +484,30 @@ impl AppThreadHandle {
         txid: TransactionId,
         source: FrameSource,
     ) {
+        self.send_interactive_frames([(wid, frame, set_size, txid, source)]);
+    }
+
+    /// Publish one application's refresh under one lock and one wake.
+    pub(crate) fn send_interactive_frames(
+        &self,
+        frames: impl IntoIterator<Item = (WindowId, CGRect, bool, TransactionId, FrameSource)>,
+    ) {
         let mut pending = self.interactive_frames.0.lock().unwrap();
-        let set_size = set_size
-            || pending
-                .latest
-                .get(&wid)
-                .is_some_and(|(_, size, _, old, _)| *size && *old == source);
-        pending.sequence = pending.sequence.wrapping_add(1);
-        let sequence = pending.sequence;
-        pending.latest.insert(wid, (frame, set_size, txid, source, sequence));
+        let mut changed = false;
+        for (wid, frame, set_size, txid, source) in frames {
+            let set_size = set_size
+                || pending
+                    .latest
+                    .get(&wid)
+                    .is_some_and(|(_, size, _, old, _)| *size && *old == source);
+            pending.sequence = pending.sequence.wrapping_add(1);
+            let sequence = pending.sequence;
+            pending.latest.insert(wid, (frame, set_size, txid, source, sequence));
+            changed = true;
+        }
+        if !changed {
+            return;
+        }
         // Enqueue the wake before releasing the publication lock. Otherwise a
         // second producer could enqueue EndWindowAnimation ahead of this wake.
         if !std::mem::replace(&mut pending.wake_pending, true)
@@ -525,11 +542,7 @@ pub enum Request {
     WindowMaybeDestroyed(WindowId),
     CloseWindow(Option<WindowServerId>),
 
-    SetWindowFrame(WindowId, CGRect, TransactionId, bool),
-    SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
-    /// Position-only batch reserved for virtual workspace switches.
-    SetWorkspaceSwitchPositions(Vec<(WindowId, CGPoint)>, TransactionId, bool),
-    SetWindowPos(WindowId, CGPoint, TransactionId, bool),
+    SetWindowFrames(Vec<(WindowId, CGRect)>, TransactionId, FrameMode, bool),
     #[doc(hidden)]
     InteractiveFramesPending(InteractiveFrameQueue),
 
@@ -546,14 +559,21 @@ pub enum Request {
     Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameMode {
+    Full,
+    Position,
+}
+
 impl Request {
+    pub fn set_window_frame(wid: WindowId, frame: CGRect, txid: TransactionId, eui: bool) -> Self {
+        Self::SetWindowFrames(vec![(wid, frame)], txid, FrameMode::Full, eui)
+    }
+
     #[inline]
     fn disables_enhanced_ui(&self) -> bool {
         match self {
-            Self::SetWindowFrame(_, _, _, enabled)
-            | Self::SetBatchWindowFrame(_, _, enabled)
-            | Self::SetWorkspaceSwitchPositions(_, _, enabled)
-            | Self::SetWindowPos(_, _, _, enabled) => *enabled,
+            Self::SetWindowFrames(_, _, _, enabled) => *enabled,
             _ => false,
         }
     }
@@ -611,7 +631,6 @@ struct State {
     enhanced_ui: EnhancedUi,
     raises_tx: actor::Sender<RaiseRequest>,
     tx_store: Option<WindowTxStore>,
-    pending_frames: HashMap<WindowId, PendingFrame>,
 }
 
 struct AppWindowState {
@@ -855,6 +874,7 @@ impl State {
             state.enhanced_ui.acquire(&app);
         }
 
+        let mut pending_frames = HashMap::default();
         let mut should_terminate = false;
         for (span, request) in batch.drain(..) {
             let mut state = this.borrow_mut();
@@ -863,7 +883,7 @@ impl State {
                 debug!(?state.bundle_id, ?state.pid, ?request, "Got request");
             }
             let request_kind: &'static str = (&request).into();
-            match state.handle_request(request) {
+            match state.handle_request(request, &mut pending_frames) {
                 Ok(true) => {
                     should_terminate = true;
                     break;
@@ -882,7 +902,12 @@ impl State {
         }
 
         if !should_terminate {
-            this.borrow_mut().flush_all_frames();
+            let mut state = this.borrow_mut();
+            for (wid, frame) in pending_frames {
+                if let Err(err) = state.apply_interactive_frame(wid, frame) {
+                    warn!(?wid, ?err, "Failed to apply animation frame");
+                }
+            }
         }
 
         if disable_enhanced_ui {
@@ -894,18 +919,19 @@ impl State {
         should_terminate
     }
 
-    fn flush_frames(&mut self, wid: WindowId) -> Result<(), AxError> {
-        let Some(PendingFrame {
+    fn apply_interactive_frame(
+        &mut self,
+        wid: WindowId,
+        pending: PendingFrame,
+    ) -> Result<(), AxError> {
+        let PendingFrame {
             span,
             frame,
             set_size,
             txid,
             source,
             ..
-        }) = self.pending_frames.remove(&wid)
-        else {
-            return Ok(());
-        };
+        } = pending;
         let _guard = span.enter();
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
@@ -922,14 +948,6 @@ impl State {
             window.last_known_frame.origin = frame.origin;
         }
         Ok(())
-    }
-
-    fn flush_all_frames(&mut self) {
-        while let Some(wid) = self.pending_frames.keys().next().copied() {
-            if let Err(err) = self.flush_frames(wid) {
-                warn!(?wid, ?err, "Failed to apply animation frame");
-            }
-        }
     }
 
     async fn handle_raises(this: &RefCell<Self>, mut rx: actor::Receiver<RaiseRequest>) {
@@ -1055,7 +1073,11 @@ impl State {
     }
 
     #[instrument(skip_all, fields(app = ?self.app, ?request))]
-    fn handle_request(&mut self, request: Request) -> Result<bool, AxError> {
+    fn handle_request(
+        &mut self,
+        request: Request,
+        pending_frames: &mut HashMap<WindowId, PendingFrame>,
+    ) -> Result<bool, AxError> {
         match request {
             Request::Terminate => {
                 return Ok(true);
@@ -1094,61 +1116,9 @@ impl State {
                     self.on_global_activation()?;
                 }
             }
-            Request::SetWindowPos(wid, pos, txid, _) => {
-                let elem = match self.window_mut(wid) {
-                    Ok(window) => {
-                        window.last_seen_txid = txid;
-                        window.frame_source = FrameSource::Ordinary;
-                        window.elem.clone()
-                    }
-                    Err(err) => match err {
-                        AxError::Ax(code) => {
-                            if self.handle_ax_error(wid, &code) {
-                                return Ok(false);
-                            }
-                            return Err(AxError::Ax(code));
-                        }
-                        AxError::NotFound => return Ok(false),
-                    },
-                };
-
-                let _ = elem.set_position(pos);
-                self.window_mut(wid)?.last_known_frame.origin = pos;
-
-                let mut frame =
-                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => {
-                            self.window_mut(wid)?.last_known_frame = frame;
-                            frame
-                        }
-                        None => return Ok(false),
-                    };
-
-                // one retry
-                if frame.origin.x != pos.x || frame.origin.y != pos.y {
-                    warn!("set_position failed, retrying");
-                    let _ = elem.set_position(pos);
-                    frame =
-                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                            Some(frame) => {
-                                self.window_mut(wid)?.last_known_frame = frame;
-                                frame
-                            }
-                            None => return Ok(false),
-                        };
-                }
-
-                self.send_event(Event::WindowFrameChanged(
-                    wid,
-                    frame,
-                    Some(txid),
-                    Requested(true),
-                    None,
-                ));
-            }
             Request::InteractiveFramesPending(frames) => {
                 frames.drain_with(|wid, frame, set_size, txid, source, sequence| {
-                    self.pending_frames.insert(wid, PendingFrame {
+                    pending_frames.insert(wid, PendingFrame {
                         span: Span::current(),
                         frame,
                         set_size,
@@ -1158,46 +1128,7 @@ impl State {
                     });
                 });
             }
-            Request::SetWindowFrame(wid, desired, txid, _) => {
-                let elem = match self.window_mut(wid) {
-                    Ok(window) => {
-                        window.last_seen_txid = txid;
-                        window.frame_source = FrameSource::Ordinary;
-                        window.elem.clone()
-                    }
-                    Err(err) => match err {
-                        AxError::Ax(code) => {
-                            if self.handle_ax_error(wid, &code) {
-                                return Ok(false);
-                            }
-                            return Err(AxError::Ax(code));
-                        }
-                        AxError::NotFound => return Ok(false),
-                    },
-                };
-
-                let window = self.window_mut(wid)?;
-                write_frame(&elem, Some(window.last_known_frame), desired);
-                window.last_known_frame = desired;
-
-                let frame =
-                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => {
-                            self.window_mut(wid)?.last_known_frame = frame;
-                            frame
-                        }
-                        None => return Ok(false),
-                    };
-
-                self.send_event(Event::WindowFrameChanged(
-                    wid,
-                    frame,
-                    Some(txid),
-                    Requested(true),
-                    None,
-                ));
-            }
-            Request::SetBatchWindowFrame(frames, txid, _) => {
+            Request::SetWindowFrames(frames, txid, mode, _) => {
                 for (wid, desired) in frames {
                     let elem = match self.window_mut(wid) {
                         Ok(window) => {
@@ -1217,52 +1148,14 @@ impl State {
                     };
 
                     let window = self.window_mut(wid)?;
-                    write_frame(&elem, Some(window.last_known_frame), desired);
-                    window.last_known_frame = desired;
+                    if mode == FrameMode::Position {
+                        let _ = elem.set_position(desired.origin);
+                        window.last_known_frame.origin = desired.origin;
+                    } else {
+                        write_frame(&elem, Some(window.last_known_frame), desired);
+                        window.last_known_frame = desired;
+                    }
 
-                    let frame =
-                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                            Some(frame) => {
-                                self.window_mut(wid)?.last_known_frame = frame;
-                                frame
-                            }
-                            None => continue,
-                        };
-
-                    self.send_event(Event::WindowFrameChanged(
-                        wid,
-                        frame,
-                        Some(txid),
-                        Requested(true),
-                        None,
-                    ));
-                }
-            }
-            Request::SetWorkspaceSwitchPositions(positions, txid, _) => {
-                for (wid, position) in positions {
-                    let elem = match self.window_mut(wid) {
-                        Ok(window) => {
-                            window.last_seen_txid = txid;
-                            window.frame_source = FrameSource::Ordinary;
-                            window.elem.clone()
-                        }
-                        Err(err) => match err {
-                            AxError::Ax(code) => {
-                                if self.handle_ax_error(wid, &code) {
-                                    continue;
-                                }
-                                return Err(AxError::Ax(code));
-                            }
-                            AxError::NotFound => continue,
-                        },
-                    };
-
-                    let _ = elem.set_position(position);
-                    self.window_mut(wid)?.last_known_frame.origin = position;
-
-                    // Preserve the existing per-window acknowledgement semantics. In
-                    // particular, report the frame AX actually accepted rather than the
-                    // requested position combined with a cached size.
                     let frame =
                         match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
                             Some(frame) => {
@@ -1303,16 +1196,16 @@ impl State {
                     _ => unreachable!(),
                 };
                 if let Some(through) = through {
-                    if self.pending_frames.get(&wid).is_some_and(|frame| frame.sequence <= through)
-                    {
-                        self.pending_frames.remove(&wid);
+                    if pending_frames.get(&wid).is_some_and(|frame| frame.sequence <= through) {
+                        pending_frames.remove(&wid);
                     }
                     if let Ok(window) = self.window_mut(wid) {
                         window.last_animation_frame = None;
                     }
                 }
                 if through.is_none()
-                    && let Err(err) = self.flush_frames(wid)
+                    && let Some(frame) = pending_frames.remove(&wid)
+                    && let Err(err) = self.apply_interactive_frame(wid, frame)
                 {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
@@ -2487,7 +2380,6 @@ fn app_thread_main(
         enhanced_ui: EnhancedUi::default(),
         raises_tx,
         tx_store,
-        pending_frames: HashMap::default(),
     };
 
     Executor::run(state.run(info, handle, requests_rx, notifications_rx, raises_rx));

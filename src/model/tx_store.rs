@@ -43,9 +43,13 @@ impl WindowTxStore {
         }
     }
 
-    /// Publish a presentation frame and its transaction in one entry update.
-    pub fn next_frame(&self, id: WindowServerId, target: CGRect) -> TransactionId {
-        self.advance(id, Some(target))
+    /// A retiring presentation cannot clear a newer semantic transaction.
+    pub fn clear_target_if_current(&self, id: &WindowServerId, txid: TransactionId) {
+        if let Some(mut record) = self.0.get_mut(id)
+            && record.txid == txid
+        {
+            record.target = None;
+        }
     }
 
     pub fn next_txid(&self, id: WindowServerId) -> TransactionId { self.advance(id, None) }
@@ -82,11 +86,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clear_target_keeps_last_txid() {
+    fn clear_target_keeps_last_txid_and_fences_retired_presentations() {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
-        let txid = store.next_frame(wsid, target);
+        let txid = store.next_txid(wsid);
+        store.insert(wsid, txid, target);
         assert_eq!(txid, TransactionId::default().next());
         assert_eq!(store.get(&wsid).unwrap().target, Some(target));
 
@@ -95,6 +100,18 @@ mod tests {
         let record = store.get(&wsid).expect("tx record should exist");
         assert_eq!(record.txid, txid);
         assert_eq!(record.target, None);
+
+        let newer = store.next_txid(wsid);
+        store.insert(wsid, newer, target);
+        store.clear_target_if_current(&wsid, txid);
+        assert_eq!(
+            store.get(&wsid).unwrap().target,
+            Some(target),
+            "late retirement must preserve the new target"
+        );
+        store.clear_target_if_current(&wsid, newer);
+        assert_eq!(store.get(&wsid).unwrap().target, None);
+        assert_eq!(store.last_txid(&wsid), newer);
     }
 
     #[test]
