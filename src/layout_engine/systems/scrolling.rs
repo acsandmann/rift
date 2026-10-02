@@ -996,23 +996,25 @@ impl ScrollingLayoutSystem {
             return None;
         };
         let g = state.geometry.as_ref()?;
+        // Once an edge swipe starts, keep its direction and camera fixed until lift.
+        // Opposite movement neither reverses the strip nor cancels accumulated intent.
+        let edge_swipe = state.motion.overscroll != 0.0;
         let raw = *offset + delta;
-        let bounded = raw.clamp(g.bounds.0, g.bounds.1);
+        let bounded = if edge_swipe {
+            *offset
+        } else {
+            raw.clamp(g.bounds.0, g.bounds.1)
+        };
         let moved = bounded - *offset;
         if !state.motion.push(moved, timestamp) {
             return None;
         }
-        if delta != 0.0 {
-            let excess = raw - bounded;
-            // Keep the strip at its edge while accumulating workspace intent.
-            // Reversing moves inward immediately and clears the edge intent.
-            state.motion.overscroll = if excess == 0.0 {
-                0.0
-            } else if excess.signum() == state.motion.overscroll.signum() {
-                state.motion.overscroll + excess
-            } else {
-                excess
-            };
+        if edge_swipe {
+            if delta.signum() == state.motion.overscroll.signum() {
+                state.motion.overscroll += delta;
+            }
+        } else {
+            state.motion.overscroll = raw - bounded;
         }
         *offset = bounded;
         Some(moved)
@@ -2796,7 +2798,7 @@ mod tests {
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
     #[test]
-    fn gesture_edges_stay_bounded_and_reverse_immediately() {
+    fn gesture_edges_latch_direction_until_lift() {
         for direction in [-1.0, 1.0] {
             let mut f = Fixture::new(4);
             let bounds = f.system.layouts[f.layout].geometry.as_ref().unwrap().bounds;
@@ -2838,11 +2840,23 @@ mod tests {
                 -direction * 75.0,
                 Duration::from_millis(40),
             );
-            assert_eq!(f.frame(1).origin.x, before + direction * 75.0);
+            assert_eq!(f.frame(1).origin.x, before);
             assert_eq!(
                 f.system.gesture_overscroll(f.layout),
-                0.0,
-                "reversal cancels workspace intent immediately"
+                direction * 0.2,
+                "opposite movement cannot reverse an edge swipe"
+            );
+            f.system.cancel_viewport_gesture(f.layout);
+            f.system.begin_viewport_gesture(f.layout, Instant::now());
+            f.system.update_viewport_gesture(
+                f.layout,
+                -direction * 75.0,
+                Duration::from_millis(30),
+            );
+            assert_eq!(
+                f.frame(1).origin.x,
+                before + direction * 75.0,
+                "lifting releases the edge direction for the next gesture"
             );
             f.system.cancel_viewport_gesture(f.layout);
             f.system.begin_viewport_gesture(f.layout, Instant::now());

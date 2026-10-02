@@ -660,7 +660,7 @@ mod tests {
                 let travel = threshold * fraction;
                 let store = r.layout_manager.layout_engine.workspaces();
                 let before = store.active_workspace(ctx.space);
-                let expected = if !enabled || skip_empty || fraction < 1.0 || reverse || cancelled {
+                let expected = if !enabled || skip_empty || fraction < 1.0 || cancelled {
                     before
                 } else if invert {
                     store.next_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
@@ -673,7 +673,7 @@ mod tests {
                     assert_eq!(
                         r.layout_manager.layout_engine.workspaces().active_workspace(ctx.space),
                         before,
-                        "edge movement must remain reversible until lift"
+                        "workspace handoff waits until lift"
                     );
                 }
                 for total in [

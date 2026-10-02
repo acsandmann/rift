@@ -1644,6 +1644,29 @@ fn unmanageable_window_crossing_spaces_is_not_reinserted_into_layout() {
 }
 
 #[test]
+fn deminiaturize_refreshes_stale_snapshot_without_activation() {
+    let (mut reactor, wid, _wsid, space, _other, frame) = reactor_with_window_on_space1();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.handle_event(Event::WindowMinimized(wid));
+    let mut restored_info = reactor.state.windows.window(wid).unwrap().info.clone();
+    restored_info.is_minimized = false;
+    // Some apps expose a nonstandard AX snapshot while minimized.
+    reactor.state.windows.window_mut(wid).unwrap().info.is_standard = false;
+
+    let outcome = reactor.dispatch_workflow(Event::WindowDeminiaturized(wid)).unwrap();
+    assert!(outcome.window_inventory_requests.contains(&wid.pid));
+    reactor.apply_event_outcome(outcome);
+    reactor.on_windows_discovered_with_app_info(
+        wid.pid,
+        vec![(wid, restored_info)],
+        vec![wid],
+        None,
+    );
+    assert!(has_window_in_layout(&mut reactor, space, frame, wid));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space));
+}
+
+#[test]
 fn duplicate_minimize_deminimize_and_unknown_window_events_do_not_arrange() {
     let (mut reactor, wid, _wsid, _space1, _space2, _frame) = reactor_with_window_on_space1();
 
