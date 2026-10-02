@@ -689,7 +689,7 @@ impl Apps {
                 Request::BeginWindowAnimation(wid) => {
                     self.windows.entry(wid).or_default().animating = true;
                 }
-                Request::EndWindowAnimation(wid) => {
+                Request::EndWindowAnimation(wid) | Request::CancelWindowAnimation(wid) => {
                     let window = self.windows.entry(wid).or_default();
                     window.animating = false;
                     events.push(Event::WindowFrameChanged(

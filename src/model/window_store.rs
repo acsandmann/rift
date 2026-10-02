@@ -202,13 +202,13 @@ impl WindowStore {
         true
     }
 
-    pub(crate) fn windows_owned_by(&self, manager: ExternalManagerId) -> Vec<WindowId> {
-        self.windows
-            .iter()
-            .filter_map(|(&id, record)| {
-                (record.state.is_some() && record.external_manager() == Some(manager)).then_some(id)
-            })
-            .collect()
+    pub(crate) fn windows_owned_by(
+        &self,
+        manager: ExternalManagerId,
+    ) -> impl Iterator<Item = WindowId> + '_ {
+        self.windows.iter().filter_map(move |(&id, record)| {
+            (record.state.is_some() && record.external_manager() == Some(manager)).then_some(id)
+        })
     }
 
     fn native_fullscreen_original_window(&self, window_id: WindowId) -> Option<WindowId> {

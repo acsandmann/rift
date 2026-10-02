@@ -468,6 +468,7 @@ pub enum Request {
 
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
+    CancelWindowAnimation(WindowId),
 
     /// Raise the windows within a single space, in the given order. All windows must be
     /// in the same space, or they will not be raised correctly.
@@ -1177,7 +1178,11 @@ impl State {
                 }
                 self.stop_notifications_for_animation(&elem);
             }
-            Request::EndWindowAnimation(wid) => {
+            Request::EndWindowAnimation(wid) | Request::CancelWindowAnimation(wid) => {
+                let cancelled = matches!(request, Request::CancelWindowAnimation(_));
+                if cancelled {
+                    self.pending_frames.remove(&wid);
+                }
                 if let Err(err) = self.flush_frames(wid) {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
@@ -1207,7 +1212,7 @@ impl State {
                 let txid = self
                     .txid_from_store(window_server_id)
                     .or_else(|| Self::some_txid(last_seen_txid));
-                if let Some(frame) = last_animation_frame {
+                if !cancelled && let Some(frame) = last_animation_frame {
                     let _ = elem.set_size(frame.size);
                     let _ = elem.set_position(frame.origin);
                     let _ = elem.set_size(frame.size);

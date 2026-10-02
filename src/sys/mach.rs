@@ -1271,6 +1271,8 @@ extern "C" fn mach_message_callback(
                 if let Some(handler) = mach_server.dead_name_handler {
                     handler(mach_server.context, notification.port);
                 }
+                // Delivery adds a dead-name reference independently of the watched right.
+                let _ = mach_port_deallocate(mach_task_self(), notification.port);
             }
             let _ = mach_msg_destroy(message as *mut mach_msg_header_t);
             return;

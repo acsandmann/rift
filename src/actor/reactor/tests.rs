@@ -1302,6 +1302,39 @@ fn external_claim_detaches_tiled_window_and_release_readmits_it() {
 }
 
 #[test]
+fn claiming_window_cancels_drag_and_pending_geometry() {
+    let (mut reactor, wid, wsid, space, _, frame) = reactor_with_window_on_space1();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    reactor.drag_manager.actor.begin_modifier(
+        crate::actor::drag::DragSource {
+            window: wid,
+            origin_frame: frame,
+            last_frame: frame,
+            origin_space: Some(space),
+            current_space: Some(space),
+            tiled: true,
+        },
+        frame.mid(),
+        crate::common::config::MouseAction::Move,
+        crate::actor::drag::DragScene::default(),
+    );
+    reactor.drag_manager.externally_controlled_window = Some(wid);
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, frame);
+    reactor
+        .claim_window(
+            wid,
+            ExternalManagerId(101),
+            rift_protocol::WindowClaimFlags::empty(),
+        )
+        .unwrap();
+    assert!(!reactor.drag_manager.actor.is_active());
+    assert_eq!(reactor.drag_manager.externally_controlled_window, None);
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert!(!reactor.test_active_workspace_windows(space).contains(&wid));
+}
+
+#[test]
 fn claim_flags_update_without_layout_churn_or_owner_change() {
     let (mut reactor, wid, _, space, _, frame) = reactor_with_window_on_space1();
     let other = WindowId::new(wid.pid, 2);

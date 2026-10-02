@@ -73,17 +73,7 @@ impl ServerState {
         let client_uses = Arc::new(Mutex::new(HashMap::default()));
         let (event_dispatch_tx, event_dispatch_rx) = bounded(EVENT_DISPATCH_QUEUE_CAPACITY);
 
-        let worker_subscriptions_by_client = Arc::clone(&subscriptions_by_client);
-        let worker_subscriptions_by_event = Arc::clone(&subscriptions_by_event);
-        let worker_client_uses = Arc::clone(&client_uses);
-        thread::spawn(move || {
-            Self::run_event_dispatch_worker(
-                event_dispatch_rx,
-                worker_subscriptions_by_client,
-                worker_subscriptions_by_event,
-                worker_client_uses,
-            );
-        });
+        thread::spawn(move || Self::run_event_dispatch_worker(event_dispatch_rx));
 
         Self {
             subscriptions_by_client,
@@ -311,21 +301,18 @@ impl ServerState {
         }
     }
 
-    fn send_event_to_client(client_port: ClientPort, c_message: &CString) -> bool {
-        let bytes = c_message.as_bytes_with_nul();
-        unsafe {
-            let result = mach_try_send_message(
+    fn send_event_to_client(client_port: ClientPort, c_message: &CString) {
+        let sent = unsafe {
+            mach_try_send_message(
                 client_port,
                 c_message.as_ptr() as *const c_char,
-                bytes.len() as u32,
-            );
-            if !result {
-                warn!("Failed to send event to client {}", client_port);
-                return false;
-            } else {
-                debug!("Successfully sent event to client {}", client_port);
-                return true;
-            }
+                c_message.as_bytes_with_nul().len() as u32,
+            )
+        };
+        if sent {
+            debug!("Successfully sent event to client {}", client_port);
+        } else {
+            warn!("Failed to send event to client {}", client_port);
         }
     }
 
@@ -339,12 +326,7 @@ impl ServerState {
         self.release_management(client_port);
     }
 
-    fn run_event_dispatch_worker(
-        event_dispatch_rx: crossbeam_channel::Receiver<DispatchBatch>,
-        subscriptions_by_client: Arc<DashMap<ClientPort, Vec<String>>>,
-        subscriptions_by_event: Arc<DashMap<String, Vec<ClientPort>>>,
-        client_uses: Arc<Mutex<HashMap<ClientPort, ClientUses>>>,
-    ) {
+    fn run_event_dispatch_worker(event_dispatch_rx: crossbeam_channel::Receiver<DispatchBatch>) {
         while let Ok(batch) = event_dispatch_rx.recv() {
             let c_message = match CString::new(batch.event_json) {
                 Ok(message) => message,
@@ -355,14 +337,9 @@ impl ServerState {
             };
 
             for client_port in batch.targets {
-                if !Self::send_event_to_client(client_port, &c_message) {
-                    Self::remove_client_from_maps(
-                        client_port,
-                        &subscriptions_by_client,
-                        &subscriptions_by_event,
-                        &client_uses,
-                    );
-                }
+                // A full receive queue is not a disconnect. Port death is handled on
+                // the reactor thread, which owns subscription and management lifetimes.
+                Self::send_event_to_client(client_port, &c_message);
             }
         }
     }

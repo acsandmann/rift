@@ -22,6 +22,7 @@ pub type Receiver = mpsc::UnboundedReceiver<Message>;
 pub enum Message {
     Replace(Animation),
     SkipToEnd(Animation),
+    CancelWindow(WindowId),
 }
 
 #[derive(Debug, Default)]
@@ -106,6 +107,21 @@ impl AnimationManager {
 
     pub fn handle_message(&mut self, message: Message) -> Option<Duration> {
         match message {
+            Message::CancelWindow(wid) => {
+                if let Some(active) = &mut self.active {
+                    active.animation.windows.retain(|window| {
+                        if window.wid != wid {
+                            return true;
+                        }
+                        let _ = window.handle.send(Request::CancelWindowAnimation(wid));
+                        false
+                    });
+                    if active.animation.is_empty() {
+                        self.active = None;
+                    }
+                }
+                None
+            }
             Message::Replace(animation) => {
                 self.active = match self.active.take() {
                     Some(active) => Some(active.replace_with(animation)),
@@ -154,6 +170,9 @@ impl AnimationManager {
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
+            if !reactor.state.windows.is_admitted(wid) {
+                continue;
+            }
             if skip_wid == Some(wid) {
                 anim.mark_handled(wid);
                 trace!(
@@ -258,6 +277,7 @@ impl AnimationManager {
                     match err.0 {
                         Message::Replace(animation) => animation.skip_to_end(),
                         Message::SkipToEnd(animation) => animation.skip_to_end(),
+                        Message::CancelWindow(_) => unreachable!(),
                     }
                 }
             } else {
@@ -302,6 +322,9 @@ impl AnimationManager {
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
+            if !reactor.state.windows.is_admitted(wid) {
+                continue;
+            }
             if skip_wid == Some(wid) {
                 trace!(?wid, "Skipping layout update for window currently being dragged");
                 continue;
@@ -846,6 +869,40 @@ mod tests {
         manager.handle_message(Message::Replace(second));
 
         assert!(!animation_contains(&manager, wid2));
+    }
+
+    #[test]
+    fn cancelling_window_stops_its_frames_without_finishing_other_windows() {
+        let (tx, mut rx) = crate::actor::channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let first = WindowId::new(1, 1);
+        let second = WindowId::new(1, 2);
+        let mut anim = animation(&handle, first, rect(0., 0., 10., 10.), rect(50., 0., 10., 10.));
+        anim.add_window(
+            &handle,
+            second,
+            rect(0., 0., 10., 10.),
+            rect(100., 0., 10., 10.),
+            false,
+            TransactionId::default(),
+        );
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(anim));
+        collect_requests(&mut rx);
+        manager.handle_message(Message::CancelWindow(first));
+        let requests = collect_requests(&mut rx);
+        assert!(
+            matches!(requests.as_slice(), [Request::CancelWindowAnimation(wid)] if *wid == first)
+        );
+        manager.tick();
+        let requests = collect_requests(&mut rx);
+        assert!(
+            matches!(requests.as_slice(), [Request::AnimationFrame { wid, .. }] if *wid == second)
+        );
+        manager.handle_message(Message::CancelWindow(second));
+        collect_requests(&mut rx);
+        manager.tick();
+        assert!(collect_requests(&mut rx).is_empty());
     }
 
     #[test]

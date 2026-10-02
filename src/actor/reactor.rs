@@ -2780,6 +2780,18 @@ impl Reactor {
             wid,
             Some(crate::model::window_store::ExternalWindowClaim { manager, flags }),
         );
+        self.drag_manager.actor.window_removed(wid);
+        self.drag_manager.sync_motion_gate();
+        self.drag_manager.sync_preview();
+        if self.drag_manager.externally_controlled_window == Some(wid) {
+            self.drag_manager.externally_controlled_window = None;
+        }
+        if let Some(tx) = &self.animation_tx {
+            let _ = tx.send(animation::Message::CancelWindow(wid));
+        }
+        if let Some(wsid) = self.state.windows.window(wid).and_then(|window| window.info.sys_id) {
+            self.transaction_manager.clear_target_for_window(wsid);
+        }
         self.send_layout_event(LayoutEvent::WindowRemoved(wid));
         if was_admitted && let Some(space) = space {
             self.update_layout_or_warn(false, false, Some(space));
@@ -2805,13 +2817,8 @@ impl Reactor {
             }
             Some(_) => {}
         }
-        self.state.windows.set_external_claim(wid, None);
-        if self.state.windows.is_admitted(wid)
-            && let Some(space) = self
-                .authoritative_space_for_window_id(wid)
-                .or_else(|| self.best_space_for_window_id(wid))
-        {
-            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+        let space = self.readmit_external_window(wid);
+        if let Some(space) = space {
             self.update_layout_or_warn(false, false, Some(space));
         }
         if self.main_window() == Some(wid) {
@@ -2820,20 +2827,44 @@ impl Reactor {
         Ok(true)
     }
 
+    fn readmit_external_window(&mut self, wid: WindowId) -> Option<SpaceId> {
+        self.state.windows.set_external_claim(wid, None);
+        if self.state.windows.is_admitted(wid)
+            && let Some(space) = self
+                .authoritative_space_for_window_id(wid)
+                .or_else(|| self.best_space_for_window_id(wid))
+        {
+            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+            return Some(space);
+        }
+        None
+    }
+
     pub(crate) fn release_manager(
         &mut self,
         manager: crate::model::window_store::ExternalManagerId,
     ) {
-        for wid in self.state.windows.windows_owned_by(manager) {
-            let _ = self.release_window(wid, manager);
+        let windows: Vec<_> = self.state.windows.windows_owned_by(manager).collect();
+        if windows.is_empty() {
+            return;
         }
+        let mut spaces = HashSet::default();
+        for wid in windows {
+            if let Some(space) = self.readmit_external_window(wid) {
+                spaces.insert(space);
+            }
+        }
+        for space in spaces {
+            self.update_layout_or_warn(false, false, Some(space));
+        }
+        self.update_focus_follows_mouse_state();
     }
 
     pub(crate) fn manager_has_windows(
         &self,
         manager: crate::model::window_store::ExternalManagerId,
     ) -> bool {
-        !self.state.windows.windows_owned_by(manager).is_empty()
+        self.state.windows.windows_owned_by(manager).next().is_some()
     }
 
     fn update_complete_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
@@ -3375,9 +3406,8 @@ impl Reactor {
         outcome.absorb(process_outcome);
         let new_window_ids: Vec<_> = new_windows.iter().map(|(wid, _)| *wid).collect();
         window_discovery::update_window_states(&mut self.state, new_windows);
-        let has_admitted_windows = new_window_ids
-            .iter()
-            .any(|wid| self.state.windows.window(*wid).is_some_and(WindowState::is_admitted));
+        let has_admitted_windows =
+            new_window_ids.iter().any(|wid| self.state.windows.is_admitted(*wid));
 
         let candidate_windows: HashSet<WindowId> = self
             .state
