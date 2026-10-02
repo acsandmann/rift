@@ -214,6 +214,8 @@ pub enum SpaceEventKind {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
     #[serde(skip)]
+    CameraFinished,
+    #[serde(skip)]
     OverviewSelectWorkspace {
         display: String,
         workspace: crate::model::VirtualWorkspaceId,
@@ -437,7 +439,7 @@ pub struct Reactor {
     startup_ready: Option<oneshot::Sender<()>>,
     pub animation_tx: Option<AnimationSender>,
     viewport_gesture: Option<gesture::ViewportSession>,
-    presentations: HashMap<SpaceId, animation::PreparedCamera>,
+    presentations: HashMap<SpaceId, animation::CameraRegistration>,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
@@ -977,6 +979,10 @@ impl Reactor {
                         .event_broadcaster
                         .send(BroadcastEvent::BindingModeChanged { previous_mode, mode });
                 }
+                return;
+            }
+            Event::CameraFinished => {
+                self.reconcile_presentations();
                 return;
             }
             Event::Query(req) => {

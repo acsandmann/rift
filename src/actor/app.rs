@@ -467,6 +467,11 @@ impl AppThreadHandle {
         frames.sequence
     }
 
+    pub(crate) fn cancel_window_animation(&self, wid: WindowId) {
+        let through = self.cancel_interactive_frame(wid);
+        let _ = self.send(Request::CancelWindowAnimation(wid, through));
+    }
+
     /// Publish a high-frequency interactive frame without growing the actor queue.
     /// Only the newest frame for each window is retained until the app actor drains it.
     pub(crate) fn send_interactive_frame(
@@ -477,19 +482,18 @@ impl AppThreadHandle {
         txid: TransactionId,
         source: FrameSource,
     ) {
-        let should_wake = {
-            let mut pending = self.interactive_frames.0.lock().unwrap();
-            let set_size = set_size
-                || pending
-                    .latest
-                    .get(&wid)
-                    .is_some_and(|(_, size, _, old, _)| *size && *old == source);
-            pending.sequence = pending.sequence.wrapping_add(1);
-            let sequence = pending.sequence;
-            pending.latest.insert(wid, (frame, set_size, txid, source, sequence));
-            !std::mem::replace(&mut pending.wake_pending, true)
-        };
-        if should_wake
+        let mut pending = self.interactive_frames.0.lock().unwrap();
+        let set_size = set_size
+            || pending
+                .latest
+                .get(&wid)
+                .is_some_and(|(_, size, _, old, _)| *size && *old == source);
+        pending.sequence = pending.sequence.wrapping_add(1);
+        let sequence = pending.sequence;
+        pending.latest.insert(wid, (frame, set_size, txid, source, sequence));
+        // Enqueue the wake before releasing the publication lock. Otherwise a
+        // second producer could enqueue EndWindowAnimation ahead of this wake.
+        if !std::mem::replace(&mut pending.wake_pending, true)
             && self
                 .requests_tx
                 .try_send(Request::InteractiveFramesPending(
@@ -497,7 +501,6 @@ impl AppThreadHandle {
                 ))
                 .is_err()
         {
-            let mut pending = self.interactive_frames.0.lock().unwrap();
             pending.wake_pending = false;
             pending.latest.clear();
         }
@@ -527,12 +530,6 @@ pub enum Request {
     /// Position-only batch reserved for virtual workspace switches.
     SetWorkspaceSwitchPositions(Vec<(WindowId, CGPoint)>, TransactionId, bool),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
-    AnimationFrame {
-        wid: WindowId,
-        frame: CGRect,
-        set_size: bool,
-        txid: TransactionId,
-    },
     #[doc(hidden)]
     InteractiveFramesPending(InteractiveFrameQueue),
 
@@ -1149,16 +1146,6 @@ impl State {
                     None,
                 ));
             }
-            Request::AnimationFrame { wid, frame, set_size, txid } => {
-                self.pending_frames.insert(wid, PendingFrame {
-                    span: Span::current(),
-                    frame,
-                    set_size,
-                    txid,
-                    source: FrameSource::Ordinary,
-                    sequence: 0,
-                });
-            }
             Request::InteractiveFramesPending(frames) => {
                 frames.drain_with(|wid, frame, set_size, txid, source, sequence| {
                     self.pending_frames.insert(wid, PendingFrame {
@@ -1298,14 +1285,16 @@ impl State {
                 let (elem, started_animation) = {
                     let window = self.window_mut(wid)?;
                     let started_animation = !std::mem::replace(&mut window.is_animating, true);
-                    window.last_animation_frame = None;
+                    if started_animation {
+                        window.last_animation_frame = None;
+                    }
                     (window.elem.clone(), started_animation)
                 };
                 if started_animation {
                     let app = self.app.clone();
                     self.enhanced_ui.acquire(&app);
+                    self.stop_notifications_for_animation(&elem);
                 }
-                self.stop_notifications_for_animation(&elem);
             }
             request @ (Request::EndWindowAnimation(_) | Request::CancelWindowAnimation(..)) => {
                 let (wid, through) = match request {
@@ -1356,8 +1345,8 @@ impl State {
                 if ended_animation {
                     let app = self.app.clone();
                     self.enhanced_ui.release(&app);
+                    self.restart_notifications_after_animation(&elem);
                 }
-                self.restart_notifications_after_animation(&elem);
                 let mut frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
                         Some(frame) => frame,

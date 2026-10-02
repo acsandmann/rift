@@ -212,8 +212,6 @@ pub(crate) struct ViewportPresentation {
     width: f64,
     tiling: CGRect,
     screen: CGRect,
-    // Fullscreen frames stay fixed; all other frames are world coordinates.
-    pub frames: Vec<(WindowId, CGRect, bool)>,
 }
 
 impl ViewportPresentation {
@@ -259,6 +257,11 @@ impl ViewportPresentation {
 
     pub fn sample(&mut self, now: Instant, scale: f64) -> bool {
         self.viewport.sample(self.bounds, now, scale).unwrap_or(self.gesturing())
+    }
+
+    pub fn offset_for_frame(&self, world: CGRect, presented: CGRect) -> Option<f64> {
+        (presented.max().x > self.tiling.origin.x && presented.origin.x < self.tiling.max().x)
+            .then_some(world.origin.x + self.tiling.origin.x - presented.origin.x)
     }
 
     pub fn frame(&self, mut frame: CGRect, fixed: bool, scale: f64) -> CGRect {
@@ -1120,44 +1123,36 @@ impl ScrollingLayoutSystem {
         })
     }
 
-    /// Cached-geometry fast path; no constraint solving or topology rebuilding.
-    pub fn viewport_frames(
+    pub(crate) fn presentation(
         &self,
         layout: LayoutId,
-    ) -> impl Iterator<Item = (WindowId, CGRect)> + '_ {
-        self.layouts
-            .get(layout)
-            .into_iter()
-            .filter_map(|state| Some((state, state.geometry.as_ref()?)))
-            .flat_map(|(state, geometry)| Self::translate_frames(state, geometry, true))
-    }
-
-    pub(crate) fn presentation(&self, layout: LayoutId) -> Option<ViewportPresentation> {
+    ) -> Option<(ViewportPresentation, Vec<(WindowId, CGRect, bool)>)> {
         let state = self.layouts.get(layout)?;
         let g = state.geometry.as_ref()?;
         let mut motion = state.motion.clone();
         motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
-        Some(ViewportPresentation {
+        let camera = ViewportPresentation {
             viewport: state.viewport.clone(),
             motion,
             bounds: g.bounds,
             width: g.tiling.size.width,
             tiling: g.tiling,
             screen: g.screen,
-            frames: g
-                .frames
-                .iter()
-                .map(|&(wid, frame)| {
-                    if state.fullscreen.contains(&wid) {
-                        (wid, g.screen, true)
-                    } else if state.fullscreen_within_gaps.contains(&wid) {
-                        (wid, g.tiling, true)
-                    } else {
-                        (wid, frame.round(), false)
-                    }
-                })
-                .collect(),
-        })
+        };
+        let frames = g
+            .frames
+            .iter()
+            .map(|&(wid, frame)| {
+                if state.fullscreen.contains(&wid) {
+                    (wid, g.screen, true)
+                } else if state.fullscreen_within_gaps.contains(&wid) {
+                    (wid, g.tiling, true)
+                } else {
+                    (wid, frame.round(), false)
+                }
+            })
+            .collect();
+        Some((camera, frames))
     }
 
     pub(crate) fn reconcile_presentation(&mut self, layout: LayoutId, p: &ViewportPresentation) {
@@ -1208,7 +1203,8 @@ impl ScrollingLayoutSystem {
         state.motion.overscroll = 0.0;
         state.motion.samples.clear();
         state.motion.samples.reserve(64);
-        Self::advance_camera(state, now);
+        let bounds = state.geometry.as_ref().unwrap().bounds;
+        state.viewport.sample(bounds, now, 1.0);
         state.viewport = Viewport::Gesture(state.viewport.offset());
         true
     }
@@ -1268,25 +1264,6 @@ impl ScrollingLayoutSystem {
             ));
         }
         Some(release)
-    }
-
-    fn advance_camera(state: &mut LayoutState, now: Instant) -> Option<bool> {
-        let bounds =
-            state.geometry.as_ref().map_or((f64::NEG_INFINITY, f64::INFINITY), |g| g.bounds);
-        state.viewport.sample(bounds, now, 1.0)
-    }
-
-    pub fn advance_viewport_animation(&mut self, layout: LayoutId, now: Instant) -> Option<bool> {
-        self.layouts.get_mut(layout).and_then(|state| Self::advance_camera(state, now))
-    }
-
-    /// Resolve an abandoned release to its already-selected target.
-    pub fn finish_viewport_animation(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.get_mut(layout)
-            && let Viewport::Animation(spring) = &state.viewport
-        {
-            state.viewport = Viewport::Static(spring.target);
-        }
     }
 
     /// Settle where cancellation occurred, with no artificial fling or focus change.
@@ -2040,7 +2017,22 @@ fn set_height_share(column: &mut Column, row: usize, share: f64, scale: f64) {
     }
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) fn presented_frames(
+        system: &super::ScrollingLayoutSystem,
+        layout: crate::layout_engine::LayoutId,
+    ) -> std::vec::IntoIter<(crate::actor::app::WindowId, objc2_core_foundation::CGRect)> {
+        system
+            .presentation(layout)
+            .map(|(camera, frames)| {
+                frames
+                    .into_iter()
+                    .map(|(wid, frame, fixed)| (wid, camera.frame(frame, fixed, 1.0)))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+    }
     use super::*;
     use crate::common::config::{ScrollingWidthOverride, StackDefaultOrientation};
 
@@ -2628,7 +2620,10 @@ mod tests {
             let layout = system.create_layout();
             system.add_window_after_selection(layout, wid(1));
             system.prepare_layout(layout, f.screen, &f.constraints, &f.gaps);
-            assert_eq!(system.viewport_frames(layout).next().unwrap().1.origin.x, single);
+            assert_eq!(
+                presented_frames(&system, layout).next().unwrap().1.origin.x,
+                single
+            );
         }
     }
 
@@ -2828,7 +2823,7 @@ mod tests {
         f.drop(5, 4, WindowDropAction::Stack);
         f.select(1);
         let logical = f.frames();
-        let native: Vec<_> = f.system.viewport_frames(f.layout).collect();
+        let native: Vec<_> = presented_frames(&f.system, f.layout).collect();
         for index in 0..3 {
             assert!((logical[index + 1].1.origin.x - logical[index].1.max().x - 17.0).abs() <= 1.0);
         }
@@ -2836,7 +2831,7 @@ mod tests {
         assert!((logical[4].1.origin.y - logical[3].1.max().y - 11.0).abs() <= 1.0);
         assert_eq!(native[3].1.origin.x, f.screen.max().x);
         assert!(logical[3].1.origin.x > native[3].1.origin.x);
-        assert_eq!(f.system.viewport_frames(f.layout).collect::<Vec<_>>(), native);
+        assert_eq!(presented_frames(&f.system, f.layout).collect::<Vec<_>>(), native);
     }
 
     #[test]
@@ -2893,13 +2888,13 @@ mod tests {
         let frames = f.frames();
         let clone = f.system.clone_layout(f.layout);
         assert_eq!(f.system.container_tree(clone), tree);
-        assert_eq!(f.system.viewport_frames(clone).collect::<Vec<_>>(), frames);
+        assert_eq!(presented_frames(&f.system, clone).collect::<Vec<_>>(), frames);
         let text = ron::to_string(&f.system).unwrap();
         let mut restored: ScrollingLayoutSystem = ron::from_str(&text).unwrap();
         restored.update_settings(&f.system.settings);
         restored.prepare_layout(f.layout, f.screen, &f.constraints, &f.gaps);
         assert_eq!(restored.container_tree(f.layout), tree);
-        assert_eq!(restored.viewport_frames(f.layout).collect::<Vec<_>>(), frames);
+        assert_eq!(presented_frames(&restored, f.layout).collect::<Vec<_>>(), frames);
         f.system.select_window(clone, wid(3));
         f.system.center_selected_column(clone);
         let old_x = f
@@ -2952,7 +2947,7 @@ mod tests {
                 f.system.remove_window(wid(index));
             }
             assert_eq!(f.selected(), None);
-            assert!(f.system.viewport_frames(f.layout).next().is_none());
+            assert!(presented_frames(&f.system, f.layout).next().is_none());
             assert!(!f.system.begin_viewport_gesture(f.layout, Instant::now()));
         }
     }
@@ -2971,7 +2966,7 @@ mod tests {
         assert_eq!(system.selected_window(layout), Some(wid(2)));
         assert_eq!(system.container_tree(layout).children[0].node_id, 42);
         assert_eq!(
-            system.viewport_frames(layout).next().unwrap().1.size.width,
+            presented_frames(&system, layout).next().unwrap().1.size.width,
             600.0
         );
         system.add_window_after_selection(layout, wid(3));
@@ -3128,10 +3123,8 @@ mod tests {
             assert_eq!(release.offset, 1500.0);
             if !animate {
                 assert_eq!(f.system.layouts[f.layout].viewport.offset(), 1500.0);
-                assert_eq!(
-                    f.system.advance_viewport_animation(f.layout, Instant::now()),
-                    None
-                );
+                let (mut p, _) = f.system.presentation(f.layout).unwrap();
+                assert!(!p.sample(Instant::now(), 1.0));
                 continue;
             }
             assert_eq!(
@@ -3142,14 +3135,11 @@ mod tests {
                 panic!("release spring")
             };
             let started = spring.started;
+            let (mut p, _) = f.system.presentation(f.layout).unwrap();
             let mut previous = from + direction * 300.0;
             for ms in [1, 10, 40, 80] {
-                assert_eq!(
-                    f.system
-                        .advance_viewport_animation(f.layout, started + Duration::from_millis(ms)),
-                    Some(true)
-                );
-                let current = f.system.layouts[f.layout].viewport.offset();
+                assert!(p.sample(started + Duration::from_millis(ms), 1.0));
+                let current = p.offset();
                 assert!(
                     (current - previous) * direction > 0.0
                         && (release.offset - current) * direction > 0.0
@@ -3160,6 +3150,7 @@ mod tests {
                 previous = current;
             }
             let now = started + Duration::from_millis(80);
+            f.system.reconcile_presentation(f.layout, &p);
             f.system.begin_viewport_gesture(f.layout, now);
             assert_eq!(f.system.layouts[f.layout].viewport.offset(), previous);
             f.system.update_viewport_gesture(
@@ -3176,11 +3167,9 @@ mod tests {
                 .end_viewport_gesture(f.layout, Duration::from_millis(310), true)
                 .unwrap();
             assert_eq!(second.from_offset, previous + direction * 20.0);
-            assert_eq!(
-                f.system
-                    .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(2)),
-                Some(false)
-            );
+            let (mut p, _) = f.system.presentation(f.layout).unwrap();
+            assert!(!p.sample(Instant::now() + Duration::from_secs(2), 1.0));
+            f.system.reconcile_presentation(f.layout, &p);
             assert!(
                 matches!(f.system.layouts[f.layout].viewport, Viewport::Static(x) if x == second.offset)
             );
@@ -3197,14 +3186,16 @@ mod tests {
         let state = &f.system.layouts[f.layout];
         assert_eq!(state.selected(), Some(wid(2)));
         assert!(matches!(&state.viewport, Viewport::Animation(s) if s.target == 500.0));
-        f.system.finish_viewport_animation(f.layout);
+        let (mut p, _) = f.system.presentation(f.layout).unwrap();
+        p.finish();
+        f.system.reconcile_presentation(f.layout, &p);
         assert_eq!(f.system.layouts[f.layout].viewport.offset(), 500.0);
     }
 
     #[test]
     fn camera_retarget_and_rebase_preserve_position_and_velocity() {
         let f = Fixture::new(4);
-        let mut p = f.system.presentation(f.layout).unwrap();
+        let (mut p, frames) = f.system.presentation(f.layout).unwrap();
         let start = Instant::now();
         p.viewport = Viewport::Static(800.0);
         p.retarget(100.0, 150.0, start);
@@ -3220,7 +3211,7 @@ mod tests {
         let (next_position, next_velocity) = spring.position_velocity(now);
         assert!((position - next_position).abs() < 1e-9);
         assert!((velocity - next_velocity).abs() < 1e-9);
-        let (_, world, fixed) = p.frames[0];
+        let (_, world, fixed) = frames[0];
         let before_rebase = p.frame(world, fixed, 2.0);
         p.viewport.rebase(40.0);
         let mut rebased_world = world;
@@ -3262,7 +3253,7 @@ mod tests {
     fn spring_finishes_at_pixel_precision_and_snaps_to_exact_target() {
         for scale in [1.0, 2.0] {
             let f = Fixture::new(4);
-            let mut p = f.system.presentation(f.layout).unwrap();
+            let (mut p, _) = f.system.presentation(f.layout).unwrap();
             let start = Instant::now();
             p.viewport = Viewport::Static(700.0);
             p.retarget(100.0, 250.0, start);
@@ -3288,9 +3279,9 @@ mod tests {
     #[test]
     fn viewport_presentation_aligns_to_physical_pixels_without_changing_sizes() {
         let f = Fixture::new(4);
-        let mut p = f.system.presentation(f.layout).unwrap();
+        let (mut p, frames) = f.system.presentation(f.layout).unwrap();
         p.viewport = Viewport::Static(0.6);
-        let (_, world, fixed) = p.frames[0];
+        let (_, world, fixed) = frames[0];
         let retina = p.frame(world, fixed, 2.0);
         assert_eq!(retina.origin.x.fract().abs(), 0.5);
         assert_eq!(retina.size, world.size);
@@ -3319,16 +3310,18 @@ mod tests {
                 }
             }
             let frames = f.frames();
-            let ongoing = f
-                .system
-                .advance_viewport_animation(f.layout, Instant::now() + Duration::from_secs(1));
-            assert_ne!(ongoing, Some(true), "edit {edit} must settle");
+            let (mut p, _) = f.system.presentation(f.layout).unwrap();
             if edit <= 1 {
-                assert_eq!(ongoing, Some(false), "non-focus edits preserve release");
+                assert!(p.animated(), "non-focus edits preserve release");
             }
             if edit == 2 {
-                assert_eq!(ongoing, None, "clones remain static");
+                assert!(!p.animated(), "clones remain static");
             }
+            assert!(
+                !p.sample(Instant::now() + Duration::from_secs(1), 1.0),
+                "edit {edit} must settle"
+            );
+            f.system.reconcile_presentation(f.layout, &p);
             if edit == 2 {
                 assert_eq!(f.frames(), frames);
             }

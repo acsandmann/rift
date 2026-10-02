@@ -79,7 +79,10 @@ impl Reactor {
                         .get_mut(workspace)
                         && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
                     {
-                        system.finish_viewport_animation(layout);
+                        if let Some((mut p, _)) = system.presentation(layout) {
+                            p.finish();
+                            system.reconcile_presentation(layout, &p);
+                        }
                     }
                     if visible {
                         self.apply_viewport_frames();
@@ -136,7 +139,7 @@ impl Reactor {
             let space = s.context.space;
             let gesture = (!s.released)
                 .then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
-            self.present_camera(space, true, gesture, None);
+            let _ = self.present_camera(space, true, gesture, None);
         }
     }
 
@@ -164,15 +167,19 @@ impl Reactor {
     fn apply_viewport_frames(&mut self) {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
-            self.present_camera(space, false, None, None);
+            let _ = self.present_camera(space, false, None, None);
             self.reconcile_presentations();
         }
     }
 
     fn finish_gesture(&mut self, final_sample: Option<Motion>, cancelled: bool) {
         let Some(s) = &self.viewport_gesture else { return };
-        if let Some(camera) = self.presentations.get(&s.context.space) {
-            camera.state.lock().paused = true;
+        let space = s.context.space;
+        if let Some(camera) = self.freeze_camera(space) {
+            self.reconcile_camera(&camera);
+            if let Some(prepared) = self.presentations.get_mut(&space) {
+                prepared.frozen = Some(camera);
+            }
         }
         self.reconcile_presentations();
         let Some(s) = &self.viewport_gesture else { return };
@@ -288,9 +295,7 @@ impl Reactor {
 
     pub(super) fn retire_viewport_session(&mut self) {
         if let Some(s) = self.viewport_gesture.take() {
-            if let Some(camera) = self.presentations.get(&s.context.space) {
-                camera.state.lock().stop();
-            }
+            self.stop_camera(s.context.space);
         }
     }
 
@@ -345,9 +350,10 @@ mod tests {
                 return;
             }
             if let Some(s) = &self.viewport_gesture
-                && let Some(camera) = self.presentations.get(&s.context.space)
+                && let Some(camera) = self.presentations.get_mut(&s.context.space)
+                && let Some(camera) = &mut camera.frozen
             {
-                camera.state.lock().sample(Instant::now());
+                camera.sample(Instant::now());
             }
             self.reconcile_presentations();
             if self.viewport_gesture.as_ref().is_some_and(|s| {
@@ -355,7 +361,7 @@ mod tests {
                     && self
                         .presentations
                         .get(&s.context.space)
-                        .is_none_or(|c| !c.state.lock().active)
+                        .is_none_or(|c| c.frozen.as_ref().is_none_or(|c| !c.active))
             }) {
                 self.retire_viewport_session();
             }
@@ -502,7 +508,7 @@ mod tests {
             else {
                 panic!("scrolling");
             };
-            s.presentation(layout).unwrap().offset()
+            s.presentation(layout).unwrap().0.offset()
         };
         r.add_test_app(1);
         let LayoutSystemKind::Scrolling(system) =
@@ -510,16 +516,18 @@ mod tests {
         else {
             panic!("scrolling");
         };
-        let frames: Vec<_> = system.viewport_frames(layout).collect();
+        let frames: Vec<_> =
+            crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                .collect();
         for (wid, frame) in frames {
             r.insert_test_window_state(wid, frame, None, true);
         }
         r.start_gesture_presentation();
         let before = offset(&r);
         motion.publish(sample(1, 40.0, 100));
-        let camera = r.presentations.get(&ctx.space).unwrap().state.clone();
-        camera.lock().sample(Instant::now());
-        let presented = camera.lock().presentation.offset();
+        let camera = r.presentations.get_mut(&ctx.space).unwrap().frozen.as_mut().unwrap();
+        camera.sample(Instant::now());
+        let presented = camera.presentation.offset();
         assert_ne!(presented, before);
         r.handle_loop_event(super::super::Event::WindowTitleChanged(
             WindowId::new(1, 1),
@@ -559,23 +567,35 @@ mod tests {
                 workspace: None,
                 mode: LayoutMode::Scrolling,
             });
+
             apps.make_app_and_settle(&mut r, 1, make_windows(4));
+
             r.send_layout_event(crate::layout_engine::LayoutEvent::WindowFocused(
                 space,
                 WindowId::new(1, 1),
             ));
+
             apps.simulate_until_quiet(&mut r);
+
             let initial = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
 
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
             config.settings.layout.scrolling.gestures.animate = Some(false);
+
             let (_, _, motion) = begin(&mut r, &config, space);
             for (total_x, time) in [(20.0, 10), (40.0, 20)] {
                 motion.publish(sample(1, total_x, time));
                 r.gesture_tick();
             }
+
             let mut requests = apps.requests();
+            let leases = requests
+                .iter()
+                .filter(|r| matches!(r, Request::BeginWindowAnimation(_)))
+                .count();
+            assert_eq!(leases, 4, "each camera window acquires its lease once");
+            requests.retain(|r| !matches!(r, Request::BeginWindowAnimation(_)));
             assert_eq!(
                 requests.len(),
                 1,
@@ -750,7 +770,8 @@ mod tests {
                 else {
                     panic!("scrolling layout");
                 };
-                system.viewport_frames(layout).collect::<Vec<_>>()
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                    .collect::<Vec<_>>()
             };
             let before = frames(&r);
             if reset {
@@ -810,7 +831,9 @@ mod tests {
             else {
                 panic!("scrolling")
             };
-            let initial: Vec<_> = system.viewport_frames(layout).collect();
+            let initial: Vec<_> =
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                    .collect();
             r.add_test_app(1);
             let (tx, mut rx) = crate::actor::channel();
             r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(tx);
@@ -852,9 +875,6 @@ mod tests {
                         queue.drain_with(|wid, _, _, _, _, _| {
                             written.insert(wid);
                         });
-                    }
-                    Request::AnimationFrame { wid, .. } => {
-                        written.insert(wid);
                     }
                     Request::EndWindowAnimation(wid) | Request::CancelWindowAnimation(wid, _) => {
                         assert!(
@@ -902,7 +922,9 @@ mod tests {
             else {
                 panic!("scrolling")
             };
-            let initial: Vec<_> = system.viewport_frames(layout).collect();
+            let initial: Vec<_> =
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
+                    .collect();
             r.add_test_app(1);
             let (app_tx, mut app_rx) = crate::actor::channel();
             r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(app_tx);
@@ -910,8 +932,6 @@ mod tests {
                 r.insert_test_window_state(wid, frame, None, true);
             }
             r.start_gesture_presentation();
-            let (animation_tx, animation_rx) = crossbeam_channel::unbounded();
-            r.animation_tx = Some(animation_tx.into());
             motion.publish(sample(1, 300.0, 100));
             r.gesture_tick();
             let before = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
@@ -926,12 +946,6 @@ mod tests {
             assert_eq!(
                 r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic,
                 before
-            );
-            assert!(
-                animation_rx
-                    .try_iter()
-                    .all(|message| matches!(message, super::super::animation::Message::Camera(_))),
-                "camera release must not start generic window animation"
             );
             // Duplicate lift and late physical samples cannot retarget the release.
             r.gesture_event(Lifecycle::End {
@@ -961,16 +975,9 @@ mod tests {
                     );
                 }
             } else {
-                assert_eq!(
-                    system.advance_viewport_animation(
-                        layout,
-                        Instant::now() + Duration::from_millis(50)
-                    ),
-                    Some(true)
-                );
                 r.start_gesture_presentation();
-                let camera = &r.presentations.get(&ctx.space).unwrap().state;
-                camera.lock().sample(Instant::now() + Duration::from_millis(50));
+                let camera = r.presentations.get_mut(&ctx.space).unwrap().frozen.as_mut().unwrap();
+                camera.sample(Instant::now() + Duration::from_millis(50));
                 r.reconcile_presentations();
                 let mut moved = 0;
                 while let Ok((_, request)) = app_rx.try_recv() {

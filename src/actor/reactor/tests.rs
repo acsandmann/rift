@@ -4327,7 +4327,6 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
                 });
                 target
             }
-            Request::AnimationFrame { wid, frame, .. } if wid == right => Some(frame),
             _ => None,
         })
         .last()

@@ -29,32 +29,16 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub struct DisplayTick {
     pub timestamp: f64,
     pub target_timestamp: f64,
-    pub sequence: u64,
 }
 
 #[derive(Default)]
 struct LatestTick(Option<(DisplayTick, Instant)>);
 impl LatestTick {
     fn publish(&mut self, timestamp: f64, target_timestamp: f64, target: Instant) {
-        let sequence = self.0.map_or(1, |(tick, _)| tick.sequence.wrapping_add(1));
-        self.0 = Some((
-            DisplayTick {
-                timestamp,
-                target_timestamp,
-                sequence,
-            },
-            target,
-        ));
+        self.0 = Some((DisplayTick { timestamp, target_timestamp }, target));
     }
 
-    fn after(&self, sequence: &mut u64) -> Option<(DisplayTick, Instant)> {
-        let (tick, target) = self.0?;
-        if tick.sequence == *sequence {
-            return None;
-        }
-        *sequence = tick.sequence;
-        Some((tick, target))
-    }
+    fn take(&mut self) -> Option<(DisplayTick, Instant)> { self.0.take() }
 }
 
 struct State {
@@ -139,9 +123,7 @@ impl DisplayLink {
         Self { id, state }
     }
 
-    pub fn latest(&self, after: &mut u64) -> Option<(DisplayTick, Instant)> {
-        self.state.latest.lock().after(after)
-    }
+    pub fn latest(&self) -> Option<(DisplayTick, Instant)> { self.state.latest.lock().take() }
 }
 
 impl Drop for DisplayLink {
@@ -164,18 +146,16 @@ mod tests {
     #[test]
     fn publication_replaces_stale_ticks_and_never_replays_a_sample() {
         let mut ticks = LatestTick::default();
-        let mut sequence = 0;
-        assert!(ticks.after(&mut sequence).is_none());
+        assert!(ticks.take().is_none());
         for timestamp in [1.0, 2.0, 3.0] {
             ticks.publish(timestamp, timestamp + 0.008, Instant::now());
         }
-        let (newest, _) = ticks.after(&mut sequence).unwrap();
+        let (newest, _) = ticks.take().unwrap();
         assert_eq!(newest.timestamp, 3.0);
         assert_eq!(newest.target_timestamp, 3.008);
-        assert_eq!(newest.sequence, 3);
-        assert!(ticks.after(&mut sequence).is_none());
+        assert!(ticks.take().is_none());
         ticks.publish(4.0, 4.008, Instant::now());
-        assert_eq!(ticks.after(&mut sequence).unwrap().0.sequence, 4);
-        assert!(ticks.after(&mut sequence).is_none());
+        assert_eq!(ticks.take().unwrap().0.timestamp, 4.0);
+        assert!(ticks.take().is_none());
     }
 }
