@@ -6227,10 +6227,10 @@ fn closing_focused_window_refocuses_survivor() {
     assert!(
         requests.iter().any(|event| matches!(
             event,
-            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
-                if *wid == survivor
+            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), app_handles, .. })
+                if *wid == survivor && app_handles.contains_key(&survivor.pid)
         )),
-        "closing the focused window must request focus for the survivor: {requests:?}"
+        "closing the focused window must request deliverable focus for the survivor: {requests:?}"
     );
     reactor.handle_event(Event::WindowServerFocusChanged(survivor, space));
     assert!(reactor.create_window_data(survivor).unwrap().is_focused);

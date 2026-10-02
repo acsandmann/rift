@@ -4438,7 +4438,10 @@ impl Reactor {
             self.insert_app_handle_for_window(&mut app_handles, wid);
         }
 
-        if let Some(wid) = original_focus {
+        // Refocus after removal can select a survivor even when the layout
+        // response had no focus target. Include its app so the raise manager
+        // can deliver the focus request.
+        for wid in original_focus.into_iter().chain(focus_window) {
             self.insert_app_handle_for_window(&mut app_handles, wid);
         }
 
