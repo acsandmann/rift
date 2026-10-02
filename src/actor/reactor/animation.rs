@@ -198,19 +198,19 @@ impl AnimationManager {
                 match window_store.window_mut(wid) {
                     Some(window) => {
                         let current_frame = window.frame_monotonic;
-                        if target_frame.same_as(current_frame) {
+                        let wsid = window.info.sys_id;
+                        let pending_target = wsid
+                            .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
+                        // An observed intermediate frame may already match this layout,
+                        // while an older animation is still headed somewhere else.
+                        if target_frame.same_as(current_frame)
+                            && pending_target.is_none_or(|pending| pending.same_as(target_frame))
+                        {
                             continue;
                         }
-                        let wsid = window.info.sys_id;
-                        if let Some(wsid) = wsid {
-                            if reactor
-                                .transaction_manager
-                                .get_target_frame(wsid)
-                                .is_some_and(|pending| pending.same_as(target_frame))
-                            {
-                                trace!(?wid, ?target_frame, "Skipping redundant layout request");
-                                continue;
-                            }
+                        if pending_target.is_some_and(|pending| pending.same_as(target_frame)) {
+                            trace!(?wid, ?target_frame, "Skipping redundant layout request");
+                            continue;
                         }
                         any_frame_changed = true;
                         let txid = wsid

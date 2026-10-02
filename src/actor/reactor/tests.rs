@@ -4202,6 +4202,73 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
 }
 
 #[test]
+fn changed_layout_retargets_window_already_at_new_position_during_animation() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1512., 982.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    apps.requests();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    reactor.animation_tx = Some(tx);
+    reactor.config.settings.animate = true;
+    let mut manager = super::animation::AnimationManager::new();
+    let left = WindowId::new(1, 1);
+    let right = WindowId::new(1, 2);
+    let frame = |x| CGRect::new(CGPoint::new(x, 38.), CGSize::new(1284., 944.));
+
+    assert!(super::animation::AnimationManager::animate_layout(
+        &mut reactor,
+        space,
+        &[(left, frame(228.)), (right, frame(1284.))],
+        false,
+        None,
+    ));
+    manager.handle_message(rx.try_recv().unwrap());
+    let wsid = reactor.state.windows.window(right).unwrap().info.sys_id.unwrap();
+    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    // An intermediate AX frame can coincide with the next layout's target.
+    reactor.handle_event(Event::WindowFrameChanged(
+        right,
+        frame(228.),
+        Some(txid),
+        Requested(true),
+        Some(MouseState::Up),
+    ));
+    assert!(
+        reactor
+            .state
+            .windows
+            .window(right)
+            .unwrap()
+            .frame_monotonic
+            .same_as(frame(228.))
+    );
+    assert!(super::animation::AnimationManager::animate_layout(
+        &mut reactor,
+        space,
+        &[(left, frame(-1056.)), (right, frame(228.))],
+        false,
+        None,
+    ));
+    manager.handle_message(rx.try_recv().unwrap());
+    apps.requests();
+    while manager.tick().is_some() {}
+    let final_frame = apps
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::AnimationFrame { wid, frame, .. } if wid == right => Some(frame),
+            _ => None,
+        })
+        .last()
+        .expect("right window animation must finish");
+    assert!(
+        final_frame.same_as(frame(228.)),
+        "stale animation left a gap: {final_frame:?}"
+    );
+}
+
+#[test]
 fn animated_layout_handles_windows_without_server_ids() {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);
