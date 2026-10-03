@@ -256,9 +256,8 @@ skip_empty = true
 fingers = 3
 # Normalized horizontal distance (0..1) to trigger swipe for NSTouch-based detection
 distance_pct = 0.08
-# Haptic feedback on commit (generic | alignment | level_change)
+# Haptic feedback on swipe
 haptics_enabled = true
-haptic_pattern = "level_change"
 
 # Mouse move and tiled-window drop behavior
 [settings.drag_drop]
