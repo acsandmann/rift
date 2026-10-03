@@ -291,7 +291,10 @@ impl ViewportPresentation {
             },
             target: self.target(),
             gesturing: self.gesturing(),
-            timestamp: now,
+            timestamp: match &self.viewport {
+                Viewport::Animation(s) => s.sampled,
+                _ => now,
+            },
             motion: self.motion.clone(),
         }
     }
@@ -3244,7 +3247,7 @@ pub(crate) mod tests {
 
     #[test]
     fn camera_retarget_and_rebase_preserve_position_and_velocity() {
-        let f = Fixture::new(4);
+        let mut f = Fixture::new(4);
         let (mut p, frames) = f.system.presentation(f.layout).unwrap();
         let start = Instant::now();
         p.viewport = Viewport::Static(800.0);
@@ -3253,6 +3256,15 @@ pub(crate) mod tests {
         p.sample(now, 1.0);
         let (position, velocity) = p.position_velocity(now);
         assert!(velocity > 0.0);
+        // Native target timestamps can lead the time of semantic publication.
+        let next = now + Duration::from_millis(10);
+        let expected = p.position_velocity(next);
+        f.system.commit_presented_viewport(f.layout, &p.snapshot(start));
+        let (mut resumed, _) = f.system.presentation(f.layout).unwrap();
+        resumed.sample(next, 1.0);
+        let actual = resumed.position_velocity(next);
+        assert!((actual.0 - expected.0).abs() < 1e-9);
+        assert!((actual.1 - expected.1).abs() < 1e-9);
         p.viewport = Viewport::Static(900.0);
         p.retarget(position, velocity, now);
         let Viewport::Animation(spring) = &p.viewport else {
