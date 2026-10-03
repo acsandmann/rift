@@ -73,6 +73,20 @@ fn logical_window_positions(tree: &ContainerTreeNode) -> HashMap<WindowId, Windo
         .collect()
 }
 
+/// Order windows by their logical layout position.
+///
+/// Windows with a position lead in column-major (left-to-right, then
+/// top-to-bottom) order, which is the scrolling layout's visual order. Floating
+/// windows and layouts without column semantics have no position, so they
+/// follow in their existing stable membership order.
+fn sort_by_layout_position(windows: &mut [RuntimeWindowData]) {
+    windows.sort_by_key(|window| {
+        window.layout_position.map_or((1, usize::MAX, usize::MAX), |position| {
+            (0, position.column, position.row)
+        })
+    });
+}
+
 #[derive(Clone)]
 pub struct ReactorQueryHandle {
     tx: Sender,
@@ -360,12 +374,7 @@ impl Reactor {
             let predicted_map: std::collections::HashMap<WindowId, CGRect> =
                 predicted_positions.into_iter().collect();
 
-            let logical_positions = space_id
-                .and_then(|space| {
-                    self.layout_manager.layout_engine.query_workspace_layout(space, Some(index))
-                })
-                .map(|snapshot| logical_window_positions(&snapshot.container_tree))
-                .unwrap_or_default();
+            let logical_positions = self.logical_window_positions_for(space_id, Some(index));
 
             let layout_frames = space_id
                 .and_then(|space| {
@@ -400,13 +409,7 @@ impl Reactor {
                     windows.push(wd);
                 }
             }
-            // Scrolling windows are returned in their logical visual order. Floating and
-            // non-column layouts retain their existing stable membership order afterward.
-            windows.sort_by_key(|window| {
-                window.layout_position.map_or((1, usize::MAX, usize::MAX), |position| {
-                    (0, position.column, position.row)
-                })
-            });
+            sort_by_layout_position(&mut windows);
 
             let layout_mode = space_id
                 .and_then(|space| {
@@ -523,6 +526,23 @@ impl Reactor {
             .collect()
     }
 
+    /// Logical `{column, row}` positions for a workspace's tiled windows.
+    ///
+    /// `workspace_index` of `None` means the space's active workspace. The map is
+    /// empty for layout modes without column semantics.
+    fn logical_window_positions_for(
+        &self,
+        space_id: Option<SpaceId>,
+        workspace_index: Option<usize>,
+    ) -> HashMap<WindowId, WindowLayoutPosition> {
+        space_id
+            .and_then(|space| {
+                self.layout_manager.layout_engine.query_workspace_layout(space, workspace_index)
+            })
+            .map(|snapshot| logical_window_positions(&snapshot.container_tree))
+            .unwrap_or_default()
+    }
+
     pub fn query_windows(&self, space_id: Option<SpaceId>) -> Vec<RuntimeWindowData> {
         let target_space = space_id.or_else(|| self.default_query_space());
 
@@ -532,11 +552,20 @@ impl Reactor {
                 .layout_engine
                 .workspaces()
                 .windows_in_active_workspace(&self.state.windows, space);
+            let logical_positions = self.logical_window_positions_for(Some(space), None);
 
-            active_windows
+            let mut windows: Vec<RuntimeWindowData> = active_windows
                 .into_iter()
-                .filter_map(|wid| self.create_window_data(wid))
-                .collect()
+                .filter_map(|wid| {
+                    let mut wd = self.create_window_data(wid)?;
+                    if !wd.is_floating {
+                        wd.layout_position = logical_positions.get(&wid).copied();
+                    }
+                    Some(wd)
+                })
+                .collect();
+            sort_by_layout_position(&mut windows);
+            windows
         } else {
             self.state
                 .windows

@@ -3742,6 +3742,40 @@ fn workspace_query_exposes_scrolling_order_for_inactive_workspace() {
 }
 
 #[test]
+fn windows_query_exposes_scrolling_order() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let w1 = WindowId::new(1, 1);
+    let w2 = WindowId::new(1, 2);
+    let w3 = WindowId::new(1, 3);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    // Moving the selected window left changes scroll order without changing the
+    // membership order the window store reports.
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Left));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let queried = reactor.query_windows(Some(space));
+    assert_eq!(queried.iter().map(|window| window.id).collect::<Vec<_>>(), vec![
+        w1, w3, w2
+    ]);
+    assert_eq!(
+        queried
+            .iter()
+            .map(|window| window.layout_position.map(|position| (position.column, position.row)))
+            .collect::<Vec<_>>(),
+        vec![Some((0, 0)), Some((1, 0)), Some((2, 0))]
+    );
+}
+
+#[test]
 fn it_preserves_layout_after_login_screen() {
     // TODO: This would be better tested with a more complete simulation.
     let (mut apps, mut reactor) = test_context();
