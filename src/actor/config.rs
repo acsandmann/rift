@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::actor::{self, reactor};
-use crate::common::config::{Config, ConfigCommand, MAX_WORKSPACES};
+use crate::common::config::{Config, ConfigCommand, ConfigDocument, MAX_WORKSPACES};
 
 pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
@@ -24,6 +24,7 @@ pub enum Event {
 
 pub struct ConfigActor {
     config: Config,
+    document: ConfigDocument,
     reactor_tx: reactor::Sender,
     config_path: PathBuf,
 }
@@ -42,7 +43,13 @@ impl ConfigActor {
         std::thread::Builder::new()
             .name("config".to_string())
             .spawn(move || {
+                let document = if config_path.exists() {
+                    ConfigDocument::read(&config_path).expect("startup config must parse")
+                } else {
+                    ConfigDocument::default()
+                };
                 let actor = ConfigActor {
+                    document,
                     config,
                     reactor_tx,
                     config_path,
@@ -70,214 +77,93 @@ impl ConfigActor {
     fn handle_config_command(&mut self, cmd: ConfigCommand) -> Result<(), String> {
         debug!("Applying config command: {:?}", cmd);
 
-        let mut new_config = self.config.clone();
-        let mut config_changed = false;
-        let mut errors: Vec<String> = Vec::new();
-
-        macro_rules! set_flag {
-            ($path:expr, $value:expr, $name:literal) => {{
-                $path = $value;
-                config_changed = true;
-                info!("Updated {} to: {}", $name, $value);
-            }};
-        }
-
-        let mut set_range = |name: &str, target: &mut f64, value: f64, min: f64, max: f64| {
-            if value >= min && value <= max {
-                *target = value;
-                config_changed = true;
-                info!("Updated {} to: {}", name, value);
-            } else {
-                errors.push(format!(
-                    "Invalid {} value: {}. Must be between {} and {}",
-                    name, value, min, max
-                ));
-            }
-        };
-
-        match cmd {
-            ConfigCommand::SetAnimate(v) => set_flag!(new_config.settings.animate, v, "animate"),
-            ConfigCommand::SetAnimationDuration(v) => set_range(
-                "animation_duration",
-                &mut new_config.settings.animation_duration,
-                v,
-                0.0,
-                5.0,
-            ),
-            ConfigCommand::SetAnimationFps(v) => set_range(
-                "animation_fps",
-                &mut new_config.settings.animation_fps,
-                v,
-                0.0,
-                240.0,
-            ),
-            ConfigCommand::SetAnimationEasing(v) => {
-                new_config.settings.animation_easing = v.clone();
-                config_changed = true;
-                info!(
-                    "Updated animation_easing to: {:?}",
-                    new_config.settings.animation_easing
-                );
-            }
-            ConfigCommand::SetMouseFollowsFocus(v) => {
-                set_flag!(new_config.settings.mouse_follows_focus, v, "mouse_follows_focus")
-            }
-            ConfigCommand::SetMouseHidesOnFocus(v) => {
-                set_flag!(
-                    new_config.settings.mouse_hides_on_focus,
-                    v,
-                    "mouse_hides_on_focus"
-                )
-            }
-            ConfigCommand::SetFocusFollowsMouse(v) => {
-                set_flag!(new_config.settings.focus_follows_mouse, v, "focus_follows_mouse")
-            }
-            ConfigCommand::SetStackOffset(v) => set_range(
-                "stack_offset",
-                &mut new_config.settings.layout.stack.stack_offset,
-                v,
-                0.0,
-                200.0,
-            ),
-            ConfigCommand::SetOuterGaps { top, left, bottom, right } => {
-                if [top, left, bottom, right].into_iter().all(|v| v >= 0.0) {
-                    let gaps = &mut new_config.settings.layout.gaps.outer;
-                    gaps.top = top;
-                    gaps.left = left;
-                    gaps.bottom = bottom;
-                    gaps.right = right;
-                    config_changed = true;
-                    info!(
-                        "Updated outer gaps to: top={}, left={}, bottom={}, right={}",
-                        top, left, bottom, right
-                    );
-                } else {
-                    errors.push("Invalid outer gap values. All values must be >= 0.0".to_string());
-                }
-            }
-            ConfigCommand::SetInnerGaps { horizontal, vertical } => {
-                if horizontal >= 0.0 && vertical >= 0.0 {
-                    let gaps = &mut new_config.settings.layout.gaps.inner;
-                    gaps.horizontal = horizontal;
-                    gaps.vertical = vertical;
-                    config_changed = true;
-                    info!(
-                        "Updated inner gaps to: horizontal={}, vertical={}",
-                        horizontal, vertical
-                    );
-                } else {
-                    errors.push("Invalid inner gap values. All values must be >= 0.0".to_string());
-                }
-            }
-            ConfigCommand::SetWorkspaceNames(names) => {
-                if names.len() <= MAX_WORKSPACES {
-                    new_config.virtual_workspaces.workspace_names = names.clone();
-                    config_changed = true;
-                    info!("Updated workspace names to: {:?}", names);
-                } else {
-                    errors.push("Too many workspace names provided. Maximum is 32".to_string());
-                }
-            }
-
-            ConfigCommand::Set { key, value } => match serde_json::to_value(&new_config) {
-                Ok(mut cfg_val) => {
-                    let parts: Vec<&str> = key.split('.').collect();
-                    if parts.is_empty() {
-                        errors.push("Empty config key provided".to_string());
-                    } else {
-                        let mut cur = &mut cfg_val;
-                        let mut failed = false;
-                        for (i, part) in parts.iter().enumerate() {
-                            if i + 1 == parts.len() {
-                                if let Some(obj) = cur.as_object_mut() {
-                                    obj.insert(part.to_string(), value.clone());
-                                } else {
-                                    errors.push(format!("Invalid config path: {}", key));
-                                    failed = true;
-                                }
-                            } else if let Some(obj) = cur.as_object_mut() {
-                                if !obj.contains_key(*part) {
-                                    obj.insert(part.to_string(), serde_json::json!({}));
-                                }
-                                cur = obj.get_mut(*part).unwrap();
-                            } else {
-                                errors.push(format!("Invalid config path: {}", key));
-                                failed = true;
-                                break;
-                            }
-                        }
-
-                        if !failed {
-                            match serde_json::from_value::<Config>(cfg_val) {
-                                Ok(cfg2) => {
-                                    new_config = cfg2;
-                                    config_changed = true;
-                                    info!("Updated {} to {}", key, value);
-                                }
-                                Err(e) => {
-                                    errors.push(format!(
-                                        "Failed to deserialize config after setting '{}': {}",
-                                        key, e
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    errors.push(format!("Failed to serialize config for modification: {}", e))
-                }
-            },
-
+        match &cmd {
             ConfigCommand::GetConfig => {
-                let config_json = serde_json::to_string_pretty(&self.config)
-                    .unwrap_or_else(|e| format!("Error serializing config: {}", e));
-                info!("Current config:\n{}", config_json);
+                info!(
+                    "Current config:\n{}",
+                    serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?
+                );
                 return Ok(());
             }
-            ConfigCommand::SaveConfig => match self.save_config_to_file() {
-                Ok(()) => {
-                    info!("Config saved successfully");
-                    return Ok(());
-                }
-                Err(e) => return Err(format!("Failed to save config: {}", e)),
-            },
-            ConfigCommand::ReloadConfig => match self.load_config_from_file() {
-                Ok(cfg) => {
-                    info!("Config reloaded successfully");
-                    config_changed = true;
-                    new_config = cfg;
-                }
-                Err(e) => return Err(format!("Failed to reload config: {}", e)),
-            },
-        }
-
-        if !errors.is_empty() {
-            return Err(errors.join("; "));
-        }
-
-        let validation_issues = new_config.validate();
-        if !validation_issues.is_empty() {
-            return Err(validation_issues.join("; "));
-        }
-
-        if config_changed {
-            let validation_issues = new_config.validate();
-            if !validation_issues.is_empty() {
-                return Err(validation_issues.join("; "));
+            ConfigCommand::SaveConfig => {
+                return self.save_config_to_file().map_err(|e| e.to_string());
             }
-
-            self.config = new_config;
-
-            self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
+            ConfigCommand::ReloadConfig => {
+                self.config = self.load_config_from_file().map_err(|e| e.to_string())?;
+            }
+            ConfigCommand::Set { key, value } => {
+                self.config = self.document.set(key, value).map_err(|e| e.to_string())?;
+            }
+            _ => {
+                let range = match &cmd {
+                    ConfigCommand::SetAnimationDuration(v) => {
+                        Some(("animation_duration", *v, 0.0, 5.0))
+                    }
+                    ConfigCommand::SetAnimationFps(v) => Some(("animation_fps", *v, 0.0, 240.0)),
+                    ConfigCommand::SetStackOffset(v) => Some(("stack_offset", *v, 0.0, 200.0)),
+                    _ => None,
+                };
+                if let Some((name, value, min, max)) = range
+                    && !(min..=max).contains(&value)
+                {
+                    return Err(format!(
+                        "Invalid {name} value: {value}. Must be between {min} and {max}"
+                    ));
+                }
+                if let ConfigCommand::SetWorkspaceNames(names) = &cmd
+                    && names.len() > MAX_WORKSPACES
+                {
+                    return Err(format!(
+                        "Too many workspace names provided. Maximum is {MAX_WORKSPACES}"
+                    ));
+                }
+                self.config = self
+                    .document
+                    .update(|source| {
+                        let settings = &mut source.settings;
+                        match cmd {
+                            ConfigCommand::SetAnimate(v) => settings.animate = v,
+                            ConfigCommand::SetAnimationDuration(v) => {
+                                settings.animation_duration = v
+                            }
+                            ConfigCommand::SetAnimationFps(v) => settings.animation_fps = v,
+                            ConfigCommand::SetAnimationEasing(v) => settings.animation_easing = v,
+                            ConfigCommand::SetMouseFollowsFocus(v) => {
+                                settings.mouse_follows_focus = v
+                            }
+                            ConfigCommand::SetMouseHidesOnFocus(v) => {
+                                settings.mouse_hides_on_focus = v
+                            }
+                            ConfigCommand::SetFocusFollowsMouse(v) => {
+                                settings.focus_follows_mouse = v
+                            }
+                            ConfigCommand::SetStackOffset(v) => {
+                                settings.layout.stack.stack_offset = v
+                            }
+                            ConfigCommand::SetOuterGaps { top, left, bottom, right } => {
+                                settings.layout.gaps.outer =
+                                    crate::common::config::OuterGaps { top, left, bottom, right };
+                            }
+                            ConfigCommand::SetInnerGaps { horizontal, vertical } => {
+                                settings.layout.gaps.inner =
+                                    crate::common::config::InnerGaps { horizontal, vertical };
+                            }
+                            ConfigCommand::SetWorkspaceNames(names) => {
+                                source.virtual_workspaces.workspace_names = names
+                            }
+                            _ => unreachable!(),
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
         }
-
+        self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
         Ok(())
     }
 
     fn save_config_to_file(&self) -> Result<(), Box<dyn std::error::Error>> {
         let config_path = &self.config_path;
-        self.config.save(config_path)?;
+        self.document.save(config_path)?;
         Ok(())
     }
 
@@ -287,7 +173,13 @@ impl ConfigActor {
         let config_path = &self.config_path;
 
         if config_path.exists() {
-            let new_config = crate::common::config::Config::read(config_path)?;
+            let document = ConfigDocument::read(config_path)?;
+            let new_config = document.runtime()?;
+            let issues = new_config.validate();
+            if !issues.is_empty() {
+                return Err(issues.join("; ").into());
+            }
+            self.document = document;
             Ok(new_config)
         } else {
             Err("Config file not found".into())
@@ -301,6 +193,42 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn commands_save_and_reload_the_source_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let text = include_str!("../../rift.default.toml");
+        std::fs::write(&path, text).unwrap();
+        let (reactor_tx, _updates) = actor::channel();
+        let mut actor = ConfigActor {
+            config: Config::default(),
+            document: ConfigDocument::read(&path).unwrap(),
+            reactor_tx,
+            config_path: path.clone(),
+        };
+        actor.handle_config_command(ConfigCommand::SetAnimate(true)).unwrap();
+        actor.handle_config_command(ConfigCommand::SaveConfig).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text.replace("animate = false", "animate = true")
+        );
+        let external = format!("# external edit\n{text}");
+        std::fs::write(&path, &external).unwrap();
+        actor.handle_config_command(ConfigCommand::ReloadConfig).unwrap();
+        actor
+            .handle_config_command(ConfigCommand::Set {
+                key: "settings.animation_duration".into(),
+                value: serde_json::json!(0.2),
+            })
+            .unwrap();
+        actor.handle_config_command(ConfigCommand::SaveConfig).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            external.replace("animation_duration = 0.3", "animation_duration = 0.2")
+        );
+        assert_eq!(Config::read(&path).unwrap().settings.animation_duration, 0.2);
+    }
 
     #[test]
     fn unread_and_dropped_replies_do_not_stall_actor() {
