@@ -364,15 +364,9 @@ impl CameraAnimation {
                 }
                 (from, velocity)
             } else {
-                // Finished cameras are gone. Start from semantic window geometry,
-                // using a visible window so parking cannot distort the inverse.
-                let from = self
-                    .windows
-                    .iter()
-                    .filter(|w| !w.fixed)
-                    .find_map(|w| self.presentation.offset_for_frame(w.to, w.frame))
-                    .unwrap_or(self.presentation.offset());
-                (from, 0.0)
+                // Native frames can be clamped after parking. The viewport
+                // retains its own starting position when a target changes.
+                (self.presentation.offset(), 0.0)
             };
             self.presentation.retarget(from, velocity, now);
         }
@@ -1667,6 +1661,121 @@ mod tests {
             collect_requests(&mut rx).is_empty(),
             "old timestamps cannot sample a new transition"
         );
+    }
+
+    #[test]
+    fn completed_camera_keeps_its_offset_after_native_window_clamping() {
+        use crate::common::config::{ScrollingAlignment, ScrollingLayoutSettings};
+        use crate::layout_engine::systems::ScrollingLayoutSystem;
+
+        let (handle, _rx) = AppThreadHandle::channel();
+        let hidden = WindowId::new(1, 1);
+        let visible = WindowId::new(1, 2);
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings {
+            column_width_ratio: 1.0,
+            max_column_width_ratio: 1.0,
+            alignment: ScrollingAlignment::Left,
+            preserve_window_sizes: false,
+            ..Default::default()
+        });
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, hidden);
+        system.add_window_after_selection(layout, visible);
+        system.select_window(layout, hidden);
+        system.prepare_layout(
+            layout,
+            rect(0.0, 0.0, 1000.0, 800.0),
+            &Default::default(),
+            &Default::default(),
+        );
+        let make_camera = |system: &ScrollingLayoutSystem, native: &[(WindowId, CGRect)]| {
+            let (presentation, frames) = system.presentation(layout).unwrap();
+            let state = Arc::new(Mutex::new(PresentedCamera {
+                viewport: presentation.snapshot(Instant::now()),
+                gesture: None,
+                active: true,
+                stopped: false,
+            }));
+            CameraAnimation {
+                presentation,
+                windows: frames
+                    .into_iter()
+                    .map(|(wid, world, fixed)| {
+                        let frame = native.iter().find(|(id, _)| *id == wid).unwrap().1;
+                        PresentedWindow {
+                            handle: handle.clone(),
+                            wid,
+                            wsid: None,
+                            from: frame,
+                            to: world,
+                            fixed,
+                            announced: false,
+                            leased: false,
+                            frame,
+                            txid: TransactionId::default(),
+                        }
+                    })
+                    .collect(),
+                gesture: None,
+                active: true,
+                identity: CameraIdentity {
+                    space: SpaceId::new(1),
+                    workspace: VirtualWorkspaceId::default(),
+                    layout,
+                },
+                events: None,
+                state,
+                display: 1,
+                animate: true,
+                scale: 1.0,
+                store: WindowTxStore::new(),
+                interval: Duration::from_secs_f64(1.0 / 60.0),
+                bound: None,
+            }
+        };
+        let native = vec![
+            (hidden, rect(0.0, 0.0, 1000.0, 800.0)),
+            (visible, rect(1000.0, 0.0, 1000.0, 800.0)),
+        ];
+        system.select_window(layout, visible);
+        let mut manager = AnimationManager::new();
+        let camera = make_camera(&system, &native);
+        let state = camera.state.clone();
+        manager.handle_message(Message::Camera(Box::new(camera)));
+        assert_eq!(camera_mut(&mut manager).unwrap().presentation.offset(), 0.0);
+        let started = Instant::now();
+        manager.tick_at(started + Duration::from_millis(50));
+        let offset = camera_mut(&mut manager).unwrap().presentation.offset();
+        assert!(
+            offset > 0.0 && offset < 1000.0,
+            "focus changes must still animate"
+        );
+        manager.tick_at(started + Duration::from_secs(2));
+        system.commit_presented_viewport(layout, &state.lock().viewport);
+        manager.retire();
+        assert!(manager.motions.is_empty());
+
+        // The completed animation parked the first window at -1000. macOS
+        // reports it 40 points farther right. A click in the selected window
+        // must not turn that native correction into a new viewport position.
+        let native = vec![
+            (hidden, rect(-960.0, 0.0, 1000.0, 800.0)),
+            (visible, rect(0.0, 0.0, 1000.0, 800.0)),
+        ];
+        system.select_window(layout, visible);
+        manager.handle_message(Message::Camera(Box::new(make_camera(&system, &native))));
+        assert_eq!(
+            camera_mut(&mut manager).unwrap().presentation.offset(),
+            1000.0,
+            "an unchanged viewport must keep its completed offset"
+        );
+        manager.tick_at(Instant::now() + Duration::from_millis(16));
+        let camera = camera_mut(&mut manager).unwrap();
+        assert_eq!(
+            camera.windows.iter().find(|w| w.wid == visible).unwrap().frame,
+            rect(0.0, 0.0, 1000.0, 800.0)
+        );
+        assert!(!manager.has_work(), "a click must not start another scroll");
     }
 
     #[test]
