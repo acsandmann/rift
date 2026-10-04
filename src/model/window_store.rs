@@ -393,7 +393,8 @@ impl WindowStore {
     }
 
     /// Hidden is visibility evidence, never destruction. Return the owning PID
-    /// for a targeted, coalesced AX refresh (including pending native identity).
+    /// for a targeted, coalesced AX refresh only when visibility changes
+    /// (including pending native identity).
     pub(crate) fn observe_native_visibility(
         &mut self,
         wsid: WindowServerId,
@@ -403,8 +404,7 @@ impl WindowStore {
             .tracked_window_id(wsid)
             .map(|wid| wid.pid)
             .or_else(|| self.get_window_server_info(wsid).map(|info| info.pid));
-        self.set_native_visibility(wsid, visible);
-        pid
+        self.set_native_visibility(wsid, visible).then_some(pid).flatten()
     }
 
     /// A current successful AX omission is destructive only with native negative evidence.
