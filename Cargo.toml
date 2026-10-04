@@ -14,12 +14,12 @@ test = false
 
 [profile.dev]
 opt-level = 0
-debug = 1
+debug = "line-tables-only"
 incremental = true
-codegen-units = 16
+codegen-units = 256
 debug-assertions = true
 overflow-checks = true
-split-debuginfo = "packed"
+split-debuginfo = "unpacked"
 panic = "unwind"
 
 [profile.release]
