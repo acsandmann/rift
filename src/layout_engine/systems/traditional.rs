@@ -1814,7 +1814,16 @@ impl TraditionalLayoutSystem {
         if let Some(window) = self.window_at(node) {
             return Some(window);
         }
-
+        // Stacked groups present their locally selected window from every
+        // direction (mirrors descend_into_target), so cross-display focus
+        // keeps the stack's selection instead of raising a different member.
+        if self.tree.data.layout.kind(node).is_stacked() {
+            if let Some(selected) = self.tree.data.selection.local_selection(self.map(), node) {
+                if let Some(window) = self.window_in_direction_from(selected, direction) {
+                    return Some(window);
+                }
+            }
+        }
         let mut children: Vec<_> = node.children(self.map()).collect();
         match direction {
             Direction::Left | Direction::Up => children.reverse(),
@@ -3301,6 +3310,31 @@ mod tests {
 
         assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
+
+    #[test]
+    fn window_in_direction_uses_stack_selection() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::VerticalStack);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+        system.select_window(layout, w(2));
+
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            assert_eq!(
+                system.window_in_direction(layout, direction),
+                Some(w(2)),
+                "{direction:?}"
+            );
+        }
     }
 
     struct TestTraditionalLayoutSystem {
