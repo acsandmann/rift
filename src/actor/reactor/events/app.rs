@@ -91,14 +91,12 @@ pub fn handle_windows_discovered(
 ) -> anyhow::Result<EventOutcome> {
     let WindowsDiscoveredPayload { pid, new, known_visible } = payload;
     Ok(
-        EventOutcome::window_notification_refresh().with_discovery(
-            WindowDiscoveryRequest {
-                pid,
-                new,
-                known_visible,
-                app_info: None,
-            },
-        ),
+        EventOutcome::window_notification_refresh().with_discovery(WindowDiscoveryRequest {
+            pid,
+            new,
+            known_visible,
+            app_info: None,
+        }),
     )
 }
 

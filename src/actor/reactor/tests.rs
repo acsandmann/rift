@@ -95,10 +95,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
         "inventory must not feed a transient Rift-owned frame back into model geometry"
     );
-    assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(target)
-    );
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(target));
     assert_eq!(
         reactor.layout_update_count, layout_updates,
         "a passive inventory refresh must not schedule another arrange"
