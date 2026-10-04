@@ -152,11 +152,16 @@ pub fn handle_command_layout(
         workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
     }
 
-    let selection_changed = is_selection_command && response.changed;
+    let response_changed = response.changed;
+    let selection_changed = is_selection_command && response_changed;
     let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
-    let mut outcome = EventOutcome::layout_changed(false)
-        .with_layout_response(response, workspace_space)
-        .with_arrange_space_scope(arrange_space_scope);
+    let mut outcome = if response_changed {
+        EventOutcome::layout_changed(false)
+    } else {
+        EventOutcome::no_change()
+    }
+    .with_layout_response(response, workspace_space)
+    .with_arrange_space_scope(arrange_space_scope);
     outcome.broadcast_selection_changed = selection_changed;
     if is_move_node && let Some(window) = post_arrange_mouse_warp {
         outcome.post_arrange_mouse_warp = Some(window);

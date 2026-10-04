@@ -3311,6 +3311,7 @@ impl Reactor {
         let (new_windows, process_outcome) = window_discovery::process_window_list(
             &mut self.state,
             &mut self.layout_manager,
+            &self.transaction_manager,
             observed_windows,
         );
         outcome.absorb(process_outcome);

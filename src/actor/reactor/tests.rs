@@ -56,6 +56,72 @@ fn event_outcome_execution_keeps_phase_order() {
 }
 
 #[test]
+fn no_op_layout_command_does_not_schedule_arrange() {
+    let mut reactor = test_reactor();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::MoveFocus(Direction::Left));
+
+    assert_eq!(outcome.arrange.passes, 0);
+    assert_eq!(outcome.layout_responses.len(), 1);
+}
+
+#[test]
+fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
+    let (mut reactor, wid, wsid, _, _, frame) = reactor_with_window_on_space1();
+    reactor.discover_test_windows(
+        wid.pid,
+        vec![(wid, make_window_info(frame, Some(wsid), "Window", None))],
+        vec![wid],
+    );
+    let layout_updates = reactor.layout_update_count;
+
+    let mut target = frame;
+    target.origin.x = 200.0;
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, target);
+
+    let mut parked = frame;
+    parked.origin.x += frame.size.width;
+    reactor.discover_test_windows(
+        wid.pid,
+        vec![(wid, make_window_info(parked, Some(wsid), "Window", None))],
+        vec![wid],
+    );
+
+    assert!(
+        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
+        "inventory must not feed a transient Rift-owned frame back into model geometry"
+    );
+    assert_eq!(
+        reactor.transaction_manager.get_target_frame(wsid),
+        Some(target)
+    );
+    assert_eq!(
+        reactor.layout_update_count, layout_updates,
+        "a passive inventory refresh must not schedule another arrange"
+    );
+
+    reactor.transaction_manager.clear_target_for_window(wsid);
+    reactor.discover_test_windows(
+        wid.pid,
+        vec![(wid, make_window_info(parked, Some(wsid), "Window", None))],
+        vec![wid],
+    );
+    assert!(
+        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(parked),
+        "inventory geometry must become authoritative again after Rift releases the target"
+    );
+    assert_eq!(
+        reactor.layout_update_count,
+        layout_updates + 1,
+        "an authoritative inventory geometry change must still arrange once"
+    );
+}
+
+#[test]
 fn layout_query_exposes_active_and_inactive_workspace_container_trees() {
     let mut reactor = test_reactor();
     let space = SpaceId::new(1);

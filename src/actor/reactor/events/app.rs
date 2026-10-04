@@ -91,7 +91,7 @@ pub fn handle_windows_discovered(
 ) -> anyhow::Result<EventOutcome> {
     let WindowsDiscoveredPayload { pid, new, known_visible } = payload;
     Ok(
-        EventOutcome::window_membership_changed(false, true).with_discovery(
+        EventOutcome::window_notification_refresh().with_discovery(
             WindowDiscoveryRequest {
                 pid,
                 new,

@@ -2,17 +2,20 @@ use tracing::{debug, warn};
 
 use super::window;
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
+use crate::actor::reactor::transaction_manager::TransactionManager;
 use crate::actor::reactor::{LayoutEvent, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::layout_engine::ResolvedWindow;
 use crate::model::virtual_workspace::WorkspaceError;
 use crate::model::{AppRuleEffects, AppRuleResult, WindowRuleContext};
+use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 /// Handler for window discovery events, responsible for processing newly discovered windows
 /// and managing the lifecycle of window state in the reactor.
 fn sync_existing_window_state(
     state: &mut crate::model::RiftState,
+    transactions: &TransactionManager,
     wid: WindowId,
     mut info: WindowInfo,
     active_space: Option<SpaceId>,
@@ -21,8 +24,19 @@ fn sync_existing_window_state(
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
 
     let is_minimized = info.is_minimized;
+    let rift_owns_geometry = info
+        .sys_id
+        .is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
+    let mut needs_arrange = false;
     if let Some(existing) = state.windows.window_mut(wid) {
-        if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
+        let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
+        let geometry_changed =
+            !rift_owns_geometry && valid_frame && !existing.frame_monotonic.same_as(info.frame);
+        let constraints_changed = existing.info.is_resizable != info.is_resizable
+            || existing.info.min_size != info.min_size
+            || existing.info.max_size != info.max_size;
+        needs_arrange = geometry_changed || constraints_changed;
+        if !rift_owns_geometry && valid_frame {
             existing.frame_monotonic = info.frame;
         }
         // Preserve the observed frame and minimize transition until their handlers run.
@@ -33,7 +47,8 @@ fn sync_existing_window_state(
         return Ok(crate::actor::reactor::events::EventOutcome::default());
     }
 
-    let outcome = match (was_minimized, is_minimized) {
+    let mut admission_changed = false;
+    let mut outcome = match (was_minimized, is_minimized) {
         (_, true) => window::handle_window_minimized(state, wid)?,
         (true, false) => {
             window::handle_window_deminiaturized(state, window::WindowDeminiaturizedPayload {
@@ -44,6 +59,7 @@ fn sync_existing_window_state(
         _ => {
             let is_admitted = utils::refresh_heuristic(state, wid)
                 .is_some_and(|transition| transition.is_admitted);
+            admission_changed = was_manageable != is_admitted;
             if was_manageable && !is_admitted {
                 crate::actor::reactor::events::EventOutcome::default()
                     .with_layout_event(LayoutEvent::WindowRemoved(wid))
@@ -52,6 +68,9 @@ fn sync_existing_window_state(
             }
         }
     };
+    if needs_arrange && was_minimized == is_minimized && !admission_changed {
+        outcome.absorb(crate::actor::reactor::events::EventOutcome::layout_changed(false));
+    }
 
     if was_minimized != is_minimized {
         debug!(
@@ -92,6 +111,7 @@ pub(crate) struct ObservedWindow {
 pub(crate) fn process_window_list(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
+    transactions: &TransactionManager,
     observed: Vec<ObservedWindow>,
 ) -> (
     Vec<(WindowId, WindowInfo)>,
@@ -115,7 +135,8 @@ pub(crate) fn process_window_list(
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
         }
         if state.windows.contains_window(wid) {
-            if let Ok(existing_outcome) = sync_existing_window_state(state, wid, info, active_space)
+            if let Ok(existing_outcome) =
+                sync_existing_window_state(state, transactions, wid, info, active_space)
             {
                 outcome.absorb(existing_outcome);
             }
