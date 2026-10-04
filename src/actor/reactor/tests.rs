@@ -56,6 +56,29 @@ fn event_outcome_execution_keeps_phase_order() {
 }
 
 #[test]
+fn geometry_commands_request_arrangement_without_camera_movement() {
+    let (mut reactor, _, _, _, _, _) = reactor_with_window_on_space1();
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    for command in [
+        LayoutCommand::MoveNode(Direction::Left),
+        LayoutCommand::ResizeWindowBy { amount: 0.1 },
+        LayoutCommand::ToggleOrientation,
+        LayoutCommand::JoinWindow(Direction::Right),
+        LayoutCommand::CenterSelection,
+        LayoutCommand::AdjustMasterRatio(0.1),
+    ] {
+        let outcome = reactor.dispatch_test_layout_command(command.clone());
+        assert_eq!(
+            outcome.arrange.passes, 1,
+            "{command:?} must reconcile window frames"
+        );
+    }
+}
+
+#[test]
 fn no_op_layout_command_does_not_schedule_arrange() {
     let mut reactor = test_reactor();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

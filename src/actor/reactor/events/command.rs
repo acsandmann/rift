@@ -45,6 +45,13 @@ pub fn handle_command_layout(
     info!(?cmd);
     let is_move_node = matches!(cmd, LayoutCommand::MoveNode(_));
     let is_selection_command = matches!(cmd, LayoutCommand::Ascend | LayoutCommand::Descend);
+    let is_focus_command = matches!(
+        cmd,
+        LayoutCommand::NextWindow
+            | LayoutCommand::PrevWindow
+            | LayoutCommand::MoveFocus(_)
+            | LayoutCommand::ToggleFocusFloating
+    );
     let is_workspace_switch = matches!(
         cmd,
         LayoutCommand::NextWorkspace(_)
@@ -155,7 +162,12 @@ pub fn handle_command_layout(
     let response_changed = response.changed;
     let selection_changed = is_selection_command && response_changed;
     let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
-    let mut outcome = if response_changed {
+    // Geometry commands must reconcile frames even when their layout-system
+    // operation has no explicit change result. Focus, selection and workspace
+    // commands provide one, so preserve their no-op behavior.
+    let needs_arrange = response_changed
+        || (!is_focus_command && !is_selection_command && !is_virtual_workspace_command);
+    let mut outcome = if needs_arrange {
         EventOutcome::layout_changed(false)
     } else {
         EventOutcome::no_change()
