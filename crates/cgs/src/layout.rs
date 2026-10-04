@@ -227,6 +227,15 @@ pub struct GroupBox {
 }
 impl GroupBox {
     pub fn new(ui: &Ui, content: impl NativeView) -> Self {
+        Self::with_insets(ui, content, Insets {
+            top: 10.0,
+            left: 12.0,
+            bottom: 10.0,
+            right: 12.0,
+        })
+    }
+
+    pub fn with_insets(ui: &Ui, content: impl NativeView, insets: Insets) -> Self {
         let native = NSBox::new(ui.mtm());
         native.setBoxType(NSBoxType::Custom);
         native.setTitlePosition(NSTitlePosition::NoTitle);
@@ -236,12 +245,7 @@ impl GroupBox {
         native.setContentViewMargins(crate::CGSize::new(0.0, 0.0));
         let host = native.contentView().unwrap();
         host.addSubview(content.ns_view());
-        crate::view::pin(&host, content.ns_view(), Insets {
-            top: 10.0,
-            left: 12.0,
-            bottom: 10.0,
-            right: 12.0,
-        });
+        crate::view::pin(&host, content.ns_view(), insets);
         Self {
             native,
             _content: Box::new(content),

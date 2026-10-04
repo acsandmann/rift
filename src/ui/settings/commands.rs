@@ -251,7 +251,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         &ui,
         |(_, action)| action.clone(),
         |(key, _)| key.clone(),
-    );
+    )
+    .empty_message("No shortcuts in this keymap");
     let weak_model = Rc::downgrade(model);
     let mode_edit = mode.clone();
     let edit_binding: Rc<dyn Fn(usize)> = Rc::new(move |i| {

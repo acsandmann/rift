@@ -11,7 +11,7 @@ use objc2_foundation::{
 };
 
 use crate::bridge::{ActionTarget, callback};
-use crate::{AddRemoveControl, Label, NativeView, ScrollView, Ui, VStack};
+use crate::{AddRemoveControl, Label, NativeControl, NativeView, ScrollView, Ui, VStack};
 
 fn drag_type() -> Retained<NSString> { NSString::from_str("org.cgs.local-row") }
 type CellFactory = Box<dyn FnMut(usize, usize) -> Box<dyn NativeView>>;
@@ -625,6 +625,14 @@ impl<T: 'static> NativeView for EditableList<T> {
     fn ns_view(&self) -> &NSView { self.stack.ns_view() }
 }
 
+struct SettingsListCell {
+    native: Retained<NSTableCellView>,
+    _content: VStack,
+}
+impl NativeView for SettingsListCell {
+    fn ns_view(&self) -> &NSView { &self.native }
+}
+
 /// A native settings collection with primary text, a summary, and optional disclosure.
 /// NSTableView owns selection, keyboard navigation, scrolling, and drag reordering.
 pub struct SettingsList<T: 'static> {
@@ -633,6 +641,8 @@ pub struct SettingsList<T: 'static> {
     open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>>,
     symbol: Rc<RefCell<Option<String>>>,
     fitted_height: Option<(Retained<NSLayoutConstraint>, f64)>,
+    row_count: Rc<Cell<usize>>,
+    empty: crate::Caption,
 }
 impl<T: 'static> SettingsList<T> {
     pub fn new(
@@ -646,20 +656,31 @@ impl<T: 'static> SettingsList<T> {
         let row_symbol = symbol.clone();
         let ui_copy = *ui;
         let double_open = open.clone();
+        let row_count = Rc::new(Cell::new(0));
+        let cell_count = row_count.clone();
         let table = Table::new(ui)
             .column("item", "", 0.0)
             .cells_with_index(move |item, _, index| {
                 let name = title(item);
-                let text = VStack::new(&ui_copy).spacing(2.0).push(Label::new(&ui_copy, &name));
+                let native = NSTableCellView::new(ui_copy.mtm());
+                let label = Rc::new(Label::new(&ui_copy, &name));
+                label.tooltip(&name);
+                // The retained content stack owns both native outlets for this cell's lifetime.
+                unsafe {
+                    native.setTextField(Some(label.ns_text_field()));
+                }
+                let text = VStack::new(&ui_copy).spacing(2.0).push(label);
                 let summary = summary(item);
                 if !summary.is_empty() {
-                    text.add(crate::Caption::new(&ui_copy, &summary));
+                    let caption = crate::Caption::new(&ui_copy, &summary);
+                    caption.tooltip(&summary);
+                    text.add(caption);
                 }
                 let mut row = crate::HStack::new(&ui_copy).insets(crate::Insets {
                     top: 8.0,
-                    left: 8.0,
+                    left: 0.0,
                     bottom: 8.0,
-                    right: 8.0,
+                    right: 0.0,
                 });
                 if let Some(image) = row_symbol
                     .borrow()
@@ -671,6 +692,9 @@ impl<T: 'static> SettingsList<T> {
                     image
                         .ns_image_view()
                         .setContentTintColor(Some(&crate::Color::secondary_label()));
+                    unsafe {
+                        native.setImageView(Some(image.ns_image_view()));
+                    }
                     row = row.push(image);
                 }
                 row = row.push(text).spacer(&ui_copy);
@@ -685,15 +709,23 @@ impl<T: 'static> SettingsList<T> {
                             }
                         });
                     button.ns_button().setContentTintColor(Some(&crate::Color::secondary_label()));
+                    button.control_size(NSControlSize::Small);
+                    button.width(16.0);
                     button.accessibility_label(&format!("Open {name}"));
                     row = row.push(button);
                 }
-                Box::new(
-                    VStack::new(&ui_copy)
-                        .spacing(0.0)
-                        .push(row)
-                        .push(crate::Divider::new(&ui_copy)),
-                )
+                let content = VStack::new(&ui_copy).spacing(0.0).push(row);
+                if index + 1 < cell_count.get() {
+                    content.add(crate::Divider::new(&ui_copy));
+                }
+                native.addSubview(content.ns_view());
+                crate::view::pin(&native, content.ns_view(), crate::Insets {
+                    top: 0.0,
+                    left: 0.0,
+                    bottom: 0.0,
+                    right: 0.0,
+                });
+                Box::new(SettingsListCell { native, _content: content })
             })
             .on_double_click(move |index| {
                 if let Some(open) = double_open.borrow_mut().as_mut() {
@@ -704,13 +736,33 @@ impl<T: 'static> SettingsList<T> {
         table.ns_table_view().setRowHeight(44.0);
         table.ns_table_view().setBackgroundColor(&NSColor::clearColor());
         table.ns_scroll_view().setDrawsBackground(false);
-        let surface = crate::GroupBox::new(ui, table.ns_view().retain());
+        let surface = crate::GroupBox::with_insets(ui, table.ns_view().retain(), crate::Insets {
+            top: 4.0,
+            left: 4.0,
+            bottom: 4.0,
+            right: 4.0,
+        });
+        let empty = crate::Caption::new(ui, "No items");
+        surface.ns_view().addSubview(empty.ns_view());
+        crate::view::prepare(empty.ns_view());
+        empty
+            .ns_view()
+            .centerXAnchor()
+            .constraintEqualToAnchor(&surface.ns_view().centerXAnchor())
+            .setActive(true);
+        empty
+            .ns_view()
+            .centerYAnchor()
+            .constraintEqualToAnchor(&surface.ns_view().centerYAnchor())
+            .setActive(true);
         Self {
             table,
             surface,
             open,
             symbol,
             fitted_height: None,
+            row_count,
+            empty,
         }
     }
 
@@ -724,13 +776,25 @@ impl<T: 'static> SettingsList<T> {
 
     pub fn set_rows(&self, rows: Vec<T>) {
         let count = rows.len();
+        self.row_count.set(count);
+        self.empty.set_hidden(count != 0);
         self.table.set_rows(rows);
         if let Some((height, maximum)) = &self.fitted_height {
             height.setConstant(
-                (count as f64 * self.table.ns_table_view().rowHeight() + 20.0)
-                    .clamp(64.0, *maximum),
+                (if count == 0 {
+                    64.0
+                } else {
+                    let frame = self.table.ns_table_view().rectOfRow(count as isize - 1);
+                    frame.origin.y + frame.size.height + 8.0
+                })
+                .clamp(52.0, *maximum),
             );
         }
+    }
+
+    pub fn empty_message(self, message: &str) -> Self {
+        self.empty.set_text(message);
+        self
     }
 
     pub fn on_select(self, f: impl FnMut(Option<usize>) + 'static) -> Self {

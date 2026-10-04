@@ -71,6 +71,7 @@ fn workspace_editor(
             move |item| primary(item, 0),
             move |item| summary(item, 1),
         )
+        .empty_message("No workspaces")
         .fit_content(300.0)
         .symbol("rectangle.on.rectangle")
         .on_open(move |index| edit_workspace(index)),
@@ -455,6 +456,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let action = edit_rule.clone();
     let table = Rc::new(
         SettingsList::<AppWorkspaceRule>::new(&ui, rule_summary, rule_behavior)
+            .empty_message("No app rules")
             .fit_content(360.0)
             .symbol("app")
             .on_open(move |index| action(index))
