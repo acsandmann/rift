@@ -108,8 +108,13 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         vec![wid],
     );
     assert!(
-        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(parked),
-        "inventory geometry must become authoritative again after Rift releases the target"
+        reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
+        "after inventory geometry becomes authoritative, arrange must restore the tiled frame"
+    );
+    assert_eq!(
+        reactor.transaction_manager.get_target_frame(wsid),
+        Some(frame),
+        "the authoritative inventory change must trigger a corrective frame transaction"
     );
     assert_eq!(
         reactor.layout_update_count,

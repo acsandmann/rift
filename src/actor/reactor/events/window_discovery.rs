@@ -26,7 +26,7 @@ fn sync_existing_window_state(
     let is_minimized = info.is_minimized;
     let rift_owns_geometry =
         info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
-    let mut needs_arrange = false;
+    let needs_arrange;
     if let Some(existing) = state.windows.window_mut(wid) {
         let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
         let geometry_changed =
