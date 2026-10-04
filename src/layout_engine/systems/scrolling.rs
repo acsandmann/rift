@@ -119,7 +119,7 @@ impl Viewport {
         };
     }
 
-    fn sample(&mut self, bounds: (f64, f64), now: Instant, scale: f64) -> Option<bool> {
+    fn sample(&mut self, now: Instant, scale: f64) -> Option<bool> {
         if let Self::Pending { target, .. } = *self {
             *self = Self::Static(target);
             return Some(false);
@@ -127,11 +127,12 @@ impl Viewport {
         let Self::Animation(spring) = self else {
             return None;
         };
+        // Bounds constrain the destination. After a column closes, the previous
+        // position can lie outside them and must remain visible while returning.
         if spring.sample(now, scale) {
             *self = Self::Static(spring.target);
             Some(false)
         } else {
-            spring.current = spring.current.clamp(bounds.0, bounds.1);
             Some(true)
         }
     }
@@ -292,10 +293,7 @@ impl ViewportPresentation {
 
     pub fn position_velocity(&self, now: Instant) -> (f64, f64) {
         match &self.viewport {
-            Viewport::Animation(s) => {
-                let (position, velocity) = s.position_velocity(s.sampled.max(now));
-                (position.clamp(self.bounds.0, self.bounds.1), velocity)
-            }
+            Viewport::Animation(s) => s.position_velocity(s.sampled.max(now)),
             _ => (self.offset(), 0.0),
         }
     }
@@ -307,7 +305,7 @@ impl ViewportPresentation {
     }
 
     pub fn sample(&mut self, now: Instant, scale: f64) -> bool {
-        self.viewport.sample(self.bounds, now, scale).unwrap_or(self.gesturing())
+        self.viewport.sample(now, scale).unwrap_or(self.gesturing())
     }
 
     pub fn snapshot(&self, now: Instant) -> PresentedViewport {
@@ -1285,8 +1283,7 @@ impl ScrollingLayoutSystem {
         state.motion.overscroll = 0.0;
         state.motion.samples.clear();
         state.motion.samples.reserve(64);
-        let bounds = state.geometry.as_ref().unwrap().bounds;
-        state.viewport.sample(bounds, now, 1.0);
+        state.viewport.sample(now, 1.0);
         state.viewport = Viewport::Gesture(state.viewport.offset());
         true
     }
@@ -3424,6 +3421,25 @@ pub(crate) mod tests {
         assert_eq!(spring.current, position);
         assert!((spring.velocity - velocity).abs() < 1e-8);
         assert_eq!(spring.position_velocity(sampled), (position, velocity));
+    }
+
+    #[test]
+    fn shrinking_bounds_animates_back_from_the_previous_position() {
+        let f = Fixture::new(4);
+        let (mut presentation, _) = f.system.presentation(f.layout).unwrap();
+        let start = Instant::now();
+        presentation.bounds = (0.0, 300.0);
+        presentation.viewport = Viewport::Static(700.0);
+        presentation.retarget(700.0, 0.0, start);
+        // Closing a column leaves the displayed camera outside the new bounds.
+        if let Viewport::Animation(spring) = &mut presentation.viewport {
+            spring.target = 300.0;
+        }
+        assert_eq!(presentation.position_velocity(start).0, 700.0);
+        assert!(presentation.sample(start + Duration::from_millis(16), 2.0));
+        assert!(presentation.offset() > 300.0 && presentation.offset() < 700.0);
+        assert!(!presentation.sample(start + Duration::from_secs(2), 2.0));
+        assert_eq!(presentation.offset(), 300.0);
     }
 
     #[test]
