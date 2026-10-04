@@ -2334,7 +2334,10 @@ impl LayoutEngine {
                     amount,
                     orientation,
                 );
-                EventResponse::default()
+                EventResponse {
+                    changed: true,
+                    ..Default::default()
+                }
             }
             LayoutCommand::AdjustMasterRatio(delta) => {
                 self.workspaces[workspace_id].layout_state.last_saved = Some(layout);

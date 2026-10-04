@@ -3469,6 +3469,26 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
 }
 
 #[test]
+fn scrolling_resize_requests_immediate_arrangement() {
+    let (mut reactor, _wid, _wsid, _space1, _space2, _frame) = reactor_with_window_on_space1();
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    for command in [
+        LayoutCommand::ResizeWindowBy { amount: 0.1 },
+        LayoutCommand::ResizeWindowGrow(crate::layout_engine::ResizeOrientation::Horizontal),
+        LayoutCommand::ResizeWindowShrink(crate::layout_engine::ResizeOrientation::Vertical),
+    ] {
+        let outcome = reactor.dispatch_test_layout_command(command);
+        assert_eq!(
+            outcome.arrange.passes, 1,
+            "resize must arrange without a camera move"
+        );
+    }
+}
+
+#[test]
 fn dock_activation_does_not_reposition_visible_scrolling_window() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(600., 600.));
