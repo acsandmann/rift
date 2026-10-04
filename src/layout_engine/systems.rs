@@ -190,6 +190,15 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> (Option<WindowId>, Vec<WindowId>);
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId>;
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId);
+    /// Insert a window arriving from another display at the edge it crossed.
+    fn add_window_from_direction(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+        _direction: Direction,
+    ) {
+        self.add_window_after_selection(layout, wid);
+    }
     /// Replace a window identity in-place without changing its layout position.
     fn replace_window(&mut self, from: WindowId, to: WindowId);
     fn remove_window(&mut self, wid: WindowId);
@@ -244,6 +253,15 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
+    /// Give the adjacent display priority over creating a new outer split.
+    fn move_selection_with_display_neighbor(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+        _has_neighbor: bool,
+    ) -> bool {
+        self.move_selection(layout, direction)
+    }
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,

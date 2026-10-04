@@ -2199,13 +2199,23 @@ impl LayoutEngine {
             }
             LayoutCommand::MoveNode(direction) => {
                 self.workspaces[workspace_id].layout_state.last_saved = Some(layout);
-                if !self.workspaces[workspace_id].layout_system.move_selection(layout, direction) {
-                    if let Some(new_space) = self.next_space_for_direction(
+                let adjacent_space = self
+                    .next_space_for_direction(
                         space,
                         direction,
                         visible_spaces,
                         visible_space_centers,
-                    ) {
+                    )
+                    .filter(|&space| self.workspaces.active_layout_for_space(space).is_some());
+                if !self.workspaces[workspace_id]
+                    .layout_system
+                    .move_selection_with_display_neighbor(
+                        layout,
+                        direction,
+                        adjacent_space.is_some(),
+                    )
+                {
+                    if let Some(new_space) = adjacent_space {
                         let Some((new_ws_id, new_layout)) =
                             self.workspaces.active_layout_for_space(new_space)
                         else {
@@ -2215,9 +2225,18 @@ impl LayoutEngine {
                             );
                             return EventResponse::default();
                         };
-                        let windows = self.workspaces[workspace_id]
+                        let mut windows = self.workspaces[workspace_id]
                             .layout_system
                             .visible_windows_under_selection(layout);
+                        // Prepending each member must preserve the selected subtree's order.
+                        if matches!(direction, Direction::Right | Direction::Down)
+                            && matches!(
+                                self.workspaces[new_ws_id].layout_system,
+                                LayoutSystemKind::Traditional(_)
+                            )
+                        {
+                            windows.reverse();
+                        }
                         for wid in windows {
                             self.workspaces[workspace_id].layout_system.remove_window(wid);
                             if matches!(
@@ -2229,7 +2248,7 @@ impl LayoutEngine {
                             }
                             self.workspaces[new_ws_id]
                                 .layout_system
-                                .add_window_after_selection(new_layout, wid);
+                                .add_window_from_direction(new_layout, wid, direction);
                             self.workspaces.assign_window_to_workspace(
                                 window_store,
                                 new_space,
@@ -3586,6 +3605,128 @@ mod tests {
         centers.insert(middle, CGPoint::new(2000.0, 0.0));
 
         (vec![left, right, middle], centers, left, middle, right)
+    }
+
+    #[test]
+    fn move_node_crosses_display_edge_and_enters_at_near_edge() {
+        use crate::layout_engine::LayoutKind;
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            for stacked in [false, true] {
+                let mut engine = test_engine();
+                let mut store = WindowStore::default();
+                let source = SpaceId::new(1);
+                let target = SpaceId::new(2);
+                let size = CGSize::new(1000.0, 1000.0);
+                let moving = WindowId::new(1, 2);
+                for (space, ids) in [(source, vec![1, 2]), (target, vec![3, 4, 5])] {
+                    let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, size));
+                    let _ = engine.handle_event(
+                        &mut store,
+                        LayoutEvent::windows_observed(
+                            space,
+                            1,
+                            ids.into_iter()
+                                .map(|idx| window_layout_info(WindowId::new(1, idx), size))
+                                .collect(),
+                            None,
+                        ),
+                    );
+                    let (ws, layout) = engine.workspaces.active_layout_for_space(space).unwrap();
+                    let LayoutSystemKind::Traditional(system) =
+                        &mut engine.workspaces[ws].layout_system
+                    else {
+                        panic!("expected traditional layout");
+                    };
+                    let root = system.root(layout);
+                    let kind = if stacked {
+                        LayoutKind::VerticalStack
+                    } else {
+                        LayoutKind::from(direction.orientation())
+                    };
+                    system.set_layout(root, kind);
+                    // Select the far side on the destination, so selection-based insertion is wrong.
+                    let selected = if space == source {
+                        moving
+                    } else {
+                        WindowId::new(1, 5)
+                    };
+                    system.select_window(layout, selected);
+                    if space == source
+                        && (direction == Direction::Up
+                            || (direction == Direction::Left && !stacked))
+                    {
+                        system.select_window(layout, WindowId::new(1, 1));
+                    }
+                }
+                let moving =
+                    if direction == Direction::Up || (direction == Direction::Left && !stacked) {
+                        WindowId::new(1, 1)
+                    } else {
+                        moving
+                    };
+                let _ = engine.handle_event(&mut store, LayoutEvent::WindowFocused(source, moving));
+                let offset = match direction {
+                    Direction::Left => CGPoint::new(-1000.0, 0.0),
+                    Direction::Right => CGPoint::new(1000.0, 0.0),
+                    Direction::Up => CGPoint::new(0.0, -1000.0),
+                    Direction::Down => CGPoint::new(0.0, 1000.0),
+                };
+                let centers =
+                    HashMap::from_iter([(source, CGPoint::new(0.0, 0.0)), (target, offset)]);
+                let _ = engine.handle_command(
+                    &mut store,
+                    Some(source),
+                    &[source, target],
+                    &centers,
+                    LayoutCommand::MoveNode(direction),
+                );
+                let (source_ws, source_layout) =
+                    engine.workspaces.active_layout_for_space(source).unwrap();
+                let (target_ws, target_layout) =
+                    engine.workspaces.active_layout_for_space(target).unwrap();
+                assert!(
+                    !engine.workspaces[source_ws]
+                        .layout_system
+                        .contains_window(source_layout, moving),
+                    "{direction:?}, stacked={stacked}"
+                );
+                assert!(
+                    engine.workspaces[target_ws]
+                        .layout_system
+                        .contains_window(target_layout, moving)
+                );
+                let gaps = engine.layout_settings.gaps.clone();
+                let frames: HashMap<_, _> = engine
+                    .calculate_layout(
+                        target,
+                        CGRect::new(CGPoint::new(0.0, 0.0), size),
+                        &gaps,
+                        0.0,
+                        Default::default(),
+                        Default::default(),
+                    )
+                    .into_iter()
+                    .collect();
+                for other in [3, 4, 5].map(|idx| WindowId::new(1, idx)) {
+                    let a = frames[&moving];
+                    let b = frames[&other];
+                    assert!(
+                        match direction {
+                            Direction::Right => a.max().x <= b.min().x,
+                            Direction::Left => a.min().x >= b.max().x,
+                            Direction::Down => a.max().y <= b.min().y,
+                            Direction::Up => a.min().y >= b.max().y,
+                        },
+                        "{direction:?}, stacked={stacked}: {a:?} vs {b:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

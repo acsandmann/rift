@@ -797,6 +797,28 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.select(node);
     }
 
+    fn add_window_from_direction(&mut self, layout: LayoutId, wid: WindowId, direction: Direction) {
+        let mut root = self.root(layout);
+        if root.children(self.map()).next().is_some()
+            && (self.layout(root).is_stacked()
+                || self.layout(root).orientation() != direction.orientation())
+        {
+            root = self.nest_in_container_internal(
+                layout,
+                root,
+                LayoutKind::from(direction.orientation()),
+            );
+        }
+        self.tree.data.layout.set_kind(root, LayoutKind::from(direction.orientation()));
+        let node = self.add_window_under(layout, root, wid);
+        if matches!(direction, Direction::Right | Direction::Down) {
+            if let Some(first) = root.first_child(self.map()).filter(|&first| first != node) {
+                node.detach(&mut self.tree).insert_before(first);
+            }
+        }
+        self.select(node);
+    }
+
     fn replace_window(&mut self, from: WindowId, to: WindowId) {
         self.tree.data.window.replace_window(from, to);
     }
@@ -896,6 +918,23 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let selection = self.selection(layout);
         self.move_node(layout, selection, direction)
+    }
+
+    fn move_selection_with_display_neighbor(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+        has_neighbor: bool,
+    ) -> bool {
+        let selection = self.selection(layout);
+        if has_neighbor
+            && !selection
+                .ancestors(self.map())
+                .any(|node| self.move_over(node, direction).is_some())
+        {
+            return false;
+        }
+        self.move_selection(layout, direction)
     }
 
     fn move_selection_to_layout_after_selection(
@@ -2070,15 +2109,7 @@ impl TraditionalLayoutSystem {
             } else {
                 let old_root = moving_node.ancestors(map).last().unwrap();
                 if self.tree.data.layout.kind(old_root).orientation() == direction.orientation() {
-                    let is_edge_move = match direction {
-                        Direction::Left | Direction::Up => moving_node.prev_sibling(map).is_none(),
-                        Direction::Right | Direction::Down => {
-                            moving_node.next_sibling(map).is_none()
-                        }
-                    };
-                    if !is_edge_move {
-                        return false;
-                    }
+                    return false;
                 }
                 let new_container_kind = LayoutKind::from(direction.orientation());
                 self.nest_in_container_internal(layout, old_root, new_container_kind);
