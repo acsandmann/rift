@@ -25,7 +25,7 @@ pub struct LayoutCommandPayload {
     pub command: LayoutCommand,
     pub command_space: Option<SpaceId>,
     pub visible_spaces: Vec<SpaceId>,
-    pub visible_space_centers: HashMap<SpaceId, objc2_core_foundation::CGPoint>,
+    pub visible_space_frames: HashMap<SpaceId, objc2_core_foundation::CGRect>,
     pub post_arrange_mouse_warp: Option<WindowId>,
 }
 
@@ -39,7 +39,7 @@ pub fn handle_command_layout(
         command: cmd,
         command_space,
         visible_spaces,
-        visible_space_centers,
+        visible_space_frames,
         post_arrange_mouse_warp,
     } = payload;
     info!(?cmd);
@@ -140,7 +140,7 @@ pub fn handle_command_layout(
                 &mut state.windows,
                 command_space,
                 &visible_spaces,
-                &visible_space_centers,
+                &visible_space_frames,
                 cmd,
             )
         }

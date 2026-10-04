@@ -1817,7 +1817,7 @@ impl Reactor {
                 {
                     return Ok(EventOutcome::no_change());
                 }
-                let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
+                let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
                 return command_workflow::handle_command_layout(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -1826,7 +1826,7 @@ impl Reactor {
                         command: crate::layout_engine::LayoutCommand::SwitchToWorkspace(index),
                         command_space: Some(space),
                         visible_spaces,
-                        visible_space_centers,
+                        visible_space_frames,
                         post_arrange_mouse_warp: None,
                     },
                 );
@@ -2216,7 +2216,7 @@ impl Reactor {
                 let post_arrange_mouse_warp =
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
-                let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
+                let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
                 return command_workflow::handle_command_layout(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -2225,7 +2225,7 @@ impl Reactor {
                         command,
                         command_space,
                         visible_spaces,
-                        visible_space_centers,
+                        visible_space_frames,
                         post_arrange_mouse_warp,
                     },
                 );
@@ -3820,8 +3820,8 @@ impl Reactor {
     pub(crate) fn visible_spaces_for_layout(
         &self,
         include_inactive: bool,
-    ) -> (Vec<SpaceId>, HashMap<SpaceId, CGPoint>) {
-        let visible_spaces_input: Vec<(SpaceId, CGPoint)> = self
+    ) -> (Vec<SpaceId>, HashMap<SpaceId, CGRect>) {
+        let visible_spaces_input: Vec<(SpaceId, CGRect)> = self
             .space_state
             .screens
             .iter()
@@ -3830,18 +3830,20 @@ impl Reactor {
                 if !include_inactive && !self.is_space_active(space) {
                     return None;
                 }
-                Some((space, screen.frame.mid()))
+                Some((space, screen.frame))
             })
             .collect();
 
-        let mut visible_space_centers = HashMap::default();
-        for (space, center) in &visible_spaces_input {
-            visible_space_centers.insert(*space, *center);
+        let mut visible_space_frames = HashMap::default();
+        for (space, frame) in &visible_spaces_input {
+            visible_space_frames.insert(*space, *frame);
         }
 
-        let visible_spaces = order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
+        let visible_spaces = order_visible_spaces_by_position(
+            visible_spaces_input.iter().map(|(space, frame)| (*space, frame.mid())),
+        );
 
-        (visible_spaces, visible_space_centers)
+        (visible_spaces, visible_space_frames)
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {

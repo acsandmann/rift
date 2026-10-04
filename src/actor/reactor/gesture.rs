@@ -298,7 +298,7 @@ impl Reactor {
         if !self.gesture_space_active(context.space) {
             return false;
         }
-        let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
+        let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
         let result = command_workflow::handle_command_layout(
             &mut self.state,
             &mut self.layout_manager,
@@ -311,7 +311,7 @@ impl Reactor {
                 },
                 command_space: Some(context.space),
                 visible_spaces,
-                visible_space_centers,
+                visible_space_frames,
                 post_arrange_mouse_warp: None,
             },
         );
