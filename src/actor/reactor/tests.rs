@@ -69,6 +69,61 @@ fn no_op_layout_command_does_not_schedule_arrange() {
 }
 
 #[test]
+fn transient_ui_lifecycle_does_not_rearrange_or_refocus_windows() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(1));
+    let main = WindowId::new(1, 1);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, main));
+    let updates = reactor.layout_update_count;
+    let hud = WindowId::new(1, 2);
+    let mut info = make_window(2);
+    info.is_standard = false;
+    info.ax_role = Some("AXWindow".into());
+    info.ax_subrole = Some("AXUnknown".into());
+
+    reactor.handle_event(Event::WindowCreated(
+        hud,
+        info.clone(),
+        None,
+        Some(MouseState::Up),
+    ));
+    assert_eq!(
+        reactor.layout_update_count, updates,
+        "HUD creation must not arrange"
+    );
+
+    info.frame.size = CGSize::new(100., 100.);
+    reactor.handle_event(Event::WindowFrameChanged(
+        hud,
+        info.frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+    assert_eq!(
+        reactor.layout_update_count, updates,
+        "HUD geometry must not arrange"
+    );
+    info.frame.size = CGSize::new(120., 120.);
+    reactor.discover_test_windows(1, vec![(hud, info)], vec![main, hud]);
+    assert_eq!(
+        reactor.layout_update_count, updates,
+        "HUD refresh must not arrange"
+    );
+
+    reactor.handle_event(Event::WindowDestroyed(hud));
+    assert_eq!(
+        reactor.layout_update_count, updates,
+        "HUD removal must not arrange"
+    );
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
+    assert!(!reactor.state.windows.contains_window(hud));
+}
+
+#[test]
 fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
     let (mut reactor, wid, wsid, _, _, frame) = reactor_with_window_on_space1();
     reactor.discover_test_windows(
@@ -95,10 +150,7 @@ fn inventory_does_not_replace_geometry_owned_by_pending_rift_transaction() {
         reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(frame),
         "inventory must not feed a transient Rift-owned frame back into model geometry"
     );
-    assert_eq!(
-        reactor.transaction_manager.get_target_frame(wsid),
-        Some(target)
-    );
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), Some(target));
     assert_eq!(
         reactor.layout_update_count, layout_updates,
         "a passive inventory refresh must not schedule another arrange"

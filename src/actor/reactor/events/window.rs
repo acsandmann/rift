@@ -54,7 +54,9 @@ pub fn handle_window_created(
     state.windows.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
 
-    let outcome = EventOutcome::window_membership_changed(false, true);
+    // Registration also observes HUDs and other AX elements. Arrange only
+    // after finalization confirms that the window was admitted to a layout.
+    let outcome = EventOutcome::window_membership_changed(false, true).with_arrange_passes(0);
     Ok(
         if state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission) {
             outcome.with_created_window_finalization(wid)
@@ -76,10 +78,15 @@ pub fn handle_window_destroyed(
     payload: WindowDestroyedPayload,
 ) -> EventOutcome {
     let wid = payload.window;
+    let was_admitted = state.windows.window(wid).is_some_and(WindowState::is_admitted);
     let Some(record) = state.windows.remove_window(wid) else {
         return EventOutcome::no_change();
     };
-    apply_window_retirement(transactions, drag, (wid, record.window_server_id()))
+    let mut outcome = apply_window_retirement(transactions, drag, (wid, record.window_server_id()));
+    if !was_admitted && record.workspace().is_none() {
+        outcome.layout_events.clear();
+    }
+    outcome
 }
 
 pub(crate) fn apply_window_retirement(
@@ -272,6 +279,23 @@ pub fn handle_window_frame_changed(
     };
     let server_id = window.info.sys_id;
     let old_frame = window.frame_monotonic;
+
+    if !window.is_admitted() {
+        if let Some(window) = state.windows.window_mut(wid) {
+            window.frame_monotonic = new_frame;
+        }
+        // Native location remains useful metadata even for rejected windows.
+        if old_space != new_space
+            && let Some(server) = server_id
+        {
+            if let Some(space) = new_space {
+                state.windows.observe_native_space(server, space, new_space_active);
+            } else {
+                state.windows.set_window_server_space(server, None);
+            }
+        }
+        return Ok(EventOutcome::no_change());
+    }
 
     if !old_space_active && !new_space_active {
         return Ok(outcome);

@@ -2419,7 +2419,7 @@ impl Reactor {
     /// writes, then UI/platform presentation state is refreshed. Broadcast and
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
-    fn apply_event_outcome(&mut self, outcome: EventOutcome) {
+    fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
         #[cfg(test)]
         self.event_outcome_phase_trace.push("model");
         if !outcome.window_server_updates.is_empty() {
@@ -2470,6 +2470,7 @@ impl Reactor {
                 }
                 if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                    outcome.arrange.passes = outcome.arrange.passes.max(1);
                 }
             }
         }
