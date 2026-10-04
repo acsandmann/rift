@@ -81,6 +81,8 @@ impl<T: Clone + 'static> Sidebar<T> {
             .rows(items);
         table.ns_table_view().setHeaderView(None);
         table.ns_table_view().setStyle(NSTableViewStyle::SourceList);
+        table.ns_table_view().setUsesAutomaticRowHeights(false);
+        table.ns_table_view().setRowHeight(26.0);
         table.ns_table_view().setBackgroundColor(&NSColor::clearColor());
         table.ns_scroll_view().setDrawsBackground(false);
         table.ns_scroll_view().setBorderType(NSBorderType::NoBorder);

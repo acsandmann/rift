@@ -356,9 +356,16 @@ impl<T: 'static> Table<T> {
     }
 
     pub fn cells(self, mut f: impl FnMut(&T, usize) -> Box<dyn NativeView> + 'static) -> Self {
+        self.cells_with_index(move |item, column, _| f(item, column))
+    }
+
+    pub fn cells_with_index(
+        self,
+        mut f: impl FnMut(&T, usize, usize) -> Box<dyn NativeView> + 'static,
+    ) -> Self {
         let rows = self.rows.clone();
         *self.bridge.ivars().cell.borrow_mut() =
-            Box::new(move |row, column| f(&rows.borrow()[row], column));
+            Box::new(move |row, column| f(&rows.borrow()[row], column, row));
         self.bridge.reload(&self.native);
         self
     }
@@ -522,7 +529,7 @@ impl<T: 'static> NativeView for List<T> {
 
 pub struct EditableList<T: 'static> {
     stack: VStack,
-    list: List<T>,
+    list: SettingsList<T>,
     controls: AddRemoveControl,
     selection: Rc<RefCell<Option<Selection>>>,
 }
@@ -533,18 +540,27 @@ impl<T: 'static> EditableList<T> {
         let selection: Rc<RefCell<Option<Selection>>> = Rc::new(RefCell::new(None));
         let cb = selection.clone();
         let remove = Weak::new(controls.remove_button());
-        let list = List::new(ui, label).on_select(move |index| {
-            if let Some(remove) = remove.load() {
-                remove.setEnabled(index.is_some());
-            }
-            if let Ok(mut f) = cb.try_borrow_mut() {
-                if let Some(f) = f.as_mut() {
-                    f(index);
+        let list = SettingsList::new(ui, label, |_| String::new()).fit_content(220.0).on_select(
+            move |index| {
+                if let Some(remove) = remove.load() {
+                    remove.setEnabled(index.is_some());
                 }
-            }
-        });
+                if let Ok(mut f) = cb.try_borrow_mut() {
+                    if let Some(f) = f.as_mut() {
+                        f(index);
+                    }
+                }
+            },
+        );
+        list.min_height(80.0);
         let stack = VStack::new(ui);
         stack.ns_stack_view().addArrangedSubview(list.ns_view());
+        crate::view::prepare(list.ns_view());
+        list.ns_view()
+            .widthAnchor()
+            .constraintEqualToAnchor(&stack.ns_view().widthAnchor())
+            .setActive(true);
+
         stack.ns_stack_view().addArrangedSubview(controls.ns_view());
         Self {
             stack,
@@ -555,22 +571,22 @@ impl<T: 'static> EditableList<T> {
     }
 
     pub fn items(self, items: Vec<T>) -> Self {
-        self.list.set_items(items);
+        self.list.set_rows(items);
         self
     }
 
     pub fn set_items(&self, items: Vec<T>) {
-        self.list.set_items(items);
+        self.list.set_rows(items);
         self.controls.set_remove_enabled(self.list.selection().is_some());
     }
 
     pub fn reorderable(mut self, value: bool) -> Self {
-        self.list.0 = self.list.0.reorderable(value);
+        self.list = self.list.reorderable(value);
         self
     }
 
     pub fn on_reorder(mut self, f: impl FnMut(usize, usize) + 'static) -> Self {
-        self.list.0 = self.list.0.on_reorder(f);
+        self.list = self.list.on_reorder(f);
         self
     }
 
@@ -607,6 +623,148 @@ impl<T: 'static> EditableList<T> {
 }
 impl<T: 'static> NativeView for EditableList<T> {
     fn ns_view(&self) -> &NSView { self.stack.ns_view() }
+}
+
+/// A native settings collection with primary text, a summary, and optional disclosure.
+/// NSTableView owns selection, keyboard navigation, scrolling, and drag reordering.
+pub struct SettingsList<T: 'static> {
+    table: Table<T>,
+    surface: crate::GroupBox,
+    open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>>,
+    symbol: Rc<RefCell<Option<String>>>,
+    fitted_height: Option<(Retained<NSLayoutConstraint>, f64)>,
+}
+impl<T: 'static> SettingsList<T> {
+    pub fn new(
+        ui: &Ui,
+        title: impl Fn(&T) -> String + 'static,
+        summary: impl Fn(&T) -> String + 'static,
+    ) -> Self {
+        let open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>> = Rc::new(RefCell::new(None));
+        let symbol: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let row_open = open.clone();
+        let row_symbol = symbol.clone();
+        let ui_copy = *ui;
+        let double_open = open.clone();
+        let table = Table::new(ui)
+            .column("item", "", 0.0)
+            .cells_with_index(move |item, _, index| {
+                let name = title(item);
+                let text = VStack::new(&ui_copy).spacing(2.0).push(Label::new(&ui_copy, &name));
+                let summary = summary(item);
+                if !summary.is_empty() {
+                    text.add(crate::Caption::new(&ui_copy, &summary));
+                }
+                let mut row = crate::HStack::new(&ui_copy).insets(crate::Insets {
+                    top: 8.0,
+                    left: 8.0,
+                    bottom: 8.0,
+                    right: 8.0,
+                });
+                if let Some(image) = row_symbol
+                    .borrow()
+                    .as_deref()
+                    .and_then(|name| crate::ImageView::symbol(&ui_copy, name))
+                {
+                    image.width(22.0);
+                    image.height(22.0);
+                    image
+                        .ns_image_view()
+                        .setContentTintColor(Some(&crate::Color::secondary_label()));
+                    row = row.push(image);
+                }
+                row = row.push(text).spacer(&ui_copy);
+                if row_open.borrow().is_some() {
+                    let open = row_open.clone();
+                    let button = crate::Button::new(&ui_copy, &format!("Open {name}"))
+                        .symbol("chevron.forward")
+                        .borderless()
+                        .on_click(move || {
+                            if let Some(open) = open.borrow_mut().as_mut() {
+                                open(index);
+                            }
+                        });
+                    button.ns_button().setContentTintColor(Some(&crate::Color::secondary_label()));
+                    button.accessibility_label(&format!("Open {name}"));
+                    row = row.push(button);
+                }
+                Box::new(
+                    VStack::new(&ui_copy)
+                        .spacing(0.0)
+                        .push(row)
+                        .push(crate::Divider::new(&ui_copy)),
+                )
+            })
+            .on_double_click(move |index| {
+                if let Some(open) = double_open.borrow_mut().as_mut() {
+                    open(index);
+                }
+            });
+        table.ns_table_view().setHeaderView(None);
+        table.ns_table_view().setRowHeight(44.0);
+        table.ns_table_view().setBackgroundColor(&NSColor::clearColor());
+        table.ns_scroll_view().setDrawsBackground(false);
+        let surface = crate::GroupBox::new(ui, table.ns_view().retain());
+        Self {
+            table,
+            surface,
+            open,
+            symbol,
+            fitted_height: None,
+        }
+    }
+
+    /// Small inventories size to their rows; larger inventories scroll within the cap.
+    pub fn fit_content(mut self, maximum_height: f64) -> Self {
+        let height = self.ns_view().heightAnchor().constraintEqualToConstant(64.0);
+        height.setActive(true);
+        self.fitted_height = Some((height, maximum_height.max(64.0)));
+        self
+    }
+
+    pub fn set_rows(&self, rows: Vec<T>) {
+        let count = rows.len();
+        self.table.set_rows(rows);
+        if let Some((height, maximum)) = &self.fitted_height {
+            height.setConstant(
+                (count as f64 * self.table.ns_table_view().rowHeight() + 20.0)
+                    .clamp(64.0, *maximum),
+            );
+        }
+    }
+
+    pub fn on_select(self, f: impl FnMut(Option<usize>) + 'static) -> Self {
+        self.table.set_on_select(f);
+        self
+    }
+
+    pub fn on_open(self, f: impl FnMut(usize) + 'static) -> Self {
+        *self.open.borrow_mut() = Some(Box::new(f));
+        self
+    }
+
+    pub fn symbol(self, name: &str) -> Self {
+        *self.symbol.borrow_mut() = Some(name.into());
+        self
+    }
+
+    pub fn reorderable(mut self, value: bool) -> Self {
+        self.table = self.table.reorderable(value);
+        self
+    }
+
+    pub fn on_reorder(mut self, f: impl FnMut(usize, usize) + 'static) -> Self {
+        self.table = self.table.on_reorder(f);
+        self
+    }
+}
+impl<T: 'static> std::ops::Deref for SettingsList<T> {
+    type Target = Table<T>;
+
+    fn deref(&self) -> &Self::Target { &self.table }
+}
+impl<T: 'static> NativeView for SettingsList<T> {
+    fn ns_view(&self) -> &NSView { self.surface.ns_view() }
 }
 
 pub struct OutlineItem<T> {

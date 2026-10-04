@@ -220,6 +220,38 @@ impl NativeView for Divider {
     fn ns_view(&self) -> &NSView { &self.0 }
 }
 
+/// A quiet native group surface; semantic fill follows the window appearance.
+pub struct GroupBox {
+    native: Retained<NSBox>,
+    _content: Box<dyn NativeView>,
+}
+impl GroupBox {
+    pub fn new(ui: &Ui, content: impl NativeView) -> Self {
+        let native = NSBox::new(ui.mtm());
+        native.setBoxType(NSBoxType::Custom);
+        native.setTitlePosition(NSTitlePosition::NoTitle);
+        native.setBorderWidth(0.0);
+        native.setCornerRadius(8.0);
+        native.setFillColor(&NSColor::quaternarySystemFillColor());
+        native.setContentViewMargins(crate::CGSize::new(0.0, 0.0));
+        let host = native.contentView().unwrap();
+        host.addSubview(content.ns_view());
+        crate::view::pin(&host, content.ns_view(), Insets {
+            top: 10.0,
+            left: 12.0,
+            bottom: 10.0,
+            right: 12.0,
+        });
+        Self {
+            native,
+            _content: Box::new(content),
+        }
+    }
+}
+impl NativeView for GroupBox {
+    fn ns_view(&self) -> &NSView { &self.native }
+}
+
 pub struct ScrollView {
     native: Retained<NSScrollView>,
     content: Box<dyn NativeView>,

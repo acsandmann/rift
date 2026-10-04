@@ -97,7 +97,7 @@ impl SettingsRow {
     }
 
     pub fn description(self, text: &str) -> Self {
-        self.label.add(SecondaryLabel::new(&self.ui, text));
+        self.label.add(Caption::new(&self.ui, text));
         self
     }
 
@@ -174,20 +174,37 @@ pub type DisclosureRow = Disclosure;
 
 /// Compact preference content; AppKit controls provide their own appearance.
 pub struct SettingsGroup {
-    grid: Grid,
+    surface: GroupBox,
+    grid: Rc<Grid>,
     rows: Vec<SettingsRow>,
+    dividers: Vec<Divider>,
 }
 impl SettingsGroup {
     pub fn new(ui: &Ui) -> Self {
+        let grid = Rc::new(Grid::new(ui).spacing(8.0, 20.0));
+        let surface = GroupBox::new(ui, grid.clone());
         Self {
-            grid: Grid::new(ui).spacing(10.0, 20.0),
+            surface,
+            grid,
             rows: Vec::new(),
+            dividers: Vec::new(),
         }
     }
 
     pub fn row(mut self, row: impl Into<SettingsRow>) -> Self {
         let row = row.into();
         let grid = self.grid.ns_grid_view();
+        if !self.rows.is_empty() {
+            let divider = Divider::new(&row.ui);
+            let separator = grid.addRowWithViews(&objc2_foundation::NSArray::from_slice(&[
+                divider.ns_view(),
+                &objc2_app_kit::NSGridCell::emptyContentView(row.ui.mtm()),
+            ]));
+            separator.mergeCellsInRange(objc2_foundation::NSRange::new(0, 2));
+            grid.cellAtColumnIndex_rowIndex(0, grid.numberOfRows() - 1)
+                .setXPlacement(objc2_app_kit::NSGridCellPlacement::Fill);
+            self.dividers.push(divider);
+        }
         grid.addRowWithViews(&objc2_foundation::NSArray::from_slice(&row.take_form_cells()));
         grid.columnAtIndex(0).setXPlacement(objc2_app_kit::NSGridCellPlacement::Fill);
         grid.columnAtIndex(1)
@@ -197,7 +214,7 @@ impl SettingsGroup {
     }
 }
 impl NativeView for SettingsGroup {
-    fn ns_view(&self) -> &NSView { self.grid.ns_view() }
+    fn ns_view(&self) -> &NSView { self.surface.ns_view() }
 }
 
 pub struct Section {
@@ -219,7 +236,7 @@ impl Section {
     }
 
     pub fn description(self, text: &str) -> Self {
-        self.stack.add(SecondaryLabel::new(&self.ui, text));
+        self.stack.add(Caption::new(&self.ui, text));
         self
     }
 
@@ -293,6 +310,8 @@ impl SettingsPage {
         fill.setPriority(750.0);
         fill.setActive(true);
         let scroll = ScrollView::new(ui, outer);
+        scroll.ns_scroll_view().setDrawsBackground(true);
+        scroll.ns_scroll_view().setBackgroundColor(&Color::window_background());
         scroll.fit_width();
         Self { ui: *ui, scroll, content, top }
     }

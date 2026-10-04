@@ -2,98 +2,130 @@ use super::pages::{layouts, optional_number};
 use super::*;
 use crate::common::config::*;
 
-/// A list refreshes only when its contents change. The selected editor is retained
-/// across scalar edits; switching records constructs just that record's form.
-fn master<T: Clone + PartialEq + 'static>(
+/// Workspace records use a native collection and a small attached detail editor.
+type WorkspaceEntry = (usize, String, Option<LayoutMode>);
+
+fn workspace_editor(
     ui: Ui,
     model: &Rc<Model>,
     title: &str,
-    items: impl Fn(&ConfigSource) -> Vec<T> + 'static,
-    summary: impl Fn(&T) -> String + 'static,
+    items: impl Fn(&ConfigSource) -> Vec<WorkspaceEntry> + 'static,
+    summary: impl Fn(&WorkspaceEntry, usize) -> String + 'static,
     detail: impl Fn(Ui, &Rc<Model>, usize) -> Page + 'static,
     add: impl Fn(&Rc<Model>, Weak<ValidationMessage>) + 'static,
     remove: impl Fn(&mut ConfigSource, usize) -> Result<(), String> + Send + Copy + 'static,
-    reorder: Option<fn(&mut ConfigSource, usize, usize)>,
 ) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let host = Rc::new(PageHost::new(&ui));
-    host.set_page(SettingsPage::new(&ui, "").subtitle("Select an item to edit."));
-    let selected = Rc::new(Cell::new(None));
     let current: Rc<RefCell<Option<Page>>> = Rc::new(RefCell::new(None));
-    let weak_host = Rc::downgrade(&host);
-    let weak_model = Rc::downgrade(model);
-    let weak_current = Rc::downgrade(&current);
-    let selected_cb = selected.clone();
-    let build_detail = Rc::new(detail);
-    let build = build_detail.clone();
-    let message = Rc::new(ValidationMessage::new(&ui));
-    let error = Rc::downgrade(&message);
+    let selected = Rc::new(Cell::new(None));
     let weak = Rc::downgrade(model);
-    let list = EditableList::new(&ui, summary)
-        .on_select(move |index| {
-            if selected_cb.replace(index) == index {
-                return;
+    let editor = current.clone();
+    let edit_workspace: Rc<dyn Fn(usize)> = Rc::new(move |index| {
+        if let Some(model) = weak.upgrade() {
+            let page = detail(ui, &model, index);
+            let syncing = model.syncing.replace(true);
+            for sync in &page.sync {
+                sync(&model.source.borrow());
             }
-            if let (Some(host), Some(model), Some(current)) =
-                (weak_host.upgrade(), weak_model.upgrade(), weak_current.upgrade())
-            {
-                if let Some(index) = index {
-                    let page = build(ui, &model, index);
-                    let was_syncing = model.syncing.replace(true);
-                    for sync in &page.sync {
-                        sync(&model.source.borrow());
+            model.syncing.set(syncing);
+            let weak = Rc::downgrade(&model);
+            let current = editor.clone();
+            let done = Button::new(&ui, "Done").key_equivalent("\r").on_click(move || {
+                if let Some(model) = weak.upgrade() {
+                    if let Some(sheet) = model.sheet.borrow().as_ref() {
+                        sheet.end();
                     }
-                    model.syncing.set(was_syncing);
-                    host.set_page(page.view.clone());
-                    *current.borrow_mut() = Some(page);
-                } else {
-                    host.set_page(SettingsPage::new(&ui, "").subtitle("Select an item to edit."));
-                    *current.borrow_mut() = None;
                 }
+                *current.borrow_mut() = None;
+            });
+            let content = VStack::new(&ui)
+                .insets(Insets {
+                    top: 16.0,
+                    left: 16.0,
+                    bottom: 16.0,
+                    right: 16.0,
+                })
+                .push(SectionTitle::new(&ui, &format!("Workspace {}", index + 1)))
+                .push(page.view.clone())
+                .push(
+                    HStack::new(&ui)
+                        .push(Caption::new(&ui, "Changes save automatically."))
+                        .spacer(&ui)
+                        .push(done),
+                );
+            content.min_width(420.0);
+            let sheet = Sheet::new(&ui, "Edit Workspace", content);
+            sheet.fit_content();
+            if let Some(window) = model.window.borrow().load() {
+                sheet.show(&window);
+                *model.sheet.borrow_mut() = Some(sheet);
+                *editor.borrow_mut() = Some(page);
             }
-        })
-        .on_add(move || {
-            if let Some(model) = weak.upgrade() {
-                add(&model, error.clone());
-            }
-        });
+        }
+    });
+    let summary = Rc::new(summary);
+    let primary = summary.clone();
+    let table = Rc::new(
+        SettingsList::<WorkspaceEntry>::new(
+            &ui,
+            move |item| primary(item, 0),
+            move |item| summary(item, 1),
+        )
+        .fit_content(300.0)
+        .symbol("rectangle.on.rectangle")
+        .on_open(move |index| edit_workspace(index)),
+    );
+    let message = Rc::new(ValidationMessage::new(&ui));
     let weak = Rc::downgrade(model);
     let error = Rc::downgrade(&message);
-    let list = list.on_remove(move |index| {
-        FormBuilder::submit(&weak, Box::new(move |s| remove(s, index)), error.clone())
+    let weak_remove = weak.clone();
+    let remove_error = error.clone();
+    let remove_selected = selected.clone();
+    let actions = Rc::new(
+        AddRemoveControl::new(&ui)
+            .on_add(move || {
+                if let Some(model) = weak.upgrade() {
+                    add(&model, error.clone());
+                }
+            })
+            .on_remove(move || {
+                if let Some(index) = remove_selected.get() {
+                    FormBuilder::submit(
+                        &weak_remove,
+                        Box::new(move |s| remove(s, index)),
+                        remove_error.clone(),
+                    );
+                }
+            }),
+    );
+    let weak_actions = Rc::downgrade(&actions);
+    let weak_model = Rc::downgrade(model);
+    let selection = selected.clone();
+    table.set_on_select(move |index| {
+        selection.set(index);
+        if let (Some(actions), Some(model)) = (weak_actions.upgrade(), weak_model.upgrade()) {
+            actions.set_remove_enabled(index.is_some_and(|i| {
+                i > 0 && i + 1 == model.source.borrow().virtual_workspaces.default_workspace_count
+            }));
+        }
     });
-    let list = if let Some(reorder) = reorder {
-        let weak = Rc::downgrade(model);
-        let error = Rc::downgrade(&message);
-        list.reorderable(true).on_reorder(move |from, to| {
-            FormBuilder::submit(
-                &weak,
-                Box::new(move |s| {
-                    reorder(s, from, to);
-                    Ok(())
-                }),
-                error.clone(),
-            )
-        })
-    } else {
-        list
-    };
-    list.min_width(140.0);
-    list.min_height(160.0);
-    let list = Rc::new(list);
-    let weak_list = Rc::downgrade(&list);
-    let last: RefCell<Vec<T>> = RefCell::new(Vec::new());
+    let weak_table = Rc::downgrade(&table);
+    let weak_actions = Rc::downgrade(&actions);
+    let last = RefCell::new(Vec::new());
     f.sync.push(Box::new(move |source| {
         let values = items(source);
         if *last.borrow() != values {
-            if let Some(list) = weak_list.upgrade() {
-                let old = selected.get();
-                list.set_items(values.clone());
-                let selection =
-                    old.filter(|i| *i < values.len()).or_else(|| (!values.is_empty()).then_some(0));
-                list.set_selected(selection);
+            if let Some(table) = weak_table.upgrade() {
+                let index = selected.get().filter(|i| *i < values.len());
+                table.set_rows(values.clone());
+                table.set_selected(index);
             }
             *last.borrow_mut() = values;
+        }
+        if let Some(actions) = weak_actions.upgrade() {
+            actions.set_remove_enabled(selected.get().is_some_and(|i| {
+                i > 0 && i + 1 == source.virtual_workspaces.default_workspace_count
+            }));
         }
         if let Some(page) = current.borrow().as_ref() {
             for sync in &page.sync {
@@ -101,11 +133,12 @@ fn master<T: Clone + PartialEq + 'static>(
             }
         }
     }));
-    let detail = MasterDetail::new(&ui, VStack::new(&ui).push(list).push(message), host);
-    detail.min_height(180.0);
-    detail.hugging_priority(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
-    let page = SettingsPage::new(&ui, title).section(detail).into_editor();
-    f.finish(page)
+    f.finish(
+        Section::new(&ui, title)
+            .content(table)
+            .footer(HStack::new(&ui).push(actions))
+            .footer(message),
+    )
 }
 
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
@@ -158,22 +191,34 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
         },
     );
     section = section.row(defaults);
-    let editor = master(
+    let editor = workspace_editor(
         ui,
         model,
-        "",
+        "Workspaces",
         |s| {
             (0..s.virtual_workspaces.default_workspace_count)
                 .map(|i| (i, workspace_name(s, i), workspace_layout(s, i)))
                 .collect()
         },
-        |(i, name, layout)| {
-            format!(
-                "{}  {} · {}",
-                i + 1,
-                name,
-                layout.as_ref().map(|v| format!("{v:?}")).unwrap_or("Default layout".into())
-            )
+        |(i, name, layout), column| {
+            if column == 0 {
+                name.clone()
+            } else {
+                let layout = layout
+                    .as_ref()
+                    .and_then(|mode| {
+                        layouts()
+                            .into_iter()
+                            .find(|(_, value)| value == mode)
+                            .map(|(name, _)| name.to_string())
+                    })
+                    .unwrap_or_else(|| "Default layout".into());
+                if name == &format!("Workspace {}", i + 1) {
+                    layout
+                } else {
+                    format!("Workspace {} · {}", i + 1, layout)
+                }
+            }
         },
         |ui, model, i| {
             let mut f = FormBuilder::new(ui, model);
@@ -224,9 +269,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
                     }
                 },
             );
-            f.finish(
-                SettingsPage::new(&ui, "").section(Section::new(&ui, "").row(name).row(layout)),
-            )
+            f.finish(Section::new(&ui, "").row(name).row(layout))
         },
         |model, error| {
             FormBuilder::submit(
@@ -251,11 +294,10 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
             resize_workspaces(s, i);
             Ok(())
         },
-        None,
     );
     let editor_sync = editor.sync;
     f.sync.extend(editor_sync);
-    f.finish(SettingsPage::new(&ui, "Workspaces").section(section).section(editor.view))
+    f.finish(SettingsPage::new(&ui, "").section(section).section(editor.view))
 }
 
 fn resize_workspaces(s: &mut ConfigSource, count: usize) {
@@ -412,20 +454,10 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     });
     let action = edit_rule.clone();
     let table = Rc::new(
-        Table::<AppWorkspaceRule>::new(&ui)
-            .column("match", "Application or condition", 330.0)
-            .column("behavior", "Behavior", 210.0)
-            .cells(move |rule, column| {
-                let value = if column == 0 {
-                    rule_summary(rule)
-                } else {
-                    rule_behavior(rule)
-                };
-                let label = Label::new(&ui, &value);
-                label.tooltip(&value);
-                Box::new(label)
-            })
-            .on_double_click(move |index| action(index))
+        SettingsList::<AppWorkspaceRule>::new(&ui, rule_summary, rule_behavior)
+            .fit_content(360.0)
+            .symbol("app")
+            .on_open(move |index| action(index))
             .reorderable(true)
             .on_reorder({
                 let weak = Rc::downgrade(model);
@@ -446,15 +478,6 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
                 }
             }),
     );
-    table.min_height(80.0);
-    let preferred = table.ns_view().heightAnchor().constraintGreaterThanOrEqualToConstant(160.0);
-    preferred.setPriority(750.0);
-    preferred.setActive(true);
-    let axis = objc2_app_kit::NSLayoutConstraintOrientation::Vertical;
-    table.ns_view().setContentHuggingPriority_forOrientation(1.0, axis);
-    table
-        .ns_view()
-        .setContentCompressionResistancePriority_forOrientation(1.0, axis);
     let weak_table = Rc::downgrade(&table);
     let edit_action = edit_rule.clone();
     let edit = IconButton::new(&ui, "pencil", "Edit Rule…").on_click(move || {
@@ -528,12 +551,12 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             }
         }
     }));
-    f.finish(SettingsPage::new(&ui, "Rules")
+    f.finish(SettingsPage::new(&ui, "")
         .subtitle("Choose which windows Rift manages and where they open. Double-click a rule to edit; drag to reorder.")
         .section(table)
         .section(HStack::new(&ui).push(controls).push(edit))
         .section(message)
-        .into_editor())
+        )
 }
 
 fn rule_behavior(rule: &AppWorkspaceRule) -> String {

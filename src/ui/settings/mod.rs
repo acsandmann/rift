@@ -126,6 +126,20 @@ impl Settings {
         pages: &Rc<RefCell<Vec<Option<Page>>>>,
         id: usize,
     ) {
+        if let Some(window) = model.window.borrow().load() {
+            window.setTitle(&objc2_foundation::NSString::from_str(
+                [
+                    "General",
+                    "Layouts",
+                    "Workspaces",
+                    "Rules",
+                    "Keyboard",
+                    "Mouse & Trackpad",
+                    "Interface",
+                    "Advanced",
+                ][id],
+            ));
+        }
         if pages.borrow()[id].is_none() {
             let page = pages::build(ui, model, id);
             pages.borrow_mut()[id] = Some(page);

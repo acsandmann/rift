@@ -49,7 +49,7 @@ pub(super) fn build(ui: Ui, model: &Rc<Model>, id: usize) -> Page {
 
 fn general(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "General");
+    let mut page = SettingsPage::new(&ui, "");
     let mut section = Section::new(&ui, "Window behavior").row(f.switch(
         "Animate window changes",
         |s| s.settings.animate,
@@ -136,7 +136,7 @@ fn general(ui: Ui, model: &Rc<Model>) -> Page {
 }
 fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "Layouts");
+    let mut page = SettingsPage::new(&ui, "");
     let section = Section::new(&ui, "Defaults")
         .row(f.popup(
             "Default layout",
@@ -529,7 +529,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
 
 fn input(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "Mouse & Trackpad");
+    let mut page = SettingsPage::new(&ui, "");
     let section = Section::new(&ui, "Workspace swipes")
         .row(f.switch(
             "Enabled",
@@ -704,7 +704,7 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
 }
 fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "Interface");
+    let mut page = SettingsPage::new(&ui, "");
     let section = Section::new(&ui, "Menu Bar")
         .row(f.switch(
             "Show menu bar indicator",
@@ -858,7 +858,7 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
 }
 fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "Advanced");
+    let mut page = SettingsPage::new(&ui, "");
     page = page.section(super::editors::strings(
         &mut f,
         "Startup commands",

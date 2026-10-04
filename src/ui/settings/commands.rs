@@ -247,12 +247,11 @@ pub(super) fn recorded_key(key: &KeyShortcut) -> Option<String> {
 pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mode = Rc::new(RefCell::new("default".to_string()));
-    let table = Table::<(String, String)>::new(&ui)
-        .column("shortcut", "Shortcut", 110.0)
-        .column("action", "Action", 360.0)
-        .cells(move |(key, action), column| {
-            Box::new(Label::new(&ui, if column == 0 { key } else { action }))
-        });
+    let table = SettingsList::<(String, String)>::new(
+        &ui,
+        |(_, action)| action.clone(),
+        |(key, _)| key.clone(),
+    );
     let weak_model = Rc::downgrade(model);
     let mode_edit = mode.clone();
     let edit_binding: Rc<dyn Fn(usize)> = Rc::new(move |i| {
@@ -265,7 +264,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         }
     });
     let action = edit_binding.clone();
-    let table = Rc::new(table.on_double_click(move |i| action(i)));
+    let table = Rc::new(table.on_open(move |i| action(i)));
     table.min_height(80.0);
     let preferred = table.ns_view().heightAnchor().constraintGreaterThanOrEqualToConstant(160.0);
     preferred.setPriority(750.0);
@@ -436,7 +435,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let mode_controls = HStack::new(&ui).push(popup).spacer(&ui).push(management);
     let combinations = modifier_combinations(&mut f, model);
     f.finish(
-        SettingsPage::new(&ui, "Keyboard")
+        SettingsPage::new(&ui, "")
             .section(Section::new(&ui, "Keymap").content(mode_controls))
             .section(
                 Section::new(&ui, "Shortcuts")
@@ -458,7 +457,7 @@ fn binding_rows(s: &ConfigSource, mode: &str) -> Vec<(String, String)> {
         .flat_map(|m| m.iter().map(|(key, cmd)| (glyphs(key, s), action_name(cmd))))
         .collect()
 }
-fn refresh_bindings(table: &Table<(String, String)>, s: &ConfigSource, mode: &str) {
+fn refresh_bindings(table: &SettingsList<(String, String)>, s: &ConfigSource, mode: &str) {
     table.set_rows(binding_rows(s, mode));
 }
 
