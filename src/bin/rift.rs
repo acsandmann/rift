@@ -132,6 +132,7 @@ fn main() {
         app.finishLaunching();
         NSApplication::load();
     }
+    rift_wm::sys::hotkey::refresh_keyboard_layout(mtm);
 
     unsafe { SLSWindowManagementBridgeSetDelegate(std::ptr::null_mut()) };
 
@@ -314,6 +315,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         events_tx.clone(),
         config_tx.clone(),
         mtm,
+        config_path.clone(),
     );
     let stack_line = StackLine::new(
         config.clone(),

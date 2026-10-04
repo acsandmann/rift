@@ -607,7 +607,7 @@ pub fn spawn_app_thread(
         .name(format!("{}({pid})", info.bundle_id.as_deref().unwrap_or("")))
         .spawn(move || {
             let _guard = guard; // Also reports early initialization failures and panics.
-            app_thread_main(pid, info, events_tx, tx_store, handle, requests_rx);
+            Executor::run(run_app(pid, info, events_tx, tx_store, handle, requests_rx));
         })
     {
         warn!(pid, ?err, "Failed to spawn app thread");
@@ -2314,7 +2314,7 @@ impl Drop for State {
     }
 }
 
-fn app_thread_main(
+pub(crate) async fn run_app(
     pid: pid_t,
     info: AppInfo,
     events_tx: reactor::Sender,
@@ -2382,7 +2382,7 @@ fn app_thread_main(
         tx_store,
     };
 
-    Executor::run(state.run(info, handle, requests_rx, notifications_rx, raises_rx));
+    state.run(info, handle, requests_rx, notifications_rx, raises_rx).await;
 }
 
 fn trace<T>(

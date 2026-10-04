@@ -4,16 +4,15 @@ use std::ptr::{self, NonNull};
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, Type};
 use objc2_core_graphics::{CGContext, CGError};
 
-use super::skylight::{
-    CFRelease, CGRegionCreateEmptyRegion, CGSNewRegionWithRect, CGSNewRegionWithRectList,
-    G_CONNECTION, SLSClearWindowTags, SLSFlushWindowContentRegion,
-    SLSNewWindowWithOpaqueShapeAndContext, SLSOrderWindow, SLSReleaseWindow, SLSSetWindowAlpha,
+use super::cg_ok;
+use super::private::{
+    CGRegionCreateEmptyRegion, CGSNewRegionWithRect, CGSNewRegionWithRectList, G_CONNECTION,
+    SLSClearWindowTags, SLSFlushWindowContentRegion, SLSNewWindowWithOpaqueShapeAndContext,
+    SLSOrderWindow, SLSReleaseWindow, SLSSetWindowAlpha, SLSSetWindowBackgroundBlurRadius,
     SLSSetWindowBackgroundBlurRadiusStyle, SLSSetWindowLevel, SLSSetWindowOpacity,
     SLSSetWindowProperty, SLSSetWindowResolution, SLSSetWindowShape, SLSSetWindowSubLevel,
     SLSSetWindowTags, SLWindowContextCreate, cid_t,
 };
-use crate::sys::cg_ok;
-use crate::sys::skylight::SLSSetWindowBackgroundBlurRadius;
 
 type WindowId = u32;
 const TAG_BITSET_LEN: i32 = 64;
@@ -27,9 +26,8 @@ impl CFRegion {
     fn from_rect(rect: &CGRect) -> Result<Self, CGError> {
         let mut region: *mut CFType = ptr::null_mut();
         cg_ok(unsafe { CGSNewRegionWithRect(rect, &mut region) })?;
-        Ok(Self(unsafe {
-            CFRetained::from_raw(NonNull::new_unchecked(region))
-        }))
+        let region = NonNull::new(region).ok_or(CGError(1000))?;
+        Ok(Self(unsafe { CFRetained::from_raw(region) }))
     }
 
     pub(super) fn from_rounded_rect(size: CGSize, radius: f64) -> Result<Self, CGError> {
@@ -72,17 +70,13 @@ impl CFRegion {
             .ok_or(CGError(1000))
     }
 
-    fn empty() -> Self {
-        Self(unsafe { CFRetained::from_raw(NonNull::new_unchecked(CGRegionCreateEmptyRegion())) })
+    fn empty() -> Result<Self, CGError> {
+        let region = NonNull::new(unsafe { CGRegionCreateEmptyRegion() }).ok_or(CGError(1000))?;
+        Ok(Self(unsafe { CFRetained::from_raw(region) }))
     }
 
     #[inline]
     pub(super) fn as_ptr(&self) -> *mut CFType { CFRetained::<CFType>::as_ptr(&self.0).as_ptr() }
-}
-
-impl Drop for CFRegion {
-    // SAFETY: cfretained should be auto dropping here
-    fn drop(&mut self) {}
 }
 
 #[derive(Debug)]
@@ -134,7 +128,7 @@ impl CgsWindow {
             let connection = *G_CONNECTION;
 
             let frame_region = CFRegion::from_rect(&frame).map_err(CgsWindowError::Region)?;
-            let empty_region = CFRegion::empty();
+            let empty_region = CFRegion::empty().map_err(CgsWindowError::Region)?;
 
             let mut tags: u64 = (1 << 1) | (1 << 9);
 
@@ -154,14 +148,13 @@ impl CgsWindow {
             ))
             .map_err(CgsWindowError::Window)?;
 
-            cg_ok(SLSSetWindowResolution(connection, wid, 1.0))
-                .map_err(CgsWindowError::Resolution)?;
-
-            Ok(Self {
+            let window = Self {
                 id: wid,
                 connection,
                 owned: true,
-            })
+            };
+            window.set_resolution(1.0)?;
+            Ok(window)
         }
     }
 
@@ -171,7 +164,7 @@ impl CgsWindow {
             let connection = *G_CONNECTION;
             let frame_region = CFRegion::from_rounded_rect(frame.size, corner_radius)
                 .map_err(CgsWindowError::Region)?;
-            let empty_region = CFRegion::empty();
+            let empty_region = CFRegion::empty().map_err(CgsWindowError::Region)?;
             let mut tags: u64 = (1 << 1) | (1 << 9) | (1 << 16);
             let mut wid: WindowId = 0;
 
@@ -253,6 +246,11 @@ impl CgsWindow {
     }
 
     #[inline]
+    pub fn set_sublevel(&self, sublevel: i32) -> Result<(), CgsWindowError> {
+        unsafe { cg_ok(SLSSetWindowSubLevel(self.connection, self.id, sublevel)) }
+            .map_err(CgsWindowError::Level)
+    }
+
     pub fn set_shape(&self, frame: CGRect) -> Result<(), CgsWindowError> {
         unsafe {
             let offset = frame.origin;
@@ -369,15 +367,11 @@ impl CgsWindow {
     /// rectangle behind an otherwise transparent CA layer tree.
     pub fn clear_backing(&self, size: CGSize) -> Result<(), CgsWindowError> {
         let context = unsafe { SLWindowContextCreate(self.connection, self.id, ptr::null_mut()) };
-        if context.is_null() {
-            return Err(CgsWindowError::Surface(CGError(1000)));
-        }
-
-        unsafe {
-            CGContext::clear_rect(Some(&*context), CGRect::new(CGPoint::new(0.0, 0.0), size));
-            CGContext::flush(Some(&*context));
-            CFRelease(context.cast::<CFType>());
-        }
+        let context = NonNull::new(context).ok_or(CgsWindowError::Surface(CGError(1000)))?;
+        let context = unsafe { CFRetained::from_raw(context) };
+        CGContext::clear_rect(Some(&context), CGRect::new(CGPoint::new(0.0, 0.0), size));
+        CGContext::flush(Some(&context));
+        drop(context);
 
         // Some macOS versions reject this notification even though flushing the
         // CGContext succeeded, so it is deliberately best-effort.

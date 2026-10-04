@@ -30,6 +30,8 @@ enum CliCommand {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Open Rift’s native Settings window
+    Settings,
     /// Query information from rift
     Query {
         #[command(subcommand)]
@@ -609,6 +611,9 @@ fn main() {
 
 fn build_request(command: Commands) -> Result<RiftRequest, String> {
     match command {
+        Commands::Settings => Ok(RiftRequest::ExecuteCommand {
+            command: rift_protocol::RiftCommand::Reactor(reactor::ReactorCommand::OpenSettings),
+        }),
         Commands::Query { query } => build_query_request(query),
         Commands::Execute { command } => build_execute_request(command),
         Commands::Subscribe { subscribe } => build_subscribe_request(subscribe),

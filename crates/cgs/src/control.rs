@@ -1,0 +1,638 @@
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2_app_kit::*;
+use objc2_foundation::{NSArray, NSNumber, NSNumberFormatter, NSNumberFormatterStyle, NSString};
+
+use crate::bridge::ActionTarget;
+use crate::{HStack, NativeControl, NativeView, Ui};
+
+macro_rules! native_control {
+    ($wrapper:ident, $native:ident, $accessor:ident) => {
+        impl $wrapper {
+            pub fn $accessor(&self) -> &$native { &self.native }
+        }
+        impl NativeView for $wrapper {
+            fn ns_view(&self) -> &NSView { &self.native }
+        }
+        impl NativeControl for $wrapper {
+            fn ns_control(&self) -> &NSControl { &self.native }
+        }
+    };
+}
+pub(crate) use native_control;
+
+// The glass bezel and NSGlassEffectView were introduced together in macOS 26.
+// Check runtime availability so older systems retain their standard push buttons.
+pub(crate) fn action_button_bezel() -> NSBezelStyle {
+    if objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some() {
+        NSBezelStyle::Glass
+    } else {
+        NSBezelStyle::Push
+    }
+}
+
+pub struct Button {
+    native: Retained<NSButton>,
+    target: Retained<ActionTarget>,
+}
+impl Button {
+    pub fn new(ui: &Ui, title: &str) -> Self {
+        let native = NSButton::new(ui.mtm());
+        native.setTitle(&NSString::from_str(title));
+        native.setBezelStyle(action_button_bezel());
+        let target = ActionTarget::new(ui);
+        target.attach(&native);
+        Self { native, target }
+    }
+
+    pub fn on_click(self, mut f: impl FnMut() + 'static) -> Self {
+        self.target.set(move |_| f());
+        self
+    }
+
+    pub fn key_equivalent(self, value: &str) -> Self {
+        self.native.setKeyEquivalent(&NSString::from_str(value));
+        self.native.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+        self
+    }
+
+    pub fn set_title(&self, title: &str) { self.native.setTitle(&NSString::from_str(title)); }
+
+    pub fn borderless(self) -> Self {
+        self.native.setBordered(false);
+        self
+    }
+
+    pub fn disclosure(self) -> Self {
+        self.native.setBezelStyle(NSBezelStyle::Disclosure);
+        self.native.setButtonType(NSButtonType::PushOnPushOff);
+        self
+    }
+
+    pub fn symbol(self, name: &str) -> Self {
+        if let Some(image) = crate::Symbol::named(name) {
+            self.native.setImage(Some(&image));
+            self.native.setImagePosition(NSCellImagePosition::ImageOnly);
+        }
+        self
+    }
+}
+native_control!(Button, NSButton, ns_button);
+pub struct IconButton(Button);
+impl IconButton {
+    pub fn new(ui: &Ui, symbol: &str, label: &str) -> Self {
+        let button = Button::new(ui, label).symbol(symbol);
+        button.ns_button().setBezelStyle(NSBezelStyle::AccessoryBar);
+        button.ns_button().setControlSize(NSControlSize::Small);
+        button.accessibility_label(label);
+        Self(button)
+    }
+
+    pub fn on_click(self, f: impl FnMut() + 'static) -> Self { Self(self.0.on_click(f)) }
+
+    pub fn ns_button(&self) -> &NSButton { self.0.ns_button() }
+}
+impl NativeView for IconButton {
+    fn ns_view(&self) -> &NSView { self.0.ns_view() }
+}
+impl NativeControl for IconButton {
+    fn ns_control(&self) -> &NSControl { self.0.ns_control() }
+}
+pub type SymbolButton = IconButton;
+pub struct HelpButton(Button);
+impl HelpButton {
+    pub fn new(ui: &Ui) -> Self {
+        let b = Button::new(ui, "Help");
+        b.native.setBezelStyle(NSBezelStyle::HelpButton);
+        Self(b)
+    }
+
+    pub fn on_click(self, f: impl FnMut() + 'static) -> Self { Self(self.0.on_click(f)) }
+
+    pub fn ns_button(&self) -> &NSButton { self.0.ns_button() }
+}
+impl NativeView for HelpButton {
+    fn ns_view(&self) -> &NSView { self.0.ns_view() }
+}
+
+pub struct Switch {
+    native: Retained<NSSwitch>,
+    target: Retained<ActionTarget>,
+}
+impl Switch {
+    pub fn new(ui: &Ui) -> Self {
+        let native = NSSwitch::new(ui.mtm());
+        let target = ActionTarget::new(ui);
+        target.attach(&native);
+        Self { native, target }
+    }
+
+    pub fn value(self, value: bool) -> Self {
+        self.set_value(value);
+        self
+    }
+
+    pub fn set_value(&self, value: bool) {
+        self.native.setState(if value {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+    }
+
+    pub fn get_value(&self) -> bool { self.native.state() == NSControlStateValueOn }
+
+    pub fn on_change(self, mut f: impl FnMut(bool) + 'static) -> Self {
+        self.target.set(move |sender| {
+            if let Some(control) = sender.downcast_ref::<NSSwitch>() {
+                f(control.state() == NSControlStateValueOn);
+            }
+        });
+        self
+    }
+}
+native_control!(Switch, NSSwitch, ns_switch);
+
+pub struct Checkbox {
+    native: Retained<NSButton>,
+    target: Retained<ActionTarget>,
+}
+impl Checkbox {
+    pub fn new(ui: &Ui, title: &str) -> Self {
+        let native = NSButton::new(ui.mtm());
+        native.setTitle(&NSString::from_str(title));
+        native.setButtonType(NSButtonType::Switch);
+        let target = ActionTarget::new(ui);
+        target.attach(&native);
+        Self { native, target }
+    }
+
+    pub fn set_value(&self, value: bool) {
+        self.native.setState(if value {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+    }
+
+    pub fn value(self, value: bool) -> Self {
+        self.set_value(value);
+        self
+    }
+
+    pub fn on_change(self, mut f: impl FnMut(bool) + 'static) -> Self {
+        self.target.set(move |sender| {
+            if let Some(control) = sender.downcast_ref::<NSButton>() {
+                f(control.state() == NSControlStateValueOn);
+            }
+        });
+        self
+    }
+}
+native_control!(Checkbox, NSButton, ns_button);
+
+pub struct Popup {
+    native: Retained<NSPopUpButton>,
+    target: Retained<ActionTarget>,
+    menu: Option<crate::Menu>,
+}
+impl Popup {
+    pub fn new(ui: &Ui) -> Self {
+        let native = NSPopUpButton::new(ui.mtm());
+        let target = ActionTarget::new(ui);
+        target.attach(&native);
+        Self { native, target, menu: None }
+    }
+
+    /// Native pull-down menu for secondary collection actions.
+    pub fn actions(ui: &Ui, label: &str, menu: crate::Menu) -> Self {
+        let header = crate::MenuItem::new(ui, "");
+        header.ns_menu_item().setImage(crate::Symbol::named("ellipsis").as_deref());
+        menu.ns_menu().insertItem_atIndex(header.ns_menu_item(), 0);
+        let mut popup = Self::new(ui);
+        popup.native.setPullsDown(true);
+        if let Some(cell) =
+            popup.native.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok())
+        {
+            cell.setArrowPosition(NSPopUpArrowPosition::NoArrow);
+        }
+        popup.native.setMenu(Some(menu.ns_menu()));
+        popup.native.setControlSize(NSControlSize::Small);
+        popup.accessibility_label(label);
+        popup.menu = Some(menu);
+        popup
+    }
+
+    pub fn items(self, values: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        self.set_items(values);
+        self
+    }
+
+    pub fn set_items(&self, values: impl IntoIterator<Item = impl AsRef<str>>) {
+        self.native.removeAllItems();
+        for value in values {
+            self.native.addItemWithTitle(&NSString::from_str(value.as_ref()));
+        }
+    }
+
+    pub fn set_selected(&self, index: usize) { self.native.selectItemAtIndex(index as isize); }
+
+    pub fn selected(&self) -> Option<usize> {
+        usize::try_from(self.native.indexOfSelectedItem()).ok()
+    }
+
+    pub fn on_change(self, mut f: impl FnMut(usize) + 'static) -> Self {
+        self.target.set(move |sender| {
+            if let Some(control) = sender.downcast_ref::<NSPopUpButton>() {
+                if let Ok(index) = usize::try_from(control.indexOfSelectedItem()) {
+                    f(index);
+                }
+            }
+        });
+        self
+    }
+}
+native_control!(Popup, NSPopUpButton, ns_popup_button);
+
+pub struct SegmentedControl {
+    native: Retained<NSSegmentedControl>,
+    target: Retained<ActionTarget>,
+}
+impl SegmentedControl {
+    pub fn new(ui: &Ui, labels: &[&str]) -> Self {
+        let native = NSSegmentedControl::new(ui.mtm());
+        native.setSegmentCount(labels.len() as isize);
+        for (index, label) in labels.iter().enumerate() {
+            native.setLabel_forSegment(&NSString::from_str(label), index as isize);
+        }
+        let target = ActionTarget::new(ui);
+        target.attach(&native);
+        Self { native, target }
+    }
+
+    pub fn set_selected(&self, index: usize) { self.native.setSelectedSegment(index as isize); }
+
+    pub fn on_change(self, mut f: impl FnMut(usize) + 'static) -> Self {
+        self.target.set(move |sender| {
+            if let Some(control) = sender.downcast_ref::<NSSegmentedControl>() {
+                if let Ok(index) = usize::try_from(control.selectedSegment()) {
+                    f(index);
+                }
+            }
+        });
+        self
+    }
+}
+native_control!(SegmentedControl, NSSegmentedControl, ns_segmented_control);
+
+pub struct ComboBox {
+    native: Retained<NSComboBox>,
+    target: Retained<ActionTarget>,
+}
+impl ComboBox {
+    pub fn new(ui: &Ui) -> Self {
+        let native = NSComboBox::new(ui.mtm());
+        let target = ActionTarget::new(ui);
+        target.attach(&native);
+        Self { native, target }
+    }
+
+    pub fn items(self, values: &[&str]) -> Self {
+        let strings: Vec<_> = values.iter().map(|v| NSString::from_str(v)).collect();
+        let objects: Vec<&AnyObject> = strings.iter().map(|v| &**v as &AnyObject).collect();
+        unsafe {
+            self.native.addItemsWithObjectValues(&NSArray::from_slice(&objects));
+        }
+        self
+    }
+
+    pub fn set_value(&self, value: &str) { self.native.setStringValue(&NSString::from_str(value)); }
+
+    pub fn on_change(self, mut f: impl FnMut(String) + 'static) -> Self {
+        self.target.set(move |sender| {
+            if let Some(control) = sender.downcast_ref::<NSComboBox>() {
+                f(control.stringValue().to_string());
+            }
+        });
+        self
+    }
+}
+native_control!(ComboBox, NSComboBox, ns_combo_box);
+
+pub struct RadioGroup {
+    stack: crate::VStack,
+    buttons: Vec<Retained<NSButton>>,
+    targets: Vec<Retained<ActionTarget>>,
+}
+impl RadioGroup {
+    pub fn new(ui: &Ui, labels: &[&str]) -> Self {
+        let stack = crate::VStack::new(ui);
+        let mut buttons = Vec::new();
+        let mut targets = Vec::new();
+        for title in labels {
+            let native = NSButton::new(ui.mtm());
+            native.setTitle(&NSString::from_str(title));
+            native.setButtonType(NSButtonType::Radio);
+            stack.ns_stack_view().addArrangedSubview(&native);
+            let target = ActionTarget::new(ui);
+            target.attach(&native);
+            buttons.push(native);
+            targets.push(target);
+        }
+        Self { stack, buttons, targets }
+    }
+
+    pub fn set_selected(&self, index: usize) {
+        for (i, b) in self.buttons.iter().enumerate() {
+            b.setState(if i == index {
+                NSControlStateValueOn
+            } else {
+                NSControlStateValueOff
+            });
+        }
+    }
+
+    pub fn on_change(self, f: impl FnMut(usize) + 'static) -> Self {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use objc2::rc::Weak;
+        let f = Rc::new(RefCell::new(f));
+        let buttons: Vec<_> = self.buttons.iter().map(|b| Weak::new(&**b)).collect();
+        let buttons = Rc::new(buttons);
+        for (index, target) in self.targets.iter().enumerate() {
+            let f = f.clone();
+            let buttons = buttons.clone();
+            target.set(move |_| {
+                for (i, b) in buttons.iter().enumerate() {
+                    if let Some(b) = b.load() {
+                        b.setState(if i == index {
+                            NSControlStateValueOn
+                        } else {
+                            NSControlStateValueOff
+                        });
+                    }
+                }
+                (f.borrow_mut())(index);
+            });
+        }
+        self
+    }
+}
+impl NativeView for RadioGroup {
+    fn ns_view(&self) -> &NSView { self.stack.ns_view() }
+}
+
+macro_rules! numeric_control {
+    ($name:ident, $native:ident, $accessor:ident) => {
+        pub struct $name {
+            native: Retained<$native>,
+            target: Retained<ActionTarget>,
+        }
+        impl $name {
+            pub fn new(ui: &Ui) -> Self {
+                let native = $native::new(ui.mtm());
+                let target = ActionTarget::new(ui);
+                target.attach(&native);
+                Self { native, target }
+            }
+
+            pub fn range(self, min: f64, max: f64) -> Self {
+                self.native.setMinValue(min);
+                self.native.setMaxValue(max);
+                self
+            }
+
+            pub fn value(self, value: f64) -> Self {
+                self.set_value(value);
+                self
+            }
+
+            pub fn set_value(&self, value: f64) { self.native.setDoubleValue(value); }
+
+            pub fn get_value(&self) -> f64 { self.native.doubleValue() }
+
+            pub fn on_change(self, mut f: impl FnMut(f64) + 'static) -> Self {
+                self.target.set(move |sender| {
+                    if let Some(control) = sender.downcast_ref::<$native>() {
+                        f(control.doubleValue());
+                    }
+                });
+                self
+            }
+        }
+        native_control!($name, $native, $accessor);
+    };
+}
+numeric_control!(Slider, NSSlider, ns_slider);
+numeric_control!(Stepper, NSStepper, ns_stepper);
+impl Stepper {
+    pub fn increment(self, value: f64) -> Self {
+        self.native.setIncrement(value);
+        self
+    }
+}
+
+fn formatted_number(formatter: &NSNumberFormatter, text: &NSString) -> Option<f64> {
+    let value = formatter.numberFromString(text)?.doubleValue();
+    if !value.is_finite()
+        || (!formatter.allowsFloats() && value.fract() != 0.0)
+        || formatter.minimum().is_some_and(|min| value < min.doubleValue())
+        || formatter.maximum().is_some_and(|max| value > max.doubleValue())
+    {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub struct NumberField {
+    field: crate::TextField,
+    formatter: Retained<NSNumberFormatter>,
+}
+impl NumberField {
+    pub fn with_validation(self, ui: &Ui) -> crate::Validated<Self> {
+        crate::Validated::new(ui, self)
+    }
+
+    pub fn new(ui: &Ui) -> Self {
+        let field = crate::TextField::new(ui);
+        let formatter = NSNumberFormatter::new();
+        formatter.setNumberStyle(NSNumberFormatterStyle::DecimalStyle);
+        formatter.setUsesGroupingSeparator(false);
+        formatter.setMaximumFractionDigits(6);
+        field.ns_text_field().setFormatter(Some(&formatter));
+        Self { field, formatter }
+    }
+
+    pub fn integer(self) -> Self {
+        self.formatter.setAllowsFloats(false);
+        self.formatter.setMaximumFractionDigits(0);
+        self
+    }
+
+    pub fn range(self, min: f64, max: f64) -> Self {
+        assert!(min.is_finite() && max.is_finite() && min <= max);
+        self.formatter.setMinimum(Some(&NSNumber::new_f64(min)));
+        self.formatter.setMaximum(Some(&NSNumber::new_f64(max)));
+        self
+    }
+
+    pub fn value(self, value: f64) -> Self {
+        self.set_value(value);
+        self
+    }
+
+    pub fn set_value(&self, value: f64) { self.field.ns_text_field().setDoubleValue(value); }
+
+    pub fn get_value(&self) -> Option<f64> {
+        formatted_number(&self.formatter, &self.field.ns_text_field().stringValue())
+    }
+
+    pub fn on_change(mut self, mut f: impl FnMut(f64) + 'static) -> Self {
+        let formatter = self.formatter.clone();
+        self.field = self.field.on_commit(move |text| {
+            if let Some(value) = formatted_number(&formatter, &NSString::from_str(&text)) {
+                f(value);
+            }
+        });
+        self
+    }
+
+    pub fn ns_text_field(&self) -> &NSTextField { self.field.ns_text_field() }
+
+    pub fn ns_number_formatter(&self) -> &NSNumberFormatter { &self.formatter }
+
+    pub fn set_validation(&self, validation: &crate::Validation) {
+        self.field.set_validation(validation);
+    }
+}
+impl NativeView for NumberField {
+    fn ns_view(&self) -> &NSView { self.field.ns_view() }
+}
+impl NativeControl for NumberField {
+    fn ns_control(&self) -> &NSControl { self.field.ns_control() }
+}
+
+pub struct NumberStepper {
+    stack: HStack,
+    field: NumberField,
+    stepper: Stepper,
+}
+impl NumberStepper {
+    pub fn new(ui: &Ui, min: f64, max: f64, increment: f64) -> Self {
+        use objc2::rc::Weak;
+        let field = NumberField::new(ui).range(min, max);
+        let weak = Weak::new(field.ns_text_field());
+        let stepper =
+            Stepper::new(ui).range(min, max).increment(increment).on_change(move |value| {
+                if let Some(field) = weak.load() {
+                    field.setDoubleValue(value);
+                }
+            });
+        let weak = Weak::new(stepper.ns_stepper());
+        let field = field.on_change(move |value| {
+            if let Some(stepper) = weak.load() {
+                stepper.setDoubleValue(value);
+            }
+        });
+        let stack = HStack::new(ui);
+        stack.ns_stack_view().addArrangedSubview(field.ns_view());
+        stack.ns_stack_view().addArrangedSubview(stepper.ns_view());
+        Self { stack, field, stepper }
+    }
+
+    pub fn set_value(&self, value: f64) {
+        self.field.set_value(value);
+        self.stepper.set_value(value);
+    }
+
+    pub fn on_change(mut self, mut f: impl FnMut(f64) + 'static) -> Self {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use objc2::rc::Weak;
+        let cb = Rc::new(RefCell::new(move |v| f(v)));
+        let weak = Weak::new(self.stepper.ns_stepper());
+        let c = cb.clone();
+        self.field = self.field.on_change(move |v| {
+            if let Some(s) = weak.load() {
+                s.setDoubleValue(v);
+            }
+            (c.borrow_mut())(v);
+        });
+        let weak = Weak::new(self.field.ns_text_field());
+        self.stepper = self.stepper.on_change(move |v| {
+            if let Some(s) = weak.load() {
+                s.setDoubleValue(v);
+            }
+            (cb.borrow_mut())(v);
+        });
+        self
+    }
+
+    pub fn ns_text_field(&self) -> &NSTextField { self.field.ns_text_field() }
+
+    pub fn ns_stepper(&self) -> &NSStepper { self.stepper.ns_stepper() }
+}
+impl NativeView for NumberStepper {
+    fn ns_view(&self) -> &NSView { self.stack.ns_view() }
+}
+
+pub struct ColorWell {
+    native: Retained<NSColorWell>,
+    target: Retained<ActionTarget>,
+}
+impl ColorWell {
+    pub fn new(ui: &Ui) -> Self {
+        let native = NSColorWell::new(ui.mtm());
+        let target = ActionTarget::new(ui);
+        target.attach(&native);
+        Self { native, target }
+    }
+
+    pub fn set_value(&self, color: &NSColor) { self.native.setColor(color); }
+
+    pub fn on_change(self, mut f: impl FnMut(Retained<NSColor>) + 'static) -> Self {
+        self.target.set(move |sender| {
+            if let Some(control) = sender.downcast_ref::<NSColorWell>() {
+                f(control.color());
+            }
+        });
+        self
+    }
+}
+native_control!(ColorWell, NSColorWell, ns_color_well);
+
+pub struct AddRemoveControl {
+    stack: HStack,
+    add: IconButton,
+    remove: IconButton,
+}
+impl AddRemoveControl {
+    pub fn new(ui: &Ui) -> Self {
+        let add = IconButton::new(ui, "plus", "Add");
+        let remove = IconButton::new(ui, "minus", "Remove");
+        let stack = HStack::new(ui).spacing(crate::Metrics::CONTROL_SPACING);
+        stack.ns_stack_view().addArrangedSubview(add.ns_view());
+        stack.ns_stack_view().addArrangedSubview(remove.ns_view());
+        Self { stack, add, remove }
+    }
+
+    pub fn on_add(mut self, f: impl FnMut() + 'static) -> Self {
+        self.add = self.add.on_click(f);
+        self
+    }
+
+    pub fn on_remove(mut self, f: impl FnMut() + 'static) -> Self {
+        self.remove = self.remove.on_click(f);
+        self
+    }
+
+    pub fn set_remove_enabled(&self, value: bool) { self.remove.set_enabled(value); }
+
+    pub(crate) fn remove_button(&self) -> &NSButton { self.remove.ns_button() }
+}
+impl NativeView for AddRemoveControl {
+    fn ns_view(&self) -> &NSView { self.stack.ns_view() }
+}

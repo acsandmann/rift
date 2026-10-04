@@ -4,7 +4,9 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use dispatchr::queue;
 use dispatchr::time::Time;
@@ -146,6 +148,7 @@ pub struct WmController {
     receiver: Receiver,
     sender: Sender,
     apps: AppLifecycle,
+    local_app: Option<Pin<Box<dyn Future<Output = ()>>>>,
 }
 
 // Reserve before spawning; retain the reservation until AX resources are dropped.
@@ -231,14 +234,26 @@ impl WmController {
             receiver,
             sender: sender.clone(),
             apps: AppLifecycle::default(),
+            local_app: None,
         };
         (this, sender)
     }
 
     pub async fn run(mut self) {
-        while let Some((span, event)) = self.receiver.recv().await {
-            let _guard = span.enter();
-            self.handle_event(event);
+        loop {
+            tokio::select! {
+                event = self.receiver.recv() => {
+                    let Some((span, event)) = event else { break };
+                    let _guard = span.enter();
+                    self.handle_event(event);
+                }
+                () = async {
+                    match &mut self.local_app {
+                        Some(task) => task.await,
+                        None => std::future::pending().await,
+                    }
+                } => self.local_app = None,
+            }
         }
     }
 
@@ -339,6 +354,9 @@ impl WmController {
                 _ = self.input_tx.send(input::Request::SetLowPowerMode(is_low_power_mode));
             }
             KeyboardLayoutChanged => {
+                if let Some(mtm) = objc2::MainThreadMarker::new() {
+                    sys::hotkey::refresh_keyboard_layout(mtm);
+                }
                 _ = self.input_tx.send(input::Request::KeyboardLayoutChanged);
             }
             Command(Wm(ReloadConfig)) => self.reload_config(),
@@ -495,6 +513,18 @@ impl WmController {
         }
 
         if let Some((handle, rx)) = self.apps.reserve(pid, info.clone(), source) {
+            if pid == std::process::id() as pid_t {
+                // Self-targeted AX calls execute AppKit directly, so our own windows
+                // must be managed on the main thread rather than an app worker.
+                let events_tx = self.events_tx.clone();
+                let tx_store = self.window_tx_store.clone();
+                let wm_tx = self.sender.clone();
+                self.local_app = Some(Box::pin(async move {
+                    actor::app::run_app(pid, info, events_tx, tx_store, handle.clone(), rx).await;
+                    wm_tx.send(WmEvent::AppExited(pid, handle));
+                }));
+                return;
+            }
             actor::app::spawn_app_thread(
                 pid,
                 info,

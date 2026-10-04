@@ -90,6 +90,7 @@ pub enum LayoutCommand {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReactorCommand {
+    OpenSettings,
     BindingMode(String),
     Debug,
     Serialize,

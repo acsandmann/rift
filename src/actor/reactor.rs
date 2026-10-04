@@ -112,6 +112,7 @@ use crate::sys::window_server::{
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
+pub(crate) use query::QueryRequest;
 pub use query::ReactorQueryHandle;
 
 pub(crate) use crate::model::reactor::{AppState, WindowState};
@@ -2026,6 +2027,11 @@ impl Reactor {
             }
             Event::Command(Command::Metrics(cmd)) => {
                 return command_workflow::handle_command_metrics(cmd);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::OpenSettings)) => {
+                if let Some(tx) = &self.menu_manager.menu_tx {
+                    tx.send(menu_bar::Event::OpenSettings);
+                }
             }
             Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
                 return command_workflow::handle_command_reactor_debug(

@@ -5,13 +5,13 @@ use objc2_core_foundation::{CFRetained, CGRect};
 use objc2_core_graphics::{CGColorSpace, CGError};
 use objc2_quartz_core::{CALayer, CATransaction};
 
-use crate::sys::cg_ok;
-use crate::sys::cgs_window::CgsWindowError;
-use crate::sys::skylight::{
+use super::cg_ok;
+use super::private::{
     G_CONNECTION, SLSAddSurface, SLSBindSurface, SLSOrderSurface, SLSRemoveSurface,
     SLSSetSurfaceBounds, SLSSetSurfaceColorSpace, SLSSetSurfaceOpacity, SLSSetSurfaceResolution,
 };
-use crate::sys::window_transaction::WindowTransaction;
+use super::transaction::WindowTransaction;
+use super::window::CgsWindowError;
 
 extern_class!(
     #[unsafe(super(NSObject))]

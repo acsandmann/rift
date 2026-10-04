@@ -175,6 +175,7 @@ pub enum QueryRequest {
         resp: SyncSender<Option<VirtualWorkspaceId>>,
     },
     Displays(SyncSender<Vec<RuntimeDisplayData>>),
+    DisplaysAsync(tokio::sync::oneshot::Sender<Vec<RuntimeDisplayData>>),
     WorkspaceLayouts {
         space_id: Option<SpaceId>,
         workspace_id: Option<usize>,
@@ -204,6 +205,9 @@ impl Reactor {
             }
             QueryRequest::ActiveWorkspace { space_id, resp } => {
                 let _ = resp.send(self.query_active_workspace(space_id));
+            }
+            QueryRequest::DisplaysAsync(resp) => {
+                let _ = resp.send(self.query_displays());
             }
             QueryRequest::Displays(resp) => {
                 let _ = resp.send(self.query_displays());

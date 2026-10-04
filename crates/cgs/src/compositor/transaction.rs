@@ -3,11 +3,11 @@ use std::ptr::NonNull;
 use objc2_core_foundation::{CFRetained, CFType, CGPoint, CGRect};
 use objc2_core_graphics::CGError;
 
-use crate::sys::cgs_window::{CFRegion, CgsWindow, CgsWindowError};
-use crate::sys::skylight::{
+use super::private::{
     G_CONNECTION, SLSTransactionCommit, SLSTransactionCreate, SLSTransactionMoveWindowWithGroup,
     SLSTransactionSetSurfaceBounds, SLSTransactionSetWindowShape,
 };
+use super::window::{CFRegion, CgsWindow, CgsWindowError};
 
 /// A batch of compositor geometry changes committed atomically to WindowServer.
 #[must_use = "a WindowTransaction has no effect until it is committed"]

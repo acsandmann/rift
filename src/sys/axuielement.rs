@@ -5,12 +5,13 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::ptr::{self, NonNull};
 
+use cgs::G_CONNECTION;
 use objc2_application_services::{AXError, AXUIElement as RawAXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFData, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, ConcreteType,
 };
 
-use super::skylight::{CGSGetWindowBounds, G_CONNECTION};
+use super::skylight::CGSGetWindowBounds;
 use crate::actor::app::WindowId;
 use crate::sys::app::pid_t;
 use crate::sys::skylight::_AXUIElementCreateWithRemoteToken;

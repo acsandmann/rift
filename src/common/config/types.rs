@@ -1,19 +1,17 @@
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::PathBuf;
 
-use anyhow::bail;
 use regex::RegexBuilder;
 pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
 use serde::{Deserialize, Serialize};
 
-use super::collections::{HashMap, HashSet};
 use crate::actor::wm_controller::WmCommand;
+use crate::common::collections::HashMap;
 use crate::sys::hotkey::{Hotkey, HotkeySpec};
 
 pub const MAX_WORKSPACES: usize = 128;
 
 // TODO: when to remove these?
-const DEPRECATED_MAP: &[(&str, &str)] = &[
+pub(super) const DEPRECATED_MAP: &[(&str, &str)] = &[
     ("stack_windows", "toggle_stack"),
     ("unstack_windows", "toggle_stack"),
     ("toggle_tile_orientation", "toggle_orientation"),
@@ -36,7 +34,7 @@ pub struct VirtualWorkspaceSettings {
     pub auto_assign_windows: bool,
     #[serde(default = "yes")]
     pub preserve_focus_per_workspace: bool,
-    #[serde(default = "no")]
+    #[serde(default)]
     pub workspace_auto_back_and_forth: bool,
     #[serde(default, alias = "prevent_wrapping_around")]
     pub prevent_wrapping: bool,
@@ -55,9 +53,7 @@ pub struct VirtualWorkspaceSettings {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
-    /// Target workspace by index or name
     pub workspace: WorkspaceSelector,
-    /// Layout mode to use for this workspace
     pub layout: LayoutMode,
 }
 
@@ -70,7 +66,6 @@ pub struct AppWorkspaceRule {
     pub app_id: Option<String>,
     /// Target workspace index (0 based) OR workspace name. If None, window goes to active workspace.
     pub workspace: Option<WorkspaceSelector>,
-    /// Whether windows should be floating in this workspace
     #[serde(default)]
     pub floating: bool,
     /// Initial normalized position for a floating window. `(0, 0)` is the top-left
@@ -86,7 +81,6 @@ pub struct AppWorkspaceRule {
     /// omitted, the matching rule leaves Rift's normal manageability decision intact.
     #[serde(default)]
     pub manage: Option<bool>,
-    /// Optional: Application name pattern (alternative to app_id)
     pub app_name: Option<String>,
     /// Optional: Regular expression to match window title (applies to window.title)
     ///
@@ -105,8 +99,7 @@ pub struct AppWorkspaceRule {
     /// reported by the AX APIs for a window (exact string match).
     pub ax_role: Option<String>,
 
-    /// Optional: Accessibility subrole to match (AXSubrole). If present, it must be a
-    /// non-empty string and will be compared against the accessibility subrole
+    /// Accessibility subrole must be non-empty and is compared against the subrole
     /// reported by the AX APIs for a window (exact string match).
     pub ax_subrole: Option<String>,
 }
@@ -327,54 +320,20 @@ impl VirtualWorkspaceSettings {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-struct ConfigFile {
-    settings: Settings,
-    keys: HashMap<String, WmCommand>,
+pub struct ConfigSource {
+    pub settings: Settings,
+    pub keys: std::collections::BTreeMap<String, WmCommand>,
     #[serde(default)]
-    binding_modes: HashMap<String, HashMap<String, WmCommand>>,
+    pub binding_modes:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, WmCommand>>,
     #[serde(default)]
-    virtual_workspaces: VirtualWorkspaceSettings,
+    pub virtual_workspaces: VirtualWorkspaceSettings,
     /// Modifier combinations that can be reused in key bindings
     /// e.g., "comb1" = "Alt + Shift" allows using "comb1 + C" in keys
     #[serde(default)]
-    modifier_combinations: HashMap<String, String>,
-}
-
-fn migrate_legacy_resize_bindings(document: &mut toml::Value) -> bool {
-    let Some(keys) = document.get_mut("keys").and_then(toml::Value::as_table_mut) else {
-        return false;
-    };
-
-    let mut migrated = false;
-    for (_, command) in keys.iter_mut() {
-        let legacy_name = match command.as_str() {
-            Some("resize_window_grow") => "resize_window_grow",
-            Some("resize_window_shrink") => "resize_window_shrink",
-            _ => continue,
-        };
-        *command = toml::Value::Table(toml::map::Map::from_iter([(
-            legacy_name.to_string(),
-            toml::Value::String("horizontal".to_string()),
-        )]));
-        migrated = true;
-    }
-    migrated
-}
-
-fn migrate_legacy_window_snapping(document: &mut toml::Value) -> bool {
-    let Some(settings) = document.get_mut("settings").and_then(toml::Value::as_table_mut) else {
-        return false;
-    };
-    settings.remove("window_snapping").is_some()
-}
-
-fn parse_config_file(buf: &str) -> Result<ConfigFile, toml::de::Error> {
-    let mut document = toml::from_str::<toml::Value>(buf)?;
-    migrate_legacy_resize_bindings(&mut document);
-    migrate_legacy_window_snapping(&mut document);
-    document.try_into()
+    pub modifier_combinations: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -388,52 +347,13 @@ pub struct Config {
 
 pub type BindingModeSpecs = Vec<(String, Vec<(String, WmCommand)>)>;
 
-impl<'de> Deserialize<'de> for Config {
-    fn deserialize<D>(deserializer: D) -> Result<Config, D::Error>
-    where D: serde::Deserializer<'de> {
-        #[derive(Deserialize)]
-        struct ConfigSerde {
-            settings: Settings,
-            keys: Vec<(Hotkey, WmCommand)>,
-            #[serde(default)]
-            key_specs: Vec<(String, WmCommand)>,
-            #[serde(default)]
-            binding_mode_specs: BindingModeSpecs,
-            virtual_workspaces: VirtualWorkspaceSettings,
-        }
-
-        let config = ConfigSerde::deserialize(deserializer)?;
-        let binding_mode_specs = if config.binding_mode_specs.is_empty() {
-            let default_specs = if config.key_specs.is_empty() {
-                config
-                    .keys
-                    .iter()
-                    .map(|(hotkey, command)| (hotkey.to_string(), command.clone()))
-                    .collect()
-            } else {
-                config.key_specs
-            };
-            vec![("default".to_string(), default_specs)]
-        } else {
-            config.binding_mode_specs
-        };
-
-        Ok(Config {
-            settings: config.settings,
-            keys: config.keys,
-            binding_mode_specs,
-            virtual_workspaces: config.virtual_workspaces,
-        })
-    }
-}
-
 unsafe impl Send for Config {}
 unsafe impl Sync for Config {}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
-    #[serde(default = "no")]
+    #[serde(default)]
     pub animate: bool,
     #[serde(default = "default_animation_duration")]
     pub animation_duration: f64,
@@ -505,7 +425,7 @@ pub struct UiSettings {
 #[serde(deny_unknown_fields)]
 pub struct GestureSettings {
     /// Enable horizontal swipes to switch virtual workspaces
-    #[serde(default = "no")]
+    #[serde(default)]
     pub enabled: bool,
     /// If true, consume horizontal swipe events owned by Rift so macOS and the
     /// foreground app do not also handle them.
@@ -550,7 +470,6 @@ impl Default for GestureSettings {
     }
 }
 
-/// Keyboard modifier that activates Rift's mouse actions.
 ///
 /// Serialized values are `cmd`, `alt`, `shift`, `ctrl`, and `fn`.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq)]
@@ -562,9 +481,7 @@ pub enum MouseModifier {
     /// Option (⌥). The alias `option` is also accepted.
     #[serde(alias = "option")]
     Alt,
-    /// Shift (⇧).
     Shift,
-    /// Control (⌃). The alias `control` is also accepted.
     #[serde(alias = "control")]
     Ctrl,
     /// Globe/Fn. This is the default because it rarely conflicts with apps.
@@ -594,29 +511,7 @@ pub enum MouseDropAction {
     Stack,
 }
 
-/// Mouse-driven window movement and tiled-window drop settings.
-///
-/// Native title-bar dragging continues to work normally. Holding [`Self::modifier`]
-/// reserves `action1` for the left button and `action2` for the right button, so
-/// a window can be moved from anywhere inside it. Floating windows
-/// remain floating. A tiled destination is divided into five local zones: its center
-/// performs [`Self::drop_action`], while its edges insert the source on that side.
-/// Dragging to an edge of the source's vacated tile performs the matching MoveNode command when no
-/// window lies that way; an edge that would drop the source back in place acts like the center.
-/// Preview simulation runs only when the destination or zone changes.
-///
-/// Example:
-///
-/// ```toml
-/// [settings.drag_drop]
-/// enabled = true
-/// modifier = "fn"
-/// action1 = "move"
-/// action2 = "none"
-/// drop_action = "swap"
-/// drop_zone_fraction = 0.25
-/// preview = true
-/// ```
+/// Modifier mouse actions and native tiled-window drop settings.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(deny_unknown_fields)]
 pub struct DragDropSettings {
@@ -692,7 +587,7 @@ pub enum WorkspaceDisplayStyle {
 pub struct MenuBarSettings {
     #[serde(default = "yes")]
     pub enabled: bool,
-    #[serde(default = "no")]
+    #[serde(default)]
     pub show_empty: bool,
     #[serde(default)]
     pub mode: MenuBarDisplayMode,
@@ -731,7 +626,7 @@ impl Default for MenuBarSettings {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StackLineSettings {
-    #[serde(default = "no")]
+    #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub hover: StackLineHoverMode,
@@ -741,8 +636,6 @@ pub struct StackLineSettings {
     pub horiz_placement: HorizontalPlacement,
     #[serde(default)]
     pub vert_placement: VerticalPlacement,
-    /// Distance to position the stack line away from the window edge (in points)
-    /// This creates spacing between the window and the stack line
     #[serde(default = "default_stack_line_spacing")]
     pub spacing: f64,
     /// Color of the selected stack segment, with normalized RGBA components.
@@ -759,17 +652,16 @@ pub struct StackLineSettings {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(deny_unknown_fields)]
 pub struct Color {
-    #[serde(default = "default_color_component")]
+    #[serde(default)]
     pub r: f64,
-    #[serde(default = "default_color_component")]
+    #[serde(default)]
     pub g: f64,
-    #[serde(default = "default_color_component")]
+    #[serde(default)]
     pub b: f64,
     #[serde(default = "default_color_alpha")]
     pub a: f64,
 }
 
-fn default_color_component() -> f64 { 0.0 }
 fn default_color_alpha() -> f64 { 1.0 }
 
 impl Color {
@@ -802,9 +694,9 @@ pub struct MissionControlSettings {
     pub show_empty_workspaces: bool,
     #[serde(default = "yes")]
     pub window_previews: bool,
-    #[serde(default = "no")]
+    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "no")]
+    #[serde(default)]
     pub fade_enabled: bool,
     #[serde(default = "default_mission_control_fade_duration_ms")]
     pub fade_duration_ms: f64,
@@ -822,7 +714,6 @@ fn default_master_stack_count() -> usize { 1 }
 
 fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
 fn default_scrolling_preset_column_widths() -> Vec<f64> { vec![1.0 / 3.0, 0.5, 2.0 / 3.0] }
-fn default_true() -> bool { true }
 
 fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 
@@ -920,7 +811,6 @@ pub struct LayoutSettings {
     /// Master/stack layout configuration
     #[serde(default)]
     pub master_stack: MasterStackSettings,
-    /// Gap configuration for window spacing
     #[serde(default)]
     pub gaps: GapSettings,
     /// Scrolling layout configuration (niri-style columns)
@@ -944,7 +834,7 @@ pub struct ScrollingLayoutSettings {
     #[serde(default = "default_scrolling_preset_column_widths")]
     pub preset_column_widths: Vec<f64>,
     /// Keep a window's existing column width when it enters scrolling layout.
-    #[serde(default = "default_true")]
+    #[serde(default = "yes")]
     pub preserve_window_sizes: bool,
     /// Fill the usable width when a workspace has only one scrolling column.
     /// The column's stored width is restored when another column is added.
@@ -1040,7 +930,6 @@ pub struct MasterStackSettings {
     /// Number of windows kept in the master area (>= 1)
     #[serde(default = "default_master_stack_count")]
     pub master_count: usize,
-    /// Which side the master area occupies
     #[serde(default)]
     pub master_side: MasterStackSide,
     /// Where new windows are inserted when the master area is already full
@@ -1066,7 +955,7 @@ pub enum MasterStackNewWindowPlacement {
 #[serde(rename_all = "snake_case")]
 pub struct ScrollingGestureSettings {
     /// Enable continuous horizontal viewport gestures
-    #[serde(default = "no")]
+    #[serde(default)]
     pub enabled: bool,
     /// Animate gesture release independently of structural layout animations.
     /// When omitted, inherit the scrolling layout/global animation setting.
@@ -1086,7 +975,7 @@ pub struct ScrollingGestureSettings {
     #[serde(default = "default_distance_pct")]
     pub distance_pct: f64,
     /// If true, scrolling past the end of the strip will trigger a workspace switch
-    #[serde(default = "no")]
+    #[serde(default)]
     pub propagate_to_workspace_swipe: bool,
     /// Edge travel in working-area widths required on release for one workspace switch.
     /// Measured directly as a fraction of the working-area width.
@@ -1140,59 +1029,44 @@ pub struct StackSettings {
     pub default_orientation: StackDefaultOrientation,
 }
 
-/// Gap configuration for window spacing
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GapSettings {
-    /// Outer gaps (space between windows and screen edges)
     #[serde(default)]
     pub outer: OuterGaps,
-    /// Inner gaps (space between windows)
     #[serde(default)]
     pub inner: InnerGaps,
-    /// Display-specific gap overrides keyed by display UUID
     #[serde(default)]
     pub per_display: HashMap<String, GapOverride>,
 }
 
-/// Outer gap configuration (space between windows and screen edges)
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OuterGaps {
-    /// Gap at the top of the screen
     #[serde(default)]
     pub top: f64,
-    /// Gap at the left of the screen
     #[serde(default)]
     pub left: f64,
-    /// Gap at the bottom of the screen
     #[serde(default)]
     pub bottom: f64,
-    /// Gap at the right of the screen
     #[serde(default)]
     pub right: f64,
 }
 
-/// Inner gap configuration (space between windows)
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct InnerGaps {
-    /// Horizontal gap between windows
     #[serde(default)]
     pub horizontal: f64,
-    /// Vertical gap between windows
     #[serde(default)]
     pub vertical: f64,
 }
 
-/// Overrides for gaps on a per-display basis
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GapOverride {
-    /// Override outer gaps completely for the display
     #[serde(default)]
     pub outer: Option<OuterGaps>,
-    /// Override inner gaps completely for the display
     #[serde(default)]
     pub inner: Option<InnerGaps>,
 }
@@ -1412,10 +1286,8 @@ impl GapSettings {
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
-        // Validate outer gaps
         issues.extend(self.outer.validate());
 
-        // Validate inner gaps
         issues.extend(self.inner.validate());
 
         for (uuid, overrides) in &self.per_display {
@@ -1455,56 +1327,27 @@ impl GapSettings {
 }
 
 impl OuterGaps {
-    /// Validates outer gap configuration values and returns a list of issues found.
     pub fn validate(&self) -> Vec<String> {
-        let mut issues = Vec::new();
-
-        if self.top < 0.0 {
-            issues.push(format!("outer.top gap must be non-negative, got {}", self.top));
-        }
-
-        if self.left < 0.0 {
-            issues.push(format!("outer.left gap must be non-negative, got {}", self.left));
-        }
-
-        if self.bottom < 0.0 {
-            issues.push(format!(
-                "outer.bottom gap must be non-negative, got {}",
-                self.bottom
-            ));
-        }
-
-        if self.right < 0.0 {
-            issues.push(format!(
-                "outer.right gap must be non-negative, got {}",
-                self.right
-            ));
-        }
-
-        issues
+        [
+            ("top", self.top),
+            ("left", self.left),
+            ("bottom", self.bottom),
+            ("right", self.right),
+        ]
+        .into_iter()
+        .filter(|(_, value)| *value < 0.0)
+        .map(|(name, value)| format!("outer.{name} gap must be non-negative, got {value}"))
+        .collect()
     }
 }
 
 impl InnerGaps {
-    /// Validates inner gap configuration values and returns a list of issues found.
     pub fn validate(&self) -> Vec<String> {
-        let mut issues = Vec::new();
-
-        if self.horizontal < 0.0 {
-            issues.push(format!(
-                "inner.horizontal gap must be non-negative, got {}",
-                self.horizontal
-            ));
-        }
-
-        if self.vertical < 0.0 {
-            issues.push(format!(
-                "inner.vertical gap must be non-negative, got {}",
-                self.vertical
-            ));
-        }
-
-        issues
+        [("horizontal", self.horizontal), ("vertical", self.vertical)]
+            .into_iter()
+            .filter(|(_, value)| *value < 0.0)
+            .map(|(name, value)| format!("inner.{name} gap must be non-negative, got {value}"))
+            .collect()
     }
 }
 
@@ -1523,9 +1366,6 @@ fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement 
 fn default_animation_duration() -> f64 { 0.3 }
 
 fn default_animation_fps() -> f64 { 100.0 }
-
-#[allow(dead_code)]
-pub fn no() -> bool { false }
 
 fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
 
@@ -1557,824 +1397,4 @@ pub enum HapticPattern {
     Alignment,
     #[default]
     LevelChange,
-}
-
-impl Config {
-    pub fn read(path: &Path) -> anyhow::Result<Config> {
-        let buf = std::fs::read_to_string(path)?;
-        Self::parse(&buf)
-    }
-
-    pub fn default() -> Config { Self::parse(include_str!("../../rift.default.toml")).unwrap() }
-
-    /// Save the current config to a file
-    pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        let config_file = ConfigFile {
-            settings: self.settings.clone(),
-            keys: self
-                .binding_mode_specs
-                .first()
-                .filter(|(name, _)| name == "default")
-                .map(|(_, specs)| specs.iter().cloned().collect())
-                .unwrap_or_default(),
-            binding_modes: self
-                .binding_mode_specs
-                .iter()
-                .skip(1)
-                .map(|(name, specs)| (name.clone(), specs.iter().cloned().collect()))
-                .collect(),
-            virtual_workspaces: self.virtual_workspaces.clone(),
-            modifier_combinations: HashMap::default(),
-        };
-
-        let toml_string = toml::to_string_pretty(&config_file)?;
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        std::fs::write(path, toml_string.as_bytes())?;
-
-        Ok(())
-    }
-
-    /// Validates the entire configuration and returns a list of issues found.
-    pub fn validate(&self) -> Vec<String> {
-        let mut issues = Vec::new();
-
-        // Validate settings
-        issues.extend(self.settings.validate());
-
-        // Validate virtual workspace settings
-        issues.extend(self.virtual_workspaces.validate());
-
-        let mode_names: HashSet<_> =
-            self.binding_mode_specs.iter().map(|(name, _)| name.as_str()).collect();
-        if mode_names.len() != self.binding_mode_specs.len() {
-            issues.push("Binding mode names must be unique".to_string());
-        }
-        if self.binding_mode_specs.first().map(|(name, _)| name.as_str()) != Some("default") {
-            issues.push("The default binding mode must be the first mode".to_string());
-        }
-        for (mode, bindings) in &self.binding_mode_specs {
-            for (_, command) in bindings {
-                if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) =
-                    command
-                    && !mode_names.contains(target.as_str())
-                {
-                    issues.push(format!(
-                        "Binding mode `{mode}` references nonexistent mode `{target}`"
-                    ));
-                }
-            }
-        }
-
-        issues
-    }
-
-    fn normalize_hotkey_string(key: &str) -> String {
-        let mut out = String::with_capacity(key.len());
-        let mut word = String::new();
-
-        for ch in key.chars() {
-            if ch.is_alphabetic() {
-                word.push(ch);
-            } else {
-                if !word.is_empty() {
-                    let token = if word.len() == 1 {
-                        word.to_ascii_uppercase()
-                    } else {
-                        match word.to_lowercase().as_str() {
-                            "up" => "ArrowUp".to_string(),
-                            "down" => "ArrowDown".to_string(),
-                            "left" => "ArrowLeft".to_string(),
-                            "right" => "ArrowRight".to_string(),
-                            _ => word.clone(),
-                        }
-                    };
-                    out.push_str(&token);
-                    word.clear();
-                }
-                out.push(ch);
-            }
-        }
-
-        if !word.is_empty() {
-            let token = if word.len() == 1 {
-                word.to_ascii_uppercase()
-            } else {
-                match word.to_lowercase().as_str() {
-                    "up" => "ArrowUp".to_string(),
-                    "down" => "ArrowDown".to_string(),
-                    "left" => "ArrowLeft".to_string(),
-                    "right" => "ArrowRight".to_string(),
-                    _ => word.clone(),
-                }
-            };
-            out.push_str(&token);
-        }
-
-        out
-    }
-
-    fn expand_modifier_combinations(key: &str, combinations: &HashMap<String, String>) -> String {
-        if let Some(plus_pos) = key.find(" + ") {
-            let potential_combo = &key[..plus_pos];
-            if let Some(combo_value) = combinations.get(potential_combo) {
-                let rest = &key[plus_pos + 3..];
-                return format!("{} + {}", combo_value, rest);
-            }
-        }
-        key.to_string()
-    }
-
-    /// no need to pull in a dep for just this
-    fn levenshtein(a: &str, b: &str) -> usize {
-        let a_chars: Vec<char> = a.chars().collect();
-        let b_chars: Vec<char> = b.chars().collect();
-        let mut d = vec![vec![0usize; b_chars.len() + 1]; a_chars.len() + 1];
-        for i in 0..=a_chars.len() {
-            d[i][0] = i;
-        }
-        for j in 0..=b_chars.len() {
-            d[0][j] = j;
-        }
-        for i in 1..=a_chars.len() {
-            for j in 1..=b_chars.len() {
-                let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                    0
-                } else {
-                    1
-                };
-                d[i][j] = std::cmp::min(
-                    std::cmp::min(d[i - 1][j] + 1, d[i][j - 1] + 1),
-                    d[i - 1][j - 1] + cost,
-                );
-            }
-        }
-        d[a_chars.len()][b_chars.len()]
-    }
-
-    // Extracts an "unknown variant `...`" token from serde error string when present.
-    // Additionally, if serde's error message contains an "expected" list (backtick-delimited),
-    // embed those expected tokens alongside the unknown token using the separator "||".
-    // The resulting returned string may therefore be:
-    //   - "unknown_token" (no expected candidates found)
-    //   - "unknown_token||cand1,cand2,..." (candidates appended)
-    fn extract_unknown_variant(err: &str) -> Option<String> {
-        let needle = "unknown variant `";
-        if let Some(start) = err.find(needle) {
-            let rest = &err[start + needle.len()..];
-            if let Some(end) = rest.find('`') {
-                let unknown = rest[..end].to_string();
-
-                // Collect all backtick-enclosed tokens in the error message and
-                // treat them as candidate variants (excluding the unknown itself).
-                let mut variants: Vec<String> = Vec::new();
-                let mut i = 0usize;
-                while let Some(open) = err[i..].find('`') {
-                    let open_abs = i + open + 1;
-                    if let Some(close_off) = err[open_abs..].find('`') {
-                        let close_abs = open_abs + close_off;
-                        let token = &err[open_abs..close_abs];
-                        if token != unknown {
-                            variants.push(token.to_string());
-                        }
-                        i = close_abs + 1;
-                    } else {
-                        break;
-                    }
-                }
-
-                if !variants.is_empty() {
-                    // dedupe while preserving order
-                    let mut seen = std::collections::HashSet::new();
-                    let mut deduped = Vec::new();
-                    for v in variants {
-                        if seen.insert(v.clone()) {
-                            deduped.push(v);
-                        }
-                    }
-                    return Some(format!("{}||{}", unknown, deduped.join(",")));
-                }
-
-                return Some(unknown);
-            }
-        }
-
-        if let Some(unknown_pos) = err.find("unknown") {
-            if let Some(backtick_pos) = err[unknown_pos..].find('`') {
-                let rest = &err[unknown_pos + backtick_pos + 1..];
-                if let Some(end) = rest.find('`') {
-                    return Some(rest[..end].to_string());
-                }
-            }
-        }
-        None
-    }
-
-    // Provide suggestion by comparing the unknown token to a list of known commands.
-    // If the `unknown` string was produced by `extract_unknown_variant` and contains
-    // an embedded serde candidate list (format: "token||cand1,cand2"), prefer those
-    // candidates when computing the best suggestion. Otherwise fall back to the
-    // conservative builtin list.
-    //
-    // Returns the best candidate if its distance is within a reasonable threshold.
-    fn suggest_similar_command(unknown: &str) -> Option<(String, Option<String>)> {
-        // Detect if `unknown` was augmented with serde-provided expected variants.
-        let (unknown_token, serde_candidates): (String, Option<Vec<String>>) =
-            if let Some(idx) = unknown.find("||") {
-                let (u, rest) = unknown.split_at(idx);
-                let rest = &rest[2..];
-                let candidates: Vec<String> = rest
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                (u.to_lowercase(), Some(candidates))
-            } else {
-                (unknown.to_lowercase(), None)
-            };
-
-        // Choose candidate set: prefer serde-provided ones when available.
-        let mut best: Option<(String, usize)> = None;
-
-        if let Some(cands) = serde_candidates {
-            for cand in cands.iter() {
-                let cand_norm = cand.to_lowercase();
-                let dist = Self::levenshtein(&unknown_token, &cand_norm);
-                if best.is_none() || dist < best.as_ref().unwrap().1 {
-                    best = Some((cand.clone(), dist));
-                }
-            }
-        } else {
-            // Use dynamically generated builtin candidates.
-            let builtin_candidates = crate::actor::wm_controller::WmCmd::snake_case_variants();
-            for cand in builtin_candidates.iter() {
-                let dist = Self::levenshtein(&unknown_token, &cand.to_lowercase());
-                if best.is_none() || dist < best.as_ref().unwrap().1 {
-                    best = Some((cand.to_string(), dist));
-                }
-            }
-        }
-
-        if let Some((best_cand, dist)) = best {
-            // Heuristic threshold: allow suggestions if distance is <= half the length (or <=3).
-            let threshold = std::cmp::max(3usize, best_cand.len() / 2);
-            if dist <= threshold {
-                // If the best candidate is in deprecated map, return the non-deprecated suggestion.
-                let mut replacement = None;
-                for &(dep, repl) in DEPRECATED_MAP.iter() {
-                    if dep == best_cand {
-                        replacement = Some(repl.to_string());
-                        break;
-                    }
-                }
-                return Some((best_cand.to_string(), replacement));
-            }
-        }
-
-        // Also check if the unknown token itself matched a deprecated name exactly
-        for &(dep, repl) in DEPRECATED_MAP.iter() {
-            if dep == unknown_token {
-                return Some((repl.to_string(), None)); // recommend replacement
-            }
-        }
-
-        None
-    }
-
-    pub(crate) fn parse(buf: &str) -> anyhow::Result<Config> {
-        // Attempt to deserialize. If it fails, and the error indicates an unknown enum
-        // variant, attempt to provide a helpful suggestion.
-        match parse_config_file(buf) {
-            Ok(c) => {
-                if c.binding_modes.contains_key("default") {
-                    bail!("`default` is reserved and cannot be defined in [binding_modes]");
-                }
-
-                let mut binding_sets: Vec<_> = c.binding_modes.into_iter().collect();
-                binding_sets.sort_by(|a, b| a.0.cmp(&b.0));
-                binding_sets.insert(0, ("default".to_string(), c.keys));
-
-                let mut binding_mode_specs = Vec::with_capacity(binding_sets.len());
-                let mut keys = Vec::new();
-                let mode_names: HashSet<String> =
-                    binding_sets.iter().map(|(name, _)| name.clone()).collect();
-                for (mode, bindings) in binding_sets {
-                    let mut specs = Vec::with_capacity(bindings.len());
-                    for (key, cmd) in bindings {
-                        let expanded_key =
-                            Self::expand_modifier_combinations(&key, &c.modifier_combinations);
-                        let normalized_key = Self::normalize_hotkey_string(&expanded_key);
-                        let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
-                            bail!("Could not parse hotkey `{key}` in binding mode `{mode}`");
-                        };
-                        if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(
-                            target,
-                        )) = &cmd
-                            && target != "default"
-                            && !mode_names.contains(target)
-                        {
-                            bail!("Binding mode `{mode}` references nonexistent mode `{target}`");
-                        }
-                        if mode == "default" {
-                            keys.push((hotkey, cmd.clone()));
-                        }
-                        specs.push((normalized_key, cmd));
-                    }
-                    binding_mode_specs.push((mode, specs));
-                }
-                Ok(Config {
-                    settings: c.settings,
-                    keys,
-                    binding_mode_specs,
-                    virtual_workspaces: c.virtual_workspaces,
-                })
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if let Some(unknown_token) = Self::extract_unknown_variant(&msg) {
-                    if let Some((suggestion, deprecated_replacement)) =
-                        Self::suggest_similar_command(&unknown_token)
-                    {
-                        if let Some(repl) = deprecated_replacement {
-                            bail!(
-                                "{msg}\nDid you mean `{}`? Note: `{}` is deprecated; use `{}` instead.",
-                                suggestion,
-                                suggestion,
-                                repl
-                            );
-                        } else {
-                            bail!("{msg}\nDid you mean `{}`?", suggestion);
-                        }
-                    } else {
-                        bail!("{msg}");
-                    }
-                } else {
-                    bail!("{msg}");
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::actor::reactor;
-    use crate::layout_engine::{LayoutCommand, ResizeOrientation};
-
-    #[test]
-    fn scrolling_display_widths_merge_and_validate() {
-        let settings: ScrollingLayoutSettings = toml::from_str(
-            r#"
-            column_width_ratio = 0.7
-            min_column_width_ratio = 0.3
-            max_column_width_ratio = 0.9
-            [per_display."display-a"]
-            column_width_ratio = 0.5
-            "#,
-        )
-        .unwrap();
-        assert_eq!(settings.preset_column_widths, vec![1.0 / 3.0, 0.5, 2.0 / 3.0]);
-        assert_eq!(settings.widths_for_display(Some("display-a")), (0.5, 0.3, 0.9));
-        assert_eq!(settings.widths_for_display(Some("other")), (0.7, 0.3, 0.9));
-        assert_eq!(settings.widths_for_display(None), (0.7, 0.3, 0.9));
-        assert!(settings.validate().is_empty());
-        assert!(settings.effective_for_display(Some("display-a")).per_display.is_empty());
-
-        let mut invalid = settings;
-        invalid.per_display.get_mut("display-a").unwrap().max_column_width_ratio = Some(0.4);
-        assert!(
-            invalid
-                .validate()
-                .iter()
-                .any(|issue| issue.contains("per_display[display-a].column_width_ratio"))
-        );
-    }
-
-    #[test]
-    fn layout_insertion_point_supports_global_default_and_per_mode_override() {
-        let settings: LayoutSettings = toml::from_str(
-            r#"
-                window_insertion_point = "end_of_tree"
-
-                [traditional]
-                window_insertion_point = "next_to_selection"
-                equalize_nodes = true
-
-                [scrolling]
-                animate = false
-            "#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            settings.window_insertion_point_for(LayoutMode::Traditional),
-            WindowInsertionPoint::NextToSelection
-        );
-        assert_eq!(
-            settings.window_insertion_point_for(LayoutMode::Bsp),
-            WindowInsertionPoint::EndOfTree
-        );
-        assert!(settings.traditional.equalize_nodes);
-        assert_eq!(settings.scrolling.animate, Some(false));
-    }
-
-    #[test]
-    fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_alias() {
-        let defaults: VirtualWorkspaceSettings = toml::from_str("").unwrap();
-        assert!(!defaults.prevent_wrapping);
-
-        let settings: VirtualWorkspaceSettings =
-            toml::from_str("prevent_wrapping_around = true").unwrap();
-        assert!(settings.prevent_wrapping);
-    }
-
-    #[test]
-    fn app_rules_parse_placement_size_and_focus() {
-        let settings: VirtualWorkspaceSettings = toml::from_str(
-            r#"
-                app_rules = [{
-                    app_id = "com.example.Tool",
-                    floating = true,
-                    position = { x = 0.4, y = 0.7 },
-                    size = { w = 640, h = 480 },
-                    focus = true
-                }]
-            "#,
-        )
-        .unwrap();
-
-        let rule = &settings.app_rules[0];
-        assert_eq!(rule.position, Some(AppRulePosition { x: 0.4, y: 0.7 }));
-        assert_eq!(rule.size, Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }));
-        assert!(rule.focus);
-        assert!(settings.validate().is_empty());
-
-        let height_only: VirtualWorkspaceSettings = toml::from_str(
-            r#"
-                app_rules = [{
-                    app_id = "com.example.Panel",
-                    size = { h = 320 }
-                }]
-            "#,
-        )
-        .unwrap();
-        assert_eq!(
-            height_only.app_rules[0].size,
-            Some(AppRuleSize { w: None, h: Some(320.0) })
-        );
-        assert!(height_only.validate().is_empty());
-    }
-
-    #[test]
-    fn app_rule_geometry_validation_rejects_invalid_values() {
-        let mut settings = VirtualWorkspaceSettings::default();
-        settings.app_rules.push(AppWorkspaceRule {
-            app_id: Some("com.example.Tool".into()),
-            workspace: None,
-            floating: false,
-            position: Some(AppRulePosition { x: -0.1, y: 1.1 }),
-            size: Some(AppRuleSize {
-                w: Some(0.0),
-                h: Some(f64::NAN),
-            }),
-            focus: false,
-            manage: Some(true),
-            app_name: None,
-            title_regex: None,
-            title_substring: None,
-            ax_role: None,
-            ax_subrole: None,
-        });
-
-        let issues = settings.validate();
-        assert!(issues.iter().any(|issue| issue.contains("between 0 and 1")));
-        assert!(issues.iter().any(|issue| issue.contains("only applies")));
-        assert!(issues.iter().any(|issue| issue.contains("finite positive")));
-    }
-
-    #[test]
-    fn app_rule_validation_reports_invalid_regex_and_ignored_effects() {
-        let mut settings = VirtualWorkspaceSettings::default();
-        settings.app_rules.push(AppWorkspaceRule {
-            app_id: Some("com.example.Tool".into()),
-            workspace: Some(WorkspaceSelector::Index(1)),
-            floating: true,
-            focus: true,
-            manage: Some(false),
-            title_regex: Some("[".into()),
-            ..Default::default()
-        });
-
-        let issues = settings.validate();
-        assert!(issues.iter().any(|issue| issue.contains("invalid title_regex")));
-        assert!(issues.iter().any(|issue| issue.contains("effects are ignored")));
-    }
-
-    #[test]
-    fn horizontal_mouse_warp_config_parsing() {
-        let missing: Settings = toml::from_str("").unwrap();
-        assert_eq!(missing.horizontal_mouse_warp, None);
-        for (value, expected) in [
-            ("top-to-bottom", HorizontalMouseWarp::TopToBottom),
-            ("bottom-to-top", HorizontalMouseWarp::BottomToTop),
-        ] {
-            let settings: Settings =
-                toml::from_str(&format!("horizontal_mouse_warp = \"{value}\" ")).unwrap();
-            assert_eq!(settings.horizontal_mouse_warp, Some(expected));
-        }
-        assert!(toml::from_str::<Settings>("horizontal_mouse_warp = \"sideways\"").is_err());
-    }
-
-    #[test]
-    fn resize_command_config_supports_legacy_and_oriented_forms() {
-        #[derive(Deserialize)]
-        struct TestConfig {
-            keys: HashMap<String, WmCommand>,
-        }
-
-        let mut document: toml::Value = toml::from_str(
-            r#"
-            [keys]
-            legacy = "resize_window_grow"
-            vertical = { resize_window_shrink = "vertical" }
-            smart = { resize_window_grow = "smart" }
-            "#,
-        )
-        .unwrap();
-        assert!(migrate_legacy_resize_bindings(&mut document));
-        let config: TestConfig = document.try_into().unwrap();
-
-        assert_eq!(
-            config.keys["legacy"],
-            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
-                ResizeOrientation::Horizontal
-            )))
-        );
-        assert_eq!(
-            config.keys["vertical"],
-            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowShrink(
-                ResizeOrientation::Vertical
-            )))
-        );
-        assert_eq!(
-            config.keys["smart"],
-            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
-                ResizeOrientation::Smart
-            )))
-        );
-    }
-
-    #[test]
-    fn menu_bar_layout_folder_defaults_and_expands_home() {
-        let settings: MenuBarSettings = toml::from_str("").unwrap();
-
-        assert_eq!(settings.layout_folder, PathBuf::from("~/.config/rift/layouts"));
-        assert_eq!(
-            settings.resolved_layout_folder(),
-            dirs::home_dir().unwrap().join(".config/rift/layouts")
-        );
-    }
-
-    #[test]
-    fn menu_bar_layout_folder_preserves_absolute_paths() {
-        let settings: MenuBarSettings =
-            toml::from_str("layout_folder = \"/tmp/rift-layouts\"").unwrap();
-
-        assert_eq!(
-            settings.resolved_layout_folder(),
-            PathBuf::from("/tmp/rift-layouts")
-        );
-    }
-
-    #[test]
-    fn test_normalize_hotkey_string() {
-        assert_eq!(
-            Config::normalize_hotkey_string("Alt + Shift + Down"),
-            "Alt + Shift + ArrowDown"
-        );
-        assert_eq!(Config::normalize_hotkey_string("Ctrl + Up"), "Ctrl + ArrowUp");
-        assert_eq!(
-            Config::normalize_hotkey_string("Shift + Left"),
-            "Shift + ArrowLeft"
-        );
-        assert_eq!(
-            Config::normalize_hotkey_string("Meta + Right"),
-            "Meta + ArrowRight"
-        );
-    }
-
-    #[test]
-    fn test_modifier_combinations_in_config() {
-        let toml = r#"
-            [settings]
-            animate = false
-
-            [modifier_combinations]
-            comb1 = "Alt + Shift"
-            leader = "Ctrl + Alt"
-
-            [keys]
-            "comb1 + C" = "toggle_space_activated"
-            "leader + Tab" = "next_workspace"
-            "Alt + H" = { move_focus = "left" }
-        "#;
-
-        let cfg = Config::parse(toml).unwrap();
-        // We expect keys to be parsed into hotkeys
-        assert!(!cfg.keys.is_empty());
-    }
-
-    #[test]
-    fn mouse_settings_defaults_and_variants_parse() {
-        let defaults: DragDropSettings = toml::from_str("").unwrap();
-        assert_eq!(defaults, DragDropSettings::default());
-
-        let settings: DragDropSettings = toml::from_str(
-            r#"
-                enabled = false
-                modifier = "ctrl"
-                action1 = "none"
-                action2 = "move"
-                drop_action = "stack"
-                drop_zone_fraction = 0.45
-                preview = false
-            "#,
-        )
-        .unwrap();
-        assert_eq!(settings.modifier, MouseModifier::Ctrl);
-        assert_eq!(settings.action1, MouseAction::None);
-        assert_eq!(settings.action2, MouseAction::Move);
-        assert_eq!(settings.drop_action, MouseDropAction::Stack);
-
-        for (alias, expected) in [
-            ("command", MouseModifier::Cmd),
-            ("option", MouseModifier::Alt),
-            ("control", MouseModifier::Ctrl),
-        ] {
-            let parsed: DragDropSettings =
-                toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
-            assert_eq!(parsed.modifier, expected);
-        }
-    }
-
-    #[test]
-    fn legacy_window_snapping_is_removed_before_deserialization() {
-        let cfg = Config::parse(
-            r#"
-                [settings.window_snapping]
-                drag_swap_fraction = 0.3
-                [keys]
-            "#,
-        )
-        .unwrap();
-        assert_eq!(cfg.settings.drag_drop, DragDropSettings::default());
-    }
-
-    #[test]
-    fn drag_drop_settings_take_precedence_over_legacy_window_snapping() {
-        let cfg = Config::parse(
-            r#"
-                [settings.window_snapping]
-                drag_swap_fraction = 0.3
-                [settings.drag_drop]
-                modifier = "alt"
-                drop_action = "stack"
-                [keys]
-            "#,
-        )
-        .unwrap();
-        assert_eq!(cfg.settings.drag_drop.modifier, MouseModifier::Alt);
-        assert_eq!(cfg.settings.drag_drop.drop_action, MouseDropAction::Stack);
-    }
-
-    #[test]
-    fn invalid_drop_zone_fraction_has_clear_validation_error() {
-        let mut cfg = Config::default();
-        cfg.settings.drag_drop.drop_zone_fraction = 0.09;
-        assert!(
-            cfg.validate()
-                .iter()
-                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
-        );
-        cfg.settings.drag_drop.drop_zone_fraction = 0.46;
-        assert!(
-            cfg.validate()
-                .iter()
-                .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
-        );
-    }
-
-    #[test]
-    fn serde_round_trip_preserves_binding_mode_specs() {
-        let cfg = Config::default();
-        assert!(!cfg.binding_mode_specs[0].1.is_empty());
-
-        let json = serde_json::to_string(&cfg).unwrap();
-        let round_tripped: Config = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(round_tripped.binding_mode_specs, cfg.binding_mode_specs);
-    }
-
-    #[test]
-    fn serde_without_binding_mode_specs_reconstructs_from_keys() {
-        let cfg = Config::default();
-        let mut json = serde_json::to_value(&cfg).unwrap();
-        json.as_object_mut().unwrap().remove("binding_mode_specs");
-
-        let round_tripped: Config = serde_json::from_value(json).unwrap();
-
-        assert_eq!(
-            round_tripped.binding_mode_specs[0].1.len(),
-            round_tripped.keys.len()
-        );
-        assert!(!round_tripped.binding_mode_specs[0].1.is_empty());
-    }
-
-    #[test]
-    fn keys_only_config_still_has_only_the_default_binding_set() {
-        let config = Config::parse(
-            r#"
-                [settings]
-                [keys]
-                "A" = "reload_config"
-            "#,
-        )
-        .unwrap();
-        assert_eq!(config.binding_mode_specs.len(), 1);
-        assert_eq!(config.binding_mode_specs[0].0, "default");
-        assert!(config.binding_mode_specs[0].1.iter().any(|(spec, _)| spec == "A"));
-    }
-
-    #[test]
-    fn custom_binding_modes_parse_and_expand_modifier_combinations() {
-        let config = Config::parse(
-            r#"
-                [settings]
-                [modifier_combinations]
-                nav = "Alt + Shift"
-                [keys]
-                "Alt + R" = { binding_mode = "resize" }
-                [binding_modes.resize]
-                "nav + N" = { binding_mode = "default" }
-            "#,
-        )
-        .unwrap();
-        assert_eq!(config.binding_mode_specs[0].0, "default");
-        assert_eq!(config.binding_mode_specs[1].0, "resize");
-        assert!(config.binding_mode_specs[1]
-            .1
-            .iter()
-            .any(|(spec, command)| spec == "Alt + Shift + N"
-                && matches!(command, WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) if target == "default")));
-    }
-
-    #[test]
-    fn binding_mode_config_rejects_bad_targets_reserved_default_and_bad_hotkeys() {
-        let missing = r#"
-            [settings]
-            [keys]
-            "Alt + R" = { binding_mode = "does-not-exist" }
-            [binding_modes.resize]
-            "Escape" = { binding_mode = "default" }
-        "#;
-        assert!(Config::parse(&missing).unwrap_err().to_string().contains("does-not-exist"));
-
-        let reserved = r#"
-            [settings]
-            [keys]
-            [binding_modes.default]
-        "#;
-        assert!(Config::parse(&reserved).unwrap_err().to_string().contains("reserved"));
-
-        let malformed = r#"
-            [settings]
-            [keys]
-            "NotARealHotkey" = { binding_mode = "default" }
-        "#;
-        assert!(Config::parse(&malformed).unwrap_err().to_string().contains("hotkey"));
-    }
-
-    #[test]
-    fn config_validation_rejects_duplicate_binding_mode_names() {
-        let mut json = serde_json::to_value(Config::default()).unwrap();
-        json["binding_mode_specs"] = serde_json::json!([["default", []], ["default", []]]);
-        let config: Config = serde_json::from_value(json).unwrap();
-        assert!(config.validate().iter().any(|issue| issue.contains("unique")));
-    }
-
-    #[test]
-    fn test_levenshtein_suggests() {
-        let err =
-            "unknown variant `toggle_stak`, expected one of `toggle_stack`, `toggle_orientation`";
-        let token = Config::extract_unknown_variant(err).unwrap();
-        assert_eq!(token, "toggle_stak||toggle_stack,toggle_orientation");
-        let suggestion = Config::suggest_similar_command(&token);
-        assert!(suggestion.is_some());
-        let (s, _maybe_dep) = suggestion.unwrap();
-        assert_eq!(s, "toggle_stack");
-    }
 }

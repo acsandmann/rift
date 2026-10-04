@@ -40,6 +40,7 @@ impl Update {
 }
 
 pub enum Event {
+    OpenSettings,
     Update(Update),
     ConfigUpdated(Config),
 }
@@ -57,7 +58,11 @@ pub struct Menu {
     action_tx: UnboundedSender<MenuAction>,
     action_rx: tokio::sync::mpsc::UnboundedReceiver<MenuAction>,
     icon: Option<MenuIcon>,
+    settings: Option<crate::ui::settings::Settings>,
+    settings_requests: tokio::sync::mpsc::UnboundedReceiver<crate::ui::settings::Request>,
+    settings_request_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::settings::Request>,
     mtm: MainThreadMarker,
+    config_path: std::path::PathBuf,
     last_signature: Option<u64>,
     last_update: Option<Update>,
 }
@@ -72,7 +77,9 @@ impl Menu {
         reactor_tx: reactor::Sender,
         config_tx: config::Sender,
         mtm: MainThreadMarker,
+        config_path: std::path::PathBuf,
     ) -> Self {
+        let (settings_request_tx, settings_requests) = tokio::sync::mpsc::unbounded_channel();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let layout_folder = config.settings.ui.menu_bar.resolved_layout_folder();
         let mut icon = config
@@ -86,6 +93,9 @@ impl Menu {
         }
         Self {
             icon,
+            settings: None,
+            settings_requests,
+            settings_request_tx,
             config,
             rx,
             reactor_tx,
@@ -93,6 +103,7 @@ impl Menu {
             action_tx,
             action_rx,
             mtm,
+            config_path,
             last_signature: None,
             last_update: None,
         }
@@ -129,7 +140,13 @@ impl Menu {
                                     pending = Some(event);
                                     let _ = debounce_tx.send(DebounceCommand::Arm);
                                 }
-                                Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
+                                Event::ConfigUpdated(cfg) => {
+                                    self.handle_config_updated(cfg);
+                                    if self.settings.as_ref().is_some_and(|s| s.visible()) {
+                                        self.sync_settings().await;
+                                    }
+                                }
+                                Event::OpenSettings => self.open_settings().await,
                             }
                         }
                         None => {
@@ -142,17 +159,83 @@ impl Menu {
                     }
                 }
 
+                Some(request) = self.settings_requests.recv() => {
+                    let (response, result) = tokio::sync::oneshot::channel();
+                    self.config_tx.send(match request.action {
+                        crate::ui::settings::Action::Edit(edit) => config::Event::EditSource { edit, response },
+                        crate::ui::settings::Action::Reload => config::Event::ReloadSource(response),
+                    });
+                    let result = result.await.unwrap_or_else(|_| Err("Configuration service unavailable".into()));
+                    let source = result.as_ref().ok().cloned();
+                    (request.finish)(result);
+                    if let Some(source) = source {
+                        if let Some(settings) = &self.settings { settings.synchronize(source); }
+                    } else {
+                        self.sync_settings().await;
+                    }
+                }
                 maybe_action = self.action_rx.recv() => {
                     if let Some(action) = maybe_action {
-                        self.handle_action(action);
+                        if matches!(action, MenuAction::OpenSettings) { self.open_settings().await; }
+                        else { self.handle_action(action); }
                     }
                 }
             }
         }
     }
 
+    async fn source_snapshot(&self) -> Result<crate::common::config::ConfigSource, String> {
+        let (response, result) = tokio::sync::oneshot::channel();
+        self.config_tx.send(config::Event::QuerySource(response));
+        result.await.map_err(|_| "Configuration service unavailable".to_string())?
+    }
+
+    async fn open_settings(&mut self) {
+        match self.source_snapshot().await {
+            Ok(source) => {
+                let (response, result) = tokio::sync::oneshot::channel();
+                self.reactor_tx.send(reactor::Event::Query(reactor::QueryRequest::DisplaysAsync(
+                    response,
+                )));
+                let displays =
+                    result.await.unwrap_or_default().into_iter().map(|d| d.info).collect();
+                if let Some(settings) = &self.settings {
+                    settings.synchronize(source);
+                    settings.refresh_displays(displays);
+                } else {
+                    self.settings = Some(crate::ui::settings::Settings::new(
+                        cgs::Ui::new(self.mtm),
+                        source,
+                        self.config_path.clone(),
+                        displays,
+                        self.settings_request_tx.clone(),
+                    ));
+                }
+                let settings = self.settings.as_ref().unwrap();
+                settings.show();
+                self.sync_settings().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "Could not open Settings");
+                cgs::Alert::new(&cgs::Ui::new(self.mtm), "Could not open Settings", &error)
+                    .button("OK")
+                    .ns_alert()
+                    .runModal();
+            }
+        }
+    }
+
+    async fn sync_settings(&self) {
+        if let Ok(source) = self.source_snapshot().await {
+            if let Some(settings) = &self.settings {
+                settings.synchronize(source);
+            }
+        }
+    }
+
     fn handle_event(&mut self, event: Event) {
         match event {
+            Event::OpenSettings => {}
             Event::Update(update) => self.handle_update(update),
             Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
         }
@@ -265,6 +348,7 @@ impl Menu {
             MenuAction::OpenSponsor => {
                 Self::open_path_or_url("https://github.com/sponsors/acsandmann");
             }
+            MenuAction::OpenSettings => {}
             MenuAction::OpenConfig => {
                 Self::open_path_or_url(common::config::config_file());
             }

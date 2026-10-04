@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use anyhow::anyhow;
 use objc2_core_foundation::CFData;
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags};
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -1201,9 +1201,7 @@ const VIRTUAL_KEYCODE_NUMS: &[u16] = &[
 ];
 
 #[cfg(target_os = "macos")]
-fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
-    static KEYMAP_GENERATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    let _guard = KEYMAP_GENERATION_LOCK.lock();
+fn read_keyboard_layout(_mtm: objc2::MainThreadMarker) -> StdHashMap<String, KeyCode> {
     let mut keymap = StdHashMap::new();
 
     let keyboard = unsafe { TISCopyCurrentASCIICapableKeyboardLayoutInputSource() };
@@ -1275,8 +1273,32 @@ fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
     keymap
 }
 
+// Carbon input-source APIs require the main queue once AppKit is running.
+// Config and input workers only consume this owned, platform-independent snapshot.
+static VIRTUAL_KEYMAP: LazyLock<RwLock<StdHashMap<String, KeyCode>>> = LazyLock::new(|| {
+    let fallback = "abcdefghijklmnopqrstuvwxyz0123456789`-=[]\\;',./"
+        .chars()
+        .filter_map(|ch| {
+            let name = ch.to_string();
+            fallback_keycode_from_char(&name).map(|key| (name, key))
+        })
+        .collect();
+    RwLock::new(fallback)
+});
+
+pub fn refresh_keyboard_layout(mtm: objc2::MainThreadMarker) {
+    let keymap = read_keyboard_layout(mtm);
+    if !keymap.is_empty() {
+        *VIRTUAL_KEYMAP.write() = keymap;
+    }
+}
+
+#[cfg(test)]
+fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> { VIRTUAL_KEYMAP.read().clone() }
+
 pub fn keycode_from_char(ch: &str) -> Option<KeyCode> {
-    generate_virtual_keymap()
+    VIRTUAL_KEYMAP
+        .read()
         .get(&ch.to_lowercase())
         .copied()
         .or_else(|| fallback_keycode_from_char(ch))
@@ -1328,6 +1350,17 @@ fn fallback_keycode_from_char(ch: &str) -> Option<KeyCode> {
         '7' => Digit7,
         '8' => Digit8,
         '9' => Digit9,
+        '`' => Backquote,
+        '-' => Minus,
+        '=' => Equal,
+        '[' => BracketLeft,
+        ']' => BracketRight,
+        '\\' => Backslash,
+        ';' => Semicolon,
+        '\'' => Quote,
+        ',' => Comma,
+        '.' => Period,
+        '/' => Slash,
         _ => return None,
     };
     Some(code)
