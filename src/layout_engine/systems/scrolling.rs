@@ -415,12 +415,17 @@ impl Geometry {
         };
         let mut x = 0.0;
         for column in &state.columns {
-            let base = column.resolved_width(
-                tiling.size.width,
-                gaps.inner.horizontal,
-                settings,
-                &constraints,
-            );
+            // Expansion is derived geometry; keep the requested width for later.
+            let base = if settings.expand_single_column && state.columns.len() == 1 {
+                tiling.size.width
+            } else {
+                column.resolved_width(
+                    tiling.size.width,
+                    gaps.inner.horizontal,
+                    settings,
+                    &constraints,
+                )
+            };
             let mut min: f64 = 1.0;
             let mut fixed: f64 = 0.0;
             let mut max = f64::INFINITY;
@@ -2319,6 +2324,64 @@ pub(crate) mod tests {
             f.system.update_viewport_gesture(f.layout, 10.0, Duration::ZERO),
             None
         );
+    }
+
+    #[test]
+    fn single_column_expansion_restores_width_across_topology_and_settings_changes() {
+        let mut f = Fixture::new(1);
+        f.gaps.outer.left = 20.0;
+        f.gaps.outer.right = 30.0;
+        let mut settings = f.system.settings.clone();
+        settings.expand_single_column = true;
+        f.system.update_settings(&settings);
+        assert_eq!(f.frame(1).size.width, 950.0);
+        assert_eq!(f.frame(1).origin.x, 20.0);
+
+        // A preset chosen while expanded survives the temporary geometry override.
+        assert!(f.system.switch_preset_column_width(f.layout, false));
+        assert_eq!(f.frame(1).size.width, 950.0);
+        f.system.add_window_after_selection(f.layout, wid(2));
+        assert_eq!(f.frame(1).size.width, 317.0);
+        assert_eq!(f.frame(2).size.width, 475.0);
+
+        // Multiple windows in one column still expand, retaining vertical layout.
+        f.drop(2, 1, WindowDropAction::Stack);
+        assert_eq!(f.frame(1).size, CGSize::new(950.0, 400.0));
+        assert_eq!(f.frame(2).size, CGSize::new(950.0, 400.0));
+        f.system.remove_window(wid(2));
+        assert_eq!(f.frame(1).size, CGSize::new(950.0, 800.0));
+
+        settings.expand_single_column = false;
+        f.system.update_settings(&settings);
+        assert_eq!(f.frame(1).size.width, 317.0);
+    }
+
+    #[test]
+    fn single_column_expansion_respects_window_width_constraints() {
+        for (constraints, width) in [
+            (
+                WindowLayoutConstraints {
+                    is_resizable: true,
+                    max_width: 600.0,
+                    ..Default::default()
+                },
+                600.0,
+            ),
+            (
+                WindowLayoutConstraints {
+                    locked_width: 350.0,
+                    ..Default::default()
+                },
+                350.0,
+            ),
+        ] {
+            let mut f = Fixture::new(1);
+            let mut settings = f.system.settings.clone();
+            settings.expand_single_column = true;
+            f.system.update_settings(&settings);
+            f.constraints.insert(wid(1), constraints);
+            assert_eq!(f.frame(1).size.width, width);
+        }
     }
 
     #[test]
