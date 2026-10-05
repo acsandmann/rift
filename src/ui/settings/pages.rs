@@ -12,6 +12,17 @@ pub(super) fn layouts() -> Vec<(&'static str, LayoutMode)> {
         ("Floating", LayoutMode::Floating),
     ]
 }
+pub(super) fn layout_symbol(mode: LayoutMode) -> &'static str {
+    match mode {
+        LayoutMode::Traditional => "rectangle.split.2x2",
+        LayoutMode::Bsp => "rectangle.split.2x1",
+        LayoutMode::Stack => "square.3.layers.3d",
+        LayoutMode::MasterStack => "sidebar.left",
+        LayoutMode::Scrolling => "rectangle.split.3x1",
+        LayoutMode::Floating => "macwindow",
+    }
+}
+
 fn insertion() -> Vec<(&'static str, Option<WindowInsertionPoint>)> {
     vec![
         ("Use Default", None),
@@ -202,17 +213,7 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
         |entry: &(String, LayoutMode)| entry.0.clone(),
         |entry| layout_description(entry.1).to_string(),
     )
-    .symbols(|entry| {
-        match entry.1 {
-            LayoutMode::Traditional => "rectangle.split.2x2",
-            LayoutMode::Bsp => "rectangle.split.2x1",
-            LayoutMode::Stack => "square.3.layers.3d",
-            LayoutMode::MasterStack => "sidebar.left",
-            LayoutMode::Scrolling => "rectangle.split.3x1",
-            LayoutMode::Floating => "macwindow",
-        }
-        .to_string()
-    })
+    .symbols(|entry| layout_symbol(entry.1).to_string())
     .navigation()
     .fit_content(380.0)
     .on_open({

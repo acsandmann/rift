@@ -104,10 +104,10 @@ impl Settings {
                     pages::layouts()
                         .into_iter()
                         .enumerate()
-                        .map(|(index, (name, _))| SidebarItem {
+                        .map(|(index, (name, mode))| SidebarItem {
                             id: 8 + index,
                             title: name.into(),
-                            symbol: String::new(),
+                            symbol: pages::layout_symbol(mode).into(),
                         })
                         .collect()
                 } else {

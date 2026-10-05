@@ -50,6 +50,14 @@ pub struct SidebarItem<T> {
     pub title: String,
     pub symbol: String,
 }
+struct SidebarCell {
+    native: Retained<NSTableCellView>,
+    _content: HStack,
+}
+impl NativeView for SidebarCell {
+    fn ns_view(&self) -> &NSView { &self.native }
+}
+
 pub struct Sidebar<T: 'static> {
     outline: Outline<SidebarItem<T>>,
 }
@@ -86,28 +94,46 @@ impl<T: Clone + 'static> Sidebar<T> {
                 id: item,
             })
             .collect();
-        let outline = Outline::new(ui)
-            .items(items)
-            .row_heights(|item| if item.symbol.is_empty() { 21.0 } else { 26.0 })
-            .cells(move |item, title| {
-                let row = HStack::new(&ui_copy);
-                let row = if let Some(image) = ImageView::symbol(&ui_copy, &item.symbol) {
-                    row.push(image)
-                } else {
-                    row
-                };
-                let label = Label::new(&ui_copy, title);
-                let label = if item.symbol.is_empty() {
-                    label.font(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize()))
-                } else {
-                    label
-                };
-                Box::new(row.push(label))
-            });
+        let outline = Outline::new(ui).items(items).cells(move |item, title| {
+            let native = NSTableCellView::new(ui_copy.mtm());
+            let label = Label::new(&ui_copy, title);
+            unsafe {
+                native.setTextField(Some(label.ns_text_field()));
+            }
+            let row = HStack::new(&ui_copy).spacing(8.0);
+            let row = if let Some(image) = ImageView::symbol(&ui_copy, &item.symbol) {
+                image.width(16.0);
+                image.height(16.0);
+                unsafe {
+                    native.setImageView(Some(image.ns_image_view()));
+                }
+                row.push(image)
+            } else {
+                row
+            };
+            let content = row.push(label);
+            native.addSubview(content.ns_view());
+            crate::view::prepare(content.ns_view());
+            content
+                .ns_view()
+                .leadingAnchor()
+                .constraintEqualToAnchor(&native.leadingAnchor())
+                .setActive(true);
+            content
+                .ns_view()
+                .trailingAnchor()
+                .constraintEqualToAnchor(&native.trailingAnchor())
+                .setActive(true);
+            content
+                .ns_view()
+                .centerYAnchor()
+                .constraintEqualToAnchor(&native.centerYAnchor())
+                .setActive(true);
+            Box::new(SidebarCell { native, _content: content })
+        });
         let native = outline.ns_outline_view();
         native.setUsesAutomaticRowHeights(false);
-        native.setRowHeight(26.0);
-        native.setIndentationPerLevel(36.0);
+        native.setRowSizeStyle(NSTableViewRowSizeStyle::Default);
         native.setBackgroundColor(&NSColor::clearColor());
         outline.min_width(content_width);
         outline.max_width(content_width + Metrics::PAGE_INSET * 2.0);

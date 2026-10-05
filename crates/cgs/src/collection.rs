@@ -31,7 +31,6 @@ struct CollectionState {
     reorderable: Cell<bool>,
     roots: RefCell<Vec<usize>>,
     nodes: RefCell<Vec<Node>>,
-    row_height: RefCell<Option<Box<dyn Fn(usize) -> f64>>>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -166,15 +165,6 @@ define_class!(
             node_index(item).and_then(|row| self.make_cell(row, 0))
         }
 
-        #[unsafe(method(outlineView:heightOfRowByItem:))]
-        unsafe fn outline_height(&self, view: &NSOutlineView, item: &AnyObject) -> f64 {
-            node_index(item)
-                .and_then(|index| {
-                    self.ivars().row_height.borrow().as_ref().map(|height| height(index))
-                })
-                .unwrap_or_else(|| view.rowHeight())
-        }
-
         #[unsafe(method(outlineViewSelectionDidChange:))]
         fn outline_selection(&self, note: &NSNotification) {
             if let Some(view) = note.object().and_then(|o| o.downcast::<NSOutlineView>().ok()) {
@@ -245,7 +235,6 @@ impl CollectionBridge {
             reorderable: Cell::new(false),
             roots: RefCell::new(Vec::new()),
             nodes: RefCell::new(Vec::new()),
-            row_height: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -1014,14 +1003,6 @@ impl<T: 'static> Outline<T> {
             cell(item, title)
         });
         self.bridge.ivars().cells.borrow_mut().clear();
-        self.native.reloadData();
-        self
-    }
-
-    pub fn row_heights(self, height: impl Fn(&T) -> f64 + 'static) -> Self {
-        let items = self.items.clone();
-        *self.bridge.ivars().row_height.borrow_mut() =
-            Some(Box::new(move |index| height(&items.borrow()[index].0)));
         self.native.reloadData();
         self
     }
