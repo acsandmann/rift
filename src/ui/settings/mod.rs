@@ -25,6 +25,44 @@ pub struct Request {
     pub finish: Box<dyn FnOnce(Result<(), String>)>,
 }
 
+// Accessory apps still need a main-menu command for AppKit to dispatch ⌘W.
+fn install_close_command(ui: &Ui) {
+    use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem};
+    use objc2_foundation::NSString;
+    let app = NSApplication::sharedApplication(ui.mtm());
+    let main = app.mainMenu().unwrap_or_else(|| NSMenu::new(ui.mtm()));
+    if main.itemArray().iter().any(|item| {
+        item.submenu().is_some_and(|menu| {
+            menu.itemArray().iter().any(|item| item.keyEquivalent().to_string() == "w")
+        })
+    }) {
+        return;
+    }
+    let close = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(ui.mtm()),
+            &NSString::from_str("Close Window"),
+            Some(objc2::sel!(performClose:)),
+            &NSString::from_str("w"),
+        )
+    };
+    close.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    // A nil target lets the native responder chain find the active window.
+    let file = NSMenu::new(ui.mtm());
+    file.addItem(&close);
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(ui.mtm()),
+            &NSString::from_str("File"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    item.setSubmenu(Some(&file));
+    main.addItem(&item);
+    app.setMainMenu(Some(&main));
+}
+
 struct Model {
     source: RefCell<ConfigSource>,
     source_revision: Cell<u64>,
@@ -173,6 +211,7 @@ impl Settings {
             .page_title(&ui, model.page_title.clone())
             .on_close(on_close)
             .content(NavigationSplitView::new(&ui, sidebar, host.clone()));
+        install_close_command(&ui);
         *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
         window.ns_window().setContentSize(CGSize::new(880.0, 660.0));
         window.ns_window().center();
