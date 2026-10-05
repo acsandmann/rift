@@ -137,7 +137,8 @@ fn general(ui: Ui, model: &Rc<Model>) -> Page {
 fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
-    let section = Section::new(&ui, "Defaults")
+    let section = Section::new(&ui, "Default behavior")
+        .description("Used by workspaces that don’t have their own layout.")
         .row(f.popup(
             "Default layout",
             layouts(),
@@ -151,75 +152,88 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
             |s, v| s.settings.layout.base.window_insertion_point = v,
         ));
     page = page.section(section);
-    let choices: Vec<_> = layouts().into_iter().map(|(_, mode)| mode).collect();
-    let initial = choices
-        .iter()
-        .position(|mode| *mode == model.source.borrow().settings.layout.mode)
-        .unwrap_or(0);
-    let selected = Rc::new(Cell::new(initial));
-    let host = Rc::new(PageHost::new(&ui));
-    let panes: Rc<RefCell<Vec<Option<Page>>>> =
-        Rc::new(RefCell::new((0..choices.len()).map(|_| None).collect()));
-    show_layout(ui, model, &host, &panes, initial);
-    let weak_model = Rc::downgrade(model);
+    let host = Rc::new(NavigationHost::new(&ui));
+    let current = Rc::new(RefCell::new(None::<Page>));
+    let editor = current.clone();
     let weak_host = Rc::downgrade(&host);
-    let weak_panes = Rc::downgrade(&panes);
-    let selection = selected.clone();
-    let labels = [
-        "Traditional",
-        "BSP",
-        "Stack",
-        "Master",
-        "Scrolling",
-        "Floating",
-    ];
-    let selector = SegmentedControl::new(&ui, &labels);
-    selector
-        .ns_segmented_control()
-        .setControlSize(objc2_app_kit::NSControlSize::Small);
-    selector.accessibility_label("Layout options");
-    selector.set_selected(initial);
-    let popup = Popup::new(&ui).items(layouts().iter().map(|(label, _)| *label));
-    popup.accessibility_label("Layout options");
-    popup.set_selected(initial);
-    let segments = objc2::rc::Weak::new(selector.ns_segmented_control());
-    let menu = objc2::rc::Weak::new(popup.ns_popup_button());
-    let navigate: Rc<dyn Fn(usize)> = Rc::new(move |index| {
-        if let (Some(model), Some(host), Some(panes)) =
-            (weak_model.upgrade(), weak_host.upgrade(), weak_panes.upgrade())
-        {
-            selection.set(index);
-            if let Some(control) = segments.load() {
-                control.setSelectedSegment(index as isize);
+    let weak = Rc::downgrade(model);
+    let navigate: Rc<dyn Fn(Option<usize>)> = Rc::new(move |index| {
+        if let (Some(model), Some(host)) = (weak.upgrade(), weak_host.upgrade()) {
+            let Some(index) = index else {
+                host.pop();
+                editor.borrow_mut().take();
+                return;
+            };
+            let (name, mode) = layouts()[index];
+            let back_host = Rc::downgrade(&host);
+            let back_sidebar = model.sidebar.borrow().clone();
+            let current = Rc::downgrade(&editor);
+            let back = Button::new(&ui, "Layouts")
+                .symbol("chevron.backward")
+                .borderless()
+                .on_click(move || {
+                    if let Some(host) = back_host.upgrade() {
+                        host.pop();
+                        if let Some(sidebar) = back_sidebar.upgrade() {
+                            sidebar.set_selected(1);
+                        }
+                        if let Some(current) = current.upgrade() {
+                            current.borrow_mut().take();
+                        }
+                    }
+                });
+            back.ns_button().setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
+            back.ns_button().setKeyEquivalent(&objc2_foundation::NSString::from_str("["));
+            back.ns_button()
+                .setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command);
+            back.accessibility_label("Back to Layouts");
+            let detail = layout_options(ui, &model, mode, name, back);
+            let syncing = model.syncing.replace(true);
+            for sync in &detail.sync {
+                sync(&model.source.borrow());
             }
-            if let Some(control) = menu.load() {
-                control.selectItemAtIndex(index as isize);
-            }
-            show_layout(ui, &model, &host, &panes, index);
+            model.syncing.set(syncing);
+            host.push(detail.view.clone());
+            *editor.borrow_mut() = Some(detail);
         }
     });
-    let action = navigate.clone();
-    let selector = selector.on_change(move |index| action(index));
-    let popup = popup.on_change(move |index| navigate(index));
-    let navigation = Section::new(&ui, "Layout Settings")
-        .content(ResponsiveView::new(
-            &ui,
-            selector,
-            HStack::new(&ui).push(Label::new(&ui, "Options for:")).push(popup),
-        ))
-        .content(host);
-    page = page.section(navigation);
-    f.sync.push(Box::new(move |source| {
-        if let Some(pane) = &panes.borrow()[selected.get()] {
-            for sync in &pane.sync {
-                sync(source);
+    let list = SettingsList::new(
+        &ui,
+        |entry: &(String, LayoutMode)| entry.0.clone(),
+        |entry| layout_description(entry.1).to_string(),
+    )
+    .symbols(|entry| {
+        match entry.1 {
+            LayoutMode::Traditional => "rectangle.split.2x2",
+            LayoutMode::Bsp => "rectangle.split.2x1",
+            LayoutMode::Stack => "square.3.layers.3d",
+            LayoutMode::MasterStack => "sidebar.left",
+            LayoutMode::Scrolling => "rectangle.split.3x1",
+            LayoutMode::Floating => "macwindow",
+        }
+        .to_string()
+    })
+    .navigation()
+    .fit_content(380.0)
+    .on_open({
+        let weak = Rc::downgrade(model);
+        move |index| {
+            if let Some(sidebar) = weak.upgrade().and_then(|model| model.sidebar.borrow().upgrade())
+            {
+                sidebar.set_selected(index + 2);
             }
         }
-    }));
-    let section = Section::subsection(&ui, "Outer gaps")
-        .description("Leave blank to set each side separately.")
+    });
+    list.set_rows(layouts().into_iter().map(|(name, mode)| (name.to_string(), mode)).collect());
+    page = page.section(
+        Section::new(&ui, "Layout options")
+            .description("Choose a layout to customize its behavior.")
+            .content(list),
+    );
+    let section = Section::new(&ui, "Spacing for all layouts")
+        .description("Space around screen edges and between windows. Applies to every layout.")
         .row(f.text(
-            "All sides (points)",
+            "Screen edges (points)",
             |s| {
                 let g = &s.settings.layout.gaps.outer;
                 if g.top == g.left && g.top == g.bottom && g.top == g.right {
@@ -265,8 +279,8 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
             |s| s.settings.layout.gaps.outer.right,
             |s, v| s.settings.layout.gaps.outer.right = v,
         ));
-    page = page.section(section.content(Disclosure::new(&ui, "Customize sides", sides)));
-    let section = Section::subsection(&ui, "Inner gaps")
+    page = page.section(section.content(Disclosure::new(&ui, "Set each edge separately", sides)));
+    let section = Section::new(&ui, "Between windows")
         .row(f.number(
             "Horizontal (points)",
             1.0,
@@ -281,7 +295,22 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
         ));
     page = page.section(section);
     page = super::editors::display_overrides(&mut f, page, model);
-    f.finish(page)
+    let root = Rc::new(f.finish(page));
+    host.set_root(root.view.clone());
+    Page {
+        view: host,
+        navigate: Some(navigate),
+        sync: vec![Box::new(move |source| {
+            for sync in &root.sync {
+                sync(source);
+            }
+            if let Some(detail) = current.borrow().as_ref() {
+                for sync in &detail.sync {
+                    sync(source);
+                }
+            }
+        })],
+    }
 }
 fn percentage_text(ratio: f64) -> String {
     format!("{:.2}", ratio * 100.0)
@@ -290,29 +319,35 @@ fn percentage_text(ratio: f64) -> String {
         .to_string()
 }
 
-fn show_layout(
-    ui: Ui,
-    model: &Rc<Model>,
-    host: &PageHost,
-    panes: &RefCell<Vec<Option<Page>>>,
-    index: usize,
-) {
-    let mut panes = panes.borrow_mut();
-    let pane = panes[index].get_or_insert_with(|| layout_options(ui, model, layouts()[index].1));
-    let syncing = model.syncing.replace(true);
-    for sync in &pane.sync {
-        sync(&model.source.borrow());
+fn layout_description(mode: LayoutMode) -> &'static str {
+    match mode {
+        LayoutMode::Traditional => "Arrange windows in adjustable rows and columns.",
+        LayoutMode::Bsp => "Split available space as windows are added.",
+        LayoutMode::Stack => "Overlap windows while keeping each one visible.",
+        LayoutMode::MasterStack => "Keep primary windows large with the rest beside them.",
+        LayoutMode::Scrolling => "Arrange windows in a horizontally scrolling strip.",
+        LayoutMode::Floating => "Move and resize windows without automatic tiling.",
     }
-    model.syncing.set(syncing);
-    host.set_page(pane.view.clone());
 }
 
-fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
+fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back: Button) -> Page {
     let mut f = FormBuilder::new(ui, model);
+    let options = || {
+        Section::new(&ui, match mode {
+            LayoutMode::Stack => "Arrangement",
+            LayoutMode::MasterStack => "Master area",
+            LayoutMode::Scrolling => "Column sizing",
+            _ => "Behavior",
+        })
+    };
+    let mut page = SettingsPage::new(&ui, "")
+        .section(HStack::new(&ui).push(back).spacer(&ui))
+        .section(Title::new(&ui, name))
+        .subtitle(layout_description(mode));
     let section = match mode {
-        LayoutMode::Traditional => Section::subsection(&ui, "Traditional")
+        LayoutMode::Traditional => options()
             .row(f.switch(
-                "Equalize splits",
+                "Keep windows equally sized",
                 |s| s.settings.layout.traditional.equalize_nodes,
                 |s, v| s.settings.layout.traditional.equalize_nodes = v,
             ))
@@ -322,7 +357,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                 |s| s.settings.layout.traditional.base.window_insertion_point,
                 |s, v| s.settings.layout.traditional.base.window_insertion_point = v,
             )),
-        LayoutMode::Bsp => Section::subsection(&ui, "BSP")
+        LayoutMode::Bsp => options()
             .row(f.popup(
                 "New window position",
                 insertion(),
@@ -344,7 +379,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                     Ok(())
                 },
             )),
-        LayoutMode::Stack => Section::subsection(&ui, "Stack")
+        LayoutMode::Stack => options()
             .row(f.number(
                 "Window offset (points)",
                 1.0,
@@ -368,86 +403,91 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                 |s| s.settings.layout.stack.base.window_insertion_point,
                 |s, v| s.settings.layout.stack.base.window_insertion_point = v,
             )),
-        LayoutMode::MasterStack => Section::subsection(&ui, "Master Stack")
-            .row(
-                f.number(
-                    "Master width",
-                    100.0,
-                    |s| s.settings.layout.master_stack.master_ratio,
-                    |s, v| s.settings.layout.master_stack.master_ratio = v,
+        LayoutMode::MasterStack => {
+            let section = options()
+                .row(
+                    f.number(
+                        "Master width",
+                        100.0,
+                        |s| s.settings.layout.master_stack.master_ratio,
+                        |s, v| s.settings.layout.master_stack.master_ratio = v,
+                    )
+                    .suffix("%"),
                 )
-                .suffix("%"),
-            )
-            .row(f.integer(
-                "Master windows",
-                |s| s.settings.layout.master_stack.master_count as f64,
-                |s, v| s.settings.layout.master_stack.master_count = v as usize,
-            ))
-            .row(f.popup(
-                "Master side",
-                vec![
-                    ("Left", MasterStackSide::Left),
-                    ("Right", MasterStackSide::Right),
-                    ("Top", MasterStackSide::Top),
-                    ("Bottom", MasterStackSide::Bottom),
-                ],
-                |s| s.settings.layout.master_stack.master_side,
-                |s, v| s.settings.layout.master_stack.master_side = v,
-            ))
-            .row(f.popup(
-                "New windows",
-                vec![
-                    ("Master", MasterStackNewWindowPlacement::Master),
-                    ("Stack", MasterStackNewWindowPlacement::Stack),
-                    ("Focused", MasterStackNewWindowPlacement::Focused),
-                ],
-                |s| s.settings.layout.master_stack.new_window_placement,
-                |s, v| s.settings.layout.master_stack.new_window_placement = v,
-            ))
-            .row(f.popup(
-                "Master arrangement",
-                arrangement(),
-                |s| s.settings.layout.master_stack.master_arrangement,
-                |s, v| s.settings.layout.master_stack.master_arrangement = v,
-            ))
-            .row(f.popup(
-                "Stack arrangement",
-                arrangement(),
-                |s| s.settings.layout.master_stack.stack_arrangement,
-                |s, v| s.settings.layout.master_stack.stack_arrangement = v,
-            ))
-            .row(f.popup(
-                "New window position",
-                insertion(),
-                |s| s.settings.layout.master_stack.base.window_insertion_point,
-                |s, v| s.settings.layout.master_stack.base.window_insertion_point = v,
-            )),
-        LayoutMode::Scrolling => Section::subsection(&ui, "Scrolling")
-            .row(
-                f.number(
-                    "Default column width",
-                    100.0,
-                    |s| s.settings.layout.scrolling.column_width_ratio,
-                    |s, v| s.settings.layout.scrolling.column_width_ratio = v,
+                .row(f.integer(
+                    "Master windows",
+                    |s| s.settings.layout.master_stack.master_count as f64,
+                    |s, v| s.settings.layout.master_stack.master_count = v as usize,
+                ))
+                .row(f.popup(
+                    "Master side",
+                    vec![
+                        ("Left", MasterStackSide::Left),
+                        ("Right", MasterStackSide::Right),
+                        ("Top", MasterStackSide::Top),
+                        ("Bottom", MasterStackSide::Bottom),
+                    ],
+                    |s| s.settings.layout.master_stack.master_side,
+                    |s, v| s.settings.layout.master_stack.master_side = v,
+                ));
+            page = page.section(section);
+            Section::new(&ui, "Arrangement")
+                .row(f.popup(
+                    "New windows",
+                    vec![
+                        ("Master", MasterStackNewWindowPlacement::Master),
+                        ("Stack", MasterStackNewWindowPlacement::Stack),
+                        ("Focused", MasterStackNewWindowPlacement::Focused),
+                    ],
+                    |s| s.settings.layout.master_stack.new_window_placement,
+                    |s, v| s.settings.layout.master_stack.new_window_placement = v,
+                ))
+                .row(f.popup(
+                    "Master arrangement",
+                    arrangement(),
+                    |s| s.settings.layout.master_stack.master_arrangement,
+                    |s, v| s.settings.layout.master_stack.master_arrangement = v,
+                ))
+                .row(f.popup(
+                    "Stack arrangement",
+                    arrangement(),
+                    |s| s.settings.layout.master_stack.stack_arrangement,
+                    |s, v| s.settings.layout.master_stack.stack_arrangement = v,
+                ))
+                .row(f.popup(
+                    "New window position",
+                    insertion(),
+                    |s| s.settings.layout.master_stack.base.window_insertion_point,
+                    |s, v| s.settings.layout.master_stack.base.window_insertion_point = v,
+                ))
+        }
+        LayoutMode::Scrolling => {
+            let section = options()
+                .row(
+                    f.number(
+                        "Default column width",
+                        100.0,
+                        |s| s.settings.layout.scrolling.column_width_ratio,
+                        |s, v| s.settings.layout.scrolling.column_width_ratio = v,
+                    )
+                    .suffix("%"),
                 )
-                .suffix("%"),
-            )
-            .row(f.text(
-                "Preset widths",
-                |s| {
-                    s.settings
-                        .layout
-                        .scrolling
-                        .preset_column_widths
-                        .iter()
-                        .map(|v| percentage_text(*v))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                },
-                |s, v| {
-                    let old = &s.settings.layout.scrolling.preset_column_widths;
-                    let widths =
-                        v.split(',')
+                .row(f.text(
+                    "Preset widths",
+                    |s| {
+                        s.settings
+                            .layout
+                            .scrolling
+                            .preset_column_widths
+                            .iter()
+                            .map(|v| percentage_text(*v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    },
+                    |s, v| {
+                        let old = &s.settings.layout.scrolling.preset_column_widths;
+                        let widths = v
+                            .split(',')
                             .enumerate()
                             .map(|(index, value)| {
                                 let value = value.trim();
@@ -462,69 +502,76 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                                 })
                             })
                             .collect::<Result<_, _>>()?;
-                    s.settings.layout.scrolling.preset_column_widths = widths;
-                    Ok(())
-                },
-            ))
-            .row(f.switch(
-                "Preserve window sizes",
-                |s| s.settings.layout.scrolling.preserve_window_sizes,
-                |s, v| s.settings.layout.scrolling.preserve_window_sizes = v,
-            ))
-            .row(
-                f.number(
-                    "Minimum width",
-                    100.0,
-                    |s| s.settings.layout.scrolling.min_column_width_ratio,
-                    |s, v| s.settings.layout.scrolling.min_column_width_ratio = v,
+                        s.settings.layout.scrolling.preset_column_widths = widths;
+                        Ok(())
+                    },
+                ))
+                .row(f.switch(
+                    "Preserve window sizes",
+                    |s| s.settings.layout.scrolling.preserve_window_sizes,
+                    |s, v| s.settings.layout.scrolling.preserve_window_sizes = v,
+                ))
+                .row(
+                    f.number(
+                        "Minimum width",
+                        100.0,
+                        |s| s.settings.layout.scrolling.min_column_width_ratio,
+                        |s, v| s.settings.layout.scrolling.min_column_width_ratio = v,
+                    )
+                    .suffix("%"),
                 )
-                .suffix("%"),
-            )
-            .row(
-                f.number(
-                    "Maximum width",
-                    100.0,
-                    |s| s.settings.layout.scrolling.max_column_width_ratio,
-                    |s, v| s.settings.layout.scrolling.max_column_width_ratio = v,
-                )
-                .suffix("%"),
-            )
-            .row(f.popup(
-                "Alignment",
-                vec![
-                    ("Left", ScrollingAlignment::Left),
-                    ("Center", ScrollingAlignment::Center),
-                    ("Right", ScrollingAlignment::Right),
-                ],
-                |s| s.settings.layout.scrolling.alignment,
-                |s, v| s.settings.layout.scrolling.alignment = v,
-            ))
-            .row(f.popup(
-                "Focus navigation",
-                vec![
-                    ("Niri", ScrollingFocusNavigationStyle::Niri),
-                    ("Anchored", ScrollingFocusNavigationStyle::Anchored),
-                ],
-                |s| s.settings.layout.scrolling.focus_navigation_style,
-                |s, v| s.settings.layout.scrolling.focus_navigation_style = v,
-            ))
-            .row(f.popup(
-                "Animate navigation",
-                optional_bool(),
-                |s| s.settings.layout.scrolling.animate,
-                |s, v| s.settings.layout.scrolling.animate = v,
-            ))
-            .row(f.popup(
+                .row(
+                    f.number(
+                        "Maximum width",
+                        100.0,
+                        |s| s.settings.layout.scrolling.max_column_width_ratio,
+                        |s, v| s.settings.layout.scrolling.max_column_width_ratio = v,
+                    )
+                    .suffix("%"),
+                );
+            page = page.section(section);
+            let section = Section::new(&ui, "Navigation")
+                .row(f.popup(
+                    "Alignment",
+                    vec![
+                        ("Left", ScrollingAlignment::Left),
+                        ("Center", ScrollingAlignment::Center),
+                        ("Right", ScrollingAlignment::Right),
+                    ],
+                    |s| s.settings.layout.scrolling.alignment,
+                    |s, v| s.settings.layout.scrolling.alignment = v,
+                ))
+                .row(f.popup(
+                    "Focus navigation",
+                    vec![
+                        ("Niri", ScrollingFocusNavigationStyle::Niri),
+                        ("Anchored", ScrollingFocusNavigationStyle::Anchored),
+                    ],
+                    |s| s.settings.layout.scrolling.focus_navigation_style,
+                    |s, v| s.settings.layout.scrolling.focus_navigation_style = v,
+                ))
+                .row(f.popup(
+                    "Animate navigation",
+                    optional_bool(),
+                    |s| s.settings.layout.scrolling.animate,
+                    |s, v| s.settings.layout.scrolling.animate = v,
+                ));
+            page = page.section(section);
+            Section::new(&ui, "Window placement").row(f.popup(
                 "New window position",
                 insertion(),
                 |s| s.settings.layout.scrolling.base.window_insertion_point,
                 |s, v| s.settings.layout.scrolling.base.window_insertion_point = v,
-            )),
+            ))
+        }
         LayoutMode::Floating => {
-            Section::subsection(&ui, "Floating").description("No layout-specific options.")
+            return f.finish(page.section(Caption::new(
+                &ui,
+                "Floating does not have any additional layout options.",
+            )));
         }
     };
-    f.finish(section)
+    f.finish(page.section(section))
 }
 
 fn input(ui: Ui, model: &Rc<Model>) -> Page {

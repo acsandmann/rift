@@ -31,6 +31,7 @@ struct CollectionState {
     reorderable: Cell<bool>,
     roots: RefCell<Vec<usize>>,
     nodes: RefCell<Vec<Node>>,
+    row_height: RefCell<Option<Box<dyn Fn(usize) -> f64>>>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -165,6 +166,15 @@ define_class!(
             node_index(item).and_then(|row| self.make_cell(row, 0))
         }
 
+        #[unsafe(method(outlineView:heightOfRowByItem:))]
+        unsafe fn outline_height(&self, view: &NSOutlineView, item: &AnyObject) -> f64 {
+            node_index(item)
+                .and_then(|index| {
+                    self.ivars().row_height.borrow().as_ref().map(|height| height(index))
+                })
+                .unwrap_or_else(|| view.rowHeight())
+        }
+
         #[unsafe(method(outlineViewSelectionDidChange:))]
         fn outline_selection(&self, note: &NSNotification) {
             if let Some(view) = note.object().and_then(|o| o.downcast::<NSOutlineView>().ok()) {
@@ -235,6 +245,7 @@ impl CollectionBridge {
             reorderable: Cell::new(false),
             roots: RefCell::new(Vec::new()),
             nodes: RefCell::new(Vec::new()),
+            row_height: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -424,7 +435,11 @@ impl<T: 'static> Table<T> {
     pub fn on_double_click(self, mut f: impl FnMut(usize) + 'static) -> Self {
         self.double.set(move |sender| {
             if let Some(table) = sender.downcast_ref::<NSTableView>() {
-                if let Ok(row) = usize::try_from(table.clickedRow()) {
+                if let Ok(row) = usize::try_from(if table.clickedRow() >= 0 {
+                    table.clickedRow()
+                } else {
+                    table.selectedRow()
+                }) {
                     f(row);
                 }
             }
@@ -639,10 +654,12 @@ pub struct SettingsList<T: 'static> {
     table: Table<T>,
     surface: crate::GroupBox,
     open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>>,
-    symbol: Rc<RefCell<Option<String>>>,
+    symbol: Rc<RefCell<Option<Box<dyn Fn(&T) -> String>>>>,
     fitted_height: Option<(Retained<NSLayoutConstraint>, f64)>,
     row_count: Rc<Cell<usize>>,
     empty: crate::Caption,
+    trailing_summary: Rc<Cell<bool>>,
+    navigation: Rc<Cell<bool>>,
 }
 impl<T: 'static> SettingsList<T> {
     pub fn new(
@@ -651,13 +668,17 @@ impl<T: 'static> SettingsList<T> {
         summary: impl Fn(&T) -> String + 'static,
     ) -> Self {
         let open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>> = Rc::new(RefCell::new(None));
-        let symbol: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let symbol: Rc<RefCell<Option<Box<dyn Fn(&T) -> String>>>> = Rc::new(RefCell::new(None));
         let row_open = open.clone();
         let row_symbol = symbol.clone();
         let ui_copy = *ui;
         let double_open = open.clone();
         let row_count = Rc::new(Cell::new(0));
         let cell_count = row_count.clone();
+        let trailing_summary = Rc::new(Cell::new(false));
+        let inline = trailing_summary.clone();
+        let navigation = Rc::new(Cell::new(false));
+        let row_navigation = navigation.clone();
         let table = Table::new(ui)
             .column("item", "", 0.0)
             .cells_with_index(move |item, _, index| {
@@ -671,7 +692,7 @@ impl<T: 'static> SettingsList<T> {
                 }
                 let text = VStack::new(&ui_copy).spacing(2.0).push(label);
                 let summary = summary(item);
-                if !summary.is_empty() {
+                if !summary.is_empty() && !inline.get() {
                     let caption = crate::Caption::new(&ui_copy, &summary);
                     caption.tooltip(&summary);
                     text.add(caption);
@@ -684,8 +705,8 @@ impl<T: 'static> SettingsList<T> {
                 });
                 if let Some(image) = row_symbol
                     .borrow()
-                    .as_deref()
-                    .and_then(|name| crate::ImageView::symbol(&ui_copy, name))
+                    .as_ref()
+                    .and_then(|symbol| crate::ImageView::symbol(&ui_copy, &symbol(item)))
                 {
                     image.width(22.0);
                     image.height(22.0);
@@ -698,7 +719,21 @@ impl<T: 'static> SettingsList<T> {
                     row = row.push(image);
                 }
                 row = row.push(text).spacer(&ui_copy);
-                if row_open.borrow().is_some() {
+                if inline.get() && !summary.is_empty() {
+                    let detail = crate::Label::new(&ui_copy, &summary);
+                    detail.tooltip(&summary);
+                    row = row.push(detail);
+                }
+                if row_navigation.get() {
+                    if let Some(image) = crate::ImageView::symbol(&ui_copy, "chevron.forward") {
+                        image.width(12.0);
+                        image
+                            .ns_image_view()
+                            .setContentTintColor(Some(&crate::Color::secondary_label()));
+                        image.ns_image_view().setAccessibilityElement(false);
+                        row = row.push(image);
+                    }
+                } else if row_open.borrow().is_some() {
                     let open = row_open.clone();
                     let button = crate::Button::new(&ui_copy, &format!("Open {name}"))
                         .symbol("chevron.forward")
@@ -763,6 +798,8 @@ impl<T: 'static> SettingsList<T> {
             fitted_height: None,
             row_count,
             empty,
+            trailing_summary,
+            navigation,
         }
     }
 
@@ -784,12 +821,49 @@ impl<T: 'static> SettingsList<T> {
                 (if count == 0 {
                     64.0
                 } else {
+                    if self.navigation.get() {
+                        let table = self.table.ns_table_view();
+                        let fitted: f64 = (0..count)
+                            .filter_map(|row| {
+                                table.viewAtColumn_row_makeIfNecessary(0, row as isize, true)
+                            })
+                            .map(|view| view.fittingSize().height)
+                            .sum();
+                        table.setRowHeight((fitted / count as f64).max(44.0));
+                        table.layoutSubtreeIfNeeded();
+                        let last = table.rectOfRow(count as isize - 1);
+                        let content_height = last.origin.y + last.size.height + 24.0;
+                        self.table
+                            .ns_scroll_view()
+                            .setHasVerticalScroller(content_height > *maximum);
+                        height.setConstant(content_height.clamp(52.0, *maximum));
+                        return;
+                    }
                     let frame = self.table.ns_table_view().rectOfRow(count as isize - 1);
                     frame.origin.y + frame.size.height + 8.0
                 })
                 .clamp(52.0, *maximum),
             );
         }
+    }
+
+    /// Open destinations with one click, without a persistent selection highlight.
+    pub fn navigation(self) -> Self {
+        self.navigation.set(true);
+        let table = self.table.ns_table_view();
+        table.setUsesAutomaticRowHeights(true);
+        table.setRowHeight(56.0);
+        table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
+        unsafe {
+            table.setAction(Some(objc2::sel!(invoke:)));
+        }
+        self
+    }
+
+    /// Display a short value beside the title, as in a native keyboard shortcuts list.
+    pub fn trailing_summary(self) -> Self {
+        self.trailing_summary.set(true);
+        self
     }
 
     pub fn empty_message(self, message: &str) -> Self {
@@ -808,7 +882,13 @@ impl<T: 'static> SettingsList<T> {
     }
 
     pub fn symbol(self, name: &str) -> Self {
-        *self.symbol.borrow_mut() = Some(name.into());
+        let name = name.to_owned();
+        *self.symbol.borrow_mut() = Some(Box::new(move |_| name.clone()));
+        self
+    }
+
+    pub fn symbols(self, symbol: impl Fn(&T) -> String + 'static) -> Self {
+        *self.symbol.borrow_mut() = Some(Box::new(symbol));
         self
     }
 
@@ -924,6 +1004,46 @@ impl<T: 'static> Outline<T> {
             f(id);
         }));
         self
+    }
+
+    pub fn cells(self, mut cell: impl FnMut(&T, &str) -> Box<dyn NativeView> + 'static) -> Self {
+        let items = self.items.clone();
+        *self.bridge.ivars().cell.borrow_mut() = Box::new(move |index, _| {
+            let items = items.borrow();
+            let (item, title) = &items[index];
+            cell(item, title)
+        });
+        self.bridge.ivars().cells.borrow_mut().clear();
+        self.native.reloadData();
+        self
+    }
+
+    pub fn row_heights(self, height: impl Fn(&T) -> f64 + 'static) -> Self {
+        let items = self.items.clone();
+        *self.bridge.ivars().row_height.borrow_mut() =
+            Some(Box::new(move |index| height(&items.borrow()[index].0)));
+        self.native.reloadData();
+        self
+    }
+
+    /// Select a stable item index, revealing its parent if collapsed.
+    pub fn set_selected(&self, index: usize) {
+        let nodes = self.bridge.ivars().nodes.borrow();
+        let Some(node) = nodes.get(index) else {
+            return;
+        };
+        for parent in nodes.iter().filter(|node| node.children.contains(&index)) {
+            unsafe {
+                self.native.expandItem(Some(&parent.object));
+            }
+        }
+        let row = unsafe { self.native.rowForItem(Some(&node.object)) };
+        if row >= 0 {
+            self.native.selectRowIndexes_byExtendingSelection(
+                &NSIndexSet::indexSetWithIndex(row as usize),
+                false,
+            );
+        }
     }
 
     pub fn expand_all(&self) {

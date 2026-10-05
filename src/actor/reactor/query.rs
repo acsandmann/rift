@@ -186,6 +186,7 @@ pub enum QueryRequest {
         resp: SyncSender<Option<RuntimeWindowData>>,
     },
     Applications(SyncSender<Vec<ApplicationData>>),
+    ApplicationsAsync(tokio::sync::oneshot::Sender<Vec<ApplicationData>>),
     LayoutState {
         space_id: Option<u64>,
         workspace_id: Option<usize>,
@@ -217,6 +218,9 @@ impl Reactor {
             }
             QueryRequest::WindowInfo { window_id, resp } => {
                 let _ = resp.send(self.query_window_info(window_id));
+            }
+            QueryRequest::ApplicationsAsync(resp) => {
+                let _ = resp.send(self.query_applications());
             }
             QueryRequest::Applications(resp) => {
                 let _ = resp.send(self.query_applications());

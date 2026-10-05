@@ -51,48 +51,71 @@ pub struct SidebarItem<T> {
     pub symbol: String,
 }
 pub struct Sidebar<T: 'static> {
-    table: Table<SidebarItem<T>>,
+    outline: Outline<SidebarItem<T>>,
 }
 impl<T: Clone + 'static> Sidebar<T> {
     pub fn new(ui: &Ui, items: Vec<SidebarItem<T>>) -> Self {
+        Self::with_children(ui, items, |_| Vec::new())
+    }
+
+    pub fn with_children(
+        ui: &Ui,
+        items: Vec<SidebarItem<T>>,
+        children: impl Fn(&T) -> Vec<SidebarItem<T>>,
+    ) -> Self {
         let ui_copy = *ui;
-        // Let system fonts and symbol sizes determine the content minimum, so
-        // navigation labels remain readable even at the platform's narrow sidebar size.
         let content_width = items
             .iter()
             .map(|item| {
-                let label = Label::new(ui, &item.title).ns_view().fittingSize().width;
-                let icon = ImageView::symbol(ui, &item.symbol)
-                    .map_or(0.0, |image| image.ns_view().fittingSize().width);
-                label + icon + Metrics::CONTROL_SPACING * 4.0
+                Label::new(ui, &item.title).ns_view().fittingSize().width
+                    + Metrics::CONTROL_SPACING * 6.0
             })
             .fold(0.0, f64::max);
-        let table = Table::<SidebarItem<T>>::new(ui)
-            .column("page", "", 0.0)
-            .cells(move |item, _| {
+        let items = items
+            .into_iter()
+            .map(|item| OutlineItem {
+                children: children(&item.id)
+                    .into_iter()
+                    .map(|child| OutlineItem {
+                        title: child.title.clone(),
+                        id: child,
+                        children: Vec::new(),
+                    })
+                    .collect(),
+                title: item.title.clone(),
+                id: item,
+            })
+            .collect();
+        let outline = Outline::new(ui)
+            .items(items)
+            .row_heights(|item| if item.symbol.is_empty() { 21.0 } else { 26.0 })
+            .cells(move |item, title| {
                 let row = HStack::new(&ui_copy);
                 let row = if let Some(image) = ImageView::symbol(&ui_copy, &item.symbol) {
                     row.push(image)
                 } else {
                     row
                 };
-                Box::new(row.push(Label::new(&ui_copy, &item.title)))
-            })
-            .rows(items);
-        table.ns_table_view().setHeaderView(None);
-        table.ns_table_view().setStyle(NSTableViewStyle::SourceList);
-        table.ns_table_view().setUsesAutomaticRowHeights(false);
-        table.ns_table_view().setRowHeight(26.0);
-        table.ns_table_view().setBackgroundColor(&NSColor::clearColor());
-        table.ns_scroll_view().setDrawsBackground(false);
-        table.ns_scroll_view().setBorderType(NSBorderType::NoBorder);
-        table.min_width(content_width);
-        table.max_width(content_width + Metrics::PAGE_INSET * 2.0);
-        Self { table }
+                let label = Label::new(&ui_copy, title);
+                let label = if item.symbol.is_empty() {
+                    label.font(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize()))
+                } else {
+                    label
+                };
+                Box::new(row.push(label))
+            });
+        let native = outline.ns_outline_view();
+        native.setUsesAutomaticRowHeights(false);
+        native.setRowHeight(26.0);
+        native.setIndentationPerLevel(36.0);
+        native.setBackgroundColor(&NSColor::clearColor());
+        outline.min_width(content_width);
+        outline.max_width(content_width + Metrics::PAGE_INSET * 2.0);
+        Self { outline }
     }
 
     pub fn on_select(mut self, mut f: impl FnMut(T) + 'static) -> Self {
-        self.table = self.table.on_select_item(move |item| {
+        self.outline = self.outline.on_select(move |item| {
             if let Some(item) = item {
                 f(item.id);
             }
@@ -100,12 +123,12 @@ impl<T: Clone + 'static> Sidebar<T> {
         self
     }
 
-    pub fn set_selected(&self, index: usize) { self.table.set_selected(Some(index)); }
+    pub fn set_selected(&self, index: usize) { self.outline.set_selected(index); }
 
-    pub fn ns_table_view(&self) -> &NSTableView { self.table.ns_table_view() }
+    pub fn ns_table_view(&self) -> &NSTableView { self.outline.ns_outline_view() }
 }
 impl<T: 'static> NativeView for Sidebar<T> {
-    fn ns_view(&self) -> &NSView { self.table.ns_view() }
+    fn ns_view(&self) -> &NSView { self.outline.ns_view() }
 }
 pub struct NavigationSplitView(SplitView);
 impl NavigationSplitView {

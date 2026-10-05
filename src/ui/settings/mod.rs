@@ -17,6 +17,7 @@ mod pages;
 pub enum Action {
     Edit(SourceEdit),
     Reload,
+    RefreshRuntime,
 }
 pub struct Request {
     pub action: Action,
@@ -31,12 +32,15 @@ struct Model {
     window: RefCell<objc2::rc::Weak<objc2_app_kit::NSWindow>>,
     displays: RefCell<Vec<crate::sys::screen::ScreenInfo>>,
     config_path: std::path::PathBuf,
+    applications: RefCell<Vec<rift_protocol::ApplicationData>>,
+    sidebar: RefCell<std::rc::Weak<Sidebar<usize>>>,
 }
 
 type SyncControl = Box<dyn Fn(&ConfigSource)>;
 pub(super) struct Page {
     view: Rc<dyn NativeView>,
     sync: Vec<SyncControl>,
+    navigate: Option<Rc<dyn Fn(Option<usize>)>>,
 }
 
 pub struct Settings {
@@ -53,6 +57,7 @@ impl Settings {
         source: ConfigSource,
         config_path: std::path::PathBuf,
         displays: Vec<crate::sys::screen::ScreenInfo>,
+        applications: Vec<rift_protocol::ApplicationData>,
         requests: UnboundedSender<Request>,
         on_close: impl FnMut() + 'static,
     ) -> Self {
@@ -64,15 +69,17 @@ impl Settings {
             window: RefCell::new(objc2::rc::Weak::default()),
             displays: RefCell::new(displays),
             config_path,
+            applications: RefCell::new(applications),
+            sidebar: RefCell::new(std::rc::Weak::new()),
         });
         let host = Rc::new(PageHost::new(&ui));
-        let pages = Rc::new(RefCell::new((0..8).map(|_| None).collect()));
+        let pages = Rc::new(RefCell::new((0..8).map(|_| None).collect::<Vec<_>>()));
         let selected = Rc::new(Cell::new(0));
         let weak_model = Rc::downgrade(&model);
         let weak_host = Rc::downgrade(&host);
         let weak_pages = Rc::downgrade(&pages);
         let selected_page = selected.clone();
-        let sidebar = Sidebar::new(
+        let sidebar = Sidebar::with_children(
             &ui,
             [
                 ("General", "gearshape"),
@@ -92,15 +99,40 @@ impl Settings {
                 symbol: symbol.into(),
             })
             .collect(),
+            |id| {
+                if *id == 1 {
+                    pages::layouts()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, (name, _))| SidebarItem {
+                            id: 8 + index,
+                            title: name.into(),
+                            symbol: String::new(),
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            },
         )
-        .on_select(move |id| {
+        .on_select(move |destination| {
+            let id = if destination >= 8 { 1 } else { destination };
             if let (Some(model), Some(host), Some(pages)) =
                 (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
             {
+                if selected_page.get() == 1 && id != 1 {
+                    pages.borrow_mut()[1] = None;
+                }
                 selected_page.set(id);
                 Self::select(ui, &model, &host, &pages, id);
+                let navigate = pages.borrow()[id].as_ref().and_then(|page| page.navigate.clone());
+                if let Some(navigate) = navigate {
+                    navigate((destination >= 8).then(|| destination - 8));
+                }
             }
         });
+        let sidebar = Rc::new(sidebar);
+        *model.sidebar.borrow_mut() = Rc::downgrade(&sidebar);
         sidebar.set_selected(0);
         let window = SettingsWindow::new(&ui, "Rift Settings")
             .on_close(on_close)
@@ -151,6 +183,10 @@ impl Settings {
         }
         model.syncing.set(false);
         host.set_page(page.view.clone());
+    }
+
+    pub fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
+        *self.model.applications.borrow_mut() = applications;
     }
 
     pub fn refresh_displays(&self, displays: Vec<crate::sys::screen::ScreenInfo>) {
@@ -219,6 +255,7 @@ impl FormBuilder {
         Page {
             view: Rc::new(view),
             sync: self.sync,
+            navigate: None,
         }
     }
 

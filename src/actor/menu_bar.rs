@@ -164,6 +164,14 @@ impl Menu {
                     self.config_tx.send(match request.action {
                         crate::ui::settings::Action::Edit(edit) => config::Event::EditSource { edit, response },
                         crate::ui::settings::Action::Reload => config::Event::ReloadSource(response),
+                        crate::ui::settings::Action::RefreshRuntime => {
+                            let (displays, applications) = self.settings_runtime().await;
+                            if let Some(settings) = &self.settings {
+                                settings.refresh_applications(applications);
+                                settings.refresh_displays(displays);
+                            }
+                            config::Event::QuerySource(response)
+                        },
                     });
                     let result = result.await.unwrap_or_else(|_| Err("Configuration service unavailable".into()));
                     let source = result.as_ref().ok().cloned();
@@ -190,16 +198,34 @@ impl Menu {
         result.await.map_err(|_| "Configuration service unavailable".to_string())?
     }
 
+    async fn settings_runtime(
+        &self,
+    ) -> (
+        Vec<crate::sys::screen::ScreenInfo>,
+        Vec<rift_protocol::ApplicationData>,
+    ) {
+        let (displays_tx, displays_rx) = tokio::sync::oneshot::channel();
+        let (apps_tx, apps_rx) = tokio::sync::oneshot::channel();
+        self.reactor_tx.send(reactor::Event::Query(reactor::QueryRequest::DisplaysAsync(
+            displays_tx,
+        )));
+        self.reactor_tx
+            .send(reactor::Event::Query(reactor::QueryRequest::ApplicationsAsync(
+                apps_tx,
+            )));
+        let (displays, applications) = tokio::join!(displays_rx, apps_rx);
+        (
+            displays.unwrap_or_default().into_iter().map(|d| d.info).collect(),
+            applications.unwrap_or_default(),
+        )
+    }
+
     async fn open_settings(&mut self) {
         match self.source_snapshot().await {
             Ok(source) => {
-                let (response, result) = tokio::sync::oneshot::channel();
-                self.reactor_tx.send(reactor::Event::Query(reactor::QueryRequest::DisplaysAsync(
-                    response,
-                )));
-                let displays =
-                    result.await.unwrap_or_default().into_iter().map(|d| d.info).collect();
+                let (displays, applications) = self.settings_runtime().await;
                 if let Some(settings) = &self.settings {
+                    settings.refresh_applications(applications);
                     settings.synchronize(source);
                     settings.refresh_displays(displays);
                 } else {
@@ -208,6 +234,7 @@ impl Menu {
                         source,
                         self.config_path.clone(),
                         displays,
+                        applications,
                         self.settings_request_tx.clone(),
                         {
                             let actions = self.action_tx.clone();

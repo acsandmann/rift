@@ -2,6 +2,65 @@ use super::pages::{layouts, optional_number};
 use super::*;
 use crate::common::config::*;
 
+/// Keep detail controls and their sync closures scoped to the open Settings session.
+pub(super) fn show_editor(
+    ui: Ui,
+    model: &Rc<Model>,
+    title: &str,
+    page: Page,
+    current: &Rc<RefCell<Option<Page>>>,
+) {
+    let syncing = model.syncing.replace(true);
+    for sync in &page.sync {
+        sync(&model.source.borrow());
+    }
+    model.syncing.set(syncing);
+    page.view.min_width(480.0);
+    page.view.ns_view().layoutSubtreeIfNeeded();
+    let height = page.view.ns_view().fittingSize().height.clamp(100.0, 440.0);
+    let document = View::flipped(&ui).content(page.view.clone(), Insets {
+        top: 0.0,
+        left: 0.0,
+        bottom: 0.0,
+        right: 0.0,
+    });
+    let scroll = ScrollView::new(&ui, document);
+    scroll.fit_width();
+    scroll.height(height);
+    let weak = Rc::downgrade(model);
+    let editor = current.clone();
+    let done = Button::new(&ui, "Done").key_equivalent("\r").on_click(move || {
+        if let Some(model) = weak.upgrade() {
+            if let Some(sheet) = model.sheet.borrow().as_ref() {
+                sheet.end();
+            }
+        }
+        *editor.borrow_mut() = None;
+    });
+    let content = VStack::new(&ui)
+        .insets(Insets {
+            top: 20.0,
+            left: 20.0,
+            bottom: 20.0,
+            right: 20.0,
+        })
+        .push(SectionTitle::new(&ui, title))
+        .push(scroll)
+        .push(
+            HStack::new(&ui)
+                .push(Caption::new(&ui, "Changes save automatically."))
+                .spacer(&ui)
+                .push(done),
+        );
+    let sheet = Sheet::new(&ui, title, content);
+    sheet.fit_content();
+    if let Some(window) = model.window.borrow().load() {
+        sheet.show(&window);
+        *model.sheet.borrow_mut() = Some(sheet);
+        *current.borrow_mut() = Some(page);
+    }
+}
+
 /// Workspace records use a native collection and a small attached detail editor.
 type WorkspaceEntry = (usize, String, Option<LayoutMode>);
 
@@ -454,31 +513,48 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         }
     });
     let action = edit_rule.clone();
+    let app_names = Rc::downgrade(model);
     let table = Rc::new(
-        SettingsList::<AppWorkspaceRule>::new(&ui, rule_summary, rule_behavior)
-            .empty_message("No app rules")
-            .fit_content(360.0)
-            .symbol("app")
-            .on_open(move |index| action(index))
-            .reorderable(true)
-            .on_reorder({
-                let weak = Rc::downgrade(model);
-                let error = Rc::downgrade(&message);
-                move |from, to| {
-                    FormBuilder::submit(
-                        &weak,
-                        Box::new(move |s| {
-                            let rules = &mut s.virtual_workspaces.app_rules;
-                            if from < rules.len() && to < rules.len() {
-                                let rule = rules.remove(from);
-                                rules.insert(to, rule);
-                            }
-                            Ok(())
-                        }),
-                        error.clone(),
-                    )
-                }
-            }),
+        SettingsList::<AppWorkspaceRule>::new(
+            &ui,
+            move |rule| {
+                app_names
+                    .upgrade()
+                    .and_then(|model| {
+                        model
+                            .applications
+                            .borrow()
+                            .iter()
+                            .find(|app| rule.app_id.is_some() && app.bundle_id == rule.app_id)
+                            .map(|app| app.name.clone())
+                    })
+                    .unwrap_or_else(|| rule_summary(rule))
+            },
+            rule_behavior,
+        )
+        .empty_message("No app rules")
+        .fit_content(360.0)
+        .symbol("app")
+        .on_open(move |index| action(index))
+        .reorderable(true)
+        .on_reorder({
+            let weak = Rc::downgrade(model);
+            let error = Rc::downgrade(&message);
+            move |from, to| {
+                FormBuilder::submit(
+                    &weak,
+                    Box::new(move |s| {
+                        let rules = &mut s.virtual_workspaces.app_rules;
+                        if from < rules.len() && to < rules.len() {
+                            let rule = rules.remove(from);
+                            rules.insert(to, rule);
+                        }
+                        Ok(())
+                    }),
+                    error.clone(),
+                )
+            }
+        }),
     );
     let weak_table = Rc::downgrade(&table);
     let edit_action = edit_rule.clone();
@@ -583,9 +659,94 @@ fn rule_behavior(rule: &AppWorkspaceRule) -> String {
     parts.join(" · ")
 }
 
+type AppMatch = (Option<String>, Option<String>);
+fn running_app_choices(model: &Model) -> Vec<(String, AppMatch)> {
+    let mut apps: Vec<_> = model
+        .applications
+        .borrow()
+        .iter()
+        .filter(|app| app.window_count > 0)
+        .map(|app| {
+            (
+                app.name.clone(),
+                if let Some(id) = &app.bundle_id {
+                    (Some(id.clone()), None)
+                } else {
+                    (None, Some(app.name.clone()))
+                },
+            )
+        })
+        .collect();
+    apps.sort_by_key(|(name, _)| name.to_lowercase());
+    let mut seen = std::collections::BTreeSet::new();
+    apps.retain(|(_, target)| seen.insert(target.clone()));
+    apps
+}
+
+fn app_picker(
+    ui: Ui,
+    model: &Rc<Model>,
+    initial: AppMatch,
+    mut choose: impl FnMut(AppMatch) + 'static,
+) -> (Rc<Popup>, Rc<RefCell<Vec<(String, AppMatch)>>>) {
+    fn choices(model: &Model, current: &AppMatch) -> Vec<(String, AppMatch)> {
+        let mut apps = running_app_choices(model);
+        if *current != (None, None) && !apps.iter().any(|(_, value)| value == current) {
+            apps.push((current.1.clone().or(current.0.clone()).unwrap(), current.clone()));
+        }
+        apps.insert(0, ("Choose a running app…".into(), (None, None)));
+        apps
+    }
+    let selected = Rc::new(RefCell::new(initial));
+    let values = Rc::new(RefCell::new(choices(model, &selected.borrow())));
+    let targets = values.clone();
+    let selection = selected.clone();
+    let popup = Rc::new(
+        Popup::new(&ui)
+            .items(values.borrow().iter().map(|(name, _)| name.as_str()))
+            .on_change(move |index| {
+                if let Some((_, target)) =
+                    targets.borrow().get(index).filter(|(_, target)| *target != (None, None))
+                {
+                    *selection.borrow_mut() = target.clone();
+                    choose(target.clone());
+                }
+            }),
+    );
+    popup.set_selected(
+        values
+            .borrow()
+            .iter()
+            .position(|(_, target)| *target == *selected.borrow())
+            .unwrap_or(0),
+    );
+    let weak_model = Rc::downgrade(model);
+    let weak_popup = Rc::downgrade(&popup);
+    let refreshed = values.clone();
+    // Refresh on demand when a chooser opens, rather than polling while Settings is closed.
+    let _ = model.requests.send(Request {
+        action: Action::RefreshRuntime,
+        finish: Box::new(move |_| {
+            if let (Some(model), Some(popup)) = (weak_model.upgrade(), weak_popup.upgrade()) {
+                let apps = choices(&model, &selected.borrow());
+                popup.set_items(apps.iter().map(|(name, _)| name.as_str()));
+                popup.set_selected(
+                    apps.iter().position(|(_, target)| *target == *selected.borrow()).unwrap_or(0),
+                );
+                *refreshed.borrow_mut() = apps;
+            }
+        }),
+    });
+    (popup, values)
+}
+
 fn add_rule(ui: Ui, model: &Rc<Model>, error: Weak<ValidationMessage>) {
     // A native sheet collects the first matcher before inserting a valid rule.
+    let validation = Rc::new(ValidationMessage::new(&ui));
+    let input_error = Rc::downgrade(&validation);
     let input = Rc::new(TextField::new(&ui).placeholder("com.apple.Safari"));
+    let app_name = Rc::new(RefCell::new(None::<String>));
+    let selected_name = app_name.clone();
     let weak_sheet = Rc::downgrade(model);
     let weak_model = Rc::downgrade(model);
     let weak_input = Rc::downgrade(&input);
@@ -594,14 +755,30 @@ fn add_rule(ui: Ui, model: &Rc<Model>, error: Weak<ValidationMessage>) {
             return;
         };
         let value = input.get_value();
-        if value.trim().is_empty() {
+        let name = if value.trim().is_empty() {
+            selected_name.borrow().clone()
+        } else {
+            None
+        };
+        if value.trim().is_empty() && name.is_none() {
+            if let Some(message) = input_error.upgrade() {
+                message.set_validation(&Validation::Error(
+                    "Choose an app or enter a bundle identifier.".into(),
+                ));
+            }
+            if let Some(model) = weak_model.upgrade() {
+                if let Some(sheet) = model.sheet.borrow().as_ref() {
+                    sheet.fit_content();
+                }
+            }
             return;
         }
         FormBuilder::submit(
             &weak_model,
             Box::new(move |s| {
                 s.virtual_workspaces.app_rules.push(AppWorkspaceRule {
-                    app_id: Some(value),
+                    app_id: (!value.trim().is_empty()).then_some(value),
+                    app_name: name,
                     ..Default::default()
                 });
                 Ok(())
@@ -622,6 +799,13 @@ fn add_rule(ui: Ui, model: &Rc<Model>, error: Weak<ValidationMessage>) {
             }
         }
     });
+    let target = Rc::downgrade(&input);
+    let (picker, _) = app_picker(ui, model, (None, None), move |(id, name)| {
+        if let Some(input) = target.upgrade() {
+            input.set_value(id.as_deref().unwrap_or_default());
+            *app_name.borrow_mut() = name;
+        }
+    });
     let content = VStack::new(&ui)
         .insets(Insets {
             top: 20.0,
@@ -629,8 +813,11 @@ fn add_rule(ui: Ui, model: &Rc<Model>, error: Weak<ValidationMessage>) {
             bottom: 20.0,
             right: 20.0,
         })
-        .push(Label::new(&ui, "Bundle identifier"))
-        .push(input)
+        .push(SectionTitle::new(&ui, "Add App Rule"))
+        .push(Caption::new(&ui, "Choose an app with windows open in Rift."))
+        .push(SettingsRow::new(&ui, "Application", picker))
+        .push(Disclosure::new(&ui, "Enter a bundle identifier manually", input))
+        .push(validation)
         .push(HStack::new(&ui).spacer(&ui).push(cancel).push(button));
     content.min_width(380.0);
     let native = Sheet::new(&ui, "Add Rule", content);
@@ -656,6 +843,45 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut matches = Section::new(&ui, "Match")
         .description("All configured conditions must match. Blank fields are ignored.");
+    let existing = model
+        .source
+        .borrow()
+        .virtual_workspaces
+        .app_rules
+        .get(i)
+        .map(|r| (r.app_id.clone(), r.app_name.clone()))
+        .unwrap_or_default();
+    let weak = Rc::downgrade(model);
+    let message = Rc::new(ValidationMessage::new(&ui));
+    let error = Rc::downgrade(&message);
+    let (picker, values) = app_picker(ui, model, existing, move |target| {
+        FormBuilder::submit(
+            &weak,
+            Box::new(move |s| {
+                let rule =
+                    s.virtual_workspaces.app_rules.get_mut(i).ok_or("Rule no longer exists")?;
+                rule.app_id = target.0;
+                rule.app_name = target.1;
+                Ok(())
+            }),
+            error.clone(),
+        );
+    });
+    let weak_picker = Rc::downgrade(&picker);
+    f.sync.push(Box::new(move |source| {
+        if let Some(picker) = weak_picker.upgrade() {
+            let target = source
+                .virtual_workspaces
+                .app_rules
+                .get(i)
+                .map(|r| (r.app_id.clone(), r.app_name.clone()))
+                .unwrap_or_default();
+            picker.set_selected(
+                values.borrow().iter().position(|(_, value)| *value == target).unwrap_or(0),
+            );
+        }
+    }));
+    matches = matches.row(SettingsRow::new(&ui, "Application", picker)).footer(message);
     for (title, field) in [
         ("Bundle identifier", 0),
         ("Application name", 1),
@@ -696,7 +922,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
                 Ok(())
             },
         );
-        matches = if field >= 3 {
+        matches = if field <= 1 || field >= 3 {
             matches.content(Disclosure::new(&ui, title, row))
         } else {
             matches.row(row)
@@ -909,153 +1135,200 @@ pub(super) fn display_overrides(
     if displays.is_empty() {
         return page;
     }
-    let mut section = Section::new(&ui, "Per-display overrides");
-    for (uuid, name) in displays {
-        let mut rows = Section::new(&ui, "");
-        for (title, field) in [
-            ("Column width (%)", 0),
-            ("Minimum width (%)", 1),
-            ("Maximum width (%)", 2),
-        ] {
+    let current = Rc::new(RefCell::new(None::<Page>));
+    let editor = current.clone();
+    let weak = Rc::downgrade(model);
+    let entries = displays.clone();
+    let connected: Vec<_> =
+        model.displays.borrow().iter().map(|d| d.display_uuid.clone()).collect();
+    let list = SettingsList::new(
+        &ui,
+        |entry: &(String, String)| entry.1.clone(),
+        move |entry: &(String, String)| {
+            if connected.contains(&entry.0) {
+                "Connected · Customize spacing and scrolling widths".into()
+            } else {
+                format!("Not connected · Saved settings · {}", entry.0)
+            }
+        },
+    )
+    .symbol("display")
+    .fit_content(220.0)
+    .on_open(move |index| {
+        if let Some(model) = weak.upgrade() {
+            let (uuid, name) = &entries[index];
+            show_editor(
+                ui,
+                &model,
+                name,
+                display_options(ui, &model, uuid.clone()),
+                &editor,
+            );
+        }
+    });
+    list.set_rows(displays);
+    f.sync.push(Box::new(move |source| {
+        if let Some(page) = current.borrow().as_ref() {
+            for sync in &page.sync {
+                sync(source);
+            }
+        }
+    }));
+    page.section(
+        Section::new(&ui, "Display settings")
+            .description(
+                "Choose a display to override the spacing and scrolling widths for that screen.",
+            )
+            .content(list),
+    )
+}
+
+fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
+    let mut f = FormBuilder::new(ui, model);
+    let mut rows = Section::new(&ui, "Scrolling layout widths")
+        .description("Leave a width blank to use the scrolling layout’s value.");
+    for (title, field) in [
+        ("Column width (%)", 0),
+        ("Minimum width (%)", 1),
+        ("Maximum width (%)", 2),
+    ] {
+        let id = uuid.clone();
+        let edit_id = uuid.clone();
+        rows = rows.row(f.text(
+            title,
+            move |s| {
+                s.settings
+                    .layout
+                    .scrolling
+                    .per_display
+                    .get(&id)
+                    .and_then(|o| match field {
+                        0 => o.column_width_ratio,
+                        1 => o.min_column_width_ratio,
+                        _ => o.max_column_width_ratio,
+                    })
+                    .map(|v| (v * 100.0).to_string())
+                    .unwrap_or_default()
+            },
+            move |s, v| {
+                let value = optional_number(&v)?.map(|v| v / 100.0);
+                let o = s.settings.layout.scrolling.per_display.entry(edit_id.clone()).or_default();
+                match field {
+                    0 => o.column_width_ratio = value,
+                    1 => o.min_column_width_ratio = value,
+                    _ => o.max_column_width_ratio = value,
+                };
+                if o.column_width_ratio.is_none()
+                    && o.min_column_width_ratio.is_none()
+                    && o.max_column_width_ratio.is_none()
+                {
+                    s.settings.layout.scrolling.per_display.remove(&edit_id);
+                }
+                Ok(())
+            },
+        ));
+    }
+    for outer in [true, false] {
+        let group = Rc::new(VStack::new(&ui));
+        for axis in 0..if outer { 4 } else { 2 } {
             let id = uuid.clone();
             let edit_id = uuid.clone();
-            rows = rows.row(f.text(
-                title,
+            let row = f.number(
+                if outer {
+                    ["Top", "Left", "Bottom", "Right"][axis]
+                } else {
+                    ["Horizontal", "Vertical"][axis]
+                },
+                1.0,
                 move |s| {
-                    s.settings
-                        .layout
-                        .scrolling
-                        .per_display
-                        .get(&id)
-                        .and_then(|o| match field {
-                            0 => o.column_width_ratio,
-                            1 => o.min_column_width_ratio,
-                            _ => o.max_column_width_ratio,
-                        })
-                        .map(|v| (v * 100.0).to_string())
-                        .unwrap_or_default()
+                    let effective = s.settings.layout.gaps.effective_for_display(Some(&id));
+                    if outer {
+                        [
+                            effective.outer.top,
+                            effective.outer.left,
+                            effective.outer.bottom,
+                            effective.outer.right,
+                        ][axis]
+                    } else {
+                        [effective.inner.horizontal, effective.inner.vertical][axis]
+                    }
                 },
                 move |s, v| {
-                    let value = optional_number(&v)?.map(|v| v / 100.0);
-                    let o =
-                        s.settings.layout.scrolling.per_display.entry(edit_id.clone()).or_default();
-                    match field {
-                        0 => o.column_width_ratio = value,
-                        1 => o.min_column_width_ratio = value,
-                        _ => o.max_column_width_ratio = value,
-                    };
-                    if o.column_width_ratio.is_none()
-                        && o.min_column_width_ratio.is_none()
-                        && o.max_column_width_ratio.is_none()
-                    {
-                        s.settings.layout.scrolling.per_display.remove(&edit_id);
-                    }
-                    Ok(())
-                },
-            ));
-        }
-        for outer in [true, false] {
-            let group = Rc::new(VStack::new(&ui));
-            for axis in 0..if outer { 4 } else { 2 } {
-                let id = uuid.clone();
-                let edit_id = uuid.clone();
-                let row = f.number(
+                    let base = s.settings.layout.gaps.effective_for_display(Some(&edit_id));
+                    let o = s.settings.layout.gaps.per_display.entry(edit_id.clone()).or_default();
                     if outer {
-                        ["Top", "Left", "Bottom", "Right"][axis]
+                        let g = o.outer.get_or_insert(base.outer);
+                        match axis {
+                            0 => g.top = v,
+                            1 => g.left = v,
+                            2 => g.bottom = v,
+                            _ => g.right = v,
+                        }
                     } else {
-                        ["Horizontal", "Vertical"][axis]
-                    },
-                    1.0,
-                    move |s| {
-                        let effective = s.settings.layout.gaps.effective_for_display(Some(&id));
-                        if outer {
-                            [
-                                effective.outer.top,
-                                effective.outer.left,
-                                effective.outer.bottom,
-                                effective.outer.right,
-                            ][axis]
+                        let g = o.inner.get_or_insert(base.inner);
+                        if axis == 0 {
+                            g.horizontal = v;
                         } else {
-                            [effective.inner.horizontal, effective.inner.vertical][axis]
+                            g.vertical = v;
                         }
-                    },
-                    move |s, v| {
-                        let base = s.settings.layout.gaps.effective_for_display(Some(&edit_id));
-                        let o =
-                            s.settings.layout.gaps.per_display.entry(edit_id.clone()).or_default();
-                        if outer {
-                            let g = o.outer.get_or_insert(base.outer);
-                            match axis {
-                                0 => g.top = v,
-                                1 => g.left = v,
-                                2 => g.bottom = v,
-                                _ => g.right = v,
-                            }
-                        } else {
-                            let g = o.inner.get_or_insert(base.inner);
-                            if axis == 0 {
-                                g.horizontal = v;
-                            } else {
-                                g.vertical = v;
-                            }
-                        }
-                    },
-                );
-                // Preserve Rust callback ownership in the stack.
-                group.add(row);
-            }
-            let id = uuid.clone();
-            let edit_id = uuid.clone();
-            let weak = f.model.clone();
-            let message = Rc::new(ValidationMessage::new(&ui));
-            let error = Rc::downgrade(&message);
-            let row = Rc::new(OverrideRow::new(&ui, group, "Use Default").on_change(
-                move |custom| {
-                    let id = edit_id.clone();
-                    FormBuilder::submit(
-                        &weak,
-                        Box::new(move |s| {
-                            let base = s.settings.layout.gaps.effective_for_display(None);
-                            let o =
-                                s.settings.layout.gaps.per_display.entry(id.clone()).or_default();
-                            if outer {
-                                o.outer = custom.then_some(base.outer);
-                            } else {
-                                o.inner = custom.then_some(base.inner);
-                            }
-                            if o.outer.is_none() && o.inner.is_none() {
-                                s.settings.layout.gaps.per_display.remove(&id);
-                            }
-                            Ok(())
-                        }),
-                        error.clone(),
-                    );
+                    }
                 },
-            ));
-            let weak_row = Rc::downgrade(&row);
-            f.sync.push(Box::new(move |s| {
-                if let Some(row) = weak_row.upgrade() {
-                    row.set_overridden(s.settings.layout.gaps.per_display.get(&id).is_some_and(
-                        |o| {
-                            if outer {
-                                o.outer.is_some()
-                            } else {
-                                o.inner.is_some()
-                            }
-                        },
-                    ));
-                }
-            }));
-            rows = rows
-                .content(SubsectionTitle::new(
-                    &ui,
-                    if outer { "Outer gaps" } else { "Inner gaps" },
-                ))
-                .content(row)
-                .content(message);
+            );
+            // Preserve Rust callback ownership in the stack.
+            group.add(row);
         }
-        section = section.content(Disclosure::new(&ui, &name, rows));
+        let id = uuid.clone();
+        let edit_id = uuid.clone();
+        let weak = f.model.clone();
+        let message = Rc::new(ValidationMessage::new(&ui));
+        let error = Rc::downgrade(&message);
+        let row = Rc::new(
+            OverrideRow::new(&ui, group, "Use Default").on_change(move |custom| {
+                let id = edit_id.clone();
+                FormBuilder::submit(
+                    &weak,
+                    Box::new(move |s| {
+                        let base = s.settings.layout.gaps.effective_for_display(None);
+                        let o = s.settings.layout.gaps.per_display.entry(id.clone()).or_default();
+                        if outer {
+                            o.outer = custom.then_some(base.outer);
+                        } else {
+                            o.inner = custom.then_some(base.inner);
+                        }
+                        if o.outer.is_none() && o.inner.is_none() {
+                            s.settings.layout.gaps.per_display.remove(&id);
+                        }
+                        Ok(())
+                    }),
+                    error.clone(),
+                );
+            }),
+        );
+        let weak_row = Rc::downgrade(&row);
+        f.sync.push(Box::new(move |s| {
+            if let Some(row) = weak_row.upgrade() {
+                row.set_overridden(s.settings.layout.gaps.per_display.get(&id).is_some_and(|o| {
+                    if outer {
+                        o.outer.is_some()
+                    } else {
+                        o.inner.is_some()
+                    }
+                }));
+            }
+        }));
+        rows = rows
+            .content(SubsectionTitle::new(
+                &ui,
+                if outer {
+                    "Space around windows"
+                } else {
+                    "Space between windows"
+                },
+            ))
+            .content(row)
+            .content(message);
     }
-    page.section(section)
+    f.finish(rows)
 }
+
 pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page { super::commands::keyboard(ui, model) }

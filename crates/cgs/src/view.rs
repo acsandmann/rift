@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
@@ -352,4 +353,36 @@ impl NativeView for GlassEffectView {
             .as_ref()
             .map_or_else(|| self.content.ns_view(), |view| view.as_ref())
     }
+}
+
+/// Shallow navigation that keeps the root's controls and scroll position alive.
+pub struct NavigationHost {
+    host: PageHost,
+    root: RefCell<Option<Rc<dyn NativeView>>>,
+}
+impl NavigationHost {
+    pub fn new(ui: &Ui) -> Self {
+        Self {
+            host: PageHost::new(ui),
+            root: RefCell::new(None),
+        }
+    }
+
+    pub fn set_root(&self, page: Rc<dyn NativeView>) {
+        self.host.set_page(page.clone());
+        *self.root.borrow_mut() = Some(page);
+    }
+
+    pub fn push(&self, page: Rc<dyn NativeView>) { self.host.set_page(page); }
+
+    pub fn pop(&self) {
+        if let Some(root) = self.root.borrow().as_ref() {
+            self.host.set_page(root.clone());
+        }
+    }
+}
+impl NativeView for NavigationHost {
+    fn ns_view(&self) -> &NSView { self.host.ns_view() }
+
+    fn view_controller(&self) -> Option<&NSViewController> { self.host.view_controller() }
 }

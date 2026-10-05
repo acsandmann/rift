@@ -277,7 +277,8 @@ impl ScrollView {
 
     pub fn content_view(&self) -> &NSView { self.content.ns_view() }
 
-    pub(crate) fn fit_width(&self) {
+    /// Pin the document to the viewport width while allowing vertical scrolling.
+    pub fn fit_width(&self) {
         let clip = self.native.contentView();
         let child = self.content.ns_view();
         prepare(child);

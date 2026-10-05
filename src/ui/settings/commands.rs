@@ -158,7 +158,7 @@ fn action_name(cmd: &WmCommand) -> String {
         .into_iter()
         .find(|(_, a)| same_action(a, cmd))
         .map(|(name, _)| name.split_once(" · ").map_or(name, |(_, action)| action).to_string())
-        .unwrap_or("Custom action (retained)".into());
+        .unwrap_or("Custom command".into());
     let argument = match cmd {
         WmCommand::ReactorCommand(Command::Layout(
             L::MoveFocus(d) | L::MoveNode(d) | L::JoinWindow(d) | L::ConsumeOrExpelWindow(d),
@@ -168,6 +168,16 @@ fn action_name(cmd: &WmCommand) -> String {
             WorkspaceSelector::Name(n) => n.clone(),
         },
         WmCommand::Wm(WmCmd::BindingMode(n)) => n.clone(),
+        WmCommand::ReactorCommand(Command::Reactor(
+            R::FocusDisplay(target)
+            | R::MoveMouseToDisplay(target)
+            | R::MoveWindowToDisplay { selector: target, .. }
+            | R::MoveWorkspaceToDisplay { selector: target, .. },
+        )) => match target {
+            DisplaySelector::Direction(direction) => format!("{direction:?}"),
+            DisplaySelector::Index(index) => (index + 1).to_string(),
+            DisplaySelector::Uuid(_) => "(specific display)".into(),
+        },
         _ => String::new(),
     };
     if argument.is_empty() {
@@ -252,7 +262,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         |(_, action)| action.clone(),
         |(key, _)| key.clone(),
     )
-    .empty_message("No shortcuts in this keymap");
+    .trailing_summary()
+    .empty_message("No shortcuts in this shortcut set");
     let weak_model = Rc::downgrade(model);
     let mode_edit = mode.clone();
     let edit_binding: Rc<dyn Fn(usize)> = Rc::new(move |i| {
@@ -408,9 +419,9 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let menu = Menu::new(&ui);
     let mut managed = Vec::new();
     for (title, operation) in [
-        ("New Keymap…", 0),
-        ("Rename Keymap…", 1),
-        ("Delete Keymap…", 2),
+        ("New Shortcut Set…", 0),
+        ("Rename Shortcut Set…", 1),
+        ("Delete Shortcut Set…", 2),
     ] {
         let weak_model = Rc::downgrade(model);
         let mode = mode.clone();
@@ -432,21 +443,25 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             }
         }
     });
-    let management = Popup::actions(&ui, "Keymap Actions", menu);
+    let management = Popup::actions(&ui, "Shortcut Set Actions", menu);
     let mode_controls = HStack::new(&ui).push(popup).spacer(&ui).push(management);
     let combinations = modifier_combinations(&mut f, model);
     f.finish(
         SettingsPage::new(&ui, "")
-            .section(Section::new(&ui, "Keymap").content(mode_controls))
+            .section(Section::new(&ui, "Shortcut set")
+                .description("Choose which shortcuts to edit. Rift starts with the Default set; a shortcut can switch to another set.")
+                .content(mode_controls))
             .section(
-                Section::new(&ui, "Shortcuts")
+                Section::new(&ui, "Keyboard shortcuts")
+                    .description("Double-click a shortcut or click its arrow to edit it. Use + to add one.")
                     .content(table)
                     .content(HStack::new(&ui).push(controls).push(edit))
-                    .footer(error),
+                    .footer(error)
+                    .footer(Caption::new(&ui, "⌘ Command   ⌥ Option   ⌃ Control   ⇧ Shift")),
             )
             .section(Disclosure::new(
                 &ui,
-                "Reusable modifier combinations",
+                "Advanced: reusable modifier combinations",
                 combinations,
             ))
             .into_editor(),
@@ -579,7 +594,7 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
             Box::new(move |s| {
                 let bindings = keymap_mut(s, &mode)?;
                 if old.as_ref() != Some(&key) && bindings.contains_key(&key) {
-                    return Err("Shortcut is already assigned in this keymap".into());
+                    return Err("This shortcut is already assigned in this shortcut set".into());
                 }
                 if let Some(old) = old {
                     bindings.remove(&old);
@@ -601,6 +616,11 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
                 bottom: 20.0,
                 right: 20.0,
             })
+            .push(SectionTitle::new(&ui, "Keyboard Shortcut"))
+            .push(Caption::new(
+                &ui,
+                "Click the shortcut, then press the keys you want to use.",
+            ))
             .push(
                 Section::new(&ui, "")
                     .row(SettingsRow::new(&ui, "Shortcut", recorder))
@@ -716,7 +736,6 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                 DisplaySelector::Direction(Direction::Up),
                 DisplaySelector::Direction(Direction::Down),
             ];
-            let selected = values.iter().position(|v| *v == target);
             let mut values = values;
             let mut names = vec![
                 "Left".to_string(),
@@ -724,7 +743,16 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                 "Up".into(),
                 "Down".into(),
             ];
-            let selected = selected.unwrap_or_else(|| {
+            for display in model.displays.borrow().iter() {
+                values.push(DisplaySelector::Uuid(display.display_uuid.clone()));
+                names.push(
+                    display
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("Display {}", display.id.as_u32())),
+                );
+            }
+            let selected = values.iter().position(|value| *value == target).unwrap_or_else(|| {
                 values.push(target);
                 names.push("Current display target".into());
                 values.len() - 1
