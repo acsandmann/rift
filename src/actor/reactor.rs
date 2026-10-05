@@ -444,6 +444,8 @@ pub struct Reactor {
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
     layout_update_count: usize,
+    #[cfg(test)]
+    native_focus_for_removal: Option<WindowId>,
 }
 
 impl Reactor {
@@ -574,6 +576,8 @@ impl Reactor {
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
             layout_update_count: 0,
+            #[cfg(test)]
+            native_focus_for_removal: None,
         };
         reactor
     }
@@ -4702,6 +4706,33 @@ impl Reactor {
                 .filter(|space| self.is_space_active(*space))
                 .or_else(|| self.workspace_command_space())
         {
+            // A native tab departure can arrive before either AX or the debounced
+            // WindowServer focus notification. Sample native focus before raising
+            // a fallback, otherwise that raise can steal focus from the new tab.
+            #[cfg(not(test))]
+            let native_focus = matches!(event, LayoutEvent::WindowRemoved(_))
+                .then(|| window_server::key_focused_window(space))
+                .flatten();
+            #[cfg(test)]
+            let native_focus = self.native_focus_for_removal;
+            if matches!(event, LayoutEvent::WindowRemoved(_))
+                && let Some(native) = native_focus
+                && native.pid == wid.pid
+                && native != wid
+            {
+                let successor = self
+                    .state
+                    .windows
+                    .tracked_window_id(WindowServerId::new(native.idx.get()))
+                    .unwrap_or(native);
+                if successor != wid && !self.window_in_non_active_workspace(space, successor) {
+                    if !self.state.windows.contains_window(successor) {
+                        self.request_window_inventory(successor.pid);
+                    }
+                    debug!(?wid, ?successor, "Preserving native focus during window removal");
+                    return;
+                }
+            }
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
         }
     }

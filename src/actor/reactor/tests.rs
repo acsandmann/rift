@@ -6361,6 +6361,109 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
 }
 
 #[test]
+fn native_tab_departure_preserves_focus_before_notifications_and_discovery() {
+    for (ax_first, server_first, discovered) in [
+        (false, false, true),
+        (true, false, true),
+        (true, true, true),
+        (false, false, false),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let old_tab = WindowId::new(2, 1);
+        let new_tab = WindowId::new(2, 2);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(if discovered { 2 } else { 1 }));
+        reactor.handle_event(Event::ApplicationGloballyActivated(2));
+        reactor.handle_event(Event::WindowServerFocusChanged(old_tab, space));
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+
+        // Native focus has moved, but its notifications and AX discovery can lag
+        // behind the outgoing tab's Space departure in either order.
+        if ax_first {
+            reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(new_tab), Quiet::No));
+        }
+        if server_first {
+            reactor.handle_event(Event::WindowServerFocusChanged(new_tab, space));
+        }
+        let native_new = WindowId::new(2, 20_002);
+        reactor.native_focus_for_removal = Some(native_new);
+        let wsid = reactor.test_window_server_id(old_tab);
+        reactor.handle_event(Event::WindowServerHidden(wsid));
+        window_server::set_window_ordered_in_override(wsid, Some(false));
+        reactor.handle_event(Event::WindowServerDestroyed(wsid, space, SpaceEventKind::User));
+        window_server::set_window_ordered_in_override(wsid, None);
+        reactor.native_focus_for_removal = None;
+
+        let raises: Vec<_> = std::iter::from_fn(|| raise_rx.try_recv().ok()).collect();
+        assert!(
+            raises.is_empty(),
+            "a native tab switch must not request fallback focus: {raises:?}"
+        );
+        assert!(!reactor.state.windows.contains_window(old_tab));
+        if discovered {
+            reactor.handle_event(Event::WindowServerFocusChanged(new_tab, space));
+            assert_eq!(
+                reactor.layout_manager.layout_engine.focused_window(),
+                Some(new_tab)
+            );
+            assert!(reactor.create_window_data(new_tab).unwrap().is_focused);
+        } else {
+            assert!(
+                reactor.window_inventory_manager.in_flight.contains_key(&2),
+                "an unknown native successor must request AX discovery"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_tab_departure_keeps_recovery_without_a_native_successor() {
+    for successor_state in ["missing", "unchanged", "other-app", "inactive"] {
+        let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let old_tab = WindowId::new(2, 1);
+        let new_tab = WindowId::new(2, 2);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(2));
+        reactor.handle_event(Event::ApplicationGloballyActivated(2));
+        reactor.handle_event(Event::WindowServerFocusChanged(old_tab, space));
+        // Even a fresh AX hint must not suppress recovery without native evidence.
+        reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(new_tab), Quiet::No));
+        let native = match successor_state {
+            "unchanged" => Some(old_tab),
+            "other-app" => Some(WindowId::new(1, 10_001)),
+            "inactive" => {
+                let inactive = reactor.test_workspace(space, 1);
+                assert!(reactor.assign_test_window_to_workspace(space, new_tab, inactive));
+                Some(WindowId::new(2, 20_002))
+            }
+            _ => None,
+        };
+        reactor.native_focus_for_removal = native;
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        let wsid = reactor.test_window_server_id(old_tab);
+        reactor.handle_event(Event::WindowServerHidden(wsid));
+        window_server::set_window_ordered_in_override(wsid, Some(false));
+        reactor.handle_event(Event::WindowServerDestroyed(wsid, space, SpaceEventKind::User));
+        window_server::set_window_ordered_in_override(wsid, None);
+        reactor.native_focus_for_removal = None;
+
+        let raises: Vec<_> = std::iter::from_fn(|| raise_rx.try_recv().ok())
+            .map(|(_, request)| request)
+            .collect();
+        assert!(raises.iter().any(|request| matches!(request,
+            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
+                if *wid != old_tab
+        )), "{successor_state} native focus must not suppress recovery: {raises:?}");
+    }
+}
+
+#[test]
 fn closing_focused_window_refocuses_survivor() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -6429,6 +6532,8 @@ fn closing_focused_app_refocuses_surviving_app() {
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, closed));
     while raise_manager_rx.try_recv().is_ok() {}
 
+    // A stale native snapshot must not suppress recovery after the whole app exits.
+    reactor.native_focus_for_removal = Some(WindowId::new(1, 99));
     reactor.handle_event(Event::ApplicationThreadTerminated(1));
 
     let requests: Vec<_> = std::iter::from_fn(|| raise_manager_rx.try_recv().ok())
