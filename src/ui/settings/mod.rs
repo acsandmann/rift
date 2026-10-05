@@ -54,6 +54,7 @@ impl Settings {
         config_path: std::path::PathBuf,
         displays: Vec<crate::sys::screen::ScreenInfo>,
         requests: UnboundedSender<Request>,
+        on_close: impl FnMut() + 'static,
     ) -> Self {
         let model = Rc::new(Model {
             source: RefCell::new(source),
@@ -101,11 +102,9 @@ impl Settings {
             }
         });
         sidebar.set_selected(0);
-        let window = SettingsWindow::new(&ui, "Rift Settings").content(NavigationSplitView::new(
-            &ui,
-            sidebar,
-            host.clone(),
-        ));
+        let window = SettingsWindow::new(&ui, "Rift Settings")
+            .on_close(on_close)
+            .content(NavigationSplitView::new(&ui, sidebar, host.clone()));
         *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
         window.ns_window().setContentSize(CGSize::new(880.0, 660.0));
         window.ns_window().center();
@@ -192,6 +191,13 @@ impl Settings {
             }
         }
         self.model.syncing.set(false);
+    }
+}
+
+impl Drop for Settings {
+    fn drop(&mut self) {
+        // End the sheet while its weak parent still points to the live Settings window.
+        self.model.sheet.borrow_mut().take();
     }
 }
 

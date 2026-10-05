@@ -209,6 +209,12 @@ impl Menu {
                         self.config_path.clone(),
                         displays,
                         self.settings_request_tx.clone(),
+                        {
+                            let actions = self.action_tx.clone();
+                            move || {
+                                let _ = actions.send(MenuAction::SettingsClosed);
+                            }
+                        },
                     ));
                 }
                 let settings = self.settings.as_ref().unwrap();
@@ -349,6 +355,8 @@ impl Menu {
                 Self::open_path_or_url("https://github.com/sponsors/acsandmann");
             }
             MenuAction::OpenSettings => {}
+            // Run after windowWillClose returns, rather than dropping AppKit's active delegate.
+            MenuAction::SettingsClosed => self.settings = None,
             MenuAction::OpenConfig => {
                 Self::open_path_or_url(common::config::config_file());
             }

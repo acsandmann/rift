@@ -84,6 +84,7 @@ pub enum MenuAction {
     OpenSponsor,
     OpenConfig,
     OpenSettings,
+    SettingsClosed,
     ReloadConfig,
     QuitRift,
 }
