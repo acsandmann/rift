@@ -165,10 +165,12 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     let navigate: Rc<dyn Fn(Option<usize>)> = Rc::new(move |index| {
         if let (Some(model), Some(host)) = (weak.upgrade(), weak_host.upgrade()) {
             let Some(index) = index else {
+                model.page_title.set_text("Layouts");
                 host.pop();
                 editor.borrow_mut().take();
                 return;
             };
+            model.page_title.set_text(layouts()[index].0);
             if let Some(detail) = details.borrow()[index].as_ref() {
                 detail.synchronize(&model);
                 host.push(detail.view.clone());
@@ -328,19 +330,18 @@ fn layout_description(mode: LayoutMode) -> &'static str {
     }
 }
 
-fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back: Button) -> Page {
+fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back: Button) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let options = || {
         Section::new(&ui, match mode {
             LayoutMode::Stack => "Arrangement",
             LayoutMode::MasterStack => "Master area",
             LayoutMode::Scrolling => "Column sizing",
-            _ => "Behavior",
+            _ => "Window arrangement",
         })
     };
     let mut page = SettingsPage::new(&ui, "")
         .section(HStack::new(&ui).push(back).spacer(&ui))
-        .section(Title::new(&ui, name))
         .subtitle(layout_description(mode));
     let section = match mode {
         LayoutMode::Traditional => options()
@@ -372,10 +373,15 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back:
                         .bsp
                         .single_window_aspect_ratio
                         .map(|v| v.to_string())
-                        .unwrap_or_default()
+                        .unwrap_or_else(|| "Automatic".into())
                 },
                 |s, v| {
-                    s.settings.layout.bsp.single_window_aspect_ratio = optional_number(&v)?;
+                    s.settings.layout.bsp.single_window_aspect_ratio =
+                        if v.trim().eq_ignore_ascii_case("automatic") {
+                            None
+                        } else {
+                            optional_number(&v)?
+                        };
                     Ok(())
                 },
             )),
@@ -582,6 +588,12 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back:
                 "Floating does not have any additional layout options.",
             )));
         }
+    };
+    let section = if mode == LayoutMode::Bsp {
+        section.footer(WrappingLabel::new(&ui,
+            "Automatic fills the available space when only one window is open. Enter a width-to-height ratio, such as 1.78 for 16:9, to keep that window at a fixed shape."))
+    } else {
+        section
     };
     f.finish(page.section(section))
 }

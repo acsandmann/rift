@@ -288,6 +288,9 @@ pub struct SettingsPage {
     scroll: ScrollView,
     content: VStack,
     top: Retained<objc2_app_kit::NSLayoutConstraint>,
+    root: View,
+    scroll_bottom: Retained<objc2_app_kit::NSLayoutConstraint>,
+    footer: Option<Box<dyn NativeView>>,
 }
 impl SettingsPage {
     pub fn new(ui: &Ui, title: &str) -> Self {
@@ -327,7 +330,31 @@ impl SettingsPage {
         scroll.ns_scroll_view().setDrawsBackground(true);
         scroll.ns_scroll_view().setBackgroundColor(&Color::window_background());
         scroll.fit_width();
-        Self { ui: *ui, scroll, content, top }
+        let root = View::new(ui);
+        root.ns_view().addSubview(scroll.ns_view());
+        crate::view::prepare(scroll.ns_view());
+        let parent = root.ns_view();
+        let child = scroll.ns_view();
+        child.topAnchor().constraintEqualToAnchor(&parent.topAnchor()).setActive(true);
+        child
+            .leadingAnchor()
+            .constraintEqualToAnchor(&parent.leadingAnchor())
+            .setActive(true);
+        child
+            .trailingAnchor()
+            .constraintEqualToAnchor(&parent.trailingAnchor())
+            .setActive(true);
+        let scroll_bottom = child.bottomAnchor().constraintEqualToAnchor(&parent.bottomAnchor());
+        scroll_bottom.setActive(true);
+        Self {
+            ui: *ui,
+            scroll,
+            content,
+            top,
+            root,
+            scroll_bottom,
+            footer: None,
+        }
     }
 
     /// Let a collection editor own the viewport; its table supplies scrolling.
@@ -355,10 +382,47 @@ impl SettingsPage {
         self
     }
 
+    /// Keep collection actions reachable while the page content scrolls.
+    pub fn bottom_bar(mut self, content: impl NativeView) -> Self {
+        self.scroll_bottom.setActive(false);
+        let row = VStack::new(&self.ui)
+            .insets(Insets {
+                top: 6.0,
+                left: Metrics::PAGE_INSET,
+                bottom: 6.0,
+                right: Metrics::PAGE_INSET,
+            })
+            .push(content);
+        let footer = VStack::new(&self.ui).spacing(0.0).push(Divider::new(&self.ui)).push(row);
+        let view = footer.ns_view();
+        crate::view::prepare(view);
+        self.root.ns_view().addSubview(view);
+        view.bottomAnchor()
+            .constraintEqualToAnchor(&self.root.ns_view().safeAreaLayoutGuide().bottomAnchor())
+            .setActive(true);
+        view.centerXAnchor()
+            .constraintEqualToAnchor(&self.root.ns_view().centerXAnchor())
+            .setActive(true);
+        view.widthAnchor().constraintLessThanOrEqualToConstant(580.0).setActive(true);
+        view.widthAnchor()
+            .constraintLessThanOrEqualToAnchor(&self.root.ns_view().widthAnchor())
+            .setActive(true);
+        let fill = view.widthAnchor().constraintEqualToAnchor(&self.root.ns_view().widthAnchor());
+        fill.setPriority(750.0);
+        fill.setActive(true);
+        self.scroll
+            .ns_view()
+            .bottomAnchor()
+            .constraintEqualToAnchor(&view.topAnchor())
+            .setActive(true);
+        self.footer = Some(Box::new(footer));
+        self
+    }
+
     pub fn ns_scroll_view(&self) -> &objc2_app_kit::NSScrollView { self.scroll.ns_scroll_view() }
 }
 impl NativeView for SettingsPage {
-    fn ns_view(&self) -> &NSView { self.scroll.ns_view() }
+    fn ns_view(&self) -> &NSView { self.root.ns_view() }
 }
 
 pub struct EditorPage {

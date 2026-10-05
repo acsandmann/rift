@@ -73,7 +73,7 @@ fn workspace_editor(
     detail: impl Fn(Ui, &Rc<Model>, usize) -> Page + 'static,
     add: impl Fn(&Rc<Model>, Weak<ValidationMessage>) + 'static,
     remove: impl Fn(&mut ConfigSource, usize) -> Result<(), String> + Send + Copy + 'static,
-) -> Page {
+) -> (Page, Rc<AddRemoveControl>) {
     let mut f = FormBuilder::new(ui, model);
     let current: Rc<RefCell<Option<Page>>> = Rc::new(RefCell::new(None));
     let selected = Rc::new(Cell::new(None));
@@ -193,11 +193,9 @@ fn workspace_editor(
             }
         }
     }));
-    f.finish(
-        Section::new(&ui, title)
-            .content(HStack::new(&ui).push(actions))
-            .content(table)
-            .footer(message),
+    (
+        f.finish(Section::new(&ui, title).content(table).footer(message)),
+        actions,
     )
 }
 
@@ -251,7 +249,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
         },
     );
     section = section.row(defaults);
-    let editor = workspace_editor(
+    let (editor, actions) = workspace_editor(
         ui,
         model,
         "Workspaces",
@@ -363,7 +361,12 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     );
     let editor_sync = editor.sync;
     f.sync.extend(editor_sync);
-    f.finish(SettingsPage::new(&ui, "").section(section).section(editor.view))
+    f.finish(
+        SettingsPage::new(&ui, "")
+            .section(section)
+            .section(editor.view)
+            .bottom_bar(HStack::new(&ui).push(actions).spacer(&ui)),
+    )
 }
 
 fn resize_workspaces(s: &mut ConfigSource, count: usize) {
@@ -676,8 +679,8 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     }));
     f.finish(SettingsPage::new(&ui, "")
         .subtitle("Choose which windows Rift manages and where they open. Click a rule’s arrow to edit it. Drag rules to change their order.")
-        .section(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
         .section(table)
+        .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
         .section(message)
         )
 }
@@ -736,92 +739,115 @@ fn app_picker(
     model: &Rc<Model>,
     initial: AppMatch,
     mut choose: impl FnMut(AppMatch) + 'static,
-) -> (Rc<VStack>, Rc<Popup>, Rc<RefCell<Vec<(String, AppMatch)>>>) {
-    fn choices(model: &Model, current: &AppMatch, query: &str) -> Vec<(String, AppMatch)> {
-        let mut apps = application_choices(model);
-        if *current != (None, None) && !apps.iter().any(|(_, value)| value == current) {
-            apps.push((current.1.clone().or(current.0.clone()).unwrap(), current.clone()));
-        }
-        let query = query.trim().to_lowercase();
-        apps.retain(|(name, target)| {
-            name.to_lowercase().contains(&query)
-                || target.0.as_ref().is_some_and(|id| id.to_lowercase().contains(&query))
-        });
-        apps.sort_by_key(|(name, _)| name.to_lowercase());
-        let placeholder = if apps.is_empty() && !query.is_empty() {
-            "No matching applications"
-        } else {
-            "Choose an application…"
-        };
-        apps.insert(0, (placeholder.into(), (None, None)));
-        apps
-    }
-    let selected = Rc::new(RefCell::new(initial));
-    let values = Rc::new(RefCell::new(choices(model, &selected.borrow(), "")));
-    let targets = values.clone();
-    let selection = selected.clone();
-    let popup = Rc::new(
-        Popup::new(&ui)
-            .items(values.borrow().iter().map(|(name, _)| name.as_str()))
-            .on_change(move |index| {
-                if let Some((_, target)) =
-                    targets.borrow().get(index).filter(|(_, target)| *target != (None, None))
-                {
-                    *selection.borrow_mut() = target.clone();
-                    choose(target.clone());
+) -> (Rc<HStack>, Rc<Label>) {
+    let title = Rc::new(Label::new(
+        &ui,
+        &application_choices(model)
+            .into_iter()
+            .find(|(_, target)| *target == initial)
+            .map(|(name, _)| name)
+            .or(initial.1)
+            .or(initial.0)
+            .unwrap_or_else(|| "Any application".into()),
+    ));
+    let choices = Rc::new(RefCell::new(application_choices(model)));
+    let selected_choices = choices.clone();
+    let dismissal = Rc::new(RefCell::new(std::rc::Weak::<Popover>::new()));
+    let dismiss = dismissal.clone();
+    let list = Rc::new(
+        SettingsList::new(
+            &ui,
+            |app: &(String, AppMatch)| app.0.clone(),
+            |app| app.1.0.clone().unwrap_or_default(),
+        )
+        .empty_message("No matching applications")
+        .fit_content(240.0)
+        .symbol("app")
+        .on_select(move |index| {
+            let item = index.and_then(|index| selected_choices.borrow().get(index).cloned());
+            if let Some((_, target)) = item {
+                choose(target);
+                if let Some(popover) = dismiss.borrow().upgrade() {
+                    popover.close();
                 }
-            }),
+            }
+        }),
     );
-    popup.set_selected(
-        values
-            .borrow()
-            .iter()
-            .position(|(_, target)| *target == *selected.borrow())
-            .unwrap_or(0),
-    );
+    list.set_rows(choices.borrow().clone());
     let weak_model = Rc::downgrade(model);
-    let weak_popup = Rc::downgrade(&popup);
-    let filtered = values.clone();
-    let selected_app = selected.clone();
+    let weak_list = Rc::downgrade(&list);
+    let filtered = choices.clone();
     let search = Rc::new(
         SearchField::new(&ui)
-            .placeholder("Search applications")
+            .placeholder("Find an application")
             .on_change(move |query| {
-                if let (Some(model), Some(popup)) = (weak_model.upgrade(), weak_popup.upgrade()) {
-                    let apps = choices(&model, &selected_app.borrow(), &query);
-                    popup.set_items(apps.iter().map(|(name, _)| name.as_str()));
-                    popup.set_selected(
-                        apps.iter()
-                            .position(|(_, target)| *target == *selected_app.borrow())
-                            .unwrap_or(0),
-                    );
-                    *filtered.borrow_mut() = apps;
+                if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
+                    let query = query.trim().to_lowercase();
+                    let apps: Vec<_> = application_choices(&model)
+                        .into_iter()
+                        .filter(|(name, target)| {
+                            name.to_lowercase().contains(&query)
+                                || target
+                                    .0
+                                    .as_ref()
+                                    .is_some_and(|id| id.to_lowercase().contains(&query))
+                        })
+                        .collect();
+                    *filtered.borrow_mut() = apps.clone();
+                    list.set_rows(apps);
+                    list.set_selected(None);
                 }
             }),
     );
     let weak_model = Rc::downgrade(model);
-    let weak_popup = Rc::downgrade(&popup);
+    let weak_list = Rc::downgrade(&list);
     let weak_search = Rc::downgrade(&search);
-    let refreshed = values.clone();
-    // Refresh on demand when a chooser opens, rather than polling while Settings is closed.
     let _ = model.requests.send(Request {
         action: Action::RefreshRuntime,
         finish: Box::new(move |_| {
-            if let (Some(model), Some(popup)) = (weak_model.upgrade(), weak_popup.upgrade()) {
-                let query =
-                    weak_search.upgrade().map(|search| search.get_value()).unwrap_or_default();
-                let apps = choices(&model, &selected.borrow(), &query);
-                popup.set_items(apps.iter().map(|(name, _)| name.as_str()));
-                popup.set_selected(
-                    apps.iter().position(|(_, target)| *target == *selected.borrow()).unwrap_or(0),
-                );
-                *refreshed.borrow_mut() = apps;
+            if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
+                let query = weak_search
+                    .upgrade()
+                    .map(|search| search.get_value().trim().to_lowercase())
+                    .unwrap_or_default();
+                let apps: Vec<_> = application_choices(&model)
+                    .into_iter()
+                    .filter(|(name, target)| {
+                        name.to_lowercase().contains(&query)
+                            || target
+                                .0
+                                .as_ref()
+                                .is_some_and(|id| id.to_lowercase().contains(&query))
+                    })
+                    .collect();
+                *choices.borrow_mut() = apps.clone();
+                list.set_rows(apps);
             }
         }),
     });
-    let view = Rc::new(VStack::new(&ui).spacing(6.0).push(search).push(popup.clone()));
-    view.min_width(280.0);
-    (view, popup, values)
+    let content = VStack::new(&ui)
+        .insets(Insets {
+            top: 12.0,
+            left: 12.0,
+            bottom: 12.0,
+            right: 12.0,
+        })
+        .push(search)
+        .push(list);
+    content.width(360.0);
+    let popover = Rc::new(Popover::new(&ui, content));
+    *dismissal.borrow_mut() = Rc::downgrade(&popover);
+    let button = Button::new(&ui, "Change…");
+    let anchor = objc2::rc::Weak::new(button.ns_view());
+    let button = button.on_click(move || {
+        if let Some(view) = anchor.load() {
+            popover.show(&view);
+        }
+    });
+    (
+        Rc::new(HStack::new(&ui).push(title.clone()).spacer(&ui).push(button)),
+        title,
+    )
 }
 
 fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
@@ -1039,7 +1065,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
     let weak = Rc::downgrade(model);
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
-    let (picker_view, picker, values) = app_picker(ui, model, existing, move |target| {
+    let (picker_view, picker) = app_picker(ui, model, existing, move |target| {
         FormBuilder::submit(
             &weak,
             Box::new(move |s| {
@@ -1053,6 +1079,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         );
     });
     let weak_picker = Rc::downgrade(&picker);
+    let weak_model = Rc::downgrade(model);
     f.sync.push(Box::new(move |source| {
         if let Some(picker) = weak_picker.upgrade() {
             let target = source
@@ -1061,9 +1088,18 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
                 .get(i)
                 .map(|r| (r.app_id.clone(), r.app_name.clone()))
                 .unwrap_or_default();
-            picker.set_selected(
-                values.borrow().iter().position(|(_, value)| *value == target).unwrap_or(0),
-            );
+            let name = weak_model
+                .upgrade()
+                .and_then(|model| {
+                    application_choices(&model)
+                        .into_iter()
+                        .find(|(_, value)| *value == target)
+                        .map(|(name, _)| name)
+                })
+                .or(target.1)
+                .or(target.0)
+                .unwrap_or_else(|| "Any application".into());
+            picker.set_text(&name);
         }
     }));
     matches = matches.row(SettingsRow::new(&ui, "Application", picker_view)).footer(message);

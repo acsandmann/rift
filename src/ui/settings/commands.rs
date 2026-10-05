@@ -455,11 +455,11 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             .section(
                 Section::new(&ui, "Keyboard shortcuts")
                     .description("Double-click a shortcut or click its arrow to edit it. Use + to add one.")
-                    .content(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
                     .content(table)
                     .footer(error)
                     .footer(Caption::new(&ui, "⌘ Command   ⌥ Option   ⌃ Control   ⇧ Shift")),
             )
+            .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
             .section(Disclosure::new(
                 &ui,
                 "Advanced: reusable modifier combinations",

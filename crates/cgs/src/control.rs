@@ -1,6 +1,6 @@
-use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
+use objc2::{MainThreadOnly, Message};
 use objc2_app_kit::*;
 use objc2_foundation::{
     NSArray, NSNumber, NSNumberFormatter, NSNumberFormatterStyle, NSObjectProtocol, NSString,
@@ -250,7 +250,16 @@ impl Popup {
         }
         self.native.removeAllItems();
         for value in values {
-            self.native.addItemWithTitle(&NSString::from_str(value.as_ref()));
+            // addItemWithTitle merges duplicate titles, which breaks index-based choices.
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(self.native.mtm()),
+                    &NSString::from_str(value.as_ref()),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            self.native.menu().unwrap().addItem(&item);
         }
     }
 

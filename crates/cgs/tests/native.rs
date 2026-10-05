@@ -329,7 +329,8 @@ fn pages_start_at_top_and_controllers_leave_the_host(ui: &Ui) {
     for _ in 0..30 {
         section = section.row(SwitchRow::new(ui, "Option", Switch::new(ui)));
     }
-    let page = SettingsPage::new(ui, "Settings").section(section);
+    let controls = Rc::new(AddRemoveControl::new(ui));
+    let page = SettingsPage::new(ui, "Settings").section(section).bottom_bar(controls.clone());
     let scroll = Weak::new(page.ns_scroll_view());
     let window = Window::new(ui).size(CGSize::new(640.0, 400.0)).content(page);
     window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
@@ -340,6 +341,15 @@ fn pages_start_at_top_and_controllers_leave_the_host(ui: &Ui) {
     assert!(
         scroll.documentVisibleRect().origin.y.abs() < 1.0,
         "new pages must begin at the top"
+    );
+    let position = controls.ns_view().convertRect_toView(controls.ns_view().bounds(), None);
+    scroll.contentView().scrollToPoint(CGPoint::new(0.0, 400.0));
+    scroll.reflectScrolledClipView(&scroll.contentView());
+    window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+    assert_eq!(
+        controls.ns_view().convertRect_toView(controls.ns_view().bounds(), None),
+        position,
+        "collection actions must remain fixed while the page scrolls"
     );
     let host = Rc::new(PageHost::new(ui));
     let navigation = NavigationSplitView::new(
@@ -424,6 +434,17 @@ fn settings_lists_do_not_materialize_offscreen_rows(ui: &Ui) {
 }
 
 fn unchanged_popup_items_preserve_selection_and_native_items(ui: &Ui) {
+    let duplicates = Popup::new(ui).items(["Same app", "Same app", "Another app"]);
+    assert_eq!(
+        duplicates.ns_popup_button().numberOfItems(),
+        3,
+        "duplicate names must not shift selection indices"
+    );
+    duplicates.set_selected(2);
+    assert_eq!(
+        duplicates.ns_popup_button().titleOfSelectedItem().unwrap().to_string(),
+        "Another app"
+    );
     let popup = Popup::new(ui).items(["One", "Two"]);
     popup.set_selected(1);
     let first = popup.ns_popup_button().itemAtIndex(0).unwrap();
