@@ -6383,9 +6383,26 @@ fn native_tab_layout_fixture() -> (Apps, Reactor, CGRect, SpaceId, WindowId, Win
 }
 
 #[test]
-fn native_tab_creation_and_close_preserve_scrolling_slot_and_other_windows() {
-    for (departure_first, old_ordered_in) in [(false, true), (false, false), (true, false)] {
-        let (_apps, mut reactor, screen, space, old, separate) = native_tab_layout_fixture();
+fn native_tab_creation_and_close_preserve_layout_slot_and_other_windows() {
+    let modes = [
+        LayoutMode::Traditional,
+        LayoutMode::Bsp,
+        LayoutMode::Stack,
+        LayoutMode::MasterStack,
+        LayoutMode::Scrolling,
+        LayoutMode::Floating,
+    ];
+    for (mode, departure_first, old_ordered_in) in modes.into_iter().flat_map(|mode| {
+        [(false, true), (false, false), (true, false)]
+            .map(|(departure, ordered)| (mode, departure, ordered))
+    }) {
+        let (mut apps, mut reactor, screen, space, old, separate) = native_tab_layout_fixture();
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode,
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, old));
         let before = test_layout(&mut reactor, space, screen);
         let old_info = reactor.state.windows.window(old).unwrap().info.clone();
         let frame = reactor.state.windows.window(old).unwrap().frame_monotonic;
@@ -6458,6 +6475,110 @@ fn native_tab_creation_and_close_preserve_scrolling_slot_and_other_windows() {
             "closing a tab must restore the original identity in the same slot"
         );
         assert!(!reactor.state.windows.contains_window(new));
+    }
+}
+
+#[test]
+fn native_tab_switches_in_two_groups_preserve_each_groups_slot() {
+    let (_apps, mut reactor, screen, space, first, second) = native_tab_layout_fixture();
+    // Switch both groups, then return to their original tabs. Neither group
+    // may inherit the other's slot, width, or identity.
+    for (old, incoming) in [
+        (first, WindowId::new(2, 3)),
+        (second, WindowId::new(2, 4)),
+        (WindowId::new(2, 3), first),
+        (WindowId::new(2, 4), second),
+    ] {
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, old));
+        let mut expected = test_layout(&mut reactor, space, screen);
+        let mut info = reactor.state.windows.window(old).unwrap().info.clone();
+        let old_wsid = info.sys_id.unwrap();
+        info.frame = reactor.state.windows.window(old).unwrap().frame_monotonic;
+        info.sys_id = Some(WindowServerId::new(20_000 + incoming.idx.get()));
+        info.has_native_tabs = true;
+        window_server::set_window_ordered_in_override(old_wsid, Some(false));
+        reactor.handle_event(Event::WindowCreated(incoming, info, None, None));
+        reactor.handle_event(Event::WindowClosed(old_wsid));
+        window_server::set_window_ordered_in_override(old_wsid, None);
+        for (wid, _) in &mut expected {
+            if *wid == old {
+                *wid = incoming;
+            }
+        }
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, incoming));
+        assert_eq!(test_layout(&mut reactor, space, screen), expected);
+        assert!(!reactor.state.windows.contains_window(old));
+    }
+}
+
+#[test]
+fn native_tab_floating_transitions_preserve_position_and_floating_state() {
+    for departure_first in [false, true] {
+        let (mut apps, mut reactor, screen, space, old, separate) = native_tab_layout_fixture();
+        reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+        apps.simulate_until_quiet(&mut reactor);
+        let workspace = reactor
+            .layout_manager
+            .layout_engine
+            .workspaces()
+            .active_workspace(space)
+            .unwrap();
+        let frame = CGRect::new(CGPoint::new(75., 110.), CGSize::new(430., 320.));
+        reactor.state.windows.window_mut(old).unwrap().frame_monotonic = frame;
+        reactor
+            .layout_manager
+            .layout_engine
+            .store_floating_position(space, workspace, old, frame);
+        let before = test_layout(&mut reactor, space, screen);
+        let old_info = reactor.state.windows.window(old).unwrap().info.clone();
+        let old_wsid = old_info.sys_id.unwrap();
+        let new = WindowId::new(2, 3);
+        let new_wsid = WindowServerId::new(20_003);
+        let mut info = old_info.clone();
+        info.frame = frame;
+        info.sys_id = Some(new_wsid);
+        info.has_native_tabs = true;
+        window_server::set_window_ordered_in_override(old_wsid, Some(false));
+        if departure_first {
+            reactor.native_tab_successor = Some((WindowId::new(2, 20_003), frame));
+            reactor.handle_event(Event::WindowClosed(old_wsid));
+            reactor.discover_test_windows(2, vec![(new, info)], vec![new, separate]);
+        } else {
+            reactor.handle_event(Event::WindowCreated(new, info, None, None));
+            reactor.handle_event(Event::WindowClosed(old_wsid));
+        }
+        window_server::set_window_ordered_in_override(old_wsid, None);
+        reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(new), Quiet::No));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, new));
+        assert!(reactor.layout_manager.layout_engine.is_window_floating(new));
+        assert_eq!(
+            reactor
+                .layout_manager
+                .layout_engine
+                .get_floating_position(space, workspace, new),
+            Some(frame)
+        );
+        assert_eq!(
+            test_layout(&mut reactor, space, screen),
+            before,
+            "floating tab changes must not rearrange tiled windows"
+        );
+        let mut restored = old_info;
+        restored.frame = frame;
+        restored.has_native_tabs = false;
+        reactor.native_tab_successor = Some((WindowId::new(2, old_wsid.as_u32()), frame));
+        window_server::set_window_ordered_in_override(new_wsid, Some(false));
+        reactor.handle_event(Event::WindowClosed(new_wsid));
+        reactor.discover_test_windows(2, vec![(old, restored)], vec![old, separate]);
+        window_server::set_window_ordered_in_override(new_wsid, None);
+        assert!(reactor.layout_manager.layout_engine.is_window_floating(old));
+        assert_eq!(
+            reactor
+                .layout_manager
+                .layout_engine
+                .get_floating_position(space, workspace, old),
+            Some(frame)
+        );
     }
 }
 
