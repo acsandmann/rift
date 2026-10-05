@@ -1,6 +1,7 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
+use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::*;
 use objc2_foundation::NSArray;
 
@@ -256,13 +257,39 @@ impl NativeView for GroupBox {
     fn ns_view(&self) -> &NSView { &self.native }
 }
 
+define_class!(
+    #[unsafe(super(NSScrollView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CgUiScrollView"]
+    #[ivars = Cell<bool>]
+    struct NativeScrollView;
+
+    impl NativeScrollView {
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            if self.ivars().get() {
+                if let Some(parent) = unsafe { self.superview() } {
+                    parent.scrollWheel(event);
+                }
+            } else {
+                unsafe { let _: () = msg_send![super(self), scrollWheel: event]; }
+            }
+        }
+    }
+);
+
 pub struct ScrollView {
-    native: Retained<NSScrollView>,
+    native: Retained<NativeScrollView>,
     content: Box<dyn NativeView>,
 }
 impl ScrollView {
     pub fn new(ui: &Ui, content: impl NativeView) -> Self {
-        let native = NSScrollView::new(ui.mtm());
+        let native: Retained<NativeScrollView> = unsafe {
+            msg_send![
+                super(NativeScrollView::alloc(ui.mtm()).set_ivars(Cell::new(false))),
+                init
+            ]
+        };
         native.setHasVerticalScroller(true);
         native.setAutohidesScrollers(true);
         native.setDrawsBackground(false);
@@ -274,6 +301,14 @@ impl ScrollView {
     }
 
     pub fn ns_scroll_view(&self) -> &NSScrollView { &self.native }
+
+    pub(crate) fn defer_scrolling(&self) {
+        self.native.ivars().set(true);
+        self.native.setHasVerticalScroller(false);
+        self.native.setHasHorizontalScroller(false);
+        self.native.setVerticalScrollElasticity(NSScrollElasticity::None);
+        self.native.setHorizontalScrollElasticity(NSScrollElasticity::None);
+    }
 
     pub fn content_view(&self) -> &NSView { self.content.ns_view() }
 

@@ -241,9 +241,9 @@ impl NavigationToolbarDelegate {
     fn item_identifiers(&self) -> Retained<NSArray<NSToolbarItemIdentifier>> {
         if self.ivars().is_some() {
             NSArray::from_retained_slice(&[
+                unsafe { NSToolbarToggleSidebarItemIdentifier }.retain(),
                 NSString::from_str("cgs.page-title"),
                 unsafe { NSToolbarFlexibleSpaceItemIdentifier }.retain(),
-                unsafe { NSToolbarToggleSidebarItemIdentifier }.retain(),
             ])
         } else {
             NSArray::from_slice(&[unsafe { NSToolbarToggleSidebarItemIdentifier }, unsafe {

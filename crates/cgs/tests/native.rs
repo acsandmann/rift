@@ -382,6 +382,45 @@ fn settings_lists_do_not_materialize_offscreen_rows(ui: &Ui) {
         "sizing a capped list created {} row hierarchies",
         configured.get()
     );
+    let configured = Rc::new(Cell::new(0));
+    let count = configured.clone();
+    let list = Rc::new(
+        SettingsList::new(
+            ui,
+            move |row: &usize| {
+                count.set(count.get() + 1);
+                format!("Rule {row}")
+            },
+            |_| "Description".into(),
+        )
+        .navigation()
+        .full_length(),
+    );
+    list.set_rows((0..200).collect());
+    let page = SettingsPage::new(ui, "").section(list.clone());
+    let window = Window::new(ui).size(CGSize::new(600.0, 300.0)).content(page);
+    window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+    let clip = list.ns_scroll_view().contentView().bounds();
+    let first = list.ns_table_view().rectOfRow(0);
+    let last = list.ns_table_view().rectOfRow(199);
+    assert_eq!(clip.origin.y, 0.0, "full-length lists must stay at the top");
+    assert!(
+        clip.size.height >= last.origin.y + last.size.height + first.origin.y,
+        "the viewport must include the final row and symmetric native padding"
+    );
+    assert!(
+        !list.ns_scroll_view().hasVerticalScroller(),
+        "the page must own scrolling"
+    );
+    assert!(
+        list.ns_view().frame().size.height > 10_000.0,
+        "all rows must contribute to page height"
+    );
+    assert!(
+        configured.get() < 32,
+        "full-length page materialized {} offscreen rows",
+        configured.get()
+    );
 }
 
 fn unchanged_popup_items_preserve_selection_and_native_items(ui: &Ui) {

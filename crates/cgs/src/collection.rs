@@ -764,9 +764,9 @@ impl SettingsListCell {
         });
         let mut row = crate::HStack::new(ui).insets(crate::Insets {
             top: 8.0,
-            left: 0.0,
+            left: 12.0,
             bottom: 8.0,
-            right: 0.0,
+            right: 12.0,
         });
         if let Some(icon) = &icon {
             row = row.push(icon.clone().into_super().into_super());
@@ -840,6 +840,7 @@ impl SettingsListCell {
             trailing.set_hidden(summary.is_empty());
         }
         if let Some(icon) = &cell.icon {
+            icon.setContentTintColor(Some(&crate::Color::secondary_label()));
             icon.setImage(symbol.and_then(crate::Symbol::named).as_deref());
             icon.setHidden(symbol.is_none());
         }
@@ -860,6 +861,7 @@ pub struct SettingsList<T: 'static> {
     surface: crate::GroupBox,
     open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>>,
     symbol: Rc<RefCell<Option<Box<dyn Fn(&T) -> String>>>>,
+    image: Rc<RefCell<Option<Box<dyn Fn(&T) -> Option<Retained<NSImage>>>>>>,
     fitted_height: Option<(Retained<NSLayoutConstraint>, f64)>,
     row_count: Rc<Cell<usize>>,
     empty: crate::Caption,
@@ -874,6 +876,9 @@ impl<T: 'static> SettingsList<T> {
     ) -> Self {
         let open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>> = Rc::new(RefCell::new(None));
         let symbol: Rc<RefCell<Option<Box<dyn Fn(&T) -> String>>>> = Rc::new(RefCell::new(None));
+        let image: Rc<RefCell<Option<Box<dyn Fn(&T) -> Option<Retained<NSImage>>>>>> =
+            Rc::new(RefCell::new(None));
+        let row_image = image.clone();
         let row_open = open.clone();
         let row_symbol = symbol.clone();
         let ui_copy = *ui;
@@ -900,7 +905,7 @@ impl<T: 'static> SettingsList<T> {
                         &ui_copy,
                         row_open.clone(),
                         inline.get(),
-                        row_symbol.borrow().is_some(),
+                        row_symbol.borrow().is_some() || row_image.borrow().is_some(),
                         row_navigation.get(),
                         opens.borrow().is_some(),
                     );
@@ -917,17 +922,28 @@ impl<T: 'static> SettingsList<T> {
                 row,
                 cell_count.get(),
             );
+            if let Some(provider) = row_image.borrow().as_ref() {
+                if let Some(image) = provider(item) {
+                    if let Some(icon) = &cell.ivars().icon {
+                        icon.setContentTintColor(None);
+                        icon.setImage(Some(&image));
+                        icon.setHidden(false);
+                    }
+                }
+            }
             cell.into_super().into_super()
         }));
+        // The enclosing group supplies the surface; avoid NSTableView's extra inset margins.
+        table.ns_table_view().setStyle(NSTableViewStyle::Plain);
         table.ns_table_view().setHeaderView(None);
         table.ns_table_view().setRowHeight(44.0);
         table.ns_table_view().setBackgroundColor(&NSColor::clearColor());
         table.ns_scroll_view().setDrawsBackground(false);
         let surface = crate::GroupBox::with_insets(ui, table.ns_view().retain(), crate::Insets {
-            top: 4.0,
-            left: 4.0,
-            bottom: 4.0,
-            right: 4.0,
+            top: 0.0,
+            left: 0.0,
+            bottom: 0.0,
+            right: 0.0,
         });
         let empty = crate::Caption::new(ui, "No items");
         surface.ns_view().addSubview(empty.ns_view());
@@ -947,6 +963,7 @@ impl<T: 'static> SettingsList<T> {
             surface,
             open,
             symbol,
+            image,
             fitted_height: None,
             row_count,
             empty,
@@ -955,7 +972,14 @@ impl<T: 'static> SettingsList<T> {
         }
     }
 
+    /// Expand to every row so an enclosing settings page owns scrolling.
+    pub fn full_length(self) -> Self {
+        self.table.scroll.defer_scrolling();
+        self.fit_content(f64::MAX)
+    }
+
     /// Small inventories size to their rows; larger inventories scroll within the cap.
+
     pub fn fit_content(mut self, maximum_height: f64) -> Self {
         let height = self.ns_view().heightAnchor().constraintEqualToConstant(64.0);
         height.setActive(true);
@@ -977,8 +1001,14 @@ impl<T: 'static> SettingsList<T> {
         self.table.set_rows(rows);
         if let Some((height, maximum)) = &self.fitted_height {
             let table = self.table.ns_table_view();
+            // Inset tables add native padding before the first and after the last row.
+            let native_padding = if count == 0 {
+                0.0
+            } else {
+                table.rectOfRow(0).origin.y * 2.0
+            };
             let total = (count as f64 * (table.rowHeight() + table.intercellSpacing().height)
-                + 8.0)
+                + native_padding)
                 .max(64.0);
             let fitted = total.min(*maximum);
             if height.constant() != fitted {
@@ -1026,6 +1056,12 @@ impl<T: 'static> SettingsList<T> {
     pub fn symbol(self, name: &str) -> Self {
         let name = name.to_owned();
         *self.symbol.borrow_mut() = Some(Box::new(move |_| name.clone()));
+        self
+    }
+
+    /// Provide a native image, with the configured symbol as a fallback.
+    pub fn images(self, image: impl Fn(&T) -> Option<Retained<NSImage>> + 'static) -> Self {
+        *self.image.borrow_mut() = Some(Box::new(image));
         self
     }
 

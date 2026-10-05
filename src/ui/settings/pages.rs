@@ -23,25 +23,17 @@ pub(super) fn layout_symbol(mode: LayoutMode) -> &'static str {
     }
 }
 
-fn insertion() -> Vec<(&'static str, Option<WindowInsertionPoint>)> {
+fn insertion() -> Vec<(&'static str, WindowInsertionPoint)> {
     vec![
-        ("Use Default", None),
-        ("Next to selection", Some(WindowInsertionPoint::NextToSelection)),
-        ("End of layout", Some(WindowInsertionPoint::EndOfTree)),
+        ("Next to selection", WindowInsertionPoint::NextToSelection),
+        ("End of layout", WindowInsertionPoint::EndOfTree),
     ]
 }
-fn optional_bool() -> Vec<(&'static str, Option<bool>)> {
+fn bool_choices() -> Vec<(&'static str, bool)> { vec![("Enabled", true), ("Disabled", false)] }
+fn arrangement() -> Vec<(&'static str, Orientation)> {
     vec![
-        ("Use Default", None),
-        ("Enabled", Some(true)),
-        ("Disabled", Some(false)),
-    ]
-}
-fn arrangement() -> Vec<(&'static str, Option<Orientation>)> {
-    vec![
-        ("Use Default", None),
-        ("Horizontal", Some(Orientation::Horizontal)),
-        ("Vertical", Some(Orientation::Vertical)),
+        ("Horizontal", Orientation::Horizontal),
+        ("Vertical", Orientation::Vertical),
     ]
 }
 
@@ -156,10 +148,11 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
             |s| s.settings.layout.mode,
             |s, v| s.settings.layout.mode = v,
         ))
-        .row(f.popup(
+        .row(f.inherited_popup(
             "New window position",
             insertion(),
             |s| s.settings.layout.base.window_insertion_point,
+            |_| WindowInsertionPoint::default(),
             |s, v| s.settings.layout.base.window_insertion_point = v,
         ));
     page = page.section(section);
@@ -219,7 +212,7 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     )
     .symbols(|entry| layout_symbol(entry.1).to_string())
     .navigation()
-    .fit_content(380.0)
+    .full_length()
     .on_open({
         let weak = Rc::downgrade(model);
         move |index| {
@@ -356,17 +349,19 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back:
                 |s| s.settings.layout.traditional.equalize_nodes,
                 |s, v| s.settings.layout.traditional.equalize_nodes = v,
             ))
-            .row(f.popup(
+            .row(f.inherited_popup(
                 "New window position",
                 insertion(),
                 |s| s.settings.layout.traditional.base.window_insertion_point,
+                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
                 |s, v| s.settings.layout.traditional.base.window_insertion_point = v,
             )),
         LayoutMode::Bsp => options()
-            .row(f.popup(
+            .row(f.inherited_popup(
                 "New window position",
                 insertion(),
                 |s| s.settings.layout.bsp.base.window_insertion_point,
+                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
                 |s, v| s.settings.layout.bsp.base.window_insertion_point = v,
             ))
             .row(f.text(
@@ -402,10 +397,11 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back:
                 |s| s.settings.layout.stack.default_orientation,
                 |s, v| s.settings.layout.stack.default_orientation = v,
             ))
-            .row(f.popup(
+            .row(f.inherited_popup(
                 "New window position",
                 insertion(),
                 |s| s.settings.layout.stack.base.window_insertion_point,
+                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
                 |s, v| s.settings.layout.stack.base.window_insertion_point = v,
             )),
         LayoutMode::MasterStack => {
@@ -447,22 +443,31 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back:
                     |s| s.settings.layout.master_stack.new_window_placement,
                     |s, v| s.settings.layout.master_stack.new_window_placement = v,
                 ))
-                .row(f.popup(
+                .row(f.inherited_popup(
                     "Master arrangement",
                     arrangement(),
                     |s| s.settings.layout.master_stack.master_arrangement,
+                    |s| match s.settings.layout.master_stack.master_side {
+                        MasterStackSide::Left | MasterStackSide::Right => Orientation::Vertical,
+                        MasterStackSide::Top | MasterStackSide::Bottom => Orientation::Horizontal,
+                    },
                     |s, v| s.settings.layout.master_stack.master_arrangement = v,
                 ))
-                .row(f.popup(
+                .row(f.inherited_popup(
                     "Stack arrangement",
                     arrangement(),
                     |s| s.settings.layout.master_stack.stack_arrangement,
+                    |s| match s.settings.layout.master_stack.master_side {
+                        MasterStackSide::Left | MasterStackSide::Right => Orientation::Vertical,
+                        MasterStackSide::Top | MasterStackSide::Bottom => Orientation::Horizontal,
+                    },
                     |s, v| s.settings.layout.master_stack.stack_arrangement = v,
                 ))
-                .row(f.popup(
+                .row(f.inherited_popup(
                     "New window position",
                     insertion(),
                     |s| s.settings.layout.master_stack.base.window_insertion_point,
+                    |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
                     |s, v| s.settings.layout.master_stack.base.window_insertion_point = v,
                 ))
         }
@@ -555,17 +560,19 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, name: &str, back:
                     |s| s.settings.layout.scrolling.focus_navigation_style,
                     |s, v| s.settings.layout.scrolling.focus_navigation_style = v,
                 ))
-                .row(f.popup(
+                .row(f.inherited_popup(
                     "Animate navigation",
-                    optional_bool(),
+                    bool_choices(),
                     |s| s.settings.layout.scrolling.animate,
+                    |_| true,
                     |s, v| s.settings.layout.scrolling.animate = v,
                 ));
             page = page.section(section);
-            Section::new(&ui, "Window placement").row(f.popup(
+            Section::new(&ui, "Window placement").row(f.inherited_popup(
                 "New window position",
                 insertion(),
                 |s| s.settings.layout.scrolling.base.window_insertion_point,
+                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
                 |s, v| s.settings.layout.scrolling.base.window_insertion_point = v,
             ))
         }
@@ -659,10 +666,11 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
             |s| s.settings.layout.scrolling.gestures.propagate_to_workspace_swipe,
             |s, v| s.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = v,
         ))
-        .row(f.popup(
+        .row(f.inherited_popup(
             "Animate gestures",
-            optional_bool(),
+            bool_choices(),
             |s| s.settings.layout.scrolling.gestures.animate,
+            |s| s.settings.layout.scrolling.animate.unwrap_or(true),
             |s, v| s.settings.layout.scrolling.gestures.animate = v,
         ))
         .row(f.number(

@@ -168,6 +168,7 @@ impl Menu {
                             if let Some(settings) = &self.settings {
                                 settings.refresh_applications(applications);
                                 settings.refresh_displays(displays);
+                                settings.refresh_installed_applications().await;
                             }
                             (request.finish)(Ok(()));
                             continue;

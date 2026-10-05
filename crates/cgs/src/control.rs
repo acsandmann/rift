@@ -1,3 +1,4 @@
+use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::*;
@@ -658,9 +659,20 @@ impl AddRemoveControl {
     pub fn new(ui: &Ui) -> Self {
         let add = IconButton::new(ui, "plus", "Add");
         let remove = IconButton::new(ui, "minus", "Remove");
-        let stack = HStack::new(ui).spacing(crate::Metrics::CONTROL_SPACING);
-        stack.ns_stack_view().addArrangedSubview(add.ns_view());
-        stack.ns_stack_view().addArrangedSubview(remove.ns_view());
+        for button in [&add, &remove] {
+            button.ns_button().setBordered(false);
+            button.width(28.0);
+            button.height(24.0);
+        }
+        let divider = NSBox::new(ui.mtm());
+        divider.setBoxType(NSBoxType::Separator);
+        divider.widthAnchor().constraintEqualToConstant(1.0).setActive(true);
+        divider.heightAnchor().constraintEqualToConstant(16.0).setActive(true);
+        let stack = HStack::new(ui)
+            .spacing(0.0)
+            .push(add.ns_view().retain())
+            .push(divider.into_super())
+            .push(remove.ns_view().retain());
         Self { stack, add, remove }
     }
 

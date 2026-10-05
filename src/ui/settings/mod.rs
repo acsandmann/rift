@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::actor::config::SourceEdit;
 use crate::common::config::ConfigSource;
 
+mod applications;
 mod commands;
 mod editors;
 mod pages;
@@ -34,6 +35,7 @@ struct Model {
     displays: RefCell<Vec<crate::sys::screen::ScreenInfo>>,
     config_path: std::path::PathBuf,
     applications: RefCell<Vec<rift_protocol::ApplicationData>>,
+    installed_applications: RefCell<Option<Vec<(String, String)>>>,
     sidebar: RefCell<std::rc::Weak<Sidebar<usize>>>,
     page_title: Rc<Label>,
 }
@@ -97,6 +99,7 @@ impl Settings {
             displays: RefCell::new(displays),
             config_path,
             applications: RefCell::new(applications),
+            installed_applications: RefCell::new(None),
             sidebar: RefCell::new(std::rc::Weak::new()),
             page_title: Rc::new(Label::new(&ui, "General")),
         });
@@ -210,6 +213,19 @@ impl Settings {
         let page = pages[id].as_ref().unwrap();
         page.synchronize(model);
         host.set_cached_page(page.view.clone());
+    }
+
+    pub async fn refresh_installed_applications(&self) {
+        if self.model.installed_applications.borrow().is_some() {
+            return;
+        }
+        let (send, receive) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(applications::installed());
+        });
+        if let Ok(apps) = receive.await {
+            *self.model.installed_applications.borrow_mut() = Some(apps);
+        }
     }
 
     pub fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
@@ -491,6 +507,56 @@ impl FormBuilder {
         self.sync.push(Box::new(move |s| {
             if let Some(input) = weak.upgrade() {
                 input.set_selected(items.iter().position(|v| *v == get(s)).unwrap_or(0));
+            }
+        }));
+        self.row(title, input, message)
+    }
+
+    fn inherited_popup<T: Clone + PartialEq + Send + 'static>(
+        &mut self,
+        title: &str,
+        values: Vec<(&str, T)>,
+        get: impl Fn(&ConfigSource) -> Option<T> + 'static,
+        default: impl Fn(&ConfigSource) -> T + Send + Clone + 'static,
+        set: impl Fn(&mut ConfigSource, Option<T>) + Send + Clone + 'static,
+    ) -> SettingsRow {
+        let message = Rc::new(ValidationMessage::new(&self.ui));
+        let error = Rc::downgrade(&message);
+        let model = self.model.clone();
+        let get = Rc::new(get);
+        let current = get.clone();
+        let items: Vec<_> = values.iter().map(|(_, value)| value.clone()).collect();
+        let choices = items.clone();
+        let fallback = default.clone();
+        let input = Rc::new(
+            Popup::new(&self.ui).items(values.iter().map(|(label, _)| *label)).on_change(
+                move |index| {
+                    let value = choices[index].clone();
+                    if model.upgrade().is_some_and(|model| {
+                        let source = model.source.borrow();
+                        current(&source) == (value != fallback(&source)).then_some(value.clone())
+                    }) {
+                        return;
+                    }
+                    let set = set.clone();
+                    let fallback = fallback.clone();
+                    Self::submit(
+                        &model,
+                        Box::new(move |source| {
+                            let value = (value != fallback(source)).then_some(value);
+                            set(source, value);
+                            Ok(())
+                        }),
+                        error.clone(),
+                    );
+                },
+            ),
+        );
+        let weak = Rc::downgrade(&input);
+        self.sync.push(Box::new(move |source| {
+            if let Some(input) = weak.upgrade() {
+                let effective = get(source).unwrap_or_else(|| default(source));
+                input.set_selected(items.iter().position(|value| *value == effective).unwrap_or(0));
             }
         }));
         self.row(title, input, message)

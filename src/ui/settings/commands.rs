@@ -262,6 +262,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         |(_, action)| action.clone(),
         |(key, _)| key.clone(),
     )
+    .full_length()
     .trailing_summary()
     .empty_message("No shortcuts in this shortcut set");
     let weak_model = Rc::downgrade(model);
@@ -454,8 +455,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             .section(
                 Section::new(&ui, "Keyboard shortcuts")
                     .description("Double-click a shortcut or click its arrow to edit it. Use + to add one.")
+                    .content(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
                     .content(table)
-                    .content(HStack::new(&ui).push(controls).push(edit))
                     .footer(error)
                     .footer(Caption::new(&ui, "⌘ Command   ⌥ Option   ⌃ Control   ⇧ Shift")),
             )
@@ -463,8 +464,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                 &ui,
                 "Advanced: reusable modifier combinations",
                 combinations,
-            ))
-            .into_editor(),
+            )),
     )
 }
 fn binding_rows(s: &ConfigSource, mode: &str) -> Vec<(String, String)> {
