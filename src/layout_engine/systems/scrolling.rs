@@ -166,7 +166,7 @@ pub(crate) struct CameraSpring {
     sampled: Instant,
 }
 impl CameraSpring {
-    fn new(from: f64, target: f64, velocity: f64, started: Instant) -> Self {
+    pub(crate) fn new(from: f64, target: f64, velocity: f64, started: Instant) -> Self {
         Self {
             from,
             target,
@@ -177,6 +177,8 @@ impl CameraSpring {
             sampled: started,
         }
     }
+
+    pub(crate) fn current(&self) -> f64 { self.current }
 
     pub(crate) fn position_velocity(&self, now: Instant) -> (f64, f64) {
         let t = now.saturating_duration_since(self.started).as_secs_f64();
@@ -190,7 +192,7 @@ impl CameraSpring {
         )
     }
 
-    fn sample(&mut self, now: Instant, scale: f64) -> bool {
+    pub(crate) fn sample(&mut self, now: Instant, scale: f64) -> bool {
         let now = now.max(self.sampled);
         let (position, velocity) = self.position_velocity(now);
         self.current = position;
@@ -1858,11 +1860,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return false;
         };
         state.transient_restore = None;
-        state.mutate(&self.settings, |state| {
+        let horizontal = matches!(direction, Direction::Left | Direction::Right);
+        let viewport = horizontal.then(|| state.viewport.clone());
+        let moved = state.mutate(&self.settings, |state| {
             let Some((col, row)) = state.selected_location() else {
                 return false;
             };
-            let horizontal = matches!(direction, Direction::Left | Direction::Right);
             if horizontal && state.columns[col].windows.len() > 1 {
                 let wid = state.selected().unwrap();
                 let (width, weight) = state.detach(wid).unwrap();
@@ -1896,7 +1899,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 column.active_window = target;
             }
             true
-        })
+        });
+        if let Some(viewport) = viewport {
+            state.viewport = viewport;
+            state.reconcile_camera_bounds();
+            if moved {
+                state.reveal(&self.settings);
+            }
+        }
+        moved
     }
 
     fn move_selection_to_layout_after_selection(&mut self, from: LayoutId, to: LayoutId) {
@@ -2447,15 +2458,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn reorder_insert_remove_and_preceding_resize_rebase_the_active_column() {
+    fn horizontal_reorder_preserves_camera_and_vertical_reorder_preserves_stack() {
+        let mut f = Fixture::new(3);
+        f.select(2);
+        f.frames();
+        let offset = f.system.layouts[f.layout].viewport.start_offset();
+        assert!(f.system.move_selection(f.layout, Direction::Right));
+        assert_eq!(f.system.window_slot(f.layout, wid(2)), Some(vec![2, 0]));
+        assert_eq!(f.system.window_slot(f.layout, wid(3)), Some(vec![1, 0]));
+        assert_eq!(f.system.layouts[f.layout].viewport.start_offset(), offset);
+        f.drop(2, 3, WindowDropAction::Stack);
+        let before = f.frame(2);
+        assert!(f.system.move_selection(f.layout, Direction::Up));
+        assert_eq!(f.system.window_slot(f.layout, wid(2)), Some(vec![1, 0]));
+        assert_eq!(f.frame(2).size, before.size);
+        assert_eq!(f.selected(), Some(wid(2)));
+    }
+
+    #[test]
+    fn insert_remove_and_preceding_resize_rebase_the_active_column() {
         let mut f = Fixture::new(4);
         f.select(3);
         let x = f.frame(3).origin.x;
-        for direction in [Direction::Left, Direction::Right] {
-            assert!(f.system.move_selection(f.layout, direction));
-            assert_eq!(f.frame(3).origin.x, x);
-            assert_eq!(f.selected(), Some(wid(3)));
-        }
         // Move an inactive window before the active one via the shared drop path.
         f.drop(4, 1, WindowDropAction::Insert(Direction::Left));
         assert_eq!(f.frame(3).origin.x, x);
@@ -2508,10 +2532,10 @@ pub(crate) mod tests {
                 destination_id
             );
             f.system.resize_selection_by(f.layout, 0.2, ResizeOrientation::Vertical);
-            let x = f.frame(2).origin.x;
+            let offset = f.system.layouts[f.layout].viewport.start_offset();
             f.system.consume_or_expel_selection(f.layout, direction);
             assert_eq!(f.selected(), Some(wid(2)));
-            assert_eq!(f.frame(2).origin.x, x);
+            assert_eq!(f.system.layouts[f.layout].viewport.start_offset(), offset);
             assert_eq!(f.frame(2).size.width, 400.0);
             let tree = f.system.container_tree(f.layout);
             let expelled = tree

@@ -11,7 +11,9 @@ use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, Window
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::{HashMap, HashSet};
-use crate::layout_engine::systems::scrolling::{PresentedViewport, ViewportPresentation};
+use crate::layout_engine::systems::scrolling::{
+    CameraSpring, PresentedViewport, ViewportPresentation,
+};
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
@@ -63,6 +65,12 @@ struct PresenterControl {
     frames: HashMap<WindowId, (AppThreadHandle, CGRect)>,
     cancelled: HashSet<WindowId>,
 }
+impl PresenterControl {
+    fn frame(&self, wid: WindowId, fallback: CGRect) -> CGRect {
+        self.frames.get(&wid).map_or(fallback, |(_, frame)| *frame)
+    }
+}
+
 pub struct AnimationReceiver {
     pub(super) commands: Receiver<Message>,
     control: Arc<Mutex<PresenterControl>>,
@@ -173,6 +181,8 @@ pub(super) struct PresentedCamera {
 pub struct CameraAnimation {
     pub(super) presentation: ViewportPresentation,
     windows: Vec<PresentedWindow>,
+    // The scale converts normalized spring tolerance to the largest pixel offset.
+    movement: Option<(CameraSpring, f64)>,
     pub(super) gesture: Option<(Context, Control, f64, Duration)>,
     pub(super) active: bool,
     identity: CameraIdentity,
@@ -196,6 +206,7 @@ struct PresentedWindow {
     from: CGRect,
     to: CGRect,
     frame: CGRect,
+    move_from: CGPoint,
     txid: TransactionId,
     fixed: bool,
     leased: bool,
@@ -214,6 +225,7 @@ enum Sample<'a> {
         offset: f64,
         scale: f64,
         bound: Option<CGRect>,
+        movement: f64,
     },
 }
 
@@ -256,14 +268,17 @@ impl PresentedWindow {
                 offset,
                 scale,
                 bound,
+                movement,
             } => {
                 if self.fixed && self.announced {
                     return None;
                 }
                 let frame = presentation.frame_at_offset(self.to, self.fixed, scale, offset);
-                let frame = bound.map_or(frame, |screen| {
+                let mut frame = bound.map_or(frame, |screen| {
                     super::managers::bound_frame_to_screen(frame, screen)
                 });
+                frame.origin.x += self.move_from.x * movement;
+                frame.origin.y += self.move_from.y * movement;
                 (
                     frame,
                     !frame.size.same_as(self.frame.size),
@@ -324,6 +339,16 @@ impl CameraAnimation {
             }
         }
         let ongoing = self.presentation.sample(now, scale);
+        let movement = self.movement.as_mut().map_or(0.0, |(spring, distance)| {
+            if spring.sample(now, scale * *distance) {
+                0.0
+            } else {
+                spring.current()
+            }
+        });
+        if movement == 0.0 {
+            self.movement = None;
+        }
         stage_windows(
             &mut self.windows,
             Sample::Viewport {
@@ -331,10 +356,11 @@ impl CameraAnimation {
                 offset: self.presentation.offset(),
                 scale,
                 bound: self.bound,
+                movement,
             },
             frames,
         );
-        self.active = ongoing;
+        self.active = ongoing || self.movement.is_some();
         self.publish_state(now);
     }
 
@@ -356,13 +382,12 @@ impl CameraAnimation {
         let now = Instant::now();
         if self.animate && self.gesture.is_none() && !self.presentation.animated() {
             let (from, velocity) = if let Some(old) = &previous {
-                let (mut from, velocity) = old.presentation.position_velocity(now);
-                if let Some((new, old)) = self.windows.iter().find_map(|new| {
-                    old.windows.iter().find(|old| old.wid == new.wid).map(|old| (new, old))
-                }) {
-                    from += new.to.origin.x - old.to.origin.x;
-                }
-                (from, velocity)
+                let (from, velocity) = old.presentation.position_velocity(now);
+                // Continue in the semantic viewport's rebased coordinates.
+                (
+                    from + self.presentation.offset() - old.presentation.offset(),
+                    velocity,
+                )
             } else {
                 // Native frames can be clamped after parking. The viewport
                 // retains its own starting position when a target changes.
@@ -380,6 +405,29 @@ impl CameraAnimation {
             old.windows.retain(|old| !self.windows.iter().any(|new| new.wid == old.wid));
             old.stop();
         }
+        // Retired cameras start from the retained presenter publication.
+        for window in &mut self.windows {
+            if self.animate && !window.fixed {
+                let frame = self.presentation.frame_at_offset(
+                    window.to,
+                    window.fixed,
+                    self.scale,
+                    self.presentation.offset(),
+                );
+                let frame = self.bound.map_or(frame, |screen| {
+                    super::managers::bound_frame_to_screen(frame, screen)
+                });
+                window.move_from = CGPoint::new(
+                    window.frame.origin.x - frame.origin.x,
+                    window.frame.origin.y - frame.origin.y,
+                );
+            }
+        }
+        let distance = self.windows.iter().fold(0.0_f64, |distance, window| {
+            distance.max(window.move_from.x.abs()).max(window.move_from.y.abs())
+        });
+        self.movement = (distance > 0.25 / self.scale)
+            .then(|| (CameraSpring::new(1.0, 0.0, 0.0, now), distance));
     }
 
     fn begin(&mut self) {
@@ -596,6 +644,7 @@ impl Reactor {
                 .map(|s| (s.context.clone(), s.control.clone(), s.applied, s.timestamp))
         });
         let now = Instant::now();
+        let control = self.animation_tx.as_ref().map(|tx| tx.control.lock());
         let windows = frames
             .into_iter()
             .filter_map(|(wid, base_frame, fixed)| {
@@ -604,6 +653,9 @@ impl Reactor {
                 }
                 let window = self.state.windows.window(wid)?;
                 let app = self.app_manager.apps.get(&wid.pid)?;
+                let frame = control.as_ref().map_or(window.frame_monotonic, |control| {
+                    control.frame(wid, window.frame_monotonic)
+                });
                 Some(PresentedWindow {
                     handle: app.handle.clone(),
                     wid,
@@ -613,11 +665,13 @@ impl Reactor {
                     fixed,
                     announced: false,
                     leased: false,
-                    frame: window.frame_monotonic,
+                    frame,
+                    move_from: CGPoint::ZERO,
                     txid: TransactionId::default(),
                 })
             })
             .collect();
+        drop(control);
         if !animate {
             presentation.finish();
         }
@@ -630,6 +684,7 @@ impl Reactor {
         }));
         let mut next = CameraAnimation {
             presentation,
+            movement: None,
             windows,
             gesture,
             active: true,
@@ -1360,6 +1415,7 @@ impl Animation {
             fixed: false,
             announced: false,
             frame: start,
+            move_from: CGPoint::ZERO,
             txid,
             leased: false,
         });
@@ -1667,6 +1723,7 @@ mod tests {
     fn completed_camera_keeps_its_offset_after_native_window_clamping() {
         use crate::common::config::{ScrollingAlignment, ScrollingLayoutSettings};
         use crate::layout_engine::systems::ScrollingLayoutSystem;
+        use crate::layout_engine::{Direction, ResizeOrientation};
 
         let (handle, _rx) = AppThreadHandle::channel();
         let hidden = WindowId::new(1, 1);
@@ -1688,7 +1745,9 @@ mod tests {
             &Default::default(),
             &Default::default(),
         );
-        let make_camera = |system: &ScrollingLayoutSystem, native: &[(WindowId, CGRect)]| {
+        let make_camera = |system: &ScrollingLayoutSystem,
+                           native: &[(WindowId, CGRect)],
+                           control: &PresenterControl| {
             let (presentation, frames) = system.presentation(layout).unwrap();
             let state = Arc::new(Mutex::new(PresentedCamera {
                 viewport: presentation.snapshot(Instant::now()),
@@ -1698,10 +1757,12 @@ mod tests {
             }));
             CameraAnimation {
                 presentation,
+                movement: None,
                 windows: frames
                     .into_iter()
                     .map(|(wid, world, fixed)| {
-                        let frame = native.iter().find(|(id, _)| *id == wid).unwrap().1;
+                        let frame =
+                            control.frame(wid, native.iter().find(|(id, _)| *id == wid).unwrap().1);
                         PresentedWindow {
                             handle: handle.clone(),
                             wid,
@@ -1712,6 +1773,7 @@ mod tests {
                             announced: false,
                             leased: false,
                             frame,
+                            move_from: CGPoint::ZERO,
                             txid: TransactionId::default(),
                         }
                     })
@@ -1733,13 +1795,14 @@ mod tests {
                 bound: None,
             }
         };
+        let mut control = PresenterControl::default();
         let native = vec![
             (hidden, rect(0.0, 0.0, 1000.0, 800.0)),
             (visible, rect(1000.0, 0.0, 1000.0, 800.0)),
         ];
         system.select_window(layout, visible);
         let mut manager = AnimationManager::new();
-        let camera = make_camera(&system, &native);
+        let camera = make_camera(&system, &native, &control);
         let state = camera.state.clone();
         manager.handle_message(Message::Camera(Box::new(camera)));
         assert_eq!(camera_mut(&mut manager).unwrap().presentation.offset(), 0.0);
@@ -1752,6 +1815,7 @@ mod tests {
         );
         manager.tick_at(started + Duration::from_secs(2));
         system.commit_presented_viewport(layout, &state.lock().viewport);
+        manager.publish_frames(&mut control, false);
         manager.retire();
         assert!(manager.motions.is_empty());
 
@@ -1763,7 +1827,9 @@ mod tests {
             (visible, rect(0.0, 0.0, 1000.0, 800.0)),
         ];
         system.select_window(layout, visible);
-        manager.handle_message(Message::Camera(Box::new(make_camera(&system, &native))));
+        manager.handle_message(Message::Camera(Box::new(make_camera(
+            &system, &native, &control,
+        ))));
         assert_eq!(
             camera_mut(&mut manager).unwrap().presentation.offset(),
             1000.0,
@@ -1775,7 +1841,117 @@ mod tests {
             camera.windows.iter().find(|w| w.wid == visible).unwrap().frame,
             rect(0.0, 0.0, 1000.0, 800.0)
         );
+        assert_eq!(camera.presentation.offset(), 1000.0);
         assert!(!manager.has_work(), "a click must not start another scroll");
+
+        // Reorders commit immediately, but both windows start at their last
+        // publication, including when another reorder interrupts the swap.
+        let Motion::Viewport(mut old) = manager.motions.pop().unwrap() else {
+            panic!("viewport");
+        };
+        for direction in [Direction::Left, Direction::Right] {
+            let before: Vec<_> = old.windows.iter().map(|w| (w.wid, w.frame)).collect();
+            assert!(system.move_selection(layout, direction));
+            let (_, targets) = system.presentation(layout).unwrap();
+            let moved = targets.iter().find(|(wid, _, _)| *wid == visible).unwrap().1;
+            let neighbor = targets.iter().find(|(wid, _, _)| *wid == hidden).unwrap().1;
+            assert_eq!(moved.origin.x < neighbor.origin.x, direction == Direction::Left);
+            let started = Instant::now();
+            let mut next = make_camera(&system, &before, &control);
+            next.replace(Some(old));
+            next.begin();
+            next.sample(started);
+            for window in &next.windows {
+                assert_eq!(
+                    window.frame.origin,
+                    before.iter().find(|(id, _)| *id == window.wid).unwrap().1.origin
+                );
+                assert_eq!(window.frame.size, window.to.size);
+            }
+            next.sample(started + Duration::from_millis(40));
+            assert!(next.active);
+            let neighbor = next.windows.iter().find(|window| window.wid == hidden).unwrap();
+            assert_ne!(
+                neighbor.frame.origin,
+                before.iter().find(|(id, _)| *id == hidden).unwrap().1.origin
+            );
+            old = next;
+        }
+        old.sample(Instant::now() + Duration::from_secs(2));
+        assert!(!old.active);
+        for window in &old.windows {
+            assert_eq!(
+                window.frame,
+                old.presentation.target_frame(window.to, window.fixed, old.scale)
+            );
+            assert!(!window.leased);
+        }
+        manager.motions.push(Motion::Viewport(old));
+        manager.publish_frames(&mut control, false);
+        manager.retire();
+        assert!(manager.motions.is_empty());
+        let before: Vec<_> =
+            control.frames.iter().map(|(wid, (_, frame))| (*wid, *frame)).collect();
+        assert!(system.move_selection(layout, Direction::Left));
+        let started = Instant::now();
+        let mut next = make_camera(&system, &before, &control);
+        next.replace(None);
+        next.sample(started);
+        for window in &next.windows {
+            assert_eq!(
+                window.frame.origin,
+                before.iter().find(|(id, _)| *id == window.wid).unwrap().1.origin
+            );
+        }
+
+        // Unequal widths: move the first of three columns past its neighbor.
+        next.sample(Instant::now() + Duration::from_secs(2));
+        system.commit_presented_viewport(layout, &next.state.lock().viewport);
+        system.resize_selection_by(layout, -0.4, ResizeOrientation::Horizontal);
+        system.add_window_after_selection(layout, WindowId::new(1, 3));
+        system.select_window(layout, visible);
+        let before: Vec<_> =
+            crate::layout_engine::systems::scrolling::tests::presented_frames(&system, layout)
+                .collect();
+        let mut old = make_camera(&system, &before, &PresenterControl::default());
+        old.replace(None);
+        old.sample(Instant::now() + Duration::from_secs(2));
+        system.commit_presented_viewport(layout, &old.state.lock().viewport);
+        let before: Vec<_> = old.windows.iter().map(|w| (w.wid, w.frame)).collect();
+        assert!(system.move_selection(layout, Direction::Right));
+        assert_eq!(system.window_slot(layout, visible), Some(vec![1, 0]));
+        let started = Instant::now();
+        let mut next = make_camera(&system, &before, &PresenterControl::default());
+        next.replace(Some(old));
+        next.sample(started);
+        for window in &next.windows {
+            assert_eq!(
+                window.frame,
+                before.iter().find(|(id, _)| *id == window.wid).unwrap().1
+            );
+        }
+        next.sample(started + Duration::from_millis(40));
+        let neighbor = next.windows.iter().find(|w| w.wid == WindowId::new(1, 3)).unwrap();
+        assert!(
+            neighbor.frame.origin.x
+                < before.iter().find(|(id, _)| *id == neighbor.wid).unwrap().1.origin.x
+        );
+
+        // Removing a preceding column rebases an in-flight camera. Preserve
+        // both its position in the new coordinates and its ongoing velocity.
+        system.commit_presented_viewport(layout, &next.state.lock().viewport);
+        system.remove_window(WindowId::new(1, 3));
+        system.scroll_by_delta(layout, 0.1);
+        let mut replacement = make_camera(&system, &before, &PresenterControl::default());
+        assert!(!replacement.presentation.animated());
+        let delta = replacement.presentation.offset() - next.presentation.offset();
+        assert_eq!(delta, -1000.0);
+        let (position, velocity) = next.presentation.position_velocity(started);
+        assert_ne!(velocity, 0.0);
+        replacement.replace(Some(next));
+        let handoff = replacement.presentation.snapshot(started);
+        assert!((handoff.offset - position - delta).abs() < 1e-9);
+        assert!((handoff.velocity - velocity).abs() < 1e-9);
     }
 
     #[test]
@@ -1810,6 +1986,7 @@ mod tests {
         let wsid = WindowServerId::new(1);
         let camera = CameraAnimation {
             presentation: system.presentation(layout).unwrap().0,
+            movement: None,
             windows: vec![PresentedWindow {
                 handle: handle.clone(),
                 wid,
@@ -1820,6 +1997,7 @@ mod tests {
                 announced: false,
                 leased: false,
                 frame: rect(0.0, 0.0, 10.0, 10.0),
+                move_from: CGPoint::ZERO,
                 txid: TransactionId::default(),
             }],
             gesture: None,
@@ -1926,6 +2104,7 @@ mod tests {
                 announced: false,
                 leased: false,
                 frame: dragged,
+                move_from: CGPoint::ZERO,
                 txid: TransactionId::default(),
             });
             c.active = true;
