@@ -396,6 +396,27 @@ fn unchanged_popup_items_preserve_selection_and_native_items(ui: &Ui) {
     ));
 }
 
+fn page_headings_preserve_window_identity(ui: &Ui) {
+    let title = Rc::new(Label::new(ui, "General"));
+    let window = SettingsWindow::new(ui, "Rift Settings").page_title(ui, title.clone());
+    let items = window.ns_window().toolbar().unwrap().items();
+    let item = items
+        .iter()
+        .find(|item| item.itemIdentifier().to_string() == "cgs.page-title")
+        .expect("the page heading must be installed in the native toolbar");
+    let heading = item.view().unwrap();
+    title.set_text("Keyboard");
+    assert_eq!(
+        heading
+            .downcast_ref::<objc2_app_kit::NSTextField>()
+            .unwrap()
+            .stringValue()
+            .to_string(),
+        "Keyboard"
+    );
+    assert_eq!(window.ns_window().title().to_string(), "Rift Settings");
+}
+
 fn cached_pages_keep_their_mount_and_release_on_clear(ui: &Ui) {
     let host = PageHost::new(ui);
     let (first, second) = autoreleasepool(|_| {
@@ -435,6 +456,7 @@ fn main() {
     app.ns_application()
         .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     autoreleasepool(|_| {
+        page_headings_preserve_window_identity(&ui);
         cached_pages_keep_their_mount_and_release_on_clear(&ui);
         callbacks_survive_composition_and_release_with_the_page(&ui);
         callbacks_can_remove_their_own_controls(&ui);

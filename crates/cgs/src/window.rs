@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use block2::RcBlock;
-use objc2::MainThreadOnly;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
+use objc2::{MainThreadOnly, Message};
 use objc2_app_kit::*;
 use objc2_foundation::{NSRectEdge, NSString, NSURL};
 
@@ -154,6 +154,17 @@ impl SettingsWindow {
         Self(window)
     }
 
+    pub fn page_title(mut self, ui: &Ui, title: Rc<crate::Label>) -> Self {
+        title.ns_text_field().setFont(Some(&crate::Font::section_title()));
+        title.width(180.0);
+        title.height(22.0);
+        self.0.native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+        let toolbar = crate::Toolbar::navigation_title(ui, "cgs.settings.pages", Some(title));
+        toolbar.attach(&self.0.native);
+        self.0.toolbar = Some(toolbar);
+        self
+    }
+
     pub fn content(self, content: impl NativeView) -> Self { Self(self.0.content(content)) }
 
     pub fn show(&self) { self.0.show(); }
@@ -209,11 +220,13 @@ pub struct ViewController {
 }
 impl ViewController {
     pub fn new(ui: &Ui, content: impl NativeView) -> Self {
-        let native = NSViewController::new(ui.mtm());
-        if let Some(child) = content.view_controller() {
-            native.addChildViewController(child);
-        }
-        native.setView(content.ns_view());
+        let native = if let Some(controller) = content.view_controller() {
+            controller.retain()
+        } else {
+            let controller = NSViewController::new(ui.mtm());
+            controller.setView(content.ns_view());
+            controller
+        };
         Self {
             native,
             content: Box::new(content),

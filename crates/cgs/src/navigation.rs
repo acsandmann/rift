@@ -1,6 +1,8 @@
+use std::rc::Rc;
+
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::*;
 use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSString};
 
@@ -167,7 +169,11 @@ impl<T: 'static> NativeView for Sidebar<T> {
 pub struct NavigationSplitView(SplitView);
 impl NavigationSplitView {
     pub fn new(ui: &Ui, sidebar: impl NativeView, detail: impl NativeView) -> Self {
-        Self(SplitView::new(ui).pane(ui, sidebar, true).pane(ui, detail, false))
+        let split = SplitView::new(ui).pane(ui, sidebar, true).pane(ui, detail, false);
+        let items = split.native.splitViewItems();
+        items.objectAtIndex(0).setMinimumThickness(Metrics::SIDEBAR_MIN_WIDTH);
+        items.objectAtIndex(1).setMinimumThickness(Metrics::DETAIL_MIN_WIDTH);
+        Self(split)
     }
 
     pub fn ns_split_view_controller(&self) -> &NSSplitViewController {
@@ -205,24 +211,47 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "CgsNavigationToolbarDelegate"]
+    #[ivars = Option<Rc<Label>>]
     struct NavigationToolbarDelegate;
     unsafe impl NSObjectProtocol for NavigationToolbarDelegate {}
     unsafe impl NSToolbarDelegate for NavigationToolbarDelegate {
+        #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
+        fn item(&self, _toolbar: &NSToolbar, identifier: &NSToolbarItemIdentifier, _insert: bool) -> Option<Retained<NSToolbarItem>> {
+            self.ivars().as_ref().filter(|_| identifier.to_string() == "cgs.page-title").map(|title| {
+                let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(self.mtm()), identifier);
+                item.setView(Some(title.ns_view()));
+                item.setBordered(false);
+                item
+            })
+        }
+
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSToolbarItemIdentifier>> {
-            NSArray::from_slice(&[unsafe { NSToolbarToggleSidebarItemIdentifier }, unsafe {
-                NSToolbarFlexibleSpaceItemIdentifier
-            }])
+            self.item_identifiers()
         }
 
         #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
         fn defaults(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSToolbarItemIdentifier>> {
+            self.item_identifiers()
+        }
+    }
+);
+
+impl NavigationToolbarDelegate {
+    fn item_identifiers(&self) -> Retained<NSArray<NSToolbarItemIdentifier>> {
+        if self.ivars().is_some() {
+            NSArray::from_retained_slice(&[
+                NSString::from_str("cgs.page-title"),
+                unsafe { NSToolbarFlexibleSpaceItemIdentifier }.retain(),
+                unsafe { NSToolbarToggleSidebarItemIdentifier }.retain(),
+            ])
+        } else {
             NSArray::from_slice(&[unsafe { NSToolbarToggleSidebarItemIdentifier }, unsafe {
                 NSToolbarFlexibleSpaceItemIdentifier
             }])
         }
     }
-);
+}
 
 pub struct Toolbar {
     native: Retained<NSToolbar>,
@@ -239,11 +268,13 @@ impl Toolbar {
         }
     }
 
-    pub fn navigation(ui: &Ui, id: &str) -> Self {
+    pub fn navigation(ui: &Ui, id: &str) -> Self { Self::navigation_title(ui, id, None) }
+
+    pub(crate) fn navigation_title(ui: &Ui, id: &str, title: Option<Rc<Label>>) -> Self {
         let mut toolbar = Self::new(ui, id);
         let delegate: Retained<NavigationToolbarDelegate> = unsafe {
             msg_send![
-                super(NavigationToolbarDelegate::alloc(ui.mtm()).set_ivars(())),
+                super(NavigationToolbarDelegate::alloc(ui.mtm()).set_ivars(title)),
                 init
             ]
         };

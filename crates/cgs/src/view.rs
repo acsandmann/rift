@@ -418,7 +418,7 @@ impl NativeView for GlassEffectView {
     }
 }
 
-/// Shallow navigation that keeps the root's controls and scroll position alive.
+/// Shallow navigation that keeps visited pages and their scroll positions alive.
 pub struct NavigationHost {
     host: PageHost,
     root: RefCell<Option<Rc<dyn NativeView>>>,
@@ -432,15 +432,15 @@ impl NavigationHost {
     }
 
     pub fn set_root(&self, page: Rc<dyn NativeView>) {
-        self.host.set_page(page.clone());
+        self.host.set_cached_page(page.clone());
         *self.root.borrow_mut() = Some(page);
     }
 
-    pub fn push(&self, page: Rc<dyn NativeView>) { self.host.set_page(page); }
+    pub fn push(&self, page: Rc<dyn NativeView>) { self.host.set_cached_page(page); }
 
     pub fn pop(&self) {
         if let Some(root) = self.root.borrow().as_ref() {
-            self.host.set_page(root.clone());
+            self.host.set_cached_page(root.clone());
         }
     }
 }

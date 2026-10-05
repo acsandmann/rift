@@ -35,6 +35,7 @@ struct Model {
     config_path: std::path::PathBuf,
     applications: RefCell<Vec<rift_protocol::ApplicationData>>,
     sidebar: RefCell<std::rc::Weak<Sidebar<usize>>>,
+    page_title: Rc<Label>,
 }
 
 type SyncControl = Box<dyn Fn(&ConfigSource)>;
@@ -97,6 +98,7 @@ impl Settings {
             config_path,
             applications: RefCell::new(applications),
             sidebar: RefCell::new(std::rc::Weak::new()),
+            page_title: Rc::new(Label::new(&ui, "General")),
         });
         let host = Rc::new(PageHost::new(&ui));
         let pages = Rc::new(RefCell::new((0..8).map(|_| None::<Page>).collect::<Vec<_>>()));
@@ -165,6 +167,7 @@ impl Settings {
         *model.sidebar.borrow_mut() = Rc::downgrade(&sidebar);
         sidebar.set_selected(0);
         let window = SettingsWindow::new(&ui, "Rift Settings")
+            .page_title(&ui, model.page_title.clone())
             .on_close(on_close)
             .content(NavigationSplitView::new(&ui, sidebar, host.clone()));
         *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
@@ -187,20 +190,18 @@ impl Settings {
         pages: &Rc<RefCell<Vec<Option<Page>>>>,
         id: usize,
     ) {
-        if let Some(window) = model.window.borrow().load() {
-            window.setTitle(&objc2_foundation::NSString::from_str(
-                [
-                    "General",
-                    "Layouts",
-                    "Workspaces",
-                    "Rules",
-                    "Keyboard",
-                    "Mouse & Trackpad",
-                    "Interface",
-                    "Advanced",
-                ][id],
-            ));
-        }
+        model.page_title.set_text(
+            [
+                "General",
+                "Layouts",
+                "Workspaces",
+                "Rules",
+                "Keyboard",
+                "Mouse & Trackpad",
+                "Interface",
+                "Advanced",
+            ][id],
+        );
         if pages.borrow()[id].is_none() {
             let page = pages::build(ui, model, id);
             pages.borrow_mut()[id] = Some(page);

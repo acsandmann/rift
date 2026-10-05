@@ -164,7 +164,8 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
         ));
     page = page.section(section);
     let host = Rc::new(NavigationHost::new(&ui));
-    let current = Rc::new(RefCell::new(None::<Page>));
+    let current = Rc::new(RefCell::new(None::<Rc<Page>>));
+    let details = RefCell::new(vec![None::<Rc<Page>>; layouts().len()]);
     let editor = current.clone();
     let weak_host = Rc::downgrade(&host);
     let weak = Rc::downgrade(model);
@@ -175,6 +176,12 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
                 editor.borrow_mut().take();
                 return;
             };
+            if let Some(detail) = details.borrow()[index].as_ref() {
+                detail.synchronize(&model);
+                host.push(detail.view.clone());
+                *editor.borrow_mut() = Some(detail.clone());
+                return;
+            }
             let (name, mode) = layouts()[index];
             let back_host = Rc::downgrade(&host);
             let back_sidebar = model.sidebar.borrow().clone();
@@ -198,13 +205,10 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
             back.ns_button()
                 .setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command);
             back.accessibility_label("Back to Layouts");
-            let detail = layout_options(ui, &model, mode, name, back);
-            let syncing = model.syncing.replace(true);
-            for sync in &detail.sync {
-                sync(&model.source.borrow());
-            }
-            model.syncing.set(syncing);
+            let detail = Rc::new(layout_options(ui, &model, mode, name, back));
+            detail.synchronize(&model);
             host.push(detail.view.clone());
+            details.borrow_mut()[index] = Some(detail.clone());
             *editor.borrow_mut() = Some(detail);
         }
     });
@@ -298,17 +302,16 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     page = super::editors::display_overrides(&mut f, page, model);
     let root = Rc::new(f.finish(page));
     host.set_root(root.view.clone());
+    let weak = Rc::downgrade(model);
     Page {
         synced_revision: Cell::new(None),
         view: host,
         navigate: Some(navigate),
-        sync: vec![Box::new(move |source| {
-            for sync in &root.sync {
-                sync(source);
-            }
-            if let Some(detail) = current.borrow().as_ref() {
-                for sync in &detail.sync {
-                    sync(source);
+        sync: vec![Box::new(move |_| {
+            if let Some(model) = weak.upgrade() {
+                root.synchronize(&model);
+                if let Some(detail) = current.borrow().as_ref() {
+                    detail.synchronize(&model);
                 }
             }
         })],
