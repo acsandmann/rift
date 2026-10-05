@@ -320,7 +320,7 @@ impl VirtualWorkspaceSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSource {
     pub settings: Settings,

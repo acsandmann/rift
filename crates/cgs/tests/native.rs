@@ -362,6 +362,72 @@ fn pages_start_at_top_and_controllers_leave_the_host(ui: &Ui) {
     });
 }
 
+fn settings_lists_do_not_materialize_offscreen_rows(ui: &Ui) {
+    let configured = Rc::new(Cell::new(0));
+    let count = configured.clone();
+    let list = SettingsList::new(
+        ui,
+        move |row: &usize| {
+            count.set(count.get() + 1);
+            format!("Layout {row}")
+        },
+        |_| "Description".into(),
+    )
+    .navigation()
+    .fit_content(120.0);
+    list.set_rows((0..200).collect());
+    assert_eq!(list.ns_table_view().rectOfRow(0).size.height, 56.0);
+    assert!(
+        configured.get() < 32,
+        "sizing a capped list created {} row hierarchies",
+        configured.get()
+    );
+}
+
+fn unchanged_popup_items_preserve_selection_and_native_items(ui: &Ui) {
+    let popup = Popup::new(ui).items(["One", "Two"]);
+    popup.set_selected(1);
+    let first = popup.ns_popup_button().itemAtIndex(0).unwrap();
+    popup.set_items(["One", "Two"]);
+    assert_eq!(popup.selected(), Some(1));
+    assert!(std::ptr::eq(
+        &*first,
+        &*popup.ns_popup_button().itemAtIndex(0).unwrap()
+    ));
+}
+
+fn cached_pages_keep_their_mount_and_release_on_clear(ui: &Ui) {
+    let host = PageHost::new(ui);
+    let (first, second) = autoreleasepool(|_| {
+        let first = Rc::new(Label::new(ui, "First"));
+        let second = Rc::new(Label::new(ui, "Second"));
+        host.set_cached_page(first.clone());
+        let original = host.ns_view().constraints().firstObject().unwrap();
+        host.set_cached_page(second.clone());
+        assert!(first.ns_view().isHidden());
+        host.set_cached_page(first.clone());
+        assert!(!first.ns_view().isHidden());
+        assert!(second.ns_view().isHidden());
+        assert!(
+            std::ptr::eq(&*original, &*host.ns_view().constraints().firstObject().unwrap()),
+            "returning to a cached page must preserve its mount"
+        );
+        host.set_cached_page(first.clone());
+        assert!(std::ptr::eq(
+            &*original,
+            &*host.ns_view().constraints().firstObject().unwrap()
+        ));
+        (Weak::new(first.ns_view()), Weak::new(second.ns_view()))
+    });
+    autoreleasepool(|_| host.clear());
+    assert!(first.load().is_none(), "clear must release the active page");
+    assert!(
+        second.load().is_none(),
+        "clear must release inactive cached pages"
+    );
+    assert!(host.ns_view().subviews().is_empty());
+}
+
 fn main() {
     let ui =
         Ui::new(MainThreadMarker::new().expect("native tests must run on the macOS main thread"));
@@ -369,8 +435,11 @@ fn main() {
     app.ns_application()
         .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     autoreleasepool(|_| {
+        cached_pages_keep_their_mount_and_release_on_clear(&ui);
         callbacks_survive_composition_and_release_with_the_page(&ui);
         callbacks_can_remove_their_own_controls(&ui);
+        settings_lists_do_not_materialize_offscreen_rows(&ui);
+        unchanged_popup_items_preserve_selection_and_native_items(&ui);
         numeric_fields_reject_invalid_commits(&ui);
         delegates_and_selection_use_current_data(&ui);
         recording_is_scoped_and_cancellable(&ui);

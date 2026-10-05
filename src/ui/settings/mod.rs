@@ -21,11 +21,12 @@ pub enum Action {
 }
 pub struct Request {
     pub action: Action,
-    pub finish: Box<dyn FnOnce(Result<ConfigSource, String>)>,
+    pub finish: Box<dyn FnOnce(Result<(), String>)>,
 }
 
 struct Model {
     source: RefCell<ConfigSource>,
+    source_revision: Cell<u64>,
     requests: UnboundedSender<Request>,
     syncing: Cell<bool>,
     sheet: RefCell<Option<Sheet>>,
@@ -40,7 +41,31 @@ type SyncControl = Box<dyn Fn(&ConfigSource)>;
 pub(super) struct Page {
     view: Rc<dyn NativeView>,
     sync: Vec<SyncControl>,
+    synced_revision: Cell<Option<u64>>,
     navigate: Option<Rc<dyn Fn(Option<usize>)>>,
+}
+
+impl Model {
+    fn replace_source(&self, source: ConfigSource) {
+        if *self.source.borrow() != source {
+            *self.source.borrow_mut() = source;
+            self.source_revision.set(self.source_revision.get() + 1);
+        }
+    }
+}
+impl Page {
+    fn synchronize(&self, model: &Model) {
+        let revision = model.source_revision.get();
+        if self.synced_revision.get() == Some(revision) {
+            return;
+        }
+        let syncing = model.syncing.replace(true);
+        for sync in &self.sync {
+            sync(&model.source.borrow());
+        }
+        model.syncing.set(syncing);
+        self.synced_revision.set(Some(revision));
+    }
 }
 
 pub struct Settings {
@@ -63,6 +88,7 @@ impl Settings {
     ) -> Self {
         let model = Rc::new(Model {
             source: RefCell::new(source),
+            source_revision: Cell::new(0),
             requests,
             syncing: Cell::new(false),
             sheet: RefCell::new(None),
@@ -73,7 +99,7 @@ impl Settings {
             sidebar: RefCell::new(std::rc::Weak::new()),
         });
         let host = Rc::new(PageHost::new(&ui));
-        let pages = Rc::new(RefCell::new((0..8).map(|_| None).collect::<Vec<_>>()));
+        let pages = Rc::new(RefCell::new((0..8).map(|_| None::<Page>).collect::<Vec<_>>()));
         let selected = Rc::new(Cell::new(0));
         let weak_model = Rc::downgrade(&model);
         let weak_host = Rc::downgrade(&host);
@@ -121,10 +147,14 @@ impl Settings {
                 (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
             {
                 if selected_page.get() == 1 && id != 1 {
-                    pages.borrow_mut()[1] = None;
+                    let reset = pages.borrow()[1].as_ref().and_then(|page| page.navigate.clone());
+                    if let Some(reset) = reset {
+                        reset(None);
+                    }
                 }
-                selected_page.set(id);
-                Self::select(ui, &model, &host, &pages, id);
+                if selected_page.replace(id) != id {
+                    Self::select(ui, &model, &host, &pages, id);
+                }
                 let navigate = pages.borrow()[id].as_ref().and_then(|page| page.navigate.clone());
                 if let Some(navigate) = navigate {
                     navigate((destination >= 8).then(|| destination - 8));
@@ -177,12 +207,8 @@ impl Settings {
         }
         let pages = pages.borrow();
         let page = pages[id].as_ref().unwrap();
-        model.syncing.set(true);
-        for sync in &page.sync {
-            sync(&model.source.borrow());
-        }
-        model.syncing.set(false);
-        host.set_page(page.view.clone());
+        page.synchronize(model);
+        host.set_cached_page(page.view.clone());
     }
 
     pub fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
@@ -192,16 +218,15 @@ impl Settings {
     pub fn refresh_displays(&self, displays: Vec<crate::sys::screen::ScreenInfo>) {
         if *self.model.displays.borrow() != displays {
             *self.model.displays.borrow_mut() = displays;
+            self._host.clear();
             self.pages.borrow_mut()[1] = None;
-            if self.selected.get() == 1 {
-                Self::select(
-                    Ui::new(self.window.ns_window().mtm()),
-                    &self.model,
-                    &self._host,
-                    &self.pages,
-                    1,
-                );
-            }
+            Self::select(
+                Ui::new(self.window.ns_window().mtm()),
+                &self.model,
+                &self._host,
+                &self.pages,
+                self.selected.get(),
+            );
         }
     }
 
@@ -216,17 +241,12 @@ impl Settings {
     pub fn visible(&self) -> bool { self.window.ns_window().isVisible() }
 
     pub fn synchronize(&self, source: ConfigSource) {
-        *self.model.source.borrow_mut() = source;
-        if !self.visible() {
-            return;
-        }
-        self.model.syncing.set(true);
-        if let Some(page) = &self.pages.borrow()[self.selected.get()] {
-            for sync in &page.sync {
-                sync(&self.model.source.borrow());
+        self.model.replace_source(source);
+        if self.visible() {
+            if let Some(page) = &self.pages.borrow()[self.selected.get()] {
+                page.synchronize(&self.model);
             }
         }
-        self.model.syncing.set(false);
     }
 }
 
@@ -234,6 +254,8 @@ impl Drop for Settings {
     fn drop(&mut self) {
         // End the sheet while its weak parent still points to the live Settings window.
         self.model.sheet.borrow_mut().take();
+        self._host.clear();
+        self.pages.borrow_mut().clear();
     }
 }
 
@@ -255,6 +277,7 @@ impl FormBuilder {
         Page {
             view: Rc::new(view),
             sync: self.sync,
+            synced_revision: Cell::new(None),
             navigate: None,
         }
     }
@@ -266,16 +289,12 @@ impl FormBuilder {
         if model.syncing.get() {
             return;
         }
-        let weak_model = Rc::downgrade(&model);
-        let finish = Box::new(move |result: Result<ConfigSource, String>| {
+        let finish = Box::new(move |result: Result<(), String>| {
             if let Some(label) = error.upgrade() {
                 label.set_validation(&match &result {
                     Ok(_) => Validation::None,
                     Err(e) => Validation::Error(e.clone()),
                 });
-            }
-            if let (Some(model), Ok(source)) = (weak_model.upgrade(), result) {
-                *model.source.borrow_mut() = source;
             }
         });
         let _ = model.requests.send(Request {
@@ -478,6 +497,7 @@ impl FormBuilder {
 
     fn enabled(&mut self, row: &SettingsRow, enabled: impl Fn(&ConfigSource) -> bool + 'static) {
         let view = objc2::rc::Weak::new(row.control_view());
+        let last = Cell::new(None);
         self.sync.push(Box::new(move |s| {
             fn apply(view: &objc2_app_kit::NSView, value: bool) {
                 if let Some(control) = view.downcast_ref::<objc2_app_kit::NSControl>() {
@@ -487,8 +507,12 @@ impl FormBuilder {
                     apply(&child, value);
                 }
             }
+            let value = enabled(s);
+            if last.replace(Some(value)) == Some(value) {
+                return;
+            }
             if let Some(view) = view.load() {
-                apply(&view, enabled(s));
+                apply(&view, value);
             }
         }));
     }

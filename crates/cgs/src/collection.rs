@@ -1,5 +1,4 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use objc2::rc::{Retained, Weak};
@@ -13,8 +12,53 @@ use objc2_foundation::{
 use crate::bridge::{ActionTarget, callback};
 use crate::{AddRemoveControl, Label, NativeControl, NativeView, ScrollView, Ui, VStack};
 
+// The native reuse pool owns the Rust content and its action targets, not the datasource.
+// A legacy arbitrary cell factory can replace content; reusable factories configure it in place.
+define_class!(
+    #[unsafe(super(NSTableCellView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CgUiCollectionCell"]
+    #[ivars = RefCell<Option<Box<dyn NativeView>>>]
+    struct CollectionCell;
+);
+impl CollectionCell {
+    fn new(ui: &Ui) -> Retained<Self> {
+        unsafe {
+            msg_send![
+                super(Self::alloc(ui.mtm()).set_ivars(RefCell::new(None))),
+                init
+            ]
+        }
+    }
+
+    fn set_content(&self, content: Box<dyn NativeView>) {
+        unsafe {
+            self.setTextField(None);
+            self.setImageView(None);
+        }
+        if let Some(old) = self.ivars().borrow_mut().take() {
+            old.ns_view().removeFromSuperview();
+        }
+        self.addSubview(content.ns_view());
+        crate::view::pin(self, content.ns_view(), crate::Insets {
+            top: 0.0,
+            left: 0.0,
+            bottom: 0.0,
+            right: 0.0,
+        });
+        // Expose outlets to AppKit's native selected-cell appearance.
+        let cell = content.ns_view().downcast_ref::<NSTableCellView>();
+        unsafe {
+            self.setTextField(cell.and_then(|cell| cell.textField()).as_deref());
+            self.setImageView(cell.and_then(|cell| cell.imageView()).as_deref());
+        }
+        *self.ivars().borrow_mut() = Some(content);
+    }
+}
+
 fn drag_type() -> Retained<NSString> { NSString::from_str("org.cgs.local-row") }
 type CellFactory = Box<dyn FnMut(usize, usize) -> Box<dyn NativeView>>;
+type NativeCellFactory = Box<dyn FnMut(&NSTableView, usize, usize) -> Retained<NSView>>;
 type Selection = Box<dyn FnMut(Option<usize>)>;
 type Reorder = Box<dyn FnMut(usize, usize)>;
 struct Node {
@@ -24,7 +68,7 @@ struct Node {
 struct CollectionState {
     count: Box<dyn Fn() -> usize>,
     cell: RefCell<CellFactory>,
-    cells: RefCell<HashMap<(usize, usize), Box<dyn NativeView>>>,
+    native_cell: RefCell<Option<NativeCellFactory>>,
     selection: RefCell<Option<Selection>>,
     selectable: RefCell<Box<dyn Fn(usize) -> bool>>,
     reorder: RefCell<Option<Reorder>>,
@@ -99,6 +143,7 @@ define_class!(
         ) -> Option<Retained<NSView>> {
             usize::try_from(row).ok().and_then(|row| {
                 self.make_cell(
+                    table,
                     row,
                     column
                         .map(|c| {
@@ -158,11 +203,11 @@ define_class!(
         #[unsafe(method_id(outlineView:viewForTableColumn:item:))]
         unsafe fn outline_cell(
             &self,
-            _view: &NSOutlineView,
+            view: &NSOutlineView,
             _column: Option<&NSTableColumn>,
             item: &AnyObject,
         ) -> Option<Retained<NSView>> {
-            node_index(item).and_then(|row| self.make_cell(row, 0))
+            node_index(item).and_then(|row| self.make_cell(view, row, 0))
         }
 
         #[unsafe(method(outlineViewSelectionDidChange:))]
@@ -228,7 +273,7 @@ impl CollectionBridge {
         let this = Self::alloc(ui.mtm()).set_ivars(CollectionState {
             count: Box::new(count),
             cell: RefCell::new(Box::new(cell)),
-            cells: RefCell::new(HashMap::new()),
+            native_cell: RefCell::new(None),
             selection: RefCell::new(None),
             selectable: RefCell::new(Box::new(|_| true)),
             reorder: RefCell::new(None),
@@ -239,26 +284,37 @@ impl CollectionBridge {
         unsafe { msg_send![super(this), init] }
     }
 
-    fn make_cell(&self, row: usize, column: usize) -> Option<Retained<NSView>> {
+    fn make_cell(
+        &self,
+        table: &NSTableView,
+        row: usize,
+        column: usize,
+    ) -> Option<Retained<NSView>> {
         let _keep_alive = self.retain();
         if row >= (self.ivars().count)() {
             return None;
         }
-        if let Some(view) = self.ivars().cells.borrow().get(&(row, column)) {
-            return Some(view.ns_view().retain());
-        }
-        let mut view = None;
-        callback(|| view = Some((self.ivars().cell.borrow_mut())(row, column)));
-        let view = view?;
-        let native = view.ns_view().retain();
-        self.ivars().cells.borrow_mut().insert((row, column), view);
-        Some(native)
+        let mut result = None;
+        callback(|| {
+            if let Some(make_cell) = self.ivars().native_cell.borrow_mut().as_mut() {
+                result = Some(make_cell(table, row, column));
+            } else {
+                let identifier = NSString::from_str(&format!("cgs.cell.{column}"));
+                let native = unsafe { table.makeViewWithIdentifier_owner(&identifier, None) }
+                    .and_then(|view| view.downcast::<CollectionCell>().ok())
+                    .unwrap_or_else(|| {
+                        let cell = CollectionCell::new(&Ui::new(table.mtm()));
+                        cell.setIdentifier(Some(&identifier));
+                        cell
+                    });
+                native.set_content((self.ivars().cell.borrow_mut())(row, column));
+                result = Some(native.into_super().into_super());
+            }
+        });
+        result
     }
 
-    fn reload(&self, table: &NSTableView) {
-        self.ivars().cells.borrow_mut().clear();
-        table.reloadData();
-    }
+    fn reload(&self, table: &NSTableView) { table.reloadData(); }
 
     fn select(&self, index: Option<usize>) {
         let _keep_alive = self.retain();
@@ -299,8 +355,9 @@ impl<T: 'static> Table<T> {
         let native = NSTableView::new(ui.mtm());
         native.setAllowsEmptySelection(true);
         native.setAllowsMultipleSelection(false);
-        native.setUsesAutomaticRowHeights(true);
+        native.setUsesAutomaticRowHeights(false);
         native.setStyle(NSTableViewStyle::Inset);
+        native.setRowSizeStyle(NSTableViewRowSizeStyle::Custom);
         native.setColumnAutoresizingStyle(
             NSTableViewColumnAutoresizingStyle::LastColumnOnlyAutoresizingStyle,
         );
@@ -364,10 +421,18 @@ impl<T: 'static> Table<T> {
         mut f: impl FnMut(&T, usize, usize) -> Box<dyn NativeView> + 'static,
     ) -> Self {
         let rows = self.rows.clone();
+        *self.bridge.ivars().native_cell.borrow_mut() = None;
         *self.bridge.ivars().cell.borrow_mut() =
             Box::new(move |row, column| f(&rows.borrow()[row], column, row));
         self.bridge.reload(&self.native);
         self
+    }
+
+    pub fn set_rows_if_changed(&self, rows: Vec<T>)
+    where T: PartialEq {
+        if *self.rows.borrow() != rows {
+            self.set_rows(rows);
+        }
     }
 
     pub fn rows(self, rows: Vec<T>) -> Self {
@@ -383,6 +448,9 @@ impl<T: 'static> Table<T> {
     pub fn selection(&self) -> Option<usize> { usize::try_from(self.native.selectedRow()).ok() }
 
     pub fn set_selected(&self, index: Option<usize>) {
+        if self.selection() == index {
+            return;
+        }
         if let Some(index) = index.filter(|i| *i < self.rows.borrow().len()) {
             self.native.selectRowIndexes_byExtendingSelection(
                 &NSIndexSet::indexSetWithIndex(index),
@@ -629,12 +697,160 @@ impl<T: 'static> NativeView for EditableList<T> {
     fn ns_view(&self) -> &NSView { self.stack.ns_view() }
 }
 
-struct SettingsListCell {
-    native: Retained<NSTableCellView>,
-    _content: VStack,
+struct SettingsCellContent {
+    content: VStack,
+    title: Rc<Label>,
+    summary: Option<Rc<crate::Caption>>,
+    trailing: Option<Rc<Label>>,
+    icon: Option<Retained<NSImageView>>,
+    button: Option<Rc<crate::Button>>,
+    divider: Rc<crate::Divider>,
+    index: Rc<Cell<usize>>,
 }
-impl NativeView for SettingsListCell {
-    fn ns_view(&self) -> &NSView { &self.native }
+define_class!(
+    #[unsafe(super(NSTableCellView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CgUiSettingsListCell"]
+    #[ivars = SettingsCellContent]
+    struct SettingsListCell;
+);
+impl SettingsListCell {
+    fn new(
+        ui: &Ui,
+        open: Rc<RefCell<Option<Box<dyn FnMut(usize)>>>>,
+        inline: bool,
+        has_icon: bool,
+        navigation: bool,
+        opens: bool,
+    ) -> Retained<Self> {
+        let title = Rc::new(Label::new(ui, ""));
+        let summary = (!inline).then(|| {
+            let label = Rc::new(crate::Caption::new(ui, ""));
+            label.ns_text_field().setMaximumNumberOfLines(1);
+            label
+        });
+        let trailing = inline.then(|| Rc::new(Label::new(ui, "")));
+        let icon = has_icon.then(|| {
+            let image = NSImageView::new(ui.mtm());
+            image.widthAnchor().constraintEqualToConstant(22.0).setActive(true);
+            image.heightAnchor().constraintEqualToConstant(22.0).setActive(true);
+            image.setContentTintColor(Some(&crate::Color::secondary_label()));
+            image
+        });
+        let chevron = navigation.then(|| {
+            let image = NSImageView::new(ui.mtm());
+            image.setImage(crate::Symbol::named("chevron.forward").as_deref());
+            image.widthAnchor().constraintEqualToConstant(12.0).setActive(true);
+            image.setContentTintColor(Some(&crate::Color::secondary_label()));
+            image.setAccessibilityElement(false);
+            image
+        });
+        let index = Rc::new(Cell::new(0));
+        let action_index = index.clone();
+        let button = (opens && !navigation).then(|| {
+            let button = Rc::new(
+                crate::Button::new(ui, "Open").symbol("chevron.forward").borderless().on_click(
+                    move || {
+                        if let Some(open) = open.borrow_mut().as_mut() {
+                            open(action_index.get());
+                        }
+                    },
+                ),
+            );
+            button.ns_button().setContentTintColor(Some(&crate::Color::secondary_label()));
+            button.control_size(NSControlSize::Small);
+            button.width(16.0);
+            button
+        });
+        let mut row = crate::HStack::new(ui).insets(crate::Insets {
+            top: 8.0,
+            left: 0.0,
+            bottom: 8.0,
+            right: 0.0,
+        });
+        if let Some(icon) = &icon {
+            row = row.push(icon.clone().into_super().into_super());
+        }
+        row = if let Some(summary) = &summary {
+            row.push(VStack::new(ui).spacing(2.0).push(title.clone()).push(summary.clone()))
+        } else {
+            row.push(title.clone())
+        };
+        row = row.spacer(ui);
+        if let Some(trailing) = &trailing {
+            row = row.push(trailing.clone());
+        }
+        if let Some(chevron) = &chevron {
+            row = row.push(chevron.clone().into_super().into_super());
+        }
+        if let Some(button) = &button {
+            row = row.push(button.clone());
+        }
+        let divider = Rc::new(crate::Divider::new(ui));
+        let content = VStack::new(ui).spacing(0.0).push(row).push(divider.clone());
+        let native: Retained<Self> = unsafe {
+            msg_send![
+                super(Self::alloc(ui.mtm()).set_ivars(SettingsCellContent {
+                    content,
+                    title,
+                    summary,
+                    trailing,
+                    icon,
+                    button,
+                    divider,
+                    index,
+                })),
+                init
+            ]
+        };
+        native.addSubview(native.ivars().content.ns_view());
+        crate::view::pin(&native, native.ivars().content.ns_view(), crate::Insets {
+            top: 0.0,
+            left: 0.0,
+            bottom: 0.0,
+            right: 0.0,
+        });
+        unsafe {
+            native.setTextField(Some(native.ivars().title.ns_text_field()));
+            native.setImageView(native.ivars().icon.as_deref());
+        }
+        native
+    }
+
+    fn configure(
+        &self,
+        name: &str,
+        summary: &str,
+        symbol: Option<&str>,
+        index: usize,
+        count: usize,
+    ) {
+        let cell = self.ivars();
+        cell.index.set(index);
+        cell.title.set_text(name);
+        cell.title.tooltip(name);
+        if let Some(caption) = &cell.summary {
+            caption.set_text(summary);
+            caption.tooltip(summary);
+            caption.set_hidden(summary.is_empty());
+        }
+        if let Some(trailing) = &cell.trailing {
+            trailing.set_text(summary);
+            trailing.tooltip(summary);
+            trailing.set_hidden(summary.is_empty());
+        }
+        if let Some(icon) = &cell.icon {
+            icon.setImage(symbol.and_then(crate::Symbol::named).as_deref());
+            icon.setHidden(symbol.is_none());
+        }
+        if let Some(button) = &cell.button {
+            button.accessibility_label(&format!("Open {name}"));
+        }
+        cell.divider.set_hidden(index + 1 == count);
+    }
+}
+impl NativeView for Retained<SettingsListCell> {
+    fn ns_view(&self) -> &NSView { self }
 }
 
 /// A native settings collection with primary text, a summary, and optional disclosure.
@@ -668,94 +884,41 @@ impl<T: 'static> SettingsList<T> {
         let inline = trailing_summary.clone();
         let navigation = Rc::new(Cell::new(false));
         let row_navigation = navigation.clone();
-        let table = Table::new(ui)
-            .column("item", "", 0.0)
-            .cells_with_index(move |item, _, index| {
-                let name = title(item);
-                let native = NSTableCellView::new(ui_copy.mtm());
-                let label = Rc::new(Label::new(&ui_copy, &name));
-                label.tooltip(&name);
-                // The retained content stack owns both native outlets for this cell's lifetime.
-                unsafe {
-                    native.setTextField(Some(label.ns_text_field()));
-                }
-                let text = VStack::new(&ui_copy).spacing(2.0).push(label);
-                let summary = summary(item);
-                if !summary.is_empty() && !inline.get() {
-                    let caption = crate::Caption::new(&ui_copy, &summary);
-                    caption.tooltip(&summary);
-                    text.add(caption);
-                }
-                let mut row = crate::HStack::new(&ui_copy).insets(crate::Insets {
-                    top: 8.0,
-                    left: 0.0,
-                    bottom: 8.0,
-                    right: 0.0,
+        let table = Table::new(ui).column("item", "", 0.0).on_double_click(move |index| {
+            if let Some(open) = double_open.borrow_mut().as_mut() {
+                open(index);
+            }
+        });
+        let rows = table.rows.clone();
+        let opens = open.clone();
+        *table.bridge.ivars().native_cell.borrow_mut() = Some(Box::new(move |table, row, _| {
+            let identifier = NSString::from_str("cgs.settings-list");
+            let cell = unsafe { table.makeViewWithIdentifier_owner(&identifier, None) }
+                .and_then(|view| view.downcast::<SettingsListCell>().ok())
+                .unwrap_or_else(|| {
+                    let cell = SettingsListCell::new(
+                        &ui_copy,
+                        row_open.clone(),
+                        inline.get(),
+                        row_symbol.borrow().is_some(),
+                        row_navigation.get(),
+                        opens.borrow().is_some(),
+                    );
+                    cell.setIdentifier(Some(&identifier));
+                    cell
                 });
-                if let Some(image) = row_symbol
-                    .borrow()
-                    .as_ref()
-                    .and_then(|symbol| crate::ImageView::symbol(&ui_copy, &symbol(item)))
-                {
-                    image.width(22.0);
-                    image.height(22.0);
-                    image
-                        .ns_image_view()
-                        .setContentTintColor(Some(&crate::Color::secondary_label()));
-                    unsafe {
-                        native.setImageView(Some(image.ns_image_view()));
-                    }
-                    row = row.push(image);
-                }
-                row = row.push(text).spacer(&ui_copy);
-                if inline.get() && !summary.is_empty() {
-                    let detail = crate::Label::new(&ui_copy, &summary);
-                    detail.tooltip(&summary);
-                    row = row.push(detail);
-                }
-                if row_navigation.get() {
-                    if let Some(image) = crate::ImageView::symbol(&ui_copy, "chevron.forward") {
-                        image.width(12.0);
-                        image
-                            .ns_image_view()
-                            .setContentTintColor(Some(&crate::Color::secondary_label()));
-                        image.ns_image_view().setAccessibilityElement(false);
-                        row = row.push(image);
-                    }
-                } else if row_open.borrow().is_some() {
-                    let open = row_open.clone();
-                    let button = crate::Button::new(&ui_copy, &format!("Open {name}"))
-                        .symbol("chevron.forward")
-                        .borderless()
-                        .on_click(move || {
-                            if let Some(open) = open.borrow_mut().as_mut() {
-                                open(index);
-                            }
-                        });
-                    button.ns_button().setContentTintColor(Some(&crate::Color::secondary_label()));
-                    button.control_size(NSControlSize::Small);
-                    button.width(16.0);
-                    button.accessibility_label(&format!("Open {name}"));
-                    row = row.push(button);
-                }
-                let content = VStack::new(&ui_copy).spacing(0.0).push(row);
-                if index + 1 < cell_count.get() {
-                    content.add(crate::Divider::new(&ui_copy));
-                }
-                native.addSubview(content.ns_view());
-                crate::view::pin(&native, content.ns_view(), crate::Insets {
-                    top: 0.0,
-                    left: 0.0,
-                    bottom: 0.0,
-                    right: 0.0,
-                });
-                Box::new(SettingsListCell { native, _content: content })
-            })
-            .on_double_click(move |index| {
-                if let Some(open) = double_open.borrow_mut().as_mut() {
-                    open(index);
-                }
-            });
+            let rows = rows.borrow();
+            let item = &rows[row];
+            let symbol = row_symbol.borrow().as_ref().map(|symbol| symbol(item));
+            cell.configure(
+                &title(item),
+                &summary(item),
+                symbol.as_deref(),
+                row,
+                cell_count.get(),
+            );
+            cell.into_super().into_super()
+        }));
         table.ns_table_view().setHeaderView(None);
         table.ns_table_view().setRowHeight(44.0);
         table.ns_table_view().setBackgroundColor(&NSColor::clearColor());
@@ -800,39 +963,28 @@ impl<T: 'static> SettingsList<T> {
         self
     }
 
+    pub fn set_rows_if_changed(&self, rows: Vec<T>)
+    where T: PartialEq {
+        if *self.table.rows.borrow() != rows {
+            self.set_rows(rows);
+        }
+    }
+
     pub fn set_rows(&self, rows: Vec<T>) {
         let count = rows.len();
         self.row_count.set(count);
         self.empty.set_hidden(count != 0);
         self.table.set_rows(rows);
         if let Some((height, maximum)) = &self.fitted_height {
-            height.setConstant(
-                (if count == 0 {
-                    64.0
-                } else {
-                    if self.navigation.get() {
-                        let table = self.table.ns_table_view();
-                        let fitted: f64 = (0..count)
-                            .filter_map(|row| {
-                                table.viewAtColumn_row_makeIfNecessary(0, row as isize, true)
-                            })
-                            .map(|view| view.fittingSize().height)
-                            .sum();
-                        table.setRowHeight((fitted / count as f64).max(44.0));
-                        table.layoutSubtreeIfNeeded();
-                        let last = table.rectOfRow(count as isize - 1);
-                        let content_height = last.origin.y + last.size.height + 24.0;
-                        self.table
-                            .ns_scroll_view()
-                            .setHasVerticalScroller(content_height > *maximum);
-                        height.setConstant(content_height.clamp(52.0, *maximum));
-                        return;
-                    }
-                    let frame = self.table.ns_table_view().rectOfRow(count as isize - 1);
-                    frame.origin.y + frame.size.height + 8.0
-                })
-                .clamp(52.0, *maximum),
-            );
+            let table = self.table.ns_table_view();
+            let total = (count as f64 * (table.rowHeight() + table.intercellSpacing().height)
+                + 8.0)
+                .max(64.0);
+            let fitted = total.min(*maximum);
+            if height.constant() != fitted {
+                height.setConstant(fitted);
+            }
+            self.table.ns_scroll_view().setHasVerticalScroller(total > *maximum);
         }
     }
 
@@ -840,7 +992,7 @@ impl<T: 'static> SettingsList<T> {
     pub fn navigation(self) -> Self {
         self.navigation.set(true);
         let table = self.table.ns_table_view();
-        table.setUsesAutomaticRowHeights(true);
+        table.setUsesAutomaticRowHeights(false);
         table.setRowHeight(56.0);
         table.setSelectionHighlightStyle(NSTableViewSelectionHighlightStyle::None);
         unsafe {
@@ -852,6 +1004,7 @@ impl<T: 'static> SettingsList<T> {
     /// Display a short value beside the title, as in a native keyboard shortcuts list.
     pub fn trailing_summary(self) -> Self {
         self.trailing_summary.set(true);
+        self.table.ns_table_view().setRowHeight(44.0);
         self
     }
 
@@ -981,7 +1134,6 @@ impl<T: 'static> Outline<T> {
         *self.items.borrow_mut() = values;
         *self.bridge.ivars().nodes.borrow_mut() = nodes;
         *self.bridge.ivars().roots.borrow_mut() = roots;
-        self.bridge.ivars().cells.borrow_mut().clear();
         self.native.reloadData();
     }
 
@@ -1002,7 +1154,6 @@ impl<T: 'static> Outline<T> {
             let (item, title) = &items[index];
             cell(item, title)
         });
-        self.bridge.ivars().cells.borrow_mut().clear();
         self.native.reloadData();
         self
     }

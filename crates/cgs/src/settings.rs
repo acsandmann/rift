@@ -24,15 +24,12 @@ impl Validation {
     }
 }
 pub struct ValidationMessage {
-    stack: HStack,
     label: SecondaryLabel,
 }
 impl ValidationMessage {
     pub fn new(ui: &Ui) -> Self {
         let label = SecondaryLabel::new(ui, "");
-        let stack = HStack::new(ui);
-        stack.ns_stack_view().addArrangedSubview(label.ns_view());
-        let this = Self { stack, label };
+        let this = Self { label };
         this.set_hidden(true);
         this
     }
@@ -46,7 +43,7 @@ impl ValidationMessage {
     pub fn ns_text_field(&self) -> &NSTextField { self.label.ns_text_field() }
 }
 impl NativeView for ValidationMessage {
-    fn ns_view(&self) -> &NSView { self.stack.ns_view() }
+    fn ns_view(&self) -> &NSView { self.label.ns_view() }
 }
 pub struct Badge(Caption);
 impl Badge {
@@ -63,9 +60,9 @@ impl NativeView for Badge {
 pub struct SettingsRow {
     ui: Ui,
     grid: OnceCell<Grid>,
-    label: VStack,
+    label: Rc<dyn NativeView>,
     value: VStack,
-    line: Rc<HStack>,
+    line: OnceCell<Rc<HStack>>,
     control: Box<dyn NativeView>,
     validation: Rc<ValidationMessage>,
 }
@@ -80,29 +77,46 @@ impl SettingsRow {
         control: impl NativeView,
         validation: Rc<ValidationMessage>,
     ) -> Self {
-        let label = VStack::new(ui).spacing(4.0).push(WrappingLabel::new(ui, title));
-        let line = Rc::new(HStack::new(ui));
+        let label = Rc::new(WrappingLabel::new(ui, title));
         control.accessibility_label(title);
-        line.ns_stack_view().addArrangedSubview(control.ns_view());
-        let value = VStack::new(ui).spacing(4.0).push(line.clone()).push(validation.clone());
+        let value = VStack::new(ui)
+            .spacing(4.0)
+            .push(control.ns_view().retain())
+            .push(validation.clone());
         Self {
             ui: *ui,
             grid: OnceCell::new(),
             label,
             value,
-            line,
+            line: OnceCell::new(),
             control: Box::new(control),
             validation,
         }
     }
 
-    pub fn description(self, text: &str) -> Self {
-        self.label.add(Caption::new(&self.ui, text));
+    pub fn description(mut self, text: &str) -> Self {
+        self.label = Rc::new(
+            VStack::new(&self.ui)
+                .spacing(4.0)
+                .push(self.label)
+                .push(Caption::new(&self.ui, text)),
+        );
         self
     }
 
     pub fn suffix(self, text: &str) -> Self {
-        self.line.add(SecondaryLabel::new(&self.ui, text));
+        let line = self.line.get_or_init(|| {
+            self.value.ns_stack_view().removeArrangedSubview(self.control.ns_view());
+            self.control.ns_view().removeFromSuperview();
+            let line = Rc::new(HStack::new(&self.ui).push(self.control.ns_view().retain()));
+            self.value.ns_stack_view().insertArrangedSubview_atIndex(line.ns_view(), 0);
+            line.ns_view()
+                .widthAnchor()
+                .constraintEqualToAnchor(&self.value.ns_view().widthAnchor())
+                .setActive(true);
+            line
+        });
+        line.add(SecondaryLabel::new(&self.ui, text));
         self
     }
 

@@ -119,6 +119,7 @@ impl Drop for Window {
     fn drop(&mut self) {
         self.native.setDelegate(None);
         self.native.orderOut(None);
+        self.native.setToolbar(None);
         self.native.setContentViewController(None);
         self.native.setContentView(None);
     }

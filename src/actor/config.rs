@@ -13,16 +13,26 @@ pub type Receiver = actor::Receiver<Event>;
 /// A typed transaction executed only against the actor’s authoritative source.
 pub type SourceEdit = Box<dyn FnOnce(&mut ConfigSource) -> Result<(), String> + Send>;
 
+pub struct SourceSnapshot {
+    pub revision: u64,
+    pub source: ConfigSource,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Event {
     #[serde(skip)]
     QuerySource(tokio::sync::oneshot::Sender<Result<ConfigSource, String>>),
     #[serde(skip)]
-    ReloadSource(tokio::sync::oneshot::Sender<Result<ConfigSource, String>>),
+    ReloadSource(tokio::sync::oneshot::Sender<Result<SourceSnapshot, String>>),
+    #[serde(skip)]
+    QuerySourceSince {
+        revision: Option<u64>,
+        response: tokio::sync::oneshot::Sender<Result<Option<SourceSnapshot>, String>>,
+    },
     #[serde(skip)]
     EditSource {
         edit: SourceEdit,
-        response: tokio::sync::oneshot::Sender<Result<ConfigSource, String>>,
+        response: tokio::sync::oneshot::Sender<Result<SourceSnapshot, String>>,
     },
     #[serde(skip)]
     QueryConfig(SyncSender<Config>),
@@ -37,6 +47,7 @@ pub enum Event {
 pub struct ConfigActor {
     config: Config,
     document: ConfigDocument,
+    source_revision: u64,
     reactor_tx: reactor::Sender,
     config_path: PathBuf,
 }
@@ -62,6 +73,7 @@ impl ConfigActor {
                 };
                 let actor = ConfigActor {
                     document,
+                    source_revision: 0,
                     config,
                     reactor_tx,
                     config_path,
@@ -78,14 +90,25 @@ impl ConfigActor {
                 Event::ReloadSource(response) => {
                     let result = self
                         .handle_config_command(ConfigCommand::ReloadConfig)
-                        .and_then(|()| self.document.source().map_err(|e| e.to_string()));
+                        .and_then(|()| self.source_snapshot());
+                    let _ = response.send(result);
+                }
+                Event::QuerySourceSince { revision, response } => {
+                    let result = if revision == Some(self.source_revision) {
+                        Ok(None)
+                    } else {
+                        self.source_snapshot().map(Some)
+                    };
                     let _ = response.send(result);
                 }
                 Event::QuerySource(response) => {
                     let _ = response.send(self.document.source().map_err(|e| e.to_string()));
                 }
                 Event::EditSource { edit, response } => {
-                    let result = self.edit_source(edit);
+                    let result = self.edit_source(edit).map(|source| SourceSnapshot {
+                        revision: self.source_revision,
+                        source,
+                    });
                     let _ = response.send(result);
                 }
                 Event::QueryConfig(resp) => {
@@ -97,6 +120,16 @@ impl ConfigActor {
                 }
             }
         }
+    }
+
+    fn source_snapshot(&self) -> Result<SourceSnapshot, String> {
+        self.document
+            .source()
+            .map(|source| SourceSnapshot {
+                revision: self.source_revision,
+                source,
+            })
+            .map_err(|e| e.to_string())
     }
 
     fn edit_source(&mut self, edit: SourceEdit) -> Result<ConfigSource, String> {
@@ -111,6 +144,7 @@ impl ConfigActor {
         let source = candidate.source().map_err(|e| e.to_string())?;
         self.document = candidate;
         self.config = config;
+        self.source_revision += 1;
         self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
         Ok(source)
     }
@@ -198,6 +232,7 @@ impl ConfigActor {
                     .map_err(|e| e.to_string())?;
             }
         }
+        self.source_revision += 1;
         self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
         Ok(())
     }
@@ -236,6 +271,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_snapshots_skip_echoes_and_preserve_external_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        ConfigDocument::default().save(&path).unwrap();
+        let (reactor, _updates) = actor::channel();
+        let actor = ConfigActor::spawn_with_path(Config::default(), reactor, path.clone());
+        let query = |revision| {
+            let (response, result) = tokio::sync::oneshot::channel();
+            actor.send(Event::QuerySourceSince { revision, response });
+            result.blocking_recv().unwrap().unwrap()
+        };
+        let initial = query(None).unwrap();
+        assert!(query(Some(initial.revision)).is_none());
+        let (response, result) = tokio::sync::oneshot::channel();
+        let animate = !initial.source.settings.animate;
+        actor.send(Event::EditSource {
+            edit: Box::new(move |s| {
+                s.settings.animate = animate;
+                Ok(())
+            }),
+            response,
+        });
+        let edited = result.blocking_recv().unwrap().unwrap();
+        assert!(edited.revision > initial.revision);
+        assert_eq!(edited.source.settings.animate, animate);
+        assert!(
+            query(Some(edited.revision)).is_none(),
+            "edit echo must not return another source"
+        );
+        let (response, result) = tokio::sync::oneshot::channel();
+        actor.send(Event::EditSource {
+            edit: Box::new(|_| Err("rejected".into())),
+            response,
+        });
+        assert!(result.blocking_recv().unwrap().is_err());
+        assert!(
+            query(Some(edited.revision)).is_none(),
+            "failed edit must not advance the source"
+        );
+        let mut external = ConfigDocument::read(&path).unwrap();
+        external.update(|s| s.settings.animate = !animate).unwrap();
+        external.save(&path).unwrap();
+        let (response, result) = tokio::sync::oneshot::channel();
+        actor.send(Event::ReloadSource(response));
+        let reloaded = result.blocking_recv().unwrap().unwrap();
+        assert!(reloaded.revision > edited.revision);
+        assert_eq!(reloaded.source.settings.animate, !animate);
+        assert!(query(Some(edited.revision)).is_some());
+    }
+
+    #[test]
     fn commands_save_and_reload_the_source_document() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -247,6 +333,7 @@ mod tests {
             document: ConfigDocument::read(&path).unwrap(),
             reactor_tx,
             config_path: path.clone(),
+            source_revision: 0,
         };
         actor.handle_config_command(ConfigCommand::SetAnimate(true)).unwrap();
         actor.handle_config_command(ConfigCommand::SaveConfig).unwrap();
@@ -288,6 +375,7 @@ mod tests {
             document,
             reactor_tx,
             config_path: path.clone(),
+            source_revision: 0,
         };
         let source = actor
             .edit_source(Box::new(|s| {

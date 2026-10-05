@@ -59,6 +59,7 @@ pub struct Menu {
     action_rx: tokio::sync::mpsc::UnboundedReceiver<MenuAction>,
     icon: Option<MenuIcon>,
     settings: Option<crate::ui::settings::Settings>,
+    settings_source_revision: std::cell::Cell<Option<u64>>,
     settings_requests: tokio::sync::mpsc::UnboundedReceiver<crate::ui::settings::Request>,
     settings_request_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::settings::Request>,
     mtm: MainThreadMarker,
@@ -94,6 +95,7 @@ impl Menu {
         Self {
             icon,
             settings: None,
+            settings_source_revision: std::cell::Cell::new(None),
             settings_requests,
             settings_request_tx,
             config,
@@ -160,27 +162,34 @@ impl Menu {
                 }
 
                 Some(request) = self.settings_requests.recv() => {
-                    let (response, result) = tokio::sync::oneshot::channel();
-                    self.config_tx.send(match request.action {
-                        crate::ui::settings::Action::Edit(edit) => config::Event::EditSource { edit, response },
-                        crate::ui::settings::Action::Reload => config::Event::ReloadSource(response),
+                    let result = match request.action {
                         crate::ui::settings::Action::RefreshRuntime => {
                             let (displays, applications) = self.settings_runtime().await;
                             if let Some(settings) = &self.settings {
                                 settings.refresh_applications(applications);
                                 settings.refresh_displays(displays);
                             }
-                            config::Event::QuerySource(response)
-                        },
-                    });
-                    let result = result.await.unwrap_or_else(|_| Err("Configuration service unavailable".into()));
-                    let source = result.as_ref().ok().cloned();
-                    (request.finish)(result);
-                    if let Some(source) = source {
+                            (request.finish)(Ok(()));
+                            continue;
+                        }
+                        action => {
+                            let (response, result) = tokio::sync::oneshot::channel();
+                            self.config_tx.send(match action {
+                                crate::ui::settings::Action::Edit(edit) => config::Event::EditSource { edit, response },
+                                crate::ui::settings::Action::Reload => config::Event::ReloadSource(response),
+                                crate::ui::settings::Action::RefreshRuntime => unreachable!(),
+                            });
+                            result.await.unwrap_or_else(|_| Err("Configuration service unavailable".into())).map(|snapshot| {
+                                self.settings_source_revision.set(Some(snapshot.revision));
+                                snapshot.source
+                            })
+                        }
+                    };
+                    let failed = result.is_err();
+                    (request.finish)(result.map(|source| {
                         if let Some(settings) = &self.settings { settings.synchronize(source); }
-                    } else {
-                        self.sync_settings().await;
-                    }
+                    }));
+                    if failed { self.sync_settings().await; }
                 }
                 maybe_action = self.action_rx.recv() => {
                     if let Some(action) = maybe_action {
@@ -194,8 +203,14 @@ impl Menu {
 
     async fn source_snapshot(&self) -> Result<crate::common::config::ConfigSource, String> {
         let (response, result) = tokio::sync::oneshot::channel();
-        self.config_tx.send(config::Event::QuerySource(response));
-        result.await.map_err(|_| "Configuration service unavailable".to_string())?
+        self.config_tx
+            .send(config::Event::QuerySourceSince { revision: None, response });
+        let snapshot = result
+            .await
+            .map_err(|_| "Configuration service unavailable".to_string())??
+            .ok_or_else(|| "Missing configuration snapshot".to_string())?;
+        self.settings_source_revision.set(Some(snapshot.revision));
+        Ok(snapshot.source)
     }
 
     async fn settings_runtime(
@@ -246,7 +261,6 @@ impl Menu {
                 }
                 let settings = self.settings.as_ref().unwrap();
                 settings.show();
-                self.sync_settings().await;
             }
             Err(error) => {
                 tracing::error!(%error, "Could not open Settings");
@@ -259,9 +273,18 @@ impl Menu {
     }
 
     async fn sync_settings(&self) {
-        if let Ok(source) = self.source_snapshot().await {
+        if self.settings.is_none() {
+            return;
+        }
+        let (response, result) = tokio::sync::oneshot::channel();
+        self.config_tx.send(config::Event::QuerySourceSince {
+            revision: self.settings_source_revision.get(),
+            response,
+        });
+        if let Ok(Ok(Some(snapshot))) = result.await {
+            self.settings_source_revision.set(Some(snapshot.revision));
             if let Some(settings) = &self.settings {
-                settings.synchronize(source);
+                settings.synchronize(snapshot.source);
             }
         }
     }

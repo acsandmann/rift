@@ -67,7 +67,11 @@ impl Label {
 
     pub fn ns_text_field(&self) -> &NSTextField { &self.0 }
 
-    pub fn set_text(&self, value: &str) { self.0.setStringValue(&NSString::from_str(value)); }
+    pub fn set_text(&self, value: &str) {
+        if self.0.stringValue().to_string() != value {
+            self.0.setStringValue(&NSString::from_str(value));
+        }
+    }
 
     pub fn font(self, value: &NSFont) -> Self {
         self.0.setFont(Some(value));

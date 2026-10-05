@@ -1,7 +1,9 @@
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSNumber, NSNumberFormatter, NSNumberFormatterStyle, NSString};
+use objc2_foundation::{
+    NSArray, NSNumber, NSNumberFormatter, NSNumberFormatterStyle, NSObjectProtocol, NSString,
+};
 
 use crate::bridge::ActionTarget;
 use crate::{HStack, NativeControl, NativeView, Ui};
@@ -133,6 +135,9 @@ impl Switch {
     }
 
     pub fn set_value(&self, value: bool) {
+        if (self.native.state() == NSControlStateValueOn) == value {
+            return;
+        }
         self.native.setState(if value {
             NSControlStateValueOn
         } else {
@@ -168,6 +173,9 @@ impl Checkbox {
     }
 
     pub fn set_value(&self, value: bool) {
+        if (self.native.state() == NSControlStateValueOn) == value {
+            return;
+        }
         self.native.setState(if value {
             NSControlStateValueOn
         } else {
@@ -229,13 +237,27 @@ impl Popup {
     }
 
     pub fn set_items(&self, values: impl IntoIterator<Item = impl AsRef<str>>) {
+        let values: Vec<_> = values.into_iter().collect();
+        let titles = self.native.itemTitles();
+        if titles.len() == values.len()
+            && titles
+                .iter()
+                .zip(&values)
+                .all(|(title, value)| title.to_string() == value.as_ref())
+        {
+            return;
+        }
         self.native.removeAllItems();
         for value in values {
             self.native.addItemWithTitle(&NSString::from_str(value.as_ref()));
         }
     }
 
-    pub fn set_selected(&self, index: usize) { self.native.selectItemAtIndex(index as isize); }
+    pub fn set_selected(&self, index: usize) {
+        if self.native.indexOfSelectedItem() != index as isize {
+            self.native.selectItemAtIndex(index as isize);
+        }
+    }
 
     pub fn selected(&self) -> Option<usize> {
         usize::try_from(self.native.indexOfSelectedItem()).ok()
@@ -270,7 +292,11 @@ impl SegmentedControl {
         Self { native, target }
     }
 
-    pub fn set_selected(&self, index: usize) { self.native.setSelectedSegment(index as isize); }
+    pub fn set_selected(&self, index: usize) {
+        if self.native.selectedSegment() != index as isize {
+            self.native.setSelectedSegment(index as isize);
+        }
+    }
 
     pub fn on_change(self, mut f: impl FnMut(usize) + 'static) -> Self {
         self.target.set(move |sender| {
@@ -306,7 +332,11 @@ impl ComboBox {
         self
     }
 
-    pub fn set_value(&self, value: &str) { self.native.setStringValue(&NSString::from_str(value)); }
+    pub fn set_value(&self, value: &str) {
+        if self.native.stringValue().to_string() != value {
+            self.native.setStringValue(&NSString::from_str(value));
+        }
+    }
 
     pub fn on_change(self, mut f: impl FnMut(String) + 'static) -> Self {
         self.target.set(move |sender| {
@@ -344,6 +374,9 @@ impl RadioGroup {
 
     pub fn set_selected(&self, index: usize) {
         for (i, b) in self.buttons.iter().enumerate() {
+            if (b.state() == NSControlStateValueOn) == (i == index) {
+                continue;
+            }
             b.setState(if i == index {
                 NSControlStateValueOn
             } else {
@@ -408,7 +441,11 @@ macro_rules! numeric_control {
                 self
             }
 
-            pub fn set_value(&self, value: f64) { self.native.setDoubleValue(value); }
+            pub fn set_value(&self, value: f64) {
+                if self.native.doubleValue() != value {
+                    self.native.setDoubleValue(value);
+                }
+            }
 
             pub fn get_value(&self) -> f64 { self.native.doubleValue() }
 
@@ -483,7 +520,11 @@ impl NumberField {
         self
     }
 
-    pub fn set_value(&self, value: f64) { self.field.ns_text_field().setDoubleValue(value); }
+    pub fn set_value(&self, value: f64) {
+        if self.get_value() != Some(value) {
+            self.field.ns_text_field().setDoubleValue(value);
+        }
+    }
 
     pub fn get_value(&self) -> Option<f64> {
         formatted_number(&self.formatter, &self.field.ns_text_field().stringValue())
@@ -591,7 +632,11 @@ impl ColorWell {
         Self { native, target }
     }
 
-    pub fn set_value(&self, color: &NSColor) { self.native.setColor(color); }
+    pub fn set_value(&self, color: &NSColor) {
+        if !self.native.color().isEqual(Some(color)) {
+            self.native.setColor(color);
+        }
+    }
 
     pub fn on_change(self, mut f: impl FnMut(Retained<NSColor>) + 'static) -> Self {
         self.target.set(move |sender| {

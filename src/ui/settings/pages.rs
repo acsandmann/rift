@@ -299,6 +299,7 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     let root = Rc::new(f.finish(page));
     host.set_root(root.view.clone());
     Page {
+        synced_revision: Cell::new(None),
         view: host,
         navigate: Some(navigate),
         sync: vec![Box::new(move |source| {
@@ -934,7 +935,6 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     let weak_model = Rc::downgrade(model);
     let reload = Button::new(&ui, "Reload From Disk").on_click(move || {
         if let Some(model) = weak_model.upgrade() {
-            let weak_model = Rc::downgrade(&model);
             let error = error.clone();
             let _ = model.requests.send(Request {
                 action: Action::Reload,
@@ -944,9 +944,6 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
                             Ok(_) => Validation::None,
                             Err(e) => Validation::Error(e.clone()),
                         });
-                    }
-                    if let (Some(model), Ok(source)) = (weak_model.upgrade(), result) {
-                        *model.source.borrow_mut() = source;
                     }
                 }),
             });

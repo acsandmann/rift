@@ -474,7 +474,7 @@ fn binding_rows(s: &ConfigSource, mode: &str) -> Vec<(String, String)> {
         .collect()
 }
 fn refresh_bindings(table: &SettingsList<(String, String)>, s: &ConfigSource, mode: &str) {
-    table.set_rows(binding_rows(s, mode));
+    table.set_rows_if_changed(binding_rows(s, mode));
 }
 
 fn save_sheet(model: &Weak<Model>, edit: SourceEdit, message: &Rc<ValidationMessage>) {
@@ -497,8 +497,7 @@ fn save_sheet(model: &Weak<Model>, edit: SourceEdit, message: &Rc<ValidationMess
                         }
                     }
                 }
-                if let (Some(model), Ok(source)) = (weak.upgrade(), result) {
-                    *model.source.borrow_mut() = source;
+                if let (Some(model), Ok(())) = (weak.upgrade(), result) {
                     if let Some(sheet) = model.sheet.borrow().as_ref() {
                         sheet.end();
                     }

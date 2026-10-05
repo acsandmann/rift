@@ -270,3 +270,7 @@ impl Toolbar {
 
     pub fn ns_toolbar(&self) -> &NSToolbar { &self.native }
 }
+
+impl Drop for Toolbar {
+    fn drop(&mut self) { self.native.setDelegate(None); }
+}

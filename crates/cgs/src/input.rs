@@ -37,7 +37,9 @@ macro_rules! text_input {
             }
 
             pub fn set_value(&self, value: &str) {
-                self.native.setStringValue(&NSString::from_str(value));
+                if self.native.stringValue().to_string() != value {
+                    self.native.setStringValue(&NSString::from_str(value));
+                }
             }
 
             pub fn get_value(&self) -> String { self.native.stringValue().to_string() }

@@ -14,7 +14,11 @@ use crate::{Insets, Ui};
 pub trait NativeView: 'static {
     fn ns_view(&self) -> &NSView;
     fn view_controller(&self) -> Option<&objc2_app_kit::NSViewController> { None }
-    fn set_hidden(&self, value: bool) { self.ns_view().setHidden(value); }
+    fn set_hidden(&self, value: bool) {
+        if self.ns_view().isHidden() != value {
+            self.ns_view().setHidden(value);
+        }
+    }
     fn tooltip(&self, text: &str) { self.ns_view().setToolTip(Some(&NSString::from_str(text))); }
     fn identifier(&self, text: &str) {
         self.ns_view().setIdentifier(Some(&NSString::from_str(text)));
@@ -82,7 +86,11 @@ pub trait NativeView: 'static {
 }
 pub trait NativeControl: NativeView {
     fn ns_control(&self) -> &NSControl;
-    fn set_enabled(&self, value: bool) { self.ns_control().setEnabled(value); }
+    fn set_enabled(&self, value: bool) {
+        if self.ns_control().isEnabled() != value {
+            self.ns_control().setEnabled(value);
+        }
+    }
     fn control_size(&self, size: NSControlSize) { self.ns_control().setControlSize(size); }
 }
 impl NativeView for Retained<NSView> {
@@ -171,6 +179,7 @@ pub struct PageHost {
     view: View,
     controller: Retained<NSViewController>,
     page: RefCell<Option<Box<dyn NativeView>>>,
+    cached: RefCell<Vec<Box<dyn NativeView>>>,
 }
 impl PageHost {
     pub fn new(ui: &Ui) -> Self {
@@ -181,18 +190,22 @@ impl PageHost {
             view,
             controller,
             page: RefCell::new(None),
+            cached: RefCell::new(Vec::new()),
         }
     }
 
     pub fn ns_view_controller(&self) -> &NSViewController { &self.controller }
 
     pub fn set_page(&self, page: impl NativeView) {
-        if let Some(old) = self.page.borrow_mut().take() {
-            old.ns_view().removeFromSuperview();
-            if let Some(controller) = old.view_controller() {
-                controller.removeFromParentViewController();
-            }
+        if self
+            .page
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| std::ptr::eq(current.ns_view(), page.ns_view()))
+        {
+            return;
         }
+        self.clear();
         if let Some(controller) = page.view_controller() {
             self.controller.addChildViewController(controller);
         }
@@ -204,6 +217,56 @@ impl PageHost {
             right: 0.0,
         });
         *self.page.borrow_mut() = Some(Box::new(page));
+    }
+
+    /// Switch among pages the caller already caches without migrating their layout trees.
+    /// All mounted pages, including inactive ones, are released by clear().
+    pub fn set_cached_page(&self, page: impl NativeView) {
+        if self
+            .page
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| std::ptr::eq(current.ns_view(), page.ns_view()))
+        {
+            return;
+        }
+        if let Some(old) = self.page.borrow_mut().take() {
+            old.set_hidden(true);
+            self.cached.borrow_mut().push(old);
+        }
+        let existing = self
+            .cached
+            .borrow()
+            .iter()
+            .position(|cached| std::ptr::eq(cached.ns_view(), page.ns_view()));
+        let page: Box<dyn NativeView> = if let Some(index) = existing {
+            self.cached.borrow_mut().remove(index)
+        } else {
+            if let Some(controller) = page.view_controller() {
+                self.controller.addChildViewController(controller);
+            }
+            self.view.ns_view().addSubview(page.ns_view());
+            pin(self.view.ns_view(), page.ns_view(), Insets {
+                top: 0.0,
+                left: 0.0,
+                bottom: 0.0,
+                right: 0.0,
+            });
+            Box::new(page)
+        };
+        page.set_hidden(false);
+        *self.page.borrow_mut() = Some(page);
+    }
+
+    pub fn clear(&self) {
+        let mut pages = std::mem::take(&mut *self.cached.borrow_mut());
+        pages.extend(self.page.borrow_mut().take());
+        for page in pages {
+            page.ns_view().removeFromSuperview();
+            if let Some(controller) = page.view_controller() {
+                controller.removeFromParentViewController();
+            }
+        }
     }
 }
 impl NativeView for PageHost {
