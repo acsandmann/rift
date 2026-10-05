@@ -141,8 +141,16 @@ impl<T: Clone + 'static> Sidebar<T> {
     }
 
     pub fn on_select(mut self, mut f: impl FnMut(T) + 'static) -> Self {
+        let native = objc2::rc::Weak::new(self.outline.ns_outline_view());
         self.outline = self.outline.on_select(move |item| {
             if let Some(item) = item {
+                unsafe {
+                    if let Some(native) = native.load() {
+                        if let Some(selected) = native.itemAtRow(native.selectedRow()) {
+                            native.expandItem(Some(&selected));
+                        }
+                    }
+                }
                 f(item.id);
             }
         });
