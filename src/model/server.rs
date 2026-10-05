@@ -186,6 +186,7 @@ impl<'de> Deserialize<'de> for RuntimeWindowData {
             path: None,
             ax_role: None,
             ax_subrole: None,
+            is_tabbed: false,
         };
 
         Ok(RuntimeWindowData {
@@ -295,6 +296,7 @@ mod tests {
             path: None,
             ax_role: None,
             ax_subrole: None,
+            is_tabbed: false,
         };
         let data = RuntimeWindowData {
             layout_frame: None,

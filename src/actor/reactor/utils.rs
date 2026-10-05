@@ -126,6 +126,7 @@ mod tests {
             path: None,
             ax_role: Some("AXWindow".into()),
             ax_subrole: Some(subrole.into()),
+            is_tabbed: false,
         }
     }
 

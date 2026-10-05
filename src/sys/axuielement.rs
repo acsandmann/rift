@@ -17,6 +17,7 @@ use crate::sys::skylight::_AXUIElementCreateWithRemoteToken;
 
 pub const AX_WINDOW_ROLE: &str = "AXWindow";
 pub const AX_STANDARD_WINDOW_SUBROLE: &str = "AXStandardWindow";
+pub const AX_TAB_GROUP_ROLE: &str = "AXTabGroup";
 
 #[derive(Clone)]
 pub struct AXUIElement {
@@ -296,6 +297,28 @@ impl AXUIElement {
     pub fn windows(&self) -> Result<Vec<AXUIElement>> { self.elements_attribute("AXWindows") }
 
     pub fn children(&self) -> Result<Vec<AXUIElement>> { self.elements_attribute("AXChildren") }
+
+    /// True when this window has an AXTabGroup child whose AXTabs list has ≥ 2
+    /// entries. macOS only exposes the tab group once a second tab is added.
+    pub fn is_native_tabbed(&self) -> bool {
+        let Ok(children) = self.children() else {
+            return false;
+        };
+        for child in &children {
+            let Ok(role) = child.role() else { continue };
+            if role != AX_TAB_GROUP_ROLE {
+                continue;
+            }
+            let Ok(Some(tabs)) = child.copy_attribute("AXTabs") else {
+                return false;
+            };
+            let Ok(tabs) = self.downcast::<CFArray>(tabs) else {
+                return false;
+            };
+            return tabs.len() >= 2;
+        }
+        false
+    }
 
     pub fn parent(&self) -> Result<Option<AXUIElement>> {
         let Some(value) = self.copy_attribute("AXParent")? else {
