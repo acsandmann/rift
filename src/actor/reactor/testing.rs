@@ -235,6 +235,7 @@ impl Reactor {
     ) {
         self.state.windows.insert_window(wid, super::WindowState {
             info: WindowInfo {
+                has_native_tabs: false,
                 is_standard: true,
                 is_root: true,
                 is_minimized: false,
@@ -417,6 +418,7 @@ pub fn make_window_info(
     bundle_id: Option<&str>,
 ) -> WindowInfo {
     WindowInfo {
+        has_native_tabs: false,
         is_standard: true,
         is_root: true,
         is_minimized: false,

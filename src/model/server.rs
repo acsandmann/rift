@@ -173,6 +173,7 @@ impl<'de> Deserialize<'de> for RuntimeWindowData {
 
         let helper = WindowDataDe::deserialize(deserializer)?;
         let info = WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -282,6 +283,7 @@ mod tests {
     #[test]
     fn window_data_serializes_with_legacy_shape() {
         let info = WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,

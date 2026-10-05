@@ -118,6 +118,7 @@ fn restored_workspace_is_resolved_before_app_rule_assignment() {
     engine.persistence.pending_windows.insert(window);
     window_store.insert_window(window, WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -218,6 +219,7 @@ fn full_save_records_floating_window_in_its_inactive_workspace() {
         .unwrap();
     window_store.insert_window(window, WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -279,6 +281,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
     let workspace = engine.workspaces().active_workspace(space).unwrap();
     window_store.insert_window(window, WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -542,6 +545,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
     let target_workspace = engine.workspaces().active_workspace(space).unwrap();
     let live_state = |title: &str, bundle_id: &str, window_server_id: u32| WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -663,6 +667,7 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
         engine.workspaces.active_layout(external_space, external_workspace).unwrap();
     window_store.insert_window(reused_id, WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -772,6 +777,7 @@ fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
         engine.workspaces.active_layout(external_space, external_workspace).unwrap();
     window_store.insert_window(live, WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -885,6 +891,7 @@ fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
     let sibling_layout = engine.workspaces.active_layout(space, sibling_workspace).unwrap();
     window_store.insert_window(live, WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,
@@ -986,6 +993,7 @@ fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused
     let target_workspace = engine.workspaces().active_workspace(space).unwrap();
     window_store.insert_window(reused, WindowState {
         info: WindowInfo {
+            has_native_tabs: false,
             is_standard: true,
             is_root: true,
             is_minimized: false,

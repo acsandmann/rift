@@ -4321,6 +4321,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)]));
 
     let window = WindowInfo {
+        has_native_tabs: false,
         is_standard: true,
         is_root: true,
         is_minimized: false,
@@ -6358,6 +6359,134 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
         without_frames(topology_before),
         "reconnecting a known display size must reactivate the exact saved layout tree",
     );
+}
+
+fn native_tab_layout_fixture() -> (Apps, Reactor, CGRect, SpaceId, WindowId, WindowId) {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1200., 900.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(2));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let old = WindowId::new(2, 1);
+    let separate = WindowId::new(2, 2);
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    reactor.handle_event(Event::WindowServerFocusChanged(old, space));
+    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.1 });
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.state.windows.window_mut(separate).unwrap().info.has_native_tabs = true;
+    (apps, reactor, screen, space, old, separate)
+}
+
+#[test]
+fn native_tab_creation_and_close_preserve_scrolling_slot_and_other_windows() {
+    for (departure_first, old_ordered_in) in [(false, true), (false, false), (true, false)] {
+        let (_apps, mut reactor, screen, space, old, separate) = native_tab_layout_fixture();
+        let before = test_layout(&mut reactor, space, screen);
+        let old_info = reactor.state.windows.window(old).unwrap().info.clone();
+        let frame = reactor.state.windows.window(old).unwrap().frame_monotonic;
+        let old_wsid = old_info.sys_id.unwrap();
+        let new = WindowId::new(2, 3);
+        let new_wsid = WindowServerId::new(20_003);
+        let mut new_info = old_info.clone();
+        new_info.frame = frame;
+        new_info.sys_id = Some(new_wsid);
+        new_info.has_native_tabs = true;
+        window_server::set_window_ordered_in_override(old_wsid, Some(old_ordered_in));
+        if departure_first {
+            reactor.native_tab_successor = Some((WindowId::new(2, 20_003), frame));
+            reactor.handle_event(Event::WindowServerHidden(old_wsid));
+            reactor.handle_event(Event::WindowServerDestroyed(
+                old_wsid,
+                space,
+                SpaceEventKind::User,
+            ));
+            assert_eq!(
+                test_layout(&mut reactor, space, screen),
+                before,
+                "retain the slot while the incoming tab is being discovered"
+            );
+            reactor.discover_test_windows(2, vec![(new, new_info)], vec![new, separate]);
+        } else {
+            reactor.handle_event(Event::WindowCreated(
+                new,
+                new_info,
+                Some(WindowServerInfo {
+                    id: new_wsid,
+                    pid: 2,
+                    layer: 0,
+                    frame,
+                    min_frame: CGSize::ZERO,
+                    max_frame: CGSize::ZERO,
+                }),
+                None,
+            ));
+            window_server::set_window_ordered_in_override(old_wsid, Some(false));
+            reactor.handle_event(Event::WindowServerDestroyed(
+                old_wsid,
+                space,
+                SpaceEventKind::User,
+            ));
+        }
+        window_server::set_window_ordered_in_override(old_wsid, None);
+        let expected: Vec<_> = before
+            .iter()
+            .map(|(wid, frame)| (if *wid == old { new } else { *wid }, *frame))
+            .collect();
+        assert_eq!(
+            test_layout(&mut reactor, space, screen),
+            expected,
+            "creating a tab must preserve order, widths, selection, and camera position"
+        );
+
+        // Closing the new tab returns to the original, now a single-tab window.
+        let mut restored = old_info;
+        restored.frame = frame;
+        restored.has_native_tabs = false;
+        reactor.native_tab_successor = Some((WindowId::new(2, old_wsid.as_u32()), frame));
+        window_server::set_window_ordered_in_override(new_wsid, Some(false));
+        reactor.handle_event(Event::WindowClosed(new_wsid));
+        reactor.discover_test_windows(2, vec![(old, restored)], vec![old, separate]);
+        window_server::set_window_ordered_in_override(new_wsid, None);
+        assert_eq!(
+            test_layout(&mut reactor, space, screen),
+            before,
+            "closing a tab must restore the original identity in the same slot"
+        );
+        assert!(!reactor.state.windows.contains_window(new));
+    }
+}
+
+#[test]
+fn native_tab_matching_does_not_merge_independent_windows() {
+    for (tabbed, outgoing_hidden, same_frame) in [
+        (false, true, true),
+        (true, false, true),
+        (true, true, false),
+    ] {
+        let (_apps, mut reactor, screen, space, old, separate) = native_tab_layout_fixture();
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, separate));
+        let before = test_layout(&mut reactor, space, screen);
+        let new = WindowId::new(2, 3);
+        let mut info = reactor.state.windows.window(old).unwrap().info.clone();
+        let wsid = info.sys_id.unwrap();
+        info.sys_id = Some(WindowServerId::new(20_003));
+        info.frame = reactor.state.windows.window(old).unwrap().frame_monotonic;
+        info.has_native_tabs = tabbed;
+        if !same_frame {
+            info.frame.origin.x += 40.0;
+        }
+        window_server::set_window_ordered_in_override(wsid, Some(!outgoing_hidden));
+        reactor.replace_native_tab(new, &mut info);
+        window_server::set_window_ordered_in_override(wsid, None);
+        assert_eq!(test_layout(&mut reactor, space, screen), before);
+        assert!(reactor.state.windows.contains_window(old));
+        assert!(!reactor.state.windows.contains_window(new));
+    }
 }
 
 #[test]

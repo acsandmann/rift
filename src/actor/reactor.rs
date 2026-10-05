@@ -10,6 +10,7 @@ mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
+mod native_tabs;
 mod query;
 mod replay;
 pub mod transaction_manager;
@@ -446,6 +447,8 @@ pub struct Reactor {
     layout_update_count: usize,
     #[cfg(test)]
     native_focus_for_removal: Option<WindowId>,
+    #[cfg(test)]
+    native_tab_successor: Option<(WindowId, CGRect)>,
 }
 
 impl Reactor {
@@ -578,6 +581,8 @@ impl Reactor {
             layout_update_count: 0,
             #[cfg(test)]
             native_focus_for_removal: None,
+            #[cfg(test)]
+            native_tab_successor: None,
         };
         reactor
     }
@@ -1430,8 +1435,9 @@ impl Reactor {
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
-            Event::WindowCreated(wid, window, ws_info, mouse_state) => {
+            Event::WindowCreated(wid, mut window, ws_info, mouse_state) => {
                 let _ = mouse_state;
+                self.replace_native_tab(wid, &mut window);
                 let mut outcome = window_workflow::handle_window_created(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -1454,6 +1460,10 @@ impl Reactor {
                     return Ok(EventOutcome::default());
                 }
 
+                if self.retain_native_tab_slot_on_departure(wid) {
+                    return Ok(EventOutcome::default());
+                }
+
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
@@ -1468,6 +1478,9 @@ impl Reactor {
                     self.state.windows.mark_window_hidden(wsid);
                     return Ok(EventOutcome::default());
                 };
+                if self.retain_native_tab_slot_on_departure(wid) {
+                    return Ok(EventOutcome::default());
+                }
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
@@ -1501,6 +1514,12 @@ impl Reactor {
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
                 let tracked_window = self.state.windows.tracked_window_id(wsid);
+                if matches!(kind, SpaceEventKind::User)
+                    && tracked_window
+                        .is_some_and(|wid| self.retain_native_tab_slot_on_departure(wid))
+                {
+                    return Ok(EventOutcome::default());
+                }
                 let last_known_user_space = tracked_window
                     .and_then(|window| self.best_space_for_window_id(window))
                     .or_else(|| self.space_state.iter_known_spaces().next());
@@ -3227,10 +3246,14 @@ impl Reactor {
     fn on_windows_discovered_with_app_info(
         &mut self,
         pid: pid_t,
-        new: Vec<(WindowId, WindowInfo)>,
+        mut new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
         app_info: Option<AppInfo>,
     ) {
+        // Rebind the visible tab before inventory retirement removes its old slot.
+        for (wid, info) in &mut new {
+            self.replace_native_tab(*wid, info);
+        }
         let app_info =
             app_info.or_else(|| self.app_manager.apps.get(&pid).map(|app| app.info.clone()));
         // Resolve each native identity once for this inventory observation.

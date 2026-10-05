@@ -1592,6 +1592,7 @@ mod tests {
         window_store.insert_window(
             wid,
             WindowState::from(crate::sys::app::WindowInfo {
+                has_native_tabs: false,
                 is_standard: true,
                 is_root: true,
                 is_minimized: false,
