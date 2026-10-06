@@ -733,10 +733,28 @@ impl LayoutEngine {
         window_store: &WindowStore,
         settings: &crate::common::config::VirtualWorkspaceSettings,
     ) {
+        let previous_modes: HashMap<_, _> = self
+            .workspaces
+            .initialized_spaces()
+            .into_iter()
+            .flat_map(|space| {
+                self.workspaces
+                    .list_workspaces(space)
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (id, name))| {
+                        (
+                            *id,
+                            self.workspaces.desired_layout_mode_for_workspace(index, name),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         self.app_rules = AppRuleEngine::new(&settings.app_rules);
         self.workspaces.update_settings(settings, &self.layout_settings);
 
-        // Re-apply workspace layout rules to already-existing workspaces on hot reload.
+        // Preserve runtime layout choices unless the workspace's configured mode changed.
         let spaces = self.workspaces.initialized_spaces();
         for space in spaces {
             let workspaces = self.workspaces.list_workspaces(space).to_vec();
@@ -747,7 +765,9 @@ impl LayoutEngine {
                     .workspace_info(space, *workspace_id)
                     .map(|ws| ws.layout_mode())
                     .unwrap_or_default();
-                if current_mode != desired_mode {
+                if previous_modes.get(workspace_id).is_some_and(|mode| *mode != desired_mode)
+                    && current_mode != desired_mode
+                {
                     let _ = self.switch_workspace_layout_mode(
                         window_store,
                         space,
@@ -4470,6 +4490,37 @@ mod tests {
                 .map(|ws| ws.layout_mode()),
             Some(LayoutMode::Scrolling)
         );
+    }
+
+    #[test]
+    fn config_reload_preserves_runtime_workspace_layout() {
+        for rule_layout in [None, Some(LayoutMode::Stack)] {
+            let mut settings = VirtualWorkspaceSettings::default();
+            let mut layouts = LayoutSettings::default();
+            layouts.mode = LayoutMode::Stack;
+            if let Some(layout) = rule_layout {
+                settings.workspace_rules.push(WorkspaceLayoutRule {
+                    workspace: WorkspaceSelector::Index(0),
+                    layout,
+                });
+            }
+            let mut engine = LayoutEngine::new(&settings, &layouts, None);
+            let mut store = WindowStore::default();
+            let space = SpaceId::new(7);
+            engine.workspaces_mut().list_workspaces(space);
+            let _ = engine.handle_virtual_workspace_command(
+                &mut store,
+                space,
+                &LayoutCommand::SetWorkspaceLayout {
+                    workspace: Some(0),
+                    mode: LayoutMode::Floating,
+                },
+            );
+            assert_eq!(engine.active_layout_mode_at(space), LayoutMode::Floating);
+            engine.set_layout_settings(&layouts);
+            engine.update_virtual_workspace_settings(&store, &settings);
+            assert_eq!(engine.active_layout_mode_at(space), LayoutMode::Floating);
+        }
     }
 
     #[test]
