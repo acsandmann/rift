@@ -621,6 +621,16 @@ impl NumberStepper {
         Self { stack, field, stepper }
     }
 
+    pub fn integer(mut self) -> Self {
+        self.field = self.field.integer();
+        self
+    }
+
+    pub fn accessibility_label(&self, label: &str) {
+        self.field.accessibility_label(label);
+        self.stepper.accessibility_label(label);
+    }
+
     pub fn set_value(&self, value: f64) {
         self.field.set_value(value);
         self.stepper.set_value(value);

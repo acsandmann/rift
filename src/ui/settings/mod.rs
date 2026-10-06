@@ -486,13 +486,10 @@ impl FormBuilder {
         let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
+        let step = if integer || scale == 100.0 { 1.0 } else { 0.1 };
+        let input = NumberStepper::new(&self.ui, -f64::MAX, f64::MAX, step);
         let input = Rc::new(
-            if integer {
-                NumberField::new(&self.ui).integer()
-            } else {
-                NumberField::new(&self.ui)
-            }
-            .on_change(move |v| {
+            if integer { input.integer() } else { input }.on_change(move |v| {
                 if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v / scale) {
                     return;
                 }
@@ -507,7 +504,8 @@ impl FormBuilder {
                 );
             }),
         );
-        input.min_width(60.0);
+        input.accessibility_label(title);
+        input.min_width(80.0);
         let weak = Rc::downgrade(&input);
         self.sync.push(Box::new(move |s| {
             if let Some(input) = weak.upgrade() {
