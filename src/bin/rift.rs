@@ -275,6 +275,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let (spaces_actor, spaces_tx) =
         SpacesActor::new(events_tx.clone(), wm_controller_sender.clone());
+    events_tx.send(reactor::Event::RegisterSpacesSender(spaces_tx.clone()));
     let wn_actor = window_notify_actor::WindowNotify::new(
         events_tx.clone(),
         spaces_tx.clone(),
