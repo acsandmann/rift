@@ -1734,7 +1734,7 @@ static CAPTURE_JOBS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn outstanding_preview_captures() -> usize { CAPTURE_JOBS.load(Ordering::Acquire) }
 
 fn acquire_capture_slot(jobs: &AtomicUsize) -> bool {
-    jobs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
+    jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
         .is_ok()
 }
 
