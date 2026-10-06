@@ -1409,7 +1409,8 @@ fn appeared_waits_for_snapshot_before_reassigning_window_without_pending_rift_mo
     let (mut reactor, wid, wsid, space1, space2, _frame) = reactor_with_window_on_space1();
 
     let (spaces_tx, mut spaces_rx) = actor::channel();
-    reactor.handle_event(Event::RegisterSpacesSender(spaces_tx));
+    let (wm_tx, _wm_rx) = actor::channel();
+    reactor.handle_event(Event::RegisterSenders { wm: wm_tx, spaces: spaces_tx });
     // Native presence requests a snapshot; only that snapshot commits ownership.
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
 

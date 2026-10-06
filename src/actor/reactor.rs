@@ -384,9 +384,10 @@ pub enum Event {
     Command(Command),
 
     #[serde(skip)]
-    RegisterWmSender(crate::actor::wm_controller::Sender),
-    #[serde(skip)]
-    RegisterSpacesSender(crate::actor::spaces::Sender),
+    RegisterSenders {
+        wm: crate::actor::wm_controller::Sender,
+        spaces: crate::actor::spaces::Sender,
+    },
 
     #[serde(skip)]
     ConfigUpdated(Config),
@@ -1409,14 +1410,11 @@ impl Reactor {
                     EventOutcome::default()
                 });
             }
-            Event::RegisterSpacesSender(sender) => {
-                self.spaces_tx = Some(sender);
-                return Ok(EventOutcome::no_change());
-            }
-            Event::RegisterWmSender(sender) => {
+            Event::RegisterSenders { wm, spaces } => {
+                self.spaces_tx = Some(spaces);
                 return Ok(system_workflow::handle_register_wm_sender(
                     &mut self.communication_manager,
-                    sender,
+                    wm,
                 )?);
             }
             Event::WindowInventoryRefreshRequested(pid) => {
