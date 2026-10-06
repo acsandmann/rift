@@ -1005,7 +1005,8 @@ impl Reactor {
             Event::MouseMoved(wsid) => {
                 self.suppress_auto_workspace_switch_until_input = false;
                 if let Some(window) = self.state.windows.tracked_window_id(wsid)
-                    && self.main_window() == Some(window)
+                    && (self.main_window() == Some(window)
+                        || crate::sys::app::is_own_window_focused(window))
                     && self.layout_manager.layout_engine.focused_window() == Some(window)
                 {
                     if let Some(space) = self.assigned_space_for_window_id(window)
@@ -1993,7 +1994,10 @@ impl Reactor {
                         should_sync: window.is_some_and(|window| {
                             self.should_raise_on_mouse_over(window, active_space)
                         }),
-                        is_main: window.is_some_and(|window| self.main_window() == Some(window)),
+                        is_main: window.is_some_and(|window| {
+                            self.main_window() == Some(window)
+                                || crate::sys::app::is_own_window_focused(window)
+                        }),
                         needs_layout_sync,
                         active_space,
                     },
