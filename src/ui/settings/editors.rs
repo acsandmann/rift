@@ -551,29 +551,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         .empty_message("No app rules")
         .full_length()
         .symbol("app")
-        .images({
-            let icons: RefCell<
-                std::collections::HashMap<
-                    String,
-                    Option<objc2::rc::Retained<objc2_app_kit::NSImage>>,
-                >,
-            > = RefCell::new(std::collections::HashMap::new());
-            move |rule| {
-                let id = rule.app_id.as_deref()?;
-                if let Some(icon) = icons.borrow().get(id) {
-                    return icon.clone();
-                }
-                let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
-                let icon = workspace
-                    .URLForApplicationWithBundleIdentifier(&objc2_foundation::NSString::from_str(
-                        id,
-                    ))
-                    .and_then(|url| url.path())
-                    .map(|path| workspace.iconForFile(&path));
-                icons.borrow_mut().insert(id.to_owned(), icon.clone());
-                icon
-            }
-        })
+        .images(application_icons(|rule: &AppWorkspaceRule| rule.app_id.clone()))
         .on_open(move |index| action(index))
         .reorderable(true)
         .on_reorder({
@@ -734,6 +712,28 @@ fn application_choices(model: &Model) -> Vec<(String, AppMatch)> {
     apps
 }
 
+fn application_icons<T>(
+    bundle_id: impl Fn(&T) -> Option<String>,
+) -> impl Fn(&T) -> Option<objc2::rc::Retained<objc2_app_kit::NSImage>> {
+    let icons = RefCell::new(std::collections::HashMap::<
+        String,
+        Option<objc2::rc::Retained<objc2_app_kit::NSImage>>,
+    >::new());
+    move |item| {
+        let id = bundle_id(item)?;
+        if let Some(icon) = icons.borrow().get(&id) {
+            return icon.clone();
+        }
+        let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
+        let icon = workspace
+            .URLForApplicationWithBundleIdentifier(&objc2_foundation::NSString::from_str(&id))
+            .and_then(|url| url.path())
+            .map(|path| workspace.iconForFile(&path));
+        icons.borrow_mut().insert(id, icon.clone());
+        icon
+    }
+}
+
 fn app_picker(
     ui: Ui,
     model: &Rc<Model>,
@@ -763,6 +763,7 @@ fn app_picker(
         .empty_message("No matching applications")
         .fit_content(240.0)
         .symbol("app")
+        .images(application_icons(|app: &(String, AppMatch)| app.1.0.clone()))
         .on_select(move |index| {
             let item = index.and_then(|index| selected_choices.borrow().get(index).cloned());
             if let Some((_, target)) = item {
@@ -947,6 +948,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         )
         .fit_content(260.0)
         .symbol("app")
+        .images(application_icons(|app: &(String, AppMatch)| app.1.0.clone()))
         .on_select(move |index| {
             if let Some((_, (id, name))) =
                 index.and_then(|index| selection_choices.borrow().get(index).cloned())
