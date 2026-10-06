@@ -465,7 +465,7 @@ impl FormBuilder {
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
-        self.numeric(title, scale, false, get, set)
+        self.numeric(title, scale, false, None, get, set)
     }
 
     fn integer(
@@ -474,7 +474,17 @@ impl FormBuilder {
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
-        self.numeric(title, 1.0, true, get, set)
+        self.numeric(title, 1.0, true, None, get, set)
+    }
+
+    fn percentage(
+        &mut self,
+        title: &str,
+        range: impl Fn(&ConfigSource) -> (f64, f64) + 'static,
+        get: impl Fn(&ConfigSource) -> f64 + 'static,
+        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
+    ) -> SettingsRow {
+        self.numeric(title, 100.0, false, Some(Rc::new(range)), get, set)
     }
 
     fn numeric(
@@ -482,6 +492,7 @@ impl FormBuilder {
         title: &str,
         scale: f64,
         integer: bool,
+        slider_range: Option<Rc<dyn Fn(&ConfigSource) -> (f64, f64)>>,
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
@@ -490,33 +501,72 @@ impl FormBuilder {
         let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
-        let step = if integer || scale == 100.0 { 1.0 } else { 0.1 };
-        let input = NumberStepper::new(&self.ui, -f64::MAX, f64::MAX, step);
+        let commit = move |v: f64| {
+            if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v / scale) {
+                return;
+            }
+            let set = set.clone();
+            Self::submit(
+                &model,
+                Box::new(move |s| {
+                    set(s, v / scale);
+                    Ok(())
+                }),
+                error.clone(),
+            );
+        };
         let input = Rc::new(
-            if integer { input.integer() } else { input }.on_change(move |v| {
-                if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v / scale) {
-                    return;
-                }
-                let set = set.clone();
-                Self::submit(
-                    &model,
-                    Box::new(move |s| {
-                        set(s, v / scale);
-                        Ok(())
-                    }),
-                    error.clone(),
-                );
-            }),
+            if integer {
+                NumberField::new(&self.ui).integer()
+            } else {
+                NumberField::new(&self.ui)
+            }
+            .on_change(commit.clone()),
         );
+        let slider = slider_range.as_ref().map(|range| {
+            let source = self.model.upgrade().unwrap();
+            let (min, max) = range(&source.source.borrow());
+            let range = range.clone();
+            let model = self.model.clone();
+            let slider = Rc::new(Slider::new(&self.ui).range(min, max).on_change(move |v| {
+                if let Some(model) = model.upgrade() {
+                    let (min, max) = range(&model.source.borrow());
+                    commit(v.round().clamp(min, max));
+                }
+            }));
+            slider.ns_slider().setContinuous(false);
+            slider.width(120.0);
+            slider.accessibility_label(title);
+            slider
+        });
         input.accessibility_label(title);
-        input.min_width(80.0);
+        input.min_width(60.0);
         let weak = Rc::downgrade(&input);
+        let weak_slider = slider.as_ref().map(Rc::downgrade);
         self.sync.push(Box::new(move |s| {
             if let Some(input) = weak.upgrade() {
-                input.set_value(get(s) * scale);
+                let value = get(s) * scale;
+                input.set_value(value);
+                if let Some(slider) = weak_slider.as_ref().and_then(Weak::upgrade) {
+                    if let Some(range) = &slider_range {
+                        let (min, max) = range(s);
+                        slider.ns_slider().setMinValue(min);
+                        slider.ns_slider().setMaxValue(max);
+                    }
+                    slider.set_value(value);
+                }
             }
         }));
-        self.row(title, input, message)
+        if let Some(slider) = slider {
+            input.width(60.0);
+            self.row(
+                title,
+                HStack::new(&self.ui).spacing(8.0).push(slider).push(input),
+                message,
+            )
+        } else {
+            self.row(title, input, message)
+        }
     }
 
     fn text(

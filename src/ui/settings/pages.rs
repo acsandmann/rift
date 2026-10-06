@@ -420,9 +420,9 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
         LayoutMode::MasterStack => {
             let section = options()
                 .row(
-                    f.number(
+                    f.percentage(
                         "Master width",
-                        100.0,
+                        |_| (5.0, 95.0),
                         |s| s.settings.layout.master_stack.master_ratio,
                         |s, v| s.settings.layout.master_stack.master_ratio = v,
                     )
@@ -487,9 +487,14 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
         LayoutMode::Scrolling => {
             let section = options()
                 .row(
-                    f.number(
+                    f.percentage(
                         "Default column width",
-                        100.0,
+                        |s| {
+                            (
+                                s.settings.layout.scrolling.min_column_width_ratio * 100.0,
+                                s.settings.layout.scrolling.max_column_width_ratio * 100.0,
+                            )
+                        },
                         |s| s.settings.layout.scrolling.column_width_ratio,
                         |s, v| s.settings.layout.scrolling.column_width_ratio = v,
                     )
