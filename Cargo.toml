@@ -198,3 +198,7 @@ pretty_assertions = "1.4.0"
 tokio = { version = "1.35.1", features = ["sync", "tokio-macros"] }
 test-log = { version = "0.2.16", default-features = false }
 test_bin = "0.5.0"
+
+[[test]]
+name = "settings_native"
+harness = false

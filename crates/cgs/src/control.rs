@@ -637,6 +637,7 @@ pub struct ColorWell {
 impl ColorWell {
     pub fn new(ui: &Ui) -> Self {
         let native = NSColorWell::new(ui.mtm());
+        native.setContinuous(false);
         let target = ActionTarget::new(ui);
         target.attach(&native);
         Self { native, target }

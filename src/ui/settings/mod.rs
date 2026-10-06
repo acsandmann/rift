@@ -25,44 +25,6 @@ pub struct Request {
     pub finish: Box<dyn FnOnce(Result<(), String>)>,
 }
 
-// Accessory apps still need a main-menu command for AppKit to dispatch ⌘W.
-fn install_close_command(ui: &Ui) {
-    use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem};
-    use objc2_foundation::NSString;
-    let app = NSApplication::sharedApplication(ui.mtm());
-    let main = app.mainMenu().unwrap_or_else(|| NSMenu::new(ui.mtm()));
-    if main.itemArray().iter().any(|item| {
-        item.submenu().is_some_and(|menu| {
-            menu.itemArray().iter().any(|item| item.keyEquivalent().to_string() == "w")
-        })
-    }) {
-        return;
-    }
-    let close = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(ui.mtm()),
-            &NSString::from_str("Close Window"),
-            Some(objc2::sel!(performClose:)),
-            &NSString::from_str("w"),
-        )
-    };
-    close.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
-    // A nil target lets the native responder chain find the active window.
-    let file = NSMenu::new(ui.mtm());
-    file.addItem(&close);
-    let item = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(ui.mtm()),
-            &NSString::from_str("File"),
-            None,
-            &NSString::from_str(""),
-        )
-    };
-    item.setSubmenu(Some(&file));
-    main.addItem(&item);
-    app.setMainMenu(Some(&main));
-}
-
 struct Model {
     source: RefCell<ConfigSource>,
     source_revision: Cell<u64>,
@@ -74,8 +36,9 @@ struct Model {
     config_path: std::path::PathBuf,
     applications: RefCell<Vec<rift_protocol::ApplicationData>>,
     installed_applications: RefCell<Option<Vec<(String, String)>>>,
-    sidebar: RefCell<std::rc::Weak<Sidebar<usize>>>,
+    application_inventory: RefCell<Vec<applications::Choice>>,
     page_title: Rc<Label>,
+    toolbar: RefCell<Weak<Toolbar>>,
 }
 
 type SyncControl = Box<dyn Fn(&ConfigSource)>;
@@ -83,10 +46,17 @@ pub(super) struct Page {
     view: Rc<dyn NativeView>,
     sync: Vec<SyncControl>,
     synced_revision: Cell<Option<u64>>,
-    navigate: Option<Rc<dyn Fn(Option<usize>)>>,
+    back: Option<Rc<dyn Fn()>>,
 }
 
 impl Model {
+    fn rebuild_applications(&self) {
+        *self.application_inventory.borrow_mut() = applications::inventory(
+            &self.applications.borrow(),
+            self.installed_applications.borrow().as_deref().unwrap_or(&[]),
+        );
+    }
+
     fn replace_source(&self, source: ConfigSource) {
         if *self.source.borrow() != source {
             *self.source.borrow_mut() = source;
@@ -106,6 +76,77 @@ impl Page {
         }
         model.syncing.set(syncing);
         self.synced_revision.set(Some(revision));
+    }
+}
+
+/// One-level drill-in shared by the settings collections; callbacks hold weak references.
+pub(super) struct DetailNavigation {
+    ui: Ui,
+    model: Weak<Model>,
+    host: Rc<NavigationHost>,
+    current: RefCell<Option<Rc<Page>>>,
+    title: String,
+}
+impl DetailNavigation {
+    fn new(ui: Ui, model: &Rc<Model>, title: &str) -> Rc<Self> {
+        Rc::new(Self {
+            ui,
+            model: Rc::downgrade(model),
+            host: Rc::new(NavigationHost::new(&ui)),
+            current: RefCell::new(None),
+            title: title.into(),
+        })
+    }
+
+    fn pop(&self) {
+        self.host.pop();
+        self.current.borrow_mut().take();
+        if let Some(model) = self.model.upgrade() {
+            model.page_title.set_text(&self.title);
+            if let Some(toolbar) = model.toolbar.borrow().upgrade() {
+                toolbar.set_back(None);
+            }
+        }
+    }
+
+    fn detail(self: &Rc<Self>, mut page: Page) -> Rc<Page> {
+        page.view = Rc::new(SettingsPage::new(&self.ui, "").section(page.view));
+        Rc::new(page)
+    }
+
+    fn push(self: &Rc<Self>, page: Rc<Page>, title: &str) {
+        if let Some(model) = self.model.upgrade() {
+            page.synchronize(&model);
+            model.page_title.set_text(title);
+            if let Some(toolbar) = model.toolbar.borrow().upgrade() {
+                let weak = Rc::downgrade(self);
+                toolbar.set_back(Some((
+                    &format!("Back to {}", self.title),
+                    Box::new(move || {
+                        if let Some(nav) = weak.upgrade() {
+                            nav.pop();
+                        }
+                    }),
+                )));
+            }
+            self.host.push(page.view.clone());
+            *self.current.borrow_mut() = Some(page);
+        }
+    }
+
+    fn finish(self: &Rc<Self>, mut page: Page) -> Page {
+        self.host.set_root(page.view.clone());
+        page.view = self.host.clone();
+        let nav = self.clone();
+        page.back = Some(Rc::new(move || nav.pop()));
+        let nav = self.clone();
+        page.sync.push(Box::new(move |_| {
+            if let (Some(model), Some(page)) = (nav.model.upgrade(), nav.current.borrow().as_ref())
+            {
+                page.synchronize(&model);
+            }
+        }));
+        page
     }
 }
 
@@ -138,9 +179,11 @@ impl Settings {
             config_path,
             applications: RefCell::new(applications),
             installed_applications: RefCell::new(None),
-            sidebar: RefCell::new(std::rc::Weak::new()),
+            application_inventory: RefCell::new(Vec::new()),
             page_title: Rc::new(Label::new(&ui, "General")),
+            toolbar: RefCell::new(Weak::new()),
         });
+        model.rebuild_applications();
         let host = Rc::new(PageHost::new(&ui));
         let pages = Rc::new(RefCell::new((0..8).map(|_| None::<Page>).collect::<Vec<_>>()));
         let selected = Rc::new(Cell::new(0));
@@ -148,7 +191,7 @@ impl Settings {
         let weak_host = Rc::downgrade(&host);
         let weak_pages = Rc::downgrade(&pages);
         let selected_page = selected.clone();
-        let sidebar = Sidebar::with_children(
+        let sidebar = Sidebar::new(
             &ui,
             [
                 ("General", "gearshape"),
@@ -168,50 +211,23 @@ impl Settings {
                 symbol: symbol.into(),
             })
             .collect(),
-            |id| {
-                if *id == 1 {
-                    pages::layouts()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, (name, mode))| SidebarItem {
-                            id: 8 + index,
-                            title: name.into(),
-                            symbol: pages::layout_symbol(mode).into(),
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            },
         )
-        .on_select(move |destination| {
-            let id = if destination >= 8 { 1 } else { destination };
+        .on_select(move |id| {
             if let (Some(model), Some(host), Some(pages)) =
                 (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
             {
-                if selected_page.get() == 1 && id != 1 {
-                    let reset = pages.borrow()[1].as_ref().and_then(|page| page.navigate.clone());
-                    if let Some(reset) = reset {
-                        reset(None);
-                    }
-                }
                 if selected_page.replace(id) != id {
                     Self::select(ui, &model, &host, &pages, id);
-                }
-                let navigate = pages.borrow()[id].as_ref().and_then(|page| page.navigate.clone());
-                if let Some(navigate) = navigate {
-                    navigate((destination >= 8).then(|| destination - 8));
                 }
             }
         });
         let sidebar = Rc::new(sidebar);
-        *model.sidebar.borrow_mut() = Rc::downgrade(&sidebar);
         sidebar.set_selected(0);
         let window = SettingsWindow::new(&ui, "Rift Settings")
             .page_title(&ui, model.page_title.clone())
             .on_close(on_close)
             .content(NavigationSplitView::new(&ui, sidebar, host.clone()));
-        install_close_command(&ui);
+        *model.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
         *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
         window.ns_window().setContentSize(CGSize::new(880.0, 660.0));
         window.ns_window().center();
@@ -232,6 +248,9 @@ impl Settings {
         pages: &Rc<RefCell<Vec<Option<Page>>>>,
         id: usize,
     ) {
+        if let Some(toolbar) = model.toolbar.borrow().upgrade() {
+            toolbar.set_back(None);
+        }
         model.page_title.set_text(
             [
                 "General",
@@ -250,6 +269,9 @@ impl Settings {
         }
         let pages = pages.borrow();
         let page = pages[id].as_ref().unwrap();
+        if let Some(back) = &page.back {
+            back();
+        }
         page.synchronize(model);
         host.set_cached_page(page.view.clone());
     }
@@ -264,18 +286,36 @@ impl Settings {
         });
         if let Ok(apps) = receive.await {
             *self.model.installed_applications.borrow_mut() = Some(apps);
+            self.model.rebuild_applications();
         }
     }
 
     pub fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
+        let changed = self
+            .model
+            .applications
+            .borrow()
+            .iter()
+            .filter(|app| app.window_count > 0)
+            .map(|app| (&app.name, &app.bundle_id))
+            .ne(applications
+                .iter()
+                .filter(|app| app.window_count > 0)
+                .map(|app| (&app.name, &app.bundle_id)));
         *self.model.applications.borrow_mut() = applications;
+        if changed {
+            self.model.rebuild_applications();
+        }
     }
 
     pub fn refresh_displays(&self, displays: Vec<crate::sys::screen::ScreenInfo>) {
         if *self.model.displays.borrow() != displays {
             *self.model.displays.borrow_mut() = displays;
-            self._host.clear();
             self.pages.borrow_mut()[1] = None;
+            if self.selected.get() != 1 {
+                return;
+            }
+            self._host.clear();
             Self::select(
                 Ui::new(self.window.ns_window().mtm()),
                 &self.model,
@@ -334,7 +374,7 @@ impl FormBuilder {
             view: Rc::new(view),
             sync: self.sync,
             synced_revision: Cell::new(None),
-            navigate: None,
+            back: None,
         }
     }
 
@@ -565,37 +605,40 @@ impl FormBuilder {
         let get = Rc::new(get);
         let current = get.clone();
         let items: Vec<_> = values.iter().map(|(_, value)| value.clone()).collect();
+        let labels: Vec<String> = values.iter().map(|(label, _)| (*label).into()).collect();
         let choices = items.clone();
-        let fallback = default.clone();
-        let input = Rc::new(
-            Popup::new(&self.ui).items(values.iter().map(|(label, _)| *label)).on_change(
-                move |index| {
-                    let value = choices[index].clone();
-                    if model.upgrade().is_some_and(|model| {
-                        let source = model.source.borrow();
-                        current(&source) == (value != fallback(&source)).then_some(value.clone())
-                    }) {
-                        return;
-                    }
-                    let set = set.clone();
-                    let fallback = fallback.clone();
-                    Self::submit(
-                        &model,
-                        Box::new(move |source| {
-                            let value = (value != fallback(source)).then_some(value);
-                            set(source, value);
-                            Ok(())
-                        }),
-                        error.clone(),
-                    );
-                },
-            ),
-        );
+        let input = Rc::new(Popup::new(&self.ui).on_change(move |index| {
+            let value = index.checked_sub(1).and_then(|i| choices.get(i)).cloned();
+            if model.upgrade().is_some_and(|model| current(&model.source.borrow()) == value) {
+                return;
+            }
+            let set = set.clone();
+            Self::submit(
+                &model,
+                Box::new(move |source| {
+                    set(source, value);
+                    Ok(())
+                }),
+                error.clone(),
+            );
+        }));
         let weak = Rc::downgrade(&input);
         self.sync.push(Box::new(move |source| {
             if let Some(input) = weak.upgrade() {
-                let effective = get(source).unwrap_or_else(|| default(source));
-                input.set_selected(items.iter().position(|value| *value == effective).unwrap_or(0));
+                let effective = default(source);
+                let name = items
+                    .iter()
+                    .position(|value| *value == effective)
+                    .map(|i| labels[i].as_str())
+                    .unwrap_or("Default");
+                let mut titles = vec![format!("{name} (Default)")];
+                titles.extend(labels.iter().cloned());
+                input.set_items(titles.iter().map(String::as_str));
+                input.set_selected(
+                    get(source)
+                        .and_then(|value| items.iter().position(|item| *item == value))
+                        .map_or(0, |i| i + 1),
+                );
             }
         }));
         self.row(title, input, message)
@@ -623,3 +666,6 @@ impl FormBuilder {
         }));
     }
 }
+
+#[cfg(test)]
+pub mod native_tests;

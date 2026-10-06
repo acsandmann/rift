@@ -624,7 +624,6 @@ impl<T: 'static> EditableList<T> {
                 }
             },
         );
-        list.min_height(80.0);
         let stack = VStack::new(ui);
         stack.ns_stack_view().addArrangedSubview(list.ns_view());
         crate::view::prepare(list.ns_view());
@@ -640,6 +639,12 @@ impl<T: 'static> EditableList<T> {
             controls,
             selection,
         }
+    }
+
+    /// Let the enclosing settings page scroll the entire collection.
+    pub fn full_length(mut self) -> Self {
+        self.list = self.list.full_length();
+        self
     }
 
     pub fn items(self, items: Vec<T>) -> Self {
@@ -698,7 +703,7 @@ impl<T: 'static> NativeView for EditableList<T> {
 }
 
 struct SettingsCellContent {
-    content: VStack,
+    content: crate::HStack,
     title: Rc<Label>,
     summary: Option<Rc<crate::Caption>>,
     trailing: Option<Rc<Label>>,
@@ -787,7 +792,7 @@ impl SettingsListCell {
             row = row.push(button.clone());
         }
         let divider = Rc::new(crate::Divider::new(ui));
-        let content = VStack::new(ui).spacing(0.0).push(row).push(divider.clone());
+        let content = row;
         let native: Retained<Self> = unsafe {
             msg_send![
                 super(Self::alloc(ui.mtm()).set_ivars(SettingsCellContent {
@@ -804,6 +809,19 @@ impl SettingsListCell {
             ]
         };
         native.addSubview(native.ivars().content.ns_view());
+        native.addSubview(native.ivars().divider.ns_view());
+        let line = native.ivars().divider.ns_view();
+        crate::view::prepare(line);
+        line.leadingAnchor()
+            .constraintEqualToAnchor_constant(&native.leadingAnchor(), 12.0)
+            .setActive(true);
+        line.trailingAnchor()
+            .constraintEqualToAnchor_constant(&native.trailingAnchor(), -12.0)
+            .setActive(true);
+        line.bottomAnchor()
+            .constraintEqualToAnchor(&native.bottomAnchor())
+            .setActive(true);
+        line.heightAnchor().constraintEqualToConstant(1.0).setActive(true);
         crate::view::pin(&native, native.ivars().content.ns_view(), crate::Insets {
             top: 0.0,
             left: 0.0,
@@ -981,9 +999,13 @@ impl<T: 'static> SettingsList<T> {
     /// Small inventories size to their rows; larger inventories scroll within the cap.
 
     pub fn fit_content(mut self, maximum_height: f64) -> Self {
-        let height = self.ns_view().heightAnchor().constraintEqualToConstant(64.0);
-        height.setActive(true);
-        self.fitted_height = Some((height, maximum_height.max(64.0)));
+        if let Some((_, maximum)) = &mut self.fitted_height {
+            *maximum = maximum_height.max(64.0);
+        } else {
+            let height = self.ns_view().heightAnchor().constraintEqualToConstant(64.0);
+            height.setActive(true);
+            self.fitted_height = Some((height, maximum_height.max(64.0)));
+        }
         self
     }
 

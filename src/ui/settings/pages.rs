@@ -111,30 +111,6 @@ fn general(ui: Ui, model: &Rc<Model>) -> Page {
         |s, v| s.settings.default_disable = v,
     ));
     page = page.section(section);
-    let section = Section::new(&ui, "Focus")
-        .row(f.switch(
-            "Focus follows pointer",
-            |s| s.settings.focus_follows_mouse,
-            |s, v| s.settings.focus_follows_mouse = v,
-        ))
-        .row(f.switch(
-            "Move pointer to focused window",
-            |s| s.settings.mouse_follows_focus,
-            |s, v| s.settings.mouse_follows_focus = v,
-        ));
-    let row = f.switch(
-        "Hide pointer after focusing",
-        |s| s.settings.mouse_hides_on_focus,
-        |s, v| s.settings.mouse_hides_on_focus = v,
-    );
-    f.enabled(&row, |s| s.settings.mouse_follows_focus);
-    page = page.section(section.row(row));
-    let section = Section::new(&ui, "Configuration").row(f.switch(
-        "Reload config when edited externally",
-        |s| s.settings.hot_reload,
-        |s, v| s.settings.hot_reload = v,
-    ));
-    page = page.section(section);
     f.finish(page)
 }
 fn layout(ui: Ui, model: &Rc<Model>) -> Page {
@@ -156,55 +132,17 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
             |s, v| s.settings.layout.base.window_insertion_point = v,
         ));
     page = page.section(section);
-    let host = Rc::new(NavigationHost::new(&ui));
-    let current = Rc::new(RefCell::new(None::<Rc<Page>>));
+    let navigation = DetailNavigation::new(ui, model, "Layouts");
     let details = RefCell::new(vec![None::<Rc<Page>>; layouts().len()]);
-    let editor = current.clone();
-    let weak_host = Rc::downgrade(&host);
+    let weak_navigation = Rc::downgrade(&navigation);
     let weak = Rc::downgrade(model);
-    let navigate: Rc<dyn Fn(Option<usize>)> = Rc::new(move |index| {
-        if let (Some(model), Some(host)) = (weak.upgrade(), weak_host.upgrade()) {
-            let Some(index) = index else {
-                model.page_title.set_text("Layouts");
-                host.pop();
-                editor.borrow_mut().take();
-                return;
-            };
-            model.page_title.set_text(layouts()[index].0);
-            if let Some(detail) = details.borrow()[index].as_ref() {
-                detail.synchronize(&model);
-                host.push(detail.view.clone());
-                *editor.borrow_mut() = Some(detail.clone());
-                return;
-            }
+    let open: Rc<dyn Fn(usize)> = Rc::new(move |index| {
+        if let (Some(model), Some(nav)) = (weak.upgrade(), weak_navigation.upgrade()) {
             let (name, mode) = layouts()[index];
-            let back_host = Rc::downgrade(&host);
-            let back_sidebar = model.sidebar.borrow().clone();
-            let current = Rc::downgrade(&editor);
-            let back = Button::new(&ui, "Layouts")
-                .symbol("chevron.backward")
-                .borderless()
-                .on_click(move || {
-                    if let Some(host) = back_host.upgrade() {
-                        host.pop();
-                        if let Some(sidebar) = back_sidebar.upgrade() {
-                            sidebar.set_selected(1);
-                        }
-                        if let Some(current) = current.upgrade() {
-                            current.borrow_mut().take();
-                        }
-                    }
-                });
-            back.ns_button().setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeft);
-            back.ns_button().setKeyEquivalent(&objc2_foundation::NSString::from_str("["));
-            back.ns_button()
-                .setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command);
-            back.accessibility_label("Back to Layouts");
-            let detail = Rc::new(layout_options(ui, &model, mode, name, back));
-            detail.synchronize(&model);
-            host.push(detail.view.clone());
-            details.borrow_mut()[index] = Some(detail.clone());
-            *editor.borrow_mut() = Some(detail);
+            let mut details = details.borrow_mut();
+            let detail =
+                details[index].get_or_insert_with(|| nav.detail(layout_options(ui, &model, mode)));
+            nav.push(detail.clone(), name);
         }
     });
     let list = SettingsList::new(
@@ -215,15 +153,7 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     .symbols(|entry| layout_symbol(entry.1).to_string())
     .navigation()
     .full_length()
-    .on_open({
-        let weak = Rc::downgrade(model);
-        move |index| {
-            if let Some(sidebar) = weak.upgrade().and_then(|model| model.sidebar.borrow().upgrade())
-            {
-                sidebar.set_selected(index + 2);
-            }
-        }
-    });
+    .on_open(move |index| open(index));
     list.set_rows(layouts().into_iter().map(|(name, mode)| (name.to_string(), mode)).collect());
     page = page.section(
         Section::new(&ui, "Layout options")
@@ -294,24 +224,10 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
             |s, v| s.settings.layout.gaps.inner.vertical = v,
         ));
     page = page.section(section);
-    page = super::editors::display_overrides(&mut f, page, model);
-    let root = Rc::new(f.finish(page));
-    host.set_root(root.view.clone());
-    let weak = Rc::downgrade(model);
-    Page {
-        synced_revision: Cell::new(None),
-        view: host,
-        navigate: Some(navigate),
-        sync: vec![Box::new(move |_| {
-            if let Some(model) = weak.upgrade() {
-                root.synchronize(&model);
-                if let Some(detail) = current.borrow().as_ref() {
-                    detail.synchronize(&model);
-                }
-            }
-        })],
-    }
+    page = super::editors::display_overrides(&mut f, page, model, &navigation);
+    navigation.finish(f.finish(page))
 }
+
 fn percentage_text(ratio: f64) -> String {
     format!("{:.2}", ratio * 100.0)
         .trim_end_matches('0')
@@ -330,7 +246,7 @@ fn layout_description(mode: LayoutMode) -> &'static str {
     }
 }
 
-fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back: Button) -> Page {
+fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let options = || {
         Section::new(&ui, match mode {
@@ -340,9 +256,9 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back
             _ => "Window arrangement",
         })
     };
-    let mut page = SettingsPage::new(&ui, "")
-        .section(HStack::new(&ui).push(back).spacer(&ui))
-        .subtitle(layout_description(mode));
+    let mut page = VStack::new(&ui)
+        .spacing(Metrics::SECTION_SPACING)
+        .push(WrappingLabel::new(&ui, layout_description(mode)));
     let section = match mode {
         LayoutMode::Traditional => options()
             .row(f.switch(
@@ -437,7 +353,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back
                     |s| s.settings.layout.master_stack.master_side,
                     |s, v| s.settings.layout.master_stack.master_side = v,
                 ));
-            page = page.section(section);
+            page = page.push(section);
             Section::new(&ui, "Arrangement")
                 .row(f.popup(
                     "New windows",
@@ -545,7 +461,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back
                     )
                     .suffix("%"),
                 );
-            page = page.section(section);
+            page = page.push(section);
             let section = Section::new(&ui, "Navigation")
                 .row(f.popup(
                     "Alignment",
@@ -573,7 +489,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back
                     |_| true,
                     |s, v| s.settings.layout.scrolling.animate = v,
                 ));
-            page = page.section(section);
+            page = page.push(section);
             Section::new(&ui, "Window placement").row(f.inherited_popup(
                 "New window position",
                 insertion(),
@@ -583,7 +499,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back
             ))
         }
         LayoutMode::Floating => {
-            return f.finish(page.section(Caption::new(
+            return f.finish(page.push(Caption::new(
                 &ui,
                 "Floating does not have any additional layout options.",
             )));
@@ -595,12 +511,30 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode, _name: &str, back
     } else {
         section
     };
-    f.finish(page.section(section))
+    f.finish(page.push(section))
 }
 
 fn input(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
+    let section = Section::new(&ui, "Focus")
+        .row(f.switch(
+            "Focus follows pointer",
+            |s| s.settings.focus_follows_mouse,
+            |s, v| s.settings.focus_follows_mouse = v,
+        ))
+        .row(f.switch(
+            "Move pointer to focused window",
+            |s| s.settings.mouse_follows_focus,
+            |s, v| s.settings.mouse_follows_focus = v,
+        ));
+    let row = f.switch(
+        "Hide pointer after focusing",
+        |s| s.settings.mouse_hides_on_focus,
+        |s, v| s.settings.mouse_hides_on_focus = v,
+    );
+    f.enabled(&row, |s| s.settings.mouse_follows_focus);
+    page = page.section(section.row(row));
     let section = Section::new(&ui, "Workspace swipes")
         .row(f.switch(
             "Enabled",
@@ -783,38 +717,54 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
             |s| s.settings.ui.menu_bar.enabled,
             |s, v| s.settings.ui.menu_bar.enabled = v,
         ))
-        .row(f.switch(
-            "Show empty workspaces",
-            |s| s.settings.ui.menu_bar.show_empty,
-            |s, v| s.settings.ui.menu_bar.show_empty = v,
-        ))
-        .row(f.popup(
-            "Workspaces to show",
-            vec![
-                ("All", MenuBarDisplayMode::All),
-                ("Active", MenuBarDisplayMode::Active),
-            ],
-            |s| s.settings.ui.menu_bar.mode,
-            |s, v| s.settings.ui.menu_bar.mode = v,
-        ))
-        .row(f.popup(
-            "Active workspace label",
-            vec![
-                ("Index", ActiveWorkspaceLabel::Index),
-                ("Name", ActiveWorkspaceLabel::Name),
-            ],
-            |s| s.settings.ui.menu_bar.active_label,
-            |s, v| s.settings.ui.menu_bar.active_label = v,
-        ))
-        .row(f.popup(
-            "Display style",
-            vec![
-                ("Layout", WorkspaceDisplayStyle::Layout),
-                ("Label", WorkspaceDisplayStyle::Label),
-            ],
-            |s| s.settings.ui.menu_bar.display_style,
-            |s, v| s.settings.ui.menu_bar.display_style = v,
-        ));
+        .row({
+            let row = f.switch(
+                "Show empty workspaces",
+                |s| s.settings.ui.menu_bar.show_empty,
+                |s, v| s.settings.ui.menu_bar.show_empty = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
+            row
+        })
+        .row({
+            let row = f.popup(
+                "Workspaces to show",
+                vec![
+                    ("All", MenuBarDisplayMode::All),
+                    ("Active", MenuBarDisplayMode::Active),
+                ],
+                |s| s.settings.ui.menu_bar.mode,
+                |s, v| s.settings.ui.menu_bar.mode = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
+            row
+        })
+        .row({
+            let row = f.popup(
+                "Active workspace label",
+                vec![
+                    ("Index", ActiveWorkspaceLabel::Index),
+                    ("Name", ActiveWorkspaceLabel::Name),
+                ],
+                |s| s.settings.ui.menu_bar.active_label,
+                |s, v| s.settings.ui.menu_bar.active_label = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
+            row
+        })
+        .row({
+            let row = f.popup(
+                "Display style",
+                vec![
+                    ("Layout", WorkspaceDisplayStyle::Layout),
+                    ("Label", WorkspaceDisplayStyle::Label),
+                ],
+                |s| s.settings.ui.menu_bar.display_style,
+                |s, v| s.settings.ui.menu_bar.display_style = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
+            row
+        });
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let weak_model = f.model.clone();
@@ -834,35 +784,53 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
             path.set_value(&s.settings.ui.menu_bar.layout_folder);
         }
     }));
-    page = page.section(section.row(f.row("Layout folder", path, message)));
+    let row = f.row("Layout folder", path, message);
+    f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
+    page = page.section(section.row(row));
     let section = Section::new(&ui, "Overview")
-        .description("Changing whether Overview is enabled requires restarting Rift.")
+        .description("Requires restarting Rift.")
         .row(f.switch(
-            "Enabled (restart required)",
+            "Enabled",
             |s| s.settings.ui.mission_control.enabled,
             |s, v| s.settings.ui.mission_control.enabled = v,
         ))
-        .row(f.switch(
-            "Show empty workspaces",
-            |s| s.settings.ui.mission_control.show_empty_workspaces,
-            |s, v| s.settings.ui.mission_control.show_empty_workspaces = v,
-        ))
-        .row(f.switch(
-            "Window previews",
-            |s| s.settings.ui.mission_control.window_previews,
-            |s, v| s.settings.ui.mission_control.window_previews = v,
-        ))
-        .row(f.switch(
-            "Fade transitions",
-            |s| s.settings.ui.mission_control.fade_enabled,
-            |s, v| s.settings.ui.mission_control.fade_enabled = v,
-        ))
-        .row(f.number(
-            "Fade duration (milliseconds)",
-            1.0,
-            |s| s.settings.ui.mission_control.fade_duration_ms,
-            |s, v| s.settings.ui.mission_control.fade_duration_ms = v,
-        ));
+        .row({
+            let row = f.switch(
+                "Show empty workspaces",
+                |s| s.settings.ui.mission_control.show_empty_workspaces,
+                |s, v| s.settings.ui.mission_control.show_empty_workspaces = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
+            row
+        })
+        .row({
+            let row = f.switch(
+                "Window previews",
+                |s| s.settings.ui.mission_control.window_previews,
+                |s, v| s.settings.ui.mission_control.window_previews = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
+            row
+        })
+        .row({
+            let row = f.switch(
+                "Fade transitions",
+                |s| s.settings.ui.mission_control.fade_enabled,
+                |s, v| s.settings.ui.mission_control.fade_enabled = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
+            row
+        })
+        .row({
+            let row = f.number(
+                "Fade duration (milliseconds)",
+                1.0,
+                |s| s.settings.ui.mission_control.fade_duration_ms,
+                |s, v| s.settings.ui.mission_control.fade_duration_ms = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
+            row
+        });
     page = page.section(section);
     let section = Section::new(&ui, "Stack Line")
         .description("Experimental")
@@ -871,60 +839,92 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
             |s| s.settings.ui.stack_line.enabled,
             |s, v| s.settings.ui.stack_line.enabled = v,
         ))
-        .row(f.popup(
-            "Interaction",
-            vec![
-                ("Hover", StackLineHoverMode::Hover),
-                ("Click", StackLineHoverMode::Click),
-            ],
-            |s| s.settings.ui.stack_line.hover,
-            |s, v| s.settings.ui.stack_line.hover = v,
-        ))
-        .row(f.popup(
-            "Horizontal placement",
-            vec![
-                ("Top", HorizontalPlacement::Top),
-                ("Bottom", HorizontalPlacement::Bottom),
-            ],
-            |s| s.settings.ui.stack_line.horiz_placement,
-            |s, v| s.settings.ui.stack_line.horiz_placement = v,
-        ))
-        .row(f.popup(
-            "Vertical placement",
-            vec![
-                ("Left", VerticalPlacement::Left),
-                ("Right", VerticalPlacement::Right),
-            ],
-            |s| s.settings.ui.stack_line.vert_placement,
-            |s, v| s.settings.ui.stack_line.vert_placement = v,
-        ))
-        .row(f.number(
-            "Thickness (points)",
-            1.0,
-            |s| s.settings.ui.stack_line.thickness,
-            |s, v| s.settings.ui.stack_line.thickness = v,
-        ))
-        .row(f.number(
-            "Spacing (points)",
-            1.0,
-            |s| s.settings.ui.stack_line.spacing,
-            |s, v| s.settings.ui.stack_line.spacing = v,
-        ));
-    let section = section.row(f.color(
-        "Selected color",
-        |s| s.settings.ui.stack_line.selected_color,
-        |s, v| s.settings.ui.stack_line.selected_color = v,
-    ));
-    let section = section.row(f.color(
-        "Unselected color",
-        |s| s.settings.ui.stack_line.unselected_color,
-        |s, v| s.settings.ui.stack_line.unselected_color = v,
-    ));
-    let section = section.row(f.color(
-        "Border color",
-        |s| s.settings.ui.stack_line.border_color,
-        |s, v| s.settings.ui.stack_line.border_color = v,
-    ));
+        .row({
+            let row = f.popup(
+                "Interaction",
+                vec![
+                    ("Hover", StackLineHoverMode::Hover),
+                    ("Click", StackLineHoverMode::Click),
+                ],
+                |s| s.settings.ui.stack_line.hover,
+                |s, v| s.settings.ui.stack_line.hover = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+            row
+        })
+        .row({
+            let row = f.popup(
+                "Horizontal placement",
+                vec![
+                    ("Top", HorizontalPlacement::Top),
+                    ("Bottom", HorizontalPlacement::Bottom),
+                ],
+                |s| s.settings.ui.stack_line.horiz_placement,
+                |s, v| s.settings.ui.stack_line.horiz_placement = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+            row
+        })
+        .row({
+            let row = f.popup(
+                "Vertical placement",
+                vec![
+                    ("Left", VerticalPlacement::Left),
+                    ("Right", VerticalPlacement::Right),
+                ],
+                |s| s.settings.ui.stack_line.vert_placement,
+                |s, v| s.settings.ui.stack_line.vert_placement = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+            row
+        })
+        .row({
+            let row = f.number(
+                "Thickness (points)",
+                1.0,
+                |s| s.settings.ui.stack_line.thickness,
+                |s, v| s.settings.ui.stack_line.thickness = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+            row
+        })
+        .row({
+            let row = f.number(
+                "Spacing (points)",
+                1.0,
+                |s| s.settings.ui.stack_line.spacing,
+                |s, v| s.settings.ui.stack_line.spacing = v,
+            );
+            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+            row
+        });
+    let section = section.row({
+        let row = f.color(
+            "Selected color",
+            |s| s.settings.ui.stack_line.selected_color,
+            |s, v| s.settings.ui.stack_line.selected_color = v,
+        );
+        f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+        row
+    });
+    let section = section.row({
+        let row = f.color(
+            "Unselected color",
+            |s| s.settings.ui.stack_line.unselected_color,
+            |s, v| s.settings.ui.stack_line.unselected_color = v,
+        );
+        f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+        row
+    });
+    let section = section.row({
+        let row = f.color(
+            "Border color",
+            |s| s.settings.ui.stack_line.border_color,
+            |s, v| s.settings.ui.stack_line.border_color = v,
+        );
+        f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
+        row
+    });
     page = page.section(section);
     f.finish(page)
 }
@@ -975,6 +975,11 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     page = page.section(
         Section::new(&ui, "Configuration file")
             .description(&path.to_string_lossy())
+            .row(f.switch(
+                "Reload config when edited externally",
+                |s| s.settings.hot_reload,
+                |s, v| s.settings.hot_reload = v,
+            ))
             .content(actions.push(reload))
             .footer(message),
     );

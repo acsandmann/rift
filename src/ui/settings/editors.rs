@@ -2,65 +2,6 @@ use super::pages::{layouts, optional_number};
 use super::*;
 use crate::common::config::*;
 
-/// Keep detail controls and their sync closures scoped to the open Settings session.
-pub(super) fn show_editor(
-    ui: Ui,
-    model: &Rc<Model>,
-    title: &str,
-    page: Page,
-    current: &Rc<RefCell<Option<Page>>>,
-) {
-    let syncing = model.syncing.replace(true);
-    for sync in &page.sync {
-        sync(&model.source.borrow());
-    }
-    model.syncing.set(syncing);
-    page.view.min_width(480.0);
-    page.view.ns_view().layoutSubtreeIfNeeded();
-    let height = page.view.ns_view().fittingSize().height.clamp(100.0, 440.0);
-    let document = View::flipped(&ui).content(page.view.clone(), Insets {
-        top: 0.0,
-        left: 0.0,
-        bottom: 0.0,
-        right: 0.0,
-    });
-    let scroll = ScrollView::new(&ui, document);
-    scroll.fit_width();
-    scroll.height(height);
-    let weak = Rc::downgrade(model);
-    let editor = current.clone();
-    let done = Button::new(&ui, "Done").key_equivalent("\r").on_click(move || {
-        if let Some(model) = weak.upgrade() {
-            if let Some(sheet) = model.sheet.borrow().as_ref() {
-                sheet.end();
-            }
-        }
-        *editor.borrow_mut() = None;
-    });
-    let content = VStack::new(&ui)
-        .insets(Insets {
-            top: 20.0,
-            left: 20.0,
-            bottom: 20.0,
-            right: 20.0,
-        })
-        .push(SectionTitle::new(&ui, title))
-        .push(scroll)
-        .push(
-            HStack::new(&ui)
-                .push(Caption::new(&ui, "Changes save automatically."))
-                .spacer(&ui)
-                .push(done),
-        );
-    let sheet = Sheet::new(&ui, title, content);
-    sheet.fit_content();
-    if let Some(window) = model.window.borrow().load() {
-        sheet.show(&window);
-        *model.sheet.borrow_mut() = Some(sheet);
-        *current.borrow_mut() = Some(page);
-    }
-}
-
 /// Workspace records use a native collection and a small attached detail editor.
 type WorkspaceEntry = (usize, String, Option<LayoutMode>);
 
@@ -68,60 +9,25 @@ fn workspace_editor(
     ui: Ui,
     model: &Rc<Model>,
     title: &str,
+    navigation: &Rc<DetailNavigation>,
     items: impl Fn(&ConfigSource) -> Vec<WorkspaceEntry> + 'static,
     summary: impl Fn(&WorkspaceEntry, usize) -> String + 'static,
     detail: impl Fn(Ui, &Rc<Model>, usize) -> Page + 'static,
-    add: impl Fn(&Rc<Model>, Weak<ValidationMessage>) + 'static,
     remove: impl Fn(&mut ConfigSource, usize) -> Result<(), String> + Send + Copy + 'static,
 ) -> (Page, Rc<AddRemoveControl>) {
     let mut f = FormBuilder::new(ui, model);
-    let current: Rc<RefCell<Option<Page>>> = Rc::new(RefCell::new(None));
     let selected = Rc::new(Cell::new(None));
     let weak = Rc::downgrade(model);
-    let editor = current.clone();
+    let nav = Rc::downgrade(navigation);
     let edit_workspace: Rc<dyn Fn(usize)> = Rc::new(move |index| {
-        if let Some(model) = weak.upgrade() {
-            let page = detail(ui, &model, index);
-            let syncing = model.syncing.replace(true);
-            for sync in &page.sync {
-                sync(&model.source.borrow());
-            }
-            model.syncing.set(syncing);
-            let weak = Rc::downgrade(&model);
-            let current = editor.clone();
-            let done = Button::new(&ui, "Done").key_equivalent("\r").on_click(move || {
-                if let Some(model) = weak.upgrade() {
-                    if let Some(sheet) = model.sheet.borrow().as_ref() {
-                        sheet.end();
-                    }
-                }
-                *current.borrow_mut() = None;
-            });
-            let content = VStack::new(&ui)
-                .insets(Insets {
-                    top: 16.0,
-                    left: 16.0,
-                    bottom: 16.0,
-                    right: 16.0,
-                })
-                .push(SectionTitle::new(&ui, &format!("Workspace {}", index + 1)))
-                .push(page.view.clone())
-                .push(
-                    HStack::new(&ui)
-                        .push(Caption::new(&ui, "Changes save automatically."))
-                        .spacer(&ui)
-                        .push(done),
-                );
-            content.min_width(420.0);
-            let sheet = Sheet::new(&ui, "Edit Workspace", content);
-            sheet.fit_content();
-            if let Some(window) = model.window.borrow().load() {
-                sheet.show(&window);
-                *model.sheet.borrow_mut() = Some(sheet);
-                *editor.borrow_mut() = Some(page);
-            }
+        if let (Some(model), Some(nav)) = (weak.upgrade(), nav.upgrade()) {
+            nav.push(
+                nav.detail(detail(ui, &model, index)),
+                &format!("Workspace {}", index + 1),
+            );
         }
     });
+    let open_added = edit_workspace.clone();
     let summary = Rc::new(summary);
     let primary = summary.clone();
     let table = Rc::new(
@@ -145,7 +51,30 @@ fn workspace_editor(
         AddRemoveControl::new(&ui)
             .on_add(move || {
                 if let Some(model) = weak.upgrade() {
-                    add(&model, error.clone());
+                    let weak = Rc::downgrade(&model);
+                    let error = error.clone();
+                    let open = open_added.clone();
+                    let index = model.source.borrow().virtual_workspaces.default_workspace_count;
+                    let _ = model.requests.send(Request {
+                        action: Action::Edit(Box::new(|s| {
+                            if s.virtual_workspaces.default_workspace_count >= MAX_WORKSPACES {
+                                return Err(format!("Use at most {MAX_WORKSPACES} workspaces."));
+                            }
+                            resize_workspaces(s, s.virtual_workspaces.default_workspace_count + 1);
+                            Ok(())
+                        })),
+                        finish: Box::new(move |result| {
+                            if let Some(error) = error.upgrade() {
+                                error.set_validation(&match &result {
+                                    Ok(()) => Validation::None,
+                                    Err(message) => Validation::Error(message.clone()),
+                                })
+                            }
+                            if result.is_ok() && weak.upgrade().is_some() {
+                                open(index);
+                            }
+                        }),
+                    });
                 }
             })
             .on_remove(move || {
@@ -187,11 +116,6 @@ fn workspace_editor(
                 i > 0 && i + 1 == source.virtual_workspaces.default_workspace_count
             }));
         }
-        if let Some(page) = current.borrow().as_ref() {
-            for sync in &page.sync {
-                sync(source);
-            }
-        }
     }));
     (
         f.finish(Section::new(&ui, title).content(table).footer(message)),
@@ -200,17 +124,13 @@ fn workspace_editor(
 }
 
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
+    let navigation = DetailNavigation::new(ui, model, "Workspaces");
     let mut f = FormBuilder::new(ui, model);
     let mut section = Section::new(&ui, "Virtual Workspaces")
         .row(f.switch(
             "Enabled",
             |s| s.virtual_workspaces.enabled,
             |s, v| s.virtual_workspaces.enabled = v,
-        ))
-        .row(f.integer(
-            "Workspace count",
-            |s| s.virtual_workspaces.default_workspace_count as f64,
-            |s, v| resize_workspaces(s, v as usize),
         ))
         .row(f.switch(
             "Auto-assign windows",
@@ -253,6 +173,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
         ui,
         model,
         "Workspaces",
+        &navigation,
         |s| {
             (0..s.virtual_workspaces.default_workspace_count)
                 .map(|i| {
@@ -335,22 +256,9 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
             );
             f.finish(Section::new(&ui, "").row(name).row(layout))
         },
-        |model, error| {
-            FormBuilder::submit(
-                &Rc::downgrade(model),
-                Box::new(|s| {
-                    if s.virtual_workspaces.default_workspace_count >= MAX_WORKSPACES {
-                        return Err(format!("Maximum is {MAX_WORKSPACES} workspaces"));
-                    }
-                    resize_workspaces(s, s.virtual_workspaces.default_workspace_count + 1);
-                    Ok(())
-                }),
-                error,
-            )
-        },
         |s, i| {
             if i + 1 != s.virtual_workspaces.default_workspace_count {
-                return Err("Remove the last workspace, or change Workspace count.".into());
+                return Err("Only the last workspace can be removed.".into());
             }
             if i == 0 {
                 return Err("Keep at least one workspace.".into());
@@ -361,12 +269,13 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     );
     let editor_sync = editor.sync;
     f.sync.extend(editor_sync);
-    f.finish(
+    let page = f.finish(
         SettingsPage::new(&ui, "")
             .section(section)
             .section(editor.view)
             .bottom_bar(HStack::new(&ui).push(actions).spacer(&ui)),
-    )
+    );
+    navigation.finish(page)
 }
 
 fn resize_workspaces(s: &mut ConfigSource, count: usize) {
@@ -475,50 +384,20 @@ fn workspace_popup(
 pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let message = Rc::new(ValidationMessage::new(&ui));
-    let current: Rc<RefCell<Option<Page>>> = Rc::new(RefCell::new(None));
+    let navigation = DetailNavigation::new(ui, model, "Rules");
     let weak = Rc::downgrade(model);
-    let editor = current.clone();
+    let nav = Rc::downgrade(&navigation);
     let edit_rule: Rc<dyn Fn(usize)> = Rc::new(move |index| {
-        if let Some(model) = weak.upgrade() {
-            let page = rule_detail(ui, &model, index);
-            let syncing = model.syncing.replace(true);
-            for sync in &page.sync {
-                sync(&model.source.borrow());
-            }
-            model.syncing.set(syncing);
-            page.view.min_height(360.0);
-            let axis = objc2_app_kit::NSLayoutConstraintOrientation::Vertical;
-            page.view.ns_view().setContentHuggingPriority_forOrientation(1.0, axis);
-            page.view
-                .ns_view()
-                .setContentCompressionResistancePriority_forOrientation(1.0, axis);
-            let weak = Rc::downgrade(&model);
-            let done = Button::new(&ui, "Done").key_equivalent("\r").on_click(move || {
-                if let Some(model) = weak.upgrade() {
-                    if let Some(sheet) = model.sheet.borrow().as_ref() {
-                        sheet.end();
-                    }
-                }
-            });
-            let content = VStack::new(&ui).push(page.view.clone()).push(
-                HStack::new(&ui)
-                    .insets(Insets {
-                        top: 0.0,
-                        left: 20.0,
-                        bottom: 12.0,
-                        right: 20.0,
-                    })
-                    .push(Caption::new(&ui, "Changes save automatically."))
-                    .spacer(&ui)
-                    .push(done),
-            );
-            let sheet = Sheet::new(&ui, "Edit App Rule", content);
-            sheet.ns_window().setContentSize(CGSize::new(600.0, 620.0));
-            if let Some(window) = model.window.borrow().load() {
-                sheet.show(&window);
-                *model.sheet.borrow_mut() = Some(sheet);
-                *editor.borrow_mut() = Some(page);
-            }
+        if let (Some(model), Some(nav)) = (weak.upgrade(), nav.upgrade()) {
+            let title = model
+                .source
+                .borrow()
+                .virtual_workspaces
+                .app_rules
+                .get(index)
+                .map(|rule| rule_name(&model, rule))
+                .unwrap_or_else(|| "App Rule".into());
+            nav.push(nav.detail(rule_detail(ui, &model, index)), &title);
         }
     });
     let action = edit_rule.clone();
@@ -529,27 +408,13 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             move |rule| {
                 app_names
                     .upgrade()
-                    .and_then(|model| {
-                        model
-                            .applications
-                            .borrow()
-                            .iter()
-                            .find(|app| rule.app_id.is_some() && app.bundle_id == rule.app_id)
-                            .map(|app| app.name.clone())
-                            .or_else(|| {
-                                model.installed_applications.borrow().as_ref().and_then(|apps| {
-                                    apps.iter()
-                                        .find(|(_, id)| rule.app_id.as_ref() == Some(id))
-                                        .map(|(name, _)| name.clone())
-                                })
-                            })
-                    })
+                    .map(|model| rule_name(&model, rule))
                     .unwrap_or_else(|| rule_summary(rule))
             },
             rule_behavior,
         )
-        .empty_message("No app rules")
         .full_length()
+        .empty_message("No app rules")
         .symbol("app")
         .images(application_icons(|rule: &AppWorkspaceRule| rule.app_id.clone()))
         .on_open(move |index| action(index))
@@ -575,14 +440,16 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     );
     let weak_table = Rc::downgrade(&table);
     let names = weak_table.clone();
-    let _ = model.requests.send(Request {
-        action: Action::RefreshRuntime,
-        finish: Box::new(move |_| {
-            if let Some(table) = names.upgrade() {
-                table.ns_table_view().reloadData();
-            }
-        }),
-    });
+    if model.installed_applications.borrow().is_none() {
+        let _ = model.requests.send(Request {
+            action: Action::RefreshRuntime,
+            finish: Box::new(move |_| {
+                if let Some(table) = names.upgrade() {
+                    table.ns_table_view().reloadData();
+                }
+            }),
+        });
+    }
     let edit_action = edit_rule.clone();
     let edit = IconButton::new(&ui, "pencil", "Edit Rule…").on_click(move || {
         if let Some(index) = weak_table.upgrade().and_then(|table| table.selection()) {
@@ -649,18 +516,13 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             }
             *last.borrow_mut() = rules.clone();
         }
-        if let Some(page) = current.borrow().as_ref() {
-            for sync in &page.sync {
-                sync(source);
-            }
-        }
     }));
-    f.finish(SettingsPage::new(&ui, "")
+    navigation.finish(f.finish(SettingsPage::new(&ui, "")
         .subtitle("Choose which windows Rift manages and where they open. Click a rule’s arrow to edit it. Drag rules to change their order.")
         .section(table)
         .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
         .section(message)
-        )
+        ))
 }
 
 fn rule_behavior(rule: &AppWorkspaceRule) -> String {
@@ -687,50 +549,28 @@ fn rule_behavior(rule: &AppWorkspaceRule) -> String {
 
 type AppMatch = (Option<String>, Option<String>);
 fn application_choices(model: &Model) -> Vec<(String, AppMatch)> {
-    let mut apps: Vec<_> = model
-        .applications
+    filtered_applications(model, "")
+}
+fn filtered_applications(model: &Model, query: &str) -> Vec<(String, AppMatch)> {
+    model
+        .application_inventory
         .borrow()
         .iter()
-        .filter(|app| app.window_count > 0)
-        .map(|app| {
-            (
-                app.name.clone(),
-                if let Some(id) = &app.bundle_id {
-                    (Some(id.clone()), None)
-                } else {
-                    (None, Some(app.name.clone()))
-                },
-            )
-        })
-        .collect();
-    if let Some(installed) = model.installed_applications.borrow().as_ref() {
-        apps.extend(installed.iter().map(|(name, id)| (name.clone(), (Some(id.clone()), None))));
-    }
-    apps.sort_by_key(|(name, _)| name.to_lowercase());
-    let mut seen = std::collections::BTreeSet::new();
-    apps.retain(|(_, target)| seen.insert(target.clone()));
-    apps
+        .filter(|app| app.search.contains(query))
+        .map(|app| (app.name.clone(), app.target.clone()))
+        .collect()
 }
 
 fn application_icons<T>(
     bundle_id: impl Fn(&T) -> Option<String>,
 ) -> impl Fn(&T) -> Option<objc2::rc::Retained<objc2_app_kit::NSImage>> {
-    let icons = RefCell::new(std::collections::HashMap::<
-        String,
-        Option<objc2::rc::Retained<objc2_app_kit::NSImage>>,
-    >::new());
     move |item| {
         let id = bundle_id(item)?;
-        if let Some(icon) = icons.borrow().get(&id) {
-            return icon.clone();
-        }
         let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
-        let icon = workspace
+        workspace
             .URLForApplicationWithBundleIdentifier(&objc2_foundation::NSString::from_str(&id))
             .and_then(|url| url.path())
-            .map(|path| workspace.iconForFile(&path));
-        icons.borrow_mut().insert(id, icon.clone());
-        icon
+            .map(|path| workspace.iconForFile(&path))
     }
 }
 
@@ -742,10 +582,12 @@ fn app_picker(
 ) -> (Rc<HStack>, Rc<Label>) {
     let title = Rc::new(Label::new(
         &ui,
-        &application_choices(model)
-            .into_iter()
-            .find(|(_, target)| *target == initial)
-            .map(|(name, _)| name)
+        &model
+            .application_inventory
+            .borrow()
+            .iter()
+            .find(|app| app.target == initial)
+            .map(|app| app.name.clone())
             .or(initial.1)
             .or(initial.0)
             .unwrap_or_else(|| "Any application".into()),
@@ -784,48 +626,32 @@ fn app_picker(
             .on_change(move |query| {
                 if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
                     let query = query.trim().to_lowercase();
-                    let apps: Vec<_> = application_choices(&model)
-                        .into_iter()
-                        .filter(|(name, target)| {
-                            name.to_lowercase().contains(&query)
-                                || target
-                                    .0
-                                    .as_ref()
-                                    .is_some_and(|id| id.to_lowercase().contains(&query))
-                        })
-                        .collect();
+                    let apps: Vec<_> = filtered_applications(&model, &query);
+                    list.set_selected(None);
                     *filtered.borrow_mut() = apps.clone();
                     list.set_rows(apps);
-                    list.set_selected(None);
                 }
             }),
     );
     let weak_model = Rc::downgrade(model);
     let weak_list = Rc::downgrade(&list);
     let weak_search = Rc::downgrade(&search);
-    let _ = model.requests.send(Request {
-        action: Action::RefreshRuntime,
-        finish: Box::new(move |_| {
-            if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
-                let query = weak_search
-                    .upgrade()
-                    .map(|search| search.get_value().trim().to_lowercase())
-                    .unwrap_or_default();
-                let apps: Vec<_> = application_choices(&model)
-                    .into_iter()
-                    .filter(|(name, target)| {
-                        name.to_lowercase().contains(&query)
-                            || target
-                                .0
-                                .as_ref()
-                                .is_some_and(|id| id.to_lowercase().contains(&query))
-                    })
-                    .collect();
-                *choices.borrow_mut() = apps.clone();
-                list.set_rows(apps);
-            }
-        }),
-    });
+    if model.installed_applications.borrow().is_none() {
+        let _ = model.requests.send(Request {
+            action: Action::RefreshRuntime,
+            finish: Box::new(move |_| {
+                if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
+                    let query = weak_search
+                        .upgrade()
+                        .map(|search| search.get_value().trim().to_lowercase())
+                        .unwrap_or_default();
+                    let apps: Vec<_> = filtered_applications(&model, &query);
+                    *choices.borrow_mut() = apps.clone();
+                    list.set_rows(apps);
+                }
+            }),
+        });
+    }
     let content = VStack::new(&ui)
         .insets(Insets {
             top: 12.0,
@@ -973,48 +799,32 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
             .on_change(move |query| {
                 if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
                     let query = query.trim().to_lowercase();
-                    let apps: Vec<_> = application_choices(&model)
-                        .into_iter()
-                        .filter(|(name, target)| {
-                            name.to_lowercase().contains(&query)
-                                || target
-                                    .0
-                                    .as_ref()
-                                    .is_some_and(|id| id.to_lowercase().contains(&query))
-                        })
-                        .collect();
+                    let apps: Vec<_> = filtered_applications(&model, &query);
+                    list.set_selected(None);
                     *filtered.borrow_mut() = apps.clone();
                     list.set_rows(apps);
-                    list.set_selected(None);
                 }
             }),
     );
     let weak_model = Rc::downgrade(model);
     let weak_list = Rc::downgrade(&list);
     let weak_search = Rc::downgrade(&search);
-    let _ = model.requests.send(Request {
-        action: Action::RefreshRuntime,
-        finish: Box::new(move |_| {
-            if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
-                let query = weak_search
-                    .upgrade()
-                    .map(|search| search.get_value().trim().to_lowercase())
-                    .unwrap_or_default();
-                let apps: Vec<_> = application_choices(&model)
-                    .into_iter()
-                    .filter(|(name, target)| {
-                        name.to_lowercase().contains(&query)
-                            || target
-                                .0
-                                .as_ref()
-                                .is_some_and(|id| id.to_lowercase().contains(&query))
-                    })
-                    .collect();
-                *choices.borrow_mut() = apps.clone();
-                list.set_rows(apps);
-            }
-        }),
-    });
+    if model.installed_applications.borrow().is_none() {
+        let _ = model.requests.send(Request {
+            action: Action::RefreshRuntime,
+            finish: Box::new(move |_| {
+                if let (Some(model), Some(list)) = (weak_model.upgrade(), weak_list.upgrade()) {
+                    let query = weak_search
+                        .upgrade()
+                        .map(|search| search.get_value().trim().to_lowercase())
+                        .unwrap_or_default();
+                    let apps: Vec<_> = filtered_applications(&model, &query);
+                    *choices.borrow_mut() = apps.clone();
+                    list.set_rows(apps);
+                }
+            }),
+        });
+    }
     let picker = VStack::new(&ui).push(search).push(list);
     let content = VStack::new(&ui)
         .insets(Insets {
@@ -1041,6 +851,15 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
     }
 }
 
+fn rule_name(model: &Model, rule: &AppWorkspaceRule) -> String {
+    model
+        .application_inventory
+        .borrow()
+        .iter()
+        .find(|app| rule.app_id.is_some() && app.target.0 == rule.app_id)
+        .map(|app| app.name.clone())
+        .unwrap_or_else(|| rule_summary(rule))
+}
 fn rule_summary(r: &AppWorkspaceRule) -> String {
     r.app_name
         .as_ref()
@@ -1093,10 +912,12 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
             let name = weak_model
                 .upgrade()
                 .and_then(|model| {
-                    application_choices(&model)
-                        .into_iter()
-                        .find(|(_, value)| *value == target)
-                        .map(|(name, _)| name)
+                    model
+                        .application_inventory
+                        .borrow()
+                        .iter()
+                        .find(|app| app.target == target)
+                        .map(|app| app.name.clone())
                 })
                 .or(target.1)
                 .or(target.0)
@@ -1266,10 +1087,11 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         geometry = geometry.row(row);
     }
     f.finish(
-        SettingsPage::new(&ui, "")
-            .section(matches)
-            .section(actions)
-            .section(Disclosure::new(&ui, "Set initial size and position", geometry)),
+        VStack::new(&ui)
+            .spacing(Metrics::SECTION_SPACING)
+            .push(matches)
+            .push(actions)
+            .push(Disclosure::new(&ui, "Set initial size and position", geometry)),
     )
 }
 
@@ -1308,24 +1130,25 @@ pub(super) fn strings(
     let weak = f.model.clone();
     let error = Rc::downgrade(&message);
     let list = Rc::new(
-        EditableList::new(&ui, |s: &String| s.clone()).on_remove(move |i| {
-            if let Some(model) = weak.upgrade() {
-                let mut values = get(&model.source.borrow());
-                if i < values.len() {
-                    values.remove(i);
+        EditableList::new(&ui, |s: &String| s.clone())
+            .full_length()
+            .on_remove(move |i| {
+                if let Some(model) = weak.upgrade() {
+                    let mut values = get(&model.source.borrow());
+                    if i < values.len() {
+                        values.remove(i);
+                    }
+                    FormBuilder::submit(
+                        &weak,
+                        Box::new(move |s| {
+                            set(s, values);
+                            Ok(())
+                        }),
+                        error.clone(),
+                    );
                 }
-                FormBuilder::submit(
-                    &weak,
-                    Box::new(move |s| {
-                        set(s, values);
-                        Ok(())
-                    }),
-                    error.clone(),
-                );
-            }
-        }),
+            }),
     );
-    list.height(120.0);
     let weak_list = Rc::downgrade(&list);
     f.sync.push(Box::new(move |s| {
         if let Some(list) = weak_list.upgrade() {
@@ -1342,6 +1165,7 @@ pub(super) fn display_overrides(
     f: &mut FormBuilder,
     page: SettingsPage,
     model: &Rc<Model>,
+    navigation: &Rc<DetailNavigation>,
 ) -> SettingsPage {
     let ui = f.ui;
     let mut displays: Vec<_> = model
@@ -1372,8 +1196,7 @@ pub(super) fn display_overrides(
     if displays.is_empty() {
         return page;
     }
-    let current = Rc::new(RefCell::new(None::<Page>));
-    let editor = current.clone();
+    let nav = Rc::downgrade(navigation);
     let weak = Rc::downgrade(model);
     let entries = displays.clone();
     let connected: Vec<_> =
@@ -1394,23 +1217,12 @@ pub(super) fn display_overrides(
     .on_open(move |index| {
         if let Some(model) = weak.upgrade() {
             let (uuid, name) = &entries[index];
-            show_editor(
-                ui,
-                &model,
-                name,
-                display_options(ui, &model, uuid.clone()),
-                &editor,
-            );
+            if let Some(nav) = nav.upgrade() {
+                nav.push(nav.detail(display_options(ui, &model, uuid.clone())), name);
+            }
         }
     });
     list.set_rows(displays);
-    f.sync.push(Box::new(move |source| {
-        if let Some(page) = current.borrow().as_ref() {
-            for sync in &page.sync {
-                sync(source);
-            }
-        }
-    }));
     page.section(
         Section::new(&ui, "Display settings")
             .description(

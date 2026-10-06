@@ -406,31 +406,81 @@ fn settings_lists_do_not_materialize_offscreen_rows(ui: &Ui) {
         .navigation()
         .full_length(),
     );
-    list.set_rows((0..200).collect());
-    let page = SettingsPage::new(ui, "").section(list.clone());
+    list.min_height(100.0);
+    list.set_rows((0..10_000).collect());
+    let controls = Rc::new(AddRemoveControl::new(ui));
+    let page = SettingsPage::new(ui, "").section(list.clone()).bottom_bar(controls.clone());
+    let scroll = Weak::new(page.ns_scroll_view());
     let window = Window::new(ui).size(CGSize::new(600.0, 300.0)).content(page);
     window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
-    let clip = list.ns_scroll_view().contentView().bounds();
-    let first = list.ns_table_view().rectOfRow(0);
-    let last = list.ns_table_view().rectOfRow(199);
-    assert_eq!(clip.origin.y, 0.0, "full-length lists must stay at the top");
-    assert!(
-        clip.size.height >= last.origin.y + last.size.height + first.origin.y,
-        "the viewport must include the final row and symmetric native padding"
-    );
     assert!(
         !list.ns_scroll_view().hasVerticalScroller(),
-        "the page must own scrolling"
+        "the enclosing page must own scrolling"
+    );
+    let scroll = scroll.load().unwrap();
+    let position = controls.ns_view().convertRect_toView(controls.ns_view().bounds(), None);
+    scroll.contentView().scrollToPoint(CGPoint::new(0.0, 20_000.0));
+    scroll.reflectScrolledClipView(&scroll.contentView());
+    window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+    objc2_foundation::NSRunLoop::currentRunLoop()
+        .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.03));
+    assert_eq!(
+        controls.ns_view().convertRect_toView(controls.ns_view().bounds(), None),
+        position,
+        "list actions must remain fixed while the page scrolls"
     );
     assert!(
-        list.ns_view().frame().size.height > 10_000.0,
-        "all rows must contribute to page height"
-    );
-    assert!(
-        configured.get() < 32,
-        "full-length page materialized {} offscreen rows",
+        configured.get() < 64,
+        "page-scrolled collection materialized {} rows",
         configured.get()
     );
+    assert!(
+        controls.ns_view().window().is_some(),
+        "editor must retain its action footer"
+    );
+}
+
+fn reused_cells_clear_missing_images(ui: &Ui) {
+    fn image(view: &objc2_app_kit::NSView) -> Option<Retained<objc2_app_kit::NSImageView>> {
+        if let Some(icon) = view.downcast_ref::<objc2_app_kit::NSImageView>() {
+            return Some(icon.retain());
+        }
+        view.subviews().iter().find_map(|child| image(&child))
+    }
+    let list = Rc::new(
+        SettingsList::new(ui, |row: &bool| format!("Icon {row}"), |_| String::new())
+            .fit_content(120.0)
+            .images(move |present| {
+                present.then(|| {
+                    objc2_app_kit::NSWorkspace::sharedWorkspace()
+                        .iconForFile(&NSString::from_str("/System/Applications/Music.app"))
+                })
+            }),
+    );
+    list.set_rows((0..200).map(|row| row < 4).collect());
+    let window = Window::new(ui).size(CGSize::new(600.0, 140.0)).content(list.clone());
+    window.show();
+    window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+    let first = list.ns_table_view().viewAtColumn_row_makeIfNecessary(0, 0, true).unwrap();
+    assert!(image(&first).unwrap().image().is_some());
+    let mut pointers = std::collections::HashSet::new();
+    pointers.insert(&*first as *const _ as usize);
+    drop(first);
+    let mut reused = false;
+    for row in [20, 40, 60, 80, 100, 120, 140, 160, 180, 20] {
+        list.ns_table_view().scrollRowToVisible(row);
+        objc2_foundation::NSRunLoop::currentRunLoop()
+            .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.03));
+        window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+        let cell = list.ns_table_view().viewAtColumn_row_makeIfNecessary(0, row, true).unwrap();
+        reused |= !pointers.insert(&*cell as *const _ as usize);
+        assert!(
+            image(&cell).unwrap().image().is_none(),
+            "reused cells must clear stale application icons"
+        );
+    }
+    assert!(reused, "scrolling must recycle cells");
+    window.close();
 }
 
 fn unchanged_popup_items_preserve_selection_and_native_items(ui: &Ui) {
@@ -477,34 +527,120 @@ fn page_headings_preserve_window_identity(ui: &Ui) {
     assert_eq!(window.ns_window().title().to_string(), "Rift Settings");
 }
 
+fn navigation_uses_native_toolbar_items_and_responder_chain(ui: &Ui) {
+    let title = Rc::new(Label::new(ui, "Workspaces"));
+    let window = SettingsWindow::new(ui, "Navigation test").page_title(ui, title);
+    let toolbar = window.toolbar();
+    let original = toolbar.ns_toolbar() as *const _;
+    let calls = Rc::new(Cell::new(0));
+    let count = calls.clone();
+    toolbar.set_back(Some((
+        "Back to Workspaces",
+        Box::new(move || count.set(count.get() + 1)),
+    )));
+    let back = toolbar
+        .ns_toolbar()
+        .items()
+        .iter()
+        .find(|item| item.itemIdentifier().to_string() == "cgs.back")
+        .unwrap();
+    assert!(back.isNavigational());
+    assert!(
+        back.view().is_none(),
+        "AppKit must render the navigation control"
+    );
+    assert_eq!(back.toolTip().unwrap().to_string(), "Back to Workspaces");
+    let command = unsafe {
+        objc2_app_kit::NSMenuItem::initWithTitle_action_keyEquivalent(
+            objc2_app_kit::NSMenuItem::alloc(ui.mtm()),
+            &NSString::from_str("Back"),
+            Some(objc2::sel!(cgsGoBack:)),
+            &NSString::from_str("["),
+        )
+    };
+    let validated =
+        ProtocolObject::<dyn objc2_app_kit::NSValidatedUserInterfaceItem>::from_ref(&*command);
+    assert!(
+        objc2_app_kit::NSUserInterfaceValidations::validateUserInterfaceItem(
+            window.ns_window(),
+            validated
+        )
+    );
+    window.show();
+    assert!(unsafe {
+        objc2_app_kit::NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
+            objc2::sel!(cgsGoBack:),
+            Some(window.ns_window()),
+            None,
+        )
+    });
+    assert_eq!(calls.get(), 1);
+    toolbar.set_back(None);
+    assert!(
+        !objc2_app_kit::NSUserInterfaceValidations::validateUserInterfaceItem(
+            window.ns_window(),
+            validated
+        )
+    );
+    assert_eq!(toolbar.ns_toolbar() as *const _, original);
+    assert!(
+        !toolbar
+            .ns_toolbar()
+            .items()
+            .iter()
+            .any(|item| item.itemIdentifier().to_string() == "cgs.back")
+    );
+    window.close();
+}
+
 fn cached_pages_keep_their_mount_and_release_on_clear(ui: &Ui) {
-    let host = PageHost::new(ui);
+    let host = Rc::new(PageHost::new(ui));
     let (first, second) = autoreleasepool(|_| {
-        let first = Rc::new(Label::new(ui, "First"));
-        let second = Rc::new(Label::new(ui, "Second"));
+        let field = Rc::new(TextField::new(ui));
+        field.set_value("Retained edit");
+        let mut rows =
+            Section::new(ui, "Cached page").row(SettingsRow::new(ui, "Name", field.clone()));
+        for _ in 0..30 {
+            rows = rows.row(SwitchRow::new(ui, "Option", Switch::new(ui)));
+        }
+        let first = Rc::new(SettingsPage::new(ui, "").section(rows));
+        let window = Window::new(ui).size(CGSize::new(600.0, 300.0)).content(host.clone());
+        let second = Rc::new(ViewController::new(ui, Label::new(ui, "Second")));
         host.set_cached_page(first.clone());
-        let original = host.ns_view().constraints().firstObject().unwrap();
+        window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+        first.ns_scroll_view().contentView().scrollToPoint(CGPoint::new(0.0, 300.0));
+        first
+            .ns_scroll_view()
+            .reflectScrolledClipView(&first.ns_scroll_view().contentView());
+        let position = first.ns_scroll_view().documentVisibleRect().origin;
         host.set_cached_page(second.clone());
-        assert!(first.ns_view().isHidden());
+        assert!(unsafe { first.ns_view().superview() }.is_none());
+        assert!(second.ns_view_controller().parentViewController().is_some());
         host.set_cached_page(first.clone());
-        assert!(!first.ns_view().isHidden());
-        assert!(second.ns_view().isHidden());
-        assert!(
-            std::ptr::eq(&*original, &*host.ns_view().constraints().firstObject().unwrap()),
-            "returning to a cached page must preserve its mount"
+        assert!(unsafe { second.ns_view().superview() }.is_none());
+        assert!(second.ns_view_controller().parentViewController().is_none());
+        assert_eq!(field.get_value(), "Retained edit");
+        window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+        assert_eq!(
+            first.ns_scroll_view().documentVisibleRect().origin,
+            position,
+            "reattaching a cached page must preserve its scroll position"
         );
-        host.set_cached_page(first.clone());
+        assert_eq!(host.ns_view().subviews().len(), 1);
         assert!(std::ptr::eq(
-            &*original,
-            &*host.ns_view().constraints().firstObject().unwrap()
+            &*host.ns_view().subviews().firstObject().unwrap(),
+            first.ns_view()
         ));
-        (Weak::new(first.ns_view()), Weak::new(second.ns_view()))
+        (
+            Weak::new(first.ns_view()),
+            Weak::new(second.ns_view_controller()),
+        )
     });
     autoreleasepool(|_| host.clear());
     assert!(first.load().is_none(), "clear must release the active page");
     assert!(
         second.load().is_none(),
-        "clear must release inactive cached pages"
+        "detached controller must be released with its caller cache"
     );
     assert!(host.ns_view().subviews().is_empty());
 }
@@ -517,10 +653,12 @@ fn main() {
         .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     autoreleasepool(|_| {
         page_headings_preserve_window_identity(&ui);
+        navigation_uses_native_toolbar_items_and_responder_chain(&ui);
         cached_pages_keep_their_mount_and_release_on_clear(&ui);
         callbacks_survive_composition_and_release_with_the_page(&ui);
         callbacks_can_remove_their_own_controls(&ui);
         settings_lists_do_not_materialize_offscreen_rows(&ui);
+        reused_cells_clear_missing_images(&ui);
         unchanged_popup_items_preserve_selection_and_native_items(&ui);
         numeric_fields_reject_invalid_commits(&ui);
         delegates_and_selection_use_current_data(&ui);

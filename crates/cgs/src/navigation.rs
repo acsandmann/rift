@@ -207,27 +207,50 @@ impl NativeView for MasterDetail {
     fn view_controller(&self) -> Option<&NSViewController> { self.0.view_controller() }
 }
 
+struct NavigationToolbarItems {
+    title: Option<Rc<Label>>,
+    back: Retained<NSToolbarItem>,
+}
+
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "CgsNavigationToolbarDelegate"]
-    #[ivars = Option<Rc<Label>>]
+    #[ivars = NavigationToolbarItems]
     struct NavigationToolbarDelegate;
     unsafe impl NSObjectProtocol for NavigationToolbarDelegate {}
     unsafe impl NSToolbarDelegate for NavigationToolbarDelegate {
         #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
-        fn item(&self, _toolbar: &NSToolbar, identifier: &NSToolbarItemIdentifier, _insert: bool) -> Option<Retained<NSToolbarItem>> {
-            self.ivars().as_ref().filter(|_| identifier.to_string() == "cgs.page-title").map(|title| {
-                let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(self.mtm()), identifier);
-                item.setView(Some(title.ns_view()));
-                item.setBordered(false);
-                item
-            })
+        fn item(
+            &self,
+            _toolbar: &NSToolbar,
+            identifier: &NSToolbarItemIdentifier,
+            _insert: bool,
+        ) -> Option<Retained<NSToolbarItem>> {
+            if identifier.to_string() == "cgs.back" {
+                Some(self.ivars().back.clone())
+            } else {
+                self.ivars()
+                    .title
+                    .as_ref()
+                    .filter(|_| identifier.to_string() == "cgs.page-title")
+                    .map(|title| {
+                        let item = NSToolbarItem::initWithItemIdentifier(
+                            NSToolbarItem::alloc(self.mtm()),
+                            identifier,
+                        );
+                        item.setView(Some(title.ns_view()));
+                        item.setBordered(false);
+                        item
+                    })
+            }
         }
 
         #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
         fn allowed(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSToolbarItemIdentifier>> {
-            self.item_identifiers()
+            let mut ids: Vec<_> = self.item_identifiers().iter().collect();
+            ids.push(NSString::from_str("cgs.back"));
+            NSArray::from_retained_slice(&ids)
         }
 
         #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
@@ -239,7 +262,7 @@ define_class!(
 
 impl NavigationToolbarDelegate {
     fn item_identifiers(&self) -> Retained<NSArray<NSToolbarItemIdentifier>> {
-        if self.ivars().is_some() {
+        if self.ivars().title.is_some() {
             NSArray::from_retained_slice(&[
                 unsafe { NSToolbarToggleSidebarItemIdentifier }.retain(),
                 NSString::from_str("cgs.page-title"),
@@ -256,6 +279,7 @@ impl NavigationToolbarDelegate {
 pub struct Toolbar {
     native: Retained<NSToolbar>,
     delegate: Option<Retained<NavigationToolbarDelegate>>,
+    back_target: Retained<crate::bridge::ActionTarget>,
 }
 impl Toolbar {
     pub fn new(ui: &Ui, id: &str) -> Self {
@@ -265,6 +289,7 @@ impl Toolbar {
                 &NSString::from_str(id),
             ),
             delegate: None,
+            back_target: crate::bridge::ActionTarget::new(ui),
         }
     }
 
@@ -272,9 +297,26 @@ impl Toolbar {
 
     pub(crate) fn navigation_title(ui: &Ui, id: &str, title: Option<Rc<Label>>) -> Self {
         let mut toolbar = Self::new(ui, id);
+        let back = NSToolbarItem::initWithItemIdentifier(
+            NSToolbarItem::alloc(ui.mtm()),
+            &NSString::from_str("cgs.back"),
+        );
+        back.setLabel(&NSString::from_str("Back"));
+        back.setPaletteLabel(&NSString::from_str("Back"));
+        back.setNavigational(true);
+        back.setImage(crate::Symbol::named("chevron.backward").as_deref());
+        back.setEnabled(false);
+        back.setAutovalidates(false);
+        unsafe {
+            back.setTarget(Some(&toolbar.back_target));
+            back.setAction(Some(objc2::sel!(invoke:)));
+        }
         let delegate: Retained<NavigationToolbarDelegate> = unsafe {
             msg_send![
-                super(NavigationToolbarDelegate::alloc(ui.mtm()).set_ivars(title)),
+                super(
+                    NavigationToolbarDelegate::alloc(ui.mtm())
+                        .set_ivars(NavigationToolbarItems { title, back })
+                ),
                 init
             ]
         };
@@ -299,9 +341,44 @@ impl Toolbar {
         self.native.setVisible(true);
     }
 
+    /// Show one native navigation item without replacing the toolbar.
+    pub fn set_back(&self, back: Option<(&str, Box<dyn FnMut()>)>) {
+        let Some(delegate) = &self.delegate else {
+            return;
+        };
+        let item = &delegate.ivars().back;
+        let existing = self
+            .native
+            .items()
+            .iter()
+            .position(|item| item.itemIdentifier().to_string() == "cgs.back");
+        if let Some((label, mut action)) = back {
+            self.back_target.set(move |_| action());
+            item.setToolTip(Some(&NSString::from_str(label)));
+            item.setEnabled(true);
+            if existing.is_none() {
+                self.native
+                    .insertItemWithItemIdentifier_atIndex(&NSString::from_str("cgs.back"), 1);
+            }
+        } else {
+            item.setEnabled(false);
+            if let Some(index) = existing {
+                self.native.removeItemAtIndex(index as isize);
+            }
+        }
+    }
+
     pub fn ns_toolbar(&self) -> &NSToolbar { &self.native }
 }
 
 impl Drop for Toolbar {
-    fn drop(&mut self) { self.native.setDelegate(None); }
+    fn drop(&mut self) {
+        if let Some(delegate) = &self.delegate {
+            unsafe {
+                delegate.ivars().back.setTarget(None);
+                delegate.ivars().back.setAction(None);
+            }
+        }
+        self.native.setDelegate(None);
+    }
 }

@@ -4,8 +4,9 @@ use std::rc::Rc;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSControl, NSControlSize, NSLayoutAttribute, NSLayoutConstraint,
-    NSLayoutRelation, NSUserInterfaceItemIdentification, NSView, NSViewController,
+    NSAccessibility, NSAutoresizingMaskOptions, NSControl, NSControlSize, NSLayoutAttribute,
+    NSLayoutConstraint, NSLayoutRelation, NSUserInterfaceItemIdentification, NSView,
+    NSViewController,
 };
 use objc2_foundation::NSString;
 
@@ -179,7 +180,6 @@ pub struct PageHost {
     view: View,
     controller: Retained<NSViewController>,
     page: RefCell<Option<Box<dyn NativeView>>>,
-    cached: RefCell<Vec<Box<dyn NativeView>>>,
 }
 impl PageHost {
     pub fn new(ui: &Ui) -> Self {
@@ -190,7 +190,6 @@ impl PageHost {
             view,
             controller,
             page: RefCell::new(None),
-            cached: RefCell::new(Vec::new()),
         }
     }
 
@@ -209,59 +208,22 @@ impl PageHost {
         if let Some(controller) = page.view_controller() {
             self.controller.addChildViewController(controller);
         }
-        self.view.ns_view().addSubview(page.ns_view());
-        pin(self.view.ns_view(), page.ns_view(), Insets {
-            top: 0.0,
-            left: 0.0,
-            bottom: 0.0,
-            right: 0.0,
-        });
+        let view = page.ns_view();
+        view.setTranslatesAutoresizingMaskIntoConstraints(true);
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        view.setFrame(self.view.ns_view().bounds());
+        self.view.ns_view().addSubview(view);
         *self.page.borrow_mut() = Some(Box::new(page));
     }
 
-    /// Switch among pages the caller already caches without migrating their layout trees.
-    /// All mounted pages, including inactive ones, are released by clear().
-    pub fn set_cached_page(&self, page: impl NativeView) {
-        if self
-            .page
-            .borrow()
-            .as_ref()
-            .is_some_and(|current| std::ptr::eq(current.ns_view(), page.ns_view()))
-        {
-            return;
-        }
-        if let Some(old) = self.page.borrow_mut().take() {
-            old.set_hidden(true);
-            self.cached.borrow_mut().push(old);
-        }
-        let existing = self
-            .cached
-            .borrow()
-            .iter()
-            .position(|cached| std::ptr::eq(cached.ns_view(), page.ns_view()));
-        let page: Box<dyn NativeView> = if let Some(index) = existing {
-            self.cached.borrow_mut().remove(index)
-        } else {
-            if let Some(controller) = page.view_controller() {
-                self.controller.addChildViewController(controller);
-            }
-            self.view.ns_view().addSubview(page.ns_view());
-            pin(self.view.ns_view(), page.ns_view(), Insets {
-                top: 0.0,
-                left: 0.0,
-                bottom: 0.0,
-                right: 0.0,
-            });
-            Box::new(page)
-        };
-        page.set_hidden(false);
-        *self.page.borrow_mut() = Some(page);
-    }
+    /// The caller retains cached pages; only the active root is attached to this host.
+    pub fn set_cached_page(&self, page: impl NativeView) { self.set_page(page); }
 
     pub fn clear(&self) {
-        let mut pages = std::mem::take(&mut *self.cached.borrow_mut());
-        pages.extend(self.page.borrow_mut().take());
-        for page in pages {
+        if let Some(page) = self.page.borrow_mut().take() {
             page.ns_view().removeFromSuperview();
             if let Some(controller) = page.view_controller() {
                 controller.removeFromParentViewController();

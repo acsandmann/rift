@@ -464,7 +464,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                 &ui,
                 "Advanced: reusable modifier combinations",
                 combinations,
-            )),
+            ))
+,
     )
 }
 fn binding_rows(s: &ConfigSource, mode: &str) -> Vec<(String, String)> {
@@ -993,8 +994,9 @@ fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> VStack {
     let weak_model = Rc::downgrade(model);
     let error = Rc::downgrade(&message);
     let list = Rc::new(
-        EditableList::new(&ui, |v: &(String, String)| format!("{} · {}", v.0, v.1)).on_remove(
-            move |i| {
+        EditableList::new(&ui, |v: &(String, String)| format!("{} · {}", v.0, v.1))
+            .full_length()
+            .on_remove(move |i| {
                 if let Some(model) = weak_model.upgrade() {
                     let name = model.source.borrow().modifier_combinations.keys().nth(i).cloned();
                     if let Some(name) = name {
@@ -1008,10 +1010,8 @@ fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> VStack {
                         );
                     }
                 }
-            },
-        ),
+            }),
     );
-    list.height(100.0);
     let weak_list = Rc::downgrade(&list);
     f.sync.push(Box::new(move |s| {
         if let Some(list) = weak_list.upgrade() {

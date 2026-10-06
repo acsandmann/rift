@@ -5,33 +5,66 @@ use std::rc::Rc;
 use block2::RcBlock;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
-use objc2::{MainThreadOnly, Message};
+use objc2::{MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::*;
 use objc2_foundation::{NSRectEdge, NSString, NSURL};
 
 use crate::bridge::{DelegateBridge, Event, callback};
 use crate::{CGPoint, CGRect, CGSize, NativeView, Ui, View};
 
+// Local toolbar navigation participates in the normal window responder chain.
+define_class!(
+    #[unsafe(super(NSWindow))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "CgsWindow"]
+    #[ivars = ()]
+    struct NativeWindow;
+    impl NativeWindow {
+        #[unsafe(method(cgsGoBack:))]
+        fn go_back(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            if let Some(item) = self.back_item() {
+                if let Some(action) = item.action() {
+                unsafe { NSApplication::sharedApplication(self.mtm()).sendAction_to_from(action, item.target().as_deref(), Some(self)); }
+                }
+            }
+        }
+    }
+    unsafe impl NSUserInterfaceValidations for NativeWindow {
+        #[unsafe(method(validateUserInterfaceItem:))]
+        fn validate(&self, item: &ProtocolObject<dyn NSValidatedUserInterfaceItem>) -> bool {
+            if item.action() == Some(objc2::sel!(cgsGoBack:)) { self.back_item().is_some_and(|item| item.isEnabled()) }
+            else { unsafe { msg_send![super(self), validateUserInterfaceItem: item] } }
+        }
+    }
+);
+impl NativeWindow {
+    fn back_item(&self) -> Option<Retained<NSToolbarItem>> {
+        self.toolbar().and_then(|toolbar| {
+            toolbar
+                .items()
+                .iter()
+                .find(|item| item.itemIdentifier().to_string() == "cgs.back")
+        })
+    }
+}
+
 pub struct Window {
     native: Retained<NSWindow>,
     content: RefCell<Option<Box<dyn NativeView>>>,
     delegate: Option<Retained<DelegateBridge>>,
-    toolbar: Option<crate::Toolbar>,
+    toolbar: Option<Rc<crate::Toolbar>>,
 }
 impl Window {
     pub fn new(ui: &Ui) -> Self {
-        let native = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                NSWindow::alloc(ui.mtm()),
-                CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, 600.0)),
-                NSWindowStyleMask::Titled
-                    | NSWindowStyleMask::Closable
-                    | NSWindowStyleMask::Miniaturizable
-                    | NSWindowStyleMask::Resizable,
-                NSBackingStoreType::Buffered,
-                false,
-            )
+        let native: Retained<NativeWindow> = unsafe {
+            msg_send![super(NativeWindow::alloc(ui.mtm()).set_ivars(())),
+                initWithContentRect: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, 600.0)),
+                styleMask: NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable | NSWindowStyleMask::Resizable,
+                backing: NSBackingStoreType::Buffered,
+                defer: false
+            ]
         };
+        let native = native.into_super();
         unsafe {
             native.setReleasedWhenClosed(false);
         }
@@ -150,7 +183,7 @@ impl SettingsWindow {
             .setStyleMask(window.native.styleMask() | NSWindowStyleMask::FullSizeContentView);
         let toolbar = crate::Toolbar::navigation(ui, "cgs.settings");
         toolbar.attach(&window.native);
-        window.toolbar = Some(toolbar);
+        window.toolbar = Some(Rc::new(toolbar));
         Self(window)
     }
 
@@ -161,9 +194,11 @@ impl SettingsWindow {
         self.0.native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         let toolbar = crate::Toolbar::navigation_title(ui, "cgs.settings.pages", Some(title));
         toolbar.attach(&self.0.native);
-        self.0.toolbar = Some(toolbar);
+        self.0.toolbar = Some(Rc::new(toolbar));
         self
     }
+
+    pub fn toolbar(&self) -> &Rc<crate::Toolbar> { self.0.toolbar.as_ref().unwrap() }
 
     pub fn content(self, content: impl NativeView) -> Self { Self(self.0.content(content)) }
 
