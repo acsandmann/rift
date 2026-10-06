@@ -2308,6 +2308,9 @@ impl Reactor {
                 if source_space == target_space {
                     return Ok(EventOutcome::no_change());
                 }
+                // Retained scrolling frames belong to the source Space. Fence queued
+                // presentation work before the transfer installs its destination frame.
+                self.cancel_window_presentations(vec![window]);
                 let target_frame = Self::center_frame_on_screen(window_frame, target_screen.frame);
                 return command_workflow::handle_command_reactor_move_window_to_display(
                     &mut self.state,
