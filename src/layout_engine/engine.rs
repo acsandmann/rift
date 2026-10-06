@@ -576,27 +576,29 @@ impl LayoutEngine {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> EventResponse {
-        let unstacked_windows = {
-            self.workspaces[workspace_id]
-                .layout_system
-                .unstack_parent_of_selection(layout, default_orientation)
+        let system = &mut self.workspaces[workspace_id].layout_system;
+        let selected_window = system.selected_window(layout);
+        let unstacked_windows = system.unstack_parent_of_selection(layout, default_orientation);
+        let raised_windows = if !unstacked_windows.is_empty() {
+            unstacked_windows
+        } else {
+            let stacked_windows =
+                system.apply_stacking_to_parent_of_selection(layout, default_orientation);
+            if !stacked_windows.is_empty() {
+                stacked_windows
+            } else {
+                system.visible_windows_in_layout(layout)
+            }
         };
-        if !unstacked_windows.is_empty() {
-            return Self::response_for_raised_windows(unstacked_windows);
-        }
 
-        let stacked_windows = {
-            self.workspaces[workspace_id]
-                .layout_system
-                .apply_stacking_to_parent_of_selection(layout, default_orientation)
-        };
-        if !stacked_windows.is_empty() {
-            return Self::response_for_raised_windows(stacked_windows);
+        let mut response = Self::response_for_raised_windows(raised_windows);
+        if response.changed
+            && let Some(selected_window) = selected_window
+            && system.select_window(layout, selected_window)
+        {
+            response.focus_window = Some(selected_window);
         }
-
-        let visible_windows =
-            self.workspaces[workspace_id].layout_system.visible_windows_in_layout(layout);
-        Self::response_for_raised_windows(visible_windows)
+        response
     }
 
     fn collect_group_containers_for_space(
@@ -3611,6 +3613,61 @@ mod tests {
             min_size: None,
             max_size: None,
         }
+    }
+
+    #[test]
+    fn toggle_stack_preserves_focused_window() {
+        let mut window_store = WindowStore::default();
+        let mut engine = test_engine();
+        let space = SpaceId::new(43);
+        let windows = [
+            WindowId::new(1, 1),
+            WindowId::new(1, 2),
+            WindowId::new(1, 3),
+        ];
+        let focused = windows[1];
+        let visible_spaces = vec![space];
+        let visible_space_centers = HashMap::default();
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                space,
+                1,
+                windows
+                    .into_iter()
+                    .map(|window| window_layout_info(window, CGSize::new(300.0, 500.0)))
+                    .collect(),
+                None,
+            ),
+        );
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, focused));
+
+        let response = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::ToggleStack,
+        );
+
+        assert_eq!(response.focus_window, Some(focused));
+        assert_eq!(engine.selected_window(space), Some(focused));
+
+        let response = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::ToggleStack,
+        );
+
+        assert_eq!(response.focus_window, Some(focused));
+        assert_eq!(engine.selected_window(space), Some(focused));
     }
 
     #[test]

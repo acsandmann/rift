@@ -1473,3 +1473,62 @@ fn wake_and_unlock_share_two_sample_authority_without_poisoning_display_history(
     assert!(stable.revision >= lock_revision);
     assert!(actor.topology_is_authoritative());
 }
+
+#[test]
+fn topology_delta_retains_published_membership_before_early_appeared_event() {
+    let (mut actor, mut wm_rx, _) = build_actor();
+    let old = SpaceId::new(901);
+    let new = SpaceId::new(902);
+    let wsid = WindowServerId::new(903);
+    let before = make_screen_with(1, "external", 0.0, 1000.0, Some(old));
+    window_server::set_space_window_list_for_space_override(old.get(), Some(vec![wsid.as_u32()]));
+    actor.forward_screen_parameters(vec![before], CoordinateConverter::from_height(800.0));
+    let (published, _) = recv_snapshot(&mut wm_rx);
+    assert_eq!(published.active_window_spaces.get(&wsid), Some(&old));
+
+    actor.handle_event(Event::WindowServerAppeared(wsid, new));
+    actor.handle_event(Event::DisplayChurnBegin);
+    let after = vec![
+        make_screen_with(1, "external", 0.0, 1000.0, Some(new)),
+        make_screen_with(2, "builtin", 1000.0, 1000.0, Some(old)),
+    ];
+    window_server::set_space_window_list_for_space_override(old.get(), Some(vec![]));
+    window_server::set_space_window_list_for_space_override(new.get(), Some(vec![wsid.as_u32()]));
+    actor.forward_screen_parameters(after, CoordinateConverter::from_height(800.0));
+    let (published, _) = recv_snapshot(&mut wm_rx);
+    window_server::set_space_window_list_for_space_override(old.get(), None);
+    window_server::set_space_window_list_for_space_override(new.get(), None);
+    let delta = published.topology_window_delta.expect("topology delta");
+    assert_eq!(delta.disappeared, vec![(wsid, old)]);
+    assert_eq!(delta.appeared, vec![(wsid, new)]);
+}
+
+#[test]
+fn native_move_refresh_publishes_membership_on_unchanged_displays() {
+    let (mut actor, mut wm_rx, _) = build_actor();
+    let old = SpaceId::new(911);
+    let new = SpaceId::new(912);
+    let wsid = WindowServerId::new(913);
+    let screens = vec![
+        make_screen_with(1, "left", 0.0, 1000.0, Some(old)),
+        make_screen_with(2, "right", 1000.0, 1000.0, Some(new)),
+    ];
+    window_server::set_space_window_list_for_space_override(old.get(), Some(vec![wsid.as_u32()]));
+    window_server::set_space_window_list_for_space_override(new.get(), Some(vec![]));
+    actor.handle_event(Event::ScreenParametersChanged(
+        screens,
+        CoordinateConverter::from_height(800.0),
+    ));
+    let _ = recv_snapshot(&mut wm_rx);
+    window_server::set_space_window_list_for_space_override(old.get(), Some(vec![]));
+    window_server::set_space_window_list_for_space_override(new.get(), Some(vec![wsid.as_u32()]));
+    actor.handle_event(Event::ReconcileWindowSpaces);
+    let (snapshot, _) = recv_snapshot(&mut wm_rx);
+    window_server::set_space_window_list_for_space_override(old.get(), None);
+    window_server::set_space_window_list_for_space_override(new.get(), None);
+    assert_eq!(snapshot.active_window_spaces.get(&wsid), Some(&new));
+    assert!(snapshot.membership_complete);
+    assert!(!snapshot.display_set_changed);
+    assert!(!snapshot.should_force_refresh_layout);
+    assert!(snapshot.topology_window_delta.is_none());
+}

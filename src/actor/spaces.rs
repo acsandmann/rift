@@ -67,6 +67,7 @@ pub enum Event {
     ScreenParametersChanged(Vec<ScreenInfo>, CoordinateConverter),
     SpaceChanged(Vec<Option<SpaceId>>),
     SpaceInventoryChanged,
+    ReconcileWindowSpaces,
     SpaceCreated(SpaceId),
     SpaceDestroyed(SpaceId),
     WindowServerAppeared(WindowServerId, SpaceId),
@@ -373,6 +374,14 @@ impl SpacesActor {
                     self.forward_space_snapshot(spaces);
                 }
             }
+            Event::ReconcileWindowSpaces => {
+                // A native move may be the first evidence of display churn. Refresh
+                // physical screens too, rather than waiting for its late callback.
+                if let Some(cache) = self.state.screen_cache.as_mut() {
+                    cache.mark_dirty();
+                }
+                self.handle_space_inventory_changed();
+            }
             Event::SpaceInventoryChanged => {
                 self.handle_space_inventory_changed();
             }
@@ -412,7 +421,7 @@ impl SpacesActor {
                             // WindowServer reports a confirmed move out of the origin
                             // space as a destroy. The selected Space may remain the
                             // same, so explicitly forward the refreshed membership.
-                            self.handle_space_inventory_changed();
+                            self.handle_event(Event::ReconcileWindowSpaces);
                             return;
                         }
                         self.reactor_tx
@@ -680,6 +689,20 @@ impl SpacesActor {
             self.state.display_space_ids = managed_display_space_ids();
         }
 
+        // Full native inventories distinguish identity loss from switching the
+        // current Space. This can be visible before a display callback arrives.
+        let should_force_refresh_layout = should_force_refresh_layout
+            || self.state.last_forwarded.as_ref().is_some_and(|previous| {
+                previous.display_space_ids.iter().any(|(display, spaces)| {
+                    spaces.iter().any(|space| {
+                        !self
+                            .state
+                            .display_space_ids
+                            .get(display)
+                            .is_some_and(|current| current.contains(space))
+                    })
+                })
+            });
         if !screens.is_empty() {
             self.state.has_seen_display_set = true;
         }
@@ -1263,6 +1286,20 @@ impl SpacesActor {
             return false;
         }
 
+        // Membership can change before the display callback arrives. If the
+        // refresh already sees physical churn, use the existing stabilization flow.
+        let physical_topology_changed =
+            self.state.screens.len() != screens.len()
+                || screens.iter().any(|screen| {
+                    !self.state.screens.iter().any(|old| {
+                        old.display_uuid == screen.display_uuid && old.frame == screen.frame
+                    })
+                });
+        if !self.state.screens.is_empty() && physical_topology_changed {
+            let epoch = self.begin_display_churn(DisplayReconfigFlags::empty());
+            self.schedule_display_stabilization_check(epoch);
+            return false;
+        }
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
         if !force && self.state.last_sent_spaces.as_ref() == Some(&spaces) {
             return false;
@@ -1344,7 +1381,13 @@ impl SpacesActor {
         self.state.display_topology_state = None;
         self.state.last_sent_spaces = None;
         if !was_active {
-            self.state.pre_churn_visible_window_spaces = self.state.visible_window_spaces.clone();
+            // Live membership may already have changed before the display callback.
+            self.state.pre_churn_visible_window_spaces = self
+                .state
+                .last_forwarded
+                .as_ref()
+                .map(|state| state.active_window_spaces.clone())
+                .unwrap_or_else(|| self.state.visible_window_spaces.clone());
         }
         self.invalidate_topology();
         self.state.display_churn_epoch

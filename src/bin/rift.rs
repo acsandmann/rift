@@ -132,7 +132,6 @@ fn main() {
         app.finishLaunching();
         NSApplication::load();
     }
-    rift_wm::sys::hotkey::refresh_keyboard_layout(mtm);
 
     unsafe { SLSWindowManagementBridgeSetDelegate(std::ptr::null_mut()) };
 
@@ -147,6 +146,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         );
         std::process::exit(1);
     }
+
+    rift_wm::sys::hotkey::refresh_virtual_keymap(mtm);
 
     let config_path = opt.config.clone().unwrap_or_else(|| config_file());
     let mut config = if config_path.exists() {
@@ -270,10 +271,12 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some(window_tx_store.clone()),
     );
 
-    let _ = events_tx.send(reactor::Event::RegisterWmSender(wm_controller_sender.clone()));
-
     let (spaces_actor, spaces_tx) =
         SpacesActor::new(events_tx.clone(), wm_controller_sender.clone());
+    events_tx.send(reactor::Event::RegisterSenders {
+        wm: wm_controller_sender.clone(),
+        spaces: spaces_tx.clone(),
+    });
     let wn_actor = window_notify_actor::WindowNotify::new(
         events_tx.clone(),
         spaces_tx.clone(),

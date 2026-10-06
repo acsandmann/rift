@@ -335,12 +335,15 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
                 .map(move |id| (WindowServerId::new(id), space))
             })
             .collect(),
-        screens,
+        screens: screens.clone(),
         fullscreen_spaces: Default::default(),
         active_spaces,
         menu_bar_space: command_space,
         command_space,
-        display_space_ids: Default::default(),
+        display_space_ids: screens
+            .iter()
+            .filter_map(|screen| Some((screen.display_uuid.clone(), vec![screen.space?])))
+            .collect(),
         last_user_space_by_display: Default::default(),
         space_remaps: Vec::new(),
         display_set_changed: false,

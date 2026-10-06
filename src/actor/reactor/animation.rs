@@ -2191,6 +2191,137 @@ mod tests {
     }
 
     #[test]
+    fn display_transfer_resets_scrolling_frames_and_preserves_tiling() {
+        use rift_protocol::DisplaySelector;
+
+        use super::super::testing::*;
+        use super::super::{Command, Event, ReactorCommand};
+        use crate::common::config::LayoutMode;
+        use crate::layout_engine::LayoutCommand;
+
+        let (mut apps, mut reactor) = test_context();
+        let spaces = [SpaceId::new(1), SpaceId::new(2)];
+        let screens = [rect(0., 0., 1000., 800.), rect(0., -1000., 1000., 800.)];
+        reactor.handle_event(space_state_event(screens.to_vec(), spaces.map(Some).to_vec()));
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+        for space in spaces {
+            reactor.space_state.command_space = Some(space);
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode: LayoutMode::Scrolling,
+            });
+        }
+        let wid = WindowId::new(1, 1);
+        let (sender, mut receiver) = AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        let handle = reactor.app_manager.apps[&1].handle.clone();
+        for turn in 0..4 {
+            let source = turn % 2;
+            let target = 1 - source;
+            reactor.space_state.command_space = Some(spaces[source]);
+            let retained = rect(20., screens[source].origin.y + 30., 400., 500.);
+            reactor
+                .animation_tx
+                .as_ref()
+                .unwrap()
+                .control
+                .lock()
+                .frames
+                .insert(wid, (handle.clone(), retained));
+            // Within a Space, a new camera must preserve the last publication.
+            reactor.present_camera(spaces[source], true, None, None).unwrap();
+            let Message::Camera(source_camera) = receiver.commands.try_recv().unwrap() else {
+                panic!("expected source camera");
+            };
+            assert_eq!(
+                source_camera.windows.iter().find(|w| w.wid == wid).unwrap().frame,
+                retained
+            );
+            // Leave older work queued across the cancellation fence.
+            reactor
+                .animation_tx
+                .as_ref()
+                .unwrap()
+                .send(Message::Camera(source_camera))
+                .unwrap();
+            let uuid = reactor
+                .space_state
+                .screen_by_space(spaces[target])
+                .unwrap()
+                .display_uuid
+                .clone();
+            reactor.handle_event(Event::Command(Command::Reactor(
+                ReactorCommand::MoveWindowToDisplay {
+                    selector: if turn % 2 == 0 {
+                        DisplaySelector::Uuid(uuid)
+                    } else {
+                        DisplaySelector::Direction(rift_protocol::Direction::Down)
+                    },
+                    window_id: Some(1),
+                },
+            )));
+            let queued: Vec<_> = receiver.commands.try_iter().collect();
+            let stop = queued
+                .iter()
+                .position(|m| matches!(m, Message::Stop(ids) if ids == &[wid]))
+                .expect("transfer must fence the source presentation");
+            let destination = queued
+                .iter()
+                .position(|m| matches!(m, Message::Camera(c) if c.identity.space == spaces[target]))
+                .expect("destination camera");
+            assert!(stop < destination);
+            let Message::Camera(camera) = &queued[destination] else {
+                unreachable!()
+            };
+            let window = camera.windows.iter().find(|w| w.wid == wid).unwrap();
+            assert_eq!(
+                window.frame, window.from,
+                "start from the destination transfer frame"
+            );
+            assert!(window.frame.origin.y >= screens[target].origin.y);
+            assert!(window.frame.origin.y < screens[target].max().y);
+            let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+            reactor.handle_event(Event::WindowServerAppeared(
+                wsid,
+                spaces[source],
+                super::super::SpaceEventKind::User,
+            ));
+            assert_eq!(reactor.assigned_space_for_window_id(wid), Some(spaces[target]));
+            for (index, space) in spaces.into_iter().enumerate() {
+                let gaps = reactor.config.settings.layout.gaps.clone();
+                let layout = reactor.layout_manager.layout_engine.calculate_layout(
+                    space,
+                    screens[index],
+                    &gaps,
+                    0.,
+                    Default::default(),
+                    Default::default(),
+                );
+                assert_eq!(layout.iter().any(|(id, _)| *id == wid), index == target);
+            }
+            let state = camera.state.clone();
+            for message in queued {
+                reactor.animation_tx.as_ref().unwrap().send(message).unwrap();
+            }
+            let runner = std::thread::spawn(move || AnimationManager::run(receiver));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while state.lock().active && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(!state.lock().active, "destination camera must run after Stop");
+            let control = reactor.animation_tx.as_ref().unwrap().control.lock();
+            assert!(!control.cancelled.contains(&wid));
+            assert!(control.frames[&wid].1.origin.y < screens[target].max().y);
+            drop(control);
+            reactor.animation_tx.take();
+            runner.join().unwrap();
+            let (sender, next_receiver) = AnimationSender::channel();
+            reactor.animation_tx = Some(sender);
+            receiver = next_receiver;
+        }
+    }
+
+    #[test]
     fn cancellation_discards_pending_frames_and_does_not_replay_the_target() {
         let (handle, mut rx) = AppThreadHandle::channel();
         let wid = WindowId::new(1, 1);

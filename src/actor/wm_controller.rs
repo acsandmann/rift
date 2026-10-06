@@ -354,9 +354,6 @@ impl WmController {
                 _ = self.input_tx.send(input::Request::SetLowPowerMode(is_low_power_mode));
             }
             KeyboardLayoutChanged => {
-                if let Some(mtm) = objc2::MainThreadMarker::new() {
-                    sys::hotkey::refresh_keyboard_layout(mtm);
-                }
                 _ = self.input_tx.send(input::Request::KeyboardLayoutChanged);
             }
             Command(Wm(ReloadConfig)) => self.reload_config(),
