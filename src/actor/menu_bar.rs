@@ -172,8 +172,22 @@ impl Menu {
         let (tick_tx, mut tick_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let debounce_tx = Self::spawn_debouncer(DEBOUNCE, tick_tx);
 
+        let mut update_check: Option<(
+            tokio::sync::oneshot::Receiver<Result<String, String>>,
+            crate::ui::settings::updates::Completion,
+        )> = None;
         loop {
             tokio::select! {
+                result = async {
+                    match &mut update_check {
+                        Some((receive, _)) => receive.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some((_, done)) = update_check.take() {
+                        done(result.unwrap_or_else(|_| Err("Couldn’t check for updates. Try again.".into())));
+                    }
+                }
                 maybe_tick = tick_rx.recv() => {
                     if maybe_tick.is_none() {
                         if let Some(ev) = pending.take() {
@@ -217,6 +231,11 @@ impl Menu {
 
                 Some(request) = self.settings_requests.recv() => {
                     let result = match request.action {
+                        crate::ui::settings::Action::CheckUpdates(done) => {
+                            update_check = Some((crate::ui::settings::updates::start(), done));
+                            (request.finish)(Ok(()));
+                            continue;
+                        }
                         crate::ui::settings::Action::RefreshRuntime => {
                             if let Some(settings) = &self.settings {
                                 settings.refresh_installed_applications().await;
@@ -229,7 +248,7 @@ impl Menu {
                             self.config_tx.send(match action {
                                 crate::ui::settings::Action::Edit(edit) => config::Event::EditSource { edit, response },
                                 crate::ui::settings::Action::Reload => config::Event::ReloadSource(response),
-                                crate::ui::settings::Action::RefreshRuntime => unreachable!(),
+                                crate::ui::settings::Action::RefreshRuntime | crate::ui::settings::Action::CheckUpdates(_) => unreachable!(),
                             });
                             result.await.unwrap_or_else(|_| Err("Configuration service unavailable".into())).map(|snapshot| {
                                 self.settings_source_revision.set(Some(snapshot.revision));

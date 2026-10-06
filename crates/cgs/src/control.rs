@@ -72,6 +72,12 @@ impl Button {
         self
     }
 
+    pub fn symbol_with_title(self, name: &str) -> Self {
+        let button = self.symbol(name);
+        button.native.setImagePosition(NSCellImagePosition::ImageLeading);
+        button
+    }
+
     pub fn symbol(self, name: &str) -> Self {
         if let Some(image) = crate::Symbol::named(name) {
             self.native.setImage(Some(&image));

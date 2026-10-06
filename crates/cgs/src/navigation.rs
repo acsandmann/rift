@@ -264,7 +264,9 @@ impl NavigationToolbarDelegate {
     fn item_identifiers(&self) -> Retained<NSArray<NSToolbarItemIdentifier>> {
         if self.ivars().title.is_some() {
             NSArray::from_retained_slice(&[
+                unsafe { NSToolbarFlexibleSpaceItemIdentifier }.retain(),
                 unsafe { NSToolbarToggleSidebarItemIdentifier }.retain(),
+                unsafe { NSToolbarSidebarTrackingSeparatorItemIdentifier }.retain(),
                 NSString::from_str("cgs.page-title"),
                 unsafe { NSToolbarFlexibleSpaceItemIdentifier }.retain(),
             ])
@@ -357,8 +359,20 @@ impl Toolbar {
             item.setToolTip(Some(&NSString::from_str(label)));
             item.setEnabled(true);
             if existing.is_none() {
-                self.native
-                    .insertItemWithItemIdentifier_atIndex(&NSString::from_str("cgs.back"), 1);
+                let index = self
+                    .native
+                    .items()
+                    .iter()
+                    .position(|item| {
+                        item.itemIdentifier().to_string()
+                            == unsafe { NSToolbarSidebarTrackingSeparatorItemIdentifier }
+                                .to_string()
+                    })
+                    .map_or(1, |index| index + 1);
+                self.native.insertItemWithItemIdentifier_atIndex(
+                    &NSString::from_str("cgs.back"),
+                    index as isize,
+                );
             }
         } else {
             item.setEnabled(false);

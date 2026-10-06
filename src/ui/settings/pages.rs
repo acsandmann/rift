@@ -46,6 +46,9 @@ pub(super) fn build(ui: Ui, model: &Rc<Model>, id: usize) -> Page {
         4 => super::editors::keyboard(ui, model),
         5 => input(ui, model),
         6 => interface(ui, model),
+        8 => {
+            FormBuilder::new(ui, model).finish(SettingsPage::new(&ui, "").section(about(ui, model)))
+        }
         _ => advanced(ui, model),
     }
 }
@@ -113,6 +116,94 @@ fn general(ui: Ui, model: &Rc<Model>) -> Page {
     page = page.section(section);
     f.finish(page)
 }
+fn about(ui: Ui, model: &Rc<Model>) -> VStack {
+    let status = Rc::new(Label::new(&ui, "").color(&cgs::Color::secondary_label()).wrapping());
+    status.set_hidden(true);
+    let weak_status = Rc::downgrade(&status);
+    let weak_model = Rc::downgrade(model);
+    let check = Button::new(&ui, "Check for Updates…");
+    let weak_button = objc2::rc::Weak::new(check.ns_button());
+    // Keep only weak view references in the pending request so closing Settings
+    // releases the page even while the bounded network request is finishing.
+    let check = check.on_click(move || {
+        if let Some(status) = weak_status.upgrade() {
+            status.set_hidden(false);
+            status.set_text("Checking for updates…");
+        }
+        if let Some(button) = weak_button.load() {
+            button.setEnabled(false);
+        }
+        let Some(model) = weak_model.upgrade() else {
+            return;
+        };
+        let status = weak_status.clone();
+        let button = weak_button.clone();
+        let _ = model.requests.send(Request {
+            action: Action::CheckUpdates(Box::new(move |result| {
+                if let Some(status) = status.upgrade() {
+                    status.set_text(&result.unwrap_or_else(|e| e));
+                }
+                if let Some(button) = button.load() {
+                    button.setEnabled(true);
+                }
+            })),
+            finish: Box::new(|_| {}),
+        });
+    });
+    let identity = HStack::new(&ui).spacing(16.0);
+    identity.add(
+        VStack::new(&ui)
+            .spacing(4.0)
+            .push(Label::new(&ui, "Rift").font(&Font::title()))
+            .push(Caption::new(&ui, "A window manager for macOS"))
+            .push(Caption::new(
+                &ui,
+                &format!("Version {}", env!("CARGO_PKG_VERSION")),
+            )),
+    );
+    let destinations = vec![
+        (
+            "Documentation",
+            "book",
+            "https://acsandmann.github.io/rift-docs/",
+        ),
+        (
+            "Release Notes",
+            "clock.arrow.circlepath",
+            "https://github.com/acsandmann/rift/releases",
+        ),
+        ("Sponsor Rift", "heart", "https://github.com/sponsors/acsandmann"),
+    ];
+    let links = destinations.clone();
+    let resources = SettingsList::new(
+        &ui,
+        |item: &(&str, &str, &str)| item.0.to_string(),
+        |_| String::new(),
+    )
+    .full_length()
+    .navigation()
+    .trailing_summary()
+    .symbols(|item| item.1.to_string())
+    .on_open(move |index| {
+        if let Some(item) = links.get(index) {
+            let _ = std::process::Command::new("open").arg(item.2).spawn();
+        }
+    });
+    resources.set_rows(destinations);
+    VStack::new(&ui)
+        .spacing(24.0)
+        .push(identity)
+        .push(
+            Section::new(&ui, "")
+                .row(
+                    SettingsRow::new(&ui, "Software updates", check)
+                        .description("Find out if a newer release is available."),
+                )
+                .footer(status),
+        )
+        .push(Section::new(&ui, "Resources").content(resources))
+}
+
 fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");

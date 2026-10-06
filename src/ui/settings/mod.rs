@@ -14,11 +14,13 @@ mod applications;
 mod commands;
 mod editors;
 mod pages;
+pub(crate) mod updates;
 
 pub enum Action {
     Edit(SourceEdit),
     Reload,
     RefreshRuntime,
+    CheckUpdates(updates::Completion),
 }
 pub struct Request {
     pub action: Action,
@@ -185,7 +187,7 @@ impl Settings {
         });
         model.rebuild_applications();
         let host = Rc::new(PageHost::new(&ui));
-        let pages = Rc::new(RefCell::new((0..8).map(|_| None::<Page>).collect::<Vec<_>>()));
+        let pages = Rc::new(RefCell::new((0..9).map(|_| None::<Page>).collect::<Vec<_>>()));
         let selected = Rc::new(Cell::new(0));
         let weak_model = Rc::downgrade(&model);
         let weak_host = Rc::downgrade(&host);
@@ -202,6 +204,7 @@ impl Settings {
                 ("Mouse & Trackpad", "computermouse"),
                 ("Interface", "macwindow"),
                 ("Advanced", "slider.horizontal.3"),
+                ("About", "info.circle"),
             ]
             .into_iter()
             .enumerate()
@@ -261,6 +264,7 @@ impl Settings {
                 "Mouse & Trackpad",
                 "Interface",
                 "Advanced",
+                "About",
             ][id],
         );
         if pages.borrow()[id].is_none() {

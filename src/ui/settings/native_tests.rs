@@ -32,7 +32,7 @@ pub fn run(ui: Ui) {
             || {},
         );
         let root = settings.window.ns_window().contentView().unwrap();
-        assert_eq!(find::<NSOutlineView>(&root).unwrap().numberOfRows(), 8);
+        assert_eq!(find::<NSOutlineView>(&root).unwrap().numberOfRows(), 9);
         Settings::select(ui, &settings.model, &settings._host, &settings.pages, 4);
         settings.selected.set(4);
         let keyboard = settings.pages.borrow()[4].as_ref().unwrap().view.clone();
