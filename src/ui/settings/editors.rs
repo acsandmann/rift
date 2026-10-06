@@ -5,11 +5,144 @@ use crate::common::config::*;
 /// Workspace records use a native collection and a small attached detail editor.
 type WorkspaceEntry = (usize, String, Option<LayoutMode>);
 
+/// Retain only the open editor, so its controls stay synchronized with ConfigActor.
+fn editor_sheet(
+    ui: Ui,
+    model: &Rc<Model>,
+    title: &str,
+    build: impl FnOnce(&Rc<Model>) -> Page,
+    scrolling: bool,
+) {
+    let Some(parent) = model.window.borrow().load() else {
+        return;
+    };
+    let base = model.source.borrow().clone();
+    let draft = Rc::new(Model {
+        source: RefCell::new(base.clone()),
+        source_revision: Cell::new(0),
+        requests: model.requests.clone(),
+        syncing: Cell::new(false),
+        sheet: RefCell::new(None),
+        sheet_page: RefCell::new(None),
+        sheet_model: RefCell::new(None),
+        draft_changed: RefCell::new(None),
+        draft_base: Some(base.clone()),
+        window: RefCell::new(model.window.borrow().clone()),
+        displays: RefCell::new(model.displays.borrow().clone()),
+        config_path: model.config_path.clone(),
+        applications: RefCell::new(model.applications.borrow().clone()),
+        installed_applications: RefCell::new(model.installed_applications.borrow().clone()),
+        application_inventory: RefCell::new(Vec::new()),
+        page_title: model.page_title.clone(),
+        toolbar: RefCell::new(Weak::new()),
+    });
+    draft.rebuild_applications();
+    let page = Rc::new(build(&draft));
+    page.synchronize(&draft);
+    *draft.sheet_page.borrow_mut() = Some(page.clone());
+    let weak = Rc::downgrade(model);
+    let cancel = Rc::new(SheetActions::new(&ui));
+    cancel.set_on_cancel(move || {
+        if let Some(model) = weak.upgrade() {
+            model.sheet.borrow_mut().take();
+            model.sheet_page.borrow_mut().take();
+            model.sheet_model.borrow_mut().take();
+        }
+    });
+    cancel.set_changed(*draft.source.borrow() != base);
+    let dirty_cancel = Rc::downgrade(&cancel);
+    *draft.draft_changed.borrow_mut() = Some(Box::new(move |dirty| {
+        if let Some(cancel) = dirty_cancel.upgrade() {
+            cancel.set_changed(dirty);
+        }
+    }));
+    let message = Rc::new(ValidationMessage::new(&ui));
+    let error = Rc::downgrade(&message);
+    let weak = Rc::downgrade(model);
+    let weak_draft = Rc::downgrade(&draft);
+    cancel.set_on_done(move || {
+        // Commit the field editor before reading the draft, including numeric fields.
+        let (Some(model), Some(draft)) = (weak.upgrade(), weak_draft.upgrade()) else {
+            return;
+        };
+        if let Some(sheet) = model.sheet.borrow().as_ref() {
+            if !sheet.ns_window().makeFirstResponder(None) {
+                return;
+            }
+        }
+        let value = draft.source.borrow().clone();
+        let base = draft.draft_base.clone().unwrap();
+        if value == base {
+            model.sheet.borrow_mut().take();
+            model.sheet_page.borrow_mut().take();
+            model.sheet_model.borrow_mut().take();
+            return;
+        }
+        let weak = Rc::downgrade(&model);
+        let error = error.clone();
+        let _ = model.requests.send(Request {
+            action: Action::Edit(Box::new(move |source| {
+                if *source != base {
+                    return Err(
+                        "Settings changed elsewhere. Cancel and reopen this editor to try again."
+                            .into(),
+                    );
+                }
+                *source = value;
+                Ok(())
+            })),
+            finish: Box::new(move |result| {
+                if let Some(model) = weak.upgrade() {
+                    match result {
+                        Ok(()) => {
+                            model.sheet.borrow_mut().take();
+                            model.sheet_page.borrow_mut().take();
+                            model.sheet_model.borrow_mut().take();
+                        }
+                        Err(text) => {
+                            if let Some(error) = error.upgrade() {
+                                error.set_validation(&Validation::Error(text));
+                            }
+                        }
+                    }
+                }
+            }),
+        });
+    });
+    let body: Rc<dyn NativeView> = if scrolling {
+        let scroll = ScrollView::new(&ui, page.view.clone());
+        scroll.fit_width();
+        scroll.height(430.0);
+        Rc::new(scroll)
+    } else {
+        page.view.clone()
+    };
+    let content = VStack::new(&ui)
+        .insets(Insets {
+            top: 24.0,
+            left: 24.0,
+            bottom: 20.0,
+            right: 24.0,
+        })
+        .spacing(16.0)
+        .push(SectionTitle::new(&ui, title))
+        .push(body)
+        .push(message)
+        .push(cancel);
+    content.width(if scrolling { 540.0 } else { 420.0 });
+    let sheet = Sheet::new(&ui, title, content);
+    sheet.fit_content();
+    model.sheet.borrow_mut().take();
+    *model.sheet_page.borrow_mut() = Some(page);
+    *model.sheet_model.borrow_mut() = Some(draft);
+    sheet.show(&parent);
+    *model.sheet.borrow_mut() = Some(sheet);
+}
+
 fn workspace_editor(
     ui: Ui,
     model: &Rc<Model>,
     title: &str,
-    navigation: &Rc<DetailNavigation>,
     items: impl Fn(&ConfigSource) -> Vec<WorkspaceEntry> + 'static,
     summary: impl Fn(&WorkspaceEntry, usize) -> String + 'static,
     detail: impl Fn(Ui, &Rc<Model>, usize) -> Page + 'static,
@@ -18,12 +151,19 @@ fn workspace_editor(
     let mut f = FormBuilder::new(ui, model);
     let selected = Rc::new(Cell::new(None));
     let weak = Rc::downgrade(model);
-    let nav = Rc::downgrade(navigation);
     let edit_workspace: Rc<dyn Fn(usize)> = Rc::new(move |index| {
-        if let (Some(model), Some(nav)) = (weak.upgrade(), nav.upgrade()) {
-            nav.push(
-                nav.detail(detail(ui, &model, index)),
+        if let Some(model) = weak.upgrade() {
+            editor_sheet(
+                ui,
+                &model,
                 &format!("Workspace {}", index + 1),
+                |draft| {
+                    if index == draft.source.borrow().virtual_workspaces.default_workspace_count {
+                        resize_workspaces(&mut draft.source.borrow_mut(), index + 1);
+                    }
+                    detail(ui, draft, index)
+                },
+                false,
             );
         }
     });
@@ -51,30 +191,16 @@ fn workspace_editor(
         AddRemoveControl::new(&ui)
             .on_add(move || {
                 if let Some(model) = weak.upgrade() {
-                    let weak = Rc::downgrade(&model);
-                    let error = error.clone();
-                    let open = open_added.clone();
                     let index = model.source.borrow().virtual_workspaces.default_workspace_count;
-                    let _ = model.requests.send(Request {
-                        action: Action::Edit(Box::new(|s| {
-                            if s.virtual_workspaces.default_workspace_count >= MAX_WORKSPACES {
-                                return Err(format!("Use at most {MAX_WORKSPACES} workspaces."));
-                            }
-                            resize_workspaces(s, s.virtual_workspaces.default_workspace_count + 1);
-                            Ok(())
-                        })),
-                        finish: Box::new(move |result| {
-                            if let Some(error) = error.upgrade() {
-                                error.set_validation(&match &result {
-                                    Ok(()) => Validation::None,
-                                    Err(message) => Validation::Error(message.clone()),
-                                })
-                            }
-                            if result.is_ok() && weak.upgrade().is_some() {
-                                open(index);
-                            }
-                        }),
-                    });
+                    if index >= MAX_WORKSPACES {
+                        if let Some(error) = error.upgrade() {
+                            error.set_validation(&Validation::Error(format!(
+                                "Use at most {MAX_WORKSPACES} workspaces."
+                            )));
+                        }
+                    } else {
+                        open_added(index);
+                    }
                 }
             })
             .on_remove(move || {
@@ -124,7 +250,6 @@ fn workspace_editor(
 }
 
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
-    let navigation = DetailNavigation::new(ui, model, "Workspaces");
     let mut f = FormBuilder::new(ui, model);
     let mut section = Section::new(&ui, "Virtual Workspaces")
         .row(f.switch(
@@ -173,7 +298,6 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
         ui,
         model,
         "Workspaces",
-        &navigation,
         |s| {
             (0..s.virtual_workspaces.default_workspace_count)
                 .map(|i| {
@@ -275,7 +399,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
             .section(editor.view)
             .bottom_bar(HStack::new(&ui).push(actions).spacer(&ui)),
     );
-    navigation.finish(page)
+    page
 }
 
 fn resize_workspaces(s: &mut ConfigSource, count: usize) {
@@ -384,11 +508,9 @@ fn workspace_popup(
 pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let message = Rc::new(ValidationMessage::new(&ui));
-    let navigation = DetailNavigation::new(ui, model, "Rules");
     let weak = Rc::downgrade(model);
-    let nav = Rc::downgrade(&navigation);
     let edit_rule: Rc<dyn Fn(usize)> = Rc::new(move |index| {
-        if let (Some(model), Some(nav)) = (weak.upgrade(), nav.upgrade()) {
+        if let Some(model) = weak.upgrade() {
             let title = model
                 .source
                 .borrow()
@@ -397,7 +519,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
                 .get(index)
                 .map(|rule| rule_name(&model, rule))
                 .unwrap_or_else(|| "App Rule".into());
-            nav.push(nav.detail(rule_detail(ui, &model, index)), &title);
+            editor_sheet(ui, &model, &title, |draft| rule_detail(ui, draft, index), true);
         }
     });
     let action = edit_rule.clone();
@@ -517,12 +639,12 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             *last.borrow_mut() = rules.clone();
         }
     }));
-    navigation.finish(f.finish(SettingsPage::new(&ui, "")
+    f.finish(SettingsPage::new(&ui, "")
         .subtitle("Choose which windows Rift manages and where they open. Click a rule’s arrow to edit it. Drag rules to change their order.")
         .section(table)
         .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
         .section(message)
-        ))
+        )
 }
 
 fn rule_behavior(rule: &AppWorkspaceRule) -> String {
@@ -681,12 +803,29 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
     // A native sheet collects the first matcher before inserting a valid rule.
     let validation = Rc::new(ValidationMessage::new(&ui));
     let input_error = Rc::downgrade(&validation);
-    let input = Rc::new(TextField::new(&ui).placeholder("com.apple.Safari"));
+    let weak_sheet = Rc::downgrade(model);
+    let cancel = Rc::new(SheetActions::new(&ui));
+    cancel.set_on_cancel(move || {
+        if let Some(sheet) = weak_sheet.upgrade() {
+            if let Some(sheet) = sheet.sheet.borrow().as_ref() {
+                sheet.end();
+            }
+        }
+    });
+    let weak_cancel = Rc::downgrade(&cancel);
+    let input = Rc::new(TextField::new(&ui).placeholder("com.apple.Safari").on_change(
+        move |value| {
+            if let Some(cancel) = weak_cancel.upgrade() {
+                cancel.set_changed(!value.trim().is_empty());
+            }
+        },
+    ));
     let app_name = Rc::new(RefCell::new(None::<String>));
     let selected_name = app_name.clone();
     let weak_model = Rc::downgrade(model);
     let weak_input = Rc::downgrade(&input);
-    let button = Button::new(&ui, "Add Rule").key_equivalent("\r").on_click(move || {
+    cancel.set_primary_title("Add Rule");
+    cancel.set_on_done(move || {
         let Some(input) = weak_input.upgrade() else {
             return;
         };
@@ -755,17 +894,10 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
             }),
         });
     });
-    let weak_sheet = Rc::downgrade(model);
-    let cancel = Button::new(&ui, "Cancel").key_equivalent("\u{1b}").on_click(move || {
-        if let Some(sheet) = weak_sheet.upgrade() {
-            if let Some(sheet) = sheet.sheet.borrow().as_ref() {
-                sheet.end();
-            }
-        }
-    });
     let target = Rc::downgrade(&input);
     let choices = Rc::new(RefCell::new(application_choices(model)));
     let selection_choices = choices.clone();
+    let weak_cancel = Rc::downgrade(&cancel);
     let list = Rc::new(
         SettingsList::new(
             &ui,
@@ -776,6 +908,9 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         .symbol("app")
         .images(application_icons(|app: &(String, AppMatch)| app.1.0.clone()))
         .on_select(move |index| {
+            if let Some(cancel) = weak_cancel.upgrade() {
+                cancel.set_changed(index.is_some());
+            }
             if let Some((_, (id, name))) =
                 index.and_then(|index| selection_choices.borrow().get(index).cloned())
             {
@@ -841,7 +976,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         .push(picker)
         .push(Disclosure::new(&ui, "Enter a bundle identifier manually", input))
         .push(validation)
-        .push(HStack::new(&ui).spacer(&ui).push(cancel).push(button));
+        .push(cancel);
     content.min_width(380.0);
     let native = Sheet::new(&ui, "Add Rule", content);
     native.fit_content();
@@ -1165,7 +1300,6 @@ pub(super) fn display_overrides(
     f: &mut FormBuilder,
     page: SettingsPage,
     model: &Rc<Model>,
-    navigation: &Rc<DetailNavigation>,
 ) -> SettingsPage {
     let ui = f.ui;
     let mut displays: Vec<_> = model
@@ -1196,7 +1330,6 @@ pub(super) fn display_overrides(
     if displays.is_empty() {
         return page;
     }
-    let nav = Rc::downgrade(navigation);
     let weak = Rc::downgrade(model);
     let entries = displays.clone();
     let connected: Vec<_> =
@@ -1217,9 +1350,13 @@ pub(super) fn display_overrides(
     .on_open(move |index| {
         if let Some(model) = weak.upgrade() {
             let (uuid, name) = &entries[index];
-            if let Some(nav) = nav.upgrade() {
-                nav.push(nav.detail(display_options(ui, &model, uuid.clone())), name);
-            }
+            editor_sheet(
+                ui,
+                &model,
+                name,
+                |draft| display_options(ui, draft, uuid.clone()),
+                true,
+            );
         }
     });
     list.set_rows(displays);

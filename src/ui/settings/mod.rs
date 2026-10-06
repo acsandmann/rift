@@ -33,6 +33,10 @@ struct Model {
     requests: UnboundedSender<Request>,
     syncing: Cell<bool>,
     sheet: RefCell<Option<Sheet>>,
+    sheet_page: RefCell<Option<Rc<Page>>>,
+    sheet_model: RefCell<Option<Rc<Model>>>,
+    draft_changed: RefCell<Option<Box<dyn Fn(bool)>>>,
+    draft_base: Option<ConfigSource>,
     window: RefCell<objc2::rc::Weak<objc2_app_kit::NSWindow>>,
     displays: RefCell<Vec<crate::sys::screen::ScreenInfo>>,
     config_path: std::path::PathBuf,
@@ -176,6 +180,10 @@ impl Settings {
             requests,
             syncing: Cell::new(false),
             sheet: RefCell::new(None),
+            sheet_page: RefCell::new(None),
+            sheet_model: RefCell::new(None),
+            draft_changed: RefCell::new(None),
+            draft_base: None,
             window: RefCell::new(objc2::rc::Weak::default()),
             displays: RefCell::new(displays),
             config_path,
@@ -343,6 +351,11 @@ impl Settings {
     pub fn synchronize(&self, source: ConfigSource) {
         self.model.replace_source(source);
         if self.visible() {
+            if let Some(page) = self.model.sheet_page.borrow().as_ref() {
+                if let Some(draft) = self.model.sheet_model.borrow().as_ref() {
+                    page.synchronize(draft);
+                }
+            }
             if let Some(page) = &self.pages.borrow()[self.selected.get()] {
                 page.synchronize(&self.model);
             }
@@ -354,6 +367,8 @@ impl Drop for Settings {
     fn drop(&mut self) {
         // End the sheet while its weak parent still points to the live Settings window.
         self.model.sheet.borrow_mut().take();
+        self.model.sheet_page.borrow_mut().take();
+        self.model.sheet_model.borrow_mut().take();
         self._host.clear();
         self.pages.borrow_mut().clear();
     }
@@ -397,10 +412,25 @@ impl FormBuilder {
                 });
             }
         });
-        let _ = model.requests.send(Request {
-            action: Action::Edit(edit),
-            finish,
-        });
+        if let Some(base) = &model.draft_base {
+            let mut source = model.source.borrow().clone();
+            let result = edit(&mut source);
+            if result.is_ok() {
+                model.replace_source(source);
+                if let Some(page) = model.sheet_page.borrow().as_ref() {
+                    page.synchronize(&model);
+                }
+                if let Some(changed) = model.draft_changed.borrow().as_ref() {
+                    changed(*model.source.borrow() != *base);
+                }
+            }
+            finish(result);
+        } else {
+            let _ = model.requests.send(Request {
+                action: Action::Edit(edit),
+                finish,
+            });
+        }
     }
 
     fn row(
@@ -515,14 +545,17 @@ impl FormBuilder {
                 error.clone(),
             );
         };
-        let input = Rc::new(
-            if integer {
-                NumberField::new(&self.ui).integer()
-            } else {
-                NumberField::new(&self.ui)
-            }
-            .on_change(commit.clone()),
-        );
+        let field = if integer {
+            NumberField::new(&self.ui).integer()
+        } else {
+            NumberField::new(&self.ui)
+        };
+        let draft = self.model.upgrade().is_some_and(|m| m.draft_base.is_some());
+        let input = Rc::new(if draft {
+            field.on_edit(commit.clone())
+        } else {
+            field.on_change(commit.clone())
+        });
         let slider = slider_range.as_ref().map(|range| {
             let source = self.model.upgrade().unwrap();
             let (min, max) = range(&source.source.borrow());
@@ -580,13 +613,20 @@ impl FormBuilder {
         let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
-        let input = Rc::new(TextField::new(&self.ui).on_commit(move |v| {
+        let draft = model.upgrade().is_some_and(|m| m.draft_base.is_some());
+        let commit = move |v| {
             if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v) {
                 return;
             }
             let set = set.clone();
             Self::submit(&model, Box::new(move |s| set(s, v)), error.clone());
-        }));
+        };
+        let field = TextField::new(&self.ui);
+        let input = Rc::new(if draft {
+            field.on_change(commit)
+        } else {
+            field.on_commit(commit)
+        });
         input.min_width(140.0);
         input.max_width(260.0);
         let weak = Rc::downgrade(&input);

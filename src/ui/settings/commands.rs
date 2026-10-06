@@ -516,21 +516,39 @@ fn show_sheet(ui: Ui, model: &Rc<Model>, title: &str, content: impl NativeView) 
         *model.sheet.borrow_mut() = Some(sheet);
     }
 }
-fn cancel_button(ui: Ui, model: &Rc<Model>) -> Button {
+fn sheet_actions(ui: Ui, model: &Rc<Model>) -> Rc<SheetActions> {
     let weak = Rc::downgrade(model);
-    Button::new(&ui, "Cancel").key_equivalent("\u{1b}").on_click(move || {
+    let actions = Rc::new(SheetActions::new(&ui));
+    actions.set_on_cancel(move || {
         if let Some(model) = weak.upgrade() {
             if let Some(sheet) = model.sheet.borrow().as_ref() {
                 sheet.end();
             }
         }
-    })
+    });
+    actions
 }
 fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, command: WmCommand) {
+    let cancel = sheet_actions(ui, model);
     let key = Rc::new(RefCell::new(old.clone()));
+    let draft = Rc::new(RefCell::new(command.clone()));
+    let dirty_key = key.clone();
+    let dirty_command = draft.clone();
+    let initial_key = old.clone();
+    let initial_command = command.clone();
+    let weak_cancel = Rc::downgrade(&cancel);
+    let changed: Rc<dyn Fn()> = Rc::new(move || {
+        if let Some(cancel) = weak_cancel.upgrade() {
+            cancel.set_changed(
+                *dirty_key.borrow() != initial_key || *dirty_command.borrow() != initial_command,
+            );
+        }
+    });
+    let key_changed = changed.clone();
     let key_cb = key.clone();
     let recorder = KeyRecorder::new(&ui).on_change(move |v| {
         *key_cb.borrow_mut() = v.as_ref().and_then(recorded_key);
+        key_changed();
     });
     if let Some(old) = &old {
         recorder.ns_button().setTitle(&objc2_foundation::NSString::from_str(&glyphs(
@@ -538,12 +556,12 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
             &model.source.borrow(),
         )));
     }
-    let draft = Rc::new(RefCell::new(command.clone()));
     let host = Rc::new(PageHost::new(&ui));
-    host.set_page(argument_editor(ui, model, &draft));
+    host.set_page(argument_editor(ui, model, &draft, &changed));
     let weak_host = Rc::downgrade(&host);
     let weak_model = Rc::downgrade(model);
     let edited = draft.clone();
+    let action_changed = changed.clone();
     let mut descriptors = actions();
     let current =
         descriptors
@@ -559,8 +577,9 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
             .items(descriptors.iter().map(|(title, _)| *title))
             .on_change(move |i| {
                 *edited.borrow_mut() = templates[i].clone();
+                action_changed();
                 if let (Some(host), Some(model)) = (weak_host.upgrade(), weak_model.upgrade()) {
-                    host.set_page(argument_editor(ui, &model, &edited));
+                    host.set_page(argument_editor(ui, &model, &edited, &action_changed));
                     if let Some(window) = host.ns_view().window() {
                         if let Some(content) = window.contentView() {
                             content.layoutSubtreeIfNeeded();
@@ -573,7 +592,8 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let weak_model = Rc::downgrade(model);
-    let save = Button::new(&ui, "Save Shortcut").key_equivalent("\r").on_click(move || {
+    cancel.set_primary_title("Save Shortcut");
+    cancel.set_on_done(move || {
         let Some(message) = error.upgrade() else {
             return;
         };
@@ -628,11 +648,16 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
             )
             .push(host)
             .push(message)
-            .push(HStack::new(&ui).spacer(&ui).push(cancel_button(ui, model)).push(save)),
+            .push(cancel),
     );
 }
 
-fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) -> Section {
+fn argument_editor(
+    ui: Ui,
+    model: &Rc<Model>,
+    draft: &Rc<RefCell<WmCommand>>,
+    changed: &Rc<dyn Fn()>,
+) -> Section {
     let command = draft.borrow().clone();
     let mut view = Section::new(&ui, "");
     use WmCommand::{ReactorCommand as RcCommand, Wm};
@@ -642,6 +667,7 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
         ))
         | RcCommand(Command::Reactor(R::SwitchSpace(d))) => {
             let edited = draft.clone();
+            let changed = changed.clone();
             let directions = [
                 Direction::Left,
                 Direction::Right,
@@ -660,12 +686,15 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                         }
                         _ => reactor(R::SwitchSpace(d)),
                     };
+
+                    changed();
                 });
             popup.set_selected(directions.iter().position(|v| *v == d).unwrap_or(0));
             view = view.row(SettingsRow::new(&ui, "Direction", popup));
         }
         RcCommand(Command::Layout(L::ResizeWindowGrow(o) | L::ResizeWindowShrink(o))) => {
             let edited = draft.clone();
+            let changed = changed.clone();
             let values = [
                 ResizeOrientation::Smart,
                 ResizeOrientation::Horizontal,
@@ -679,6 +708,8 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                         } else {
                             layout(L::ResizeWindowShrink(values[i]))
                         };
+
+                    changed();
                 });
             popup.set_selected(values.iter().position(|v| *v == o).unwrap_or(0));
             view = view.row(SettingsRow::new(&ui, "Orientation", popup));
@@ -700,6 +731,7 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                     .unwrap_or(0),
             };
             let edited = draft.clone();
+            let changed = changed.clone();
             let popup = Popup::new(&ui).items(names).on_change(move |i| {
                 let target = WorkspaceSelector::Index(i);
                 *edited.borrow_mut() = Wm(if matches!(command, Wm(WmCmd::SwitchToWorkspace(_))) {
@@ -707,6 +739,8 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                 } else {
                     WmCmd::MoveWindowToWorkspace(target)
                 });
+
+                changed();
             });
             popup.set_selected(initial);
             view = view.row(SettingsRow::new(&ui, "Workspace", popup));
@@ -714,12 +748,15 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
         RcCommand(Command::Layout(L::SetWorkspaceLayout { mode, workspace })) => {
             let values = super::pages::layouts();
             let edited = draft.clone();
+            let changed = changed.clone();
             let modes: Vec<_> = values.iter().map(|(_, v)| *v).collect();
             let selected = modes.iter().position(|v| *v == mode).unwrap_or(0);
             let popup =
                 Popup::new(&ui).items(values.iter().map(|(name, _)| *name)).on_change(move |i| {
                     *edited.borrow_mut() =
                         layout(L::SetWorkspaceLayout { workspace, mode: modes[i] });
+
+                    changed();
                 });
             popup.set_selected(selected);
             view = view.row(SettingsRow::new(&ui, "Layout", popup));
@@ -758,6 +795,7 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                 values.len() - 1
             });
             let edited = draft.clone();
+            let changed = changed.clone();
             let popup = Popup::new(&ui).items(names).on_change(move |i| {
                 let selector = values[i].clone();
                 *edited.borrow_mut() = reactor(match &command {
@@ -779,6 +817,8 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                     }
                     _ => unreachable!(),
                 });
+
+                changed();
             });
             popup.set_selected(selected);
             view = view.row(SettingsRow::new(&ui, "Display direction", popup));
@@ -789,7 +829,8 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
             | L::AdjustMasterRatio(amount),
         )) => {
             let edited = draft.clone();
-            let input = NumberField::new(&ui).value(amount).on_change(move |v| {
+            let changed = changed.clone();
+            let input = NumberField::new(&ui).value(amount).on_edit(move |v| {
                 *edited.borrow_mut() = match &command {
                     RcCommand(Command::Layout(L::ResizeWindowBy { .. })) => {
                         layout(L::ResizeWindowBy { amount: v })
@@ -799,16 +840,21 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
                     }
                     _ => layout(L::AdjustMasterRatio(v)),
                 };
+
+                changed();
             });
             view = view.row(SettingsRow::new(&ui, "Amount", input));
         }
         RcCommand(Command::Layout(L::AdjustMasterCount { delta })) => {
             let edited = draft.clone();
+            let changed = changed.clone();
             view = view.row(SettingsRow::new(
                 &ui,
                 "Change in window count",
-                NumberField::new(&ui).integer().value(delta as f64).on_change(move |v| {
+                NumberField::new(&ui).integer().value(delta as f64).on_edit(move |v| {
                     *edited.borrow_mut() = layout(L::AdjustMasterCount { delta: v as i32 });
+
+                    changed();
                 }),
             ));
         }
@@ -818,19 +864,25 @@ fn argument_editor(ui: Ui, model: &Rc<Model>, draft: &Rc<RefCell<WmCommand>>) ->
             let selected = names.iter().position(|v| *v == name).unwrap_or(0);
             let choices = names.clone();
             let edited = draft.clone();
+            let changed = changed.clone();
             let popup = Popup::new(&ui).items(names).on_change(move |i| {
                 *edited.borrow_mut() = Wm(WmCmd::BindingMode(choices[i].clone()));
+
+                changed();
             });
             popup.set_selected(selected);
             view = view.row(SettingsRow::new(&ui, "Keymap", popup));
         }
         Wm(WmCmd::Exec(ExecCmd::String(text))) => {
             let edited = draft.clone();
+            let changed = changed.clone();
             view = view.row(SettingsRow::new(
                 &ui,
                 "Shell command",
-                TextField::new(&ui).value(&text).on_commit(move |v| {
+                TextField::new(&ui).value(&text).on_change(move |v| {
                     *edited.borrow_mut() = Wm(WmCmd::Exec(ExecCmd::String(v)));
+
+                    changed();
                 }),
             ));
         }
@@ -849,85 +901,94 @@ fn mode_sheet(ui: Ui, model: &Rc<Model>, old: String, operation: usize) {
     if operation != 0 && old == "default" {
         return;
     }
-    let input = Rc::new(TextField::new(&ui).value(if operation == 1 { &old } else { "" }));
+    let cancel = sheet_actions(ui, model);
+    cancel.set_changed(operation == 2);
+    let weak_cancel = Rc::downgrade(&cancel);
+    let initial = if operation == 1 {
+        old.clone()
+    } else {
+        String::new()
+    };
+    let input = Rc::new(TextField::new(&ui).value(&initial).on_change(move |value| {
+        if let Some(cancel) = weak_cancel.upgrade() {
+            cancel.set_changed(value != initial);
+        }
+    }));
     let message = Rc::new(ValidationMessage::new(&ui));
     let weak_input = Rc::downgrade(&input);
     let error = Rc::downgrade(&message);
     let weak_model = Rc::downgrade(model);
-    let save =
-        Button::new(
-            &ui,
-            if operation == 2 {
-                "Delete Keymap"
-            } else {
-                "Save"
-            },
-        )
-        .key_equivalent("\r")
-        .on_click(move || {
-            let (Some(input), Some(message)) = (weak_input.upgrade(), error.upgrade()) else {
-                return;
-            };
-            let name = input.get_value().trim().to_string();
-            let old = old.clone();
-            save_sheet(
-                &weak_model,
-                Box::new(move |s| {
-                    if operation != 2
-                        && (name.is_empty()
-                            || name == "default"
-                            || s.binding_modes.contains_key(&name) && name != old)
-                    {
-                        return Err("Choose a unique keymap name".into());
-                    }
-                    if operation == 0 {
-                        s.binding_modes.insert(name, BTreeMap::new());
+    cancel.set_primary_title(if operation == 2 {
+        "Delete Keymap"
+    } else {
+        "Save"
+    });
+    cancel.set_on_done(move || {
+        let (Some(input), Some(message)) = (weak_input.upgrade(), error.upgrade()) else {
+            return;
+        };
+        let name = input.get_value().trim().to_string();
+        let old = old.clone();
+        save_sheet(
+            &weak_model,
+            Box::new(move |s| {
+                if operation != 2
+                    && (name.is_empty()
+                        || name == "default"
+                        || s.binding_modes.contains_key(&name) && name != old)
+                {
+                    return Err("Choose a unique keymap name".into());
+                }
+                if operation == 0 {
+                    s.binding_modes.insert(name, BTreeMap::new());
+                } else {
+                    let bindings = s
+                        .binding_modes
+                        .remove(&old)
+                        .ok_or_else(|| "Mode no longer exists".to_string())?;
+                    let target = if operation == 2 {
+                        "default".into()
                     } else {
-                        let bindings = s
-                            .binding_modes
-                            .remove(&old)
-                            .ok_or_else(|| "Mode no longer exists".to_string())?;
-                        let target = if operation == 2 {
-                            "default".into()
-                        } else {
-                            name.clone()
-                        };
-                        for command in s
-                            .keys
-                            .values_mut()
-                            .chain(s.binding_modes.values_mut().flat_map(|m| m.values_mut()))
-                        {
+                        name.clone()
+                    };
+                    for command in s
+                        .keys
+                        .values_mut()
+                        .chain(s.binding_modes.values_mut().flat_map(|m| m.values_mut()))
+                    {
+                        match command {
+                            WmCommand::Wm(WmCmd::BindingMode(mode)) if *mode == old => {
+                                *mode = target.clone()
+                            }
+                            WmCommand::ReactorCommand(Command::Reactor(R::BindingMode(mode)))
+                                if *mode == old =>
+                            {
+                                *mode = target.clone()
+                            }
+                            _ => {}
+                        }
+                    }
+                    if operation != 2 {
+                        let mut bindings = bindings;
+                        for command in bindings.values_mut() {
                             match command {
                                 WmCommand::Wm(WmCmd::BindingMode(mode)) if *mode == old => {
-                                    *mode = target.clone()
+                                    *mode = name.clone()
                                 }
                                 WmCommand::ReactorCommand(Command::Reactor(R::BindingMode(
                                     mode,
-                                ))) if *mode == old => *mode = target.clone(),
+                                ))) if *mode == old => *mode = name.clone(),
                                 _ => {}
                             }
                         }
-                        if operation != 2 {
-                            let mut bindings = bindings;
-                            for command in bindings.values_mut() {
-                                match command {
-                                    WmCommand::Wm(WmCmd::BindingMode(mode)) if *mode == old => {
-                                        *mode = name.clone()
-                                    }
-                                    WmCommand::ReactorCommand(Command::Reactor(
-                                        R::BindingMode(mode),
-                                    )) if *mode == old => *mode = name.clone(),
-                                    _ => {}
-                                }
-                            }
-                            s.binding_modes.insert(name, bindings);
-                        }
+                        s.binding_modes.insert(name, bindings);
                     }
-                    Ok(())
-                }),
-                &message,
-            );
-        });
+                }
+                Ok(())
+            }),
+            &message,
+        );
+    });
     let mut content = VStack::new(&ui).insets(Insets {
         top: 20.0,
         left: 20.0,
@@ -942,14 +1003,7 @@ fn mode_sheet(ui: Ui, model: &Rc<Model>, old: String, operation: usize) {
     } else {
         content = content.push(SettingsRow::new(&ui, "Name", input));
     }
-    show_sheet(
-        ui,
-        model,
-        "Keymap",
-        content
-            .push(message)
-            .push(HStack::new(&ui).spacer(&ui).push(cancel_button(ui, model)).push(save)),
-    );
+    show_sheet(ui, model, "Keymap", content.push(message).push(cancel));
 }
 fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> VStack {
     let ui = f.ui;

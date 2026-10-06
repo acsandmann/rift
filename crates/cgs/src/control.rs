@@ -584,6 +584,17 @@ impl NumberField {
         self
     }
 
+    /// Update a local draft as valid numeric input is entered.
+    pub fn on_edit(mut self, mut f: impl FnMut(f64) + 'static) -> Self {
+        let formatter = self.formatter.clone();
+        self.field = self.field.on_change(move |text| {
+            if let Some(value) = formatted_number(&formatter, &NSString::from_str(&text)) {
+                f(value);
+            }
+        });
+        self
+    }
+
     pub fn ns_text_field(&self) -> &NSTextField { self.field.ns_text_field() }
 
     pub fn ns_number_formatter(&self) -> &NSNumberFormatter { &self.formatter }
@@ -746,4 +757,36 @@ impl AddRemoveControl {
 }
 impl NativeView for AddRemoveControl {
     fn ns_view(&self) -> &NSView { self.stack.ns_view() }
+}
+
+/// Native trailing sheet actions. Cancel is visible only while the draft differs
+/// from its initial value; clients report draft changes without managing buttons.
+pub struct SheetActions {
+    row: HStack,
+    done: std::rc::Rc<Button>,
+    cancel: std::rc::Rc<Button>,
+}
+impl SheetActions {
+    pub fn new(ui: &Ui) -> Self {
+        let done = std::rc::Rc::new(Button::new(ui, "Done").key_equivalent("\r"));
+        let cancel = std::rc::Rc::new(Button::new(ui, "Cancel").key_equivalent("\u{1b}"));
+        cancel.set_hidden(true);
+        cancel.identifier("cgs.sheet-cancel");
+        done.identifier("cgs.sheet-primary");
+        let row = HStack::new(ui).spacing(8.0).spacer(ui).push(cancel.clone()).push(done.clone());
+        Self { row, done, cancel }
+    }
+
+    pub fn set_changed(&self, changed: bool) { self.cancel.set_hidden(!changed); }
+
+    pub fn set_primary_title(&self, title: &str) { self.done.set_title(title); }
+
+    pub fn set_on_done(&self, mut f: impl FnMut() + 'static) { self.done.target.set(move |_| f()); }
+
+    pub fn set_on_cancel(&self, mut f: impl FnMut() + 'static) {
+        self.cancel.target.set(move |_| f());
+    }
+}
+impl NativeView for SheetActions {
+    fn ns_view(&self) -> &NSView { self.row.ns_view() }
 }

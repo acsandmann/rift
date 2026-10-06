@@ -315,7 +315,7 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
             |s, v| s.settings.layout.gaps.inner.vertical = v,
         ));
     page = page.section(section);
-    page = super::editors::display_overrides(&mut f, page, model, &navigation);
+    page = super::editors::display_overrides(&mut f, page, model);
     navigation.finish(f.finish(page))
 }
 
