@@ -607,11 +607,20 @@ impl FormBuilder {
         let items: Vec<_> = values.iter().map(|(_, value)| value.clone()).collect();
         let labels: Vec<String> = values.iter().map(|(label, _)| (*label).into()).collect();
         let choices = items.clone();
+        let inherited = default.clone();
         let input = Rc::new(Popup::new(&self.ui).on_change(move |index| {
-            let value = index.checked_sub(1).and_then(|i| choices.get(i)).cloned();
-            if model.upgrade().is_some_and(|model| current(&model.source.borrow()) == value) {
+            let Some(choice) = choices.get(index).cloned() else {
+                return;
+            };
+            let Some(owner) = model.upgrade() else {
+                return;
+            };
+            let source = owner.source.borrow();
+            let value = (choice != inherited(&source)).then_some(choice);
+            if current(&source) == value {
                 return;
             }
+            drop(source);
             let set = set.clone();
             Self::submit(
                 &model,
@@ -625,20 +634,13 @@ impl FormBuilder {
         let weak = Rc::downgrade(&input);
         self.sync.push(Box::new(move |source| {
             if let Some(input) = weak.upgrade() {
-                let effective = default(source);
-                let name = items
-                    .iter()
-                    .position(|value| *value == effective)
-                    .map(|i| labels[i].as_str())
-                    .unwrap_or("Default");
-                let mut titles = vec![format!("{name} (Default)")];
-                titles.extend(labels.iter().cloned());
-                input.set_items(titles.iter().map(String::as_str));
-                input.set_selected(
-                    get(source)
-                        .and_then(|value| items.iter().position(|item| *item == value))
-                        .map_or(0, |i| i + 1),
-                );
+                input.set_items(labels.iter().map(String::as_str));
+                let inherited = default(source);
+                for (index, item) in items.iter().enumerate() {
+                    input.set_item_badge(index, (*item == inherited).then_some("Default"));
+                }
+                let effective = get(source).unwrap_or(inherited);
+                input.set_selected(items.iter().position(|item| *item == effective).unwrap_or(0));
             }
         }));
         self.row(title, input, message)

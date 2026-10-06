@@ -424,6 +424,7 @@ pub struct Reactor {
     space_activation_policy: SpaceActivationPolicy,
     main_window_tracker: MainWindowTracker,
     pending_mouse_focus: Option<(WindowId, Instant)>,
+    mouse_inventory_hit: Option<WindowServerId>,
     drag_manager: managers::DragManager,
     workspace_switch_manager: managers::WorkspaceSwitchManager,
     recording_manager: managers::RecordingManager,
@@ -513,6 +514,7 @@ impl Reactor {
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             pending_mouse_focus: None,
+            mouse_inventory_hit: None,
             drag_manager: managers::DragManager {
                 actor: crate::actor::drag::DragActor::new(config.settings.drag_drop),
                 native_motion_active: std::sync::Arc::default(),
@@ -1012,6 +1014,7 @@ impl Reactor {
                     {
                         self.space_state.command_space = Some(space);
                     }
+                    self.mouse_inventory_hit = None;
                     // Refresh the command display without native queries or
                     // outcome processing when focus already matches the hit.
                     return;
@@ -1934,7 +1937,12 @@ impl Reactor {
                 return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
             }
             Event::MouseMoved(wsid) => {
-                let window = self.state.windows.tracked_window_id(wsid);
+                // Attached sheets focus their owning window; they are not
+                // independent tiling targets and may not appear in AXWindows.
+                let window = self.state.windows.tracked_window_id(wsid).or_else(|| {
+                    window_server::window_parent(wsid)
+                        .and_then(|parent| self.state.windows.tracked_window_id(parent))
+                });
                 if window.is_some_and(|window| {
                     self.pending_mouse_focus.is_some_and(|(pending, started)| {
                         pending == window && started.elapsed() < Duration::from_secs(1)
@@ -1943,6 +1951,10 @@ impl Reactor {
                     return Ok(EventOutcome::default());
                 }
                 if window.is_none() {
+                    if self.mouse_inventory_hit == Some(wsid) {
+                        return Ok(EventOutcome::default());
+                    }
+                    self.mouse_inventory_hit = Some(wsid);
                     trace!(?wsid, "Mouse hit window missing from inventory");
                     if let Some(info) = self
                         .state
@@ -1956,6 +1968,7 @@ impl Reactor {
                     }
                     return Ok(EventOutcome::default());
                 }
+                self.mouse_inventory_hit = None;
                 let active_space = window.and_then(|window| {
                     self.state.windows.window(window).and_then(|state| {
                         self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)

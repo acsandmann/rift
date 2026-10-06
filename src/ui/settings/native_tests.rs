@@ -20,7 +20,8 @@ pub fn run(ui: Ui) {
             virtual_workspaces: Default::default(),
             modifier_combinations: Default::default(),
         };
-        source.settings.layout.base.window_insertion_point = None;
+        source.settings.layout.base.window_insertion_point =
+            Some(crate::common::config::WindowInsertionPoint::NextToSelection);
         let settings = Settings::new(
             ui,
             source,
@@ -99,14 +100,24 @@ pub fn run(ui: Ui) {
         page.synchronize(&settings.model);
         assert_eq!(
             popup.titleOfSelectedItem().unwrap().to_string(),
-            "Next to selection (Default)"
+            "Next to selection"
         );
+        assert_eq!(popup.numberOfItems(), 2);
+        assert_eq!(
+            popup
+                .itemAtIndex(0)
+                .unwrap()
+                .badge()
+                .unwrap()
+                .stringValue()
+                .unwrap()
+                .to_string(),
+            "Default"
+        );
+        assert!(popup.itemAtIndex(1).unwrap().badge().is_none());
         for (index, expected) in [
-            (
-                1,
-                Some(crate::common::config::WindowInsertionPoint::NextToSelection),
-            ),
-            (2, Some(crate::common::config::WindowInsertionPoint::EndOfTree)),
+            (0, None),
+            (1, Some(crate::common::config::WindowInsertionPoint::EndOfTree)),
             (0, None),
         ] {
             popup.selectItemAtIndex(index);
@@ -129,9 +140,18 @@ pub fn run(ui: Ui) {
             Some(crate::common::config::WindowInsertionPoint::EndOfTree);
         settings.model.replace_source(source);
         page.synchronize(&settings.model);
+        assert_eq!(popup.titleOfSelectedItem().unwrap().to_string(), "End of layout");
+        assert!(popup.itemAtIndex(0).unwrap().badge().is_none());
         assert_eq!(
-            popup.titleOfSelectedItem().unwrap().to_string(),
-            "End of layout (Default)"
+            popup
+                .itemAtIndex(1)
+                .unwrap()
+                .badge()
+                .unwrap()
+                .stringValue()
+                .unwrap()
+                .to_string(),
+            "Default"
         );
         assert!(
             pending.try_recv().is_err(),

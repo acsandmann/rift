@@ -263,6 +263,34 @@ impl Popup {
         }
     }
 
+    /// Let AppKit render a native menu badge beside a choice.
+    pub fn set_item_badge(&self, index: usize, label: Option<&str>) {
+        use objc2::AnyThread;
+        use objc2_foundation::NSObjectProtocol;
+        let Some(item) = self.native.itemAtIndex(index as isize) else {
+            return;
+        };
+        if !item.respondsToSelector(objc2::sel!(setBadge:)) {
+            return;
+        }
+        if item
+            .badge()
+            .and_then(|badge| badge.stringValue())
+            .map(|s| s.to_string())
+            .as_deref()
+            == label
+        {
+            return;
+        }
+        let badge = label.map(|label| {
+            objc2_app_kit::NSMenuItemBadge::initWithString(
+                objc2_app_kit::NSMenuItemBadge::alloc(),
+                &NSString::from_str(label),
+            )
+        });
+        item.setBadge(badge.as_deref());
+    }
+
     pub fn set_selected(&self, index: usize) {
         if self.native.indexOfSelectedItem() != index as isize {
             self.native.selectItemAtIndex(index as isize);

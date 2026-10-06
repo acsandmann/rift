@@ -3601,13 +3601,30 @@ fn mouse_hit_missing_from_inventory_refreshes_its_owner_once() {
         max_frame: CGSize::ZERO,
     });
     reactor.handle_event(Event::MouseMoved(wsid));
-    assert!(matches!(
-        app_rx.try_recv().unwrap().1,
-        Request::RefreshWindowInventory(_)
-    ));
+    let (_, Request::RefreshWindowInventory(token)) = app_rx.try_recv().unwrap() else {
+        panic!("expected inventory refresh");
+    };
     reactor.handle_event(Event::MouseMoved(wsid));
     assert!(app_rx.try_recv().is_err());
     assert!(!reactor.window_inventory_manager.pending.contains(&pid));
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid,
+        token,
+        successful: true,
+        new: vec![],
+        known_visible: vec![],
+    });
+    // A modal surface absent from AXWindows must not trigger a new scan on
+    // every mouse event after the previous inventory request has completed.
+    while app_rx.try_recv().is_ok() {}
+    reactor.handle_event(Event::MouseMoved(wsid));
+    assert!(app_rx.try_recv().is_err());
+    reactor.handle_event(Event::MouseMoved(WindowServerId::new(911)));
+    reactor.handle_event(Event::MouseMoved(wsid));
+    assert!(matches!(
+        app_rx.try_recv(),
+        Ok((_, Request::RefreshWindowInventory(_)))
+    ));
 }
 
 #[test]
