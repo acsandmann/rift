@@ -3620,7 +3620,11 @@ mod tests {
         let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(43);
-        let windows = [WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3)];
+        let windows = [
+            WindowId::new(1, 1),
+            WindowId::new(1, 2),
+            WindowId::new(1, 3),
+        ];
         let focused = windows[1];
         let visible_spaces = vec![space];
         let visible_space_centers = HashMap::default();
@@ -3641,10 +3645,7 @@ mod tests {
                 None,
             ),
         );
-        let _ = engine.handle_event(
-            &mut window_store,
-            LayoutEvent::WindowFocused(space, focused),
-        );
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, focused));
 
         let response = engine.handle_command(
             &mut window_store,
