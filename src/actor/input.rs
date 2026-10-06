@@ -1900,16 +1900,20 @@ mod tests {
 
     #[test]
     fn hotkey_maps_are_deferred_until_app_events_are_registered() {
-        let (input, _, _) = input();
-        assert!(!input.hotkeys_active.get());
-        assert!(input.hotkeys.borrow().is_empty());
+        std::thread::spawn(|| {
+            let (input, _, _) = input();
+            assert!(!input.hotkeys_active.get());
+            assert!(input.hotkeys.borrow().is_empty());
 
-        input.hotkeys_active.set(true);
-        input.rebuild_binding_maps();
+            input.hotkeys_active.set(true);
+            input.rebuild_binding_maps();
 
-        assert!(!input.hotkeys.borrow().is_empty());
-        let key_mask = (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::FlagsChanged.0);
-        assert_eq!(input.desired_event_mask() & key_mask, key_mask);
+            assert!(!input.hotkeys.borrow().is_empty());
+            let key_mask = (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::FlagsChanged.0);
+            assert_eq!(input.desired_event_mask() & key_mask, key_mask);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

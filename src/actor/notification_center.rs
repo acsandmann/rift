@@ -8,7 +8,10 @@ use std::{future, mem};
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2::rc::{Allocated, Retained};
-use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, ClassType, DeclaredClass, Encode, Encoding, MainThreadMarker, define_class,
+    msg_send, sel,
+};
 use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
 use objc2_foundation::{
     NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
@@ -101,6 +104,8 @@ define_class! {
         #[unsafe(method(recvKeyboardLayoutChanged:))]
         fn recv_keyboard_layout_changed(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
+            let mtm = MainThreadMarker::new().expect("layout notifications run on the main thread");
+            crate::sys::hotkey::refresh_virtual_keymap(mtm);
             self.send_event(WmEvent::KeyboardLayoutChanged);
         }
     }

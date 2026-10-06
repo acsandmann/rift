@@ -147,6 +147,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         std::process::exit(1);
     }
 
+    rift_wm::sys::hotkey::refresh_virtual_keymap(mtm);
+
     let config_path = opt.config.clone().unwrap_or_else(|| config_file());
     let mut config = if config_path.exists() {
         Config::read(&config_path).unwrap()
