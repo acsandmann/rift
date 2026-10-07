@@ -625,16 +625,6 @@ impl FormBuilder {
         self.row(title, input, message)
     }
 
-    fn number(
-        &mut self,
-        title: &str,
-        scale: f64,
-        get: impl Fn(&ConfigSource) -> f64 + 'static,
-        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
-    ) -> SettingsRow {
-        self.numeric(title, scale, false, None, get, set)
-    }
-
     fn gap(
         &mut self,
         title: &str,
@@ -642,15 +632,6 @@ impl FormBuilder {
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
         self.numeric(title, 1.0, false, Some(Rc::new(|_| (0.0, 100.0))), get, set)
-    }
-
-    fn integer(
-        &mut self,
-        title: &str,
-        get: impl Fn(&ConfigSource) -> f64 + 'static,
-        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
-    ) -> SettingsRow {
-        self.numeric(title, 1.0, true, None, get, set)
     }
 
     fn percentage(

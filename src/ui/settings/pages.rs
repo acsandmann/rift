@@ -523,109 +523,25 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
     let section = f.schema_section("Workspace swipes", "main", |s| &s.settings.gestures, |s| &mut s.settings.gestures);
     let tuning = f.schema_section("", "advanced", |s| &s.settings.gestures, |s| &mut s.settings.gestures);
     page = page.section(section.content(Disclosure::new(&ui, "Advanced swipe settings", tuning)));
-    let section = Section::new(&ui, "Scrolling layout gestures")
-        .description("These gestures navigate the Scrolling layout strip.")
-        .row(f.switch(
-            "Enabled",
-            |s| s.settings.layout.scrolling.gestures.enabled,
-            |s, v| s.settings.layout.scrolling.gestures.enabled = v,
-        ))
-        .row(f.switch(
-            "Invert horizontal direction",
-            |s| s.settings.layout.scrolling.gestures.invert_horizontal,
-            |s, v| s.settings.layout.scrolling.gestures.invert_horizontal = v,
-        ))
-        .row(f.integer(
-            "Fingers",
-            |s| s.settings.layout.scrolling.gestures.fingers as f64,
-            |s, v| s.settings.layout.scrolling.gestures.fingers = v as usize,
-        ))
-        .row(f.switch(
-            "Continue into workspace swipe",
-            |s| s.settings.layout.scrolling.gestures.propagate_to_workspace_swipe,
-            |s, v| s.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = v,
-        ))
-        .row(f.inherited_popup(
-            "Animate gestures",
-            bool_choices(),
-            |s| s.settings.layout.scrolling.gestures.animate,
-            |s| s.settings.layout.scrolling.animate.unwrap_or(true),
-            |s, v| s.settings.layout.scrolling.gestures.animate = v,
-        ))
-        .row(f.number(
-            "Vertical tolerance",
-            1.0,
-            |s| s.settings.layout.scrolling.gestures.vertical_tolerance,
-            |s, v| s.settings.layout.scrolling.gestures.vertical_tolerance = v,
-        ))
-        .row(f.number(
-            "Workspace switch threshold (%)",
-            100.0,
-            |s| s.settings.layout.scrolling.gestures.workspace_switch_threshold,
-            |s, v| s.settings.layout.scrolling.gestures.workspace_switch_threshold = v,
-        ));
+    let mut section = Section::new(&ui, "Scrolling layout gestures")
+        .description("These gestures navigate the Scrolling layout strip.");
+    for field in ScrollingGestureSettings::fields() {
+        let row = if field.key == "animate" {
+            let row = f.inherited_popup(
+                field.title,
+                bool_choices(),
+                |s| s.settings.layout.scrolling.gestures.animate,
+                |s| s.settings.layout.scrolling.animate.unwrap_or(true),
+                |s, v| s.settings.layout.scrolling.gestures.animate = v,
+            );
+            Some(f.schema_metadata(row, field, |s| &s.settings.layout.scrolling.gestures))
+        } else {
+            f.schema_field(field, |s| &s.settings.layout.scrolling.gestures, |s| &mut s.settings.layout.scrolling.gestures)
+        };
+        if let Some(row) = row { section = section.row(row); }
+    }
     page = page.section(section);
-    let section = Section::new(&ui, "Drag & Drop")
-        .row(f.switch(
-            "Enabled",
-            |s| s.settings.drag_drop.enabled,
-            |s, v| s.settings.drag_drop.enabled = v,
-        ))
-        .row(f.popup(
-            "Modifier",
-            vec![
-                ("⌘ Command", MouseModifier::Cmd),
-                ("⌥ Option", MouseModifier::Alt),
-                ("⇧ Shift", MouseModifier::Shift),
-                ("⌃ Control", MouseModifier::Ctrl),
-                ("Fn", MouseModifier::Fn),
-            ],
-            |s| s.settings.drag_drop.modifier,
-            |s, v| s.settings.drag_drop.modifier = v,
-        ))
-        .row(f.popup(
-            "Primary button",
-            vec![
-                ("Move window", MouseAction::Move),
-                ("Pass through", MouseAction::None),
-            ],
-            |s| s.settings.drag_drop.action1,
-            |s, v| s.settings.drag_drop.action1 = v,
-        ))
-        .row(f.popup(
-            "Secondary button",
-            vec![
-                ("Move window", MouseAction::Move),
-                ("Pass through", MouseAction::None),
-            ],
-            |s| s.settings.drag_drop.action2,
-            |s, v| s.settings.drag_drop.action2 = v,
-        ))
-        .row(f.popup(
-            "Drop in center",
-            vec![
-                ("Swap", MouseDropAction::Swap),
-                ("Stack", MouseDropAction::Stack),
-            ],
-            |s| s.settings.drag_drop.drop_action,
-            |s, v| s.settings.drag_drop.drop_action = v,
-        ))
-        .row(f.number(
-            "Center drop zone (%)",
-            100.0,
-            |s| s.settings.drag_drop.drop_zone_fraction,
-            |s, v| s.settings.drag_drop.drop_zone_fraction = v,
-        ))
-        .row(f.switch(
-            "Show drop preview",
-            |s| s.settings.drag_drop.preview,
-            |s, v| s.settings.drag_drop.preview = v,
-        ))
-        .row(f.switch(
-            "Haptic feedback",
-            |s| s.settings.drag_drop.haptics_enabled,
-            |s, v| s.settings.drag_drop.haptics_enabled = v,
-        ));
+    let section = f.schema_section("Drag & Drop", "", |s| &s.settings.drag_drop, |s| &mut s.settings.drag_drop);
     page = page.section(section);
     let section = Section::new(&ui, "Pointer movement").row(f.popup(
         "Horizontal pointer warp",

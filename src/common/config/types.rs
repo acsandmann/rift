@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use regex::RegexBuilder;
 pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
 use serde::{Deserialize, Serialize};
-use super::{ConfigSchema, ConfigEnum};
 
+use super::{ConfigEnum, ConfigSchema};
 use crate::actor::wm_controller::WmCommand;
 use crate::common::collections::HashMap;
 use crate::sys::hotkey::{Hotkey, HotkeySpec};
@@ -29,15 +29,23 @@ pub fn config_file() -> PathBuf {
 pub struct VirtualWorkspaceSettings {
     #[serde(default = "yes")]
     /// Organize windows into separate virtual workspaces.
-    #[setting(label = "Enabled")]
+    #[setting(ignore)]
     pub enabled: bool,
     #[serde(default = "default_workspace_count")]
     /// Number of virtual workspaces.
-    #[setting(label = "Workspace count", custom, aliases = "workspace count number desktops spaces")]
+    #[setting(
+        label = "Workspace count",
+        custom,
+        aliases = "workspace count number desktops spaces"
+    )]
     pub default_workspace_count: usize,
     #[serde(default = "yes")]
     /// Automatically assign new windows to a workspace.
-    #[setting(label = "Auto-assign windows", aliases = "automatically assign apps workspaces")]
+    // #[setting(
+    //     label = "Auto-assign windows",
+    //     aliases = "automatically assign apps workspaces"
+    // )]
+    #[setting(ignore)]
     pub auto_assign_windows: bool,
     #[serde(default = "yes")]
     /// Remember the focused window in each workspace.
@@ -45,7 +53,10 @@ pub struct VirtualWorkspaceSettings {
     pub preserve_focus_per_workspace: bool,
     #[serde(default)]
     /// Return to the previous workspace when the active workspace is selected again.
-    #[setting(label = "Switch back when selecting active workspace", aliases = "back and forth previous desktop")]
+    #[setting(
+        label = "Switch back when selecting active workspace",
+        aliases = "back and forth previous desktop"
+    )]
     pub workspace_auto_back_and_forth: bool,
     #[serde(default, alias = "prevent_wrapping_around")]
     /// Stop workspace navigation at the first and last workspace.
@@ -53,7 +64,11 @@ pub struct VirtualWorkspaceSettings {
     pub prevent_wrapping: bool,
     #[serde(default = "default_workspace_names")]
     /// Names assigned to virtual workspaces.
-    #[setting(label = "Workspaces", custom, aliases = "names rename layout desktop space count number add remove")]
+    #[setting(
+        label = "Workspaces",
+        custom,
+        aliases = "names rename layout desktop space count number add remove"
+    )]
     pub workspace_names: Vec<String>,
     #[serde(default)]
     /// Workspace used for new windows without another assignment.
@@ -61,7 +76,10 @@ pub struct VirtualWorkspaceSettings {
     pub default_workspace: usize,
     #[serde(default)]
     /// Recheck workspace rules when a window title changes.
-    #[setting(label = "Reapply rules when titles change", aliases = "application title updated match workspace")]
+    #[setting(
+        label = "Reapply rules when titles change",
+        aliases = "application title updated match workspace"
+    )]
     pub reapply_app_rules_on_title_change: bool,
     #[serde(default)]
     /// Assign matching applications and windows to workspaces.
@@ -391,35 +409,76 @@ unsafe impl Sync for Config {}
 pub struct Settings {
     #[serde(default)]
     /// Animate windows when their layout changes.
-    #[setting(label = "Animate window changes", group = "general", aliases = "animation transitions motion")]
+    #[setting(
+        label = "Animate window changes",
+        group = "general",
+        aliases = "animation transitions motion"
+    )]
     pub animate: bool,
     #[serde(default = "default_animation_duration")]
     /// Duration of a window animation, in seconds.
-    #[setting(label = "Duration (seconds)", group = "general", enabled_by = "animate", aliases = "animation speed seconds")]
+    // #[setting(
+    //     label = "Duration (seconds)",
+    //     group = "general",
+    //     enabled_by = "animate",
+    //     aliases = "animation speed seconds"
+    // )]
+    #[setting(ignore)]
     pub animation_duration: f64,
     #[serde(default = "default_animation_fps")]
     /// Maximum number of frames per second during a window animation.
-    #[setting(label = "Frame rate", group = "general", enabled_by = "animate", aliases = "animation fps performance")]
+    // #[setting(
+    //     label = "Frame rate",
+    //     group = "general",
+    //     enabled_by = "animate",
+    //     aliases = "animation fps performance"
+    // )]
+    #[setting(ignore)]
     pub animation_fps: f64,
     #[serde(default)]
     /// The timing curve used for window animations.
-    #[setting(label = "Animation easing", group = "general", choices, enabled_by = "animate", aliases = "transition curve")]
+    // #[setting(
+    //     label = "Animation easing",
+    //     group = "general",
+    //     choices,
+    //     enabled_by = "animate",
+    //     aliases = "transition curve"
+    // )]
+    #[setting(ignore)]
     pub animation_easing: AnimationEasing,
     #[serde(default = "yes")]
     /// Start Rift with automatic tiling turned off.
-    #[setting(label = "Start with tiling disabled", group = "general", aliases = "floating startup automatic tiling")]
+    #[setting(
+        label = "Start with tiling disabled",
+        group = "general",
+        aliases = "floating startup automatic tiling"
+    )]
     pub default_disable: bool,
     #[serde(default = "yes")]
     /// Move the pointer into the window when focus changes.
-    #[setting(label = "Move pointer to focused window", group = "pointer", aliases = "mouse follows focus cursor warp")]
+    #[setting(
+        label = "Move pointer to focused window",
+        group = "pointer",
+        aliases = "mouse follows focus cursor warp"
+    )]
     pub mouse_follows_focus: bool,
     #[serde(default = "yes")]
     /// Hide the pointer after moving it into the focused window.
-    #[setting(label = "Hide pointer after focusing", group = "pointer", enabled_by = "mouse_follows_focus", aliases = "hide mouse cursor")]
+    #[setting(
+        label = "Hide pointer after focusing",
+        group = "pointer",
+        enabled_by = "mouse_follows_focus",
+        aliases = "hide mouse cursor"
+    )]
     pub mouse_hides_on_focus: bool,
     #[serde(default = "yes")]
     /// Focus a window when the pointer moves over it.
-    #[setting(label = "Focus follows pointer", group = "pointer", order = 0, aliases = "ffm focus follows mouse hover autofocus")]
+    #[setting(
+        label = "Focus follows pointer",
+        group = "pointer",
+        order = 0,
+        aliases = "ffm focus follows mouse hover autofocus"
+    )]
     pub focus_follows_mouse: bool,
     /// Treat vertically stacked displays as a horizontal pointer chain.
     /// `top-to-bottom` maps higher displays to the left; `bottom-to-top` reverses it.
@@ -435,7 +494,12 @@ pub struct Settings {
     /// List of bundle identifiers (e.g., "com.apple.Spotlight") that often
     /// inappropriately steal focus and shouldn't cause workspace switches.
     #[serde(default)]
-    #[setting(label = "Autofocus blacklist", group = "advanced", custom, aliases = "focus exclude ignore app")]
+    #[setting(
+        label = "Autofocus blacklist",
+        group = "advanced",
+        custom,
+        aliases = "focus exclude ignore app"
+    )]
     pub auto_focus_blacklist: Vec<String>,
     #[serde(default)]
     #[setting(ignore)]
@@ -454,13 +518,22 @@ pub struct Settings {
 
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
-    #[setting(label = "Startup commands", group = "advanced", custom, aliases = "launch run shell exec")]
+    #[setting(
+        label = "Startup commands",
+        group = "advanced",
+        custom,
+        aliases = "launch run shell exec"
+    )]
     pub run_on_start: Vec<String>,
 
     /// Enable hot-reloading of the config file when it changes
     #[serde(default = "yes")]
     /// Reload the configuration automatically when the file changes.
-    #[setting(label = "Reload config when edited externally", group = "advanced", aliases = "configuration file automatic reload toml")]
+    #[setting(
+        label = "Reload config when edited externally",
+        group = "advanced",
+        aliases = "configuration file automatic reload toml"
+    )]
     pub hot_reload: bool,
 }
 
@@ -543,36 +616,43 @@ impl Default for GestureSettings {
 
 ///
 /// Serialized values are `cmd`, `alt`, `shift`, `ctrl`, and `fn`.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseModifier {
     /// Command (⌘). The alias `command` is also accepted.
     #[serde(alias = "command")]
+    #[setting(label = "⌘ Command")]
     Cmd,
     /// Option (⌥). The alias `option` is also accepted.
     #[serde(alias = "option")]
+    #[setting(label = "⌥ Option")]
     Alt,
+    #[setting(label = "⇧ Shift")]
     Shift,
     #[serde(alias = "control")]
+    #[setting(label = "⌃ Control")]
     Ctrl,
     /// Globe/Fn. This is the default because it rarely conflicts with apps.
     #[default]
+    #[setting(label = "Fn")]
     Fn,
 }
 
 /// Operation reserved for a modifier-plus-mouse-button gesture.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseAction {
     /// Do not capture this button; the click is delivered normally.
+    #[setting(label = "Pass through")]
     None,
     /// Move a window from anywhere inside it.
     #[default]
+    #[setting(label = "Move window")]
     Move,
 }
 
 /// Action used when a tiled window is released in another tile's center zone.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MouseDropAction {
     /// Exchange the source and target's logical layout positions.
@@ -583,34 +663,42 @@ pub enum MouseDropAction {
 }
 
 /// Modifier mouse actions and native tiled-window drop settings.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DragDropSettings {
     /// Enable trackpad feedback after a successful window drop.
     #[serde(default = "yes")]
+    #[setting(label = "Haptic feedback", order = 7)]
     pub haptics_enabled: bool,
     /// Enables native drag targeting and modifier mouse actions.
     #[serde(default = "yes")]
+    #[setting(order = 0)]
     pub enabled: bool,
     /// Modifier held with `action1` or `action2`.
     #[serde(default)]
+    #[setting(choices, order = 1)]
     pub modifier: MouseModifier,
     /// Left-button action while the configured modifier is held.
     #[serde(default)]
+    #[setting(label = "Primary button", choices, order = 2)]
     pub action1: MouseAction,
     /// Right-button action while the configured modifier is held.
     #[serde(default = "default_mouse_action_none")]
+    #[setting(label = "Secondary button", choices, order = 3)]
     pub action2: MouseAction,
     /// Center-zone action for tiled move drops.
     #[serde(default)]
+    #[setting(label = "Drop in center", choices, order = 4)]
     pub drop_action: MouseDropAction,
     /// Depth of each edge zone as a fraction of the destination window's size.
     /// Valid values are `0.10..=0.45`; the default is `0.25`.
     #[serde(default = "default_drop_zone_fraction")]
+    #[setting(label = "Center drop zone (%)", scale = 100.0, order = 5)]
     pub drop_zone_fraction: f64,
     /// Shows a translucent, rounded WindowServer overlay for the pending drop.
     /// The overlay is updated only when the target tile or drop zone changes.
     #[serde(default = "yes")]
+    #[setting(label = "Show drop preview", order = 6)]
     pub preview: bool,
 }
 
@@ -947,15 +1035,27 @@ pub struct ScrollingLayoutSettings {
     /// Whether to animate windows moving in the scrolling layout
     /// HIGHLY RECOMMENDED to leave this enabled.
     #[serde(default = "default_scrolling_animate")]
-    #[setting(label = "Animate navigation", custom, aliases = "animation transitions motion")]
+    #[setting(
+        label = "Animate navigation",
+        custom,
+        aliases = "animation transitions motion"
+    )]
     pub animate: Option<bool>,
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
-    #[setting(label = "Default column width", custom, aliases = "column width sizing percentages tiling")]
+    #[setting(
+        label = "Default column width",
+        custom,
+        aliases = "column width sizing percentages tiling"
+    )]
     pub column_width_ratio: f64,
     /// Proportional column widths cycled in configured order.
     #[serde(default = "default_scrolling_preset_column_widths")]
-    #[setting(label = "Width presets", custom, aliases = "column width presets cycle sizes")]
+    #[setting(
+        label = "Width presets",
+        custom,
+        aliases = "column width presets cycle sizes"
+    )]
     pub preset_column_widths: Vec<f64>,
     /// Keep a window's existing column width when it enters scrolling layout.
     #[serde(default = "yes")]
@@ -968,11 +1068,19 @@ pub struct ScrollingLayoutSettings {
     pub expand_single_column: bool,
     /// Minimum column width ratio allowed by resize commands.
     #[serde(default = "default_scrolling_min_column_width_ratio")]
-    #[setting(label = "Minimum width", scale = 100.0, aliases = "minimum column width sizing percentages tiling")]
+    #[setting(
+        label = "Minimum width",
+        scale = 100.0,
+        aliases = "minimum column width sizing percentages tiling"
+    )]
     pub min_column_width_ratio: f64,
     /// Maximum column width ratio allowed by resize commands.
     #[serde(default = "default_scrolling_max_column_width_ratio")]
-    #[setting(label = "Maximum width", scale = 100.0, aliases = "maximum column width sizing percentages tiling")]
+    #[setting(
+        label = "Maximum width",
+        scale = 100.0,
+        aliases = "maximum column width sizing percentages tiling"
+    )]
     pub max_column_width_ratio: f64,
     /// Sparse width overrides keyed by display UUID.
     #[serde(default)]
@@ -1090,35 +1198,43 @@ pub enum MasterStackNewWindowPlacement {
     Focused,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, ConfigSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ScrollingGestureSettings {
     /// Enable continuous horizontal viewport gestures
     #[serde(default)]
+    #[setting(order = 0)]
     pub enabled: bool,
     /// Animate gesture release independently of structural layout animations.
     /// When omitted, inherit the scrolling layout/global animation setting.
     #[serde(default)]
+    #[setting(label = "Animate gestures", custom, order = 4)]
     pub animate: Option<bool>,
     /// Invert horizontal direction (swap left/right)
     #[serde(default)]
+    #[setting(label = "Invert horizontal direction", order = 1)]
     pub invert_horizontal: bool,
     /// Maximum absolute Y delta allowed for the gesture to count as horizontal
     #[serde(default = "default_swipe_vertical_tolerance")]
+    #[setting(order = 5)]
     pub vertical_tolerance: f64,
     /// Number of fingers required for scroll gesture
     #[serde(default = "default_swipe_fingers")]
+    #[setting(order = 2)]
     pub fingers: usize,
     /// Retained for config compatibility; continuous scrolling uses a small intent dead zone
     #[deprecated(since = "0.6.3")]
     #[serde(default = "default_distance_pct")]
+    #[setting(ignore)]
     pub distance_pct: f64,
     /// If true, scrolling past the end of the strip will trigger a workspace switch
     #[serde(default)]
+    #[setting(label = "Continue into workspace swipe", order = 3)]
     pub propagate_to_workspace_swipe: bool,
     /// Edge travel in working-area widths required on release for one workspace switch.
     /// Measured directly as a fraction of the working-area width.
     #[serde(default = "default_overscroll_threshold")]
+    #[setting(label = "Workspace switch threshold (%)", scale = 100.0, order = 6)]
     pub workspace_switch_threshold: f64,
 }
 

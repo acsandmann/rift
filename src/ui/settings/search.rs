@@ -50,6 +50,8 @@ fn catalog() -> &'static [Destination] {
         append::<VirtualWorkspaceSettings>(&mut out, "", 2, None, "Workspaces");
         append::<GestureSettings>(&mut out, "main", 5, None, "Mouse & Trackpad › Workspace swipes");
         append::<GestureSettings>(&mut out, "advanced", 5, None, "Mouse & Trackpad › Advanced swipe settings");
+        append::<ScrollingGestureSettings>(&mut out, "", 5, None, "Mouse & Trackpad › Scrolling layout gestures");
+        append::<DragDropSettings>(&mut out, "", 5, None, "Mouse & Trackpad › Drag & Drop");
         append::<MenuBarSettings>(&mut out, "", 6, None, "Interface › Menu Bar");
         append::<MissionControlSettings>(&mut out, "", 6, None, "Interface › Overview");
         append::<StackLineSettings>(&mut out, "", 6, None, "Interface › Stack Line");
