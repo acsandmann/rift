@@ -132,48 +132,64 @@ impl Settings {
         let weak_pages = Rc::downgrade(&pages);
         let selected_page = selected.clone();
         let entries: Vec<_> = [
-                ("General", "gearshape"),
-                ("Layouts", "rectangle.split.2x2"),
-                ("Workspaces", "square.grid.2x2"),
-                ("Rules", "line.3.horizontal.decrease"),
-                ("Keyboard", "keyboard"),
-                ("Mouse & Trackpad", "computermouse"),
-                ("Interface", "macwindow"),
-                ("Advanced", "slider.horizontal.3"),
-                ("About", "info.circle"),
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(id, (title, symbol))| SidebarItem {
-                id,
-                title: title.into(),
-                symbol: symbol.into(),
-            })
-            .collect();
+            ("General", "gearshape"),
+            ("Layouts", "rectangle.split.2x2"),
+            ("Workspaces", "square.grid.2x2"),
+            ("Rules", "line.3.horizontal.decrease"),
+            ("Keyboard", "keyboard"),
+            ("Mouse & Trackpad", "computermouse"),
+            ("Interface", "macwindow"),
+            ("Advanced", "slider.horizontal.3"),
+            ("About", "info.circle"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(id, (title, symbol))| SidebarItem {
+            id,
+            title: title.into(),
+            symbol: symbol.into(),
+        })
+        .collect();
         let history = Rc::new(RefCell::new(vec![0usize]));
         let cursor = Rc::new(Cell::new(0usize));
         let replaying = Rc::new(Cell::new(false));
         let sidebar_slot = Rc::new(RefCell::new(Weak::<Sidebar<usize>>::new()));
         let search_slot = Rc::new(RefCell::new(Weak::<SearchField>::new()));
         let nav_slot = Rc::new(RefCell::new(Weak::<SegmentedControl>::new()));
-        let (h, c, r, b, q, n) = (history.clone(), cursor.clone(), replaying.clone(), sidebar_slot.clone(), search_slot.clone(), nav_slot.clone());
+        let (h, c, r, b, q, n) = (
+            history.clone(),
+            cursor.clone(),
+            replaying.clone(),
+            sidebar_slot.clone(),
+            search_slot.clone(),
+            nav_slot.clone(),
+        );
         let all = entries.clone();
-        let navigation = Rc::new(SegmentedControl::new(&ui, &["", ""]).on_change(move |direction| {
-            let next = if direction == 0 { c.get().checked_sub(1) } else { Some(c.get() + 1).filter(|i| *i < h.borrow().len()) };
-            let Some(next) = next else { return };
-            if let Some(sidebar) = b.borrow().upgrade() {
-                c.set(next);
-                r.set(true);
-                if let Some(search) = q.borrow().upgrade() { search.set_value(""); }
-                sidebar.set_items(all.clone());
-                sidebar.set_selected(h.borrow()[next]);
-                r.set(false);
-                if let Some(nav) = n.borrow().upgrade() {
-                    nav.ns_segmented_control().setEnabled_forSegment(next > 0, 0);
-                    nav.ns_segmented_control().setEnabled_forSegment(next + 1 < h.borrow().len(), 1);
+        let navigation = Rc::new(SegmentedControl::new(&ui, &["", ""]).on_change(
+            move |direction| {
+                let next = if direction == 0 {
+                    c.get().checked_sub(1)
+                } else {
+                    Some(c.get() + 1).filter(|i| *i < h.borrow().len())
+                };
+                let Some(next) = next else { return };
+                if let Some(sidebar) = b.borrow().upgrade() {
+                    c.set(next);
+                    r.set(true);
+                    if let Some(search) = q.borrow().upgrade() {
+                        search.set_value("");
+                    }
+                    sidebar.set_items(all.clone());
+                    sidebar.set_selected(h.borrow()[next]);
+                    r.set(false);
+                    if let Some(nav) = n.borrow().upgrade() {
+                        nav.ns_segmented_control().setEnabled_forSegment(next > 0, 0);
+                        nav.ns_segmented_control()
+                            .setEnabled_forSegment(next + 1 < h.borrow().len(), 1);
+                    }
                 }
-            }
-        }));
+            },
+        ));
         *nav_slot.borrow_mut() = Rc::downgrade(&navigation);
         let native = navigation.ns_segmented_control();
         native.setTrackingMode(objc2_app_kit::NSSegmentSwitchTracking::Momentary);
@@ -183,9 +199,13 @@ impl Settings {
         native.setToolTip_forSegment(Some(&objc2_foundation::NSString::from_str("Forward")), 1);
         native.setEnabled_forSegment(false, 0);
         native.setEnabled_forSegment(false, 1);
-        let (h, c, r, nav) = (history.clone(), cursor.clone(), replaying.clone(), Rc::downgrade(&navigation));
-        let sidebar = Sidebar::new(&ui, entries.clone())
-        .on_select(move |id| {
+        let (h, c, r, nav) = (
+            history.clone(),
+            cursor.clone(),
+            replaying.clone(),
+            Rc::downgrade(&navigation),
+        );
+        let sidebar = Sidebar::new(&ui, entries.clone()).on_select(move |id| {
             if let (Some(model), Some(host), Some(pages)) =
                 (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
             {
@@ -197,7 +217,8 @@ impl Settings {
                     }
                     if let Some(nav) = nav.upgrade() {
                         nav.ns_segmented_control().setEnabled_forSegment(c.get() > 0, 0);
-                        nav.ns_segmented_control().setEnabled_forSegment(c.get() + 1 < h.borrow().len(), 1);
+                        nav.ns_segmented_control()
+                            .setEnabled_forSegment(c.get() + 1 < h.borrow().len(), 1);
                     }
                     Self::select(ui, &model, &host, &pages, id);
                 }
@@ -215,10 +236,15 @@ impl Settings {
         let weak_sidebar = Rc::downgrade(&sidebar);
         let selected_result = selected.clone();
         let open_result = Rc::new(RefCell::new(move |index: usize| {
-            let Some(destination) = opening_destinations.borrow().get(index).cloned() else { return };
-            if let (Some(model), Some(host), Some(pages), Some(sidebar)) =
-                (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade(), weak_sidebar.upgrade())
-            {
+            let Some(destination) = opening_destinations.borrow().get(index).cloned() else {
+                return;
+            };
+            if let (Some(model), Some(host), Some(pages), Some(sidebar)) = (
+                weak_model.upgrade(),
+                weak_host.upgrade(),
+                weak_pages.upgrade(),
+                weak_sidebar.upgrade(),
+            ) {
                 if let Some(scope) = destination.scope {
                     pages.borrow_mut()[1] = Some(pages::layout_search_scope(ui, &model, scope));
                 }
@@ -234,30 +260,53 @@ impl Settings {
         let search_rows = Rc::new(RefCell::new(Vec::<search::Row>::new()));
         let selected_rows = search_rows.clone();
         let destinations_for_selection = destinations.clone();
-        let results = Rc::new(Table::new(&ui).column("setting", "", 0.0)
-            .cells(move |row: &search::Row, _| {
-                let content = VStack::new(&ui).spacing(3.0)
-                    .insets(Insets { top: 6.0, left: 12.0, bottom: 6.0, right: 12.0 });
-                match row {
-                    search::Row::Heading(title) => Box::new(content.push(SubsectionTitle::new(&ui, title))) as Box<dyn NativeView>,
-                    search::Row::Setting(result) => {
-                        let description = Caption::new(&ui, &result.description());
-                        description.ns_text_field().setMaximumNumberOfLines(2);
-                        let title = Label::new(&ui, result.title);
-                        Box::new(content.push(title).push(description))
+        let results = Rc::new(
+            Table::new(&ui)
+                .column("setting", "", 0.0)
+                .cells(move |row: &search::Row, _| {
+                    let content = VStack::new(&ui).spacing(3.0).insets(Insets {
+                        top: 6.0,
+                        left: 12.0,
+                        bottom: 6.0,
+                        right: 12.0,
+                    });
+                    match row {
+                        search::Row::Heading(title) => {
+                            Box::new(content.push(SubsectionTitle::new(&ui, title)))
+                                as Box<dyn NativeView>
+                        }
+                        search::Row::Setting(result) => {
+                            let description = Caption::new(&ui, &result.description());
+                            description.ns_text_field().setMaximumNumberOfLines(2);
+                            let title = Label::new(&ui, result.title);
+                            Box::new(content.push(title).push(description))
+                        }
                     }
-                }
-            })
-            .group_rows(|row| matches!(row, search::Row::Heading(_)))
-            .selectable(|row| matches!(row, search::Row::Setting(_)))
-            .row_heights(|row| if matches!(row, search::Row::Heading(_)) { 30.0 } else { 54.0 })
-            .on_select(move |index| {
-                let destination = index.and_then(|index| selected_rows.borrow().get(index).cloned());
-                if let Some(search::Row::Setting(result)) = destination {
-                    let index = destinations_for_selection.borrow().iter().position(|entry| entry.title == result.title && entry.page == result.page && entry.scope == result.scope);
-                    if let Some(index) = index { (open_row.borrow_mut())(index); }
-                }
-            }));
+                })
+                .group_rows(|row| matches!(row, search::Row::Heading(_)))
+                .selectable(|row| matches!(row, search::Row::Setting(_)))
+                .row_heights(|row| {
+                    if matches!(row, search::Row::Heading(_)) {
+                        30.0
+                    } else {
+                        54.0
+                    }
+                })
+                .on_select(move |index| {
+                    let destination =
+                        index.and_then(|index| selected_rows.borrow().get(index).cloned());
+                    if let Some(search::Row::Setting(result)) = destination {
+                        let index = destinations_for_selection.borrow().iter().position(|entry| {
+                            entry.title == result.title
+                                && entry.page == result.page
+                                && entry.scope == result.scope
+                        });
+                        if let Some(index) = index {
+                            (open_row.borrow_mut())(index);
+                        }
+                    }
+                }),
+        );
         results.ns_table_view().setHeaderView(None);
         results.ns_table_view().setFloatsGroupRows(false);
         results.ns_table_view().setStyle(objc2_app_kit::NSTableViewStyle::SourceList);
@@ -266,32 +315,60 @@ impl Settings {
         sidebar_content.set_cached_page(sidebar.clone());
         let weak_sidebar_content = Rc::downgrade(&sidebar_content);
         let normal_sidebar = sidebar.clone();
-        let empty = Rc::new(VStack::new(&ui)
-            .insets(Insets { top: 12.0, left: 12.0, bottom: 12.0, right: 12.0 })
-            .push(Caption::new(&ui, "No matching settings")));
-        let search = Rc::new(SearchField::new(&ui).placeholder("Search settings").on_change(move |query| {
-            let Some(sidebar_content) = weak_sidebar_content.upgrade() else { return };
-            if query.trim().is_empty() {
-                sidebar_content.set_cached_page(normal_sidebar.clone());
-                return;
-            }
-            let matches = search::results(&query);
-            *found.borrow_mut() = matches.clone();
-            let rows = search::grouped(&matches);
-            *search_rows.borrow_mut() = rows.clone();
-            results.set_rows(rows);
-            if !found.borrow().is_empty() { results.ns_table_view().scrollRowToVisible(0); }
-            if found.borrow().is_empty() {
-                sidebar_content.set_cached_page(empty.clone());
-            } else {
-                sidebar_content.set_cached_page(results.clone());
-            }
-        }).on_commit(move |query| {
-            if !query.trim().is_empty() { (open_result.borrow_mut())(0); }
-        }));
+        let empty = Rc::new(
+            VStack::new(&ui)
+                .insets(Insets {
+                    top: 12.0,
+                    left: 12.0,
+                    bottom: 12.0,
+                    right: 12.0,
+                })
+                .push(Caption::new(&ui, "No matching settings")),
+        );
+        let search = Rc::new(
+            SearchField::new(&ui)
+                .placeholder("Search")
+                .on_change(move |query| {
+                    let Some(sidebar_content) = weak_sidebar_content.upgrade() else {
+                        return;
+                    };
+                    if query.trim().is_empty() {
+                        sidebar_content.set_cached_page(normal_sidebar.clone());
+                        return;
+                    }
+                    let matches = search::results(&query);
+                    *found.borrow_mut() = matches.clone();
+                    let rows = search::grouped(&matches);
+                    *search_rows.borrow_mut() = rows.clone();
+                    results.set_rows(rows);
+                    if !found.borrow().is_empty() {
+                        results.ns_table_view().scrollRowToVisible(0);
+                    }
+                    if found.borrow().is_empty() {
+                        sidebar_content.set_cached_page(empty.clone());
+                    } else {
+                        sidebar_content.set_cached_page(results.clone());
+                    }
+                })
+                .on_commit(move |query| {
+                    if !query.trim().is_empty() {
+                        (open_result.borrow_mut())(0);
+                    }
+                }),
+        );
         *search_slot.borrow_mut() = Rc::downgrade(&search);
-        let sidebar_pane = VStack::new(&ui).spacing(8.0)
-            .push(HStack::new(&ui).insets(Insets { top: 6.0, left: 10.0, bottom: 0.0, right: 10.0 }).push(search))
+        let sidebar_pane = VStack::new(&ui)
+            .spacing(8.0)
+            .push(
+                HStack::new(&ui)
+                    .insets(Insets {
+                        top: 6.0,
+                        left: 10.0,
+                        bottom: 0.0,
+                        right: 10.0,
+                    })
+                    .push(search),
+            )
             .push(sidebar_content);
         let sidebar_pane = View::new(&ui).safe_area_content(sidebar_pane);
         let window = SettingsWindow::new(&ui, "Rift Settings")
@@ -593,6 +670,24 @@ impl FormBuilder {
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
+        let (slider, input, message) = self.numeric_controls(title, scale, integer, slider_range, get, set);
+        if let Some(slider) = slider {
+            slider.width(120.0);
+            input.width(60.0);
+            self.row(title, HStack::new(&self.ui).spacing(8.0).push(slider).push(input), message)
+        } else { self.row(title, input, message) }
+    }
+
+    // Bind native controls independently of their form layout.
+    fn numeric_controls(
+        &mut self,
+        title: &str,
+        scale: f64,
+        integer: bool,
+        slider_range: Option<Rc<dyn Fn(&ConfigSource) -> (f64, f64)>>,
+        get: impl Fn(&ConfigSource) -> f64 + 'static,
+        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
+    ) -> (Option<Rc<Slider>>, Rc<NumberField>, Rc<ValidationMessage>) {
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
         let model = self.model.clone();
@@ -637,22 +732,39 @@ impl FormBuilder {
             let slider = Rc::new(Slider::new(&self.ui).range(min, max).on_change(move |v| {
                 if let Some(model) = model.upgrade() {
                     let (min, max) = range(&model.source.borrow());
-                    let value = if preview.is_some() { (v * 10.0).round() / 10.0 } else { v.round() }.clamp(min, max);
+                    let value = if preview.is_some() {
+                        if integer { v.round() } else { (v * 10.0).round() / 10.0 }
+                    } else {
+                        v.round()
+                    }
+                    .clamp(min, max);
                     if let Some(preview) = &preview {
-                        let local = local_preview.get_or_insert_with(|| model.source.borrow().clone());
+                        let local =
+                            local_preview.get_or_insert_with(|| model.source.borrow().clone());
                         edit_preview(local, value / scale);
                         preview(local);
-                        if let Some(input) = preview_input.upgrade() { input.set_value(value); }
-                        let dragging = NSApplication::sharedApplication(model.page_title.ns_view().mtm())
-                            .currentEvent().is_some_and(|event| matches!(event.r#type(), objc2_app_kit::NSEventType::LeftMouseDragged | objc2_app_kit::NSEventType::LeftMouseDown));
-                        if dragging { return; }
+                        if let Some(input) = preview_input.upgrade() {
+                            input.set_value(value);
+                        }
+                        let dragging =
+                            NSApplication::sharedApplication(model.page_title.ns_view().mtm())
+                                .currentEvent()
+                                .is_some_and(|event| {
+                                    matches!(
+                                        event.r#type(),
+                                        objc2_app_kit::NSEventType::LeftMouseDragged
+                                            | objc2_app_kit::NSEventType::LeftMouseDown
+                                    )
+                                });
+                        if dragging {
+                            return;
+                        }
                     }
                     local_preview = None;
                     commit(value);
                 }
             }));
             slider.ns_slider().setContinuous(continuous);
-            slider.width(120.0);
             slider.accessibility_label(title);
             slider
         });
@@ -674,16 +786,29 @@ impl FormBuilder {
                 }
             }
         }));
-        if let Some(slider) = slider {
-            input.width(60.0);
-            self.row(
-                title,
-                HStack::new(&self.ui).spacing(8.0).push(slider).push(input),
-                message,
-            )
-        } else {
-            self.row(title, input, message)
-        }
+        (slider, input, message)
+    }
+
+    fn gap_cells(
+        &mut self,
+        title: &str,
+        get: impl Fn(&ConfigSource) -> f64 + 'static,
+        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
+    ) -> Vec<Box<dyn NativeView>> {
+        let (slider, input, message) = self.numeric_controls(
+            title, 1.0, true, Some(Rc::new(|_| (0.0, 100.0))), get, set,
+        );
+        let slider = slider.unwrap();
+        slider.width(120.0);
+        input.width(60.0);
+        input.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
+        let unit = SecondaryLabel::new(&self.ui, "pt");
+        unit.min_width(16.0);
+        let value = VStack::new(&self.ui).spacing(2.0)
+            .push(HStack::new(&self.ui).spacing(5.0).alignment(objc2_app_kit::NSLayoutAttribute::FirstBaseline)
+                .push(input).push(unit))
+            .push(message);
+        vec![Box::new(Label::new(&self.ui, title)), Box::new(slider), Box::new(value)]
     }
 
     fn text(

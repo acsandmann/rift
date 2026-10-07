@@ -434,6 +434,12 @@ impl SettingsPage {
         EditorPage { native, _content: self.content }
     }
 
+    /// Adjust the rhythm of a compact visual editor without changing other panes.
+    pub fn content_spacing(self, spacing: f64) -> Self {
+        self.content.ns_stack_view().setSpacing(spacing);
+        self
+    }
+
     pub fn subtitle(self, text: &str) -> Self {
         self.content.add(SecondaryLabel::new(&self.ui, text));
         self
