@@ -70,6 +70,10 @@ impl WorkspaceLayoutState {
     }
 
     pub(crate) fn validate(&self, tree: &impl LayoutSystem) -> Result<(), String> {
+        if self.configurations.is_empty() && self.last_saved.is_none() {
+            // Never shown yet; `ensure_active` creates the first layout when it is.
+            return Ok(());
+        }
         if self.configurations.is_empty() {
             return Err("no layout configurations".into());
         }
