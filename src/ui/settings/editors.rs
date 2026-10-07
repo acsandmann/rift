@@ -1326,6 +1326,8 @@ pub(super) fn display_overrides(
             displays.push((uuid.clone(), "Disconnected display".into()));
         }
     }
+    let customized: Vec<_> = source.settings.layout.scrolling.per_display.keys()
+        .chain(source.settings.layout.gaps.per_display.keys()).cloned().collect();
     drop(source);
     if displays.is_empty() {
         return page;
@@ -1339,7 +1341,11 @@ pub(super) fn display_overrides(
         |entry: &(String, String)| entry.1.clone(),
         move |entry: &(String, String)| {
             if connected.contains(&entry.0) {
-                "Connected · Customize spacing and scrolling widths".into()
+                if customized.contains(&entry.0) {
+                    "Connected · Custom settings".into()
+                } else {
+                    "Connected · Default".into()
+                }
             } else {
                 format!("Not connected · Saved settings · {}", entry.0)
             }
@@ -1363,7 +1369,7 @@ pub(super) fn display_overrides(
     page.section(
         Section::new(&ui, "Display settings")
             .description(
-                "Choose a display to override the spacing and scrolling widths for that screen.",
+                "Choose a display to customize its spacing.",
             )
             .content(list),
     )

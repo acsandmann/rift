@@ -102,7 +102,12 @@ macro_rules! text_style {
         pub struct $name(Label);
         impl $name {
             pub fn new(ui: &Ui, text: &str) -> Self {
-                Self(Label::new(ui, text).font(&Font::$font()).color(&Color::$color()).wrapping())
+                Self(
+                    Label::new(ui, text)
+                        .font(&Font::$font())
+                        .color(&Color::$color())
+                        .wrapping(),
+                )
             }
 
             pub fn set_text(&self, text: &str) { self.0.set_text(text); }

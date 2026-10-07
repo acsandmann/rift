@@ -8,7 +8,7 @@ use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSApplicationActivationPolicy, NSControl, NSControlStateValueOn, NSControlTextEditingDelegate,
     NSDragOperation, NSDraggingInfo, NSEvent, NSEventType, NSPasteboard, NSPasteboardWriting,
-    NSTableViewDataSource, NSTableViewDropOperation,
+    NSTextField, NSTableViewDataSource, NSTableViewDropOperation,
 };
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSString};
 
@@ -73,10 +73,18 @@ fn callbacks_can_remove_their_own_controls(ui: &Ui) {
 fn numeric_fields_reject_invalid_commits(ui: &Ui) {
     let values = Rc::new(RefCell::new(Vec::new()));
     let copy = values.clone();
-    let number = NumberField::new(ui)
+    let number = Rc::new(NumberField::new(ui)
         .integer()
         .range(1.0, 10.0)
-        .on_change(move |value| copy.borrow_mut().push(value));
+        .on_change(move |value| copy.borrow_mut().push(value)));
+    let _row = SettingsRow::new(ui, "Offset", number.clone()).suffix("pt");
+    number.set_value(4.0);
+    assert_eq!(number.ns_text_field().stringValue().to_string(), "4");
+    let unit = unsafe { number.ns_text_field().superview() }.unwrap().subviews().iter()
+        .filter_map(|view| view.downcast_ref::<NSTextField>().map(|field| field.retain()))
+        .find(|field| field.stringValue().to_string() == "pt").unwrap();
+    assert!(!unit.isEditable());
+    assert!(!unit.isSelectable());
     let field = number.ns_text_field();
     for text in ["4", "11", "not a number", "2.5", "-1"] {
         field.setStringValue(&NSString::from_str(text));

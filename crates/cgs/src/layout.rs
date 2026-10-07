@@ -302,7 +302,8 @@ impl ScrollView {
 
     pub fn ns_scroll_view(&self) -> &NSScrollView { &self.native }
 
-    pub(crate) fn defer_scrolling(&self) {
+    /// Forward wheel input to the enclosing scroll view when content is fully expanded.
+    pub fn defer_scrolling(&self) {
         self.native.ivars().set(true);
         self.native.setHasVerticalScroller(false);
         self.native.setHasHorizontalScroller(false);

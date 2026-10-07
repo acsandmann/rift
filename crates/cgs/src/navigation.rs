@@ -159,6 +159,14 @@ impl<T: Clone + 'static> Sidebar<T> {
         self
     }
 
+    pub fn set_items(&self, items: Vec<SidebarItem<T>>) {
+        self.outline.set_items(items.into_iter().map(|item| OutlineItem {
+            title: item.title.clone(), id: item, children: Vec::new(),
+        }).collect());
+    }
+
+    pub fn group_parents(&self) { self.outline.group_parents(); }
+
     pub fn set_selected(&self, index: usize) { self.outline.set_selected(index); }
 
     pub fn ns_table_view(&self) -> &NSTableView { self.outline.ns_outline_view() }
@@ -210,6 +218,7 @@ impl NativeView for MasterDetail {
 struct NavigationToolbarItems {
     title: Option<Rc<Label>>,
     back: Retained<NSToolbarItem>,
+    navigation: std::cell::RefCell<Option<Retained<NSToolbarItem>>>,
 }
 
 define_class!(
@@ -227,7 +236,9 @@ define_class!(
             identifier: &NSToolbarItemIdentifier,
             _insert: bool,
         ) -> Option<Retained<NSToolbarItem>> {
-            if identifier.to_string() == "cgs.back" {
+            if identifier.to_string() == "cgs.navigation" {
+                self.ivars().navigation.borrow().clone()
+            } else if identifier.to_string() == "cgs.back" {
                 Some(self.ivars().back.clone())
             } else {
                 self.ivars()
@@ -250,6 +261,7 @@ define_class!(
         fn allowed(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSToolbarItemIdentifier>> {
             let mut ids: Vec<_> = self.item_identifiers().iter().collect();
             ids.push(NSString::from_str("cgs.back"));
+            ids.push(NSString::from_str("cgs.navigation"));
             NSArray::from_retained_slice(&ids)
         }
 
@@ -317,7 +329,7 @@ impl Toolbar {
             msg_send![
                 super(
                     NavigationToolbarDelegate::alloc(ui.mtm())
-                        .set_ivars(NavigationToolbarItems { title, back })
+                        .set_ivars(NavigationToolbarItems { title, back, navigation: std::cell::RefCell::new(None) })
                 ),
                 init
             ]
@@ -380,6 +392,16 @@ impl Toolbar {
                 self.native.removeItemAtIndex(index as isize);
             }
         }
+    }
+
+    pub fn set_navigation_control(&self, ui: &Ui, control: &impl NativeView) {
+        let Some(delegate) = &self.delegate else { return };
+        let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.navigation"));
+        item.setView(Some(control.ns_view()));
+        item.setNavigational(true);
+        *delegate.ivars().navigation.borrow_mut() = Some(item);
+        let index = self.native.items().iter().position(|item| item.itemIdentifier().to_string() == "cgs.page-title").unwrap_or(0);
+        self.native.insertItemWithItemIdentifier_atIndex(&NSString::from_str("cgs.navigation"), index as isize);
     }
 
     pub fn ns_toolbar(&self) -> &NSToolbar { &self.native }

@@ -73,6 +73,9 @@ struct CollectionState {
     selectable: RefCell<Box<dyn Fn(usize) -> bool>>,
     reorder: RefCell<Option<Reorder>>,
     reorderable: Cell<bool>,
+    group_parents: Cell<bool>,
+    table_groups: RefCell<Box<dyn Fn(usize) -> bool>>,
+    row_height: RefCell<Option<Box<dyn Fn(usize) -> f64>>>,
     roots: RefCell<Vec<usize>>,
     nodes: RefCell<Vec<Node>>,
 }
@@ -134,6 +137,15 @@ define_class!(
         }
     }
     unsafe impl NSTableViewDelegate for CollectionBridge {
+        #[unsafe(method(tableView:isGroupRow:))]
+        fn table_group(&self, _table: &NSTableView, row: isize) -> bool {
+            (self.ivars().table_groups.borrow())(row as usize)
+        }
+        #[unsafe(method(tableView:heightOfRow:))]
+        fn table_height(&self, table: &NSTableView, row: isize) -> f64 {
+            self.ivars().row_height.borrow().as_ref().map_or(table.rowHeight(), |height| height(row as usize))
+        }
+
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
         fn table_cell(
             &self,
@@ -200,6 +212,20 @@ define_class!(
         }
     }
     unsafe impl NSOutlineViewDelegate for CollectionBridge {
+        #[unsafe(method(outlineView:isGroupItem:))]
+        fn is_group(&self, _view: &NSOutlineView, item: &AnyObject) -> bool {
+            self.ivars().group_parents.get() && node_index(item).is_some_and(|index| {
+                self.ivars().nodes.borrow().get(index).is_some_and(|node| !node.children.is_empty())
+            })
+        }
+
+        #[unsafe(method(outlineView:shouldSelectItem:))]
+        fn should_select_item(&self, _view: &NSOutlineView, item: &AnyObject) -> bool {
+            !self.ivars().group_parents.get() || node_index(item).is_some_and(|index| {
+                self.ivars().nodes.borrow().get(index).is_some_and(|node| node.children.is_empty())
+            })
+        }
+
         #[unsafe(method_id(outlineView:viewForTableColumn:item:))]
         unsafe fn outline_cell(
             &self,
@@ -278,6 +304,9 @@ impl CollectionBridge {
             selectable: RefCell::new(Box::new(|_| true)),
             reorder: RefCell::new(None),
             reorderable: Cell::new(false),
+            group_parents: Cell::new(false),
+            table_groups: RefCell::new(Box::new(|_| false)),
+            row_height: RefCell::new(None),
             roots: RefCell::new(Vec::new()),
             nodes: RefCell::new(Vec::new()),
         });
@@ -482,6 +511,18 @@ impl<T: 'static> Table<T> {
         *self.bridge.ivars().selection.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Use AppKit source-list section rows and intrinsic per-item heights.
+    pub fn group_rows(self, group: impl Fn(&T) -> bool + 'static) -> Self {
+        let rows = self.rows.clone();
+        *self.bridge.ivars().table_groups.borrow_mut() = Box::new(move |row| group(&rows.borrow()[row]));
+        self
+    }
+    pub fn row_heights(self, height: impl Fn(&T) -> f64 + 'static) -> Self {
+        let rows = self.rows.clone();
+        *self.bridge.ivars().row_height.borrow_mut() = Some(Box::new(move |row| height(&rows.borrow()[row])));
+        self
+    }
+
     pub fn selectable(self, f: impl Fn(&T) -> bool + 'static) -> Self {
         let rows = self.rows.clone();
         *self.bridge.ivars().selectable.borrow_mut() =
@@ -594,6 +635,8 @@ impl<T: 'static> List<T> {
     pub fn set_selected(&self, index: Option<usize>) { self.0.set_selected(index); }
 
     pub fn ns_table_view(&self) -> &NSTableView { self.0.ns_table_view() }
+
+    pub fn defer_scrolling(&self) { self.0.scroll.defer_scrolling(); }
 }
 impl<T: 'static> NativeView for List<T> {
     fn ns_view(&self) -> &NSView { self.0.ns_view() }
@@ -1234,6 +1277,13 @@ impl<T: 'static> Outline<T> {
                 false,
             );
         }
+    }
+
+    /// Treat parent rows as native, nonselectable source-list section headings.
+    pub fn group_parents(&self) {
+        self.bridge.ivars().group_parents.set(true);
+        self.native.reloadData();
+        self.expand_all();
     }
 
     pub fn expand_all(&self) {

@@ -77,10 +77,9 @@ fn install_window_commands(ui: &cgs::Ui) {
     use objc2_foundation::NSString;
     let app = objc2_app_kit::NSApplication::sharedApplication(ui.mtm());
     let main = app.mainMenu().unwrap_or_else(|| NSMenu::new(ui.mtm()));
-    for (category, title, key, action) in [
-        ("File", "Close Window", "w", objc2::sel!(performClose:)),
-        ("Go", "Back", "[", objc2::sel!(cgsGoBack:)),
-    ] {
+    for (category, title, key, action) in
+        [("File", "Close Window", "w", objc2::sel!(performClose:))]
+    {
         if main.itemArray().iter().filter_map(|item| item.submenu()).any(|menu| {
             menu.itemArray().iter().any(|item| {
                 item.keyEquivalent().to_string() == key

@@ -14,6 +14,7 @@ mod applications;
 mod commands;
 mod editors;
 mod pages;
+mod search;
 pub(crate) mod updates;
 
 pub enum Action {
@@ -52,7 +53,6 @@ pub(super) struct Page {
     view: Rc<dyn NativeView>,
     sync: Vec<SyncControl>,
     synced_revision: Cell<Option<u64>>,
-    back: Option<Rc<dyn Fn()>>,
 }
 
 impl Model {
@@ -85,83 +85,13 @@ impl Page {
     }
 }
 
-/// One-level drill-in shared by the settings collections; callbacks hold weak references.
-pub(super) struct DetailNavigation {
-    ui: Ui,
-    model: Weak<Model>,
-    host: Rc<NavigationHost>,
-    current: RefCell<Option<Rc<Page>>>,
-    title: String,
-}
-impl DetailNavigation {
-    fn new(ui: Ui, model: &Rc<Model>, title: &str) -> Rc<Self> {
-        Rc::new(Self {
-            ui,
-            model: Rc::downgrade(model),
-            host: Rc::new(NavigationHost::new(&ui)),
-            current: RefCell::new(None),
-            title: title.into(),
-        })
-    }
-
-    fn pop(&self) {
-        self.host.pop();
-        self.current.borrow_mut().take();
-        if let Some(model) = self.model.upgrade() {
-            model.page_title.set_text(&self.title);
-            if let Some(toolbar) = model.toolbar.borrow().upgrade() {
-                toolbar.set_back(None);
-            }
-        }
-    }
-
-    fn detail(self: &Rc<Self>, mut page: Page) -> Rc<Page> {
-        page.view = Rc::new(SettingsPage::new(&self.ui, "").section(page.view));
-        Rc::new(page)
-    }
-
-    fn push(self: &Rc<Self>, page: Rc<Page>, title: &str) {
-        if let Some(model) = self.model.upgrade() {
-            page.synchronize(&model);
-            model.page_title.set_text(title);
-            if let Some(toolbar) = model.toolbar.borrow().upgrade() {
-                let weak = Rc::downgrade(self);
-                toolbar.set_back(Some((
-                    &format!("Back to {}", self.title),
-                    Box::new(move || {
-                        if let Some(nav) = weak.upgrade() {
-                            nav.pop();
-                        }
-                    }),
-                )));
-            }
-            self.host.push(page.view.clone());
-            *self.current.borrow_mut() = Some(page);
-        }
-    }
-
-    fn finish(self: &Rc<Self>, mut page: Page) -> Page {
-        self.host.set_root(page.view.clone());
-        page.view = self.host.clone();
-        let nav = self.clone();
-        page.back = Some(Rc::new(move || nav.pop()));
-        let nav = self.clone();
-        page.sync.push(Box::new(move |_| {
-            if let (Some(model), Some(page)) = (nav.model.upgrade(), nav.current.borrow().as_ref())
-            {
-                page.synchronize(&model);
-            }
-        }));
-        page
-    }
-}
-
 pub struct Settings {
     window: SettingsWindow,
     model: Rc<Model>,
     _host: Rc<PageHost>,
     pages: Rc<RefCell<Vec<Option<Page>>>>,
     selected: Rc<Cell<usize>>,
+    _navigation: Rc<SegmentedControl>,
 }
 
 impl Settings {
@@ -201,9 +131,7 @@ impl Settings {
         let weak_host = Rc::downgrade(&host);
         let weak_pages = Rc::downgrade(&pages);
         let selected_page = selected.clone();
-        let sidebar = Sidebar::new(
-            &ui,
-            [
+        let entries: Vec<_> = [
                 ("General", "gearshape"),
                 ("Layouts", "rectangle.split.2x2"),
                 ("Workspaces", "square.grid.2x2"),
@@ -221,23 +149,157 @@ impl Settings {
                 title: title.into(),
                 symbol: symbol.into(),
             })
-            .collect(),
-        )
+            .collect();
+        let history = Rc::new(RefCell::new(vec![0usize]));
+        let cursor = Rc::new(Cell::new(0usize));
+        let replaying = Rc::new(Cell::new(false));
+        let sidebar_slot = Rc::new(RefCell::new(Weak::<Sidebar<usize>>::new()));
+        let search_slot = Rc::new(RefCell::new(Weak::<SearchField>::new()));
+        let nav_slot = Rc::new(RefCell::new(Weak::<SegmentedControl>::new()));
+        let (h, c, r, b, q, n) = (history.clone(), cursor.clone(), replaying.clone(), sidebar_slot.clone(), search_slot.clone(), nav_slot.clone());
+        let all = entries.clone();
+        let navigation = Rc::new(SegmentedControl::new(&ui, &["", ""]).on_change(move |direction| {
+            let next = if direction == 0 { c.get().checked_sub(1) } else { Some(c.get() + 1).filter(|i| *i < h.borrow().len()) };
+            let Some(next) = next else { return };
+            if let Some(sidebar) = b.borrow().upgrade() {
+                c.set(next);
+                r.set(true);
+                if let Some(search) = q.borrow().upgrade() { search.set_value(""); }
+                sidebar.set_items(all.clone());
+                sidebar.set_selected(h.borrow()[next]);
+                r.set(false);
+                if let Some(nav) = n.borrow().upgrade() {
+                    nav.ns_segmented_control().setEnabled_forSegment(next > 0, 0);
+                    nav.ns_segmented_control().setEnabled_forSegment(next + 1 < h.borrow().len(), 1);
+                }
+            }
+        }));
+        *nav_slot.borrow_mut() = Rc::downgrade(&navigation);
+        let native = navigation.ns_segmented_control();
+        native.setTrackingMode(objc2_app_kit::NSSegmentSwitchTracking::Momentary);
+        native.setImage_forSegment(Symbol::named("chevron.backward").as_deref(), 0);
+        native.setImage_forSegment(Symbol::named("chevron.forward").as_deref(), 1);
+        native.setToolTip_forSegment(Some(&objc2_foundation::NSString::from_str("Back")), 0);
+        native.setToolTip_forSegment(Some(&objc2_foundation::NSString::from_str("Forward")), 1);
+        native.setEnabled_forSegment(false, 0);
+        native.setEnabled_forSegment(false, 1);
+        let (h, c, r, nav) = (history.clone(), cursor.clone(), replaying.clone(), Rc::downgrade(&navigation));
+        let sidebar = Sidebar::new(&ui, entries.clone())
         .on_select(move |id| {
             if let (Some(model), Some(host), Some(pages)) =
                 (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
             {
                 if selected_page.replace(id) != id {
+                    if !r.get() {
+                        h.borrow_mut().truncate(c.get() + 1);
+                        h.borrow_mut().push(id);
+                        c.set(h.borrow().len() - 1);
+                    }
+                    if let Some(nav) = nav.upgrade() {
+                        nav.ns_segmented_control().setEnabled_forSegment(c.get() > 0, 0);
+                        nav.ns_segmented_control().setEnabled_forSegment(c.get() + 1 < h.borrow().len(), 1);
+                    }
                     Self::select(ui, &model, &host, &pages, id);
                 }
             }
         });
         let sidebar = Rc::new(sidebar);
         sidebar.set_selected(0);
+        *sidebar_slot.borrow_mut() = Rc::downgrade(&sidebar);
+        let found = Rc::new(RefCell::new(Vec::<search::Result>::new()));
+        let destinations = found.clone();
+        let opening_destinations = destinations.clone();
+        let weak_model = Rc::downgrade(&model);
+        let weak_host = Rc::downgrade(&host);
+        let weak_pages = Rc::downgrade(&pages);
+        let weak_sidebar = Rc::downgrade(&sidebar);
+        let selected_result = selected.clone();
+        let open_result = Rc::new(RefCell::new(move |index: usize| {
+            let Some(destination) = opening_destinations.borrow().get(index).cloned() else { return };
+            if let (Some(model), Some(host), Some(pages), Some(sidebar)) =
+                (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade(), weak_sidebar.upgrade())
+            {
+                if let Some(scope) = destination.scope {
+                    pages.borrow_mut()[1] = Some(pages::layout_search_scope(ui, &model, scope));
+                }
+                // Keep the query and its sidebar results while browsing matches.
+                sidebar.set_selected(destination.page);
+                selected_result.set(destination.page);
+                Self::select(ui, &model, &host, &pages, destination.page);
+                host.ns_view().layoutSubtreeIfNeeded();
+                search::reveal(host.ns_view(), destination.title);
+            }
+        }));
+        let open_row = open_result.clone();
+        let search_rows = Rc::new(RefCell::new(Vec::<search::Row>::new()));
+        let selected_rows = search_rows.clone();
+        let destinations_for_selection = destinations.clone();
+        let results = Rc::new(Table::new(&ui).column("setting", "", 0.0)
+            .cells(move |row: &search::Row, _| {
+                let content = VStack::new(&ui).spacing(3.0)
+                    .insets(Insets { top: 6.0, left: 12.0, bottom: 6.0, right: 12.0 });
+                match row {
+                    search::Row::Heading(title) => Box::new(content.push(SubsectionTitle::new(&ui, title))) as Box<dyn NativeView>,
+                    search::Row::Setting(result) => {
+                        let description = Caption::new(&ui, &result.description());
+                        description.ns_text_field().setMaximumNumberOfLines(2);
+                        let title = Label::new(&ui, result.title);
+                        Box::new(content.push(title).push(description))
+                    }
+                }
+            })
+            .group_rows(|row| matches!(row, search::Row::Heading(_)))
+            .selectable(|row| matches!(row, search::Row::Setting(_)))
+            .row_heights(|row| if matches!(row, search::Row::Heading(_)) { 30.0 } else { 54.0 })
+            .on_select(move |index| {
+                let destination = index.and_then(|index| selected_rows.borrow().get(index).cloned());
+                if let Some(search::Row::Setting(result)) = destination {
+                    let index = destinations_for_selection.borrow().iter().position(|entry| entry.title == result.title && entry.page == result.page && entry.scope == result.scope);
+                    if let Some(index) = index { (open_row.borrow_mut())(index); }
+                }
+            }));
+        results.ns_table_view().setHeaderView(None);
+        results.ns_table_view().setFloatsGroupRows(false);
+        results.ns_table_view().setStyle(objc2_app_kit::NSTableViewStyle::SourceList);
+        results.ns_scroll_view().setDrawsBackground(false);
+        let sidebar_content = Rc::new(PageHost::new(&ui));
+        sidebar_content.set_cached_page(sidebar.clone());
+        let weak_sidebar_content = Rc::downgrade(&sidebar_content);
+        let normal_sidebar = sidebar.clone();
+        let empty = Rc::new(VStack::new(&ui)
+            .insets(Insets { top: 12.0, left: 12.0, bottom: 12.0, right: 12.0 })
+            .push(Caption::new(&ui, "No matching settings")));
+        let search = Rc::new(SearchField::new(&ui).placeholder("Search settings").on_change(move |query| {
+            let Some(sidebar_content) = weak_sidebar_content.upgrade() else { return };
+            if query.trim().is_empty() {
+                sidebar_content.set_cached_page(normal_sidebar.clone());
+                return;
+            }
+            let matches = search::results(&query);
+            *found.borrow_mut() = matches.clone();
+            let rows = search::grouped(&matches);
+            *search_rows.borrow_mut() = rows.clone();
+            results.set_rows(rows);
+            if !found.borrow().is_empty() { results.ns_table_view().scrollRowToVisible(0); }
+            if found.borrow().is_empty() {
+                sidebar_content.set_cached_page(empty.clone());
+            } else {
+                sidebar_content.set_cached_page(results.clone());
+            }
+        }).on_commit(move |query| {
+            if !query.trim().is_empty() { (open_result.borrow_mut())(0); }
+        }));
+        *search_slot.borrow_mut() = Rc::downgrade(&search);
+        let sidebar_pane = VStack::new(&ui).spacing(8.0)
+            .push(HStack::new(&ui).insets(Insets { top: 6.0, left: 10.0, bottom: 0.0, right: 10.0 }).push(search))
+            .push(sidebar_content);
+        let sidebar_pane = View::new(&ui).safe_area_content(sidebar_pane);
         let window = SettingsWindow::new(&ui, "Rift Settings")
             .page_title(&ui, model.page_title.clone())
             .on_close(on_close)
-            .content(NavigationSplitView::new(&ui, sidebar, host.clone()));
+            .content(NavigationSplitView::new(&ui, sidebar_pane, host.clone()));
+        window.ns_window().setInitialFirstResponder(Some(sidebar.ns_table_view()));
+        window.toolbar().set_navigation_control(&ui, navigation.as_ref());
         *model.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
         *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
         window.ns_window().setContentSize(CGSize::new(880.0, 660.0));
@@ -249,6 +311,7 @@ impl Settings {
             _host: host,
             pages,
             selected,
+            _navigation: navigation,
         }
     }
 
@@ -259,9 +322,6 @@ impl Settings {
         pages: &Rc<RefCell<Vec<Option<Page>>>>,
         id: usize,
     ) {
-        if let Some(toolbar) = model.toolbar.borrow().upgrade() {
-            toolbar.set_back(None);
-        }
         model.page_title.set_text(
             [
                 "General",
@@ -281,9 +341,6 @@ impl Settings {
         }
         let pages = pages.borrow();
         let page = pages[id].as_ref().unwrap();
-        if let Some(back) = &page.back {
-            back();
-        }
         page.synchronize(model);
         host.set_cached_page(page.view.clone());
     }
@@ -393,7 +450,6 @@ impl FormBuilder {
             view: Rc::new(view),
             sync: self.sync,
             synced_revision: Cell::new(None),
-            back: None,
         }
     }
 

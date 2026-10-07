@@ -165,6 +165,19 @@ impl View {
 
     pub fn ns_view(&self) -> &NSView { &self.native }
 
+    /// Keep controls below full-size window chrome using AppKit's safe area.
+    pub fn safe_area_content(self, child: impl NativeView) -> Self {
+        self.native.addSubview(child.ns_view());
+        prepare(child.ns_view());
+        let guide = self.native.safeAreaLayoutGuide();
+        child.ns_view().topAnchor().constraintEqualToAnchor(&guide.topAnchor()).setActive(true);
+        child.ns_view().leadingAnchor().constraintEqualToAnchor(&guide.leadingAnchor()).setActive(true);
+        child.ns_view().trailingAnchor().constraintEqualToAnchor(&guide.trailingAnchor()).setActive(true);
+        child.ns_view().bottomAnchor().constraintEqualToAnchor(&guide.bottomAnchor()).setActive(true);
+        self.children.borrow_mut().push(Box::new(child));
+        self
+    }
+
     pub fn content(self, child: impl NativeView, insets: Insets) -> Self {
         self.native.addSubview(child.ns_view());
         pin(&self.native, child.ns_view(), insets);

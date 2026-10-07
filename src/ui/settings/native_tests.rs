@@ -1,5 +1,5 @@
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::{NSControl, NSOutlineView, NSPopUpButton, NSView};
+use objc2_app_kit::{NSControl, NSOutlineView, NSPopUpButton, NSSwitch, NSTableView, NSView};
 
 use super::*;
 
@@ -8,6 +8,11 @@ fn find<T: objc2::DowncastTarget + 'static>(view: &NSView) -> Option<Retained<T>
         return Some(value.retain());
     }
     view.subviews().iter().find_map(|child| find(&child))
+}
+
+fn count<T: objc2::DowncastTarget + 'static>(view: &NSView) -> usize {
+    usize::from(view.downcast_ref::<T>().is_some())
+        + view.subviews().iter().map(|child| count::<T>(&child)).sum::<usize>()
 }
 
 pub fn run(ui: Ui) {
@@ -33,6 +38,18 @@ pub fn run(ui: Ui) {
         );
         let root = settings.window.ns_window().contentView().unwrap();
         assert_eq!(find::<NSOutlineView>(&root).unwrap().numberOfRows(), 9);
+        let sidebar = find::<NSOutlineView>(&root).unwrap();
+        sidebar.selectRowIndexes_byExtendingSelection(
+            &objc2_foundation::NSIndexSet::indexSetWithIndex(1), false,
+        );
+        let navigation = settings._navigation.ns_segmented_control();
+        assert!(navigation.isEnabledForSegment(0), "enable Back after visiting a section");
+        assert!(!navigation.isEnabledForSegment(1), "disable Forward at the latest destination");
+        sidebar.selectRowIndexes_byExtendingSelection(
+            &objc2_foundation::NSIndexSet::indexSetWithIndex(0), false,
+        );
+        drop(sidebar);
+
         Settings::select(ui, &settings.model, &settings._host, &settings.pages, 4);
         settings.selected.set(4);
         let keyboard = settings.pages.borrow()[4].as_ref().unwrap().view.clone();
@@ -69,6 +86,26 @@ pub fn run(ui: Ui) {
                 .iter()
                 .any(|app| app.search.contains("dev.test.editor"))
         );
+        // Selecting a peer layout replaces its controls without writing configuration.
+        autoreleasepool(|_| {
+            Settings::select(ui, &settings.model, &settings._host, &settings.pages, 1);
+            settings.selected.set(1);
+            let pages = settings.pages.borrow();
+            let view = pages[1].as_ref().unwrap().view.ns_view();
+            let browser = find::<NSOutlineView>(view).unwrap();
+            browser.selectRowIndexes_byExtendingSelection(
+                &objc2_foundation::NSIndexSet::indexSetWithIndex(3), false,
+            );
+            assert_eq!(count::<NSSwitch>(view), 1, "mount the selected layout once");
+            browser.selectRowIndexes_byExtendingSelection(
+                &objc2_foundation::NSIndexSet::indexSetWithIndex(4), false,
+            );
+            assert_eq!(count::<NSSwitch>(view), 0, "replace the old layout form");
+            assert!(
+                pending.try_recv().is_err(),
+                "layout selection must not change config"
+            );
+        });
         let model = Rc::downgrade(&settings.model);
         let host = objc2::rc::Weak::new(settings._host.ns_view());
         let mut form = FormBuilder::new(ui, &settings.model);

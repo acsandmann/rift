@@ -63,6 +63,7 @@ pub struct SettingsRow {
     label: Rc<dyn NativeView>,
     value: VStack,
     line: OnceCell<Rc<HStack>>,
+    unit: Option<crate::UnitField>,
     control: Box<dyn NativeView>,
     validation: Rc<ValidationMessage>,
 }
@@ -89,6 +90,7 @@ impl SettingsRow {
             label,
             value,
             line: OnceCell::new(),
+            unit: None,
             control: Box::new(control),
             validation,
         }
@@ -104,7 +106,27 @@ impl SettingsRow {
         self
     }
 
-    pub fn suffix(self, text: &str) -> Self {
+    pub fn suffix(mut self, text: &str) -> Self {
+        fn input(view: &NSView) -> Option<Retained<NSTextField>> {
+            if let Some(field) = view.downcast_ref::<NSTextField>() {
+                if field.isEditable() { return Some(field.retain()); }
+            }
+            view.subviews().iter().find_map(|child| input(&child))
+        }
+        if let Some(field) = input(self.control.ns_view()) {
+            if let Some(parent) = unsafe { field.superview() }.and_then(|view| view.downcast::<objc2_app_kit::NSStackView>().ok()) {
+                let index = parent.arrangedSubviews().iter().position(|view| std::ptr::eq::<NSView>(&*view, &***field)).unwrap_or(0);
+                parent.removeArrangedSubview(&field);
+                field.removeFromSuperview();
+                let unit = crate::UnitField::new(&self.ui, &field, text);
+                parent.insertArrangedSubview_atIndex(unit.ns_view(), index as isize);
+                if parent.orientation() == objc2_app_kit::NSUserInterfaceLayoutOrientation::Vertical {
+                    unit.ns_view().widthAnchor().constraintEqualToAnchor(&parent.widthAnchor()).setActive(true);
+                }
+                self.unit = Some(unit);
+                return self;
+            }
+        }
         let line = self.line.get_or_init(|| {
             self.value.ns_stack_view().removeArrangedSubview(self.control.ns_view());
             self.control.ns_view().removeFromSuperview();
@@ -188,7 +210,7 @@ pub type DisclosureRow = Disclosure;
 
 /// Compact preference content; AppKit controls provide their own appearance.
 pub struct SettingsGroup {
-    surface: GroupBox,
+    surface: Option<GroupBox>,
     grid: Rc<Grid>,
     rows: Vec<SettingsRow>,
     dividers: Vec<Divider>,
@@ -198,8 +220,17 @@ impl SettingsGroup {
         let grid = Rc::new(Grid::new(ui).spacing(8.0, 20.0));
         let surface = GroupBox::new(ui, grid.clone());
         Self {
-            surface,
+            surface: Some(surface),
             grid,
+            rows: Vec::new(),
+            dividers: Vec::new(),
+        }
+    }
+
+    pub fn plain(ui: &Ui) -> Self {
+        Self {
+            surface: None,
+            grid: Rc::new(Grid::new(ui).spacing(8.0, 20.0)),
             rows: Vec::new(),
             dividers: Vec::new(),
         }
@@ -208,7 +239,7 @@ impl SettingsGroup {
     pub fn row(mut self, row: impl Into<SettingsRow>) -> Self {
         let row = row.into();
         let grid = self.grid.ns_grid_view();
-        if !self.rows.is_empty() {
+        if self.surface.is_some() && !self.rows.is_empty() {
             let divider = Divider::new(&row.ui);
             let separator = grid.addRowWithViews(&objc2_foundation::NSArray::from_slice(&[
                 divider.ns_view(),
@@ -219,22 +250,36 @@ impl SettingsGroup {
                 .setXPlacement(objc2_app_kit::NSGridCellPlacement::Fill);
             self.dividers.push(divider);
         }
+        if self.surface.is_none() {
+            if row.control_view().downcast_ref::<objc2_app_kit::NSPopUpButton>().is_some() {
+                row.control_view().widthAnchor().constraintEqualToConstant(220.0).setActive(true);
+            }
+        }
         grid.addRowWithViews(&objc2_foundation::NSArray::from_slice(&row.take_form_cells()));
         grid.columnAtIndex(0).setXPlacement(objc2_app_kit::NSGridCellPlacement::Fill);
-        grid.columnAtIndex(1)
-            .setXPlacement(objc2_app_kit::NSGridCellPlacement::Trailing);
+        grid.columnAtIndex(1).setXPlacement(if self.surface.is_none() {
+            objc2_app_kit::NSGridCellPlacement::Leading
+        } else {
+            objc2_app_kit::NSGridCellPlacement::Trailing
+        });
+        if self.surface.is_none() {
+            grid.columnAtIndex(1).setWidth(240.0);
+        }
         self.rows.push(row);
         self
     }
 }
 impl NativeView for SettingsGroup {
-    fn ns_view(&self) -> &NSView { self.surface.ns_view() }
+    fn ns_view(&self) -> &NSView {
+        self.surface.as_ref().map_or(self.grid.ns_view(), NativeView::ns_view)
+    }
 }
 
 pub struct Section {
     ui: Ui,
     stack: VStack,
     group: Option<SettingsGroup>,
+    plain: bool,
 }
 impl Section {
     pub fn new(ui: &Ui, title: &str) -> Self {
@@ -242,7 +287,20 @@ impl Section {
         if !title.is_empty() {
             stack = stack.push(SectionTitle::new(ui, title));
         }
-        Self { ui: *ui, stack, group: None }
+        Self {
+            ui: *ui,
+            stack,
+            group: None,
+            plain: false,
+        }
+    }
+
+    /// An aligned native preferences form without a grouped card or row dividers.
+    pub fn form(ui: &Ui, title: &str) -> Self {
+        Self {
+            plain: true,
+            ..Self::new(ui, title)
+        }
     }
 
     pub fn subsection(ui: &Ui, title: &str) -> Self {
@@ -256,7 +314,11 @@ impl Section {
 
     pub fn row(mut self, row: impl Into<SettingsRow>) -> Self {
         let group = self.group.take().unwrap_or_else(|| {
-            let group = SettingsGroup::new(&self.ui);
+            let group = if self.plain {
+                SettingsGroup::plain(&self.ui)
+            } else {
+                SettingsGroup::new(&self.ui)
+            };
             self.stack.ns_stack_view().addArrangedSubview(group.ns_view());
             group
                 .ns_view()
