@@ -897,6 +897,20 @@ pub struct BspLayoutSettings {
     pub base: BaseLayoutSettings,
     /// Center a lone window at this width-to-height ratio.
     pub single_window_aspect_ratio: Option<f64>,
+    /// What `move_node` does to the selected window.
+    #[serde(default)]
+    pub move_style: BspMoveStyle,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BspMoveStyle {
+    /// Exchange places with the neighbouring window.
+    #[default]
+    Swap,
+    /// Take the window out and re-insert it just past its edge, splitting the
+    /// window found there.
+    Warp,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

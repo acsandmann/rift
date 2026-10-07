@@ -711,6 +711,7 @@ impl LayoutEngine {
                 LayoutSystemKind::Bsp(system) => {
                     system.set_window_insertion_point(insertion_point);
                     system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
+                    system.set_move_style(settings.bsp.move_style);
                 }
                 LayoutSystemKind::Stack(system) => {
                     system.update_settings(settings.stack.default_orientation, insertion_point);

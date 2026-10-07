@@ -98,6 +98,16 @@ window_insertion_point = "next_to_selection"
 # average sibling share while preserving the relative proportions of resized nodes.
 equalize_nodes = true
 
+# these settings only apply when layout mode == "bsp"
+[settings.layout.bsp]
+# What `move_node` does:
+# - "swap" (default): exchange places with the neighbouring window
+# - "warp": take the window out and re-insert it just past its edge, splitting
+#   the window there along its longer side. Moving toward a lone sibling still
+#   swaps, and at the workspace edge the window breaks out of its split unless
+#   there is a display in that direction.
+move_style = "swap"
+
 # these settings only apply when layout mode == "master_stack"
 [settings.layout.master_stack]
 # Fraction of space reserved for the master area (0.05..0.95)

@@ -1,10 +1,12 @@
+use std::cell::RefCell;
+
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
-use crate::common::config::WindowInsertionPoint;
+use crate::common::config::{BspMoveStyle, WindowInsertionPoint};
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
@@ -46,6 +48,12 @@ pub struct BspLayoutSystem {
     window_insertion_point: WindowInsertionPoint,
     #[serde(skip, default)]
     single_window_aspect_ratio: Option<f64>,
+    #[serde(skip, default)]
+    move_style: BspMoveStyle,
+    /// Tiling area each layout was last laid out in, so warp moves can
+    /// reason about window geometry.
+    #[serde(skip, default)]
+    last_area: RefCell<HashMap<LayoutId, CGRect>>,
 }
 
 impl BspLayoutSystem {
@@ -204,6 +212,8 @@ impl Default for BspLayoutSystem {
             stacks: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
             single_window_aspect_ratio: None,
+            move_style: BspMoveStyle::default(),
+            last_area: Default::default(),
         }
     }
 }
@@ -219,6 +229,8 @@ impl BspLayoutSystem {
     pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
         self.window_insertion_point = value;
     }
+
+    pub fn set_move_style(&mut self, style: BspMoveStyle) { self.move_style = style; }
 
     pub fn set_single_window_aspect_ratio(&mut self, ratio: Option<f64>) {
         self.single_window_aspect_ratio = ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0);
@@ -429,6 +441,190 @@ impl BspLayoutSystem {
         self.stacks.remove(&node);
         self.stacks.remove(&sibling);
         parent_id
+    }
+
+    fn swap_with_neighbor(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let sel_snapshot = self.selection_of_layout(layout);
+        let Some(sel) = sel_snapshot else {
+            return false;
+        };
+        let sel_leaf = self.descend_to_leaf(sel);
+        let Some(neighbor_leaf) = self.find_neighbor_leaf(sel_leaf, direction) else {
+            return false;
+        };
+        let (mut a_window, mut b_window) = (None, None);
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
+            a_window = *window;
+        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
+            b_window = *window;
+        }
+        if a_window.is_none() && b_window.is_none() {
+            return false;
+        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
+            *window = b_window;
+        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
+            *window = a_window;
+        }
+        if let Some(w) = a_window {
+            self.index_window(w, neighbor_leaf);
+        }
+        if let Some(w) = b_window {
+            self.index_window(w, sel_leaf);
+        }
+        self.tree.data.selection.select(&self.tree.map, neighbor_leaf);
+        true
+    }
+
+    /// Whether the selection's direct sibling is a single window lying in `direction`.
+    fn sibling_leaf_in_direction(&self, leaf: NodeId, direction: Direction) -> bool {
+        let Some(parent) = leaf.parent(&self.tree.map) else {
+            return false;
+        };
+        let Some(NodeKind::Split { orientation, .. }) = self.kind.get(parent) else {
+            return false;
+        };
+        if *orientation != direction.orientation() {
+            return false;
+        }
+        let children: Vec<_> = parent.children(&self.tree.map).collect();
+        if children.len() != 2 {
+            return false;
+        }
+        let sibling = match direction {
+            Direction::Left | Direction::Up if children[1] == leaf => children[0],
+            Direction::Right | Direction::Down if children[0] == leaf => children[1],
+            _ => return false,
+        };
+        matches!(self.kind.get(sibling), Some(NodeKind::Leaf { .. }))
+    }
+
+    /// Frames of the window-holding leaves of `layout`, split by ratio from the
+    /// last tiling area. Gaps and size constraints are ignored.
+    fn leaf_frames(&self, layout: LayoutId) -> Vec<(NodeId, CGRect)> {
+        let mut out = Vec::new();
+        let Some(state) = self.layouts.get(layout).copied() else {
+            return out;
+        };
+        let Some(area) = self.last_area.borrow().get(&layout).copied() else {
+            return out;
+        };
+        self.collect_leaf_frames(state.root, area, &mut out);
+        out
+    }
+
+    fn collect_leaf_frames(&self, node: NodeId, rect: CGRect, out: &mut Vec<(NodeId, CGRect)>) {
+        match self.kind.get(node) {
+            Some(NodeKind::Leaf { window: Some(_), .. }) => out.push((node, rect)),
+            Some(NodeKind::Split { orientation, ratio }) => {
+                let children: Vec<_> = node.children(&self.tree.map).collect();
+                let [first, second] = children[..] else {
+                    for child in children {
+                        self.collect_leaf_frames(child, rect, out);
+                    }
+                    return;
+                };
+                let ratio = (*ratio as f64).clamp(0.0, 1.0);
+                let (r1, r2) = match orientation {
+                    Orientation::Horizontal => {
+                        let w = rect.size.width * ratio;
+                        (
+                            CGRect::new(rect.origin, CGSize::new(w, rect.size.height)),
+                            CGRect::new(
+                                CGPoint::new(rect.origin.x + w, rect.origin.y),
+                                CGSize::new(rect.size.width - w, rect.size.height),
+                            ),
+                        )
+                    }
+                    Orientation::Vertical => {
+                        let h = rect.size.height * ratio;
+                        (
+                            CGRect::new(rect.origin, CGSize::new(rect.size.width, h)),
+                            CGRect::new(
+                                CGPoint::new(rect.origin.x, rect.origin.y + h),
+                                CGSize::new(rect.size.width, rect.size.height - h),
+                            ),
+                        )
+                    }
+                };
+                self.collect_leaf_frames(first, r1, out);
+                self.collect_leaf_frames(second, r2, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Warp: take the selected window out of the tree and insert it again as if
+    /// it had been opened at a point just past its edge in `direction`. The
+    /// window under that point is split along its longer side, and the moved
+    /// window takes the half the point falls in.
+    fn reinsert_in_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let Some(sel) = self.selection_of_layout(layout) else {
+            return false;
+        };
+        let leaf = self.descend_to_leaf(sel);
+        if self.stacks.contains_key(&leaf) {
+            return false;
+        }
+        let Some(NodeKind::Leaf {
+            window: Some(wid),
+            fullscreen: false,
+            fullscreen_within_gaps: false,
+            ..
+        }) = self.kind.get(leaf).cloned()
+        else {
+            return false;
+        };
+        let frames = self.leaf_frames(layout);
+        if frames.len() < 2 {
+            return false;
+        }
+        let Some(&(_, frame)) = frames.iter().find(|(node, _)| *node == leaf) else {
+            return false;
+        };
+
+        let mid_x = frame.origin.x + frame.size.width / 2.0;
+        let mid_y = frame.origin.y + frame.size.height / 2.0;
+        let focal = match direction {
+            Direction::Left => CGPoint::new(frame.origin.x - 1.0, mid_y),
+            Direction::Right => CGPoint::new(frame.origin.x + frame.size.width + 1.0, mid_y),
+            Direction::Up => CGPoint::new(mid_x, frame.origin.y - 1.0),
+            Direction::Down => CGPoint::new(mid_x, frame.origin.y + frame.size.height + 1.0),
+        };
+        let distance = |rect: &CGRect| {
+            let dx = (rect.origin.x - focal.x)
+                .max(focal.x - (rect.origin.x + rect.size.width))
+                .max(0.0);
+            let dy = (rect.origin.y - focal.y)
+                .max(focal.y - (rect.origin.y + rect.size.height))
+                .max(0.0);
+            dx.hypot(dy)
+        };
+
+        self.remove_window_internal(layout, wid);
+
+        let Some((target, rect)) = self
+            .leaf_frames(layout)
+            .into_iter()
+            .min_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)))
+        else {
+            return false;
+        };
+        let side = if rect.size.width > rect.size.height {
+            if focal.x < rect.origin.x + rect.size.width / 2.0 {
+                Direction::Left
+            } else {
+                Direction::Right
+            }
+        } else if focal.y < rect.origin.y + rect.size.height / 2.0 {
+            Direction::Up
+        } else {
+            Direction::Down
+        };
+        self.split_leaf_in_direction(target, side, wid);
+        true
     }
 
     fn selection_of_layout(&self, layout: crate::layout_engine::LayoutId) -> Option<NodeId> {
@@ -813,6 +1009,131 @@ mod tests {
     use super::*;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    fn frames_of(system: &BspLayoutSystem, layout: LayoutId) -> HashMap<WindowId, CGRect> {
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 900.0));
+        system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &HashMap::default(),
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect()
+    }
+
+    fn assert_frame(
+        frames: &HashMap<WindowId, CGRect>,
+        wid: WindowId,
+        x: f64,
+        y: f64,
+        wd: f64,
+        ht: f64,
+    ) {
+        let f = frames.get(&wid).copied().expect("frame missing");
+        assert!(
+            (f.origin.x - x).abs() < 1.0
+                && (f.origin.y - y).abs() < 1.0
+                && (f.size.width - wd).abs() < 1.0
+                && (f.size.height - ht).abs() < 1.0,
+            "{wid:?}: got {f:?}, want ({x}, {y}, {wd}, {ht})"
+        );
+    }
+
+    fn warp_system() -> BspLayoutSystem {
+        let mut system = BspLayoutSystem::default();
+        system.set_move_style(BspMoveStyle::Warp);
+        system
+    }
+
+    /// 1 | 2 | 3 as three columns (0.5 / 0.25 / 0.25).
+    fn three_columns() -> (BspLayoutSystem, LayoutId) {
+        let mut system = warp_system();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+        system.toggle_tile_orientation(layout);
+        let frames = frames_of(&system, layout);
+        assert_frame(&frames, w(1), 0.0, 0.0, 800.0, 900.0);
+        assert_frame(&frames, w(2), 800.0, 0.0, 400.0, 900.0);
+        assert_frame(&frames, w(3), 1200.0, 0.0, 400.0, 900.0);
+        (system, layout)
+    }
+
+    #[test]
+    fn warp_at_edge_breaks_out_of_split() {
+        let (mut system, layout) = three_columns();
+        system.select_window(layout, w(3));
+        // An adjacent display takes priority over re-arranging at the edge.
+        assert!(!system.move_selection_with_display_neighbor(layout, Direction::Right, true));
+        assert!(system.move_selection_with_display_neighbor(layout, Direction::Right, false));
+        let frames = frames_of(&system, layout);
+        assert_frame(&frames, w(1), 0.0, 0.0, 800.0, 900.0);
+        assert_frame(&frames, w(2), 800.0, 0.0, 800.0, 450.0);
+        assert_frame(&frames, w(3), 800.0, 450.0, 800.0, 450.0);
+        assert_eq!(system.selected_window(layout), Some(w(3)));
+    }
+
+    #[test]
+    fn move_into_non_sibling_reinserts() {
+        let (mut system, layout) = three_columns();
+        system.select_window(layout, w(2));
+        assert!(system.move_selection(layout, Direction::Left));
+        let frames = frames_of(&system, layout);
+        assert_frame(&frames, w(1), 0.0, 0.0, 800.0, 450.0);
+        assert_frame(&frames, w(2), 0.0, 450.0, 800.0, 450.0);
+        assert_frame(&frames, w(3), 800.0, 0.0, 800.0, 900.0);
+    }
+
+    #[test]
+    fn move_across_perpendicular_split_reinserts() {
+        let mut system = warp_system();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+        let _ = frames_of(&system, layout);
+        system.select_window(layout, w(2));
+        assert!(system.move_selection(layout, Direction::Left));
+        let frames = frames_of(&system, layout);
+        assert_frame(&frames, w(2), 0.0, 0.0, 800.0, 450.0);
+        assert_frame(&frames, w(1), 0.0, 450.0, 800.0, 450.0);
+        assert_frame(&frames, w(3), 800.0, 0.0, 800.0, 900.0);
+    }
+
+    #[test]
+    fn swap_style_keeps_swapping() {
+        let (mut system, layout) = three_columns();
+        system.set_move_style(BspMoveStyle::Swap);
+        system.select_window(layout, w(3));
+        assert!(!system.move_selection_with_display_neighbor(layout, Direction::Right, false));
+        system.select_window(layout, w(2));
+        assert!(system.move_selection(layout, Direction::Left));
+        let frames = frames_of(&system, layout);
+        assert_frame(&frames, w(2), 0.0, 0.0, 800.0, 900.0);
+        assert_frame(&frames, w(1), 800.0, 0.0, 400.0, 900.0);
+        assert_frame(&frames, w(3), 1200.0, 0.0, 400.0, 900.0);
+    }
+
+    #[test]
+    fn move_toward_lone_sibling_swaps() {
+        let mut system = warp_system();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        let _ = frames_of(&system, layout);
+        system.select_window(layout, w(2));
+        assert!(system.move_selection(layout, Direction::Left));
+        let frames = frames_of(&system, layout);
+        assert_frame(&frames, w(2), 0.0, 0.0, 800.0, 900.0);
+        assert_frame(&frames, w(1), 800.0, 0.0, 800.0, 900.0);
+    }
 
     #[test]
     fn window_in_direction_prefers_leftmost_when_moving_right() {
@@ -1262,6 +1583,7 @@ impl LayoutSystem for BspLayoutSystem {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = compute_tiling_area(screen, gaps);
+            self.last_area.borrow_mut().insert(layout, rect);
             self.calculate_layout_recursive(state.root, rect, screen, constraints, gaps, &mut out);
             if let (Some(ratio), [(_, frame)]) =
                 (self.single_window_aspect_ratio, out.as_mut_slice())
@@ -1626,38 +1948,39 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(sel) = sel_snapshot else {
+        if self.move_style == BspMoveStyle::Swap {
+            return self.swap_with_neighbor(layout, direction);
+        }
+        let Some(sel) = self.selection_of_layout(layout) else {
             return false;
         };
         let sel_leaf = self.descend_to_leaf(sel);
-        let Some(neighbor_leaf) = self.find_neighbor_leaf(sel_leaf, direction) else {
-            return false;
-        };
-        let (mut a_window, mut b_window) = (None, None);
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
-            a_window = *window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
-            b_window = *window;
-        }
-        if a_window.is_none() && b_window.is_none() {
+        if self.find_neighbor_leaf(sel_leaf, direction).is_none() {
             return false;
         }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
-            *window = b_window;
+        // Moving toward a lone sibling swaps with it,
+        // anything else takes the window out and re-inserts it past its edge.
+        if !self.sibling_leaf_in_direction(sel_leaf, direction)
+            && self.reinsert_in_direction(layout, direction)
+        {
+            return true;
         }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
-            *window = a_window;
+        self.swap_with_neighbor(layout, direction)
+    }
+
+    fn move_selection_with_display_neighbor(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+        has_neighbor: bool,
+    ) -> bool {
+        if self.move_selection(layout, direction) {
+            return true;
         }
-        if let Some(w) = a_window {
-            self.index_window(w, neighbor_leaf);
-        }
-        if let Some(w) = b_window {
-            self.index_window(w, sel_leaf);
-        }
-        self.tree.data.selection.select(&self.tree.map, neighbor_leaf);
-        true
+        // At the workspace edge an adjacent display still wins, as in traditional.
+        !has_neighbor
+            && self.move_style == BspMoveStyle::Warp
+            && self.reinsert_in_direction(layout, direction)
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
