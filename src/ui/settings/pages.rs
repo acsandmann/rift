@@ -222,7 +222,10 @@ fn layout_defaults(ui: Ui, model: &Rc<Model>) -> Page {
 }
 
 pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) -> impl NativeView {
-    let preview = Rc::new(LayoutPreview::new(&ui, CGSize::new(360.0, 190.0)));
+    // Match the grid's 128 + 120 + 82 point columns and two 12 point gaps.
+    // A wider canvas was compressed by the editor while its window geometry
+    // still used the original width, making equal edge insets look unequal.
+    let preview = Rc::new(LayoutPreview::new(&ui, CGSize::new(354.0, 190.0)));
     let illustration = preview.clone();
     let update: Rc<dyn Fn(&ConfigSource)> = Rc::new(move |s| {
         let size = illustration.canvas_size();

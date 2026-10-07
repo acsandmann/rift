@@ -784,14 +784,19 @@ impl FormBuilder {
         let slider = slider.unwrap();
         slider.width(120.0);
         input.width(60.0);
-        input.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
-        let unit = SecondaryLabel::new(&self.ui, "pt");
-        unit.min_width(16.0);
+        input.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Left);
+        let value_field = UnitField::new(&self.ui, input.ns_text_field(), "pt");
+        value_field.width(82.0);
         let value = VStack::new(&self.ui).spacing(2.0)
-            .push(HStack::new(&self.ui).spacing(5.0).alignment(objc2_app_kit::NSLayoutAttribute::FirstBaseline)
-                .push(input).push(unit))
+            .push(value_field)
             .push(message);
-        vec![Box::new(Label::new(&self.ui, title)), Box::new(slider), Box::new(value)]
+        // Keep the Rust field/delegate alive as well as its native view.
+        struct ValueCell { view: VStack, _input: Rc<NumberField> }
+        impl NativeView for ValueCell {
+            fn ns_view(&self) -> &objc2_app_kit::NSView { self.view.ns_view() }
+        }
+        vec![Box::new(Label::new(&self.ui, title)), Box::new(slider),
+            Box::new(ValueCell { view: value, _input: input })]
     }
 
     fn text(
