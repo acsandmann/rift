@@ -289,73 +289,113 @@ fn layout_defaults(ui: Ui, model: &Rc<Model>) -> Page {
     f.finish(page)
 }
 
+pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) -> impl NativeView {
+    use objc2_quartz_core::{CALayer, CATransaction};
+    use objc2_app_kit::{NSColor, NSWorkspace};
+    let root = CALayer::layer();
+    root.setGeometryFlipped(true);
+    root.setCornerRadius(12.0);
+    root.setBackgroundColor(Some(&NSColor::controlBackgroundColor().CGColor()));
+    root.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
+    root.setBorderWidth(1.0);
+    let windows: Vec<_> = (0..3).map(|_| {
+        let layer = CALayer::layer();
+        layer.setCornerRadius(6.0);
+        layer.setBackgroundColor(Some(&NSColor::controlAccentColor().colorWithAlphaComponent(0.18).CGColor()));
+        layer.setBorderColor(Some(&NSColor::controlAccentColor().colorWithAlphaComponent(0.4).CGColor()));
+        layer.setBorderWidth(1.0);
+        root.addSublayer(&layer);
+        layer
+    }).collect();
+    let initialized = Cell::new(false);
+    let update: Rc<dyn Fn(&ConfigSource)> = Rc::new(move |s| {
+        let gaps = s.settings.layout.gaps.effective_for_display(display.as_deref());
+        // A representative desktop, scaled to keep even large gaps legible.
+        let edge = |v: f64| 10.0 + v.clamp(0.0, 200.0) * 0.35;
+        let left = edge(gaps.outer.left);
+        let top = edge(gaps.outer.top);
+        let width = (420.0 - left - edge(gaps.outer.right)).max(24.0);
+        let height = (220.0 - top - edge(gaps.outer.bottom)).max(24.0);
+        let horizontal = gaps.inner.horizontal.clamp(0.0, 200.0) * 0.35;
+        let vertical = gaps.inner.vertical.clamp(0.0, 200.0) * 0.35;
+        let half = ((width - horizontal) / 2.0).max(8.0);
+        let right = left + half + horizontal;
+        let half_height = ((height - vertical) / 2.0).max(8.0);
+        CATransaction::begin();
+        CATransaction::setDisableActions(!initialized.replace(true) || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion());
+        CATransaction::setAnimationDuration(0.16);
+        windows[0].setFrame(CGRect::new(CGPoint::new(left, top), CGSize::new(half, height)));
+        windows[1].setFrame(CGRect::new(CGPoint::new(right, top), CGSize::new(half, half_height)));
+        windows[2].setFrame(CGRect::new(CGPoint::new(right, top + half_height + vertical), CGSize::new(half, half_height)));
+        CATransaction::commit();
+    });
+    f.gap_preview = Some(update.clone());
+    f.sync.push(Box::new(move |source| update(source)));
+    let preview = LayerHost::new(&ui, &root);
+    preview.width(420.0);
+    preview.height(220.0);
+    preview.accessibility_label("Preview of screen edges and spacing between windows");
+    preview
+}
+
 fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "");
-    let section = Section::form(&ui, "Spacing")
-        .description("Applied to every layout.")
-        .row(f.text(
-            "Screen edges (points)",
-            |s| {
-                let g = &s.settings.layout.gaps.outer;
-                if g.top == g.left && g.top == g.bottom && g.top == g.right {
-                    g.top.to_string()
-                } else {
-                    String::new()
-                }
-            },
-            |s, value| {
-                if let Some(v) = optional_number(&value)? {
-                    s.settings.layout.gaps.outer = OuterGaps {
-                        top: v,
-                        left: v,
-                        bottom: v,
-                        right: v,
-                    };
-                }
+    let preview = gap_preview(ui, &mut f, None);
+    let source = model.source.borrow();
+    let outer = &source.settings.layout.gaps.outer;
+    let inner = &source.settings.layout.gaps.inner;
+    let custom = outer.top != outer.bottom || outer.top != outer.left || outer.top != outer.right || inner.horizontal != inner.vertical;
+    drop(source);
+    let simple = Rc::new(Section::new(&ui, "").row(f.gap(
+        "Screen edges (points)",
+        |s| s.settings.layout.gaps.outer.top,
+        |s, v| s.settings.layout.gaps.outer = OuterGaps { top: v, bottom: v, left: v, right: v },
+    )));
+    let mut edges = Section::new(&ui, "");
+    for (axis, name) in ["Top (points)", "Bottom (points)", "Right (points)", "Left (points)"].into_iter().enumerate() {
+        edges = edges.row(f.gap(name,
+            move |s| { let g = &s.settings.layout.gaps.outer; [g.top, g.bottom, g.right, g.left][axis] },
+            move |s, v| { let g = &mut s.settings.layout.gaps.outer; match axis { 0 => g.top = v, 1 => g.bottom = v, 2 => g.right = v, _ => g.left = v } },
+        ));
+    }
+    let edges = Rc::new(edges);
+    let between = Rc::new(Section::new(&ui, "Between windows")
+        .row(f.gap("Horizontal (points)", |s| s.settings.layout.gaps.inner.horizontal, |s, v| s.settings.layout.gaps.inner.horizontal = v))
+        .row(f.gap("Vertical (points)", |s| s.settings.layout.gaps.inner.vertical, |s, v| s.settings.layout.gaps.inner.vertical = v)));
+    let uniform_between = Rc::new(Section::new(&ui, "").row(f.gap(
+        "Between windows (points)",
+        |s| s.settings.layout.gaps.inner.horizontal,
+        |s, v| { s.settings.layout.gaps.inner.horizontal = v; s.settings.layout.gaps.inner.vertical = v; },
+    )));
+    between.set_hidden(!custom);
+    uniform_between.set_hidden(custom);
+    let (weak_between, weak_uniform) = (Rc::downgrade(&between), Rc::downgrade(&uniform_between));
+    simple.set_hidden(custom);
+    edges.set_hidden(!custom);
+    let (weak_simple, weak_edges) = (Rc::downgrade(&simple), Rc::downgrade(&edges));
+    let weak_model = Rc::downgrade(model);
+    let mode = SegmentedControl::new(&ui, &["Simple", "Custom"]).on_change(move |index| {
+        if let (Some(simple), Some(edges)) = (weak_simple.upgrade(), weak_edges.upgrade()) {
+            simple.set_hidden(index != 0);
+            edges.set_hidden(index == 0);
+        }
+        if let (Some(between), Some(uniform)) = (weak_between.upgrade(), weak_uniform.upgrade()) {
+            between.set_hidden(index == 0);
+            uniform.set_hidden(index != 0);
+        }
+        if index == 0 {
+            FormBuilder::submit(&weak_model, Box::new(|s| {
+                let v = s.settings.layout.gaps.outer.top;
+                s.settings.layout.gaps.outer = OuterGaps { top: v, bottom: v, left: v, right: v };
+                s.settings.layout.gaps.inner.vertical = s.settings.layout.gaps.inner.horizontal;
                 Ok(())
-            },
-        ));
-    let sides = VStack::new(&ui)
-        .push(f.number(
-            "Top (points)",
-            1.0,
-            |s| s.settings.layout.gaps.outer.top,
-            |s, v| s.settings.layout.gaps.outer.top = v,
-        ))
-        .push(f.number(
-            "Left (points)",
-            1.0,
-            |s| s.settings.layout.gaps.outer.left,
-            |s, v| s.settings.layout.gaps.outer.left = v,
-        ))
-        .push(f.number(
-            "Bottom (points)",
-            1.0,
-            |s| s.settings.layout.gaps.outer.bottom,
-            |s, v| s.settings.layout.gaps.outer.bottom = v,
-        ))
-        .push(f.number(
-            "Right (points)",
-            1.0,
-            |s| s.settings.layout.gaps.outer.right,
-            |s, v| s.settings.layout.gaps.outer.right = v,
-        ));
-    let spacing = section.content(Disclosure::new(&ui, "Set each edge separately", sides));
-    let section = Section::form(&ui, "").content(SubsectionTitle::new(&ui, "Between windows"))
-        .row(f.number(
-            "Horizontal (points)",
-            1.0,
-            |s| s.settings.layout.gaps.inner.horizontal,
-            |s, v| s.settings.layout.gaps.inner.horizontal = v,
-        ))
-        .row(f.number(
-            "Vertical (points)",
-            1.0,
-            |s| s.settings.layout.gaps.inner.vertical,
-            |s, v| s.settings.layout.gaps.inner.vertical = v,
-        ));
-    page = page.section(spacing.footer(section));
+            }), Weak::new());
+        }
+    });
+    mode.set_selected(usize::from(custom));
+    let page = SettingsPage::new(&ui, "Spacing").subtitle("Applied to every layout. Values are in points.")
+        .section(preview).section(mode).section(Section::form(&ui, "Screen edges").content(simple).content(edges))
+        .section(uniform_between).section(between);
     f.finish(page)
 }
 

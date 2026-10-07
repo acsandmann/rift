@@ -1432,18 +1432,18 @@ fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
             },
         ));
     }
+    rows = rows.content(super::pages::gap_preview(ui, &mut f, Some(uuid.clone())));
     for outer in [true, false] {
         let group = Rc::new(VStack::new(&ui));
         for axis in 0..if outer { 4 } else { 2 } {
             let id = uuid.clone();
             let edit_id = uuid.clone();
-            let row = f.number(
+            let row = f.gap(
                 if outer {
                     ["Top", "Left", "Bottom", "Right"][axis]
                 } else {
                     ["Horizontal", "Vertical"][axis]
                 },
-                1.0,
                 move |s| {
                     let effective = s.settings.layout.gaps.effective_for_display(Some(&id));
                     if outer {
@@ -1477,7 +1477,7 @@ fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
                         }
                     }
                 },
-            );
+            ).suffix("pt");
             // Preserve Rust callback ownership in the stack.
             group.add(row);
         }

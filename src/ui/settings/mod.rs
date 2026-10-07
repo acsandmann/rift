@@ -435,6 +435,7 @@ pub(super) struct FormBuilder {
     ui: Ui,
     model: Weak<Model>,
     sync: Vec<SyncControl>,
+    gap_preview: Option<Rc<dyn Fn(&ConfigSource)>>,
 }
 impl FormBuilder {
     fn new(ui: Ui, model: &Rc<Model>) -> Self {
@@ -442,6 +443,7 @@ impl FormBuilder {
             ui,
             model: Rc::downgrade(model),
             sync: Vec::new(),
+            gap_preview: None,
         }
     }
 
@@ -554,6 +556,15 @@ impl FormBuilder {
         self.numeric(title, scale, false, None, get, set)
     }
 
+    fn gap(
+        &mut self,
+        title: &str,
+        get: impl Fn(&ConfigSource) -> f64 + 'static,
+        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
+    ) -> SettingsRow {
+        self.numeric(title, 1.0, false, Some(Rc::new(|_| (0.0, 100.0))), get, set)
+    }
+
     fn integer(
         &mut self,
         title: &str,
@@ -587,6 +598,7 @@ impl FormBuilder {
         let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
+        let set_preview = set.clone();
         let commit = move |v: f64| {
             if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v / scale) {
                 return;
@@ -617,13 +629,29 @@ impl FormBuilder {
             let (min, max) = range(&source.source.borrow());
             let range = range.clone();
             let model = self.model.clone();
+            let preview = self.gap_preview.clone();
+            let continuous = preview.is_some();
+            let edit_preview = set_preview.clone();
+            let preview_input = Rc::downgrade(&input);
+            let mut local_preview = None::<ConfigSource>;
             let slider = Rc::new(Slider::new(&self.ui).range(min, max).on_change(move |v| {
                 if let Some(model) = model.upgrade() {
                     let (min, max) = range(&model.source.borrow());
-                    commit(v.round().clamp(min, max));
+                    let value = if preview.is_some() { (v * 10.0).round() / 10.0 } else { v.round() }.clamp(min, max);
+                    if let Some(preview) = &preview {
+                        let local = local_preview.get_or_insert_with(|| model.source.borrow().clone());
+                        edit_preview(local, value / scale);
+                        preview(local);
+                        if let Some(input) = preview_input.upgrade() { input.set_value(value); }
+                        let dragging = NSApplication::sharedApplication(model.page_title.ns_view().mtm())
+                            .currentEvent().is_some_and(|event| matches!(event.r#type(), objc2_app_kit::NSEventType::LeftMouseDragged | objc2_app_kit::NSEventType::LeftMouseDown));
+                        if dragging { return; }
+                    }
+                    local_preview = None;
+                    commit(value);
                 }
             }));
-            slider.ns_slider().setContinuous(false);
+            slider.ns_slider().setContinuous(continuous);
             slider.width(120.0);
             slider.accessibility_label(title);
             slider
