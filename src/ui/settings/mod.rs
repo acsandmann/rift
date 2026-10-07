@@ -15,6 +15,7 @@ mod commands;
 mod editors;
 mod pages;
 mod search;
+mod schema;
 pub(crate) mod updates;
 
 pub enum Action {
@@ -253,7 +254,7 @@ impl Settings {
                 selected_result.set(destination.page);
                 Self::select(ui, &model, &host, &pages, destination.page);
                 host.ns_view().layoutSubtreeIfNeeded();
-                search::reveal(host.ns_view(), destination.title);
+                search::reveal(host.ns_view(), destination.title, destination.location);
             }
         }));
         let open_row = open_result.clone();
@@ -300,6 +301,7 @@ impl Settings {
                             entry.title == result.title
                                 && entry.page == result.page
                                 && entry.scope == result.scope
+                                && entry.location == result.location
                         });
                         if let Some(index) = index {
                             (open_row.borrow_mut())(index);

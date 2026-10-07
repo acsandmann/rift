@@ -3,14 +3,9 @@ use crate::common::config::{Color, *};
 use crate::layout_engine::Orientation;
 
 pub(super) fn layouts() -> Vec<(&'static str, LayoutMode)> {
-    vec![
-        ("Traditional", LayoutMode::Traditional),
-        ("BSP", LayoutMode::Bsp),
-        ("Stack", LayoutMode::Stack),
-        ("Master Stack", LayoutMode::MasterStack),
-        ("Scrolling", LayoutMode::Scrolling),
-        ("Floating", LayoutMode::Floating),
-    ]
+    LayoutMode::CONFIG_CHOICES.iter().enumerate()
+        .map(|(index, choice)| (choice.0, LayoutMode::from_config_choice(index).unwrap()))
+        .collect()
 }
 
 fn insertion() -> Vec<(&'static str, WindowInsertionPoint)> {
@@ -45,66 +40,8 @@ pub(super) fn build(ui: Ui, model: &Rc<Model>, id: usize) -> Page {
 
 fn general(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "");
-    let mut section = Section::new(&ui, "Window behavior").row(f.switch(
-        "Animate window changes",
-        |s| s.settings.animate,
-        |s, v| s.settings.animate = v,
-    ));
-    let row = f.number(
-        "Duration (seconds)",
-        1.0,
-        |s| s.settings.animation_duration,
-        |s, v| s.settings.animation_duration = v,
-    );
-    f.enabled(&row, |s| s.settings.animate);
-    section = section.row(row);
-    let row = f.number(
-        "Frame rate",
-        1.0,
-        |s| s.settings.animation_fps,
-        |s, v| s.settings.animation_fps = v,
-    );
-    f.enabled(&row, |s| s.settings.animate);
-    section = section.row(row);
-    let row = f.popup(
-        "Animation easing",
-        vec![
-            ("Ease In Out", AnimationEasing::EaseInOut),
-            ("Linear", AnimationEasing::Linear),
-            ("Ease In Sine", AnimationEasing::EaseInSine),
-            ("Ease Out Sine", AnimationEasing::EaseOutSine),
-            ("Ease In Out Sine", AnimationEasing::EaseInOutSine),
-            ("Ease In Quad", AnimationEasing::EaseInQuad),
-            ("Ease Out Quad", AnimationEasing::EaseOutQuad),
-            ("Ease In Out Quad", AnimationEasing::EaseInOutQuad),
-            ("Ease In Cubic", AnimationEasing::EaseInCubic),
-            ("Ease Out Cubic", AnimationEasing::EaseOutCubic),
-            ("Ease In Out Cubic", AnimationEasing::EaseInOutCubic),
-            ("Ease In Quart", AnimationEasing::EaseInQuart),
-            ("Ease Out Quart", AnimationEasing::EaseOutQuart),
-            ("Ease In Out Quart", AnimationEasing::EaseInOutQuart),
-            ("Ease In Quint", AnimationEasing::EaseInQuint),
-            ("Ease Out Quint", AnimationEasing::EaseOutQuint),
-            ("Ease In Out Quint", AnimationEasing::EaseInOutQuint),
-            ("Ease In Expo", AnimationEasing::EaseInExpo),
-            ("Ease Out Expo", AnimationEasing::EaseOutExpo),
-            ("Ease In Out Expo", AnimationEasing::EaseInOutExpo),
-            ("Ease In Circ", AnimationEasing::EaseInCirc),
-            ("Ease Out Circ", AnimationEasing::EaseOutCirc),
-            ("Ease In Out Circ", AnimationEasing::EaseInOutCirc),
-        ],
-        |s| s.settings.animation_easing,
-        |s, v| s.settings.animation_easing = v,
-    );
-    f.enabled(&row, |s| s.settings.animate);
-    let section = section.row(row).row(f.switch(
-        "Start with tiling disabled",
-        |s| s.settings.default_disable,
-        |s, v| s.settings.default_disable = v,
-    ));
-    page = page.section(section);
-    f.finish(page)
+    let section = f.schema_section("Window behavior", "general", |s| &s.settings, |s| &mut s.settings);
+    f.finish(SettingsPage::new(&ui, "").section(section))
 }
 fn about(ui: Ui, model: &Rc<Model>) -> VStack {
     let status = Rc::new(Label::new(&ui, "").color(&cgs::Color::secondary_label()).wrapping());
@@ -272,12 +209,7 @@ fn layout_defaults(ui: Ui, model: &Rc<Model>) -> Page {
     let mut page = SettingsPage::new(&ui, "");
     let section = Section::form(&ui, "Default behavior")
         .description("Used by workspaces that don’t have their own layout.")
-        .row(f.popup(
-            "Default layout",
-            layouts(),
-            |s| s.settings.layout.mode,
-            |s, v| s.settings.layout.mode = v,
-        ))
+        .row(f.schema_field(LayoutSettings::field("mode").unwrap(), |s| &s.settings.layout, |s| &mut s.settings.layout).unwrap())
         .row(f.inherited_popup(
             "New window position",
             insertion(),
@@ -378,14 +310,7 @@ fn percentage_text(ratio: f64) -> String {
 }
 
 fn layout_description(mode: LayoutMode) -> &'static str {
-    match mode {
-        LayoutMode::Traditional => "Arrange windows in adjustable rows and columns.",
-        LayoutMode::Bsp => "Split available space as windows are added.",
-        LayoutMode::Stack => "Overlap windows while keeping each one visible.",
-        LayoutMode::MasterStack => "Keep primary windows large with the rest beside them.",
-        LayoutMode::Scrolling => "Arrange windows in a horizontally scrolling strip.",
-        LayoutMode::Floating => "Move and resize windows without automatic tiling.",
-    }
+    LayoutMode::CONFIG_CHOICES[mode.config_choice_index()].1
 }
 
 fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
@@ -404,11 +329,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
         .push(Caption::new(&ui, layout_description(mode)));
     let section = match mode {
         LayoutMode::Traditional => options()
-            .row(f.switch(
-                "Keep windows equally sized",
-                |s| s.settings.layout.traditional.equalize_nodes,
-                |s, v| s.settings.layout.traditional.equalize_nodes = v,
-            ))
+            .row(f.schema_field(TraditionalLayoutSettings::field("equalize_nodes").unwrap(), |s| &s.settings.layout.traditional, |s| &mut s.settings.layout.traditional).unwrap())
             .row(f.inherited_popup(
                 "New window position",
                 insertion(),
@@ -445,23 +366,8 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                 },
             )),
         LayoutMode::Stack => options()
-            .row(f.number(
-                "Window offset (points)",
-                1.0,
-                |s| s.settings.layout.stack.stack_offset,
-                |s, v| s.settings.layout.stack.stack_offset = v,
-            ))
-            .row(f.popup(
-                "Orientation",
-                vec![
-                    ("Perpendicular", StackDefaultOrientation::Perpendicular),
-                    ("Same", StackDefaultOrientation::Same),
-                    ("Horizontal", StackDefaultOrientation::Horizontal),
-                    ("Vertical", StackDefaultOrientation::Vertical),
-                ],
-                |s| s.settings.layout.stack.default_orientation,
-                |s, v| s.settings.layout.stack.default_orientation = v,
-            ))
+            .row(f.schema_field(StackSettings::field("stack_offset").unwrap(), |s| &s.settings.layout.stack, |s| &mut s.settings.layout.stack).unwrap())
+            .row(f.schema_field(StackSettings::field("default_orientation").unwrap(), |s| &s.settings.layout.stack, |s| &mut s.settings.layout.stack).unwrap())
             .row(f.inherited_popup(
                 "New window position",
                 insertion(),
@@ -480,34 +386,11 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                     )
                     .suffix("%"),
                 )
-                .row(f.integer(
-                    "Master windows",
-                    |s| s.settings.layout.master_stack.master_count as f64,
-                    |s, v| s.settings.layout.master_stack.master_count = v as usize,
-                ))
-                .row(f.popup(
-                    "Master side",
-                    vec![
-                        ("Left", MasterStackSide::Left),
-                        ("Right", MasterStackSide::Right),
-                        ("Top", MasterStackSide::Top),
-                        ("Bottom", MasterStackSide::Bottom),
-                    ],
-                    |s| s.settings.layout.master_stack.master_side,
-                    |s, v| s.settings.layout.master_stack.master_side = v,
-                ));
+                .row(f.schema_field(MasterStackSettings::field("master_count").unwrap(), |s| &s.settings.layout.master_stack, |s| &mut s.settings.layout.master_stack).unwrap())
+                .row(f.schema_field(MasterStackSettings::field("master_side").unwrap(), |s| &s.settings.layout.master_stack, |s| &mut s.settings.layout.master_stack).unwrap());
             page = page.push(section);
             Section::form(&ui, "").content(SubsectionTitle::new(&ui, "Arrangement"))
-                .row(f.popup(
-                    "New windows",
-                    vec![
-                        ("Master", MasterStackNewWindowPlacement::Master),
-                        ("Stack", MasterStackNewWindowPlacement::Stack),
-                        ("Focused", MasterStackNewWindowPlacement::Focused),
-                    ],
-                    |s| s.settings.layout.master_stack.new_window_placement,
-                    |s, v| s.settings.layout.master_stack.new_window_placement = v,
-                ))
+                .row(f.schema_field(MasterStackSettings::field("new_window_placement").unwrap(), |s| &s.settings.layout.master_stack, |s| &mut s.settings.layout.master_stack).unwrap())
                 .row(f.inherited_popup(
                     "Master arrangement",
                     arrangement(),
@@ -587,50 +470,19 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                         Ok(())
                     },
                 ))
-                .row(f.switch(
-                    "Preserve window sizes",
-                    |s| s.settings.layout.scrolling.preserve_window_sizes,
-                    |s, v| s.settings.layout.scrolling.preserve_window_sizes = v,
-                ))
+                .row(f.schema_field(ScrollingLayoutSettings::field("preserve_window_sizes").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap())
                 .row(
-                    f.number(
-                        "Minimum width",
-                        100.0,
-                        |s| s.settings.layout.scrolling.min_column_width_ratio,
-                        |s, v| s.settings.layout.scrolling.min_column_width_ratio = v,
-                    )
+                    f.schema_field(ScrollingLayoutSettings::field("min_column_width_ratio").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap()
                     .suffix("%"),
                 )
                 .row(
-                    f.number(
-                        "Maximum width",
-                        100.0,
-                        |s| s.settings.layout.scrolling.max_column_width_ratio,
-                        |s, v| s.settings.layout.scrolling.max_column_width_ratio = v,
-                    )
+                    f.schema_field(ScrollingLayoutSettings::field("max_column_width_ratio").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap()
                     .suffix("%"),
                 );
             page = page.push(section);
             let section = Section::form(&ui, "").content(SubsectionTitle::new(&ui, "Navigation"))
-                .row(f.popup(
-                    "Alignment",
-                    vec![
-                        ("Left", ScrollingAlignment::Left),
-                        ("Center", ScrollingAlignment::Center),
-                        ("Right", ScrollingAlignment::Right),
-                    ],
-                    |s| s.settings.layout.scrolling.alignment,
-                    |s, v| s.settings.layout.scrolling.alignment = v,
-                ))
-                .row(f.popup(
-                    "Focus navigation",
-                    vec![
-                        ("Niri", ScrollingFocusNavigationStyle::Niri),
-                        ("Anchored", ScrollingFocusNavigationStyle::Anchored),
-                    ],
-                    |s| s.settings.layout.scrolling.focus_navigation_style,
-                    |s, v| s.settings.layout.scrolling.focus_navigation_style = v,
-                ))
+                .row(f.schema_field(ScrollingLayoutSettings::field("alignment").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap())
+                .row(f.schema_field(ScrollingLayoutSettings::field("focus_navigation_style").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap())
                 .row(f.inherited_popup(
                     "Animate navigation",
                     bool_choices(),
@@ -666,78 +518,10 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
 fn input(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
-    let section = Section::new(&ui, "Focus")
-        .row(f.switch(
-            "Focus follows pointer",
-            |s| s.settings.focus_follows_mouse,
-            |s, v| s.settings.focus_follows_mouse = v,
-        ))
-        .row(f.switch(
-            "Move pointer to focused window",
-            |s| s.settings.mouse_follows_focus,
-            |s, v| s.settings.mouse_follows_focus = v,
-        ));
-    let row = f.switch(
-        "Hide pointer after focusing",
-        |s| s.settings.mouse_hides_on_focus,
-        |s, v| s.settings.mouse_hides_on_focus = v,
-    );
-    f.enabled(&row, |s| s.settings.mouse_follows_focus);
-    page = page.section(section.row(row));
-    let section = Section::new(&ui, "Workspace swipes")
-        .row(f.switch(
-            "Enabled",
-            |s| s.settings.gestures.enabled,
-            |s, v| s.settings.gestures.enabled = v,
-        ))
-        .row(f.switch(
-            "Consume macOS workspace swipe",
-            |s| s.settings.gestures.consume_dock_swipe,
-            |s, v| s.settings.gestures.consume_dock_swipe = v,
-        ))
-        .row(f.switch(
-            "Invert direction",
-            |s| s.settings.gestures.invert_horizontal_swipe,
-            |s, v| s.settings.gestures.invert_horizontal_swipe = v,
-        ))
-        .row(f.switch(
-            "Skip empty workspaces",
-            |s| s.settings.gestures.skip_empty,
-            |s, v| s.settings.gestures.skip_empty = v,
-        ))
-        .row(f.switch(
-            "Haptic feedback",
-            |s| s.settings.gestures.haptics_enabled,
-            |s, v| s.settings.gestures.haptics_enabled = v,
-        ))
-        .row(f.integer(
-            "Fingers",
-            |s| s.settings.gestures.fingers as f64,
-            |s, v| s.settings.gestures.fingers = v as usize,
-        ));
-    let tuning = VStack::new(&ui)
-        .push(f.number(
-            "Distance (%)",
-            100.0,
-            |s| s.settings.gestures.distance_pct,
-            |s, v| s.settings.gestures.distance_pct = v,
-        ))
-        .push(f.number(
-            "Vertical tolerance",
-            1.0,
-            |s| s.settings.gestures.swipe_vertical_tolerance,
-            |s, v| s.settings.gestures.swipe_vertical_tolerance = v,
-        ))
-        .push(f.popup(
-            "Haptic pattern",
-            vec![
-                ("Generic", HapticPattern::Generic),
-                ("Alignment", HapticPattern::Alignment),
-                ("Level change", HapticPattern::LevelChange),
-            ],
-            |s| s.settings.gestures.haptic_pattern,
-            |s, v| s.settings.gestures.haptic_pattern = v,
-        ));
+    let section = f.schema_section("Focus", "pointer", |s| &s.settings, |s| &mut s.settings);
+    page = page.section(section);
+    let section = f.schema_section("Workspace swipes", "main", |s| &s.settings.gestures, |s| &mut s.settings.gestures);
+    let tuning = f.schema_section("", "advanced", |s| &s.settings.gestures, |s| &mut s.settings.gestures);
     page = page.section(section.content(Disclosure::new(&ui, "Advanced swipe settings", tuning)));
     let section = Section::new(&ui, "Scrolling layout gestures")
         .description("These gestures navigate the Scrolling layout strip.")
@@ -860,60 +644,7 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
 fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
-    let section = Section::new(&ui, "Menu Bar")
-        .row(f.switch(
-            "Show menu bar indicator",
-            |s| s.settings.ui.menu_bar.enabled,
-            |s, v| s.settings.ui.menu_bar.enabled = v,
-        ))
-        .row({
-            let row = f.switch(
-                "Show empty workspaces",
-                |s| s.settings.ui.menu_bar.show_empty,
-                |s, v| s.settings.ui.menu_bar.show_empty = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
-            row
-        })
-        .row({
-            let row = f.popup(
-                "Workspaces to show",
-                vec![
-                    ("All", MenuBarDisplayMode::All),
-                    ("Active", MenuBarDisplayMode::Active),
-                ],
-                |s| s.settings.ui.menu_bar.mode,
-                |s, v| s.settings.ui.menu_bar.mode = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
-            row
-        })
-        .row({
-            let row = f.popup(
-                "Active workspace label",
-                vec![
-                    ("Index", ActiveWorkspaceLabel::Index),
-                    ("Name", ActiveWorkspaceLabel::Name),
-                ],
-                |s| s.settings.ui.menu_bar.active_label,
-                |s, v| s.settings.ui.menu_bar.active_label = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
-            row
-        })
-        .row({
-            let row = f.popup(
-                "Display style",
-                vec![
-                    ("Layout", WorkspaceDisplayStyle::Layout),
-                    ("Label", WorkspaceDisplayStyle::Label),
-                ],
-                |s| s.settings.ui.menu_bar.display_style,
-                |s, v| s.settings.ui.menu_bar.display_style = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
-            row
-        });
+    let section = f.schema_section("Menu Bar", "", |s| &s.settings.ui.menu_bar, |s| &mut s.settings.ui.menu_bar);
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let weak_model = f.model.clone();
@@ -933,120 +664,13 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
             path.set_value(&s.settings.ui.menu_bar.layout_folder);
         }
     }));
-    let row = f.row("Layout folder", path, message);
-    f.enabled(&row, |s| s.settings.ui.menu_bar.enabled);
+    let field = MenuBarSettings::field("layout_folder").unwrap();
+    let row = f.row(field.title, path, message);
+    let row = f.schema_metadata(row, field, |s| &s.settings.ui.menu_bar);
     page = page.section(section.row(row));
-    let section = Section::new(&ui, "Overview")
-        .description("Requires restarting Rift.")
-        .row(f.switch(
-            "Enabled",
-            |s| s.settings.ui.mission_control.enabled,
-            |s, v| s.settings.ui.mission_control.enabled = v,
-        ))
-        .row({
-            let row = f.switch(
-                "Show empty workspaces",
-                |s| s.settings.ui.mission_control.show_empty_workspaces,
-                |s, v| s.settings.ui.mission_control.show_empty_workspaces = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
-            row
-        })
-        .row({
-            let row = f.switch(
-                "Window previews",
-                |s| s.settings.ui.mission_control.window_previews,
-                |s, v| s.settings.ui.mission_control.window_previews = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
-            row
-        })
-        .row({
-            let row = f.switch(
-                "Fade transitions",
-                |s| s.settings.ui.mission_control.fade_enabled,
-                |s, v| s.settings.ui.mission_control.fade_enabled = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
-            row
-        })
-        .row({
-            let row = f.number(
-                "Fade duration (milliseconds)",
-                1.0,
-                |s| s.settings.ui.mission_control.fade_duration_ms,
-                |s, v| s.settings.ui.mission_control.fade_duration_ms = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.mission_control.enabled);
-            row
-        });
+    let section = f.schema_rows(Section::new(&ui, "Overview").description("Requires restarting Rift."), "", |s| &s.settings.ui.mission_control, |s| &mut s.settings.ui.mission_control);
     page = page.section(section);
-    let section = Section::new(&ui, "Stack Line")
-        .description("Experimental")
-        .row(f.switch(
-            "Enabled",
-            |s| s.settings.ui.stack_line.enabled,
-            |s, v| s.settings.ui.stack_line.enabled = v,
-        ))
-        .row({
-            let row = f.popup(
-                "Interaction",
-                vec![
-                    ("Hover", StackLineHoverMode::Hover),
-                    ("Click", StackLineHoverMode::Click),
-                ],
-                |s| s.settings.ui.stack_line.hover,
-                |s, v| s.settings.ui.stack_line.hover = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-            row
-        })
-        .row({
-            let row = f.popup(
-                "Horizontal placement",
-                vec![
-                    ("Top", HorizontalPlacement::Top),
-                    ("Bottom", HorizontalPlacement::Bottom),
-                ],
-                |s| s.settings.ui.stack_line.horiz_placement,
-                |s, v| s.settings.ui.stack_line.horiz_placement = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-            row
-        })
-        .row({
-            let row = f.popup(
-                "Vertical placement",
-                vec![
-                    ("Left", VerticalPlacement::Left),
-                    ("Right", VerticalPlacement::Right),
-                ],
-                |s| s.settings.ui.stack_line.vert_placement,
-                |s, v| s.settings.ui.stack_line.vert_placement = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-            row
-        })
-        .row({
-            let row = f.number(
-                "Thickness (points)",
-                1.0,
-                |s| s.settings.ui.stack_line.thickness,
-                |s, v| s.settings.ui.stack_line.thickness = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-            row
-        })
-        .row({
-            let row = f.number(
-                "Spacing (points)",
-                1.0,
-                |s| s.settings.ui.stack_line.spacing,
-                |s, v| s.settings.ui.stack_line.spacing = v,
-            );
-            f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-            row
-        });
+    let section = f.schema_rows(Section::new(&ui, "Stack Line").description("Experimental"), "", |s| &s.settings.ui.stack_line, |s| &mut s.settings.ui.stack_line);
     let section = section.row({
         let row = f.color(
             "Selected color",
@@ -1124,11 +748,7 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     page = page.section(
         Section::new(&ui, "Configuration file")
             .description(&path.to_string_lossy())
-            .row(f.switch(
-                "Reload config when edited externally",
-                |s| s.settings.hot_reload,
-                |s, v| s.settings.hot_reload = v,
-            ))
+            .row(f.schema_field(crate::common::config::Settings::field("hot_reload").unwrap(), |s| &s.settings, |s| &mut s.settings).unwrap())
             .content(actions.push(reload))
             .footer(message),
     );

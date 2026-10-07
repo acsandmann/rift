@@ -125,15 +125,22 @@ impl LayoutKind {
     pub const fn is_group(self) -> bool { self.is_stacked() }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, rift_config_derive::ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode {
     #[default]
+    /// Arrange windows in adjustable rows and columns.
     Traditional,
+    /// Split available space as windows are added.
+    #[setting(label = "BSP")]
     Bsp,
+    /// Overlap windows while keeping each one visible.
     Stack,
+    /// Keep primary windows large with the rest beside them.
     MasterStack,
+    /// Arrange windows in a horizontally scrolling strip.
     Scrolling,
+    /// Move and resize windows without automatic tiling.
     Floating,
 }
 

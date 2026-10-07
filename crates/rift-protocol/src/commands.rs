@@ -172,7 +172,7 @@ pub enum ConfigCommand {
     ReloadConfig,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, rift_config_derive::ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum AnimationEasing {
     #[default]

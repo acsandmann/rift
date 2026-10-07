@@ -251,37 +251,7 @@ fn workspace_editor(
 
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut section = Section::new(&ui, "Virtual Workspaces")
-        .row(f.switch(
-            "Enabled",
-            |s| s.virtual_workspaces.enabled,
-            |s, v| s.virtual_workspaces.enabled = v,
-        ))
-        .row(f.switch(
-            "Auto-assign windows",
-            |s| s.virtual_workspaces.auto_assign_windows,
-            |s, v| s.virtual_workspaces.auto_assign_windows = v,
-        ))
-        .row(f.switch(
-            "Preserve workspace focus",
-            |s| s.virtual_workspaces.preserve_focus_per_workspace,
-            |s, v| s.virtual_workspaces.preserve_focus_per_workspace = v,
-        ))
-        .row(f.switch(
-            "Switch back when selecting active workspace",
-            |s| s.virtual_workspaces.workspace_auto_back_and_forth,
-            |s, v| s.virtual_workspaces.workspace_auto_back_and_forth = v,
-        ))
-        .row(f.switch(
-            "Prevent wrapping",
-            |s| s.virtual_workspaces.prevent_wrapping,
-            |s, v| s.virtual_workspaces.prevent_wrapping = v,
-        ))
-        .row(f.switch(
-            "Reapply rules when titles change",
-            |s| s.virtual_workspaces.reapply_app_rules_on_title_change,
-            |s, v| s.virtual_workspaces.reapply_app_rules_on_title_change = v,
-        ));
+    let mut section = f.schema_section("Virtual Workspaces", "", |s| &s.virtual_workspaces, |s| &mut s.virtual_workspaces);
     let defaults = workspace_popup(
         &mut f,
         "Default workspace",

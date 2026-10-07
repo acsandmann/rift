@@ -5,7 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [workspace]
-members = [".", "crates/rift-client", "crates/rift-protocol", "crates/cgs"]
+members = [".", "crates/rift-client", "crates/rift-protocol", "crates/cgs", "crates/rift-config-derive"]
 resolver = "3"
 
 [[bin]]
@@ -53,6 +53,7 @@ custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
 disable-axuielement-destroyed = []
 
 [dependencies]
+rift-config-derive = { path = "crates/rift-config-derive" }
 cgs = { path = "crates/cgs" }
 anyhow = { version = "1.0.83", default-features = false }
 arc-swap = "1"

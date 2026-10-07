@@ -59,6 +59,7 @@ impl NativeView for Badge {
 
 pub struct SettingsRow {
     ui: Ui,
+    title: String,
     grid: OnceCell<Grid>,
     label: Rc<dyn NativeView>,
     value: VStack,
@@ -86,6 +87,7 @@ impl SettingsRow {
             .push(validation.clone());
         Self {
             ui: *ui,
+            title: title.to_owned(),
             grid: OnceCell::new(),
             label,
             value,
@@ -94,6 +96,16 @@ impl SettingsRow {
             control: Box::new(control),
             validation,
         }
+    }
+
+    /// Add a discoverable description beside the label, without expanding the row.
+    pub fn help(mut self, text: &str) -> Self {
+        if !text.trim().is_empty() {
+            self.label = Rc::new(HStack::new(&self.ui).spacing(6.0)
+                .push(self.label).push(InfoButton::new(&self.ui, &self.title, text))
+                .push(Spacer::new(&self.ui)));
+        }
+        self
     }
 
     pub fn description(mut self, text: &str) -> Self {
@@ -184,6 +196,8 @@ macro_rules! setting_row {
             }
 
             pub fn description(self, text: &str) -> Self { Self(self.0.description(text)) }
+
+            pub fn help(self, text: &str) -> Self { Self(self.0.help(text)) }
 
             pub fn suffix(self, text: &str) -> Self { Self(self.0.suffix(text)) }
 
