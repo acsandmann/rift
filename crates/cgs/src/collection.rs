@@ -1074,7 +1074,7 @@ impl<T: 'static> SettingsList<T> {
             };
             let total = (count as f64 * (table.rowHeight() + table.intercellSpacing().height)
                 + native_padding)
-                .max(64.0);
+                .max(if self.navigation.get() && count > 0 { table.rowHeight() } else { 64.0 });
             let fitted = total.min(*maximum);
             if height.constant() != fitted {
                 height.setConstant(fitted);
@@ -1115,6 +1115,11 @@ impl<T: 'static> SettingsList<T> {
 
     pub fn on_open(self, f: impl FnMut(usize) + 'static) -> Self {
         *self.open.borrow_mut() = Some(Box::new(f));
+        // Use AppKit's click action, preserving selection and drag handling.
+        unsafe {
+            self.table.ns_table_view().setAction(Some(objc2::sel!(invoke:)));
+            self.table.ns_table_view().setDoubleAction(None);
+        }
         self
     }
 

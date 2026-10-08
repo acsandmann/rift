@@ -116,7 +116,7 @@ impl LayoutPreview {
             let index = index.unwrap_or_else(|| {
                 let layer = CALayer::layer();
                 layer.setCornerRadius(5.0);
-                layer.setBackgroundColor(Some(&NSColor::quaternaryLabelColor().CGColor()));
+                layer.setBackgroundColor(Some(&NSColor::tertiarySystemFillColor().CGColor()));
                 layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
                 layer.setBorderWidth(0.5);
                 let view = LayerHost::new(&self.ui, &layer);

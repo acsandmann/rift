@@ -1,6 +1,6 @@
 [package]
 name = "cgs"
-version = "0.1.1"
+version = "0.1.2"
 description = "a ui library for macos"
 license = "Apache-2.0"
 edition = "2024"
@@ -13,7 +13,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGContext", "CGColorSpace", "CGError"] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["CALayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
-    "std", "NSAttributedString", "NSAccessibility", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSApplication", "NSAnimation", "NSAnimationContext", "NSRunningApplication", "NSAppearance", "NSWindow", "NSPanel", "NSView", "NSViewController", "NSLayoutAnchor", "NSLayoutGuide", "NSLayoutConstraint", "NSStackView", "NSGridView", "NSScrollView", "NSClipView", "NSScroller", "NSSplitView", "NSSplitViewController", "NSSplitViewItem", "NSBox", "NSVisualEffectView", "NSGlassEffectView", "NSControl", "NSCell", "NSActionCell", "NSButton", "NSButtonCell", "NSSwitch", "NSSegmentedControl", "NSSegmentedCell", "NSPopUpButton", "NSPopUpButtonCell", "NSComboBox", "NSTextField", "NSTextFieldCell", "NSText", "NSTextView", "NSTextContainer", "NSSearchField", "NSTokenField", "NSSlider", "NSSliderCell", "NSStepper", "NSColor", "NSColorWell", "NSFont", "NSFontDescriptor", "NSImage", "NSImageView", "NSMenu", "NSMenuItem", "NSMenuItemBadge", "NSMenuItemCell", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSTableView", "NSTableColumn", "NSTableHeaderView", "NSTableCellView", "NSOutlineView", "NSDragging", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSPopover", "NSAlert", "NSOpenPanel", "NSSavePanel", "NSToolbar", "NSToolbarItem", "NSProgressIndicator", "NSEvent", "NSTrackingArea", "NSResponder", "NSGraphicsContext", "NSGraphics", "NSUserInterfaceLayout", "NSUserInterfaceValidation", "NSUserInterfaceItemIdentification", "NSWorkspace", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-quartz-core"
+    "std", "NSAttributedString", "NSAccessibility", "NSAccessibilityProtocols", "NSAccessibilityConstants", "NSApplication", "NSAnimation", "NSAnimationContext", "NSRunningApplication", "NSAppearance", "NSWindow", "NSPanel", "NSView", "NSViewController", "NSLayoutAnchor", "NSLayoutGuide", "NSLayoutConstraint", "NSStackView", "NSGridView", "NSScrollView", "NSClipView", "NSScroller", "NSSplitView", "NSSplitViewController", "NSSplitViewItem", "NSBox", "NSVisualEffectView", "NSGlassEffectView", "NSControl", "NSCell", "NSActionCell", "NSButton", "NSButtonCell", "NSSwitch", "NSSegmentedControl", "NSSegmentedCell", "NSPopUpButton", "NSPopUpButtonCell", "NSComboBox", "NSTextField", "NSTextFieldCell", "NSText", "NSTextView", "NSTextContainer", "NSSearchField", "NSTokenField", "NSSlider", "NSSliderCell", "NSStepper", "NSColor", "NSColorWell", "NSFont", "NSFontDescriptor", "NSImage", "NSImageView", "NSMenu", "NSMenuItem", "NSMenuItemBadge", "NSMenuItemCell", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSTableView", "NSTableColumn", "NSTableHeaderView", "NSTableCellView", "NSOutlineView", "NSDragging", "NSDraggingSession", "NSPasteboard", "NSPasteboardItem", "NSPopover", "NSAlert", "NSOpenPanel", "NSSavePanel", "NSToolbar", "NSToolbarItem", "NSMenuToolbarItem", "NSProgressIndicator", "NSEvent", "NSTrackingArea", "NSResponder", "NSGraphicsContext", "NSGraphics", "NSUserInterfaceLayout", "NSUserInterfaceValidation", "NSUserInterfaceItemIdentification", "NSWorkspace", "block2", "objc2-core-foundation", "objc2-core-graphics", "objc2-quartz-core"
 ] }
 tracing = { version = "0.1.40", default-features = false }
 
@@ -23,3 +23,7 @@ harness = false
 
 [dev-dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSDraggingItem"] }
+
+[package.metadata.docs.rs]
+default-target = "aarch64-apple-darwin"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]

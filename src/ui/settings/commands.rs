@@ -442,7 +442,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                 .content(mode_controls))
             .section(
                 Section::new(&ui, "Keyboard shortcuts")
-                    .description("Double-click a shortcut or click its arrow to edit it. Use + to add one.")
+                    .description("Click a shortcut to edit it. Use + to add one.")
                     .content(table)
                     .footer(error)
                     .footer(Caption::new(&ui, "⌘ Command   ⌥ Option   ⌃ Control   ⇧ Shift")),

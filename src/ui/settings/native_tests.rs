@@ -1,5 +1,7 @@
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::{NSControl, NSOutlineView, NSPopUpButton, NSSwitch, NSTableView, NSView};
+use objc2_app_kit::{
+    NSControl, NSMenuToolbarItem, NSOutlineView, NSPopUpButton, NSSlider, NSSwitch, NSTableView, NSView,
+};
 
 use super::*;
 
@@ -40,18 +42,22 @@ pub fn run(ui: Ui) {
         assert_eq!(find::<NSOutlineView>(&root).unwrap().numberOfRows(), 9);
         let sidebar = find::<NSOutlineView>(&root).unwrap();
         sidebar.selectRowIndexes_byExtendingSelection(
-            &objc2_foundation::NSIndexSet::indexSetWithIndex(1), false,
+            &objc2_foundation::NSIndexSet::indexSetWithIndex(1),
+            false,
         );
-        let navigation = settings._navigation.ns_segmented_control();
-        assert!(navigation.isEnabledForSegment(0), "enable Back after visiting a section");
-        assert!(!navigation.isEnabledForSegment(1), "disable Forward at the latest destination");
+        let toolbar = settings.window.toolbar().ns_toolbar();
+        let back = toolbar.items().iter().find(|item| item.itemIdentifier().to_string() == "cgs.back").unwrap();
+        let forward = toolbar.items().iter().find(|item| item.itemIdentifier().to_string() == "cgs.forward").unwrap();
+        assert!(back.isEnabled(), "enable Back after visiting a section");
+        assert!(!forward.isEnabled(), "disable Forward at the latest destination");
         sidebar.selectRowIndexes_byExtendingSelection(
-            &objc2_foundation::NSIndexSet::indexSetWithIndex(0), false,
+            &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
+            false,
         );
         drop(sidebar);
 
         Settings::select(ui, &settings.model, &settings._host, &settings.pages, 4);
-        settings.selected.set(4);
+        settings.history.borrow_mut().select(4);
         let keyboard = settings.pages.borrow()[4].as_ref().unwrap().view.clone();
         settings.refresh_displays(vec![crate::sys::screen::ScreenInfo {
             id: crate::sys::screen::ScreenId::new(1),
@@ -86,24 +92,156 @@ pub fn run(ui: Ui) {
                 .iter()
                 .any(|app| app.search.contains("dev.test.editor"))
         );
-        // Selecting a peer layout replaces its controls without writing configuration.
+        // The native menu switches layouts, history returns to the overview, and no secondary sidebar remains.
         autoreleasepool(|_| {
-            Settings::select(ui, &settings.model, &settings._host, &settings.pages, 1);
-            settings.selected.set(1);
-            let pages = settings.pages.borrow();
-            let view = pages[1].as_ref().unwrap().view.ns_view();
-            let browser = find::<NSOutlineView>(view).unwrap();
-            browser.selectRowIndexes_byExtendingSelection(
-                &objc2_foundation::NSIndexSet::indexSetWithIndex(3), false,
+            let navigate = settings.model.navigate.borrow().as_ref().unwrap().clone();
+            navigate(1);
+            assert_eq!(count::<NSOutlineView>(&root), 1, "one persistent sidebar");
+            let menu = toolbar
+                .items()
+                .iter()
+                .find_map(|item| item.downcast::<NSMenuToolbarItem>().ok())
+                .unwrap()
+                .menu();
+            autoreleasepool(|_| {
+                menu.performActionForItemAtIndex(
+                    menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("Traditional")),
+                )
+            });
+            let old =
+                objc2::rc::Weak::new(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view());
+            assert_eq!(
+                autoreleasepool(|_| count::<NSSwitch>(settings._host.ns_view())),
+                1
             );
-            assert_eq!(count::<NSSwitch>(view), 1, "mount the selected layout once");
-            browser.selectRowIndexes_byExtendingSelection(
-                &objc2_foundation::NSIndexSet::indexSetWithIndex(4), false,
+            autoreleasepool(|_| {
+                menu.performActionForItemAtIndex(
+                    menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("BSP")),
+                )
+            });
+            assert_eq!(count::<NSSwitch>(settings._host.ns_view()), 0);
+            autoreleasepool(|_| {
+                root.layoutSubtreeIfNeeded();
+                objc2_foundation::NSRunLoop::currentRunLoop()
+                    .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05));
+            });
+            assert!(old.load().is_none(), "release replaced subpages");
+            assert_eq!(
+                settings.history.borrow().history[settings.history.borrow().cursor],
+                11
             );
-            assert_eq!(count::<NSSwitch>(view), 0, "replace the old layout form");
-            assert!(
-                pending.try_recv().is_err(),
-                "layout selection must not change config"
+            assert!(unsafe {
+                NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
+                    back.action().unwrap(),
+                    back.target().as_deref(),
+                    Some(&back),
+                )
+            });
+            assert_eq!(
+                count::<NSSwitch>(settings._host.ns_view()),
+                1,
+                "Back restores Traditional"
+            );
+            assert!(unsafe {
+                NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
+                    back.action().unwrap(),
+                    back.target().as_deref(),
+                    Some(&back),
+                )
+            });
+            assert_eq!(
+                count::<NSOutlineView>(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view()),
+                0
+            );
+            assert!(forward.isEnabled());
+            assert!(unsafe {
+                NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
+                    forward.action().unwrap(),
+                    forward.target().as_deref(),
+                    Some(&forward),
+                )
+            });
+            assert_eq!(
+                count::<NSSwitch>(settings._host.ns_view()),
+                1,
+                "Forward restores Traditional"
+            );
+            assert_eq!(
+                find::<NSOutlineView>(&root).unwrap().selectedRow(),
+                1,
+                "Layouts remains selected"
+            );
+            assert!(pending.try_recv().is_err(), "navigation must not change config");
+        });
+        // A normal collection row's first click opens its editor without changing configuration.
+        autoreleasepool(|_| {
+            let page = editors::workspaces(ui, &settings.model);
+            page.synchronize(&settings.model);
+            let table = find::<NSTableView>(page.view.ns_view()).unwrap();
+            table.selectRowIndexes_byExtendingSelection(&objc2_foundation::NSIndexSet::indexSetWithIndex(0), false);
+            assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
+            assert!(settings.model.sheet.borrow().is_some(), "first-click action opens the workspace editor");
+            settings.model.close_sheet();
+            assert!(pending.try_recv().is_err(), "opening an editor must not change config");
+        });
+        // A spacing slider must edit the visible display override, not an ineffective global value.
+        autoreleasepool(|_| {
+            use crate::sys::screen::NSScreenExt;
+            let screen = settings.window.ns_window().screen().unwrap();
+            settings.refresh_displays(vec![crate::sys::screen::ScreenInfo {
+                id: screen.get_number().unwrap(),
+                display_uuid: "focused-display".into(),
+                name: Some("Focused display".into()),
+                frame: Default::default(),
+                backing_scale: 1.0,
+                space: None,
+            }]);
+            let mut source = settings.model.source.borrow().clone();
+            let global = source.settings.layout.gaps.outer.clone();
+            source
+                .settings
+                .layout
+                .gaps
+                .per_display
+                .entry("focused-display".into())
+                .or_default()
+                .outer = Some(crate::common::config::OuterGaps {
+                top: 12.0,
+                right: 12.0,
+                bottom: 12.0,
+                left: 12.0,
+            });
+            settings.model.replace_source(source);
+            let page = pages::layout_scope(ui, &settings.model, 7);
+            page.synchronize(&settings.model);
+            let slider = find::<NSSlider>(page.view.ns_view()).unwrap();
+            assert_eq!(
+                slider.doubleValue(),
+                12.0,
+                "show the display's effective spacing"
+            );
+            slider.setDoubleValue(24.0);
+            assert!(unsafe { slider.sendAction_to(slider.action(), slider.target().as_deref()) });
+            let request = pending.try_recv().unwrap();
+            let Action::Edit(edit) = request.action else {
+                panic!("expected spacing edit")
+            };
+            let mut source = settings.model.source.borrow().clone();
+            edit(&mut source).unwrap();
+            assert_eq!(
+                source.settings.layout.gaps.outer, global,
+                "preserve global spacing"
+            );
+            let effective =
+                source.settings.layout.gaps.effective_for_display(Some("focused-display"));
+            assert_eq!(
+                [
+                    effective.outer.top,
+                    effective.outer.right,
+                    effective.outer.bottom,
+                    effective.outer.left
+                ],
+                [24.0; 4]
             );
         });
         let model = Rc::downgrade(&settings.model);

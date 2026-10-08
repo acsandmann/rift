@@ -569,7 +569,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         }
     }));
     f.finish(SettingsPage::new(&ui, "")
-        .subtitle("Choose which windows Rift manages and where they open. Click a rule’s arrow to edit it. Drag rules to change their order.")
+        .subtitle("Choose which windows Rift manages and where they open. Click a rule to edit it. Drag rules to change their order.")
         .section(table)
         .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
         .section(message)

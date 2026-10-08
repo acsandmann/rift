@@ -46,6 +46,7 @@ struct Model {
     installed_applications: RefCell<Option<Vec<(String, String)>>>,
     application_inventory: RefCell<Vec<applications::Choice>>,
     page_title: Rc<Label>,
+    navigate: RefCell<Option<Rc<dyn Fn(usize)>>>,
     toolbar: RefCell<Weak<Toolbar>>,
 }
 
@@ -97,6 +98,7 @@ impl Model {
             installed_applications: RefCell::new(self.installed_applications.borrow().clone()),
             application_inventory: RefCell::new(Vec::new()),
             page_title: self.page_title.clone(),
+            navigate: RefCell::new(None),
             toolbar: RefCell::new(Weak::new()),
         });
         draft.rebuild_applications();
@@ -187,8 +189,7 @@ pub struct Settings {
     model: Rc<Model>,
     _host: Rc<PageHost>,
     pages: Rc<RefCell<Vec<Option<Page>>>>,
-    selected: Rc<Cell<usize>>,
-    _navigation: Rc<SegmentedControl>,
+    history: Rc<RefCell<NavigationState>>,
 }
 
 impl Settings {
@@ -218,16 +219,15 @@ impl Settings {
             installed_applications: RefCell::new(None),
             application_inventory: RefCell::new(Vec::new()),
             page_title: Rc::new(Label::new(&ui, "General")),
+            navigate: RefCell::new(None),
             toolbar: RefCell::new(Weak::new()),
         });
         model.rebuild_applications();
         let host = Rc::new(PageHost::new(&ui));
         let pages = Rc::new(RefCell::new((0..9).map(|_| None::<Page>).collect::<Vec<_>>()));
-        let selected = Rc::new(Cell::new(0));
         let weak_model = Rc::downgrade(&model);
         let weak_host = Rc::downgrade(&host);
         let weak_pages = Rc::downgrade(&pages);
-        let selected_page = selected.clone();
         let entries: Vec<_> = [
             ("General", "gearshape"),
             ("Layouts", "rectangle.split.2x2"),
@@ -249,62 +249,31 @@ impl Settings {
         .collect();
         let history = Rc::new(RefCell::new(NavigationState { history: vec![0], cursor: 0 }));
         let sidebar_slot = Rc::new(RefCell::new(Weak::<Sidebar<usize>>::new()));
-        let search_slot = Rc::new(RefCell::new(Weak::<SearchField>::new()));
-        let nav_slot = Rc::new(RefCell::new(Weak::<SegmentedControl>::new()));
-        let (h, b, q, n) = (
-            history.clone(),
-            sidebar_slot.clone(),
-            search_slot.clone(),
-            nav_slot.clone(),
-        );
-        let all = entries.clone();
-        let navigation = Rc::new(SegmentedControl::new(&ui, &["", ""]).on_change(
-            move |direction| {
-                if let Some(sidebar) = b.borrow().upgrade() {
-                    let Some(page) = h.borrow_mut().step(direction != 0) else {
-                        return;
-                    };
-                    if let Some(search) = q.borrow().upgrade() {
-                        search.set_value("");
-                    }
-                    sidebar.set_items(all.clone());
-                    sidebar.set_selected(page);
-                    if let Some(nav) = n.borrow().upgrade() {
-                        nav.ns_segmented_control().setEnabled_forSegment(h.borrow().cursor > 0, 0);
-                        nav.ns_segmented_control().setEnabled_forSegment(
-                            h.borrow().cursor + 1 < h.borrow().history.len(),
-                            1,
-                        );
-                    }
-                }
-            },
-        ));
-        *nav_slot.borrow_mut() = Rc::downgrade(&navigation);
-        let native = navigation.ns_segmented_control();
-        native.setTrackingMode(objc2_app_kit::NSSegmentSwitchTracking::Momentary);
-        native.setImage_forSegment(Symbol::named("chevron.backward").as_deref(), 0);
-        native.setImage_forSegment(Symbol::named("chevron.forward").as_deref(), 1);
-        native.setToolTip_forSegment(Some(&objc2_foundation::NSString::from_str("Back")), 0);
-        native.setToolTip_forSegment(Some(&objc2_foundation::NSString::from_str("Forward")), 1);
-        native.setEnabled_forSegment(false, 0);
-        native.setEnabled_forSegment(false, 1);
-        let (h, nav) = (history.clone(), Rc::downgrade(&navigation));
-        let sidebar = Sidebar::new(&ui, entries.clone()).on_select(move |id| {
-            if let (Some(model), Some(host), Some(pages)) =
-                (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
-            {
-                if selected_page.replace(id) != id {
-                    h.borrow_mut().select(id);
-                    if let Some(nav) = nav.upgrade() {
-                        nav.ns_segmented_control().setEnabled_forSegment(h.borrow().cursor > 0, 0);
-                        nav.ns_segmented_control().setEnabled_forSegment(
-                            h.borrow().cursor + 1 < h.borrow().history.len(),
-                            1,
-                        );
-                    }
-                    Self::select(ui, &model, &host, &pages, id);
-                }
+        let routing = Rc::new(Cell::new(false));
+        let history_router = history.clone();
+        let sidebar_router = sidebar_slot.clone();
+        let routing_router = routing.clone();
+        let navigate: Rc<dyn Fn(usize)> = Rc::new(move |id| {
+            let (Some(model), Some(host), Some(pages)) =
+                (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade()) else { return; };
+            let previous = { let history = history_router.borrow(); history.history[history.cursor] };
+            history_router.borrow_mut().select(id);
+            let category = if id >= 9 { 1 } else { id };
+            routing_router.set(true);
+            if let Some(sidebar) = sidebar_router.borrow().upgrade() { sidebar.set_selected(category); }
+            routing_router.set(false);
+            if previous >= 9 || id == 1 || id >= 9 { pages.borrow_mut()[1] = None; }
+            Self::select(ui, &model, &host, &pages, id);
+            if let Some(toolbar) = model.toolbar.borrow().upgrade() {
+                let history = history_router.borrow();
+                toolbar.update_navigation(history.cursor > 0, history.cursor + 1 < history.history.len(),
+                    if id >= 9 { pages::LAYOUT_PAGES[id - 9].0 } else { "All" }, id == 1 || id >= 9);
             }
+        });
+        *model.navigate.borrow_mut() = Some(navigate.clone());
+        let route = navigate.clone();
+        let sidebar = Sidebar::new(&ui, entries.clone()).on_select(move |id| {
+            if !routing.get() { route(id); }
         });
         let sidebar = Rc::new(sidebar);
         sidebar.set_selected(0);
@@ -314,26 +283,13 @@ impl Settings {
         let opening_destinations = destinations.clone();
         let weak_model = Rc::downgrade(&model);
         let weak_host = Rc::downgrade(&host);
-        let weak_pages = Rc::downgrade(&pages);
-        let weak_sidebar = Rc::downgrade(&sidebar);
-        let selected_result = selected.clone();
         let open_result = Rc::new(RefCell::new(move |index: usize| {
             let Some(destination) = opening_destinations.borrow().get(index).cloned() else {
                 return;
             };
-            if let (Some(model), Some(host), Some(pages), Some(sidebar)) = (
-                weak_model.upgrade(),
-                weak_host.upgrade(),
-                weak_pages.upgrade(),
-                weak_sidebar.upgrade(),
-            ) {
-                if let Some(scope) = destination.scope {
-                    pages.borrow_mut()[1] = Some(pages::layout_search_scope(ui, &model, scope));
-                }
-                // Keep the query and its sidebar results while browsing matches.
-                sidebar.set_selected(destination.page);
-                selected_result.set(destination.page);
-                Self::select(ui, &model, &host, &pages, destination.page);
+            if let (Some(model), Some(host)) = (weak_model.upgrade(), weak_host.upgrade()) {
+                let id = destination.scope.map_or(destination.page, |scope| 9 + scope);
+                if let Some(navigate) = model.navigate.borrow().as_ref() { navigate(id); }
                 host.ns_view().layoutSubtreeIfNeeded();
                 search::reveal(host.ns_view(), destination.title, destination.location);
             }
@@ -439,7 +395,6 @@ impl Settings {
                     }
                 }),
         );
-        *search_slot.borrow_mut() = Rc::downgrade(&search);
         let sidebar_pane = VStack::new(&ui)
             .spacing(8.0)
             .push(
@@ -459,7 +414,33 @@ impl Settings {
             .on_close(on_close)
             .content(NavigationSplitView::new(&ui, sidebar_pane, host.clone()));
         window.ns_window().setInitialFirstResponder(Some(sidebar.ns_table_view()));
-        window.toolbar().set_navigation_control(&ui, navigation.as_ref());
+        let menu = Rc::new(Menu::new(&ui));
+        let route = navigate.clone();
+        let overview = MenuItem::new(&ui, "All").on_click(move || route(1));
+        overview.ns_menu_item().setTag(1);
+        menu.add(overview);
+        for (title, range) in [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)] {
+            menu.ns_menu().addItem(&objc2_app_kit::NSMenuItem::sectionHeaderWithTitle(
+                &objc2_foundation::NSString::from_str(title), ui.mtm()));
+            for index in range {
+                let route = navigate.clone();
+                let item = MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).on_click(move || route(9 + index));
+                item.ns_menu_item().setTag((9 + index) as isize);
+                menu.add(item);
+            }
+        }
+        let history_back = history.clone();
+        let route_back = navigate.clone();
+        let route_forward = navigate.clone();
+        let history_forward = history.clone();
+        window.toolbar().set_navigation(&ui, move || {
+            let id = history_back.borrow_mut().step(false);
+            if let Some(id) = id { route_back(id); }
+        }, move || {
+            let id = history_forward.borrow_mut().step(true);
+            if let Some(id) = id { route_forward(id); }
+        }, menu);
+        window.toolbar().update_navigation(false, false, "General", false);
         *model.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
         *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
         window.ns_window().setContentSize(CGSize::new(880.0, 660.0));
@@ -470,8 +451,7 @@ impl Settings {
             model,
             _host: host,
             pages,
-            selected,
-            _navigation: navigation,
+            history,
         }
     }
 
@@ -482,25 +462,18 @@ impl Settings {
         pages: &Rc<RefCell<Vec<Option<Page>>>>,
         id: usize,
     ) {
-        model.page_title.set_text(
-            [
-                "General",
-                "Layouts",
-                "Workspaces",
-                "Rules",
-                "Keyboard",
-                "Mouse & Trackpad",
-                "Interface",
-                "Advanced",
-                "About",
-            ][id],
-        );
-        if pages.borrow()[id].is_none() {
-            let page = pages::build(ui, model, id);
-            pages.borrow_mut()[id] = Some(page);
+        let category = if id >= 9 { 1 } else { id };
+        let title = if id >= 9 { pages::LAYOUT_PAGES[id - 9].0 } else {
+            ["General", "Layouts", "Workspaces", "Rules", "Keyboard", "Mouse & Trackpad", "Interface", "Advanced", "About"][id]
+        };
+        model.page_title.set_text(if id >= 9 { "Layouts" } else { title });
+        if id >= 9 {
+            pages.borrow_mut()[1] = Some(pages::layout_scope(ui, model, id - 9));
+        } else if pages.borrow()[category].is_none() {
+            pages.borrow_mut()[category] = Some(pages::build(ui, model, category));
         }
         let pages = pages.borrow();
-        let page = pages[id].as_ref().unwrap();
+        let page = pages[category].as_ref().unwrap();
         page.synchronize(model);
         host.set_cached_page(page.view.clone());
     }
@@ -541,7 +514,8 @@ impl Settings {
         if *self.model.displays.borrow() != displays {
             *self.model.displays.borrow_mut() = displays;
             self.pages.borrow_mut()[1] = None;
-            if self.selected.get() != 1 {
+            let id = self.history.borrow().history[self.history.borrow().cursor];
+            if id != 1 && id < 9 {
                 return;
             }
             self._host.clear();
@@ -550,7 +524,7 @@ impl Settings {
                 &self.model,
                 &self._host,
                 &self.pages,
-                self.selected.get(),
+                id,
             );
         }
     }
@@ -573,7 +547,8 @@ impl Settings {
                     page.synchronize(draft);
                 }
             }
-            if let Some(page) = &self.pages.borrow()[self.selected.get()] {
+            let id = self.history.borrow().history[self.history.borrow().cursor];
+            if let Some(page) = &self.pages.borrow()[if id >= 9 { 1 } else { id }] {
                 page.synchronize(&self.model);
             }
         }
@@ -835,25 +810,28 @@ impl FormBuilder {
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> Vec<Box<dyn NativeView>> {
-        let (slider, input, message) = self.numeric_controls(
-            title, 1.0, true, Some(Rc::new(|_| (0.0, 100.0))), get, set,
-        );
+        let (slider, input, message) =
+            self.numeric_controls(title, 1.0, true, Some(Rc::new(|_| (0.0, 100.0))), get, set);
         let slider = slider.unwrap();
         slider.width(120.0);
-        input.width(60.0);
+        input.width(44.0);
         input.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Left);
         let value_field = UnitField::new(&self.ui, input.ns_text_field(), "pt");
         value_field.width(82.0);
-        let value = VStack::new(&self.ui).spacing(2.0)
-            .push(value_field)
-            .push(message);
+        let value = VStack::new(&self.ui).spacing(2.0).push(value_field).push(message);
         // Keep the Rust field/delegate alive as well as its native view.
-        struct ValueCell { view: VStack, _input: Rc<NumberField> }
+        struct ValueCell {
+            view: VStack,
+            _input: Rc<NumberField>,
+        }
         impl NativeView for ValueCell {
             fn ns_view(&self) -> &objc2_app_kit::NSView { self.view.ns_view() }
         }
-        vec![Box::new(Label::new(&self.ui, title)), Box::new(slider),
-            Box::new(ValueCell { view: value, _input: input })]
+        vec![
+            Box::new(Label::new(&self.ui, title)),
+            Box::new(slider),
+            Box::new(ValueCell { view: value, _input: input }),
+        ]
     }
 
     fn text(

@@ -131,66 +131,47 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
         .push(Section::new(&ui, "Resources").content(resources))
 }
 
+pub(super) const LAYOUT_PAGES: [(&str, &str); 9] = [
+    ("Default behavior", "gearshape"),
+    ("Traditional", "rectangle.split.2x2"),
+    ("BSP", "rectangle.split.2x1"),
+    ("Stack", "square.3.layers.3d"),
+    ("Master Stack", "sidebar.left"),
+    ("Scrolling", "rectangle.split.3x1"),
+    ("Floating", "macwindow"),
+    ("Spacing", "arrow.up.left.and.arrow.down.right"),
+    ("Displays", "display"),
+];
+
 fn layout(ui: Ui, model: &Rc<Model>) -> Page {
-    layout_search_scope(ui, model, 0)
+    let f = FormBuilder::new(ui, model);
+    let mut page = SettingsPage::new(&ui, "Layouts");
+    for (title, range) in [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)] {
+        let weak = Rc::downgrade(model);
+        let start = range.start;
+        let list = SettingsList::new(
+            &ui,
+            |index: &usize| LAYOUT_PAGES[*index].0.into(),
+            |_| String::new(),
+        )
+        .full_length()
+        .navigation()
+        .trailing_summary()
+        .symbols(|index| LAYOUT_PAGES[*index].1.into())
+        .on_open(move |index| {
+            if let Some(model) = weak.upgrade() {
+                if let Some(navigate) = model.navigate.borrow().as_ref() {
+                    navigate(9 + start + index);
+                }
+            }
+        });
+        list.set_rows(range.collect());
+        page = page.section(Section::new(&ui, title).content(list));
+    }
+    f.finish(page)
 }
 
-pub(super) fn layout_search_scope(ui: Ui, model: &Rc<Model>, initial: usize) -> Page {
-    let mut f = FormBuilder::new(ui, model);
-    let host = Rc::new(PageHost::new(&ui));
-    let current = Rc::new(RefCell::new(Rc::new(layout_scope(ui, model, initial))));
-    current.borrow().synchronize(model);
-    host.set_page(current.borrow().view.clone());
-    let selected = Rc::new(Cell::new(initial));
-    let weak_model = Rc::downgrade(model);
-    let weak_host = Rc::downgrade(&host);
-    let active = current.clone();
-    let selection = selected.clone();
-    let entries = [
-        ("Default behavior", "gearshape"),
-        ("Traditional", "rectangle.split.2x2"),
-        ("BSP", "rectangle.split.2x1"),
-        ("Stack", "square.3.layers.3d"),
-        ("Master Stack", "sidebar.left"),
-        ("Scrolling", "rectangle.split.3x1"),
-        ("Floating", "macwindow"),
-        ("Spacing", "arrow.up.left.and.arrow.down.right"),
-        ("Displays", "display"),
-    ];
-    let browser = Sidebar::with_children(&ui, vec![
-        SidebarItem { id: 100, title: "Default".into(), symbol: String::new() },
-        SidebarItem { id: 101, title: "Layouts".into(), symbol: String::new() },
-        SidebarItem { id: 102, title: "Global".into(), symbol: String::new() },
-    ], move |group| {
-        let range = match group { 100 => 0..1, 101 => 1..7, _ => 7..9 };
-        range.map(|id| {
-            let (title, symbol) = entries[id];
-            SidebarItem { id, title: title.into(), symbol: symbol.into() }
-        }).collect()
-    }).on_select(move |index| {
-        if selection.get() == index { return; }
-        if let (Some(model), Some(host)) = (weak_model.upgrade(), weak_host.upgrade()) {
-            let page = Rc::new(layout_scope(ui, &model, index));
-            page.synchronize(&model);
-            host.set_page(page.view.clone());
-            *active.borrow_mut() = page;
-            selection.set(index);
-        }
-    });
-    browser.group_parents();
-    browser.set_selected([1, 3, 4, 5, 6, 7, 8, 10, 11][initial]);
-    let split = MasterDetail::new(&ui, browser, host);
-    let item = split.ns_split_view_controller().splitViewItems().objectAtIndex(0);
-    item.setMinimumThickness(170.0);
-    item.setMaximumThickness(200.0);
-    let weak_model = Rc::downgrade(model);
-    f.sync.push(Box::new(move |_| {
-        if let Some(model) = weak_model.upgrade() { current.borrow().synchronize(&model); }
-    }));
-    f.finish(split)
-}
-
-fn layout_scope(ui: Ui, model: &Rc<Model>, index: usize) -> Page {
+pub(super) fn layout_scope(ui: Ui, model: &Rc<Model>, index: usize) -> Page {
     match index {
         0 => layout_defaults(ui, model),
         1..=6 => layout_options(ui, model, layouts()[index - 1].1),
@@ -225,7 +206,7 @@ pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) 
     // Match the grid's 128 + 120 + 82 point columns and two 12 point gaps.
     // A wider canvas was compressed by the editor while its window geometry
     // still used the original width, making equal edge insets look unequal.
-    let preview = Rc::new(LayoutPreview::new(&ui, CGSize::new(354.0, 190.0)));
+    let preview = Rc::new(LayoutPreview::new(&ui, CGSize::new(354.0, 160.0)));
     let illustration = preview.clone();
     let update: Rc<dyn Fn(&ConfigSource)> = Rc::new(move |s| {
         let size = illustration.canvas_size();
@@ -241,11 +222,26 @@ pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) 
         let half = ((width - horizontal) / 2.0).max(8.0);
         let right = left + half + horizontal;
         let half_height = ((height - vertical) / 2.0).max(8.0);
-        illustration.set_windows(&[
-            PreviewWindow::new(0, CGRect::new(CGPoint::new(left, top), CGSize::new(half, height))),
-            PreviewWindow::new(1, CGRect::new(CGPoint::new(right, top), CGSize::new(half, half_height))),
-            PreviewWindow::new(2, CGRect::new(CGPoint::new(right, top + half_height + vertical), CGSize::new(half, half_height))),
-        ], PreviewAnimation::default());
+        illustration.set_windows(
+            &[
+                PreviewWindow::new(
+                    0,
+                    CGRect::new(CGPoint::new(left, top), CGSize::new(half, height)),
+                ),
+                PreviewWindow::new(
+                    1,
+                    CGRect::new(CGPoint::new(right, top), CGSize::new(half, half_height)),
+                ),
+                PreviewWindow::new(
+                    2,
+                    CGRect::new(
+                        CGPoint::new(right, top + half_height + vertical),
+                        CGSize::new(half, half_height),
+                    ),
+                ),
+            ],
+            PreviewAnimation::default(),
+        );
     });
     f.gap_preview = Some(update.clone());
     f.sync.push(Box::new(move |source| update(source)));
@@ -253,40 +249,144 @@ pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) 
     preview
 }
 
+fn set_spacing_gap(
+    source: &mut ConfigSource,
+    display: Option<&str>,
+    outer: bool,
+    axis: Option<usize>,
+    value: f64,
+) {
+    let mut gaps = source.settings.layout.gaps.effective_for_display(display);
+    if outer {
+        if let Some(axis) = axis {
+            match axis {
+                0 => gaps.outer.top = value,
+                1 => gaps.outer.right = value,
+                2 => gaps.outer.bottom = value,
+                _ => gaps.outer.left = value,
+            }
+        } else {
+            gaps.outer = OuterGaps {
+                top: value,
+                right: value,
+                bottom: value,
+                left: value,
+            };
+        }
+    } else if let Some(axis) = axis {
+        if axis == 0 {
+            gaps.inner.horizontal = value;
+        } else {
+            gaps.inner.vertical = value;
+        }
+    } else {
+        gaps.inner.horizontal = value;
+        gaps.inner.vertical = value;
+    }
+    if let Some(display) = display {
+        let entry = source.settings.layout.gaps.per_display.entry(display.to_owned()).or_default();
+        if outer {
+            entry.outer = Some(gaps.outer);
+        } else {
+            entry.inner = Some(gaps.inner);
+        }
+    } else if outer {
+        source.settings.layout.gaps.outer = gaps.outer;
+    } else {
+        source.settings.layout.gaps.inner = gaps.inner;
+    }
+}
+
 fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
-    let mut f = FormBuilder::new(ui, model);
-    let preview = gap_preview(ui, &mut f, None);
+    use crate::sys::screen::NSScreenExt;
+    let screen = model
+        .window
+        .borrow()
+        .load()
+        .and_then(|window| window.screen())
+        .and_then(|screen| screen.get_number().ok());
     let source = model.source.borrow();
-    let outer = &source.settings.layout.gaps.outer;
-    let inner = &source.settings.layout.gaps.inner;
-    let custom = outer.top != outer.bottom || outer.top != outer.left || outer.top != outer.right || inner.horizontal != inner.vertical;
+    let display = model
+        .displays
+        .borrow()
+        .iter()
+        .find(|display| Some(display.id) == screen)
+        .filter(|display| {
+            source.settings.layout.gaps.per_display.contains_key(&display.display_uuid)
+                || source.settings.layout.scrolling.per_display.contains_key(&display.display_uuid)
+        })
+        .map(|display| {
+            (
+                display.display_uuid.clone(),
+                display
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Display {}", display.id.as_u32())),
+            )
+        });
+    let uuid = display.as_ref().map(|(uuid, _)| uuid.clone());
+    let gaps = source.settings.layout.gaps.effective_for_display(uuid.as_deref());
+    let custom = gaps.outer.top != gaps.outer.bottom
+        || gaps.outer.top != gaps.outer.left
+        || gaps.outer.top != gaps.outer.right
+        || gaps.inner.horizontal != gaps.inner.vertical;
     drop(source);
+    let mut f = FormBuilder::new(ui, model);
+    let preview = gap_preview(ui, &mut f, uuid.clone());
     let form = |grid: Grid| {
         grid.ns_grid_view().columnAtIndex(0).setWidth(128.0);
         grid.ns_grid_view().columnAtIndex(1).setWidth(120.0);
         grid.ns_grid_view().columnAtIndex(2).setWidth(82.0);
-        grid.ns_grid_view().setRowAlignment(objc2_app_kit::NSGridRowAlignment::FirstBaseline);
+        grid.ns_grid_view()
+            .setRowAlignment(objc2_app_kit::NSGridRowAlignment::FirstBaseline);
         grid
     };
-    let simple = Rc::new(form(Grid::new(&ui).spacing(8.0, 12.0)
-        .row(f.gap_cells("Screen edges",
-            |s| s.settings.layout.gaps.outer.top,
-            |s, v| s.settings.layout.gaps.outer = OuterGaps { top: v, bottom: v, left: v, right: v }))
-        .row(f.gap_cells("Between windows",
-            |s| s.settings.layout.gaps.inner.horizontal,
-            |s, v| { s.settings.layout.gaps.inner.horizontal = v; s.settings.layout.gaps.inner.vertical = v; }))));
-    let mut edge_grid = Grid::new(&ui).spacing(8.0, 12.0);
+    let mut row = |name: &str, outer: bool, axis: Option<usize>| {
+        let read = uuid.clone();
+        let write = uuid.clone();
+        f.gap_cells(
+            name,
+            move |source| {
+                let gaps = source.settings.layout.gaps.effective_for_display(read.as_deref());
+                if outer {
+                    [
+                        gaps.outer.top,
+                        gaps.outer.right,
+                        gaps.outer.bottom,
+                        gaps.outer.left,
+                    ][axis.unwrap_or(0)]
+                } else {
+                    [gaps.inner.horizontal, gaps.inner.vertical][axis.unwrap_or(0)]
+                }
+            },
+            move |source, value| set_spacing_gap(source, write.as_deref(), outer, axis, value),
+        )
+    };
+    let simple = Rc::new(form(
+        Grid::new(&ui).spacing(8.0, 12.0).row(row("Screen edges", true, None)).row(row(
+            "Between windows",
+            false,
+            None,
+        )),
+    ));
+    let mut edges = Grid::new(&ui).spacing(8.0, 12.0);
     for (axis, name) in ["Top", "Right", "Bottom", "Left"].into_iter().enumerate() {
-        edge_grid = edge_grid.row(f.gap_cells(name,
-            move |s| { let g = &s.settings.layout.gaps.outer; [g.top, g.right, g.bottom, g.left][axis] },
-            move |s, v| { let g = &mut s.settings.layout.gaps.outer; match axis { 0 => g.top = v, 1 => g.right = v, 2 => g.bottom = v, _ => g.left = v } }));
+        edges = edges.row(row(name, true, Some(axis)));
     }
-    let between = form(Grid::new(&ui).spacing(8.0, 12.0)
-        .row(f.gap_cells("Horizontal", |s| s.settings.layout.gaps.inner.horizontal, |s, v| s.settings.layout.gaps.inner.horizontal = v))
-        .row(f.gap_cells("Vertical", |s| s.settings.layout.gaps.inner.vertical, |s, v| s.settings.layout.gaps.inner.vertical = v)));
-    let custom_form = Rc::new(VStack::new(&ui).spacing(10.0)
-        .push(SubsectionTitle::new(&ui, "Screen edges")).push(form(edge_grid))
-        .push(SubsectionTitle::new(&ui, "Between windows")).push(between));
+    let between = form(
+        Grid::new(&ui)
+            .spacing(8.0, 12.0)
+            .row(row("Horizontal", false, Some(0)))
+            .row(row("Vertical", false, Some(1))),
+    );
+    let custom_form = Rc::new(
+        VStack::new(&ui)
+            .spacing(10.0)
+            .push(SubsectionTitle::new(&ui, "Screen edges"))
+            .push(form(edges))
+            .push(SubsectionTitle::new(&ui, "Between windows"))
+            .push(between),
+    );
     simple.set_hidden(custom);
     custom_form.set_hidden(!custom);
     let (weak_simple, weak_custom) = (Rc::downgrade(&simple), Rc::downgrade(&custom_form));
@@ -297,12 +397,27 @@ fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
         }
     });
     mode.set_selected(usize::from(custom));
-    let editor = VStack::new(&ui).spacing(10.0)
-        .push(preview).push(HStack::new(&ui).push(mode).push(Spacer::new(&ui)))
-        .push(simple).push(custom_form);
-    let page = SettingsPage::new(&ui, "Spacing").subtitle("Applied to every layout.")
-        .content_spacing(12.0).section(editor);
-    f.finish(page)
+    let editor = VStack::new(&ui)
+        .spacing(10.0)
+        .push(preview)
+        .push(HStack::new(&ui).push(mode).push(Spacer::new(&ui)))
+        .push(simple)
+        .push(custom_form);
+    let mut page = SettingsPage::new(&ui, "Spacing").content_spacing(10.0);
+    if let Some((_, name)) = display {
+        let mut scope = HStack::new(&ui).spacing(6.0);
+        if let Some(symbol) = ImageView::symbol(&ui, "display") {
+            symbol.width(14.0);
+            symbol.height(14.0);
+            scope = scope.push(symbol);
+        }
+        page = page
+            .section(scope.push(SecondaryLabel::new(&ui, &name)))
+            .subtitle("Editing this display’s spacing override.");
+    } else {
+        page = page.subtitle("Applied to every layout.");
+    }
+    f.finish(page.section(editor))
 }
 
 fn percentage_text(ratio: f64) -> String {

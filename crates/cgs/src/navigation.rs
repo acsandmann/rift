@@ -218,7 +218,7 @@ impl NativeView for MasterDetail {
 struct NavigationToolbarItems {
     title: Option<Rc<Label>>,
     back: Retained<NSToolbarItem>,
-    navigation: std::cell::RefCell<Option<Retained<NSToolbarItem>>>,
+    navigation: std::cell::RefCell<Vec<Retained<NSToolbarItem>>>,
 }
 
 define_class!(
@@ -236,8 +236,14 @@ define_class!(
             identifier: &NSToolbarItemIdentifier,
             _insert: bool,
         ) -> Option<Retained<NSToolbarItem>> {
-            if identifier.to_string() == "cgs.navigation" {
-                self.ivars().navigation.borrow().clone()
+            if let Some(item) = self
+                .ivars()
+                .navigation
+                .borrow()
+                .iter()
+                .find(|item| &*item.itemIdentifier() == identifier)
+            {
+                Some(item.clone())
             } else if identifier.to_string() == "cgs.back" {
                 Some(self.ivars().back.clone())
             } else {
@@ -261,7 +267,7 @@ define_class!(
         fn allowed(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSToolbarItemIdentifier>> {
             let mut ids: Vec<_> = self.item_identifiers().iter().collect();
             ids.push(NSString::from_str("cgs.back"));
-            ids.push(NSString::from_str("cgs.navigation"));
+            ids.extend(self.ivars().navigation.borrow().iter().map(|item| item.itemIdentifier()));
             NSArray::from_retained_slice(&ids)
         }
 
@@ -294,6 +300,8 @@ pub struct Toolbar {
     native: Retained<NSToolbar>,
     delegate: Option<Retained<NavigationToolbarDelegate>>,
     back_target: Retained<crate::bridge::ActionTarget>,
+    forward_target: Retained<crate::bridge::ActionTarget>,
+    menu: std::cell::RefCell<Option<(Rc<crate::Menu>, Retained<NSPopUpButton>)>>,
 }
 impl Toolbar {
     pub fn new(ui: &Ui, id: &str) -> Self {
@@ -304,6 +312,8 @@ impl Toolbar {
             ),
             delegate: None,
             back_target: crate::bridge::ActionTarget::new(ui),
+            forward_target: crate::bridge::ActionTarget::new(ui),
+            menu: std::cell::RefCell::new(None),
         }
     }
 
@@ -327,10 +337,13 @@ impl Toolbar {
         }
         let delegate: Retained<NavigationToolbarDelegate> = unsafe {
             msg_send![
-                super(
-                    NavigationToolbarDelegate::alloc(ui.mtm())
-                        .set_ivars(NavigationToolbarItems { title, back, navigation: std::cell::RefCell::new(None) })
-                ),
+                super(NavigationToolbarDelegate::alloc(ui.mtm()).set_ivars(
+                    NavigationToolbarItems {
+                        title,
+                        back,
+                        navigation: std::cell::RefCell::new(Vec::new())
+                    }
+                )),
                 init
             ]
         };
@@ -394,16 +407,112 @@ impl Toolbar {
         }
     }
 
-    pub fn set_navigation_control(&self, ui: &Ui, control: &impl NativeView) {
-        let Some(delegate) = &self.delegate else { return };
-        let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.navigation"));
-        item.setView(Some(control.ns_view()));
-        item.setNavigational(true);
-        *delegate.ivars().navigation.borrow_mut() = Some(item);
-        let index = self.native.items().iter().position(|item| item.itemIdentifier().to_string() == "cgs.page-title").unwrap_or(0);
-        self.native.insertItemWithItemIdentifier_atIndex(&NSString::from_str("cgs.navigation"), index as isize);
+    /// Standard toolbar arrows and a native title menu; AppKit owns their appearance.
+    pub fn set_navigation(
+        &self,
+        ui: &Ui,
+        mut back: impl FnMut() + 'static,
+        mut forward: impl FnMut() + 'static,
+        menu: Rc<crate::Menu>,
+    ) {
+        let Some(delegate) = &self.delegate else {
+            return;
+        };
+        self.back_target.set(move |_| back());
+        self.forward_target.set(move |_| forward());
+        let next = NSToolbarItem::initWithItemIdentifier(
+            NSToolbarItem::alloc(ui.mtm()),
+            &NSString::from_str("cgs.forward"),
+        );
+        next.setLabel(&NSString::from_str("Forward"));
+        next.setToolTip(Some(&NSString::from_str("Forward")));
+        next.setImage(Symbol::named("chevron.forward").as_deref());
+        next.setNavigational(true);
+        next.setAutovalidates(false);
+        next.setBordered(false);
+        unsafe {
+            next.setTarget(Some(&self.forward_target));
+            next.setAction(Some(objc2::sel!(invoke:)));
+        }
+        let title = NSMenuToolbarItem::initWithItemIdentifier(
+            NSMenuToolbarItem::alloc(ui.mtm()),
+            &NSString::from_str("cgs.page-menu"),
+        );
+        title.setMenu(menu.ns_menu());
+        // Pull-down titles stay visible in an icon-only toolbar; the menu is entirely native.
+        let placeholder = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(ui.mtm()),
+                &NSString::from_str(""),
+                None,
+                &NSString::from_str(""),
+            )
+        };
+        placeholder.setHidden(true);
+        placeholder.setImage(Symbol::named("line.3.horizontal.decrease").as_deref());
+        menu.ns_menu().insertItem_atIndex(&placeholder, 0);
+        let popup = NSPopUpButton::initWithFrame_pullsDown(
+            NSPopUpButton::alloc(ui.mtm()),
+            CGRect::ZERO,
+            true,
+        );
+        popup.setBordered(true);
+        popup.setBezelStyle(crate::control::action_button_bezel());
+        popup.setImagePosition(NSCellImagePosition::ImageLeading);
+        popup.setFont(Some(&crate::Font::section_title()));
+        popup.setMenu(Some(menu.ns_menu()));
+        title.setView(Some(&popup));
+        title.setBordered(true);
+        title.setAutovalidates(false);
+        delegate.ivars().back.setBordered(false);
+        delegate.ivars().back.setToolTip(Some(&NSString::from_str("Back")));
+        *delegate.ivars().navigation.borrow_mut() = vec![next, title.into_super()];
+        *self.menu.borrow_mut() = Some((menu, popup));
+        let index = self
+            .native
+            .items()
+            .iter()
+            .position(|item| item.itemIdentifier().to_string() == "cgs.page-title")
+            .unwrap_or(0);
+        for (offset, identifier) in ["cgs.back", "cgs.forward"].into_iter().enumerate() {
+            self.native.insertItemWithItemIdentifier_atIndex(&NSString::from_str(identifier), (index + offset) as isize);
+        }
     }
 
+    pub fn update_navigation(&self, back: bool, forward: bool, title: &str, has_menu: bool) {
+        let Some(delegate) = &self.delegate else {
+            return;
+        };
+        delegate.ivars().back.setEnabled(back);
+        let items = delegate.ivars().navigation.borrow();
+        if let Some(item) = items.first() {
+            item.setEnabled(forward);
+        }
+        if let Some(item) = items.get(1).and_then(|item| item.downcast_ref::<NSMenuToolbarItem>()) {
+            item.setLabel(&NSString::from_str(title));
+            if let Some((menu, popup)) = self.menu.borrow().as_ref() {
+                for entry in menu.ns_menu().itemArray() {
+                    if entry.tag() == 1 || entry.tag() >= 9 {
+                        entry.setState(if entry.title().to_string() == title {
+                            NSControlStateValueOn
+                        } else {
+                            NSControlStateValueOff
+                        });
+                    }
+                }
+                popup.setTitle(&NSString::from_str(title));
+                popup.sizeToFit();
+                item.setView(Some(popup));
+            }
+            item.setShowsIndicator(true);
+        }
+        let index = self.native.items().iter().position(|item| item.itemIdentifier().to_string() == "cgs.page-menu");
+        if has_menu && index.is_none() {
+            self.native.insertItemWithItemIdentifier_atIndex(&NSString::from_str("cgs.page-menu"), self.native.items().len() as isize);
+        } else if !has_menu {
+            if let Some(index) = index { self.native.removeItemAtIndex(index as isize); }
+        }
+    }
     pub fn ns_toolbar(&self) -> &NSToolbar { &self.native }
 }
 
@@ -413,6 +522,10 @@ impl Drop for Toolbar {
             unsafe {
                 delegate.ivars().back.setTarget(None);
                 delegate.ivars().back.setAction(None);
+                for item in delegate.ivars().navigation.borrow().iter() {
+                    item.setTarget(None);
+                    item.setAction(None);
+                }
             }
         }
         self.native.setDelegate(None);
