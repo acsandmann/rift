@@ -298,6 +298,15 @@ impl AXUIElement {
 
     pub fn children(&self) -> Result<Vec<AXUIElement>> { self.elements_attribute("AXChildren") }
 
+    pub fn has_native_tabs(&self) -> bool {
+        self.children().is_ok_and(|children| {
+            children.into_iter().any(|child| {
+                child.role().is_ok_and(|role| role == "AXTabGroup")
+                    && child.elements_attribute("AXTabs").is_ok_and(|tabs| tabs.len() > 1)
+            })
+        })
+    }
+
     pub fn parent(&self) -> Result<Option<AXUIElement>> {
         let Some(value) = self.copy_attribute("AXParent")? else {
             return Ok(None);

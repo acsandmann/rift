@@ -10,6 +10,7 @@ mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
 mod main_window;
 mod managers;
+mod native_tabs;
 mod query;
 mod replay;
 pub mod transaction_manager;
@@ -437,6 +438,10 @@ pub struct Reactor {
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
     layout_update_count: usize,
+    #[cfg(test)]
+    native_focus_for_removal: Option<WindowId>,
+    #[cfg(test)]
+    native_tab_successor: Option<(WindowId, CGRect)>,
 }
 
 impl Reactor {
@@ -569,6 +574,10 @@ impl Reactor {
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
             layout_update_count: 0,
+            #[cfg(test)]
+            native_focus_for_removal: None,
+            #[cfg(test)]
+            native_tab_successor: None,
         };
         reactor
     }
@@ -1465,8 +1474,9 @@ impl Reactor {
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
-            Event::WindowCreated(wid, window, ws_info, mouse_state) => {
+            Event::WindowCreated(wid, mut window, ws_info, mouse_state) => {
                 let _ = mouse_state;
+                self.replace_native_tab(wid, &mut window);
                 let mut outcome = window_workflow::handle_window_created(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -1489,6 +1499,10 @@ impl Reactor {
                     return Ok(EventOutcome::default());
                 }
 
+                if self.retain_native_tab_slot_on_departure(wid) {
+                    return Ok(EventOutcome::default());
+                }
+
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
@@ -1503,6 +1517,9 @@ impl Reactor {
                     self.state.windows.mark_window_hidden(wsid);
                     return Ok(EventOutcome::default());
                 };
+                if self.retain_native_tab_slot_on_departure(wid) {
+                    return Ok(EventOutcome::default());
+                }
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
@@ -1543,6 +1560,12 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 }
                 let tracked_window = self.state.windows.tracked_window_id(wsid);
+                if matches!(kind, SpaceEventKind::User)
+                    && tracked_window
+                        .is_some_and(|wid| self.retain_native_tab_slot_on_departure(wid))
+                {
+                    return Ok(EventOutcome::default());
+                }
                 let last_known_user_space = tracked_window
                     .and_then(|window| self.best_space_for_window_id(window))
                     .or_else(|| self.space_state.iter_known_spaces().next());
@@ -3349,10 +3372,14 @@ impl Reactor {
     fn on_windows_discovered_with_app_info(
         &mut self,
         pid: pid_t,
-        new: Vec<(WindowId, WindowInfo)>,
+        mut new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
         app_info: Option<AppInfo>,
     ) {
+        // Rebind the visible tab before inventory retirement removes its old slot.
+        for (wid, info) in &mut new {
+            self.replace_native_tab(*wid, info);
+        }
         let app_info =
             app_info.or_else(|| self.app_manager.apps.get(&pid).map(|app| app.info.clone()));
         // AX can observe a native move before the display callback. It may refresh
@@ -4822,7 +4849,13 @@ impl Reactor {
     }
 
     fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {
-        if self.window_in_non_active_workspace(space, window_id) {
+        // Membership refreshes also observe unfocused windows on inactive
+        // workspaces. Only hidden focus needs a replacement; otherwise this
+        // would activate that display's selection and warp the cursor back.
+        if (self.main_window() == Some(window_id)
+            || self.layout_manager.layout_engine.focused_window() == Some(window_id))
+            && self.window_in_non_active_workspace(space, window_id)
+        {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
         }
     }
@@ -4854,6 +4887,33 @@ impl Reactor {
                 .filter(|space| self.is_space_active(*space))
                 .or_else(|| self.workspace_command_space())
         {
+            // A native tab departure can arrive before either AX or the debounced
+            // WindowServer focus notification. Sample native focus before raising
+            // a fallback, otherwise that raise can steal focus from the new tab.
+            #[cfg(not(test))]
+            let native_focus = matches!(event, LayoutEvent::WindowRemoved(_))
+                .then(|| window_server::key_focused_window(space))
+                .flatten();
+            #[cfg(test)]
+            let native_focus = self.native_focus_for_removal;
+            if matches!(event, LayoutEvent::WindowRemoved(_))
+                && let Some(native) = native_focus
+                && native.pid == wid.pid
+                && native != wid
+            {
+                let successor = self
+                    .state
+                    .windows
+                    .tracked_window_id(WindowServerId::new(native.idx.get()))
+                    .unwrap_or(native);
+                if successor != wid && !self.window_in_non_active_workspace(space, successor) {
+                    if !self.state.windows.contains_window(successor) {
+                        self.request_window_inventory(successor.pid);
+                    }
+                    debug!(?wid, ?successor, "Preserving native focus during window removal");
+                    return;
+                }
+            }
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
         }
     }
@@ -4864,9 +4924,7 @@ impl Reactor {
                 self.request_refocus_if_hidden(*space, *wid);
             }
             LayoutEvent::WindowObserved(space, window) => {
-                if self.window_in_non_active_workspace(*space, window.info.window_id) {
-                    self.refocus_manager.refocus_state = RefocusState::Pending(*space);
-                }
+                self.request_refocus_if_hidden(*space, window.info.window_id);
             }
             _ => {}
         }
