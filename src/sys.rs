@@ -33,10 +33,4 @@ pub mod window_notify;
 pub mod window_server;
 
 #[inline(always)]
-pub fn cg_ok(err: CGError) -> Result<(), CGError> {
-    if err == CGError::Success {
-        Ok(())
-    } else {
-        Err(err)
-    }
-}
+pub fn cg_ok(err: CGError) -> Result<(), CGError> { if err == CGError::Success { Ok(()) } else { Err(err) } }

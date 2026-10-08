@@ -188,9 +188,11 @@ impl SettingsWindow {
     }
 
     pub fn page_title(mut self, ui: &Ui, title: Rc<crate::Label>) -> Self {
-        title.ns_text_field().setFont(Some(&NSFont::systemFontOfSize_weight(
-            15.0, unsafe { NSFontWeightSemibold },
-        )));
+        title
+            .ns_text_field()
+            .setFont(Some(&NSFont::systemFontOfSize_weight(15.0, unsafe {
+                NSFontWeightSemibold
+            })));
         title.max_width(180.0);
         title.height(20.0);
         self.0.native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
@@ -272,8 +274,7 @@ impl Sheet {
             {
                 return event.as_ptr();
             }
-            let cancel =
-                sheet.contentView().and_then(|view| sheet_button(&view, "cgs.sheet-cancel"));
+            let cancel = sheet.contentView().and_then(|view| sheet_button(&view, "cgs.sheet-cancel"));
             if !escape && cancel.as_ref().is_some_and(|button| !button.isHidden()) {
                 if let Some(button) =
                     sheet.contentView().and_then(|view| sheet_button(&view, "cgs.sheet-primary"))

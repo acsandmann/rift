@@ -77,7 +77,8 @@ impl EventLoopWaker {
             RIFT_WAKE_EVENT_SUBTYPE,
             RIFT_WAKE_EVENT_DATA,
             0,
-        ).expect("unable to create Rift's Cocoa wake event")
+        )
+        .expect("unable to create Rift's Cocoa wake event")
     }
 
     fn consume_wake(&self) {
@@ -297,17 +298,19 @@ mod tests {
     #[test]
     fn only_rift_tagged_application_events_are_consumed() {
         assert!(EventLoopWaker::is_rift_wake(&EventLoopWaker::make_wake_event()));
-        let other = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-            NSEventType::ApplicationDefined,
-            NSPoint::ZERO,
-            NSEventModifierFlags::empty(),
-            0.0,
-            0,
-            None,
-            RIFT_WAKE_EVENT_SUBTYPE,
-            0,
-            0,
-        ).unwrap();
+        let other =
+            NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::ApplicationDefined,
+                NSPoint::ZERO,
+                NSEventModifierFlags::empty(),
+                0.0,
+                0,
+                None,
+                RIFT_WAKE_EVENT_SUBTYPE,
+                0,
+                0,
+            )
+            .unwrap();
         assert!(!EventLoopWaker::is_rift_wake(&other));
     }
 }

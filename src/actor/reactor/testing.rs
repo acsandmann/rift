@@ -138,8 +138,7 @@ impl Reactor {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     ) {
-        let token = if let Some(token) = self.window_inventory_manager.in_flight.get(&pid).copied()
-        {
+        let token = if let Some(token) = self.window_inventory_manager.in_flight.get(&pid).copied() {
             token
         } else {
             self.window_inventory_manager.next_request_id += 1;
@@ -197,12 +196,7 @@ impl Reactor {
         self.insert_test_window(wid, wsid, space, frame, is_manageable);
     }
 
-    pub fn track_test_window_server_info(
-        &mut self,
-        wsid: WindowServerId,
-        pid: pid_t,
-        frame: CGRect,
-    ) {
+    pub fn track_test_window_server_info(&mut self, wsid: WindowServerId, pid: pid_t, frame: CGRect) {
         self.state.windows.track_window_server_info(WindowServerInfo {
             id: wsid,
             pid,
@@ -327,13 +321,9 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
             .iter()
             .filter_map(|s| s.space)
             .flat_map(|space| {
-                crate::sys::window_server::space_window_list_for_connection(
-                    &[space.get()],
-                    0,
-                    false,
-                )
-                .into_iter()
-                .map(move |id| (WindowServerId::new(id), space))
+                crate::sys::window_server::space_window_list_for_connection(&[space.get()], 0, false)
+                    .into_iter()
+                    .map(move |id| (WindowServerId::new(id), space))
             })
             .collect(),
         screens: screens.clone(),
@@ -543,12 +533,7 @@ impl Apps {
         }
     }
 
-    pub fn make_app_and_settle(
-        &mut self,
-        reactor: &mut Reactor,
-        pid: pid_t,
-        windows: Vec<WindowInfo>,
-    ) {
+    pub fn make_app_and_settle(&mut self, reactor: &mut Reactor, pid: pid_t, windows: Vec<WindowInfo>) {
         reactor.handle_events(self.make_app(pid, windows));
         self.simulate_until_quiet(reactor);
     }

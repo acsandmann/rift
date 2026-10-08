@@ -99,9 +99,7 @@ impl SpaceActivationPolicy {
             let Some(new_display) = screen.display_uuid_opt() else {
                 continue;
             };
-            if let Some(previous_display) =
-                self.last_known_display_by_screen.get(&screen.id).cloned()
-            {
+            if let Some(previous_display) = self.last_known_display_by_screen.get(&screen.id).cloned() {
                 if previous_display != new_display {
                     self.transfer_display_activation(cfg, &previous_display, new_display);
                 }
@@ -366,11 +364,10 @@ mod tests {
             input(2, Some(2), Some("display-b")),
         ]);
 
-        let active =
-            policy.compute_active_spaces(cfg, &[Some(SpaceId::new(1)), Some(SpaceId::new(2))], &[
-                Some("display-a".to_string()),
-                Some("display-b".to_string()),
-            ]);
+        let active = policy.compute_active_spaces(cfg, &[Some(SpaceId::new(1)), Some(SpaceId::new(2))], &[
+            Some("display-a".to_string()),
+            Some("display-b".to_string()),
+        ]);
 
         assert_eq!(active, vec![Some(SpaceId::new(1)), None]);
     }
@@ -389,11 +386,10 @@ mod tests {
             display_uuid: Some("display-a".to_string()),
         });
 
-        let active =
-            policy.compute_active_spaces(cfg, &[Some(SpaceId::new(1)), Some(SpaceId::new(2))], &[
-                Some("display-a".to_string()),
-                Some("display-a".to_string()),
-            ]);
+        let active = policy.compute_active_spaces(cfg, &[Some(SpaceId::new(1)), Some(SpaceId::new(2))], &[
+            Some("display-a".to_string()),
+            Some("display-a".to_string()),
+        ]);
 
         assert_eq!(active, vec![None, Some(SpaceId::new(2))]);
     }
@@ -412,8 +408,8 @@ mod tests {
             display_uuid: Some("display-a".to_string()),
         });
 
-        let active = policy
-            .compute_active_spaces(cfg, &[Some(SpaceId::new(1))], &[Some("display-a".to_string())]);
+        let active =
+            policy.compute_active_spaces(cfg, &[Some(SpaceId::new(1))], &[Some("display-a".to_string())]);
 
         assert_eq!(active, vec![Some(SpaceId::new(1))]);
     }
@@ -432,8 +428,8 @@ mod tests {
             display_uuid: Some("display-a".to_string()),
         });
 
-        let active = policy
-            .compute_active_spaces(cfg, &[Some(SpaceId::new(2))], &[Some("display-a".to_string())]);
+        let active =
+            policy.compute_active_spaces(cfg, &[Some(SpaceId::new(2))], &[Some("display-a".to_string())]);
 
         assert_eq!(active, vec![Some(SpaceId::new(2))]);
     }
@@ -448,8 +444,8 @@ mod tests {
         };
 
         policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        let active = policy
-            .compute_active_spaces(cfg, &[Some(SpaceId::new(1))], &[Some("display-a".to_string())]);
+        let active =
+            policy.compute_active_spaces(cfg, &[Some(SpaceId::new(1))], &[Some("display-a".to_string())]);
 
         assert_eq!(active, vec![None]);
     }
@@ -469,13 +465,13 @@ mod tests {
         });
 
         policy.on_spaces_updated(cfg, &[input(1, Some(2), Some("display-a"))]);
-        let active = policy
-            .compute_active_spaces(cfg, &[Some(SpaceId::new(2))], &[Some("display-a".to_string())]);
+        let active =
+            policy.compute_active_spaces(cfg, &[Some(SpaceId::new(2))], &[Some("display-a".to_string())]);
         assert_eq!(active, vec![Some(SpaceId::new(2))]);
 
         policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        let active = policy
-            .compute_active_spaces(cfg, &[Some(SpaceId::new(1))], &[Some("display-a".to_string())]);
+        let active =
+            policy.compute_active_spaces(cfg, &[Some(SpaceId::new(1))], &[Some("display-a".to_string())]);
         assert_eq!(active, vec![None]);
     }
 

@@ -14,9 +14,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
 use crate::model::broadcast::BroadcastSender;
-use crate::model::{
-    AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WindowStore, WorkspaceStore,
-};
+use crate::model::{AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WindowStore, WorkspaceStore};
 use crate::sys::screen::SpaceId;
 
 static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -123,9 +121,7 @@ impl WindowFingerprint {
             && (self.same_known_app(live) || self.same_title_and_size(live))
     }
 
-    fn same_known_app(&self, live: &Self) -> bool {
-        self.app_id.is_some() && self.app_id == live.app_id
-    }
+    fn same_known_app(&self, live: &Self) -> bool { self.app_id.is_some() && self.app_id == live.app_id }
 
     fn same_title_and_size(&self, live: &Self) -> bool {
         self.title.is_some()
@@ -168,9 +164,7 @@ impl PersistenceState {
         self.windows.insert(window, fingerprint);
     }
 
-    fn fingerprint(&self, window: WindowId) -> Option<&WindowFingerprint> {
-        self.windows.get(&window)
-    }
+    fn fingerprint(&self, window: WindowId) -> Option<&WindowFingerprint> { self.windows.get(&window) }
 
     fn forget_window(&mut self, window: WindowId) {
         self.windows.remove(&window);

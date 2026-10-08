@@ -10,8 +10,7 @@ use crate::common::config::{
 use crate::layout_engine::systems::{WindowLayoutConstraints, reconcile_app_membership};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
-    Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, ResizeOrientation,
-    TraditionalLayoutSystem,
+    Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, ResizeOrientation, TraditionalLayoutSystem,
 };
 use crate::model::tree::NodeId;
 
@@ -50,9 +49,7 @@ impl MasterStackLayoutSystem {
         self.settings = settings;
         let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
         for layout in layouts {
-            if let Some(windows) =
-                self.windows_in_layout_by_container_with_order(layout, old_master_first)
-            {
+            if let Some(windows) = self.windows_in_layout_by_container_with_order(layout, old_master_first) {
                 self.rebuild_layout_with_windows(layout, &windows);
                 continue;
             }
@@ -101,9 +98,7 @@ impl MasterStackLayoutSystem {
     ) -> Option<Vec<WindowId>> {
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
-        if children.len() != 2
-            || children.iter().any(|&child| self.inner.window_at(child).is_some())
-        {
+        if children.len() != 2 || children.iter().any(|&child| self.inner.window_at(child).is_some()) {
             return None;
         }
         let (master, stack) = if master_first {
@@ -155,12 +150,7 @@ impl MasterStackLayoutSystem {
         }
     }
 
-    fn target_container_for_new_window(
-        &self,
-        layout: LayoutId,
-        master: NodeId,
-        stack: NodeId,
-    ) -> NodeId {
+    fn target_container_for_new_window(&self, layout: LayoutId, master: NodeId, stack: NodeId) -> NodeId {
         if self.windows_in_container(master).len() < self.settings.master_count {
             return master;
         }
@@ -366,22 +356,13 @@ impl MasterStackLayoutSystem {
         Some(node.detach(&mut self.inner.tree).push_back(container).finish())
     }
 
-    fn move_window_to_end_of_current_container(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-    ) -> Option<NodeId> {
+    fn move_window_to_end_of_current_container(&mut self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
         let node = self.inner.tree.data.window.node_for(layout, wid)?;
         let parent = node.parent(self.inner.map())?;
         Some(node.detach(&mut self.inner.tree).push_back(parent).finish())
     }
 
-    fn insert_window_in_container(
-        &mut self,
-        layout: LayoutId,
-        container: NodeId,
-        wid: WindowId,
-    ) -> NodeId {
+    fn insert_window_in_container(&mut self, layout: LayoutId, container: NodeId, wid: WindowId) -> NodeId {
         debug_assert!(self.inner.map().contains(container));
         let first_child = container.children(self.inner.map()).next();
         let node = match self.settings.base.window_insertion_point {
@@ -767,8 +748,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
             } else {
                 windows.len() - 1
             };
-            (!parallel || focused_idx == border)
-                .then(|| if master_first { master_count - 1 } else { 0 })
+            (!parallel || focused_idx == border).then(|| if master_first { master_count - 1 } else { 0 })
         } else if towards_stack && in_master {
             let border = if master_first { master_count - 1 } else { 0 };
             (!parallel || focused_idx == border).then(|| {
@@ -792,15 +772,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
             return false;
         } else {
             let neighbor = match direction {
-                Direction::Left | Direction::Up => (focused_idx
-                    > if in_master { 0 } else { master_count })
-                .then_some(focused_idx.saturating_sub(1)),
+                Direction::Left | Direction::Up => (focused_idx > if in_master { 0 } else { master_count })
+                    .then_some(focused_idx.saturating_sub(1)),
                 Direction::Right | Direction::Down => (focused_idx + 1
-                    < if in_master {
-                        master_count
-                    } else {
-                        windows.len()
-                    })
+                    < if in_master { master_count } else { windows.len() })
                 .then_some(focused_idx + 1),
             };
             let Some(neighbor) = neighbor else { return false };
@@ -824,11 +799,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.apply_explicit_window_drop(layout, source, target, action)
     }
 
-    fn move_selection_to_layout_after_selection(
-        &mut self,
-        from_layout: LayoutId,
-        to_layout: LayoutId,
-    ) {
+    fn move_selection_to_layout_after_selection(&mut self, from_layout: LayoutId, to_layout: LayoutId) {
         self.inner.move_selection_to_layout_after_selection(from_layout, to_layout);
         let _ = self.ensure_structure(from_layout);
         let _ = self.ensure_structure(to_layout);
@@ -870,12 +841,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn unjoin_selection(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 
-    fn resize_selection_by(
-        &mut self,
-        layout: LayoutId,
-        amount: f64,
-        orientation: ResizeOrientation,
-    ) {
+    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64, orientation: ResizeOrientation) {
         let _ = self.ensure_structure(layout);
         self.inner.resize_selection_by(layout, amount, orientation);
     }

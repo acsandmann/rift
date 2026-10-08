@@ -31,13 +31,9 @@ impl ConfigDocument {
         Ok(Self { document: text.parse()? })
     }
 
-    pub fn read(path: &Path) -> anyhow::Result<Self> {
-        Self::parse(&std::fs::read_to_string(path)?)
-    }
+    pub fn read(path: &Path) -> anyhow::Result<Self> { Self::parse(&std::fs::read_to_string(path)?) }
 
-    pub fn source(&self) -> anyhow::Result<ConfigSource> {
-        Ok(parse_config_file(&self.to_string())?)
-    }
+    pub fn source(&self) -> anyhow::Result<ConfigSource> { Ok(parse_config_file(&self.to_string())?) }
 
     pub fn runtime(&self) -> anyhow::Result<Config> { Config::parse(&self.to_string()) }
 
@@ -108,8 +104,7 @@ impl ConfigDocument {
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         self.runtime()?;
         let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let parent =
-            target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let mut file = tempfile::NamedTempFile::new_in(parent)?;
         if let Ok(metadata) = std::fs::metadata(&target) {
@@ -144,9 +139,7 @@ fn patch(
             continue;
         };
         if (path == "settings" && key == "default_disable" && new.as_bool() == Some(true))
-            || (path == "virtual_workspaces"
-                && key == "default_workspace"
-                && new.as_integer() == Some(0))
+            || (path == "virtual_workspaces" && key == "default_workspace" && new.as_integer() == Some(0))
         {
             remove_value(table, actual);
             continue;
@@ -194,15 +187,12 @@ fn patch(
             let old_values = before.get(key).and_then(toml::Value::as_array);
             let new_values = new.as_array().unwrap();
             for (index, element) in array.iter_mut().enumerate() {
-                if let Some(old_index) = old_values
-                    .and_then(|values| values.iter().position(|old| old == &new_values[index]))
+                if let Some(old_index) =
+                    old_values.and_then(|values| values.iter().position(|old| old == &new_values[index]))
                     && let Some(old) = old_array.and_then(|array| array.get(old_index))
                 {
                     *element = old.clone();
-                } else if matches!(
-                    key.as_str(),
-                    "workspace_names" | "app_rules" | "workspace_rules"
-                ) {
+                } else if matches!(key.as_str(), "workspace_names" | "app_rules" | "workspace_rules") {
                     element.decor_mut().set_prefix("\n\t");
                 }
             }

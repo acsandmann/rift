@@ -117,9 +117,7 @@ impl MainWindowTracker {
 
     pub fn is_globally_frontmost(&self, pid: pid_t) -> bool { self.global_frontmost == Some(pid) }
 
-    pub fn app_main_window(&self, pid: pid_t) -> Option<WindowId> {
-        self.apps.get(&pid)?.main_window
-    }
+    pub fn app_main_window(&self, pid: pid_t) -> Option<WindowId> { self.apps.get(&pid)?.main_window }
 }
 
 #[cfg(test)]
@@ -341,13 +339,7 @@ mod tests {
         let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
         reactor.handle_event(space_state_event(vec![screen_frame], vec![Some(space)]));
 
-        reactor.handle_events(apps.make_app_with_opts(
-            pid,
-            windows,
-            Some(WindowId::new(3, 1)),
-            false,
-            true,
-        ));
+        reactor.handle_events(apps.make_app_with_opts(pid, windows, Some(WindowId::new(3, 1)), false, true));
 
         reactor.handle_event(space_state_event(vec![screen_frame], vec![None]));
         reactor.handle_event(ApplicationActivated(3, Quiet::No));

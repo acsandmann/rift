@@ -30,12 +30,14 @@ pub(super) fn choose_match(
     // not contradict it. If WindowServer identity disagrees, let the genuine server-id candidate
     // win rather than trusting an id that may have been reused since the file was written.
     let direct = candidates.iter().find(|candidate| {
-        candidate.window == live
-            && candidate.fingerprint.direct_identity_compatible_with(fingerprint)
+        candidate.window == live && candidate.fingerprint.direct_identity_compatible_with(fingerprint)
     });
     let server_id_match =
-        direct.is_none().then(|| fingerprint.window_server_id).flatten().and_then(
-            |window_server_id| {
+        direct
+            .is_none()
+            .then(|| fingerprint.window_server_id)
+            .flatten()
+            .and_then(|window_server_id| {
                 candidates
                     .iter()
                     .filter(|candidate| {
@@ -53,8 +55,7 @@ pub(super) fn choose_match(
                         rank(a).cmp(&rank(b)).then_with(|| b.window.cmp(&a.window))
                     })
                     .map(|candidate| candidate.window)
-            },
-        );
+            });
 
     let exact_identity = direct.is_some() || server_id_match.is_some();
     let selected = direct
@@ -85,10 +86,7 @@ pub(super) fn choose_match(
     })
 }
 
-fn choose_fallback(
-    live: &WindowFingerprint,
-    candidates: &[RestoreCandidate<'_>],
-) -> Option<WindowId> {
+fn choose_fallback(live: &WindowFingerprint, candidates: &[RestoreCandidate<'_>]) -> Option<WindowId> {
     // A known bundle id plus a non-empty title identifies a restarted application's window when
     // that pair occurs only once. Size is layout output, so it must not veto that association.
     let matching: Vec<_> = candidates

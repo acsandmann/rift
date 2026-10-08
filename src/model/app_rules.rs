@@ -50,19 +50,13 @@ impl AppRuleEffects {
         self.floating || (!self.was_rule_floating && was_floating)
     }
 
-    pub(crate) fn floating_placement(
-        self,
-        window: WindowId,
-        space: SpaceId,
-    ) -> Option<AppRulePlacement> {
-        (self.floating && (self.position.is_some() || self.size.is_some())).then_some(
-            AppRulePlacement {
-                window,
-                space,
-                position: self.position,
-                size: self.size,
-            },
-        )
+    pub(crate) fn floating_placement(self, window: WindowId, space: SpaceId) -> Option<AppRulePlacement> {
+        (self.floating && (self.position.is_some() || self.size.is_some())).then_some(AppRulePlacement {
+            window,
+            space,
+            position: self.position,
+            size: self.size,
+        })
     }
 
     pub(crate) fn tiled_resize(
@@ -105,9 +99,7 @@ pub(crate) struct AppRuleOutcome {
 }
 
 impl AppRuleOutcome {
-    pub(crate) fn push_placement(&mut self, placement: AppRulePlacement) {
-        self.placements.push(placement);
-    }
+    pub(crate) fn push_placement(&mut self, placement: AppRulePlacement) { self.placements.push(placement); }
 
     pub(crate) fn push_resize(&mut self, resize: AppRuleResize) { self.resizes.push(resize); }
 
@@ -221,10 +213,7 @@ impl AppRuleEngine {
 
     /// Re-evaluate rules after a title change without letting a title-independent
     /// fallback reassert its initial workspace placement.
-    pub fn evaluate_for_title_change(
-        &self,
-        context: WindowRuleContext<'_>,
-    ) -> Option<AppRuleDecision> {
+    pub fn evaluate_for_title_change(&self, context: WindowRuleContext<'_>) -> Option<AppRuleDecision> {
         self.matching_rule(context).map(|rule| {
             let mut decision = rule.action.clone();
             if !rule.matches_title() {
@@ -248,9 +237,7 @@ impl AppRuleEngine {
                     .into_iter()
                     .flatten(),
             )
-            .filter(|rule| {
-                rule.matches(context, app_id.as_deref(), app_name.as_deref(), title.as_deref())
-            })
+            .filter(|rule| rule.matches(context, app_id.as_deref(), app_name.as_deref(), title.as_deref()))
             // More matcher fields win; configuration order is the deterministic tie-breaker.
             .max_by_key(|rule| (rule.specificity, std::cmp::Reverse(rule.index)))
     }
@@ -335,9 +322,10 @@ impl CompiledRule {
             && self.app_name.as_deref().is_none_or(|rule| {
                 app_name.is_some_and(|actual| rule.contains(actual) || actual.contains(rule))
             })
-            && self.title_regex.as_ref().is_none_or(|regex| {
-                context.window_title.is_some_and(|actual| regex.is_match(actual))
-            })
+            && self
+                .title_regex
+                .as_ref()
+                .is_none_or(|regex| context.window_title.is_some_and(|actual| regex.is_match(actual)))
             && self
                 .title_substring
                 .as_deref()

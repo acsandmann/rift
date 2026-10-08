@@ -1,8 +1,6 @@
 use objc2::Message;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::{
-    NSControl, NSOutlineView, NSPopUpButton, NSSlider, NSSwitch, NSTableView, NSView,
-};
+use objc2_app_kit::{NSControl, NSOutlineView, NSPopUpButton, NSSlider, NSSwitch, NSTableView, NSView};
 
 use super::*;
 
@@ -13,7 +11,11 @@ fn find<T: objc2::DowncastTarget + 'static>(view: &NSView) -> Option<Retained<T>
     view.subviews().iter().find_map(|child| find(&child))
 }
 
+/// Visible instances only: cached pages stay mounted but hidden.
 fn count<T: objc2::DowncastTarget + 'static>(view: &NSView) -> usize {
+    if view.isHidden() {
+        return 0;
+    }
     usize::from(view.downcast_ref::<T>().is_some())
         + view.subviews().iter().map(|child| count::<T>(&child)).sum::<usize>()
 }
@@ -66,8 +68,11 @@ pub fn run(ui: Ui) {
             false,
         );
         let toolbar = settings.window.toolbar().ns_toolbar();
-        let history = toolbar.items().iter()
-            .find_map(|item| item.downcast::<objc2_app_kit::NSToolbarItemGroup>().ok()).unwrap();
+        let history = toolbar
+            .items()
+            .iter()
+            .find_map(|item| item.downcast::<objc2_app_kit::NSToolbarItemGroup>().ok())
+            .unwrap();
         let back = history.subitems().objectAtIndex(0);
         let forward = history.subitems().objectAtIndex(1);
         assert!(back.isEnabled(), "enable Back after visiting a section");
@@ -89,10 +94,17 @@ pub fn run(ui: Ui) {
             backing_scale: 1.0,
             space: None,
         }]);
-        assert!(std::ptr::eq(
-            &*settings._host.ns_view().subviews().firstObject().unwrap(),
-            keyboard.ns_view()
-        ));
+        let visible: Vec<_> = settings
+            ._host
+            .ns_view()
+            .subviews()
+            .iter()
+            .filter(|view| !view.isHidden())
+            .collect();
+        assert!(
+            visible.len() == 1 && std::ptr::eq(&*visible[0], keyboard.ns_view()),
+            "a display change off the layout pages keeps the current page"
+        );
         settings.refresh_applications(vec![rift_protocol::ApplicationData {
             pid: 1,
             bundle_id: Some("dev.test.Editor".into()),
@@ -124,14 +136,14 @@ pub fn run(ui: Ui) {
                 .iter()
                 .find_map(|item| item.view().and_then(|view| view.downcast::<NSPopUpButton>().ok()))
                 .unwrap()
-                .menu().unwrap();
+                .menu()
+                .unwrap();
             autoreleasepool(|_| {
                 menu.performActionForItemAtIndex(
                     menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("Traditional")),
                 )
             });
-            let old =
-                objc2::rc::Weak::new(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view());
+            let old = objc2::rc::Weak::new(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view());
             assert_eq!(
                 autoreleasepool(|_| count::<NSSwitch>(settings._host.ns_view())),
                 1
@@ -200,9 +212,13 @@ pub fn run(ui: Ui) {
             let page = editors::workspaces(ui, &settings.model);
             page.synchronize(&settings.model);
             let table = find::<NSTableView>(page.view.ns_view()).unwrap();
-            table.selectRowIndexes_byExtendingSelection(&objc2_foundation::NSIndexSet::indexSetWithIndex(0), false);
+            table.selectRowIndexes_byExtendingSelection(
+                &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
+                false,
+            );
             assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
-            assert!(settings.model.sheet.borrow().is_some(),
+            assert!(
+                settings.model.sheet.borrow().is_some(),
                 "first click opens a workspace sheet"
             );
             let draft = settings.model.sheet_model.borrow().as_ref().unwrap().clone();
@@ -253,9 +269,12 @@ pub fn run(ui: Ui) {
             let page = commands::keyboard(ui, &settings.model);
             page.synchronize(&settings.model);
             settings.window.toolbar().set_page_controls(&ui, page.header.as_deref());
-            let search = toolbar.items().iter()
+            let search = toolbar
+                .items()
+                .iter()
                 .find_map(|item| item.downcast::<objc2_app_kit::NSSearchToolbarItem>().ok())
-                .unwrap().searchField();
+                .unwrap()
+                .searchField();
             change_text(&search, "fullscreen");
             let table = find::<NSTableView>(page.view.ns_view()).unwrap();
             assert_eq!(table.numberOfRows(), 1);
@@ -322,8 +341,7 @@ pub fn run(ui: Ui) {
                 source.settings.layout.gaps.outer, global,
                 "preserve global spacing"
             );
-            let effective =
-                source.settings.layout.gaps.effective_for_display(Some("focused-display"));
+            let effective = source.settings.layout.gaps.effective_for_display(Some("focused-display"));
             assert_eq!(
                 [
                     effective.outer.top,
@@ -387,9 +405,7 @@ pub fn run(ui: Ui) {
         ] {
             popup.selectItemAtIndex(index);
             let control: &NSControl = &popup;
-            assert!(unsafe {
-                control.sendAction_to(control.action(), control.target().as_deref())
-            });
+            assert!(unsafe { control.sendAction_to(control.action(), control.target().as_deref()) });
             let request = pending.try_recv().unwrap();
             let Action::Edit(edit) = request.action else {
                 panic!("expected config edit")

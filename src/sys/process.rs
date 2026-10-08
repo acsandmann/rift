@@ -68,6 +68,5 @@ unsafe extern "C" {
     fn GetProcessForPID(pid: pid_t, psn: *mut ProcessSerialNumber) -> CGError;
 
     // Deprecated in macOS 10.9.
-    fn GetProcessInformation(psn: *const ProcessSerialNumber, info: *mut ProcessInfoRec)
-    -> CGError;
+    fn GetProcessInformation(psn: *const ProcessSerialNumber, info: *mut ProcessInfoRec) -> CGError;
 }

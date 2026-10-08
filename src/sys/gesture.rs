@@ -71,17 +71,13 @@ impl Arbitration {
         let end = phase & 12 != 0;
         let decision = match self.sequence {
             Sequence::Holding if end => Decision::Drop,
-            Sequence::Holding
-                if owner.touching && owner.consume && owner.owner != Owner::System =>
-            {
+            Sequence::Holding if owner.touching && owner.consume && owner.owner != Owner::System => {
                 self.sequence = Sequence::Dropping;
                 Decision::Drop
             }
             Sequence::Holding
                 if owner.touching
-                    || self
-                        .began
-                        .is_some_and(|t| now.duration_since(t) >= Duration::from_millis(60)) =>
+                    || self.began.is_some_and(|t| now.duration_since(t) >= Duration::from_millis(60)) =>
             {
                 self.sequence = Sequence::Passing;
                 Decision::Replay
@@ -127,9 +123,7 @@ impl Arbitration {
         let decision = match self.sequence {
             // Native begin can precede physical acquisition. Late ownership
             // cancels delivery instead of leaving Dock with a partial stroke.
-            Sequence::Passing
-                if owner.touching && owner.consume && owner.owner != Owner::System =>
-            {
+            Sequence::Passing if owner.touching && owner.consume && owner.owner != Owner::System => {
                 self.session = owner.session;
                 self.sequence = Sequence::Provisional;
                 if owner.owner == Owner::Rift {
@@ -204,22 +198,16 @@ impl Filter {
         }
         let dock = ty.0 == CGS_EVENT_DOCK_CONTROL;
         if dock {
-            let pid =
-                CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUnixProcessID);
+            let pid = CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUnixProcessID);
             if pid != 0 && pid != i64::from(std::process::id()) {
                 return true;
             }
         }
         let mut owner;
         let (sequence, phase) = if ty == CGEventType::ScrollWheel {
-            let phase = CGEvent::integer_value_field(
-                Some(event),
-                CGEventField::ScrollWheelEventScrollPhase,
-            );
-            let momentum = CGEvent::integer_value_field(
-                Some(event),
-                CGEventField::ScrollWheelEventMomentumPhase,
-            );
+            let phase = CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventScrollPhase);
+            let momentum =
+                CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventMomentumPhase);
             // Mouse wheels have neither phase. They must pass even while an
             // earlier owned trackpad sequence is waiting for momentum to end.
             if phase == 0 && momentum == 0 {
@@ -254,8 +242,7 @@ impl Filter {
             // DockSwipe and NavigationSwipe only; digitizer, zoom, rotate,
             // smart zoom and vertical Mission Control never enter the filter.
             let subtype = CGEvent::integer_value_field(Some(event), HID_TYPE);
-            if !matches!(subtype, 16 | 23) || CGEvent::integer_value_field(Some(event), MOTION) != 1
-            {
+            if !matches!(subtype, 16 | 23) || CGEvent::integer_value_field(Some(event), MOTION) != 1 {
                 return true;
             }
             owner = ownership();
@@ -334,10 +321,7 @@ impl Filter {
                     .began
                     .is_some_and(|t| now.duration_since(t) >= Duration::from_millis(60))
             {
-                if owner.session == s.arbitration.session
-                    && owner.owner == Owner::Rift
-                    && owner.consume
-                {
+                if owner.session == s.arbitration.session && owner.owner == Owner::Rift && owner.consume {
                     s.held.clear();
                     s.arbitration.sequence = Sequence::Dropping;
                     continue;
@@ -375,16 +359,8 @@ fn cancelled_event(event: &CGEvent, ty: CGEventType) -> Option<CFRetained<CGEven
     CGEvent::set_integer_value_field(Some(&cancel), PHASE, 8);
     CGEvent::set_double_value_field(Some(&cancel), VELOCITY, 0.0);
     if ty == CGEventType::ScrollWheel {
-        CGEvent::set_integer_value_field(
-            Some(&cancel),
-            CGEventField::ScrollWheelEventScrollPhase,
-            8,
-        );
-        CGEvent::set_integer_value_field(
-            Some(&cancel),
-            CGEventField::ScrollWheelEventMomentumPhase,
-            0,
-        );
+        CGEvent::set_integer_value_field(Some(&cancel), CGEventField::ScrollWheelEventScrollPhase, 8);
+        CGEvent::set_integer_value_field(Some(&cancel), CGEventField::ScrollWheelEventMomentumPhase, 0);
     }
     Some(cancel)
 }
@@ -453,11 +429,7 @@ mod tests {
     #[test]
     fn unrelated_and_reposted_events_pass() {
         let event = CGEvent::new(None).unwrap();
-        CGEvent::set_integer_value_field(
-            Some(&event),
-            CGEventField(55),
-            CGS_EVENT_DOCK_CONTROL as i64,
-        );
+        CGEvent::set_integer_value_field(Some(&event), CGEventField(55), CGS_EVENT_DOCK_CONTROL as i64);
         let mut f = Filter::default();
         let o = Ownership {
             session: 1,
@@ -493,11 +465,7 @@ mod tests {
     #[test]
     fn cancellation_clears_native_velocity_and_scroll_momentum() {
         let event = CGEvent::new(None).unwrap();
-        CGEvent::set_integer_value_field(
-            Some(&event),
-            CGEventField(55),
-            CGS_EVENT_DOCK_CONTROL as i64,
-        );
+        CGEvent::set_integer_value_field(Some(&event), CGEventField(55), CGS_EVENT_DOCK_CONTROL as i64);
         CGEvent::set_integer_value_field(Some(&event), HID_TYPE, 23);
         CGEvent::set_integer_value_field(Some(&event), PHASE, 2);
         CGEvent::set_double_value_field(Some(&event), VELOCITY, 42.0);
@@ -507,35 +475,18 @@ mod tests {
         assert_eq!(CGEvent::integer_value_field(Some(&event), PHASE), 2);
         assert_eq!(CGEvent::double_value_field(Some(&event), VELOCITY), 42.0);
 
-        let scroll = CGEvent::new_scroll_wheel_event2(
-            None,
-            objc2_core_graphics::CGScrollEventUnit::Pixel,
-            2,
-            1,
-            1,
-            0,
-        )
-        .unwrap();
-        CGEvent::set_integer_value_field(
-            Some(&scroll),
-            CGEventField::ScrollWheelEventScrollPhase,
-            2,
-        );
-        CGEvent::set_integer_value_field(
-            Some(&scroll),
-            CGEventField::ScrollWheelEventMomentumPhase,
-            1,
-        );
+        let scroll =
+            CGEvent::new_scroll_wheel_event2(None, objc2_core_graphics::CGScrollEventUnit::Pixel, 2, 1, 1, 0)
+                .unwrap();
+        CGEvent::set_integer_value_field(Some(&scroll), CGEventField::ScrollWheelEventScrollPhase, 2);
+        CGEvent::set_integer_value_field(Some(&scroll), CGEventField::ScrollWheelEventMomentumPhase, 1);
         let cancel = cancelled_event(&scroll, CGEventType::ScrollWheel).unwrap();
         assert_eq!(
             CGEvent::integer_value_field(Some(&cancel), CGEventField::ScrollWheelEventScrollPhase),
             8
         );
         assert_eq!(
-            CGEvent::integer_value_field(
-                Some(&cancel),
-                CGEventField::ScrollWheelEventMomentumPhase
-            ),
+            CGEvent::integer_value_field(Some(&cancel), CGEventField::ScrollWheelEventMomentumPhase),
             0
         );
     }
@@ -577,11 +528,7 @@ mod tests {
             |_| {}
         ));
         let momentum = scroll(0);
-        CGEvent::set_integer_value_field(
-            Some(&momentum),
-            CGEventField::ScrollWheelEventMomentumPhase,
-            2,
-        );
+        CGEvent::set_integer_value_field(Some(&momentum), CGEventField::ScrollWheelEventMomentumPhase, 2);
         assert!(!filter.forward(
             CGEventType::ScrollWheel,
             &momentum,

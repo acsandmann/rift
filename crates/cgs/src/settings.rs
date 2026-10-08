@@ -101,9 +101,13 @@ impl SettingsRow {
     /// Add a discoverable description beside the label, without expanding the row.
     pub fn help(mut self, text: &str) -> Self {
         if !text.trim().is_empty() {
-            self.label = Rc::new(HStack::new(&self.ui).spacing(6.0)
-                .push(self.label).push(InfoButton::new(&self.ui, &self.title, text))
-                .push(Spacer::new(&self.ui)));
+            self.label = Rc::new(
+                HStack::new(&self.ui)
+                    .spacing(6.0)
+                    .push(self.label)
+                    .push(InfoButton::new(&self.ui, &self.title, text))
+                    .push(Spacer::new(&self.ui)),
+            );
         }
         self
     }
@@ -121,19 +125,30 @@ impl SettingsRow {
     pub fn suffix(mut self, text: &str) -> Self {
         fn input(view: &NSView) -> Option<Retained<NSTextField>> {
             if let Some(field) = view.downcast_ref::<NSTextField>() {
-                if field.isEditable() { return Some(field.retain()); }
+                if field.isEditable() {
+                    return Some(field.retain());
+                }
             }
             view.subviews().iter().find_map(|child| input(&child))
         }
         if let Some(field) = input(self.control.ns_view()) {
-            if let Some(parent) = unsafe { field.superview() }.and_then(|view| view.downcast::<objc2_app_kit::NSStackView>().ok()) {
-                let index = parent.arrangedSubviews().iter().position(|view| std::ptr::eq::<NSView>(&*view, &***field)).unwrap_or(0);
+            if let Some(parent) = unsafe { field.superview() }
+                .and_then(|view| view.downcast::<objc2_app_kit::NSStackView>().ok())
+            {
+                let index = parent
+                    .arrangedSubviews()
+                    .iter()
+                    .position(|view| std::ptr::eq::<NSView>(&*view, &***field))
+                    .unwrap_or(0);
                 parent.removeArrangedSubview(&field);
                 field.removeFromSuperview();
                 let unit = crate::UnitField::new(&self.ui, &field, text);
                 parent.insertArrangedSubview_atIndex(unit.ns_view(), index as isize);
                 if parent.orientation() == objc2_app_kit::NSUserInterfaceLayoutOrientation::Vertical {
-                    unit.ns_view().widthAnchor().constraintEqualToAnchor(&parent.widthAnchor()).setActive(true);
+                    unit.ns_view()
+                        .widthAnchor()
+                        .constraintEqualToAnchor(&parent.widthAnchor())
+                        .setActive(true);
                 }
                 self.unit = Some(unit);
                 return self;
@@ -265,7 +280,10 @@ impl SettingsGroup {
             self.dividers.push(divider);
         }
         if row.control_view().downcast_ref::<objc2_app_kit::NSPopUpButton>().is_some() {
-                row.control_view().widthAnchor().constraintEqualToConstant(220.0).setActive(true);
+            row.control_view()
+                .widthAnchor()
+                .constraintEqualToConstant(220.0)
+                .setActive(true);
         }
         grid.addRowWithViews(&objc2_foundation::NSArray::from_slice(&row.take_form_cells()));
         grid.columnAtIndex(0).setXPlacement(objc2_app_kit::NSGridCellPlacement::Fill);
@@ -282,9 +300,7 @@ impl SettingsGroup {
     }
 }
 impl NativeView for SettingsGroup {
-    fn ns_view(&self) -> &NSView {
-        self.surface.as_ref().map_or(self.grid.ns_view(), NativeView::ns_view)
-    }
+    fn ns_view(&self) -> &NSView { self.surface.as_ref().map_or(self.grid.ns_view(), NativeView::ns_view) }
 }
 
 pub struct Section {

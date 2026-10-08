@@ -5,18 +5,14 @@ use crate::actor::app::{AppThreadHandle, Quiet, WindowId};
 use crate::actor::raise_manager;
 use crate::actor::reactor::WorkspaceSwitchOrigin;
 use crate::actor::reactor::events::EventOutcome;
-use crate::actor::reactor::managers::{
-    AppManager, DragManager, LayoutManager, WorkspaceSwitchManager,
-};
+use crate::actor::reactor::managers::{AppManager, DragManager, LayoutManager, WorkspaceSwitchManager};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
 use crate::common::log::{MetricsCommand, handle_command as handle_metrics_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
 use crate::model::RiftState;
-use crate::model::space_activation::{
-    SpaceActivationConfig, SpaceActivationPolicy, ToggleSpaceContext,
-};
+use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy, ToggleSpaceContext};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
 
@@ -82,12 +78,9 @@ pub fn handle_command_layout(
     );
     if matches!(
         cmd,
-        LayoutCommand::JoinWindow(_)
-            | LayoutCommand::ToggleStack
-            | LayoutCommand::ConsumeOrExpelWindow(_)
+        LayoutCommand::JoinWindow(_) | LayoutCommand::ToggleStack | LayoutCommand::ConsumeOrExpelWindow(_)
     ) && let Some(space) = command_space
-        && layout.layout_engine.active_layout_mode_at(space)
-            == crate::common::config::LayoutMode::Floating
+        && layout.layout_engine.active_layout_mode_at(space) == crate::common::config::LayoutMode::Floating
     {
         store_current_floating_positions(state, layout, space);
     }
@@ -111,22 +104,18 @@ pub fn handle_command_layout(
         | LayoutCommand::CreateWorkspace
         | LayoutCommand::SwitchToLastWorkspace => {
             if let Some(space) = workspace_space {
-                layout.layout_engine.handle_virtual_workspace_command(
-                    &mut state.windows,
-                    space,
-                    &cmd,
-                )
+                layout
+                    .layout_engine
+                    .handle_virtual_workspace_command(&mut state.windows, space, &cmd)
             } else {
                 EventResponse::default()
             }
         }
         LayoutCommand::MoveWindowToWorkspace { .. } => {
             if let Some(space) = command_space {
-                layout.layout_engine.handle_virtual_workspace_command(
-                    &mut state.windows,
-                    space,
-                    &cmd,
-                )
+                layout
+                    .layout_engine
+                    .handle_virtual_workspace_command(&mut state.windows, space, &cmd)
             } else {
                 EventResponse::default()
             }
@@ -165,8 +154,8 @@ pub fn handle_command_layout(
     // Geometry commands must reconcile frames even when their layout-system
     // operation has no explicit change result. Focus, selection and workspace
     // commands provide one, so preserve their no-op behavior.
-    let needs_arrange = response_changed
-        || (!is_focus_command && !is_selection_command && !is_virtual_workspace_command);
+    let needs_arrange =
+        response_changed || (!is_focus_command && !is_selection_command && !is_virtual_workspace_command);
     let mut outcome = if needs_arrange {
         EventOutcome::layout_changed(false)
     } else {
@@ -186,17 +175,15 @@ fn current_floating_positions(
     layout: &LayoutManager,
     space: SpaceId,
 ) -> Vec<(WindowId, objc2_core_foundation::CGRect)> {
-    let floats_by_layout = layout.layout_engine.active_layout_mode_at(space)
-        == crate::common::config::LayoutMode::Floating;
+    let floats_by_layout =
+        layout.layout_engine.active_layout_mode_at(space) == crate::common::config::LayoutMode::Floating;
     layout
         .layout_engine
         .workspaces()
         .windows_in_active_workspace(&state.windows, space)
         .into_iter()
         .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))
-        .filter_map(|window| {
-            state.windows.window(window).map(|state| (window, state.frame_monotonic))
-        })
+        .filter_map(|window| state.windows.window(window).map(|state| (window, state.frame_monotonic)))
         .collect()
 }
 
@@ -230,9 +217,7 @@ pub fn handle_mission_control_command(
     })
 }
 
-pub fn handle_close_window(
-    window_server_id: Option<WindowServerId>,
-) -> anyhow::Result<EventOutcome> {
+pub fn handle_close_window(window_server_id: Option<WindowServerId>) -> anyhow::Result<EventOutcome> {
     Ok(EventOutcome::no_change().with_close_window(window_server_id))
 }
 
@@ -390,10 +375,7 @@ pub fn handle_move_mouse_to_display(
     Ok(outcome)
 }
 
-pub fn handle_focus_display(
-    apps: &AppManager,
-    payload: DisplayFocusPayload,
-) -> anyhow::Result<EventOutcome> {
+pub fn handle_focus_display(apps: &AppManager, payload: DisplayFocusPayload) -> anyhow::Result<EventOutcome> {
     let Some(screen) = payload.screen else {
         return Ok(EventOutcome::no_change());
     };
@@ -553,14 +535,10 @@ pub fn handle_command_reactor_move_workspace_to_display(
     }
 
     workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
-    let mut outcome =
-        EventOutcome::layout_changed(false).with_layout_response(response, Some(target_space));
+    let mut outcome = EventOutcome::layout_changed(false).with_layout_response(response, Some(target_space));
     for window_move in applied_moves {
-        outcome = outcome.with_pre_layout_window_frame_write(
-            window_move.window,
-            window_move.target_frame,
-            true,
-        );
+        outcome =
+            outcome.with_pre_layout_window_frame_write(window_move.window, window_move.target_frame, true);
     }
     Ok(outcome)
 }

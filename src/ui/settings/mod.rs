@@ -66,9 +66,7 @@ impl Model {
                 edit,
                 Box::new(move |result| {
                     if let Some(label) = error.upgrade() {
-                        label.set_validation(
-                            &result.map_or_else(Validation::Error, |_| Validation::None),
-                        );
+                        label.set_validation(&result.map_or_else(Validation::Error, |_| Validation::None));
                     }
                 }),
             );
@@ -226,7 +224,8 @@ impl Settings {
             toolbar: RefCell::new(Weak::new()),
         });
         model.rebuild_applications();
-        let pages = Rc::new(RefCell::new((0..9).map(|_| None::<Page>).collect::<Vec<_>>()));
+        // Slots 0..9 are sidebar categories and 9..18 layout scopes; both are cached while open.
+        let pages = Rc::new(RefCell::new((0..18).map(|_| None::<Page>).collect::<Vec<_>>()));
         let weak_model = Rc::downgrade(&model);
         let weak_host = Rc::downgrade(&host);
         let weak_pages = Rc::downgrade(&pages);
@@ -257,26 +256,39 @@ impl Settings {
         let routing_router = routing.clone();
         let navigate: Rc<dyn Fn(usize)> = Rc::new(move |id| {
             let (Some(model), Some(host), Some(pages)) =
-                (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade()) else { return; };
+                (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
+            else {
+                return;
+            };
             model.close_sheet();
-            let previous = { let history = history_router.borrow(); history.history[history.cursor] };
             history_router.borrow_mut().select(id);
             let category = if id >= 9 { 1 } else { id };
             routing_router.set(true);
-            if let Some(sidebar) = sidebar_router.borrow().upgrade() { sidebar.set_selected(category); }
+            if let Some(sidebar) = sidebar_router.borrow().upgrade() {
+                sidebar.set_selected(category);
+            }
             routing_router.set(false);
-            if previous >= 9 || id == 1 || id >= 9 { pages.borrow_mut()[1] = None; }
             Self::select(ui, &model, &host, &pages, id);
             if let Some(toolbar) = model.toolbar.borrow().upgrade() {
                 let history = history_router.borrow();
-                toolbar.update_navigation(history.cursor > 0, history.cursor + 1 < history.history.len(),
-                    if id >= 9 { pages::LAYOUT_PAGES[id - 9].0 } else { "All" }, id == 1 || id >= 9);
+                toolbar.update_navigation(
+                    history.cursor > 0,
+                    history.cursor + 1 < history.history.len(),
+                    if id >= 9 {
+                        pages::LAYOUT_PAGES[id - 9].0
+                    } else {
+                        "All"
+                    },
+                    id == 1 || id >= 9,
+                );
             }
         });
         *model.navigate.borrow_mut() = Some(navigate.clone());
         let route = navigate.clone();
         let sidebar = Sidebar::new(&ui, entries.clone()).on_select(move |id| {
-            if !routing.get() { route(id); }
+            if !routing.get() {
+                route(id);
+            }
         });
         let sidebar = Rc::new(sidebar);
         sidebar.set_selected(0);
@@ -292,7 +304,9 @@ impl Settings {
             };
             if let (Some(model), Some(host)) = (weak_model.upgrade(), weak_host.upgrade()) {
                 let id = destination.scope.map_or(destination.page, |scope| 9 + scope);
-                if let Some(navigate) = model.navigate.borrow().as_ref() { navigate(id); }
+                if let Some(navigate) = model.navigate.borrow().as_ref() {
+                    navigate(id);
+                }
                 host.ns_view().layoutSubtreeIfNeeded();
                 search::reveal(host.ns_view(), destination.title, destination.location);
             }
@@ -313,8 +327,7 @@ impl Settings {
                     });
                     match row {
                         search::Row::Heading(title) => {
-                            Box::new(content.push(SubsectionTitle::new(&ui, title)))
-                                as Box<dyn NativeView>
+                            Box::new(content.push(SubsectionTitle::new(&ui, title))) as Box<dyn NativeView>
                         }
                         search::Row::Setting(result) => {
                             let description = Caption::new(&ui, &result.description());
@@ -334,8 +347,7 @@ impl Settings {
                     }
                 })
                 .on_select(move |index| {
-                    let destination =
-                        index.and_then(|index| selected_rows.borrow().get(index).cloned());
+                    let destination = index.and_then(|index| selected_rows.borrow().get(index).cloned());
                     if let Some(search::Row::Setting(result)) = destination {
                         let index = destinations_for_selection.borrow().iter().position(|entry| {
                             entry.title == result.title
@@ -425,10 +437,13 @@ impl Settings {
         menu.add_separator();
         for (title, range) in [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)] {
             menu.ns_menu().addItem(&objc2_app_kit::NSMenuItem::sectionHeaderWithTitle(
-                &objc2_foundation::NSString::from_str(title), ui.mtm()));
+                &objc2_foundation::NSString::from_str(title),
+                ui.mtm(),
+            ));
             for index in range {
                 let route = navigate.clone();
-                let item = MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).on_click(move || route(9 + index));
+                let item =
+                    MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).on_click(move || route(9 + index));
                 item.ns_menu_item().setTag((9 + index) as isize);
                 menu.add(item);
             }
@@ -437,13 +452,22 @@ impl Settings {
         let route_back = navigate.clone();
         let route_forward = navigate.clone();
         let history_forward = history.clone();
-        window.toolbar().set_navigation(&ui, move || {
-            let id = history_back.borrow_mut().step(false);
-            if let Some(id) = id { route_back(id); }
-        }, move || {
-            let id = history_forward.borrow_mut().step(true);
-            if let Some(id) = id { route_forward(id); }
-        }, menu);
+        window.toolbar().set_navigation(
+            &ui,
+            move || {
+                let id = history_back.borrow_mut().step(false);
+                if let Some(id) = id {
+                    route_back(id);
+                }
+            },
+            move || {
+                let id = history_forward.borrow_mut().step(true);
+                if let Some(id) = id {
+                    route_forward(id);
+                }
+            },
+            menu,
+        );
         window.toolbar().update_navigation(false, false, "General", false);
         *model.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
         *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
@@ -466,18 +490,32 @@ impl Settings {
         pages: &Rc<RefCell<Vec<Option<Page>>>>,
         id: usize,
     ) {
-        let category = if id >= 9 { 1 } else { id };
-        let title = if id >= 9 { pages::LAYOUT_PAGES[id - 9].0 } else {
-            ["General", "Layouts", "Workspaces", "Rules", "Keyboard", "Mouse & Trackpad", "Interface", "Advanced", "About"][id]
+        let title = if id >= 9 {
+            pages::LAYOUT_PAGES[id - 9].0
+        } else {
+            [
+                "General",
+                "Layouts",
+                "Workspaces",
+                "Rules",
+                "Keyboard",
+                "Mouse & Trackpad",
+                "Interface",
+                "Advanced",
+                "About",
+            ][id]
         };
         model.page_title.set_text(if id >= 9 { "Layouts" } else { title });
-        if id >= 9 {
-            pages.borrow_mut()[1] = Some(pages::layout_scope(ui, model, id - 9));
-        } else if pages.borrow()[category].is_none() {
-            pages.borrow_mut()[category] = Some(pages::build(ui, model, category));
+        if pages.borrow()[id].is_none() {
+            let page = if id >= 9 {
+                pages::layout_scope(ui, model, id - 9)
+            } else {
+                pages::build(ui, model, id)
+            };
+            pages.borrow_mut()[id] = Some(page);
         }
         let pages = pages.borrow();
-        let page = pages[category].as_ref().unwrap();
+        let page = pages[id].as_ref().unwrap();
         page.synchronize(model);
         host.set_cached_page(page.view.clone());
         if let Some(toolbar) = model.toolbar.borrow().upgrade() {
@@ -485,9 +523,7 @@ impl Settings {
         }
     }
 
-    pub fn has_installed_applications(&self) -> bool {
-        self.model.installed_applications.borrow().is_some()
-    }
+    pub fn has_installed_applications(&self) -> bool { self.model.installed_applications.borrow().is_some() }
 
     pub fn set_installed_applications(&self, apps: Vec<(String, String)>) {
         *self.model.installed_applications.borrow_mut() = Some(apps);
@@ -515,12 +551,12 @@ impl Settings {
     pub fn refresh_displays(&self, displays: Vec<crate::sys::screen::ScreenInfo>) {
         if *self.model.displays.borrow() != displays {
             *self.model.displays.borrow_mut() = displays;
-            self.pages.borrow_mut()[1] = None;
+            // Layout scopes read the display list; parked copies unmount once replaced.
+            self.pages.borrow_mut()[9..].fill_with(|| None);
             let id = self.history.borrow().history[self.history.borrow().cursor];
-            if id != 1 && id < 9 {
+            if id < 9 {
                 return;
             }
-            self._host.clear();
             Self::select(
                 Ui::new(self.window.ns_window().mtm()),
                 &self.model,
@@ -534,8 +570,7 @@ impl Settings {
     pub fn show(&self) {
         // Accessory applications need activation to accept keyboard input.
         #[allow(deprecated)]
-        NSApplication::sharedApplication(self.window.ns_window().mtm())
-            .activateIgnoringOtherApps(true);
+        NSApplication::sharedApplication(self.window.ns_window().mtm()).activateIgnoringOtherApps(true);
         self.window.show();
     }
 
@@ -550,7 +585,7 @@ impl Settings {
                 }
             }
             let id = self.history.borrow().history[self.history.borrow().cursor];
-            if let Some(page) = &self.pages.borrow()[if id >= 9 { 1 } else { id }] {
+            if let Some(page) = &self.pages.borrow()[id] {
                 page.synchronize(&self.model);
             }
         }
@@ -561,7 +596,9 @@ impl Drop for Settings {
     fn drop(&mut self) {
         // End the sheet while its weak parent still points to the live Settings window.
         self.model.close_sheet();
-        self.window.toolbar().set_page_controls(&Ui::new(self.window.ns_window().mtm()), None);
+        self.window
+            .toolbar()
+            .set_page_controls(&Ui::new(self.window.ns_window().mtm()), None);
         self._host.clear();
         self.pages.borrow_mut().clear();
     }
@@ -592,12 +629,7 @@ impl FormBuilder {
         }
     }
 
-    fn row(
-        &self,
-        title: &str,
-        control: impl NativeView,
-        message: Rc<ValidationMessage>,
-    ) -> SettingsRow {
+    fn row(&self, title: &str, control: impl NativeView, message: Rc<ValidationMessage>) -> SettingsRow {
         let (title, suffix) = if let Some(title) = title.strip_suffix(" (%)") {
             (title, Some("%"))
         } else if let Some(title) = title.strip_suffix(" (points)") {
@@ -695,8 +727,14 @@ impl FormBuilder {
         if let Some(slider) = slider {
             slider.width(120.0);
             input.width(60.0);
-            self.row(title, HStack::new(&self.ui).spacing(8.0).push(slider).push(input), message)
-        } else { self.row(title, input, message) }
+            self.row(
+                title,
+                HStack::new(&self.ui).spacing(8.0).push(slider).push(input),
+                message,
+            )
+        } else {
+            self.row(title, input, message)
+        }
     }
 
     // Bind native controls independently of their form layout.
@@ -758,23 +796,21 @@ impl FormBuilder {
                     }
                     .clamp(min, max);
                     if let Some(preview) = &preview {
-                        let local =
-                            local_preview.get_or_insert_with(|| model.source.borrow().clone());
+                        let local = local_preview.get_or_insert_with(|| model.source.borrow().clone());
                         edit_preview(local, value / scale);
                         preview(local);
                         if let Some(input) = preview_input.upgrade() {
                             input.set_value(value);
                         }
-                        let dragging =
-                            NSApplication::sharedApplication(model.page_title.ns_view().mtm())
-                                .currentEvent()
-                                .is_some_and(|event| {
-                                    matches!(
-                                        event.r#type(),
-                                        objc2_app_kit::NSEventType::LeftMouseDragged
-                                            | objc2_app_kit::NSEventType::LeftMouseDown
-                                    )
-                                });
+                        let dragging = NSApplication::sharedApplication(model.page_title.ns_view().mtm())
+                            .currentEvent()
+                            .is_some_and(|event| {
+                                matches!(
+                                    event.r#type(),
+                                    objc2_app_kit::NSEventType::LeftMouseDragged
+                                        | objc2_app_kit::NSEventType::LeftMouseDown
+                                )
+                            });
                         if dragging {
                             return;
                         }

@@ -13,10 +13,8 @@ impl LayoutEngine {
         engine.startup_restore_pending = true;
         let unavailable_windows = engine.discard_unmatchable_startup_candidates(
             |window, id| {
-                crate::sys::window_server::get_window(
-                    crate::sys::window_server::WindowServerId::new(id),
-                )
-                .is_some_and(|info| info.pid == window.pid)
+                crate::sys::window_server::get_window(crate::sys::window_server::WindowServerId::new(id))
+                    .is_some_and(|info| info.pid == window.pid)
             },
             crate::sys::app::is_bundle_running,
         );
@@ -281,9 +279,7 @@ impl LayoutEngine {
             .iter()
             .map(|(_, display)| display.as_str())
             .collect::<HashSet<_>>();
-        if unique_spaces.len() != current_spaces.len()
-            || unique_displays.len() != current_spaces.len()
-        {
+        if unique_spaces.len() != current_spaces.len() || unique_displays.len() != current_spaces.len() {
             return;
         }
         self.startup_restore_pending = false;

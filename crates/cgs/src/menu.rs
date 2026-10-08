@@ -92,7 +92,9 @@ impl Menu {
     pub fn new(ui: &Ui) -> Self {
         let native = NSMenu::new(ui.mtm());
         native.setAutoenablesItems(false);
-        unsafe { native.setFont(Some(&crate::Font::body())); }
+        unsafe {
+            native.setFont(Some(&crate::Font::body()));
+        }
         Self {
             native,
             items: RefCell::new(Vec::new()),
@@ -115,9 +117,7 @@ impl Menu {
         self
     }
 
-    pub fn add_separator(&self) {
-        self.native.addItem(&NSMenuItem::separatorItem(self.native.mtm()));
-    }
+    pub fn add_separator(&self) { self.native.addItem(&NSMenuItem::separatorItem(self.native.mtm())); }
 
     pub fn remove(&self, item: &NSMenuItem) {
         self.native.removeItem(item);

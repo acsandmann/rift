@@ -60,10 +60,7 @@ impl WindowRecord {
         self.pending_operation.and_then(|operation| operation.requested_frame)
     }
 
-    pub(crate) fn is_admitted_with_rule_override(
-        &self,
-        rule_override: Option<bool>,
-    ) -> Option<bool> {
+    pub(crate) fn is_admitted_with_rule_override(&self, rule_override: Option<bool>) -> Option<bool> {
         self.state.as_ref().map(|state| state.is_admitted_with_override(rule_override))
     }
 
@@ -200,11 +197,7 @@ impl WindowStore {
     ) -> Option<SpaceId> {
         match (observation, pending) {
             (Some(observed), Some(target)) if observed != target => {
-                Some(if live == Some(observed) {
-                    observed
-                } else {
-                    target
-                })
+                Some(if live == Some(observed) { observed } else { target })
             }
             (Some(observed), _) => Some(observed),
             (None, _) => live.or(pending).or(self.window_server_space(wsid)),
@@ -278,9 +271,7 @@ impl WindowStore {
                 .filter(|assignment| Some(assignment.space) == fallback_user_space)
                 .map(|_| wid)
         } else {
-            if let Some(pid) =
-                pid.or_else(|| self.get_window_server_info(wsid).map(|info| info.pid))
-            {
+            if let Some(pid) = pid.or_else(|| self.get_window_server_info(wsid).map(|info| info.pid)) {
                 self.suspend_window_server_to_native_fullscreen(
                     pid,
                     wsid,
@@ -346,8 +337,7 @@ impl WindowStore {
             self.remove_window(old);
         }
         self.clear_window_server_observed(wsid);
-        if let (Some(record), Some(space)) =
-            (self.native_fullscreen_record_for_window(wid), native_space)
+        if let (Some(record), Some(space)) = (self.native_fullscreen_record_for_window(wid), native_space)
             && space != record.fullscreen_space
             && Some(space)
                 == record
@@ -394,11 +384,7 @@ impl WindowStore {
 
     /// Hidden is visibility evidence, never destruction. Return the owning PID
     /// for a targeted, coalesced AX refresh (including pending native identity).
-    pub(crate) fn observe_native_visibility(
-        &mut self,
-        wsid: WindowServerId,
-        visible: bool,
-    ) -> Option<i32> {
+    pub(crate) fn observe_native_visibility(&mut self, wsid: WindowServerId, visible: bool) -> Option<i32> {
         let pid = self
             .tracked_window_id(wsid)
             .map(|wid| wid.pid)
@@ -475,9 +461,8 @@ impl WindowStore {
             .filter_map(|wid| {
                 let record = self.record(*wid)?;
                 let wsid = record.window_server_id?;
-                (record.placement != WindowPlacement::NativeFullscreen
-                    && !observed_ids.contains(&wsid))
-                .then_some(wsid)
+                (record.placement != WindowPlacement::NativeFullscreen && !observed_ids.contains(&wsid))
+                    .then_some(wsid)
             })
             .collect()
     }
@@ -522,10 +507,7 @@ impl WindowStore {
         }
     }
 
-    fn upsert_native_fullscreen_record(
-        &mut self,
-        record: NativeFullscreenRecord,
-    ) -> NativeFullscreenRecord {
+    fn upsert_native_fullscreen_record(&mut self, record: NativeFullscreenRecord) -> NativeFullscreenRecord {
         if let Some(previous) = self
             .native_fullscreen_records_by_original_window
             .insert(record.original_window_id, record)
@@ -551,8 +533,7 @@ impl WindowStore {
         &mut self,
         original_window_id: WindowId,
     ) -> Option<NativeFullscreenRecord> {
-        let record =
-            self.native_fullscreen_records_by_original_window.remove(&original_window_id)?;
+        let record = self.native_fullscreen_records_by_original_window.remove(&original_window_id)?;
         self.native_fullscreen_original_window_by_current_window
             .remove(&record.current_window_id);
         if let Some(wsid) = record.window_server_id {
@@ -561,11 +542,7 @@ impl WindowStore {
         Some(record)
     }
 
-    fn remove_window_from_workspace_index(
-        &mut self,
-        window_id: WindowId,
-        assignment: WindowWorkspaceInfo,
-    ) {
+    fn remove_window_from_workspace_index(&mut self, window_id: WindowId, assignment: WindowWorkspaceInfo) {
         let should_prune = if let Some(windows) = self.workspace_windows.get_mut(&assignment) {
             windows.remove(&window_id);
             windows.is_empty()
@@ -577,11 +554,7 @@ impl WindowStore {
         }
     }
 
-    fn add_window_to_workspace_index(
-        &mut self,
-        window_id: WindowId,
-        assignment: WindowWorkspaceInfo,
-    ) {
+    fn add_window_to_workspace_index(&mut self, window_id: WindowId, assignment: WindowWorkspaceInfo) {
         self.workspace_windows.entry(assignment).or_default().insert(window_id);
     }
 
@@ -609,9 +582,7 @@ impl WindowStore {
         }
     }
 
-    pub fn record(&self, window_id: WindowId) -> Option<&WindowRecord> {
-        self.windows.get(&window_id)
-    }
+    pub fn record(&self, window_id: WindowId) -> Option<&WindowRecord> { self.windows.get(&window_id) }
 
     pub fn contains_window(&self, window_id: WindowId) -> bool { self.window(window_id).is_some() }
 
@@ -620,9 +591,9 @@ impl WindowStore {
     }
 
     pub(crate) fn iter_windows(&self) -> impl Iterator<Item = (WindowId, &WindowState)> + '_ {
-        self.windows.iter().filter_map(|(&window_id, record)| {
-            record.state.as_ref().map(|state| (window_id, state))
-        })
+        self.windows
+            .iter()
+            .filter_map(|(&window_id, record)| record.state.as_ref().map(|state| (window_id, state)))
     }
 
     pub fn window_ids_for_pid(&self, pid: i32) -> impl Iterator<Item = WindowId> + '_ {
@@ -679,8 +650,7 @@ impl WindowStore {
     }
 
     fn prune_window_server_record(&mut self, wsid: WindowServerId) {
-        let should_remove =
-            self.window_servers.get(&wsid).is_some_and(WindowServerRecord::is_empty);
+        let should_remove = self.window_servers.get(&wsid).is_some_and(WindowServerRecord::is_empty);
         if should_remove {
             self.window_servers.remove(&wsid);
         }
@@ -690,11 +660,7 @@ impl WindowStore {
         self.window_servers.get(&wsid).and_then(|record| record.window_id)
     }
 
-    pub fn track_window_server_id(
-        &mut self,
-        wsid: WindowServerId,
-        window_id: WindowId,
-    ) -> Option<WindowId> {
+    pub fn track_window_server_id(&mut self, wsid: WindowServerId, window_id: WindowId) -> Option<WindowId> {
         let (old, pending_record, space) = {
             let record = self.server_record_mut(wsid);
             let old = record.window_id;
@@ -885,8 +851,7 @@ impl WindowStore {
         fullscreen_space: SpaceId,
         transition: NativeFullscreenTransition,
     ) -> NativeFullscreenRecord {
-        let original_window_id =
-            self.native_fullscreen_original_window(window_id).unwrap_or(window_id);
+        let original_window_id = self.native_fullscreen_original_window(window_id).unwrap_or(window_id);
         let existing = self
             .native_fullscreen_records_by_original_window
             .get(&original_window_id)
@@ -941,10 +906,7 @@ impl WindowStore {
         }
     }
 
-    pub fn native_fullscreen_record_for_window(
-        &self,
-        window_id: WindowId,
-    ) -> Option<NativeFullscreenRecord> {
+    pub fn native_fullscreen_record_for_window(&self, window_id: WindowId) -> Option<NativeFullscreenRecord> {
         let original_window_id = self.native_fullscreen_original_window(window_id)?;
         self.native_fullscreen_records_by_original_window
             .get(&original_window_id)
@@ -978,9 +940,7 @@ impl WindowStore {
             })
     }
 
-    pub fn iter_native_fullscreen_records(
-        &self,
-    ) -> impl Iterator<Item = NativeFullscreenRecord> + '_ {
+    pub fn iter_native_fullscreen_records(&self) -> impl Iterator<Item = NativeFullscreenRecord> + '_ {
         self.native_fullscreen_records_by_original_window.values().copied()
     }
 
@@ -1023,10 +983,7 @@ impl WindowStore {
             .is_some_and(|record| record.transition == NativeFullscreenTransition::Suspended)
     }
 
-    pub fn pending_native_fullscreen_pid_for_window_server_id(
-        &self,
-        wsid: WindowServerId,
-    ) -> Option<i32> {
+    pub fn pending_native_fullscreen_pid_for_window_server_id(&self, wsid: WindowServerId) -> Option<i32> {
         self.pending_native_fullscreen_record_for_window_server_id(wsid)
             .map(|record| record.pid)
     }
@@ -1058,11 +1015,7 @@ impl WindowStore {
         self.windows.get(&window_id).and_then(|record| record.workspace)
     }
 
-    pub fn workspace_for_window(
-        &self,
-        space: SpaceId,
-        window_id: WindowId,
-    ) -> Option<VirtualWorkspaceId> {
+    pub fn workspace_for_window(&self, space: SpaceId, window_id: WindowId) -> Option<VirtualWorkspaceId> {
         self.workspace_info_for_window(window_id)
             .filter(|assignment| assignment.space == space)
             .map(|assignment| assignment.workspace_id)
@@ -1074,11 +1027,7 @@ impl WindowStore {
             .unwrap_or_default()
     }
 
-    pub fn workspace_windows(
-        &self,
-        space: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-    ) -> Vec<WindowId> {
+    pub fn workspace_windows(&self, space: SpaceId, workspace_id: VirtualWorkspaceId) -> Vec<WindowId> {
         let assignment = WindowWorkspaceInfo { space, workspace_id };
         let mut windows: Vec<_> = self
             .workspace_windows
@@ -1090,11 +1039,7 @@ impl WindowStore {
         windows
     }
 
-    pub fn workspace_window_count(
-        &self,
-        space: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-    ) -> usize {
+    pub fn workspace_window_count(&self, space: SpaceId, workspace_id: VirtualWorkspaceId) -> usize {
         let assignment = WindowWorkspaceInfo { space, workspace_id };
         self.workspace_windows.get(&assignment).map_or(0, HashSet::len)
     }
@@ -1233,8 +1178,7 @@ impl WindowStore {
     }
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
-        let window_ids: Vec<_> =
-            self.app_windows.get(&pid).into_iter().flatten().copied().collect();
+        let window_ids: Vec<_> = self.app_windows.get(&pid).into_iter().flatten().copied().collect();
         for window_id in window_ids {
             self.remove_window(window_id);
         }
@@ -1260,12 +1204,10 @@ impl WindowStore {
         });
     }
 
-    pub fn iter_workspace_assignments(
-        &self,
-    ) -> impl Iterator<Item = (WindowId, WindowWorkspaceInfo)> + '_ {
-        self.windows.iter().filter_map(|(&window_id, record)| {
-            record.workspace.map(|workspace| (window_id, workspace))
-        })
+    pub fn iter_workspace_assignments(&self) -> impl Iterator<Item = (WindowId, WindowWorkspaceInfo)> + '_ {
+        self.windows
+            .iter()
+            .filter_map(|(&window_id, record)| record.workspace.map(|workspace| (window_id, workspace)))
     }
 
     pub fn workspace_assignment_count(&self) -> usize {
@@ -1372,8 +1314,7 @@ impl WindowStore {
                 debug_assert_eq!(record.native_space, self.window_server_space(wsid));
             }
             if let Some(workspace) = record.workspace {
-                let indexed =
-                    self.workspace_windows.get(&workspace).is_some_and(|ids| ids.contains(&wid));
+                let indexed = self.workspace_windows.get(&workspace).is_some_and(|ids| ids.contains(&wid));
                 debug_assert_eq!(indexed, record.state.is_some());
             }
         }
@@ -1389,9 +1330,11 @@ impl WindowStore {
             }
         }
         for (workspace, ids) in &self.workspace_windows {
-            debug_assert!(ids.iter().all(|wid| self.windows.get(wid).is_some_and(|record| {
-                record.state.is_some() && record.workspace == Some(*workspace)
-            })));
+            debug_assert!(ids.iter().all(|wid| {
+                self.windows
+                    .get(wid)
+                    .is_some_and(|record| record.state.is_some() && record.workspace == Some(*workspace))
+            }));
         }
     }
 }
@@ -1515,8 +1458,7 @@ mod tests {
         let space = SpaceId::new(10);
         let fullscreen_space = SpaceId::new(0x400000000 + space.get());
         let mut workspaces = WorkspaceStore::new();
-        let workspace_id =
-            workspaces.create_workspace(space, Some("Main".to_string())).expect("workspace");
+        let workspace_id = workspaces.create_workspace(space, Some("Main".to_string())).expect("workspace");
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
         let wsid = WindowServerId::new(77);

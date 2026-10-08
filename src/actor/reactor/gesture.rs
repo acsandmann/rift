@@ -71,12 +71,8 @@ impl Reactor {
                     && target != Some((s.workspace, s.layout))
                 {
                     let (workspace, layout, visible) = (s.workspace, s.layout, s.visible(self));
-                    if let Some(ws) = self
-                        .layout_manager
-                        .layout_engine
-                        .workspaces_mut()
-                        .workspaces
-                        .get_mut(workspace)
+                    if let Some(ws) =
+                        self.layout_manager.layout_engine.workspaces_mut().workspaces.get_mut(workspace)
                         && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
                     {
                         if let Some((mut p, _)) = system.presentation(layout) {
@@ -91,8 +87,7 @@ impl Reactor {
                 let cancel = self.viewport_gesture.as_ref().is_some_and(|s| !s.released);
                 self.finish_gesture(None, cancel);
                 let engine = &mut self.layout_manager.layout_engine;
-                let Some((workspace, layout)) =
-                    engine.workspaces().active_layout_for_space(context.space)
+                let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(context.space)
                 else {
                     return;
                 };
@@ -137,8 +132,8 @@ impl Reactor {
     fn start_gesture_presentation(&mut self) {
         if let Some(s) = &self.viewport_gesture {
             let space = s.context.space;
-            let gesture = (!s.released)
-                .then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
+            let gesture =
+                (!s.released).then(|| (s.context.clone(), s.control.clone(), s.applied, s.timestamp));
             let _ = self.present_camera(space, true, gesture, None);
         }
     }
@@ -205,8 +200,7 @@ impl Reactor {
             return;
         }
         let valid = s.valid(self);
-        if valid && let Some(sample) = final_sample.or_else(|| s.control.latest(s.context.session))
-        {
+        if valid && let Some(sample) = final_sample.or_else(|| s.control.latest(s.context.session)) {
             self.apply_gesture_sample(sample);
         }
         let s = self.viewport_gesture.as_ref().unwrap();
@@ -218,11 +212,10 @@ impl Reactor {
         // Like a fluid page swipe, an edge transition remains reversible until
         // lift. Require deliberate travel beyond the boundary, measured directly
         // in working-area widths, before committing a workspace switch.
-        let excess =
-            match &self.layout_manager.layout_engine.workspaces()[s.workspace].layout_system {
-                LayoutSystemKind::Scrolling(system) => system.gesture_overscroll(s.layout),
-                _ => 0.0,
-            };
+        let excess = match &self.layout_manager.layout_engine.workspaces()[s.workspace].layout_system {
+            LayoutSystemKind::Scrolling(system) => system.gesture_overscroll(s.layout),
+            _ => 0.0,
+        };
         let next = (excess > 0.0) != s.context.action.invert;
         if !cancelled
             && s.context.action.propagate
@@ -512,8 +505,7 @@ mod tests {
             panic!("scrolling");
         };
         let frames: Vec<_> =
-            crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
-                .collect();
+            crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout).collect();
         for (wid, frame) in frames {
             r.insert_test_window_state(wid, frame, None, true);
         }
@@ -607,10 +599,7 @@ mod tests {
                 written.insert(wid);
             });
             assert_eq!(written.len(), 4);
-            assert!(
-                !initial
-                    .same_as(r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic)
-            );
+            assert!(!initial.same_as(r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic));
 
             // Reconcile the last interactive frame before the release snap (or
             // cancellation), even if no additional under-finger motion arrived.
@@ -707,8 +696,7 @@ mod tests {
                 (1.2, true, false),
                 (1.2, false, true),
             ] {
-                let (mut r, ctx, _, m) =
-                    setup_options_threshold(enabled, skip_empty, invert, threshold);
+                let (mut r, ctx, _, m) = setup_options_threshold(enabled, skip_empty, invert, threshold);
                 let travel = threshold * fraction;
                 let store = r.layout_manager.layout_engine.workspaces();
                 let before = store.active_workspace(ctx.space);
@@ -799,8 +787,7 @@ mod tests {
         r.communication_manager.input_tx = Some(tx);
         r.notification_manager.last_layout_modes_by_space.clear();
         r.update_event_tap_layout_mode();
-        let crate::actor::input::Request::LayoutModesChanged(modes) = rx.try_recv().unwrap().1
-        else {
+        let crate::actor::input::Request::LayoutModesChanged(modes) = rx.try_recv().unwrap().1 else {
             panic!("gesture routing");
         };
         assert_eq!(
@@ -827,8 +814,7 @@ mod tests {
                 panic!("scrolling")
             };
             let initial: Vec<_> =
-                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
-                    .collect();
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout).collect();
             r.add_test_app(1);
             let (tx, mut rx) = crate::actor::channel();
             r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(tx);
@@ -878,18 +864,10 @@ mod tests {
                         );
                         reconciled.insert(wid);
                     }
-                    Request::SetWindowFrames(
-                        positions,
-                        _,
-                        crate::actor::app::FrameMode::Position,
-                        _,
-                    ) => {
+                    Request::SetWindowFrames(positions, _, crate::actor::app::FrameMode::Position, _) => {
                         for (wid, position) in positions {
                             if written.contains(&wid) {
-                                assert!(
-                                    reconciled.contains(&wid),
-                                    "flush viewport frames before parking"
-                                );
+                                assert!(reconciled.contains(&wid), "flush viewport frames before parking");
                             }
                             assert_eq!(
                                 position.origin,
@@ -923,8 +901,7 @@ mod tests {
                 panic!("scrolling")
             };
             let initial: Vec<_> =
-                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout)
-                    .collect();
+                crate::layout_engine::systems::scrolling::tests::presented_frames(system, layout).collect();
             r.add_test_app(1);
             let (app_tx, mut app_rx) = crate::actor::channel();
             r.app_manager.apps.get_mut(&1).unwrap().handle = AppThreadHandle::new_for_test(app_tx);
@@ -976,8 +953,7 @@ mod tests {
                 }
             } else {
                 r.start_gesture_presentation();
-                let camera =
-                    r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
+                let camera = r.presentations.get_mut(&ctx.space).unwrap().headless.as_mut().unwrap();
                 camera.sample(Instant::now() + Duration::from_millis(50));
                 r.commit_presentations();
                 let mut moved = 0;
@@ -986,9 +962,7 @@ mod tests {
                         queue.drain_with(|wid, frame, set_size, _, source, _| {
                             assert_eq!(source, FrameSource::Viewport);
                             assert!(!set_size);
-                            assert!(
-                                frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic)
-                            );
+                            assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic));
                             moved += 1;
                         });
                     }

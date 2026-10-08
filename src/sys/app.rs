@@ -20,9 +20,7 @@ use tracing::trace;
 
 use super::geometry::CGRectDef;
 use super::window_server::{WindowServerId, WindowServerInfo, window_parent};
-use crate::sys::axuielement::{
-    AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError,
-};
+use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError};
 
 const NS_KEY_VALUE_OBSERVING_OPTION_NEW: usize = 1 << 0;
 const NS_KEY_VALUE_OBSERVING_OPTION_INITIAL: usize = 1 << 2;
@@ -231,22 +229,16 @@ impl Drop for ApplicationObserver {
     }
 }
 
-static APPLICATION_CALLBACK: Lazy<Mutex<Option<ApplicationCallback>>> =
-    Lazy::new(|| Mutex::new(None));
+static APPLICATION_CALLBACK: Lazy<Mutex<Option<ApplicationCallback>>> = Lazy::new(|| Mutex::new(None));
 
-static APPLICATION_OBSERVERS: Lazy<Mutex<HashMap<pid_t, usize>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static APPLICATION_OBSERVERS: Lazy<Mutex<HashMap<pid_t, usize>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn set_application_callback<F>(callback: F)
 where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
     *APPLICATION_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
-pub fn ensure_activation_policy_observer(
-    pid: pid_t,
-    app: Retained<NSRunningApplication>,
-    info: AppInfo,
-) {
+pub fn ensure_activation_policy_observer(pid: pid_t, app: Retained<NSRunningApplication>, info: AppInfo) {
     let callback = APPLICATION_CALLBACK.lock().clone();
     let Some(callback) = callback else {
         return;
@@ -359,8 +351,7 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
 /// Persistence uses this only to decide whether a stale saved window still has a running
 /// application whose AX discovery may provide a fuzzy match.
 pub fn is_bundle_running(bundle_id: &str) -> bool {
-    !NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id))
-        .is_empty()
+    !NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id)).is_empty()
 }
 
 pub trait NSRunningApplicationExt {
@@ -448,11 +439,7 @@ impl WindowInfo {
         element: &AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
     ) -> Result<(Self, Option<WindowServerInfo>), AxError> {
-        Self::from_ax_element_with_identity(
-            element,
-            server_info_hint,
-            &mut NativeWindowIdentity::default(),
-        )
+        Self::from_ax_element_with_identity(element, server_info_hint, &mut NativeWindowIdentity::default())
     }
 
     pub(crate) fn from_ax_element_with_identity(
@@ -560,12 +547,7 @@ mod native_identity_tests {
     #[test]
     fn inventory_identity_retries_failure_and_zero_before_sharing_success() {
         let mut identity = NativeWindowIdentity::default();
-        let mut responses = [
-            None,
-            Some(WindowServerId::new(0)),
-            Some(WindowServerId::new(42)),
-        ]
-        .into_iter();
+        let mut responses = [None, Some(WindowServerId::new(0)), Some(WindowServerId::new(42))].into_iter();
         assert_eq!(identity.resolve(|| responses.next().unwrap()), None);
         assert_eq!(
             identity.resolve(|| responses.next().unwrap()),

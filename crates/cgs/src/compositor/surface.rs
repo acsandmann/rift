@@ -7,8 +7,8 @@ use objc2_quartz_core::{CALayer, CATransaction};
 
 use super::cg_ok;
 use super::private::{
-    G_CONNECTION, SLSAddSurface, SLSBindSurface, SLSOrderSurface, SLSRemoveSurface,
-    SLSSetSurfaceBounds, SLSSetSurfaceColorSpace, SLSSetSurfaceOpacity, SLSSetSurfaceResolution,
+    G_CONNECTION, SLSAddSurface, SLSBindSurface, SLSOrderSurface, SLSRemoveSurface, SLSSetSurfaceBounds,
+    SLSSetSurfaceColorSpace, SLSSetSurfaceOpacity, SLSSetSurfaceResolution,
 };
 use super::transaction::WindowTransaction;
 use super::window::CgsWindowError;
@@ -69,8 +69,7 @@ impl WindowSurface {
         context.set_layer(Some(root));
 
         let mut surface_id = 0;
-        if let Err(error) = unsafe { cg_ok(SLSAddSurface(connection, window_id, &mut surface_id)) }
-        {
+        if let Err(error) = unsafe { cg_ok(SLSAddSurface(connection, window_id, &mut surface_id)) } {
             context.set_layer(None);
             context.invalidate();
             return Err(CgsWindowError::Surface(error));

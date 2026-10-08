@@ -6,9 +6,7 @@ use super::{LayoutSystem, WindowLayoutConstraints};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
-use crate::layout_engine::{
-    Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem,
-};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem};
 use crate::model::tree::NodeId;
 
 /// Tree membership supplies focus and stacks; frames remain independent of tiling.
@@ -60,17 +58,16 @@ impl FloatingLayoutSystem {
             })
             .filter_map(|node| {
                 let children: Vec<_> = node.children(self.inner.map()).collect();
-                let selected =
-                    self.inner.local_selection(node).or_else(|| children.first().copied())?;
+                let selected = self.inner.local_selection(node).or_else(|| children.first().copied())?;
                 let index = children.iter().position(|child| *child == selected)?;
                 let wid = self.inner.visible_windows_in_subtree(selected).first().copied()?;
                 let window = self.inner.window_node(layout, wid)?;
                 if self.inner.fullscreen_frame(window, screen, gaps).is_some() {
                     return None;
                 }
-                let frame = self.frame(wid).unwrap_or_else(|| {
-                    Self::default_frame(screen, WindowLayoutConstraints::default())
-                });
+                let frame = self
+                    .frame(wid)
+                    .unwrap_or_else(|| Self::default_frame(screen, WindowLayoutConstraints::default()));
                 Some(self.inner.stack_group_container_info(
                     node,
                     self.inner.layout(node),
@@ -175,8 +172,8 @@ impl FloatingLayoutSystem {
                         source.origin.x < frame.max().x && frame.origin.x < source.max().x,
                     )
                 };
-                let along = (origin.x, origin.y)
-                    .distance_in_direction((candidate.x, candidate.y), direction)?;
+                let along =
+                    (origin.x, origin.y).distance_in_direction((candidate.x, candidate.y), direction)?;
                 (along > 0.0).then_some((wid, !overlaps, along * along + across * across))
             })
             .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)))
@@ -356,9 +353,7 @@ impl FloatingLayoutSystem {
         }
     }
 
-    pub fn contains_floating_window(&self, wid: WindowId) -> bool {
-        self.inner.contains_any_window(wid)
-    }
+    pub fn contains_floating_window(&self, wid: WindowId) -> bool { self.inner.contains_any_window(wid) }
 }
 impl LayoutSystem for FloatingLayoutSystem {
     delegate_traditional_layout_system!(@tree);
@@ -424,11 +419,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         self.inner.all_windows_in_layout(layout)
     }
 
-    fn move_focus(
-        &mut self,
-        layout: LayoutId,
-        direction: Direction,
-    ) -> (Option<WindowId>, Vec<WindowId>) {
+    fn move_focus(&mut self, layout: LayoutId, direction: Direction) -> (Option<WindowId>, Vec<WindowId>) {
         let target = self.focus_target(layout, direction);
         if let Some(wid) = target {
             self.inner.select_window(layout, wid);
@@ -492,8 +483,7 @@ impl LayoutSystem for FloatingLayoutSystem {
     }
 
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
-        let delta =
-            super::reconcile_app_membership(pid, self.inner.windows_for_app(layout, pid), desired);
+        let delta = super::reconcile_app_membership(pid, self.inner.windows_for_app(layout, pid), desired);
         for wid in delta.removals {
             self.remove_window(wid);
         }
@@ -520,11 +510,7 @@ impl LayoutSystem for FloatingLayoutSystem {
 
     fn move_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
 
-    fn move_selection_to_layout_after_selection(
-        &mut self,
-        from_layout: LayoutId,
-        to_layout: LayoutId,
-    ) {
+    fn move_selection_to_layout_after_selection(&mut self, from_layout: LayoutId, to_layout: LayoutId) {
         self.inner.move_selection_to_layout_after_selection(from_layout, to_layout)
     }
 
@@ -653,17 +639,9 @@ impl LayoutSystem for FloatingLayoutSystem {
         self.inner.select(selection);
     }
 
-    fn resize_selection_by(
-        &mut self,
-        _layout: LayoutId,
-        _amount: f64,
-        _orientation: ResizeOrientation,
-    ) {
-    }
+    fn resize_selection_by(&mut self, _layout: LayoutId, _amount: f64, _orientation: ResizeOrientation) {}
 
-    fn toggle_tile_orientation(&mut self, _layout: LayoutId) {
-        self.inner.toggle_tile_orientation(_layout)
-    }
+    fn toggle_tile_orientation(&mut self, _layout: LayoutId) { self.inner.toggle_tile_orientation(_layout) }
 }
 
 #[cfg(test)]
@@ -712,10 +690,7 @@ mod tests {
         assert_eq!(system.frame(w(2)), Some(rect(270., 40.)));
         assert_eq!(system.frame(w(4)), Some(rect(770., 40.)));
         system.select_window(layout, w(1));
-        system.unstack_parent_of_selection(
-            layout,
-            crate::common::config::default_stack_orientation(),
-        );
+        system.unstack_parent_of_selection(layout, crate::common::config::default_stack_orientation());
         assert_eq!(system.frame(w(1)), Some(rect(100., 80.)));
         assert_eq!(system.frame(w(3)), Some(rect(520., 40.)));
     }

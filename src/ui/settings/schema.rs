@@ -47,9 +47,8 @@ impl FormBuilder {
         let draft = self.model.upgrade().is_some_and(|model| model.draft_base.is_some());
         let control: Box<dyn NativeView> = match field.kind {
             FieldKind::Bool => {
-                let input = Rc::new(
-                    Switch::new(&self.ui).on_change(move |value| commit(FieldValue::Bool(value))),
-                );
+                let input =
+                    Rc::new(Switch::new(&self.ui).on_change(move |value| commit(FieldValue::Bool(value))));
                 self.sync(&input, move |input, source| {
                     if let FieldValue::Bool(value) = read(get(source)) {
                         input.set_value(value);
@@ -91,9 +90,8 @@ impl FormBuilder {
                 Box::new(input)
             }
             FieldKind::Choice(choices) => {
-                let input = Rc::new(
-                    Popup::new(&self.ui).on_change(move |index| commit(FieldValue::Choice(index))),
-                );
+                let input =
+                    Rc::new(Popup::new(&self.ui).on_change(move |index| commit(FieldValue::Choice(index))));
                 input.set_items(choices.iter().map(|choice| choice.0));
                 self.sync(&input, move |input, source| {
                     if let FieldValue::Choice(value) = read(get(source)) {

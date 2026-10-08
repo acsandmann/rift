@@ -3,7 +3,9 @@ use crate::common::config::{Color, *};
 use crate::layout_engine::Orientation;
 
 pub(super) fn layouts() -> Vec<(&'static str, LayoutMode)> {
-    LayoutMode::CONFIG_CHOICES.iter().enumerate()
+    LayoutMode::CONFIG_CHOICES
+        .iter()
+        .enumerate()
         .map(|(index, choice)| (choice.0, LayoutMode::from_config_choice(index).unwrap()))
         .collect()
 }
@@ -31,16 +33,19 @@ pub(super) fn build(ui: Ui, model: &Rc<Model>, id: usize) -> Page {
         4 => super::editors::keyboard(ui, model),
         5 => input(ui, model),
         6 => interface(ui, model),
-        8 => {
-            FormBuilder::new(ui, model).finish(SettingsPage::new(&ui, "").section(about(ui, model)))
-        }
+        8 => FormBuilder::new(ui, model).finish(SettingsPage::new(&ui, "").section(about(ui, model))),
         _ => advanced(ui, model),
     }
 }
 
 fn general(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let section = f.schema_section("Window behavior", "general", |s| &s.settings, |s| &mut s.settings);
+    let section = f.schema_section(
+        "Window behavior",
+        "general",
+        |s| &s.settings,
+        |s| &mut s.settings,
+    );
     f.finish(SettingsPage::new(&ui, "").section(section))
 }
 fn about(ui: Ui, model: &Rc<Model>) -> VStack {
@@ -193,7 +198,14 @@ fn layout_defaults(ui: Ui, model: &Rc<Model>) -> Page {
     let mut page = SettingsPage::new(&ui, "");
     let section = Section::form(&ui, "Default behavior")
         .description("Used by workspaces that don’t have their own layout.")
-        .row(f.schema_field(LayoutSettings::field("mode").unwrap(), |s| &s.settings.layout, |s| &mut s.settings.layout).unwrap())
+        .row(
+            f.schema_field(
+                LayoutSettings::field("mode").unwrap(),
+                |s| &s.settings.layout,
+                |s| &mut s.settings.layout,
+            )
+            .unwrap(),
+        )
         .row(f.inherited_popup(
             "New window position",
             insertion(),
@@ -446,11 +458,21 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
     };
     let mut page = VStack::new(&ui)
         .spacing(10.0)
-        .push(SectionTitle::new(&ui, layouts().into_iter().find(|(_, value)| *value == mode).unwrap().0))
+        .push(SectionTitle::new(
+            &ui,
+            layouts().into_iter().find(|(_, value)| *value == mode).unwrap().0,
+        ))
         .push(Caption::new(&ui, layout_description(mode)));
     let section = match mode {
         LayoutMode::Traditional => options()
-            .row(f.schema_field(TraditionalLayoutSettings::field("equalize_nodes").unwrap(), |s| &s.settings.layout.traditional, |s| &mut s.settings.layout.traditional).unwrap())
+            .row(
+                f.schema_field(
+                    TraditionalLayoutSettings::field("equalize_nodes").unwrap(),
+                    |s| &s.settings.layout.traditional,
+                    |s| &mut s.settings.layout.traditional,
+                )
+                .unwrap(),
+            )
             .row(f.inherited_popup(
                 "New window position",
                 insertion(),
@@ -487,8 +509,22 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                 },
             )),
         LayoutMode::Stack => options()
-            .row(f.schema_field(StackSettings::field("stack_offset").unwrap(), |s| &s.settings.layout.stack, |s| &mut s.settings.layout.stack).unwrap())
-            .row(f.schema_field(StackSettings::field("default_orientation").unwrap(), |s| &s.settings.layout.stack, |s| &mut s.settings.layout.stack).unwrap())
+            .row(
+                f.schema_field(
+                    StackSettings::field("stack_offset").unwrap(),
+                    |s| &s.settings.layout.stack,
+                    |s| &mut s.settings.layout.stack,
+                )
+                .unwrap(),
+            )
+            .row(
+                f.schema_field(
+                    StackSettings::field("default_orientation").unwrap(),
+                    |s| &s.settings.layout.stack,
+                    |s| &mut s.settings.layout.stack,
+                )
+                .unwrap(),
+            )
             .row(f.inherited_popup(
                 "New window position",
                 insertion(),
@@ -507,11 +543,33 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                     )
                     .suffix("%"),
                 )
-                .row(f.schema_field(MasterStackSettings::field("master_count").unwrap(), |s| &s.settings.layout.master_stack, |s| &mut s.settings.layout.master_stack).unwrap())
-                .row(f.schema_field(MasterStackSettings::field("master_side").unwrap(), |s| &s.settings.layout.master_stack, |s| &mut s.settings.layout.master_stack).unwrap());
+                .row(
+                    f.schema_field(
+                        MasterStackSettings::field("master_count").unwrap(),
+                        |s| &s.settings.layout.master_stack,
+                        |s| &mut s.settings.layout.master_stack,
+                    )
+                    .unwrap(),
+                )
+                .row(
+                    f.schema_field(
+                        MasterStackSettings::field("master_side").unwrap(),
+                        |s| &s.settings.layout.master_stack,
+                        |s| &mut s.settings.layout.master_stack,
+                    )
+                    .unwrap(),
+                );
             page = page.push(section);
-            Section::form(&ui, "").content(SubsectionTitle::new(&ui, "Arrangement"))
-                .row(f.schema_field(MasterStackSettings::field("new_window_placement").unwrap(), |s| &s.settings.layout.master_stack, |s| &mut s.settings.layout.master_stack).unwrap())
+            Section::form(&ui, "")
+                .content(SubsectionTitle::new(&ui, "Arrangement"))
+                .row(
+                    f.schema_field(
+                        MasterStackSettings::field("new_window_placement").unwrap(),
+                        |s| &s.settings.layout.master_stack,
+                        |s| &mut s.settings.layout.master_stack,
+                    )
+                    .unwrap(),
+                )
                 .row(f.inherited_popup(
                     "Master arrangement",
                     arrangement(),
@@ -582,28 +640,61 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                                 {
                                     return Ok(*original);
                                 }
-                                value.parse::<f64>().map(|v| v / 100.0).map_err(|_| {
-                                    "Enter percentages separated by commas".to_string()
-                                })
+                                value
+                                    .parse::<f64>()
+                                    .map(|v| v / 100.0)
+                                    .map_err(|_| "Enter percentages separated by commas".to_string())
                             })
                             .collect::<Result<_, _>>()?;
                         s.settings.layout.scrolling.preset_column_widths = widths;
                         Ok(())
                     },
                 ))
-                .row(f.schema_field(ScrollingLayoutSettings::field("preserve_window_sizes").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap())
                 .row(
-                    f.schema_field(ScrollingLayoutSettings::field("min_column_width_ratio").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap()
+                    f.schema_field(
+                        ScrollingLayoutSettings::field("preserve_window_sizes").unwrap(),
+                        |s| &s.settings.layout.scrolling,
+                        |s| &mut s.settings.layout.scrolling,
+                    )
+                    .unwrap(),
+                )
+                .row(
+                    f.schema_field(
+                        ScrollingLayoutSettings::field("min_column_width_ratio").unwrap(),
+                        |s| &s.settings.layout.scrolling,
+                        |s| &mut s.settings.layout.scrolling,
+                    )
+                    .unwrap()
                     .suffix("%"),
                 )
                 .row(
-                    f.schema_field(ScrollingLayoutSettings::field("max_column_width_ratio").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap()
+                    f.schema_field(
+                        ScrollingLayoutSettings::field("max_column_width_ratio").unwrap(),
+                        |s| &s.settings.layout.scrolling,
+                        |s| &mut s.settings.layout.scrolling,
+                    )
+                    .unwrap()
                     .suffix("%"),
                 );
             page = page.push(section);
-            let section = Section::form(&ui, "").content(SubsectionTitle::new(&ui, "Navigation"))
-                .row(f.schema_field(ScrollingLayoutSettings::field("alignment").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap())
-                .row(f.schema_field(ScrollingLayoutSettings::field("focus_navigation_style").unwrap(), |s| &s.settings.layout.scrolling, |s| &mut s.settings.layout.scrolling).unwrap())
+            let section = Section::form(&ui, "")
+                .content(SubsectionTitle::new(&ui, "Navigation"))
+                .row(
+                    f.schema_field(
+                        ScrollingLayoutSettings::field("alignment").unwrap(),
+                        |s| &s.settings.layout.scrolling,
+                        |s| &mut s.settings.layout.scrolling,
+                    )
+                    .unwrap(),
+                )
+                .row(
+                    f.schema_field(
+                        ScrollingLayoutSettings::field("focus_navigation_style").unwrap(),
+                        |s| &s.settings.layout.scrolling,
+                        |s| &mut s.settings.layout.scrolling,
+                    )
+                    .unwrap(),
+                )
                 .row(f.inherited_popup(
                     "Animate navigation",
                     bool_choices(),
@@ -612,13 +703,15 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                     |s, v| s.settings.layout.scrolling.animate = v,
                 ));
             page = page.push(section);
-            Section::form(&ui, "").content(SubsectionTitle::new(&ui, "Window placement")).row(f.inherited_popup(
-                "New window position",
-                insertion(),
-                |s| s.settings.layout.scrolling.base.window_insertion_point,
-                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
-                |s, v| s.settings.layout.scrolling.base.window_insertion_point = v,
-            ))
+            Section::form(&ui, "")
+                .content(SubsectionTitle::new(&ui, "Window placement"))
+                .row(f.inherited_popup(
+                    "New window position",
+                    insertion(),
+                    |s| s.settings.layout.scrolling.base.window_insertion_point,
+                    |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
+                    |s, v| s.settings.layout.scrolling.base.window_insertion_point = v,
+                ))
         }
         LayoutMode::Floating => {
             return f.finish(SettingsPage::new(&ui, "").section(page.push(Caption::new(
@@ -641,8 +734,18 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
     let mut page = SettingsPage::new(&ui, "");
     let section = f.schema_section("Focus", "pointer", |s| &s.settings, |s| &mut s.settings);
     page = page.section(section);
-    let section = f.schema_section("Workspace swipes", "main", |s| &s.settings.gestures, |s| &mut s.settings.gestures);
-    let tuning = f.schema_section("", "advanced", |s| &s.settings.gestures, |s| &mut s.settings.gestures);
+    let section = f.schema_section(
+        "Workspace swipes",
+        "main",
+        |s| &s.settings.gestures,
+        |s| &mut s.settings.gestures,
+    );
+    let tuning = f.schema_section(
+        "",
+        "advanced",
+        |s| &s.settings.gestures,
+        |s| &mut s.settings.gestures,
+    );
     page = page.section(section.content(Disclosure::new(&ui, "Advanced swipe settings", tuning)));
     let mut section = Section::new(&ui, "Scrolling layout gestures")
         .description("These gestures navigate the Scrolling layout strip.");
@@ -658,7 +761,11 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
             );
             Some(f.schema_metadata(row, field, |s| &s.settings.layout.scrolling.gestures))
         } else {
-            f.schema_field(field, |s| &s.settings.layout.scrolling.gestures, |s| &mut s.settings.layout.scrolling.gestures)
+            f.schema_field(
+                field,
+                |s| &s.settings.layout.scrolling.gestures,
+                |s| &mut s.settings.layout.scrolling.gestures,
+            )
         };
         if let Some(row) = row {
             if matches!(field.key, "vertical_tolerance" | "workspace_switch_threshold") {
@@ -669,7 +776,12 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
         }
     }
     page = page.section(section.content(Disclosure::new(&ui, "Advanced scrolling settings", tuning)));
-    let section = f.schema_section("Drag & Drop", "", |s| &s.settings.drag_drop, |s| &mut s.settings.drag_drop);
+    let section = f.schema_section(
+        "Drag & Drop",
+        "",
+        |s| &s.settings.drag_drop,
+        |s| &mut s.settings.drag_drop,
+    );
     page = page.section(section);
     let section = Section::new(&ui, "Pointer movement").row(f.popup(
         "Horizontal pointer warp",
@@ -692,7 +804,12 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
 fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
-    let section = f.schema_section("Menu Bar", "", |s| &s.settings.ui.menu_bar, |s| &mut s.settings.ui.menu_bar);
+    let section = f.schema_section(
+        "Menu Bar",
+        "",
+        |s| &s.settings.ui.menu_bar,
+        |s| &mut s.settings.ui.menu_bar,
+    );
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let weak_model = f.model.clone();
@@ -716,9 +833,19 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     let row = f.row(field.title, path, message);
     let row = f.schema_metadata(row, field, |s| &s.settings.ui.menu_bar);
     page = page.section(section.row(row));
-    let section = f.schema_rows(Section::new(&ui, "Overview").description("Requires restarting Rift."), "", |s| &s.settings.ui.mission_control, |s| &mut s.settings.ui.mission_control);
+    let section = f.schema_rows(
+        Section::new(&ui, "Overview").description("Requires restarting Rift."),
+        "",
+        |s| &s.settings.ui.mission_control,
+        |s| &mut s.settings.ui.mission_control,
+    );
     page = page.section(section);
-    let section = f.schema_rows(Section::new(&ui, "Stack Line").description("Experimental window indicators."), "", |s| &s.settings.ui.stack_line, |s| &mut s.settings.ui.stack_line);
+    let section = f.schema_rows(
+        Section::new(&ui, "Stack Line").description("Experimental window indicators."),
+        "",
+        |s| &s.settings.ui.stack_line,
+        |s| &mut s.settings.ui.stack_line,
+    );
     let section = section.row({
         let row = f.color(
             "Selected color",
@@ -790,7 +917,14 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     page = page.section(
         Section::new(&ui, "Configuration file")
             .content(location)
-            .row(f.schema_field(crate::common::config::Settings::field("hot_reload").unwrap(), |s| &s.settings, |s| &mut s.settings).unwrap())
+            .row(
+                f.schema_field(
+                    crate::common::config::Settings::field("hot_reload").unwrap(),
+                    |s| &s.settings,
+                    |s| &mut s.settings,
+                )
+                .unwrap(),
+            )
             .content(actions.push(reload))
             .footer(message),
     );
@@ -805,8 +939,7 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
         "Autofocus blacklist",
         |s| s.settings.auto_focus_blacklist.clone(),
         |s, v| s.settings.auto_focus_blacklist = v,
-    ),
-    );
+    ));
     f.finish(page)
 }
 
@@ -901,8 +1034,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
     let error = Rc::downgrade(&message);
     let model = f.model.clone();
     let modifier_recorder = Rc::new(ModifierRecorder::new(&ui).on_change(move |flags| {
-        let value =
-            (!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly { modifiers: modifiers(flags) });
+        let value = (!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly { modifiers: modifiers(flags) });
         Model::submit(
             &model,
             Box::new(move |s| {

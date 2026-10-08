@@ -151,9 +151,7 @@ impl LayoutEngine {
             }
         }
         for location @ (space, workspace) in self.floating_positions.locations_for_window(window) {
-            if !locations.contains(&location)
-                && self.workspaces.active_layout(space, workspace).is_some()
-            {
+            if !locations.contains(&location) && self.workspaces.active_layout(space, workspace).is_some() {
                 locations.push(location);
             }
         }
@@ -209,13 +207,11 @@ impl LayoutEngine {
                 self.persistence.fingerprint(*window).map(|saved| RestoreCandidate {
                     window: *window,
                     fingerprint: saved,
-                    location: self
-                        .restored_location_for_window_preferring(*window, preferred_location),
+                    location: self.restored_location_for_window_preferring(*window, preferred_location),
                 })
             })
             .collect();
-        let Some(decision) =
-            choose_match(live, live_space, fingerprint, preferred_location, &candidates)
+        let Some(decision) = choose_match(live, live_space, fingerprint, preferred_location, &candidates)
         else {
             return ReconcileOutcome::default();
         };
@@ -233,8 +229,7 @@ impl LayoutEngine {
         // workspace tree. Prefer the live authoritative assignment when it is one of those
         // locations; otherwise hash/slotmap iteration order can silently choose another
         // workspace and a later app activation appears to move the window at random.
-        let restored_location =
-            self.restored_location_for_window_preferring(old, preferred_location);
+        let restored_location = self.restored_location_for_window_preferring(old, preferred_location);
         self.persistence.pending_windows.remove(&old);
         if old != live {
             self.transfer_persistent_window_identity(old, live);
@@ -244,8 +239,7 @@ impl LayoutEngine {
             self.remove_restored_tiling_duplicates(live, (space, workspace));
             self.workspaces.retain_window_focus_location(live, workspace);
             self.floating_positions.retain_window_location(live, (space, workspace));
-            let _ =
-                self.workspaces.assign_window_to_workspace(window_store, space, live, workspace);
+            let _ = self.workspaces.assign_window_to_workspace(window_store, space, live, workspace);
         }
         ReconcileOutcome {
             matched: true,

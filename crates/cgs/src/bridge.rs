@@ -5,8 +5,8 @@ use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSControl, NSControlTextEditingDelegate, NSMenu, NSMenuDelegate, NSPopoverDelegate,
-    NSSearchFieldDelegate, NSTextDelegate, NSTextFieldDelegate, NSTextViewDelegate,
-    NSTokenFieldDelegate, NSWindow, NSWindowDelegate,
+    NSSearchFieldDelegate, NSTextDelegate, NSTextFieldDelegate, NSTextViewDelegate, NSTokenFieldDelegate,
+    NSWindow, NSWindowDelegate,
 };
 use objc2_foundation::{NSNotification, NSObject};
 

@@ -79,9 +79,7 @@ fn install_window_commands(ui: &cgs::Ui) {
     use objc2_foundation::NSString;
     let app = objc2_app_kit::NSApplication::sharedApplication(ui.mtm());
     let main = app.mainMenu().unwrap_or_else(|| NSMenu::new(ui.mtm()));
-    for (category, title, key, action) in
-        [("File", "Close Window", "w", objc2::sel!(performClose:))]
-    {
+    for (category, title, key, action) in [("File", "Close Window", "w", objc2::sel!(performClose:))] {
         if main.itemArray().iter().filter_map(|item| item.submenu()).any(|menu| {
             menu.itemArray().iter().any(|item| {
                 item.keyEquivalent().to_string() == key
@@ -345,7 +343,11 @@ impl Menu {
     /// Scan installed applications off the main thread; the result returns as a `MenuAction`
     /// so the menu actor keeps handling events and no closed window or model is retained.
     fn discover_applications(&mut self, finish: Option<Box<dyn FnOnce(Result<(), String>)>>) {
-        if self.settings.as_ref().is_none_or(|settings| settings.has_installed_applications()) {
+        if self
+            .settings
+            .as_ref()
+            .is_none_or(|settings| settings.has_installed_applications())
+        {
             if let Some(finish) = finish {
                 finish(Ok(()));
             }
@@ -436,8 +438,9 @@ impl Menu {
 
     fn handle_action(&mut self, action: MenuAction) {
         match action {
-            MenuAction::SetLayout(mode) => self
-                .send_layout_command(LayoutCommand::SetWorkspaceLayout { workspace: None, mode }),
+            MenuAction::SetLayout(mode) => {
+                self.send_layout_command(LayoutCommand::SetWorkspaceLayout { workspace: None, mode })
+            }
             MenuAction::NextWorkspace => {
                 self.send_layout_command(LayoutCommand::NextWorkspace(None));
             }
@@ -546,10 +549,7 @@ impl Menu {
         self.config_tx.send(msg);
     }
 
-    fn spawn_debouncer(
-        period: Duration,
-        tick_tx: UnboundedSender<()>,
-    ) -> mpsc::Sender<DebounceCommand> {
+    fn spawn_debouncer(period: Duration, tick_tx: UnboundedSender<()>) -> mpsc::Sender<DebounceCommand> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<DebounceCommand>();
 
         std::thread::spawn(move || {

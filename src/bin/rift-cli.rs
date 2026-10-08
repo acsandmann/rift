@@ -457,10 +457,7 @@ impl DisplaySelectionArgs {
         } else if let Some(uuid) = self.uuid {
             Ok(DisplaySelector::Uuid(uuid))
         } else {
-            Err(
-                "display selection requires exactly one of --direction, --index, or --uuid"
-                    .to_string(),
-            )
+            Err("display selection requires exactly one of --direction, --index, or --uuid".to_string())
         }
     }
 }
@@ -545,9 +542,7 @@ fn main() {
 
     let request = match cli.command {
         Commands::Service { .. } => {
-            println!(
-                "service commands have been moved to the `rift` binary. (ie `rift service install`)"
-            );
+            println!("service commands have been moved to the `rift` binary. (ie `rift service install`)");
             process::exit(0);
         }
         Commands::Subscribe {
@@ -617,10 +612,9 @@ fn build_request(command: Commands) -> Result<RiftRequest, String> {
         Commands::Query { query } => build_query_request(query),
         Commands::Execute { command } => build_execute_request(command),
         Commands::Subscribe { subscribe } => build_subscribe_request(subscribe),
-        Commands::Service { .. } => Err(
-            "Service commands are handled locally and should not be sent to the rift server."
-                .to_string(),
-        ),
+        Commands::Service { .. } => {
+            Err("Service commands are handled locally and should not be sent to the rift server.".to_string())
+        }
     }
 }
 
@@ -648,9 +642,7 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
             scope: SpaceScopeArgs { space_id, display },
             workspace_id,
         } => match display {
-            Some(display_uuid) => {
-                Ok(RiftRequest::GetLayoutStateForDisplay { display_uuid, workspace_id })
-            }
+            Some(display_uuid) => Ok(RiftRequest::GetLayoutStateForDisplay { display_uuid, workspace_id }),
             None => Ok(RiftRequest::GetLayoutState { space_id, workspace_id }),
         },
         QueryCommands::WorkspaceLayout {
@@ -696,9 +688,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         ExecuteCommands::Workspace { workspace_cmd } => map_workspace_command(workspace_cmd)?,
         ExecuteCommands::Layout { layout_cmd } => map_layout_command(layout_cmd)?,
         ExecuteCommands::Config { config_cmd } => map_config_command(config_cmd)?,
-        ExecuteCommands::MissionControl { mission_cmd } => {
-            map_mission_control_command(mission_cmd)?
-        }
+        ExecuteCommands::MissionControl { mission_cmd } => map_mission_control_command(mission_cmd)?,
         ExecuteCommands::Display { display_cmd } => map_display_command(display_cmd)?,
         ExecuteCommands::Space { space_cmd } => map_space_command(space_cmd)?,
         ExecuteCommands::SaveAndExit => {
@@ -722,15 +712,12 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
                 )
             } else {
                 (
-                    absolute_layout_path(
-                        file.path.expect("clap requires either PATH or --master"),
-                    )?,
+                    absolute_layout_path(file.path.expect("clap requires either PATH or --master"))?,
                     layout::RestoreSource::SavedActiveSpace,
                 )
             };
-            layout::LayoutEngine::load(path.clone()).map_err(|error| {
-                format!("could not load layout file at {}: {error}", path.display())
-            })?;
+            layout::LayoutEngine::load(path.clone())
+                .map_err(|error| format!("could not load layout file at {}: {error}", path.display()))?;
             let scope = match scope {
                 CliRestoreScope::Workspace => layout::RestoreScope::Workspace,
                 CliRestoreScope::Space => layout::RestoreScope::Space,
@@ -767,9 +754,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
 
 fn into_protocol_command(command: CliCommand) -> Result<rift_protocol::RiftCommand, String> {
     match command {
-        CliCommand::Config(command) => {
-            Ok(rift_protocol::RiftCommand::Config(decode_protocol(command)?))
-        }
+        CliCommand::Config(command) => Ok(rift_protocol::RiftCommand::Config(decode_protocol(command)?)),
         CliCommand::Reactor(reactor::Command::Layout(command)) => {
             Ok(rift_protocol::RiftCommand::Layout(decode_protocol(command)?))
         }
@@ -810,9 +795,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
             window_id,
             window_server_id,
         } => match (direction, window_id) {
-            (Some(direction), None) => Ok(CliCommand::Reactor(reactor::Command::Layout(
-                LC::MoveFocus(parse_focus_direction(&direction)?),
-            ))),
+            (Some(direction), None) => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::MoveFocus(
+                parse_focus_direction(&direction)?,
+            )))),
             (None, Some(window_id)) => Ok(CliCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::FocusWindow {
                     window_id: parse_window_id(&window_id)?.into(),
@@ -834,15 +819,15 @@ fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
         WindowCommands::ToggleFullscreen => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::ToggleFullscreen,
         ))),
-        WindowCommands::ToggleFullscreenWithinGaps => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
-        )),
-        WindowCommands::ResizeGrow { orientation } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ResizeWindowGrow(orientation.into())),
-        )),
-        WindowCommands::ResizeShrink { orientation } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ResizeWindowShrink(orientation.into())),
-        )),
+        WindowCommands::ToggleFullscreenWithinGaps => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::ToggleFullscreenWithinGaps,
+        ))),
+        WindowCommands::ResizeGrow { orientation } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowGrow(orientation.into()),
+        ))),
+        WindowCommands::ResizeShrink { orientation } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowShrink(orientation.into()),
+        ))),
         WindowCommands::ResizeBy { amount } => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowBy { amount },
         ))),
@@ -928,15 +913,15 @@ fn parse_layout_mode(value: &str) -> Result<LayoutMode, String> {
 fn map_workspace_command(cmd: WorkspaceCommands) -> Result<CliCommand, String> {
     use layout::LayoutCommand as LC;
     match cmd {
-        WorkspaceCommands::Next { skip_empty } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::NextWorkspace(skip_empty)),
-        )),
-        WorkspaceCommands::Prev { skip_empty } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::PrevWorkspace(skip_empty)),
-        )),
-        WorkspaceCommands::Switch { workspace_id } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::SwitchToWorkspace(workspace_id)),
-        )),
+        WorkspaceCommands::Next { skip_empty } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::NextWorkspace(skip_empty),
+        ))),
+        WorkspaceCommands::Prev { skip_empty } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::PrevWorkspace(skip_empty),
+        ))),
+        WorkspaceCommands::Switch { workspace_id } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::SwitchToWorkspace(workspace_id),
+        ))),
         WorkspaceCommands::MoveWindow {
             workspace_id,
             follow,
@@ -968,33 +953,29 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
     match cmd {
         LayoutCommands::Ascend => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Ascend))),
         LayoutCommands::Descend => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Descend))),
-        LayoutCommands::MoveNode { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::MoveNode(direction.into())),
-        )),
-        LayoutCommands::JoinWindow { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::JoinWindow(direction.into())),
-        )),
+        LayoutCommands::MoveNode { direction } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::MoveNode(direction.into()),
+        ))),
+        LayoutCommands::JoinWindow { direction } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::JoinWindow(direction.into()),
+        ))),
         LayoutCommands::ConsumeOrExpelWindow { direction } => Ok(CliCommand::Reactor(
             reactor::Command::Layout(LC::ConsumeOrExpelWindow(direction.into())),
         )),
-        LayoutCommands::ToggleStack => {
-            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::ToggleStack)))
-        }
+        LayoutCommands::ToggleStack => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::ToggleStack))),
         LayoutCommands::ToggleOrientation => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::ToggleOrientation,
         ))),
-        LayoutCommands::Unjoin => {
-            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows)))
-        }
+        LayoutCommands::Unjoin => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows))),
         LayoutCommands::ToggleFocusFloat => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::ToggleFocusFloating,
         ))),
-        LayoutCommands::AdjustMasterRatio { delta } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::AdjustMasterRatio(delta)),
-        )),
-        LayoutCommands::AdjustMasterCount { delta } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::AdjustMasterCount { delta }),
-        )),
+        LayoutCommands::AdjustMasterRatio { delta } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::AdjustMasterRatio(delta),
+        ))),
+        LayoutCommands::AdjustMasterCount { delta } => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::AdjustMasterCount { delta },
+        ))),
         LayoutCommands::PromoteToMaster => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::PromoteToMaster,
         ))),
@@ -1009,9 +990,7 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
                 delta,
             })))
         }
-        LayoutCommands::SnapStrip => {
-            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::SnapStrip)))
-        }
+        LayoutCommands::SnapStrip => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::SnapStrip))),
         LayoutCommands::SwitchPresetColumnWidth { backwards } => Ok(CliCommand::Reactor(
             reactor::Command::Layout(LC::SwitchPresetColumnWidth { backwards }),
         )),
@@ -1033,9 +1012,7 @@ fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
             };
             ConfigCommand::SetAnimate(bool_value)
         }
-        ConfigCommands::SetAnimationDuration { value } => {
-            ConfigCommand::SetAnimationDuration(value)
-        }
+        ConfigCommands::SetAnimationDuration { value } => ConfigCommand::SetAnimationDuration(value),
         ConfigCommands::SetAnimationFps { value } => ConfigCommand::SetAnimationFps(value),
         ConfigCommands::SetAnimationEasing { value } => {
             let easing = match value.as_str() {
@@ -1066,15 +1043,9 @@ fn map_config_command(cmd: ConfigCommands) -> Result<CliCommand, String> {
             };
             ConfigCommand::SetAnimationEasing(easing)
         }
-        ConfigCommands::SetMouseFollowsFocus { value } => {
-            ConfigCommand::SetMouseFollowsFocus(value)
-        }
-        ConfigCommands::SetMouseHidesOnFocus { value } => {
-            ConfigCommand::SetMouseHidesOnFocus(value)
-        }
-        ConfigCommands::SetFocusFollowsMouse { value } => {
-            ConfigCommand::SetFocusFollowsMouse(value)
-        }
+        ConfigCommands::SetMouseFollowsFocus { value } => ConfigCommand::SetMouseFollowsFocus(value),
+        ConfigCommands::SetMouseHidesOnFocus { value } => ConfigCommand::SetMouseHidesOnFocus(value),
+        ConfigCommands::SetFocusFollowsMouse { value } => ConfigCommand::SetFocusFollowsMouse(value),
         ConfigCommands::SetStackOffset { value } => ConfigCommand::SetStackOffset(value),
         ConfigCommands::SetStackDefaultOrientation { value } => {
             let parsed_value: serde_json::Value = serde_json::Value::String(value.clone());
@@ -1138,21 +1109,15 @@ fn map_display_command(cmd: DisplayCommands) -> Result<CliCommand, String> {
                 reactor::ReactorCommand::FocusDisplay(selector),
             )))
         }
-        DisplayCommands::MoveMouse { display } => {
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::MoveMouseToDisplay(display.into_selector()?),
-            )))
-        }
-        DisplayCommands::MoveMouseToIndex { index } => {
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Index(index)),
-            )))
-        }
-        DisplayCommands::MoveMouseToUuid { uuid } => {
-            Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid)),
-            )))
-        }
+        DisplayCommands::MoveMouse { display } => Ok(CliCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::MoveMouseToDisplay(display.into_selector()?),
+        ))),
+        DisplayCommands::MoveMouseToIndex { index } => Ok(CliCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Index(index)),
+        ))),
+        DisplayCommands::MoveMouseToUuid { uuid } => Ok(CliCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid)),
+        ))),
         DisplayCommands::MoveWindow { display, window_id } => Ok(CliCommand::Reactor(
             reactor::Command::Reactor(reactor::ReactorCommand::MoveWindowToDisplay {
                 selector: display.into_selector()?,

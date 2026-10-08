@@ -19,8 +19,7 @@ use crate::actor::config as config_actor;
 use crate::actor::reactor::{self, Event};
 use crate::ipc::subscriptions::SharedServerState;
 use crate::sys::mach::{
-    OwnedMachReply, is_mach_server_registered, mach_msg_header_t, mach_server_install,
-    send_mach_reply,
+    OwnedMachReply, is_mach_server_registered, mach_msg_header_t, mach_server_install, send_mach_reply,
 };
 
 type ClientPort = u32;
@@ -38,9 +37,7 @@ pub struct InstallRequest {
 }
 
 impl std::fmt::Debug for InstallRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("InstallRequest(..)")
-    }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("InstallRequest(..)") }
 }
 
 pub fn run_mach_server(
@@ -48,9 +45,7 @@ pub fn run_mach_server(
     config_tx: config_actor::Sender,
 ) -> Result<SharedServerState, String> {
     if is_mach_server_registered() {
-        return Err(
-            "Another Rift instance is already running; quit it before starting another.".into(),
-        );
+        return Err("Another Rift instance is already running; quit it before starting another.".into());
     }
     let (response, result) = sync_channel(1);
     reactor
@@ -63,9 +58,7 @@ pub(crate) fn install_mach_server(reactor: Rc<RefCell<reactor::Reactor>>, reques
     let InstallRequest { config_tx, response } = request;
     let result = (|| {
         if is_mach_server_registered() {
-            return Err(
-                "Another Rift instance is already running; quit it before starting another.".into(),
-            );
+            return Err("Another Rift instance is already running; quit it before starting another.".into());
         }
 
         let server_state: SharedServerState =
@@ -127,12 +120,7 @@ impl IpcRequestHandler {
         }
     }
 
-    fn handle_message(
-        &self,
-        payload: &[u8],
-        client_port: ClientPort,
-        header: &mut mach_msg_header_t,
-    ) {
+    fn handle_message(&self, payload: &[u8], client_port: ClientPort, header: &mut mach_msg_header_t) {
         let message = match std::str::from_utf8(payload) {
             Ok(message) => message,
             Err(error) => {
@@ -185,9 +173,7 @@ impl IpcRequestHandler {
                 self.server_state.unsubscribe_cli(event.to_string());
                 encode_success(serde_json::json!({ "cli_unsubscribed": event.to_string() }))
             }
-            RiftRequest::ListCliSubscriptions => {
-                encode_success(self.server_state.list_cli_subscriptions())
-            }
+            RiftRequest::ListCliSubscriptions => encode_success(self.server_state.list_cli_subscriptions()),
             request => match self.reactor.try_borrow_mut() {
                 Ok(mut reactor) => encode_reactor_response(&mut reactor, request),
                 Err(_) => encode_error(serde_json::json!({ "message": "Reactor is busy" })),
@@ -219,8 +205,7 @@ impl IpcRequestHandler {
 fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest) -> Vec<u8> {
     match request {
         RiftRequest::GetWorkspaces { space_id } => {
-            let workspaces =
-                reactor.query_workspaces(space_id.map(crate::sys::screen::SpaceId::new));
+            let workspaces = reactor.query_workspaces(space_id.map(crate::sys::screen::SpaceId::new));
             encode_success(
                 workspaces
                     .into_iter()
@@ -245,16 +230,12 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
 
         RiftRequest::GetDisplays => {
             let displays = reactor.query_displays();
-            encode_success(
-                displays.into_iter().map(rift_protocol::DisplayData::from).collect::<Vec<_>>(),
-            )
+            encode_success(displays.into_iter().map(rift_protocol::DisplayData::from).collect::<Vec<_>>())
         }
 
         RiftRequest::GetWindows { space_id } => {
             let windows = reactor.query_windows(space_id.map(crate::sys::screen::SpaceId::new));
-            encode_success(
-                windows.into_iter().map(rift_protocol::WindowData::from).collect::<Vec<_>>(),
-            )
+            encode_success(windows.into_iter().map(rift_protocol::WindowData::from).collect::<Vec<_>>())
         }
 
         RiftRequest::GetWindowsForDisplay { display_uuid } => {
@@ -263,9 +244,7 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
                 Err(response) => return response,
             };
             let windows = reactor.query_windows(Some(space));
-            encode_success(
-                windows.into_iter().map(rift_protocol::WindowData::from).collect::<Vec<_>>(),
-            )
+            encode_success(windows.into_iter().map(rift_protocol::WindowData::from).collect::<Vec<_>>())
         }
 
         RiftRequest::GetWindowInfo { window_id } => {
@@ -279,9 +258,7 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         RiftRequest::GetLayoutState { space_id, workspace_id } => {
             match reactor.query_layout_state(space_id, workspace_id) {
                 Some(layout_state) => encode_success(layout_state),
-                None => {
-                    encode_error(serde_json::json!({ "message": "Space or workspace not found" }))
-                }
+                None => encode_error(serde_json::json!({ "message": "Space or workspace not found" })),
             }
         }
 
@@ -297,10 +274,8 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         }
 
         RiftRequest::GetWorkspaceLayouts { space_id, workspace_id } => {
-            let workspace_layouts = reactor.query_workspace_layouts(
-                space_id.map(crate::sys::screen::SpaceId::new),
-                workspace_id,
-            );
+            let workspace_layouts =
+                reactor.query_workspace_layouts(space_id.map(crate::sys::screen::SpaceId::new), workspace_id);
             encode_success(workspace_layouts)
         }
 
@@ -366,13 +341,8 @@ struct ConfigRequestHandler {
 }
 
 impl ConfigRequestHandler {
-    fn perform<T>(
-        &self,
-        make_event: impl FnOnce(SyncSender<T>) -> config_actor::Event,
-    ) -> Result<T, String>
-    where
-        T: Send + 'static,
-    {
+    fn perform<T>(&self, make_event: impl FnOnce(SyncSender<T>) -> config_actor::Event) -> Result<T, String>
+    where T: Send + 'static {
         // Buffer one reply so the actor never waits for this worker to receive it.
         let (response, result) = sync_channel(1);
         self.config_tx
@@ -397,9 +367,7 @@ impl ConfigRequestHandler {
             },
             RiftRequest::ExecuteCommand {
                 command: rift_protocol::RiftCommand::Config(command),
-            } => match self
-                .perform(|response| config_actor::Event::ApplyConfig { cmd: command, response })
-            {
+            } => match self.perform(|response| config_actor::Event::ApplyConfig { cmd: command, response }) {
                 Ok(Ok(())) => encode_success("Config applied successfully"),
                 Ok(Err(message)) => encode_error(serde_json::json!({ "message": message })),
                 Err(error) => encode_error(serde_json::json!({
@@ -457,9 +425,7 @@ fn send_error_response(header: &mut mach_msg_header_t, message: &str) {
     send_encoded_response(header, &response);
 }
 
-fn encode_success<T: Serialize>(data: T) -> Vec<u8> {
-    encode_response(&RiftResponse::Success { data })
-}
+fn encode_success<T: Serialize>(data: T) -> Vec<u8> { encode_response(&RiftResponse::Success { data }) }
 
 fn encode_error(error: serde_json::Value) -> Vec<u8> {
     encode_response::<serde_json::Value>(&RiftResponse::Error { error })

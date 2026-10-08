@@ -67,10 +67,7 @@ impl Record {
     }
 }
 
-pub fn replay(
-    path: &Path,
-    mut on_event: impl FnMut(Span, Request) + Send + 'static,
-) -> anyhow::Result<()> {
+pub fn replay(path: &Path, mut on_event: impl FnMut(Span, Request) + Send + 'static) -> anyhow::Result<()> {
     let file = BufReader::new(File::open(path)?);
     let (tx, mut rx) = actor::channel();
     let handle = AppThreadHandle::new_for_test(tx);

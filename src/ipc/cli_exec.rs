@@ -4,10 +4,9 @@ use std::ptr;
 
 use nix::libc::{
     O_RDONLY, O_WRONLY, POSIX_SPAWN_CLOEXEC_DEFAULT, POSIX_SPAWN_SETPGROUP, c_char, pid_t,
-    posix_spawn_file_actions_addopen, posix_spawn_file_actions_destroy,
-    posix_spawn_file_actions_init, posix_spawn_file_actions_t, posix_spawnattr_destroy,
-    posix_spawnattr_init, posix_spawnattr_setflags, posix_spawnattr_setpgroup, posix_spawnattr_t,
-    posix_spawnp,
+    posix_spawn_file_actions_addopen, posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
+    posix_spawn_file_actions_t, posix_spawnattr_destroy, posix_spawnattr_init, posix_spawnattr_setflags,
+    posix_spawnattr_setpgroup, posix_spawnattr_t, posix_spawnp,
 };
 use tracing::error;
 
@@ -16,11 +15,7 @@ use crate::ipc::subscriptions::CliSubscription;
 use crate::model::broadcast::BroadcastEvent;
 
 pub trait CliExecutor: Send + Sync + 'static {
-    fn execute(
-        &self,
-        event: &BroadcastEvent,
-        subscription: &CliSubscription,
-    ) -> Result<i32, std::io::Error>;
+    fn execute(&self, event: &BroadcastEvent, subscription: &CliSubscription) -> Result<i32, std::io::Error>;
 }
 
 pub struct DefaultCliExecutor;
@@ -30,11 +25,7 @@ impl DefaultCliExecutor {
 }
 
 impl CliExecutor for DefaultCliExecutor {
-    fn execute(
-        &self,
-        event: &BroadcastEvent,
-        subscription: &CliSubscription,
-    ) -> Result<i32, std::io::Error> {
+    fn execute(&self, event: &BroadcastEvent, subscription: &CliSubscription) -> Result<i32, std::io::Error> {
         let mut env_vars: HashMap<String, String> = HashMap::default();
         match event {
             BroadcastEvent::BindingModeChanged { previous_mode, mode } => {
@@ -188,16 +179,17 @@ impl CliExecutor for DefaultCliExecutor {
         args.push(event_json.clone());
 
         let mut argv_storage: Vec<CString> = Vec::with_capacity(1 + args.len());
-        argv_storage.push(CString::new(command).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "command contains NUL")
-        })?);
-        for a in args {
-            argv_storage.push(CString::new(a.as_str()).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "arg contains NUL")
+        argv_storage
+            .push(CString::new(command).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "command contains NUL")
             })?);
+        for a in args {
+            argv_storage
+                .push(CString::new(a.as_str()).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "arg contains NUL")
+                })?);
         }
-        let mut argv: Vec<*mut c_char> =
-            argv_storage.iter_mut().map(|s| s.as_ptr() as *mut c_char).collect();
+        let mut argv: Vec<*mut c_char> = argv_storage.iter_mut().map(|s| s.as_ptr() as *mut c_char).collect();
         argv.push(ptr::null_mut());
 
         let mut override_keys =
@@ -222,8 +214,7 @@ impl CliExecutor for DefaultCliExecutor {
             kv.extend_from_slice(v.as_bytes());
             env_storage.push(CString::new(kv).unwrap());
         }
-        let mut envp: Vec<*mut c_char> =
-            env_storage.iter_mut().map(|s| s.as_ptr() as *mut c_char).collect();
+        let mut envp: Vec<*mut c_char> = env_storage.iter_mut().map(|s| s.as_ptr() as *mut c_char).collect();
         envp.push(ptr::null_mut());
 
         let mut attr: posix_spawnattr_t = unsafe { std::mem::zeroed() };

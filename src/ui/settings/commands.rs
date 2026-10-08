@@ -1,6 +1,4 @@
-use rift_protocol::{
-    Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R, ResizeOrientation,
-};
+use rift_protocol::{Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R, ResizeOrientation};
 
 use super::*;
 use crate::actor::reactor::Command;
@@ -140,14 +138,12 @@ fn same_action(a: &WmCommand, b: &WmCommand) -> bool {
     match (a, b) {
         (WmCommand::Wm(a), WmCommand::Wm(b)) => d(a) == d(b),
         (WmCommand::ConfiguredLayout(a), WmCommand::ConfiguredLayout(b)) => d(a) == d(b),
-        (
-            WmCommand::ReactorCommand(Command::Layout(a)),
-            WmCommand::ReactorCommand(Command::Layout(b)),
-        ) => d(a) == d(b),
-        (
-            WmCommand::ReactorCommand(Command::Reactor(a)),
-            WmCommand::ReactorCommand(Command::Reactor(b)),
-        ) => d(a) == d(b),
+        (WmCommand::ReactorCommand(Command::Layout(a)), WmCommand::ReactorCommand(Command::Layout(b))) => {
+            d(a) == d(b)
+        }
+        (WmCommand::ReactorCommand(Command::Reactor(a)), WmCommand::ReactorCommand(Command::Reactor(b))) => {
+            d(a) == d(b)
+        }
         _ => false,
     }
 }
@@ -240,26 +236,19 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mode = Rc::new(RefCell::new("default".to_string()));
     let query = Rc::new(RefCell::new(String::new()));
-    let table = SettingsList::<(String, String)>::new(
-        &ui,
-        |(_, action)| action.clone(),
-        |(key, _)| key.clone(),
-    )
-    .full_length()
-    .trailing_summary()
-    .empty_message("No shortcuts in this shortcut set");
+    let table =
+        SettingsList::<(String, String)>::new(&ui, |(_, action)| action.clone(), |(key, _)| key.clone())
+            .full_length()
+            .trailing_summary()
+            .empty_message("No shortcuts in this shortcut set");
     let weak_model = Rc::downgrade(model);
     let mode_edit = mode.clone();
     let edit_query = query.clone();
     let edit_binding: Rc<dyn Fn(usize)> = Rc::new(move |i| {
         if let Some(model) = weak_model.upgrade() {
-            let item = matching_bindings(
-                &model
-                .source
-                .borrow(),
-                &mode_edit.borrow(),
-                &edit_query.borrow(),
-            ).nth(i).map(|(key, command)| (key.clone(), command.clone()));
+            let item = matching_bindings(&model.source.borrow(), &mode_edit.borrow(), &edit_query.borrow())
+                .nth(i)
+                .map(|(key, command)| (key.clone(), command.clone()));
             if let Some((key, cmd)) = item {
                 binding_sheet(ui, &model, mode_edit.borrow().clone(), Some(key), cmd);
             }
@@ -291,7 +280,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         }
         if let (Some(model), Some(table)) = (weak_model.upgrade(), weak_table.upgrade()) {
             table.set_rows_if_changed(binding_rows(
-                &model.source.borrow(), &selected_mode.borrow(),
+                &model.source.borrow(),
+                &selected_mode.borrow(),
                 &mode_query.borrow(),
             ));
         }
@@ -308,15 +298,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             *current_mode.borrow_mut() = "default".into();
         }
         if let Some(popup) = weak_popup.upgrade() {
-            popup.set_items(modes.iter().map(|v| {
-                if v == "default" {
-                    "Default"
-                } else {
-                    v.as_str()
-                }
-            }));
-            popup
-                .set_selected(modes.iter().position(|v| v == &*current_mode.borrow()).unwrap_or(0));
+            popup.set_items(modes.iter().map(|v| if v == "default" { "Default" } else { v.as_str() }));
+            popup.set_selected(modes.iter().position(|v| v == &*current_mode.borrow()).unwrap_or(0));
         }
         *names.borrow_mut() = modes;
         let rows = binding_rows(s, &current_mode.borrow(), &sync_query.borrow());
@@ -357,7 +340,9 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         if let (Some(model), Some(table)) = (weak_model.upgrade(), weak_table.upgrade()) {
             if let Some(i) = table.selection() {
                 let name = selected_mode.borrow().clone();
-                let key = matching_bindings(&model.source.borrow(), &name, &remove_query.borrow()).nth(i).map(|(key, _)| key.clone());
+                let key = matching_bindings(&model.source.borrow(), &name, &remove_query.borrow())
+                    .nth(i)
+                    .map(|(key, _)| key.clone());
                 if let Some(key) = key {
                     Model::submit(
                         &weak_model,
@@ -385,14 +370,12 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             }
         }))
         .item(MenuItem::new(&ui, "Duplicate").on_click(move || {
-            if let (Some(model), Some(table)) =
-                (duplicate_model.upgrade(), duplicate_table.upgrade())
-            {
+            if let (Some(model), Some(table)) = (duplicate_model.upgrade(), duplicate_table.upgrade()) {
                 let mode = duplicate_mode.borrow().clone();
                 let command = table.selection().and_then(|index| {
-                    matching_bindings(&model
-                        .source
-                        .borrow(), &mode, &duplicate_query.borrow()).nth(index).map(|(_, command)| command.clone())
+                    matching_bindings(&model.source.borrow(), &mode, &duplicate_query.borrow())
+                        .nth(index)
+                        .map(|(_, command)| command.clone())
                 });
                 if let Some(command) = command {
                     binding_sheet(ui, &model, mode, None, command);
@@ -469,8 +452,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                 &ui,
                 "Advanced: reusable modifier combinations",
                 combinations,
-            ))
-,
+            )),
     );
     page.header = Some(header);
     page
@@ -575,31 +557,29 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
     let edited = draft.clone();
     let action_changed = changed.clone();
     let mut descriptors = actions();
-    let current =
-        descriptors
-            .iter()
-            .position(|(_, c)| same_action(c, &command))
-            .unwrap_or_else(|| {
-                descriptors.push(("Current custom action", command.clone()));
-                descriptors.len() - 1
-            });
+    let current = descriptors
+        .iter()
+        .position(|(_, c)| same_action(c, &command))
+        .unwrap_or_else(|| {
+            descriptors.push(("Current custom action", command.clone()));
+            descriptors.len() - 1
+        });
     let templates: Vec<_> = descriptors.iter().map(|(_, c)| c.clone()).collect();
-    let popup =
-        Popup::new(&ui)
-            .items(descriptors.iter().map(|(title, _)| *title))
-            .on_change(move |i| {
-                *edited.borrow_mut() = templates[i].clone();
-                action_changed();
-                if let (Some(host), Some(model)) = (weak_host.upgrade(), weak_model.upgrade()) {
-                    host.set_page(argument_editor(ui, &model, &edited, &action_changed));
-                    if let Some(window) = host.ns_view().window() {
-                        if let Some(content) = window.contentView() {
-                            content.layoutSubtreeIfNeeded();
-                            window.setContentSize(content.fittingSize());
-                        }
+    let popup = Popup::new(&ui)
+        .items(descriptors.iter().map(|(title, _)| *title))
+        .on_change(move |i| {
+            *edited.borrow_mut() = templates[i].clone();
+            action_changed();
+            if let (Some(host), Some(model)) = (weak_host.upgrade(), weak_model.upgrade()) {
+                host.set_page(argument_editor(ui, &model, &edited, &action_changed));
+                if let Some(window) = host.ns_view().window() {
+                    if let Some(content) = window.contentView() {
+                        content.layoutSubtreeIfNeeded();
+                        window.setContentSize(content.fittingSize());
                     }
                 }
-            });
+            }
+        });
     popup.set_selected(current);
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
@@ -680,27 +660,21 @@ fn argument_editor(
         | RcCommand(Command::Reactor(R::SwitchSpace(d))) => {
             let edited = draft.clone();
             let changed = changed.clone();
-            let directions = [
-                Direction::Left,
-                Direction::Right,
-                Direction::Up,
-                Direction::Down,
-            ];
-            let popup =
-                Popup::new(&ui).items(["Left", "Right", "Up", "Down"]).on_change(move |i| {
-                    let d = directions[i];
-                    *edited.borrow_mut() = match &command {
-                        RcCommand(Command::Layout(L::MoveFocus(_))) => layout(L::MoveFocus(d)),
-                        RcCommand(Command::Layout(L::MoveNode(_))) => layout(L::MoveNode(d)),
-                        RcCommand(Command::Layout(L::JoinWindow(_))) => layout(L::JoinWindow(d)),
-                        RcCommand(Command::Layout(L::ConsumeOrExpelWindow(_))) => {
-                            layout(L::ConsumeOrExpelWindow(d))
-                        }
-                        _ => reactor(R::SwitchSpace(d)),
-                    };
+            let directions = [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
+            let popup = Popup::new(&ui).items(["Left", "Right", "Up", "Down"]).on_change(move |i| {
+                let d = directions[i];
+                *edited.borrow_mut() = match &command {
+                    RcCommand(Command::Layout(L::MoveFocus(_))) => layout(L::MoveFocus(d)),
+                    RcCommand(Command::Layout(L::MoveNode(_))) => layout(L::MoveNode(d)),
+                    RcCommand(Command::Layout(L::JoinWindow(_))) => layout(L::JoinWindow(d)),
+                    RcCommand(Command::Layout(L::ConsumeOrExpelWindow(_))) => {
+                        layout(L::ConsumeOrExpelWindow(d))
+                    }
+                    _ => reactor(R::SwitchSpace(d)),
+                };
 
-                    changed();
-                });
+                changed();
+            });
             popup.set_selected(directions.iter().position(|v| *v == d).unwrap_or(0));
             view = view.row(SettingsRow::new(&ui, "Direction", popup));
         }
@@ -712,25 +686,23 @@ fn argument_editor(
                 ResizeOrientation::Horizontal,
                 ResizeOrientation::Vertical,
             ];
-            let popup =
-                Popup::new(&ui).items(["Smart", "Horizontal", "Vertical"]).on_change(move |i| {
-                    *edited.borrow_mut() =
-                        if matches!(command, RcCommand(Command::Layout(L::ResizeWindowGrow(_)))) {
-                            layout(L::ResizeWindowGrow(values[i]))
-                        } else {
-                            layout(L::ResizeWindowShrink(values[i]))
-                        };
+            let popup = Popup::new(&ui).items(["Smart", "Horizontal", "Vertical"]).on_change(move |i| {
+                *edited.borrow_mut() =
+                    if matches!(command, RcCommand(Command::Layout(L::ResizeWindowGrow(_)))) {
+                        layout(L::ResizeWindowGrow(values[i]))
+                    } else {
+                        layout(L::ResizeWindowShrink(values[i]))
+                    };
 
-                    changed();
-                });
+                changed();
+            });
             popup.set_selected(values.iter().position(|v| *v == o).unwrap_or(0));
             view = view.row(SettingsRow::new(&ui, "Orientation", popup));
         }
         Wm(WmCmd::SwitchToWorkspace(target) | WmCmd::MoveWindowToWorkspace(target)) => {
-            let names: Vec<_> =
-                (0..model.source.borrow().virtual_workspaces.default_workspace_count)
-                    .map(|i| super::editors::workspace_name(&model.source.borrow(), i))
-                    .collect();
+            let names: Vec<_> = (0..model.source.borrow().virtual_workspaces.default_workspace_count)
+                .map(|i| super::editors::workspace_name(&model.source.borrow(), i))
+                .collect();
             let initial = match target {
                 WorkspaceSelector::Index(i) => i,
                 WorkspaceSelector::Name(name) => model
@@ -763,13 +735,11 @@ fn argument_editor(
             let changed = changed.clone();
             let modes: Vec<_> = values.iter().map(|(_, v)| *v).collect();
             let selected = modes.iter().position(|v| *v == mode).unwrap_or(0);
-            let popup =
-                Popup::new(&ui).items(values.iter().map(|(name, _)| *name)).on_change(move |i| {
-                    *edited.borrow_mut() =
-                        layout(L::SetWorkspaceLayout { workspace, mode: modes[i] });
+            let popup = Popup::new(&ui).items(values.iter().map(|(name, _)| *name)).on_change(move |i| {
+                *edited.borrow_mut() = layout(L::SetWorkspaceLayout { workspace, mode: modes[i] });
 
-                    changed();
-                });
+                changed();
+            });
             popup.set_selected(selected);
             view = view.row(SettingsRow::new(&ui, "Layout", popup));
         }
@@ -786,12 +756,7 @@ fn argument_editor(
                 DisplaySelector::Direction(Direction::Down),
             ];
             let mut values = values;
-            let mut names = vec![
-                "Left".to_string(),
-                "Right".into(),
-                "Up".into(),
-                "Down".into(),
-            ];
+            let mut names = vec!["Left".to_string(), "Right".into(), "Up".into(), "Down".into()];
             for display in model.displays.borrow().iter() {
                 values.push(DisplaySelector::Uuid(display.display_uuid.clone()));
                 names.push(
@@ -812,15 +777,13 @@ fn argument_editor(
                 let selector = values[i].clone();
                 *edited.borrow_mut() = reactor(match &command {
                     RcCommand(Command::Reactor(R::FocusDisplay(_))) => R::FocusDisplay(selector),
-                    RcCommand(Command::Reactor(R::MoveMouseToDisplay(_))) => {
-                        R::MoveMouseToDisplay(selector)
+                    RcCommand(Command::Reactor(R::MoveMouseToDisplay(_))) => R::MoveMouseToDisplay(selector),
+                    RcCommand(Command::Reactor(R::MoveWorkspaceToDisplay { wrap_around, .. })) => {
+                        R::MoveWorkspaceToDisplay {
+                            selector,
+                            wrap_around: *wrap_around,
+                        }
                     }
-                    RcCommand(Command::Reactor(R::MoveWorkspaceToDisplay {
-                        wrap_around, ..
-                    })) => R::MoveWorkspaceToDisplay {
-                        selector,
-                        wrap_around: *wrap_around,
-                    },
                     RcCommand(Command::Reactor(R::MoveWindowToDisplay { window_id, .. })) => {
                         R::MoveWindowToDisplay {
                             selector,
@@ -836,9 +799,7 @@ fn argument_editor(
             view = view.row(SettingsRow::new(&ui, "Display direction", popup));
         }
         RcCommand(Command::Layout(
-            L::ResizeWindowBy { amount }
-            | L::ScrollStrip { delta: amount }
-            | L::AdjustMasterRatio(amount),
+            L::ResizeWindowBy { amount } | L::ScrollStrip { delta: amount } | L::AdjustMasterRatio(amount),
         )) => {
             let edited = draft.clone();
             let changed = changed.clone();
@@ -847,9 +808,7 @@ fn argument_editor(
                     RcCommand(Command::Layout(L::ResizeWindowBy { .. })) => {
                         layout(L::ResizeWindowBy { amount: v })
                     }
-                    RcCommand(Command::Layout(L::ScrollStrip { .. })) => {
-                        layout(L::ScrollStrip { delta: v })
-                    }
+                    RcCommand(Command::Layout(L::ScrollStrip { .. })) => layout(L::ScrollStrip { delta: v }),
                     _ => layout(L::AdjustMasterRatio(v)),
                 };
 
@@ -1038,9 +997,7 @@ fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> VStack {
     let weak_list = Rc::downgrade(&list);
     f.sync.push(Box::new(move |s| {
         if let Some(list) = weak_list.upgrade() {
-            list.set_items(
-                s.modifier_combinations.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            );
+            list.set_items(s.modifier_combinations.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
         }
     }));
     VStack::new(&ui)

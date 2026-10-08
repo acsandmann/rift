@@ -26,8 +26,7 @@ pub fn handle_menu_opened(
         MenuState::Open(owner) => {
             debug!(
                 pid,
-                owner,
-                "menu-open owner changed without a close notification; replacing stale state"
+                owner, "menu-open owner changed without a close notification; replacing stale state"
             );
             MenuState::Open(pid)
         }
@@ -86,11 +85,8 @@ pub fn handle_raise_completed(
         .with_raise_request(raise_manager::Event::RaiseCompleted { window_id, sequence_id }))
 }
 
-pub fn handle_raise_timeout(
-    sequence_id: u64,
-) -> Result<EventOutcome, crate::model::reactor::ReactorError> {
-    Ok(EventOutcome::no_change()
-        .with_raise_request(raise_manager::Event::RaiseTimeout { sequence_id }))
+pub fn handle_raise_timeout(sequence_id: u64) -> Result<EventOutcome, crate::model::reactor::ReactorError> {
+    Ok(EventOutcome::no_change().with_raise_request(raise_manager::Event::RaiseTimeout { sequence_id }))
 }
 
 pub fn handle_register_wm_sender(

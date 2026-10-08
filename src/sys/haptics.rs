@@ -7,8 +7,7 @@ use crate::common::config::HapticPattern;
 static ACTUATORS: OnceLock<Vec<Actuator>> = OnceLock::new();
 
 fn actuators() -> &'static [Actuator] {
-    ACTUATORS
-        .get_or_init(|| Device::all().into_iter().filter_map(|device| device.actuator()).collect())
+    ACTUATORS.get_or_init(|| Device::all().into_iter().filter_map(|device| device.actuator()).collect())
 }
 
 #[inline]
@@ -23,8 +22,7 @@ fn pattern_index(pattern: HapticPattern) -> FeedbackPattern {
 pub fn perform_haptic(pattern: HapticPattern) -> bool {
     let mut succeeded = false;
     for actuator in actuators() {
-        succeeded |= (actuator.is_open() || actuator.open())
-            && actuator.actuate(pattern_index(pattern), 1.0);
+        succeeded |= (actuator.is_open() || actuator.open()) && actuator.actuate(pattern_index(pattern), 1.0);
     }
     succeeded
 }

@@ -41,9 +41,7 @@ impl Modifiers {
 
     pub fn remove(&mut self, other: Modifiers) { self.0 &= !other.0; }
 
-    pub fn has_generic_modifiers(&self) -> bool {
-        MOD_FAMILIES.iter().any(|m| self.contains(m.generic))
-    }
+    pub fn has_generic_modifiers(&self) -> bool { MOD_FAMILIES.iter().any(|m| self.contains(m.generic)) }
 
     pub fn expand_to_specific(&self) -> Vec<Modifiers> {
         let mut variants = vec![Modifiers::empty()];
@@ -773,9 +771,7 @@ impl FromStr for KeyCode {
     }
 }
 
-fn layout_char_keycode(ch: &str, fallback: KeyCode) -> KeyCode {
-    keycode_from_char(ch).unwrap_or(fallback)
-}
+fn layout_char_keycode(ch: &str, fallback: KeyCode) -> KeyCode { keycode_from_char(ch).unwrap_or(fallback) }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Hotkey {
@@ -846,10 +842,7 @@ impl<'de> Deserialize<'de> for Hotkey {
         #[serde(untagged)]
         enum HotkeyRepr {
             Str(String),
-            Map {
-                modifiers: Modifiers,
-                key_code: KeyCode,
-            },
+            Map { modifiers: Modifiers, key_code: KeyCode },
         }
 
         let repr = HotkeyRepr::deserialize(deserializer)?;
@@ -882,8 +875,7 @@ impl<'de> serde::de::Deserialize<'de> for HotkeySpec {
         let repr = HotkeyRepr::deserialize(deserializer)?;
         match repr {
             HotkeyRepr::Str(s) => {
-                let (mods, key_opt) =
-                    parse_mods_and_optional_key(&s).map_err(serde::de::Error::custom)?;
+                let (mods, key_opt) = parse_mods_and_optional_key(&s).map_err(serde::de::Error::custom)?;
                 if let Some(k) = key_opt {
                     Ok(HotkeySpec::Hotkey(Hotkey::new(mods, k)))
                 } else if mods != Modifiers::empty() {
@@ -1192,13 +1184,12 @@ unsafe extern "C" {
 
 #[cfg(target_os = "macos")]
 const VIRTUAL_KEYCODE_NUMS: &[u16] = &[
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
-    0x20, 0x21, 0x22, 0x23, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
-    0x32, // backquote
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, 0x21,
+    0x22, 0x23, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x32, // backquote
     // keypad subset
-    0x41, 0x43, 0x45, 0x47, 0x4B, 0x4C, 0x4E, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
-    0x5B, 0x5C,
+    0x41, 0x43, 0x45, 0x47, 0x4B, 0x4C, 0x4E, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B,
+    0x5C,
 ];
 
 #[cfg(target_os = "macos")]
@@ -1279,9 +1270,7 @@ static VIRTUAL_KEYMAP: LazyLock<RwLock<StdHashMap<String, KeyCode>>> =
     LazyLock::new(|| RwLock::new(StdHashMap::new()));
 
 /// Acquire native layout state only on the main thread, then publish it to actors.
-pub fn refresh_virtual_keymap(mtm: MainThreadMarker) {
-    replace_virtual_keymap(generate_virtual_keymap(mtm));
-}
+pub fn refresh_virtual_keymap(mtm: MainThreadMarker) { replace_virtual_keymap(generate_virtual_keymap(mtm)); }
 
 fn replace_virtual_keymap(keymap: StdHashMap<String, KeyCode>) {
     // A transient native failure must not erase the last working layout.
@@ -1390,15 +1379,9 @@ mod tests {
     fn letter_hotkeys_round_trip_through_their_spec_string() {
         // How a binding actually reaches the event tap: parsed from the config,
         // rendered to a spec string, parsed again.
-        for spec in [
-            "Alt + N",
-            "Alt + P",
-            "Alt + Shift + J",
-            "Ctrl + Alt + Backspace",
-        ] {
+        for spec in ["Alt + N", "Alt + P", "Alt + Shift + J", "Ctrl + Alt + Backspace"] {
             let hotkey = Hotkey::from_str(spec).expect("config spec should parse");
-            let reparsed =
-                Hotkey::from_str(&hotkey.to_string()).expect("spec string should parse back");
+            let reparsed = Hotkey::from_str(&hotkey.to_string()).expect("spec string should parse back");
             assert_eq!(hotkey, reparsed, "{spec} did not survive the round trip");
         }
     }
@@ -1505,12 +1488,10 @@ mod tests {
 
     #[test]
     fn modifier_key_activity_distinguishes_left_and_right_alt() {
-        let left_alt = CGEventFlags::from_bits_retain(
-            CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].left_mask,
-        );
-        let right_alt = CGEventFlags::from_bits_retain(
-            CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].right_mask,
-        );
+        let left_alt =
+            CGEventFlags::from_bits_retain(CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].left_mask);
+        let right_alt =
+            CGEventFlags::from_bits_retain(CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].right_mask);
 
         assert!(modifier_key_is_active(left_alt, KeyCode::AltLeft));
         assert!(!modifier_key_is_active(left_alt, KeyCode::AltRight));
@@ -1520,9 +1501,8 @@ mod tests {
 
     #[test]
     fn modifier_recovery_preserves_right_alt_from_flags() {
-        let right_alt = CGEventFlags::from_bits_retain(
-            CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].right_mask,
-        );
+        let right_alt =
+            CGEventFlags::from_bits_retain(CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].right_mask);
         let pressed_keys = std::collections::HashSet::new();
 
         let modifiers = modifiers_from_flags_with_keys(right_alt, &pressed_keys);

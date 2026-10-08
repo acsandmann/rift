@@ -77,10 +77,7 @@ impl ProcessActor {
         let wm_sender = sender.clone();
         let listener = CarbonListener::application(&types, move |ev: Event| {
             let psn = match unsafe {
-                ev.parameter::<ProcessSerialNumber>(
-                    K_EVENT_PARAM_PROCESS_ID,
-                    TYPE_PROCESS_SERIAL_NUMBER,
-                )
+                ev.parameter::<ProcessSerialNumber>(K_EVENT_PARAM_PROCESS_ID, TYPE_PROCESS_SERIAL_NUMBER)
             } {
                 Some(psn) => psn,
                 None => return NO_ERR,

@@ -32,9 +32,7 @@ impl Drop for Session {
 }
 
 impl Executor {
-    pub fn run(task: impl Future<Output = ()> + 'static) {
-        Self::run_with_loop_fn(task, CFRunLoop::run);
-    }
+    pub fn run(task: impl Future<Output = ()> + 'static) { Self::run_with_loop_fn(task, CFRunLoop::run); }
 
     #[cfg(not(feature = "custom-event-loop"))]
     pub fn run_main(mtm: MainThreadMarker, task: impl Future<Output = ()> + 'static) {
@@ -119,9 +117,8 @@ impl State {
         let waker = self.wakeup.clone().into();
         let mut context = Context::from_waker(&waker);
 
-        if objc2::rc::autoreleasepool(|_| {
-            self.main_task.as_mut().unwrap().as_mut().poll(&mut context)
-        }) == Poll::Ready(())
+        if objc2::rc::autoreleasepool(|_| self.main_task.as_mut().unwrap().as_mut().poll(&mut context))
+            == Poll::Ready(())
         {
             self.main_task.take();
             if let Some(rl) = CFRunLoop::current() {

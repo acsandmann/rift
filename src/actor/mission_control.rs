@@ -39,9 +39,9 @@ pub enum Input {
 
 impl Input {
     pub(crate) fn from_keycode(keycode: u16, flags: CGEventFlags) -> Option<Self> {
-        if flags.intersects(
-            CGEventFlags::MaskCommand | CGEventFlags::MaskControl | CGEventFlags::MaskAlternate,
-        ) {
+        if flags
+            .intersects(CGEventFlags::MaskCommand | CGEventFlags::MaskControl | CGEventFlags::MaskAlternate)
+        {
             return None;
         }
         if (123..=126).contains(&keycode) && flags.contains(CGEventFlags::MaskShift) {
@@ -267,11 +267,7 @@ impl MissionControlActor {
                     self.reactor.send(reactor::Event::OverviewDrop { intent, reply });
                     let changed = rx.recv().unwrap_or(false);
                     if let Some(session) = &mut self.session {
-                        session.refresh(
-                            &self.reactor,
-                            self.cache.as_ref(),
-                            changed.then_some(window),
-                        );
+                        session.refresh(&self.reactor, self.cache.as_ref(), changed.then_some(window));
                     }
                 }
                 if matches!(action, Some(OverviewAction::Dismiss)) {

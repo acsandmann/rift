@@ -47,14 +47,11 @@ pub struct LayoutPreview {
 }
 impl LayoutPreview {
     pub fn new(ui: &Ui, size: CGSize) -> Self {
-        assert!(
-            size.width.is_finite()
-                && size.width > 0.0
-                && size.height.is_finite()
-                && size.height > 0.0
-        );
+        assert!(size.width.is_finite() && size.width > 0.0 && size.height.is_finite() && size.height > 0.0);
         let root = CALayer::layer();
-        root.setBackgroundColor(Some(&NSColor::separatorColor().colorWithAlphaComponent(0.10).CGColor()));
+        root.setBackgroundColor(Some(
+            &NSColor::separatorColor().colorWithAlphaComponent(0.10).CGColor(),
+        ));
         let host = LayerHost::new(ui, &root);
         if let Some(layer) = host.ns_view().layer() {
             layer.setMasksToBounds(true);

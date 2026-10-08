@@ -104,12 +104,9 @@ impl AXUIElement {
         debug_assert_eq!(data.len(), BUFSIZE);
         let data = CFData::from_bytes(&data);
 
-        let inner = unsafe {
-            _AXUIElementCreateWithRemoteToken(CFRetained::<CFData>::as_ptr(&data).as_ptr())
-        };
-        Self::new(unsafe {
-            CFRetained::from_raw(NonNull::new(inner).expect("non-null AXUIElement pointer"))
-        })
+        let inner =
+            unsafe { _AXUIElementCreateWithRemoteToken(CFRetained::<CFData>::as_ptr(&data).as_ptr()) };
+        Self::new(unsafe { CFRetained::from_raw(NonNull::new(inner).expect("non-null AXUIElement pointer")) })
     }
 
     #[inline]
@@ -142,8 +139,7 @@ impl AXUIElement {
         let status = unsafe {
             self.inner.copy_attribute_value(
                 attr.as_ref(),
-                NonNull::new((&mut value) as *mut *const CFType)
-                    .expect("pointer to local is never null"),
+                NonNull::new((&mut value) as *mut *const CFType).expect("pointer to local is never null"),
             )
         };
         match status {
@@ -230,8 +226,7 @@ impl AXUIElement {
             )
         });
         // Adopt any returned array immediately, including on an error response.
-        let values =
-            NonNull::new(values.cast_mut()).map(|values| unsafe { CFRetained::from_raw(values) });
+        let values = NonNull::new(values.cast_mut()).map(|values| unsafe { CFRetained::from_raw(values) });
         finish_bulk_window_attributes(status, values)
     }
 
@@ -440,9 +435,7 @@ fn finish_bulk_window_attributes(
             let values = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(values) };
             decode_window_attributes(values.iter()).map(Some)
         }
-        AXError::NotImplemented | AXError::AttributeUnsupported | AXError::IllegalArgument => {
-            Ok(None)
-        }
+        AXError::NotImplemented | AXError::AttributeUnsupported | AXError::IllegalArgument => Ok(None),
         err => Err(Error::Ax(err)),
     }
 }
@@ -467,8 +460,7 @@ fn bulk_attribute(value: CFRetained<CFType>) -> Result<CFRetained<CFType>> {
         // exact layout required for kAXValueAXErrorType.
         if unsafe { ax_value.r#type() } == AXValueType::AXError {
             let mut error = AXError::Failure;
-            let decoded =
-                unsafe { ax_value.value(AXValueType::AXError, NonNull::from(&mut error).cast()) };
+            let decoded = unsafe { ax_value.value(AXValueType::AXError, NonNull::from(&mut error).cast()) };
             return Err(if !decoded {
                 Error::Ax(AXError::Failure)
             } else if error == AXError::NoValue {

@@ -110,9 +110,7 @@ impl DisplayLink {
                 // The target is retained by the link. It does not retain the link in return.
                 let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
                 link.setPaused(paused);
-                unsafe {
-                    link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
-                };
+                unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
                 LINKS.with(|links| {
                     links.borrow_mut().insert(id, link);
                 });

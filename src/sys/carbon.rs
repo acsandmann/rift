@@ -32,9 +32,7 @@ unsafe extern "C" {
 
     fn InstallEventHandler(
         target: EventTargetRef,
-        handler: Option<
-            unsafe extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OSStatus,
-        >,
+        handler: Option<unsafe extern "C" fn(EventHandlerCallRef, EventRef, *mut c_void) -> OSStatus>,
         num_types: u32,
         type_list: *const EventType,
         user_data: *mut c_void,
@@ -199,15 +197,10 @@ impl CarbonListener {
         Self::new(Target::Application, types, callback)
     }
 
-    pub fn application_with_state<F, T>(
-        types: &[EventType],
-        state: T,
-        callback: F,
-    ) -> Result<Self, String>
+    pub fn application_with_state<F, T>(types: &[EventType], state: T, callback: F) -> Result<Self, String>
     where
         F: FnMut(Event, &mut T) -> OSStatus + Send + 'static,
-        T: Send + 'static,
-    {
+        T: Send + 'static, {
         Self::with_state(Target::Application, types, state, callback)
     }
 

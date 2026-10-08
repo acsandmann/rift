@@ -13,8 +13,8 @@ use tracing::{debug, error, info, warn};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::broadcast::BroadcastEvent;
 use crate::sys::mach::{
-    mach_release_send_right, mach_retain_send_right, mach_try_send_message,
-    mach_unwatch_send_right, mach_watch_send_right,
+    mach_release_send_right, mach_retain_send_right, mach_try_send_message, mach_unwatch_send_right,
+    mach_watch_send_right,
 };
 
 pub type ClientPort = u32;

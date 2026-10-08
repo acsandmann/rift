@@ -25,9 +25,7 @@ fn latest() -> Result<String, String> {
             "https://api.github.com/repos/acsandmann/rift/releases/latest",
         ])
         .output()
-        .map_err(|_| {
-            "Couldn’t connect. Check your internet connection and try again.".to_string()
-        })?;
+        .map_err(|_| "Couldn’t connect. Check your internet connection and try again.".to_string())?;
     if !response.status.success() {
         return Err("Couldn’t check for updates. Check your connection and try again.".into());
     }

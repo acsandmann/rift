@@ -64,9 +64,7 @@ pub struct ApplicationActivatedPayload {
     pub quiet: Quiet,
 }
 
-pub fn handle_application_activated(
-    payload: ApplicationActivatedPayload,
-) -> anyhow::Result<EventOutcome> {
+pub fn handle_application_activated(payload: ApplicationActivatedPayload) -> anyhow::Result<EventOutcome> {
     let ApplicationActivatedPayload { pid, quiet } = payload;
     if quiet == Quiet::Yes {
         debug!(
@@ -86,9 +84,7 @@ pub struct WindowsDiscoveredPayload {
     pub known_visible: Vec<WindowId>,
 }
 
-pub fn handle_windows_discovered(
-    payload: WindowsDiscoveredPayload,
-) -> anyhow::Result<EventOutcome> {
+pub fn handle_windows_discovered(payload: WindowsDiscoveredPayload) -> anyhow::Result<EventOutcome> {
     let WindowsDiscoveredPayload { pid, new, known_visible } = payload;
     Ok(
         EventOutcome::window_notification_refresh().with_discovery(WindowDiscoveryRequest {

@@ -2,9 +2,8 @@ use std::convert::TryFrom;
 
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGAssociateMouseAndMouseCursorPosition, CGDisplayHideCursor, CGDisplayShowCursor, CGError,
-    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGMouseButton,
-    kCGNullDirectDisplay,
+    CGAssociateMouseAndMouseCursorPosition, CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGEvent,
+    CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGMouseButton, kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,8 +11,7 @@ pub use super::window_server::current_cursor_location;
 use crate::sys::cg_ok;
 pub use crate::sys::hotkey::{Hotkey, HotkeySpec, KeyCode, Modifiers};
 use crate::sys::skylight::{
-    CFRelease, CGEventSourceCreate, CGEventSourceSetLocalEventsSuppressionInterval,
-    CGWarpMouseCursorPosition,
+    CFRelease, CGEventSourceCreate, CGEventSourceSetLocalEventsSuppressionInterval, CGWarpMouseCursorPosition,
 };
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
@@ -43,17 +41,9 @@ impl TryFrom<u8> for MouseState {
 }
 
 pub fn get_mouse_state() -> Option<MouseState> {
-    let down =
-        CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)
-            || CGEventSource::button_state(
-                CGEventSourceStateID::HIDSystemState,
-                CGMouseButton::Right,
-            );
-    Some(if down {
-        MouseState::Down
-    } else {
-        MouseState::Up
-    })
+    let down = CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)
+        || CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Right);
+    Some(if down { MouseState::Down } else { MouseState::Up })
 }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {

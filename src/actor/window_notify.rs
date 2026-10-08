@@ -225,15 +225,12 @@ impl WindowNotify {
                         spaces_tx.send(spaces::Event::ActiveSpaceChanged);
                     }
                     CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)
-                    | CGSEventType::Known(
-                        KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged,
-                    ) => {
+                    | CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged) => {
                         spaces_tx.send(spaces::Event::SpaceInventoryChanged);
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
                         focus_wake.notify();
-                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
-                        else {
+                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id) else {
                             continue;
                         };
                         // This is not just "window left the current active-space snapshot".
@@ -246,8 +243,7 @@ impl WindowNotify {
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
                         focus_wake.notify();
-                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
-                        else {
+                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id) else {
                             continue;
                         };
                         spaces_tx.send(spaces::Event::WindowServerAppeared(
@@ -256,15 +252,11 @@ impl WindowNotify {
                         ));
                     }
                     CGSEventType::Known(KnownCGSEvent::WindowReordered)
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged,
-                    )
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged,
-                    ) => focus_wake.notify(),
-                    CGSEventType::Known(
-                        KnownCGSEvent::WindowHidden | KnownCGSEvent::WindowUnhidden,
-                    ) => {
+                    | CGSEventType::Known(KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged)
+                    | CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged) => {
+                        focus_wake.notify()
+                    }
+                    CGSEventType::Known(KnownCGSEvent::WindowHidden | KnownCGSEvent::WindowUnhidden) => {
                         focus_wake.notify();
                         if let Some(window_id) = evt.window_id {
                             let wsid = WindowServerId::new(window_id);

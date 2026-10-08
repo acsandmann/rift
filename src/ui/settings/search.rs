@@ -9,13 +9,30 @@ pub(super) struct Result {
 }
 
 #[derive(Clone)]
-pub(super) enum Row { Heading(&'static str), Setting(Result) }
+pub(super) enum Row {
+    Heading(&'static str),
+    Setting(Result),
+}
 pub(super) fn grouped(results: &[Result]) -> Vec<Row> {
     let mut rows = Vec::new();
     for page in 0..9 {
         let matches: Vec<_> = results.iter().filter(|result| result.page == page).collect();
-        if matches.is_empty() { continue; }
-        rows.push(Row::Heading(["General", "Layouts", "Workspaces", "Rules", "Keyboard", "Mouse & Trackpad", "Interface", "Advanced", "About"][page]));
+        if matches.is_empty() {
+            continue;
+        }
+        rows.push(Row::Heading(
+            [
+                "General",
+                "Layouts",
+                "Workspaces",
+                "Rules",
+                "Keyboard",
+                "Mouse & Trackpad",
+                "Interface",
+                "Advanced",
+                "About",
+            ][page],
+        ));
         rows.extend(matches.into_iter().cloned().map(Row::Setting));
     }
     rows
@@ -35,11 +52,22 @@ fn catalog() -> &'static [Destination] {
     use crate::common::config::*;
     static CATALOG: std::sync::OnceLock<Vec<Destination>> = std::sync::OnceLock::new();
     CATALOG.get_or_init(|| {
-        fn append<T: ConfigSchema>(out: &mut Vec<Destination>, group: &str, page: usize, scope: Option<usize>, location: &'static str) {
+        fn append<T: ConfigSchema>(
+            out: &mut Vec<Destination>,
+            group: &str,
+            page: usize,
+            scope: Option<usize>,
+            location: &'static str,
+        ) {
             for field in T::fields().iter().filter(|field| field.group == group) {
                 out.push(Destination {
                     title: field.title.split(" (").next().unwrap_or(field.title),
-                    key: field.key, aliases: field.aliases, help: field.help, page, scope, location,
+                    key: field.key,
+                    aliases: field.aliases,
+                    help: field.help,
+                    page,
+                    scope,
+                    location,
                 });
             }
         }
@@ -49,14 +77,37 @@ fn catalog() -> &'static [Destination] {
         append::<Settings>(&mut out, "pointer", 5, None, "Mouse & Trackpad › Focus");
         append::<VirtualWorkspaceSettings>(&mut out, "", 2, None, "Workspaces");
         append::<GestureSettings>(&mut out, "main", 5, None, "Mouse & Trackpad › Workspace swipes");
-        append::<GestureSettings>(&mut out, "advanced", 5, None, "Mouse & Trackpad › Advanced swipe settings");
-        append::<ScrollingGestureSettings>(&mut out, "", 5, None, "Mouse & Trackpad › Scrolling layout gestures");
+        append::<GestureSettings>(
+            &mut out,
+            "advanced",
+            5,
+            None,
+            "Mouse & Trackpad › Advanced swipe settings",
+        );
+        append::<ScrollingGestureSettings>(
+            &mut out,
+            "",
+            5,
+            None,
+            "Mouse & Trackpad › Scrolling layout gestures",
+        );
         append::<DragDropSettings>(&mut out, "", 5, None, "Mouse & Trackpad › Drag & Drop");
         append::<MenuBarSettings>(&mut out, "", 6, None, "Interface › Menu Bar");
         append::<MissionControlSettings>(&mut out, "", 6, None, "Interface › Overview");
         append::<StackLineSettings>(&mut out, "", 6, None, "Interface › Stack Line");
         append::<LayoutSettings>(&mut out, "", 1, Some(0), "Layouts › Default behavior");
-        for (scope, location) in ["Layouts › Default behavior", "Layouts › Traditional", "Layouts › BSP", "Layouts › Stack", "Layouts › Master Stack", "Layouts › Scrolling", "Layouts › Floating"].into_iter().enumerate() {
+        for (scope, location) in [
+            "Layouts › Default behavior",
+            "Layouts › Traditional",
+            "Layouts › BSP",
+            "Layouts › Stack",
+            "Layouts › Master Stack",
+            "Layouts › Scrolling",
+            "Layouts › Floating",
+        ]
+        .into_iter()
+        .enumerate()
+        {
             append::<BaseLayoutSettings>(&mut out, "", 1, Some(scope), location);
         }
         append::<TraditionalLayoutSettings>(&mut out, "", 1, Some(1), "Layouts › Traditional");
@@ -72,7 +123,9 @@ fn catalog() -> &'static [Destination] {
 
 impl Result {
     pub fn description(&self) -> String {
-        if !self.help.is_empty() { return self.help.lines().map(str::trim).collect::<Vec<_>>().join(" "); }
+        if !self.help.is_empty() {
+            return self.help.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        }
         let text = match self.title {
             "Screen edges" => "Set the space between windows and screen edges.",
             "Virtual Workspaces" => "Organize your windows into separate workspaces.",
@@ -87,81 +140,230 @@ impl Result {
             _ => return self.location.to_string(),
         };
         if self.scope.is_some_and(|scope| (1..=6).contains(&scope)) {
-            format!("{} · {text}", self.location.strip_prefix("Layouts › ").unwrap_or(self.location))
-        } else { text.into() }
+            format!(
+                "{} · {text}",
+                self.location.strip_prefix("Layouts › ").unwrap_or(self.location)
+            )
+        } else {
+            text.into()
+        }
     }
 }
 
 pub(super) fn results(query: &str) -> Vec<Result> {
     let query = query.trim().to_lowercase();
     let terms: Vec<_> = query.split_whitespace().collect();
-    if terms.is_empty() { return Vec::new(); }
+    if terms.is_empty() {
+        return Vec::new();
+    }
     let mut matches = Vec::new();
     let mut add = |page, scope, location, title, aliases| {
         let title: &'static str = title;
         let mut location: &'static str = location;
         let aliases: &'static str = aliases;
-        let fields: Vec<_> = catalog().iter().filter(|field| field.title == title && field.page == page && field.scope == scope).collect();
-        let documented = fields.iter().copied().find(|field| field.location == location)
+        let fields: Vec<_> = catalog()
+            .iter()
+            .filter(|field| field.title == title && field.page == page && field.scope == scope)
+            .collect();
+        let documented = fields
+            .iter()
+            .copied()
+            .find(|field| field.location == location)
             .or_else(|| (fields.len() == 1).then(|| fields[0]));
-        if documented.is_none() && fields.len() > 1 { return; }
-        if let Some(field) = documented { location = field.location; }
+        if documented.is_none() && fields.len() > 1 {
+            return;
+        }
+        if let Some(field) = documented {
+            location = field.location;
+        }
         let help = documented.map_or("", |field| field.help);
         let name = title.to_lowercase();
         let context = location.to_lowercase();
         let key = documented.map_or("", |field| field.key);
         let schema_aliases = documented.map_or("", |field| field.aliases);
-        let words = format!("{name} {context} {aliases} {key} {schema_aliases} {}", help.to_lowercase());
-        if !terms.iter().all(|term| words.contains(term)) { return; }
-        let score = if name == query { 1000 } else if name.starts_with(&query) { 600 }
-            else if name.contains(&query) { 400 } else { 0 }
-            + terms.iter().map(|term| if name.contains(term) { 60 } else if context.contains(term) { 20 } else { 5 }).sum::<usize>();
-        matches.push((score, Result { title, location, page, scope, help }));
+        let words = format!(
+            "{name} {context} {aliases} {key} {schema_aliases} {}",
+            help.to_lowercase()
+        );
+        if !terms.iter().all(|term| words.contains(term)) {
+            return;
+        }
+        let score = if name == query {
+            1000
+        } else if name.starts_with(&query) {
+            600
+        } else if name.contains(&query) {
+            400
+        } else {
+            0
+        } + terms
+            .iter()
+            .map(|term| {
+                if name.contains(term) {
+                    60
+                } else if context.contains(term) {
+                    20
+                } else {
+                    5
+                }
+            })
+            .sum::<usize>();
+        matches.push((score, Result {
+            title,
+            location,
+            page,
+            scope,
+            help,
+        }));
     };
-    for (page, title) in ["General", "Layouts", "Workspaces", "Rules", "Keyboard", "Mouse & Trackpad", "Interface", "Advanced", "About"].into_iter().enumerate() {
+    for (page, title) in [
+        "General",
+        "Layouts",
+        "Workspaces",
+        "Rules",
+        "Keyboard",
+        "Mouse & Trackpad",
+        "Interface",
+        "Advanced",
+        "About",
+    ]
+    .into_iter()
+    .enumerate()
+    {
         add(page, None, "Settings", title, "");
     }
-    for (scope, title) in ["Default behavior", "Traditional", "BSP", "Stack", "Master Stack", "Scrolling", "Floating", "Spacing", "Displays"].into_iter().enumerate() {
+    for (scope, title) in [
+        "Default behavior",
+        "Traditional",
+        "BSP",
+        "Stack",
+        "Master Stack",
+        "Scrolling",
+        "Floating",
+        "Spacing",
+        "Displays",
+    ]
+    .into_iter()
+    .enumerate()
+    {
         add(1, Some(scope), "Layouts", title, "layout");
     }
     for (title, aliases) in [
         ("Screen edges", "gaps gap margin padding outer edges spacing"),
-        ("Set each edge separately", "gaps gap top bottom left right margin padding outer"),
+        (
+            "Set each edge separately",
+            "gaps gap top bottom left right margin padding outer",
+        ),
         ("Horizontal", "gaps gap between windows inner horizontal spacing"),
         ("Vertical", "gaps gap between windows inner vertical spacing"),
-    ] { add(1, Some(7), "Layouts › Spacing", title, aliases); }
-    add(1, Some(8), "Layouts › Displays", "Display settings", "monitor screen connected per display override gaps spacing widths");
-    add(2, None, "Workspaces", "Virtual Workspaces", "desktops spaces enabled");
-    add(3, None, "Rules", "App rules", "application bundle identifier manage ignore floating window title match workspace assign desktop");
-    add(4, None, "Keyboard", "Keyboard shortcuts", "keys hotkeys keybindings bindings commands" );
-    add(4, None, "Keyboard", "Shortcut set", "keymap keybinding mode default" );
-    add(4, None, "Keyboard", "Reusable modifier combinations", "command option control shift modifiers" );
+    ] {
+        add(1, Some(7), "Layouts › Spacing", title, aliases);
+    }
+    add(
+        1,
+        Some(8),
+        "Layouts › Displays",
+        "Display settings",
+        "monitor screen connected per display override gaps spacing widths",
+    );
+    add(
+        2,
+        None,
+        "Workspaces",
+        "Virtual Workspaces",
+        "desktops spaces enabled",
+    );
+    add(
+        3,
+        None,
+        "Rules",
+        "App rules",
+        "application bundle identifier manage ignore floating window title match workspace assign desktop",
+    );
+    add(
+        4,
+        None,
+        "Keyboard",
+        "Keyboard shortcuts",
+        "keys hotkeys keybindings bindings commands",
+    );
+    add(
+        4,
+        None,
+        "Keyboard",
+        "Shortcut set",
+        "keymap keybinding mode default",
+    );
+    add(
+        4,
+        None,
+        "Keyboard",
+        "Reusable modifier combinations",
+        "command option control shift modifiers",
+    );
     for (title, aliases) in [
-        ("Workspace swipes", "trackpad gestures fingers swipe sensitivity haptic"),
-        ("Scrolling layout gestures", "trackpad gestures fingers swipe scrolling niri"),
+        (
+            "Workspace swipes",
+            "trackpad gestures fingers swipe sensitivity haptic",
+        ),
+        (
+            "Scrolling layout gestures",
+            "trackpad gestures fingers swipe scrolling niri",
+        ),
         ("Drag & Drop", "mouse modifier move resize swap stack drop"),
         ("Pointer movement", "mouse cursor movement"),
-    ] { add(5, None, "Mouse & Trackpad", title, aliases); }
-    add(6, None, "Interface", "Overview", "window previews fade transitions");
-    add(6, None, "Interface", "Stack Line", "stackline indicator color position thickness interaction");
+    ] {
+        add(5, None, "Mouse & Trackpad", title, aliases);
+    }
+    add(
+        6,
+        None,
+        "Interface",
+        "Overview",
+        "window previews fade transitions",
+    );
+    add(
+        6,
+        None,
+        "Interface",
+        "Stack Line",
+        "stackline indicator color position thickness interaction",
+    );
     for (title, aliases) in [
         ("Startup commands", "launch run shell exec"),
         ("Autofocus blacklist", "focus exclude ignore app"),
-        ("Reload config when edited externally", "configuration file automatic reload toml"),
+        (
+            "Reload config when edited externally",
+            "configuration file automatic reload toml",
+        ),
         ("Configuration file", "open config path toml reload"),
-    ] { add(7, None, "Advanced", title, aliases); }
+    ] {
+        add(7, None, "Advanced", title, aliases);
+    }
     for (title, aliases) in [
         ("Check for Updates…", "version latest release update"),
         ("Documentation", "docs help guide manual"),
         ("Release Notes", "changelog version changes"),
         ("Sponsor Rift", "donate support sponsorship"),
-    ] { add(8, None, "About", title, aliases); }
-    for field in catalog() { add(field.page, field.scope, field.location, field.title, field.key); }
-    matches.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.title.cmp(b.1.title)).then(a.1.location.cmp(b.1.location)));
-    matches.dedup_by(|a, b| a.1.title == b.1.title && a.1.page == b.1.page && a.1.scope == b.1.scope && a.1.location == b.1.location);
+    ] {
+        add(8, None, "About", title, aliases);
+    }
+    for field in catalog() {
+        add(field.page, field.scope, field.location, field.title, field.key);
+    }
+    matches.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.title.cmp(b.1.title))
+            .then(a.1.location.cmp(b.1.location))
+    });
+    matches.dedup_by(|a, b| {
+        a.1.title == b.1.title
+            && a.1.page == b.1.page
+            && a.1.scope == b.1.scope
+            && a.1.location == b.1.location
+    });
     matches.into_iter().map(|(_, result)| result).collect()
 }
-
 
 pub(super) fn reveal(root: &objc2_app_kit::NSView, title: &str, location: &str) {
     use objc2::Message;
@@ -169,9 +371,16 @@ pub(super) fn reveal(root: &objc2_app_kit::NSView, title: &str, location: &str) 
     fn find(view: &NSView, title: &str, labels: bool) -> Option<objc2::rc::Retained<NSView>> {
         if let Some(control) = view.downcast_ref::<NSControl>() {
             let name = control.accessibilityLabel().map(|value| value.to_string());
-            let matches = name.as_deref().is_some_and(|name| name == title || name.starts_with(&format!("{title} (")))
-                || (labels && view.downcast_ref::<NSTextField>().is_some_and(|field| field.stringValue().to_string() == title));
-            if matches { return Some(view.retain()); }
+            let matches = name
+                .as_deref()
+                .is_some_and(|name| name == title || name.starts_with(&format!("{title} (")))
+                || (labels
+                    && view
+                        .downcast_ref::<NSTextField>()
+                        .is_some_and(|field| field.stringValue().to_string() == title));
+            if matches {
+                return Some(view.retain());
+            }
         }
         view.subviews().iter().find_map(|child| find(&child, title, labels))
     }
@@ -182,13 +391,16 @@ pub(super) fn reveal(root: &objc2_app_kit::NSView, title: &str, location: &str) 
     if let Some(view) = find(root, title, false).or_else(|| find(root, title, true)) {
         view.scrollRectToVisible(view.bounds());
         if let Some(control) = view.downcast_ref::<NSControl>() {
-            if control.isEnabled() && view.downcast_ref::<NSTextField>().is_none_or(|field| field.isEditable()) {
-                if let Some(window) = view.window() { window.makeFirstResponder(Some(&view)); }
+            if control.isEnabled()
+                && view.downcast_ref::<NSTextField>().is_none_or(|field| field.isEditable())
+            {
+                if let Some(window) = view.window() {
+                    window.makeFirstResponder(Some(&view));
+                }
             }
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -205,7 +417,10 @@ mod tests {
             assert_eq!((first.title, first.page, first.scope), (title, page, scope));
         }
         assert!(results("gaps").iter().any(|result| result.title == "Screen edges"));
-        assert!(results("column width unrelatedword").is_empty(), "match every query word");
+        assert!(
+            results("column width unrelatedword").is_empty(),
+            "match every query word"
+        );
         assert!(results("   ").is_empty());
     }
 }

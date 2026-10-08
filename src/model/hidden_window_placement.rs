@@ -63,14 +63,11 @@ impl HiddenWindowPlacement {
             .into_iter()
             .any(|corner| Self::calculate(screen, window, corner, other_screens) == window)
             || {
-                let visible_width = (window.max().x.min(screen.max().x)
-                    - window.origin.x.max(screen.origin.x))
-                .max(0.0);
-                let visible_height = (window.max().y.min(screen.max().y)
-                    - window.origin.y.max(screen.origin.y))
-                .max(0.0);
-                visible_width <= Self::VISIBLE_THRESHOLD_PX
-                    && visible_height <= Self::VISIBLE_THRESHOLD_PX
+                let visible_width =
+                    (window.max().x.min(screen.max().x) - window.origin.x.max(screen.origin.x)).max(0.0);
+                let visible_height =
+                    (window.max().y.min(screen.max().y) - window.origin.y.max(screen.origin.y)).max(0.0);
+                visible_width <= Self::VISIBLE_THRESHOLD_PX && visible_height <= Self::VISIBLE_THRESHOLD_PX
             }
     }
 }

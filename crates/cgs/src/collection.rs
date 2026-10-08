@@ -5,9 +5,7 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::*;
-use objc2_foundation::{
-    NSArray, NSIndexSet, NSNotification, NSNumber, NSObject, NSObjectProtocol, NSString,
-};
+use objc2_foundation::{NSArray, NSIndexSet, NSNotification, NSNumber, NSObject, NSObjectProtocol, NSString};
 
 use crate::bridge::{ActionTarget, callback};
 use crate::{AddRemoveControl, Label, NativeControl, NativeView, ScrollView, Ui, VStack};
@@ -23,12 +21,7 @@ define_class!(
 );
 impl CollectionCell {
     fn new(ui: &Ui) -> Retained<Self> {
-        unsafe {
-            msg_send![
-                super(Self::alloc(ui.mtm()).set_ivars(RefCell::new(None))),
-                init
-            ]
-        }
+        unsafe { msg_send![super(Self::alloc(ui.mtm()).set_ivars(RefCell::new(None))), init] }
     }
 
     fn set_content(&self, content: Box<dyn NativeView>) {
@@ -141,9 +134,14 @@ define_class!(
         fn table_group(&self, _table: &NSTableView, row: isize) -> bool {
             (self.ivars().table_groups.borrow())(row as usize)
         }
+
         #[unsafe(method(tableView:heightOfRow:))]
         fn table_height(&self, table: &NSTableView, row: isize) -> f64 {
-            self.ivars().row_height.borrow().as_ref().map_or(table.rowHeight(), |height| height(row as usize))
+            self.ivars()
+                .row_height
+                .borrow()
+                .as_ref()
+                .map_or(table.rowHeight(), |height| height(row as usize))
         }
 
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
@@ -158,13 +156,7 @@ define_class!(
                     table,
                     row,
                     column
-                        .map(|c| {
-                            table
-                                .tableColumns()
-                                .iter()
-                                .position(|v| std::ptr::eq(&*v, c))
-                                .unwrap_or(0)
-                        })
+                        .map(|c| table.tableColumns().iter().position(|v| std::ptr::eq(&*v, c)).unwrap_or(0))
                         .unwrap_or(0),
                 )
             })
@@ -214,16 +206,26 @@ define_class!(
     unsafe impl NSOutlineViewDelegate for CollectionBridge {
         #[unsafe(method(outlineView:isGroupItem:))]
         fn is_group(&self, _view: &NSOutlineView, item: &AnyObject) -> bool {
-            self.ivars().group_parents.get() && node_index(item).is_some_and(|index| {
-                self.ivars().nodes.borrow().get(index).is_some_and(|node| !node.children.is_empty())
-            })
+            self.ivars().group_parents.get()
+                && node_index(item).is_some_and(|index| {
+                    self.ivars()
+                        .nodes
+                        .borrow()
+                        .get(index)
+                        .is_some_and(|node| !node.children.is_empty())
+                })
         }
 
         #[unsafe(method(outlineView:shouldSelectItem:))]
         fn should_select_item(&self, _view: &NSOutlineView, item: &AnyObject) -> bool {
-            !self.ivars().group_parents.get() || node_index(item).is_some_and(|index| {
-                self.ivars().nodes.borrow().get(index).is_some_and(|node| node.children.is_empty())
-            })
+            !self.ivars().group_parents.get()
+                || node_index(item).is_some_and(|index| {
+                    self.ivars()
+                        .nodes
+                        .borrow()
+                        .get(index)
+                        .is_some_and(|node| node.children.is_empty())
+                })
         }
 
         #[unsafe(method_id(outlineView:viewForTableColumn:item:))]
@@ -313,12 +315,7 @@ impl CollectionBridge {
         unsafe { msg_send![super(this), init] }
     }
 
-    fn make_cell(
-        &self,
-        table: &NSTableView,
-        row: usize,
-        column: usize,
-    ) -> Option<Retained<NSView>> {
+    fn make_cell(&self, table: &NSTableView, row: usize, column: usize) -> Option<Retained<NSView>> {
         let _keep_alive = self.retain();
         if row >= (self.ivars().count)() {
             return None;
@@ -387,9 +384,8 @@ impl<T: 'static> Table<T> {
         native.setUsesAutomaticRowHeights(false);
         native.setStyle(NSTableViewStyle::Inset);
         native.setRowSizeStyle(NSTableViewRowSizeStyle::Custom);
-        native.setColumnAutoresizingStyle(
-            NSTableViewColumnAutoresizingStyle::LastColumnOnlyAutoresizingStyle,
-        );
+        native
+            .setColumnAutoresizingStyle(NSTableViewColumnAutoresizingStyle::LastColumnOnlyAutoresizingStyle);
         let rows = Rc::new(RefCell::new(Vec::new()));
         let r = rows.clone();
         let ui_copy = *ui;
@@ -481,10 +477,8 @@ impl<T: 'static> Table<T> {
             return;
         }
         if let Some(index) = index.filter(|i| *i < self.rows.borrow().len()) {
-            self.native.selectRowIndexes_byExtendingSelection(
-                &NSIndexSet::indexSetWithIndex(index),
-                false,
-            );
+            self.native
+                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(index), false);
         } else {
             unsafe {
                 self.native.deselectAll(None);
@@ -517,6 +511,7 @@ impl<T: 'static> Table<T> {
         *self.bridge.ivars().table_groups.borrow_mut() = Box::new(move |row| group(&rows.borrow()[row]));
         self
     }
+
     pub fn row_heights(self, height: impl Fn(&T) -> f64 + 'static) -> Self {
         let rows = self.rows.clone();
         *self.bridge.ivars().row_height.borrow_mut() = Some(Box::new(move |row| height(&rows.borrow()[row])));
@@ -626,9 +621,7 @@ impl<T: 'static> List<T> {
 
     pub fn set_items(&self, items: Vec<T>) { self.0.set_rows(items); }
 
-    pub fn on_select(self, f: impl FnMut(Option<usize>) + 'static) -> Self {
-        Self(self.0.on_select(f))
-    }
+    pub fn on_select(self, f: impl FnMut(Option<usize>) + 'static) -> Self { Self(self.0.on_select(f)) }
 
     pub fn selection(&self) -> Option<usize> { self.0.selection() }
 
@@ -656,18 +649,19 @@ impl<T: 'static> EditableList<T> {
         let selection: Rc<RefCell<Option<Selection>>> = Rc::new(RefCell::new(None));
         let cb = selection.clone();
         let remove = Weak::new(controls.remove_button());
-        let list = SettingsList::new(ui, label, |_| String::new()).fit_content(220.0).on_select(
-            move |index| {
-                if let Some(remove) = remove.load() {
-                    remove.setEnabled(index.is_some());
-                }
-                if let Ok(mut f) = cb.try_borrow_mut() {
-                    if let Some(f) = f.as_mut() {
-                        f(index);
+        let list =
+            SettingsList::new(ui, label, |_| String::new())
+                .fit_content(220.0)
+                .on_select(move |index| {
+                    if let Some(remove) = remove.load() {
+                        remove.setEnabled(index.is_some());
                     }
-                }
-            },
-        );
+                    if let Ok(mut f) = cb.try_borrow_mut() {
+                        if let Some(f) = f.as_mut() {
+                            f(index);
+                        }
+                    }
+                });
         let stack = VStack::new(ui);
         stack.ns_stack_view().addArrangedSubview(list.ns_view());
         crate::view::prepare(list.ns_view());
@@ -799,13 +793,14 @@ impl SettingsListCell {
         let action_index = index.clone();
         let button = (opens && !navigation).then(|| {
             let button = Rc::new(
-                crate::Button::new(ui, "Open").symbol("chevron.forward").borderless().on_click(
-                    move || {
+                crate::Button::new(ui, "Open")
+                    .symbol("chevron.forward")
+                    .borderless()
+                    .on_click(move || {
                         if let Some(open) = open.borrow_mut().as_mut() {
                             open(action_index.get());
                         }
-                    },
-                ),
+                    }),
             );
             button.ns_button().setContentTintColor(Some(&crate::Color::secondary_label()));
             button.control_size(NSControlSize::Small);
@@ -880,14 +875,7 @@ impl SettingsListCell {
         native
     }
 
-    fn configure(
-        &self,
-        name: &str,
-        summary: &str,
-        symbol: Option<&str>,
-        index: usize,
-        count: usize,
-    ) {
+    fn configure(&self, name: &str, summary: &str, symbol: Option<&str>, index: usize, count: usize) {
         let cell = self.ivars();
         cell.index.set(index);
         cell.title.set_text(name);
@@ -1176,10 +1164,8 @@ pub struct Outline<T: 'static> {
 impl<T: 'static> Outline<T> {
     pub fn new(ui: &Ui) -> Self {
         let native = NSOutlineView::new(ui.mtm());
-        let column = NSTableColumn::initWithIdentifier(
-            NSTableColumn::alloc(ui.mtm()),
-            &NSString::from_str("item"),
-        );
+        let column =
+            NSTableColumn::initWithIdentifier(NSTableColumn::alloc(ui.mtm()), &NSString::from_str("item"));
         native.addTableColumn(&column);
         unsafe {
             native.setOutlineTableColumn(Some(&column));
@@ -1279,10 +1265,8 @@ impl<T: 'static> Outline<T> {
         }
         let row = unsafe { self.native.rowForItem(Some(&node.object)) };
         if row >= 0 {
-            self.native.selectRowIndexes_byExtendingSelection(
-                &NSIndexSet::indexSetWithIndex(row as usize),
-                false,
-            );
+            self.native
+                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row as usize), false);
         }
     }
 

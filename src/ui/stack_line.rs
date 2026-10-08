@@ -219,9 +219,7 @@ impl GroupIndicatorWindow {
 
     pub fn space_id(&self) -> Option<SpaceId> { self.state.borrow().space_id }
 
-    pub fn set_space_id(&self, space_id: SpaceId) {
-        self.state.borrow_mut().space_id = Some(space_id);
-    }
+    pub fn set_space_id(&self, space_id: SpaceId) { self.state.borrow_mut().space_id = Some(space_id); }
 
     pub fn set_frame(&self, frame: CGRect) -> Result<(), CgsWindowError> {
         self.cgs_window.set_shape(frame)?;
@@ -252,9 +250,7 @@ impl GroupIndicatorWindow {
 
     pub fn group_data(&self) -> Option<GroupDisplayData> { self.state.borrow().group_data.clone() }
 
-    pub fn window_ids(&self) -> Vec<WindowId> {
-        self.group_data().map(|d| d.window_ids).unwrap_or_default()
-    }
+    pub fn window_ids(&self) -> Vec<WindowId> { self.group_data().map(|d| d.window_ids).unwrap_or_default() }
 
     pub fn click_segment(&self, segment_index: usize) -> Result<(), CgsWindowError> {
         let Some(group_data) = self.group_data() else {
@@ -308,8 +304,7 @@ impl GroupIndicatorWindow {
                 let state = self.state.borrow();
                 state.config
             };
-            let adjusted_bounds =
-                self.calculate_adjusted_bounds(bounds, config, group_data.group_kind);
+            let adjusted_bounds = self.calculate_adjusted_bounds(bounds, config, group_data.group_kind);
             self.update_separator_layers(&group_data, adjusted_bounds);
 
             self.update_selected_layer(&group_data, bounds);
@@ -544,8 +539,7 @@ impl GroupIndicatorWindow {
             layer
         };
 
-        let segment_frame =
-            Self::calculate_segment_frame(group_data, bounds, group_data.selected_index);
+        let segment_frame = Self::calculate_segment_frame(group_data, bounds, group_data.selected_index);
 
         selected_layer.setFrame(segment_frame);
 
@@ -568,8 +562,7 @@ impl GroupIndicatorWindow {
 
         let selected_layer = CALayer::layer();
 
-        let segment_frame =
-            Self::calculate_segment_frame(group_data, bounds, group_data.selected_index);
+        let segment_frame = Self::calculate_segment_frame(group_data, bounds, group_data.selected_index);
         selected_layer.setFrame(segment_frame);
 
         let selected_color = config.selected_color.to_nscolor();
@@ -618,11 +611,7 @@ impl GroupIndicatorWindow {
         selected_layer.setFrame(to_frame);
     }
 
-    fn calculate_segment_frame(
-        group_data: &GroupDisplayData,
-        bar: CGRect,
-        segment_index: usize,
-    ) -> CGRect {
+    fn calculate_segment_frame(group_data: &GroupDisplayData, bar: CGRect, segment_index: usize) -> CGRect {
         let segment_length = match group_data.group_kind {
             GroupKind::Horizontal => bar.size.width / group_data.total_count as f64,
             GroupKind::Vertical => bar.size.height / group_data.total_count as f64,
@@ -631,14 +620,12 @@ impl GroupIndicatorWindow {
         let (seg_x, seg_y, seg_width, seg_height) = match group_data.group_kind {
             GroupKind::Horizontal => {
                 let seg_start = (bar.origin.x + (segment_index as f64 * segment_length)).round();
-                let seg_end =
-                    (bar.origin.x + ((segment_index + 1) as f64 * segment_length)).round();
+                let seg_end = (bar.origin.x + ((segment_index + 1) as f64 * segment_length)).round();
                 let actual_width = seg_end - seg_start;
                 (seg_start, bar.origin.y, actual_width, bar.size.height)
             }
             GroupKind::Vertical => {
-                let seg_end =
-                    bar.origin.y + bar.size.height - (segment_index as f64 * segment_length);
+                let seg_end = bar.origin.y + bar.size.height - (segment_index as f64 * segment_length);
                 let seg_start =
                     bar.origin.y + bar.size.height - ((segment_index + 1) as f64 * segment_length);
                 let seg_start_rounded = seg_start.round();

@@ -211,7 +211,9 @@ pub(crate) fn header_menu_style(button: &NSPopUpButton) {
     button.setBezelStyle(action_button_bezel());
     button.setFont(Some(&crate::Font::section_title()));
     if let Some(menu) = button.menu() {
-        unsafe { menu.setFont(Some(&crate::Font::body())); }
+        unsafe {
+            menu.setFont(Some(&crate::Font::body()));
+        }
     }
 }
 
@@ -235,9 +237,7 @@ impl Popup {
         menu.ns_menu().insertItem_atIndex(header.ns_menu_item(), 0);
         let mut popup = Self::new(ui);
         popup.native.setPullsDown(true);
-        if let Some(cell) =
-            popup.native.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok())
-        {
+        if let Some(cell) = popup.native.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
             cell.setArrowPosition(NSPopUpArrowPosition::NoArrow);
         }
         popup.native.setMenu(Some(menu.ns_menu()));
@@ -317,9 +317,7 @@ impl Popup {
         }
     }
 
-    pub fn selected(&self) -> Option<usize> {
-        usize::try_from(self.native.indexOfSelectedItem()).ok()
-    }
+    pub fn selected(&self) -> Option<usize> { usize::try_from(self.native.indexOfSelectedItem()).ok() }
 
     pub fn on_change(self, mut f: impl FnMut(usize) + 'static) -> Self {
         self.target.set(move |sender| {
@@ -546,9 +544,7 @@ pub struct NumberField {
     formatter: Retained<NSNumberFormatter>,
 }
 impl NumberField {
-    pub fn with_validation(self, ui: &Ui) -> crate::Validated<Self> {
-        crate::Validated::new(ui, self)
-    }
+    pub fn with_validation(self, ui: &Ui) -> crate::Validated<Self> { crate::Validated::new(ui, self) }
 
     pub fn new(ui: &Ui) -> Self {
         let field = crate::TextField::new(ui);
@@ -613,9 +609,7 @@ impl NumberField {
 
     pub fn ns_number_formatter(&self) -> &NSNumberFormatter { &self.formatter }
 
-    pub fn set_validation(&self, validation: &crate::Validation) {
-        self.field.set_validation(validation);
-    }
+    pub fn set_validation(&self, validation: &crate::Validation) { self.field.set_validation(validation); }
 }
 impl NativeView for NumberField {
     fn ns_view(&self) -> &NSView { self.field.ns_view() }
@@ -634,12 +628,11 @@ impl NumberStepper {
         use objc2::rc::Weak;
         let field = NumberField::new(ui).range(min, max);
         let weak = Weak::new(field.ns_text_field());
-        let stepper =
-            Stepper::new(ui).range(min, max).increment(increment).on_change(move |value| {
-                if let Some(field) = weak.load() {
-                    field.setDoubleValue(value);
-                }
-            });
+        let stepper = Stepper::new(ui).range(min, max).increment(increment).on_change(move |value| {
+            if let Some(field) = weak.load() {
+                field.setDoubleValue(value);
+            }
+        });
         let weak = Weak::new(stepper.ns_stepper());
         let field = field.on_change(move |value| {
             if let Some(stepper) = weak.load() {
@@ -806,9 +799,7 @@ impl SheetActions {
 
     pub fn set_on_done(&self, mut f: impl FnMut() + 'static) { self.done.target.set(move |_| f()); }
 
-    pub fn set_on_cancel(&self, mut f: impl FnMut() + 'static) {
-        self.cancel.target.set(move |_| f());
-    }
+    pub fn set_on_cancel(&self, mut f: impl FnMut() + 'static) { self.cancel.target.set(move |_| f()); }
 }
 impl NativeView for SheetActions {
     fn ns_view(&self) -> &NSView { self.row.ns_view() }

@@ -12,15 +12,11 @@ pub(crate) struct AdmissionTransition {
     pub(crate) is_admitted: bool,
 }
 
-pub(crate) fn refresh_heuristic(
-    state: &mut RiftState,
-    wid: WindowId,
-) -> Option<AdmissionTransition> {
+pub(crate) fn refresh_heuristic(state: &mut RiftState, wid: WindowId) -> Option<AdmissionTransition> {
     let window = state.windows.window(wid)?;
     let was_admitted = window.is_admitted();
-    let manageable = compute_window_info_manageability(&window.info, |wsid| {
-        state.windows.get_window_server_info(wsid)
-    });
+    let manageable =
+        compute_window_info_manageability(&window.info, |wsid| state.windows.get_window_server_info(wsid));
     let window = state.windows.window_mut(wid)?;
     window.is_manageable = manageable;
     Some(AdmissionTransition {
@@ -49,10 +45,7 @@ fn compute_window_info_manageability(
     info: &WindowInfo,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
-    if info.is_minimized
-        || !info.is_root
-        || info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
-    {
+    if info.is_minimized || !info.is_root || info.ax_role.as_deref().is_some_and(|role| role != "AXWindow") {
         return false;
     }
 
@@ -77,8 +70,7 @@ fn compute_window_info_manageability(
 }
 
 fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
-    if info.ax_role.as_deref() != Some("AXWindow") || info.ax_subrole.as_deref() != Some("AXDialog")
-    {
+    if info.ax_role.as_deref() != Some("AXWindow") || info.ax_subrole.as_deref() != Some("AXDialog") {
         return false;
     }
 

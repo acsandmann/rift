@@ -67,19 +67,9 @@ unsafe extern "C" {
     pub fn SLSSetSurfaceBounds(cid: cid_t, wid: u32, sid: u32, bounds: CGRect) -> CGError;
     pub fn SLSSetSurfaceResolution(cid: cid_t, wid: u32, sid: u32, resolution: f64) -> CGError;
     pub fn SLSSetSurfaceOpacity(cid: cid_t, wid: u32, sid: u32, opaque: bool) -> CGError;
-    pub fn SLSSetSurfaceColorSpace(
-        cid: cid_t,
-        wid: u32,
-        sid: u32,
-        color_space: *mut CGColorSpace,
-    ) -> CGError;
-    pub fn SLSOrderSurface(
-        cid: cid_t,
-        wid: u32,
-        sid: u32,
-        order: c_int,
-        relative_to: u32,
-    ) -> CGError;
+    pub fn SLSSetSurfaceColorSpace(cid: cid_t, wid: u32, sid: u32, color_space: *mut CGColorSpace)
+    -> CGError;
+    pub fn SLSOrderSurface(cid: cid_t, wid: u32, sid: u32, order: c_int, relative_to: u32) -> CGError;
     pub fn SLSTransactionCreate(cid: cid_t) -> *mut CFType;
     pub fn SLSTransactionSetWindowShape(
         transaction: *mut CFType,
@@ -89,18 +79,9 @@ unsafe extern "C" {
         shape: *mut CFType,
     );
     pub fn SLSTransactionMoveWindowWithGroup(transaction: *mut CFType, wid: u32, point: CGPoint);
-    pub fn SLSTransactionSetSurfaceBounds(
-        transaction: *mut CFType,
-        wid: u32,
-        sid: u32,
-        bounds: CGRect,
-    );
+    pub fn SLSTransactionSetSurfaceBounds(transaction: *mut CFType, wid: u32, sid: u32, bounds: CGRect);
     pub fn SLSTransactionCommit(transaction: *mut CFType, asynchronous: u32);
-    pub fn SLSSetWindowProperty(
-        cid: cid_t,
-        wid: u32,
-        property: *mut CFString,
-        value: *mut CFType,
-    ) -> CGError;
+    pub fn SLSSetWindowProperty(cid: cid_t, wid: u32, property: *mut CFString, value: *mut CFType)
+    -> CGError;
     pub fn SLSFlushWindowContentRegion(cid: cid_t, wid: u32, dirty: *mut c_void) -> CGError;
 }

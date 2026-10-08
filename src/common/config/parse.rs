@@ -27,8 +27,7 @@ impl Config {
         // Validate virtual workspace settings
         issues.extend(self.virtual_workspaces.validate());
 
-        let mode_names: HashSet<_> =
-            self.binding_mode_specs.iter().map(|(name, _)| name.as_str()).collect();
+        let mode_names: HashSet<_> = self.binding_mode_specs.iter().map(|(name, _)| name.as_str()).collect();
         if mode_names.len() != self.binding_mode_specs.len() {
             issues.push("Binding mode names must be unique".to_string());
         }
@@ -37,8 +36,7 @@ impl Config {
         }
         for (mode, bindings) in &self.binding_mode_specs {
             for (_, command) in bindings {
-                if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) =
-                    command
+                if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) = command
                     && !mode_names.contains(target.as_str())
                 {
                     issues.push(format!(
@@ -90,8 +88,7 @@ impl Config {
             row[0] = i + 1;
             for (j, right) in b.iter().enumerate() {
                 let above = row[j + 1];
-                row[j + 1] =
-                    (above + 1).min(row[j] + 1).min(diagonal + usize::from(left != *right));
+                row[j + 1] = (above + 1).min(row[j] + 1).min(diagonal + usize::from(left != *right));
                 diagonal = above;
             }
         }
@@ -152,28 +149,22 @@ impl Config {
 
                 let mut binding_mode_specs = Vec::with_capacity(binding_sets.len());
                 let mut keys = Vec::new();
-                let mode_names: HashSet<String> =
-                    binding_sets.iter().map(|(name, _)| name.clone()).collect();
+                let mode_names: HashSet<String> = binding_sets.iter().map(|(name, _)| name.clone()).collect();
                 for (mode, bindings) in binding_sets {
                     let mut specs = Vec::with_capacity(bindings.len());
                     let mut assigned = HashSet::default();
                     for (key, cmd) in bindings {
-                        let expanded_key =
-                            Self::expand_modifier_combinations(&key, &c.modifier_combinations);
+                        let expanded_key = Self::expand_modifier_combinations(&key, &c.modifier_combinations);
                         let normalized_key = Self::normalize_hotkey_string(&expanded_key);
                         let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
                             bail!("Could not parse hotkey `{key}` in binding mode `{mode}`");
                         };
                         for modifiers in hotkey.modifiers.expand_to_specific() {
                             if !assigned.insert(Hotkey::new(modifiers, hotkey.key_code)) {
-                                bail!(
-                                    "Shortcut `{key}` conflicts with another binding in keymap `{mode}`"
-                                );
+                                bail!("Shortcut `{key}` conflicts with another binding in keymap `{mode}`");
                             }
                         }
-                        if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(
-                            target,
-                        )) = &cmd
+                        if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) = &cmd
                             && target != "default"
                             && !mode_names.contains(target)
                         {
@@ -200,9 +191,7 @@ impl Config {
                 {
                     let note = replacement
                         .map(|replacement| {
-                            format!(
-                                " Note: `{suggestion}` is deprecated; use `{replacement}` instead."
-                            )
+                            format!(" Note: `{suggestion}` is deprecated; use `{replacement}` instead.")
                         })
                         .unwrap_or_default();
                     bail!("{message}\nDid you mean `{suggestion}`?{note}");
@@ -218,8 +207,7 @@ mod tests {
     use super::*;
     #[test]
     fn command_suggestion_from_serde_error() {
-        let error =
-            "unknown variant `toggle_stak`, expected one of `toggle_stack`, `toggle_orientation`";
+        let error = "unknown variant `toggle_stak`, expected one of `toggle_stack`, `toggle_orientation`";
         let token = Config::extract_unknown_variant(error).unwrap();
         assert_eq!(
             Config::suggest_similar_command(&token).unwrap().0,

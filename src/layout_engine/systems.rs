@@ -78,9 +78,7 @@ impl WindowLayoutConstraints {
         None
     }
 
-    pub fn resizable_for_axis(self, horizontal: bool) -> bool {
-        self.fixed_for_axis(horizontal).is_none()
-    }
+    pub fn resizable_for_axis(self, horizontal: bool) -> bool { self.fixed_for_axis(horizontal).is_none() }
 
     pub fn resizable_any_axis(self) -> bool {
         self.resizable_for_axis(true) || self.resizable_for_axis(false)
@@ -183,20 +181,11 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
     fn descend_selection(&mut self, layout: LayoutId) -> bool;
-    fn move_focus(
-        &mut self,
-        layout: LayoutId,
-        direction: Direction,
-    ) -> (Option<WindowId>, Vec<WindowId>);
+    fn move_focus(&mut self, layout: LayoutId, direction: Direction) -> (Option<WindowId>, Vec<WindowId>);
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId>;
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId);
     /// Insert a window arriving from another display at the edge it crossed.
-    fn add_window_from_direction(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        _direction: Direction,
-    ) {
+    fn add_window_from_direction(&mut self, layout: LayoutId, wid: WindowId, _direction: Direction) {
         self.add_window_after_selection(layout, wid);
     }
     /// Replace a window identity in-place without changing its layout position.
@@ -262,11 +251,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> bool {
         self.move_selection(layout, direction)
     }
-    fn move_selection_to_layout_after_selection(
-        &mut self,
-        from_layout: LayoutId,
-        to_layout: LayoutId,
-    );
+    fn move_selection_to_layout_after_selection(&mut self, from_layout: LayoutId, to_layout: LayoutId);
     fn split_selection(&mut self, _layout: LayoutId, _kind: LayoutKind) {}
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
@@ -293,12 +278,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     }
     fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
     fn unjoin_selection(&mut self, _layout: LayoutId) {}
-    fn resize_selection_by(
-        &mut self,
-        layout: LayoutId,
-        amount: f64,
-        orientation: ResizeOrientation,
-    );
+    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64, orientation: ResizeOrientation);
     fn rebalance(&mut self, _layout: LayoutId) {}
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
 }
@@ -535,9 +515,7 @@ mod tests {
         assert!(c.resizable_for_axis(false));
     }
 
-    fn window_nodes(
-        tree: &rift_protocol::ContainerTreeNode,
-    ) -> Vec<&rift_protocol::ContainerTreeNode> {
+    fn window_nodes(tree: &rift_protocol::ContainerTreeNode) -> Vec<&rift_protocol::ContainerTreeNode> {
         let mut windows = Vec::new();
         if tree.node_type == rift_protocol::ContainerNodeType::Window {
             windows.push(tree);

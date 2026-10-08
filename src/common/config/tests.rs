@@ -71,8 +71,7 @@ fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_al
     let defaults: VirtualWorkspaceSettings = toml::from_str("").unwrap();
     assert!(!defaults.prevent_wrapping);
 
-    let settings: VirtualWorkspaceSettings =
-        toml::from_str("prevent_wrapping_around = true").unwrap();
+    let settings: VirtualWorkspaceSettings = toml::from_str("prevent_wrapping_around = true").unwrap();
     assert!(settings.prevent_wrapping);
 }
 
@@ -166,8 +165,7 @@ fn horizontal_mouse_warp_config_parsing() {
         ("top-to-bottom", HorizontalMouseWarp::TopToBottom),
         ("bottom-to-top", HorizontalMouseWarp::BottomToTop),
     ] {
-        let settings: Settings =
-            toml::from_str(&format!("horizontal_mouse_warp = \"{value}\" ")).unwrap();
+        let settings: Settings = toml::from_str(&format!("horizontal_mouse_warp = \"{value}\" ")).unwrap();
         assert_eq!(settings.horizontal_mouse_warp, Some(expected));
     }
     assert!(toml::from_str::<Settings>("horizontal_mouse_warp = \"sideways\"").is_err());
@@ -225,8 +223,7 @@ fn menu_bar_layout_folder_defaults_and_expands_home() {
 
 #[test]
 fn menu_bar_layout_folder_preserves_absolute_paths() {
-    let settings: MenuBarSettings =
-        toml::from_str("layout_folder = \"/tmp/rift-layouts\"").unwrap();
+    let settings: MenuBarSettings = toml::from_str("layout_folder = \"/tmp/rift-layouts\"").unwrap();
 
     assert_eq!(
         settings.resolved_layout_folder(),
@@ -419,8 +416,7 @@ fn config_validation_rejects_duplicate_binding_mode_names() {
 
 #[test]
 fn default_document_is_the_canonical_template() {
-    let document =
-        ConfigDocument::from_source(ConfigDocument::default().source().unwrap()).unwrap();
+    let document = ConfigDocument::from_source(ConfigDocument::default().source().unwrap()).unwrap();
     assert_eq!(document.to_string(), include_str!("../../../rift.default.toml"));
 }
 
@@ -519,8 +515,7 @@ fn commented_optional_setting_uses_example_anchor_and_resets_to_omission() {
     let text = document.to_string();
     assert!(text.contains("#default_disable = false\ndefault_disable = false\n"));
     assert!(
-        text.find("default_disable = false\n").unwrap()
-            < text.find("focus_follows_mouse = true").unwrap()
+        text.find("default_disable = false\n").unwrap() < text.find("focus_follows_mouse = true").unwrap()
     );
     document.update(|source| source.settings.default_disable = true).unwrap();
     assert_eq!(document.to_string(), include_str!("../../../rift.default.toml"));

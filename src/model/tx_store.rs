@@ -22,18 +22,14 @@ impl WindowTxStore {
 
     pub fn insert(&self, id: WindowServerId, txid: TransactionId, target: CGRect) {
         match self.0.entry(id) {
-            Entry::Occupied(mut entry) => {
-                *entry.get_mut() = TxRecord { txid, target: Some(target) }
-            }
+            Entry::Occupied(mut entry) => *entry.get_mut() = TxRecord { txid, target: Some(target) },
             Entry::Vacant(entry) => {
                 entry.insert(TxRecord { txid, target: Some(target) });
             }
         }
     }
 
-    pub fn get(&self, id: &WindowServerId) -> Option<TxRecord> {
-        self.0.get(id).map(|entry| *entry)
-    }
+    pub fn get(&self, id: &WindowServerId) -> Option<TxRecord> { self.0.get(id).map(|entry| *entry) }
 
     pub fn remove(&self, id: &WindowServerId) { self.0.remove(id); }
 

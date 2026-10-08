@@ -117,8 +117,7 @@ mod tests {
             })
         );
         assert_eq!(
-            serde_json::from_value::<RiftRequest>(serde_json::json!({ "get_layout_state": {} }))
-                .unwrap(),
+            serde_json::from_value::<RiftRequest>(serde_json::json!({ "get_layout_state": {} })).unwrap(),
             RiftRequest::GetLayoutState {
                 space_id: None,
                 workspace_id: None,

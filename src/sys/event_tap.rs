@@ -151,9 +151,8 @@ impl EventTap {
             return None;
         };
         if let Some(rl) = CFRunLoop::current() {
-            let mode: &CFRunLoopMode = unsafe {
-                kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS")
-            };
+            let mode: &CFRunLoopMode =
+                unsafe { kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS") };
             rl.add_source(Some(&source), Some(mode));
         }
         CGEvent::tap_enable(&port, true);

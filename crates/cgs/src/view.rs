@@ -2,11 +2,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAutoresizingMaskOptions, NSControl, NSControlSize, NSLayoutAttribute,
-    NSLayoutConstraint, NSLayoutRelation, NSUserInterfaceItemIdentification, NSView,
-    NSViewController,
+    NSLayoutConstraint, NSLayoutRelation, NSUserInterfaceItemIdentification, NSView, NSViewController,
 };
 use objc2_foundation::NSString;
 
@@ -21,9 +20,7 @@ pub trait NativeView: 'static {
         }
     }
     fn tooltip(&self, text: &str) { self.ns_view().setToolTip(Some(&NSString::from_str(text))); }
-    fn identifier(&self, text: &str) {
-        self.ns_view().setIdentifier(Some(&NSString::from_str(text)));
-    }
+    fn identifier(&self, text: &str) { self.ns_view().setIdentifier(Some(&NSString::from_str(text))); }
     fn accessibility_label(&self, text: &str) {
         self.ns_view().setAccessibilityLabel(Some(&NSString::from_str(text)));
     }
@@ -68,11 +65,7 @@ pub trait NativeView: 'static {
     fn hugging_priority(&self, priority: f32, axis: objc2_app_kit::NSLayoutConstraintOrientation) {
         self.ns_view().setContentHuggingPriority_forOrientation(priority, axis);
     }
-    fn compression_resistance(
-        &self,
-        priority: f32,
-        axis: objc2_app_kit::NSLayoutConstraintOrientation,
-    ) {
+    fn compression_resistance(&self, priority: f32, axis: objc2_app_kit::NSLayoutConstraintOrientation) {
         self.ns_view()
             .setContentCompressionResistancePriority_forOrientation(priority, axis);
     }
@@ -100,6 +93,7 @@ impl NativeView for Retained<NSView> {
 
 impl<T: NativeView + ?Sized> NativeView for Box<T> {
     fn ns_view(&self) -> &NSView { (**self).ns_view() }
+
     fn view_controller(&self) -> Option<&NSViewController> { (**self).view_controller() }
 }
 
@@ -112,16 +106,20 @@ impl<T: NativeControl> NativeControl for std::rc::Rc<T> {
     fn ns_control(&self) -> &NSControl { (**self).ns_control() }
 }
 
-pub(crate) fn dimension(
-    view: &NSView,
-    attribute: NSLayoutAttribute,
-    relation: NSLayoutRelation,
-    value: f64,
-) {
+pub(crate) fn dimension(view: &NSView, attribute: NSLayoutAttribute, relation: NSLayoutRelation, value: f64) {
     view.setTranslatesAutoresizingMaskIntoConstraints(false);
-    unsafe { NSLayoutConstraint::constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant(
-        view, attribute, relation, None, NSLayoutAttribute::NotAnAttribute, 1.0, value
-    ) }.setActive(true);
+    unsafe {
+        NSLayoutConstraint::constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant(
+            view,
+            attribute,
+            relation,
+            None,
+            NSLayoutAttribute::NotAnAttribute,
+            1.0,
+            value,
+        )
+    }
+    .setActive(true);
 }
 pub(crate) fn pin(parent: &NSView, child: &NSView, insets: Insets) {
     child.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -131,7 +129,18 @@ pub(crate) fn pin(parent: &NSView, child: &NSView, insets: Insets) {
         (NSLayoutAttribute::Top, insets.top),
         (NSLayoutAttribute::Bottom, -insets.bottom),
     ] {
-        unsafe { NSLayoutConstraint::constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant(child, attribute, NSLayoutRelation::Equal, Some(parent), attribute, 1.0, constant) }.setActive(true);
+        unsafe {
+            NSLayoutConstraint::constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant(
+                child,
+                attribute,
+                NSLayoutRelation::Equal,
+                Some(parent),
+                attribute,
+                1.0,
+                constant,
+            )
+        }
+        .setActive(true);
     }
 }
 pub(crate) fn prepare(view: &NSView) { view.setTranslatesAutoresizingMaskIntoConstraints(false); }
@@ -175,10 +184,26 @@ impl View {
         self.native.addSubview(child.ns_view());
         prepare(child.ns_view());
         let guide = self.native.safeAreaLayoutGuide();
-        child.ns_view().topAnchor().constraintEqualToAnchor(&guide.topAnchor()).setActive(true);
-        child.ns_view().leadingAnchor().constraintEqualToAnchor(&guide.leadingAnchor()).setActive(true);
-        child.ns_view().trailingAnchor().constraintEqualToAnchor(&guide.trailingAnchor()).setActive(true);
-        child.ns_view().bottomAnchor().constraintEqualToAnchor(&guide.bottomAnchor()).setActive(true);
+        child
+            .ns_view()
+            .topAnchor()
+            .constraintEqualToAnchor(&guide.topAnchor())
+            .setActive(true);
+        child
+            .ns_view()
+            .leadingAnchor()
+            .constraintEqualToAnchor(&guide.leadingAnchor())
+            .setActive(true);
+        child
+            .ns_view()
+            .trailingAnchor()
+            .constraintEqualToAnchor(&guide.trailingAnchor())
+            .setActive(true);
+        child
+            .ns_view()
+            .bottomAnchor()
+            .constraintEqualToAnchor(&guide.bottomAnchor())
+            .setActive(true);
         self.children.borrow_mut().push(Box::new(child));
         self
     }
@@ -198,6 +223,17 @@ pub struct PageHost {
     view: View,
     controller: Retained<NSViewController>,
     page: RefCell<Option<Box<dyn NativeView>>>,
+    /// Owner of the current page when it was shown with `set_cached_page`.
+    cached: RefCell<Option<std::rc::Weak<dyn NativeView>>>,
+    parked: RefCell<Vec<Parked>>,
+}
+/// A caller-cached page left mounted but hidden. Detaching a page from its window discards
+/// its solved constraints, so revisiting it would cost a full layout pass; parked pages also
+/// stop autoresizing so window resizes skip them. Unmounted once the caller drops the page.
+struct Parked {
+    owner: std::rc::Weak<dyn NativeView>,
+    view: Retained<NSView>,
+    controller: Option<Retained<NSViewController>>,
 }
 impl PageHost {
     pub fn new(ui: &Ui) -> Self {
@@ -208,44 +244,111 @@ impl PageHost {
             view,
             controller,
             page: RefCell::new(None),
+            cached: RefCell::new(None),
+            parked: RefCell::new(Vec::new()),
         }
     }
 
     pub fn ns_view_controller(&self) -> &NSViewController { &self.controller }
 
-    pub fn set_page(&self, page: impl NativeView) {
-        if self
-            .page
+    fn is_current(&self, view: &NSView) -> bool {
+        self.page
             .borrow()
             .as_ref()
-            .is_some_and(|current| std::ptr::eq(current.ns_view(), page.ns_view()))
-        {
-            return;
-        }
-        self.clear();
-        if let Some(controller) = page.view_controller() {
-            self.controller.addChildViewController(controller);
-        }
-        let view = page.ns_view();
-        view.setTranslatesAutoresizingMaskIntoConstraints(true);
-        view.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-        view.setFrame(self.view.ns_view().bounds());
-        self.view.ns_view().addSubview(view);
-        *self.page.borrow_mut() = Some(Box::new(page));
+            .is_some_and(|current| std::ptr::eq(current.ns_view(), view))
     }
 
-    /// The caller retains cached pages; only the active root is attached to this host.
-    pub fn set_cached_page(&self, page: impl NativeView) { self.set_page(page); }
+    /// Show page-owned content; it is unmounted and released when replaced.
+    pub fn set_page(&self, page: impl NativeView) {
+        if self.is_current(page.ns_view()) {
+            return;
+        }
+        self.leave();
+        self.mount(page.ns_view(), page.view_controller());
+        *self.page.borrow_mut() = Some(Box::new(page));
+        self.prune();
+    }
 
+    /// Show a page the caller keeps cached. Leaving it parks it hidden, so returning only
+    /// unhides it and preserves its layout, scroll position and editing state.
+    pub fn set_cached_page(&self, page: Rc<dyn NativeView>) {
+        if self.is_current(page.ns_view()) {
+            return;
+        }
+        self.leave();
+        let index = self.parked.borrow().iter().position(|p| std::ptr::eq(&*p.view, page.ns_view()));
+        if let Some(index) = index {
+            self.parked.borrow_mut().remove(index);
+            self.fill(page.ns_view());
+            page.ns_view().setHidden(false);
+        } else {
+            self.mount(page.ns_view(), page.view_controller());
+        }
+        *self.cached.borrow_mut() = Some(Rc::downgrade(&page));
+        *self.page.borrow_mut() = Some(Box::new(page));
+        self.prune();
+    }
+
+    fn fill(&self, view: &NSView) {
+        view.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        view.setFrame(self.view.ns_view().bounds());
+    }
+
+    fn mount(&self, view: &NSView, controller: Option<&NSViewController>) {
+        if let Some(controller) = controller {
+            self.controller.addChildViewController(controller);
+        }
+        view.setTranslatesAutoresizingMaskIntoConstraints(true);
+        self.fill(view);
+        self.view.ns_view().addSubview(view);
+    }
+
+    fn unmount(view: &NSView, controller: Option<&NSViewController>) {
+        view.removeFromSuperview();
+        if let Some(controller) = controller {
+            controller.removeFromParentViewController();
+        }
+    }
+
+    fn leave(&self) {
+        let Some(page) = self.page.borrow_mut().take() else {
+            return;
+        };
+        match self.cached.borrow_mut().take() {
+            Some(owner) => {
+                let view = page.ns_view();
+                view.setHidden(true);
+                view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewNotSizable);
+                self.parked.borrow_mut().push(Parked {
+                    owner,
+                    view: view.retain(),
+                    controller: page.view_controller().map(|controller| controller.retain()),
+                });
+            }
+            None => Self::unmount(page.ns_view(), page.view_controller()),
+        }
+    }
+
+    fn prune(&self) {
+        self.parked.borrow_mut().retain(|page| {
+            let live = page.owner.strong_count() > 0;
+            if !live {
+                Self::unmount(&page.view, page.controller.as_deref());
+            }
+            live
+        });
+    }
+
+    /// Unmount the current and all parked pages.
     pub fn clear(&self) {
         if let Some(page) = self.page.borrow_mut().take() {
-            page.ns_view().removeFromSuperview();
-            if let Some(controller) = page.view_controller() {
-                controller.removeFromParentViewController();
-            }
+            Self::unmount(page.ns_view(), page.view_controller());
+        }
+        self.cached.borrow_mut().take();
+        for page in self.parked.take() {
+            Self::unmount(&page.view, page.controller.as_deref());
         }
     }
 }
@@ -376,9 +479,8 @@ impl GlassEffectView {
     /// Interactive glass is available on macOS 27 and newer.
     pub fn interactive(self, interactive: bool) -> Self {
         if let Some(view) = &self.native {
-            let supported: bool = unsafe {
-                msg_send![view, respondsToSelector: objc2::sel!(setEffectIsInteractive:)]
-            };
+            let supported: bool =
+                unsafe { msg_send![view, respondsToSelector: objc2::sel!(setEffectIsInteractive:)] };
             if supported {
                 let _: () = unsafe { msg_send![view, setEffectIsInteractive: interactive] };
             }
@@ -386,15 +488,12 @@ impl GlassEffectView {
         self
     }
 
-    pub fn ns_glass_effect_view(&self) -> Option<&objc2_app_kit::NSGlassEffectView> {
-        self.native.as_deref()
-    }
+    pub fn ns_glass_effect_view(&self) -> Option<&objc2_app_kit::NSGlassEffectView> { self.native.as_deref() }
 }
 /// Detach borrowed content from a glass wrapper. Resolving the class before macOS 26 aborts.
 pub(crate) fn detach_glass_content(view: Option<Retained<NSView>>) {
     if objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some()
-        && let Some(glass) =
-            view.and_then(|view| view.downcast::<objc2_app_kit::NSGlassEffectView>().ok())
+        && let Some(glass) = view.and_then(|view| view.downcast::<objc2_app_kit::NSGlassEffectView>().ok())
     {
         glass.setContentView(None);
     }

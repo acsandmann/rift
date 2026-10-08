@@ -317,10 +317,7 @@ bitflags! {
 unsafe extern "C" {
     #[allow(clashing_extern_declarations)]
     pub fn CFRelease(cf: *mut CFType);
-    pub fn CGRectMakeWithDictionaryRepresentation(
-        dict: *mut CFDictionary,
-        rect: *mut CGRect,
-    ) -> bool;
+    pub fn CGRectMakeWithDictionaryRepresentation(dict: *mut CFDictionary, rect: *mut CGRect) -> bool;
 
     pub fn _AXUIElementGetWindow(elem: *mut AXUIElement, wid: *mut CGWindowID) -> AXError;
     pub fn _AXUIElementCreateWithRemoteToken(data: *mut CFData) -> *mut AXUIElement;
@@ -349,10 +346,7 @@ unsafe extern "C" {
     pub fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: *mut CFString) -> u64;
     pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> *mut CFString;
     pub fn CGDisplayCreateUUIDFromDisplayID(did: u32) -> *mut CFType;
-    pub fn CFUUIDCreateFromString(
-        allocator: *mut c_void,
-        uuid_string: *mut CFString,
-    ) -> *mut CFType;
+    pub fn CFUUIDCreateFromString(allocator: *mut c_void, uuid_string: *mut CFString) -> *mut CFType;
     pub fn CFUUIDCreateString(allocator: *mut c_void, uuid: *mut CFType) -> *mut CFString;
     pub fn CGDisplayRegisterReconfigurationCallback(
         callback: Option<unsafe extern "C" fn(u32, u32, *mut c_void)>,
@@ -370,14 +364,9 @@ unsafe extern "C" {
     pub fn SLSWindowManagementBridgeSetDelegate(delegate: *mut c_void) -> CGError;
     pub safe fn SLSDisableUpdate(cid: cid_t) -> i32;
     pub safe fn SLSReenableUpdate(cid: cid_t) -> i32;
-    pub fn _SLPSSetFrontProcessWithOptions(
-        psn: *const ProcessSerialNumber,
-        wid: u32,
-        mode: u32,
-    ) -> CGError;
+    pub fn _SLPSSetFrontProcessWithOptions(psn: *const ProcessSerialNumber, wid: u32, mode: u32) -> CGError;
     pub fn _SLPSGetFrontProcess(psn: *mut ProcessSerialNumber) -> CGError;
-    pub fn SLPSGetKeyFocusProcess(psn: *mut ProcessSerialNumber, fallback_flag: *mut u8)
-    -> CGError;
+    pub fn SLPSGetKeyFocusProcess(psn: *mut ProcessSerialNumber, fallback_flag: *mut u8) -> CGError;
     pub fn SLPSPostEventRecordTo(psn: *const ProcessSerialNumber, bytes: *const u8) -> CGError;
     pub fn SLSFindWindowAndOwner(
         cid: c_int,
@@ -403,11 +392,7 @@ unsafe extern "C" {
         data: *mut c_void,
     ) -> i32;
     // window_count must be below 1024
-    pub fn SLSRequestNotificationsForWindows(
-        cid: cid_t,
-        window_list: *const u32,
-        window_count: i32,
-    ) -> i32;
+    pub fn SLSRequestNotificationsForWindows(cid: cid_t, window_list: *const u32, window_count: i32) -> i32;
     pub fn SLSCopyWindowsWithOptionsAndTags(
         cid: c_int,
         owner: c_uint,
@@ -438,11 +423,7 @@ unsafe extern "C" {
     pub fn CGDisplayIsBuiltin(did: u32) -> bool;
     pub fn CGDisplayGetDisplayIDFromUUID(uuid: *mut CFType) -> u32;
 
-    pub fn SLSWindowQueryWindows(
-        cid: c_int,
-        windows: *mut CFArray<CFNumber>,
-        flags: c_int,
-    ) -> *mut CFType;
+    pub fn SLSWindowQueryWindows(cid: c_int, windows: *mut CFArray<CFNumber>, flags: c_int) -> *mut CFType;
     pub fn SLSWindowQueryCreate(initial_values: *mut CFDictionary) -> *mut CFType;
     pub fn SLSWindowQuerySetValue(query: *mut CFType, key: *mut CFString, value: *mut CFType);
     pub fn SLSWindowQueryRun(cid: c_int, query: *mut CFType, flags: c_int) -> *mut CFType;
