@@ -216,6 +216,36 @@ impl NativeView for MasterDetail {
     fn view_controller(&self) -> Option<&NSViewController> { self.0.view_controller() }
 }
 
+/// Page-owned native header controls. Toolbar presentation and glass remain in CGS.
+pub struct HeaderControls {
+    menu: Popup,
+    search: SearchField,
+    label: String,
+}
+impl HeaderControls {
+    pub fn new(ui: &Ui, label: &str, symbol: &str, menu: Menu, search: SearchField) -> Self {
+        let menu = Popup::actions(ui, label, menu).toolbar_style();
+        let button = menu.ns_popup_button();
+        let image = Symbol::named(symbol);
+        if let Some(header) = button.menu().and_then(|menu| menu.itemAtIndex(0)) {
+            header.setImage(image.as_deref());
+        }
+        button.setImage(image.as_deref());
+        button.setImagePosition(NSCellImagePosition::ImageOnly);
+        button.setBordered(false);
+        menu.width(36.0);
+        menu.height(36.0);
+        search.width(216.0);
+        Self { menu, search, label: label.into() }
+    }
+
+    /// Use the semantic blue tint while a filter is active.
+    pub fn set_filtered(&self, active: bool) {
+        let blue = NSColor::systemBlueColor();
+        self.menu.ns_popup_button().setContentTintColor(if active { Some(&blue) } else { None });
+    }
+}
+
 struct NavigationToolbarItems {
     title: Option<Rc<Label>>,
     back: Retained<NSToolbarItem>,
@@ -469,9 +499,8 @@ impl Toolbar {
             false,
         );
         popup.setBordered(true);
-        popup.setBezelStyle(crate::control::action_button_bezel());
+        crate::control::header_menu_style(&popup);
         popup.setImagePosition(NSCellImagePosition::ImageLeading);
-        popup.setFont(Some(&crate::Font::body()));
         popup.setMenu(Some(menu.ns_menu()));
         if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
             cell.setUsesItemFromMenu(false);
@@ -535,11 +564,14 @@ impl Toolbar {
         }
     }
     /// Native trailing filter and search controls owned by the selected page.
-    pub fn set_page_controls(&self, ui: &Ui, controls: Option<(&NSPopUpButton, &NSSearchField)>) {
+    pub fn set_page_controls(&self, ui: &Ui, controls: Option<&HeaderControls>) {
         let Some(delegate) = &self.delegate else { return; };
         for id in ["cgs.page-filter", "cgs.page-search"] {
             let id = NSString::from_str(id);
             if let Some(index) = self.native.items().iter().position(|item| item.itemIdentifier() == id) {
+                if let Some(search) = self.native.items().objectAtIndex(index).downcast_ref::<NSSearchToolbarItem>() {
+                    search.setSearchField(&NSSearchField::new(ui.mtm()));
+                }
                 if let Some(glass) = self.native.items().objectAtIndex(index).view().and_then(|view| view.downcast::<NSGlassEffectView>().ok()) {
                     glass.setContentView(None);
                 }
@@ -547,10 +579,12 @@ impl Toolbar {
             }
             delegate.ivars().navigation.borrow_mut().retain(|item| item.itemIdentifier() != id);
         }
-        if let Some((filter, search)) = controls {
+        if let Some(controls) = controls {
+            let filter = controls.menu.ns_popup_button();
+            let search = controls.search.ns_search_field();
             let item = NSMenuToolbarItem::initWithItemIdentifier(
                 NSMenuToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.page-filter"));
-            item.setLabel(&NSString::from_str("Filter rules"));
+            item.setLabel(&NSString::from_str(&controls.label));
             let content: Retained<NSView> = unsafe { Retained::retain(filter as *const NSPopUpButton as *mut NSView).unwrap() };
             let glass = GlassEffectView::new(ui, content).corner_radius(18.0);
             glass.width(36.0);
@@ -561,7 +595,7 @@ impl Toolbar {
             item.setBordered(false);
             let search_item = NSSearchToolbarItem::initWithItemIdentifier(
                 NSSearchToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.page-search"));
-            search_item.setLabel(&NSString::from_str("Search rules"));
+            search_item.setLabel(&search.placeholderString().unwrap_or_else(|| NSString::from_str("Search")));
             search_item.setSearchField(search);
             search_item.setPreferredWidthForSearchField(216.0);
             delegate.ivars().navigation.borrow_mut().extend([item.into_super(), search_item.into_super()]);

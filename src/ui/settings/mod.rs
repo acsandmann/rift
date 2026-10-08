@@ -54,7 +54,7 @@ type SyncControl = Box<dyn Fn(&ConfigSource)>;
 pub(super) struct Page {
     view: Rc<dyn NativeView>,
     sync: Vec<SyncControl>,
-    header: Option<(Rc<Popup>, Rc<SearchField>)>,
+    header: Option<Rc<HeaderControls>>,
     synced_revision: Cell<Option<u64>>,
 }
 
@@ -480,7 +480,7 @@ impl Settings {
         page.synchronize(model);
         host.set_cached_page(page.view.clone());
         if let Some(toolbar) = model.toolbar.borrow().upgrade() {
-            toolbar.set_page_controls(&ui, page.header.as_ref().map(|(filter, search)| (filter.ns_popup_button(), search.ns_search_field())));
+            toolbar.set_page_controls(&ui, page.header.as_deref());
         }
     }
 

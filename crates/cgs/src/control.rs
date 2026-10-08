@@ -206,6 +206,12 @@ impl Checkbox {
 }
 native_control!(Checkbox, NSButton, ns_button);
 
+pub(crate) fn header_menu_style(button: &NSPopUpButton) {
+    button.setControlSize(NSControlSize::Regular);
+    button.setBezelStyle(action_button_bezel());
+    button.setFont(Some(&crate::Font::body()));
+}
+
 pub struct Popup {
     native: Retained<NSPopUpButton>,
     target: Retained<ActionTarget>,
@@ -239,8 +245,7 @@ impl Popup {
     }
 
     pub fn toolbar_style(self) -> Self {
-        self.native.setControlSize(NSControlSize::Regular);
-        self.native.setBezelStyle(action_button_bezel());
+        header_menu_style(&self.native);
         self
     }
 

@@ -632,7 +632,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             *query.borrow_mut() = value.to_lowercase();
             update();
         });
-    let tint = Rc::new(RefCell::new(objc2::rc::Weak::<objc2_app_kit::NSPopUpButton>::default()));
+    let tint = Rc::new(RefCell::new(Weak::<HeaderControls>::new()));
     let menu = Menu::new(&ui);
     let mut filter_items = Vec::new();
     let mut choices = vec!["All workspaces".to_owned()];
@@ -650,9 +650,8 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         let tint = tint.clone();
         let item = MenuItem::new(&ui, &title).on_click(move || {
             filter.set(index);
-            if let Some(button) = tint.borrow().load() {
-                let blue = objc2_app_kit::NSColor::systemBlueColor();
-                button.setContentTintColor(if index == 0 { None } else { Some(&blue) });
+            if let Some(header) = tint.borrow().upgrade() {
+                header.set_filtered(index != 0);
             }
             update();
         });
@@ -666,20 +665,9 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             }
         }
     });
-    let filters = Popup::actions(&ui, "Filter rules", menu).toolbar_style();
-    let filter_button = filters.ns_popup_button();
-    let symbol = Symbol::named("line.3.horizontal.decrease");
-    if let Some(header) = filter_button.menu().and_then(|menu| menu.itemAtIndex(0)) {
-        header.setImage(symbol.as_deref());
-    }
-    filter_button.setImage(symbol.as_deref());
-    filter_button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageOnly);
-    *tint.borrow_mut() = objc2::rc::Weak::new(filter_button);
-    filter_button.setBordered(false);
-    filters.width(36.0);
-    filters.height(36.0);
-    search.width(216.0);
-    let header = (Rc::new(filters), Rc::new(search));
+    let header = Rc::new(HeaderControls::new(&ui, "Filter rules",
+        "line.3.horizontal.decrease", menu, search));
+    *tint.borrow_mut() = Rc::downgrade(&header);
     let mut page = f.finish(SettingsPage::new(&ui, "")
         .content_width(760.0)
         .subtitle("Choose which windows Rift manages and where they open. Drag rules to change their order.")
