@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use regex::RegexBuilder;
@@ -190,6 +191,27 @@ impl Default for VirtualWorkspaceSettings {
 }
 
 impl VirtualWorkspaceSettings {
+    pub fn resize(&mut self, count: usize) {
+        self.default_workspace_count = count;
+        // Invalid counts are left for the shared validator, without large allocations.
+        if !(1..=MAX_WORKSPACES).contains(&count) {
+            return;
+        }
+        let removed = self.workspace_names.iter().skip(count).cloned().collect::<Vec<_>>();
+        self.workspace_names.truncate(count);
+        self.default_workspace = self.default_workspace.min(count - 1);
+        let removed_selector = |v: &WorkspaceSelector| match v {
+            WorkspaceSelector::Index(i) => *i >= count,
+            WorkspaceSelector::Name(n) => removed.contains(n),
+        };
+        self.workspace_rules.retain(|r| !removed_selector(&r.workspace));
+        for r in &mut self.app_rules {
+            if r.workspace.as_ref().is_some_and(removed_selector) {
+                r.workspace = None;
+            }
+        }
+    }
+
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -1661,4 +1683,75 @@ pub enum HapticPattern {
     Alignment,
     #[default]
     LevelChange,
+}
+
+impl ConfigSource {
+    pub fn keymap(&self, mode: &str) -> Option<&BTreeMap<String, WmCommand>> {
+        if mode == "default" {
+            Some(&self.keys)
+        } else {
+            self.binding_modes.get(mode)
+        }
+    }
+
+    pub fn keymap_mut(&mut self, mode: &str) -> Result<&mut BTreeMap<String, WmCommand>, String> {
+        if mode == "default" {
+            Ok(&mut self.keys)
+        } else {
+            self.binding_modes.get_mut(mode).ok_or_else(|| "Keymap no longer exists".into())
+        }
+    }
+
+    fn check_keymap_name(&self, name: &str, old: Option<&str>) -> Result<(), String> {
+        if name.is_empty()
+            || name == "default"
+            || self.binding_modes.contains_key(name) && old != Some(name)
+        {
+            Err("Choose a unique keymap name".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn create_keymap(&mut self, name: String) -> Result<(), String> {
+        self.check_keymap_name(&name, None)?;
+        self.binding_modes.insert(name, Default::default());
+        Ok(())
+    }
+
+    pub fn rename_keymap(&mut self, old: &str, name: String) -> Result<(), String> {
+        self.check_keymap_name(&name, Some(old))?;
+        let bindings = self.binding_modes.remove(old).ok_or("Mode no longer exists")?;
+        self.binding_modes.insert(name.clone(), bindings);
+        self.rewrite_keymap_references(old, &name);
+        Ok(())
+    }
+
+    pub fn delete_keymap(&mut self, name: &str) -> Result<(), String> {
+        self.binding_modes.remove(name).ok_or("Mode no longer exists")?;
+        self.rewrite_keymap_references(name, "default");
+        Ok(())
+    }
+
+    fn rewrite_keymap_references(&mut self, old: &str, target: &str) {
+        use rift_protocol::ReactorCommand;
+
+        use crate::actor::reactor::Command;
+        use crate::actor::wm_controller::WmCmd;
+        for command in self
+            .keys
+            .values_mut()
+            .chain(self.binding_modes.values_mut().flat_map(|map| map.values_mut()))
+        {
+            match command {
+                WmCommand::Wm(WmCmd::BindingMode(mode))
+                | WmCommand::ReactorCommand(Command::Reactor(ReactorCommand::BindingMode(mode)))
+                    if mode == old =>
+                {
+                    target.clone_into(mode)
+                }
+                _ => {}
+            }
+        }
+    }
 }

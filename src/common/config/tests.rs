@@ -540,3 +540,75 @@ fn serde_without_binding_mode_specs_reconstructs_from_keys() {
     );
     assert!(!round_tripped.binding_mode_specs[0].1.is_empty());
 }
+
+#[test]
+fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
+    let mut settings = VirtualWorkspaceSettings::default();
+    settings.workspace_names = vec!["one".into(), "two".into(), "three".into()];
+    settings.default_workspace = 2;
+    settings.workspace_rules = vec![
+        WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Name("three".into()),
+            layout: LayoutMode::Stack,
+        },
+        WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Index(0),
+            layout: LayoutMode::Bsp,
+        },
+    ];
+    settings.app_rules = vec![AppWorkspaceRule {
+        workspace: Some(WorkspaceSelector::Index(2)),
+        ..Default::default()
+    }];
+    settings.resize(2);
+    assert_eq!(settings.workspace_names, ["one", "two"]);
+    assert_eq!(settings.default_workspace, 1);
+    assert_eq!(settings.workspace_rules.len(), 1);
+    assert_eq!(
+        settings.workspace_rules[0].workspace,
+        WorkspaceSelector::Index(0)
+    );
+    assert_eq!(settings.app_rules[0].workspace, None);
+    settings.resize(MAX_WORKSPACES + 1);
+    assert_eq!(settings.workspace_names, ["one", "two"]);
+    assert!(!settings.validate().is_empty());
+}
+
+#[test]
+fn keymap_rename_and_delete_update_both_command_encodings_and_self_references() {
+    use rift_protocol::ReactorCommand;
+
+    use crate::actor::wm_controller::WmCmd;
+    let mut source = ConfigSource {
+        settings: Config::default().settings,
+        keys: Default::default(),
+        binding_modes: Default::default(),
+        virtual_workspaces: Default::default(),
+        modifier_combinations: Default::default(),
+    };
+    source.create_keymap("edit".into()).unwrap();
+    source.keys.insert("A".into(), WmCommand::Wm(WmCmd::BindingMode("edit".into())));
+    source.keymap_mut("edit").unwrap().insert(
+        "B".into(),
+        WmCommand::ReactorCommand(reactor::Command::Reactor(ReactorCommand::BindingMode(
+            "edit".into(),
+        ))),
+    );
+    source.rename_keymap("edit", "renamed".into()).unwrap();
+    assert!(source.keymap("edit").is_none());
+    assert!(
+        matches!(source.keys.get("A"), Some(WmCommand::Wm(WmCmd::BindingMode(name))) if name == "renamed")
+    );
+    assert!(
+        matches!(source.keymap("renamed").unwrap().get("B"), Some(WmCommand::ReactorCommand(reactor::Command::Reactor(ReactorCommand::BindingMode(name)))) if name == "renamed")
+    );
+    source.keys.insert("C".into(), source.keymap("renamed").unwrap()["B"].clone());
+    source.delete_keymap("renamed").unwrap();
+    assert!(source.keymap("renamed").is_none());
+    assert!(
+        matches!(source.keys.get("A"), Some(WmCommand::Wm(WmCmd::BindingMode(name))) if name == "default")
+    );
+    assert!(
+        matches!(source.keys.get("C"), Some(WmCommand::ReactorCommand(reactor::Command::Reactor(ReactorCommand::BindingMode(name)))) if name == "default")
+    );
+}

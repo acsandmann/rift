@@ -39,31 +39,22 @@ impl FormBuilder {
         let write = field.write?;
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
-        let model = self.model.clone();
-        let commit = move |value: FieldValue| {
-            if model.upgrade().is_some_and(|model| read(get(&model.source.borrow())) == value) {
-                return;
-            }
-            Self::submit(
-                &model,
-                Box::new(move |source| write(set(source), value)),
-                error.clone(),
-            );
-        };
+        let commit = self.change(
+            move |source| read(get(source)),
+            move |source, value| write(set(source), value),
+            error,
+        );
         let draft = self.model.upgrade().is_some_and(|model| model.draft_base.is_some());
         let control: Box<dyn NativeView> = match field.kind {
             FieldKind::Bool => {
                 let input = Rc::new(
                     Switch::new(&self.ui).on_change(move |value| commit(FieldValue::Bool(value))),
                 );
-                let weak = Rc::downgrade(&input);
-                self.sync.push(Box::new(move |source| {
-                    if let (Some(input), FieldValue::Bool(value)) =
-                        (weak.upgrade(), read(get(source)))
-                    {
+                self.sync(&input, move |input, source| {
+                    if let FieldValue::Bool(value) = read(get(source)) {
                         input.set_value(value);
                     }
-                }));
+                });
                 Box::new(input)
             }
             FieldKind::Number { integer } => {
@@ -77,14 +68,11 @@ impl FormBuilder {
                     input.on_change(change)
                 });
                 input.width(100.0);
-                let weak = Rc::downgrade(&input);
-                self.sync.push(Box::new(move |source| {
-                    if let (Some(input), FieldValue::Number(value)) =
-                        (weak.upgrade(), read(get(source)))
-                    {
+                self.sync(&input, move |input, source| {
+                    if let FieldValue::Number(value) = read(get(source)) {
                         input.set_value(value * scale);
                     }
-                }));
+                });
                 Box::new(input)
             }
             FieldKind::Text => {
@@ -95,14 +83,11 @@ impl FormBuilder {
                 } else {
                     input.on_commit(change)
                 });
-                let weak = Rc::downgrade(&input);
-                self.sync.push(Box::new(move |source| {
-                    if let (Some(input), FieldValue::Text(value)) =
-                        (weak.upgrade(), read(get(source)))
-                    {
+                self.sync(&input, move |input, source| {
+                    if let FieldValue::Text(value) = read(get(source)) {
                         input.set_value(&value);
                     }
-                }));
+                });
                 Box::new(input)
             }
             FieldKind::Choice(choices) => {
@@ -110,14 +95,11 @@ impl FormBuilder {
                     Popup::new(&self.ui).on_change(move |index| commit(FieldValue::Choice(index))),
                 );
                 input.set_items(choices.iter().map(|choice| choice.0));
-                let weak = Rc::downgrade(&input);
-                self.sync.push(Box::new(move |source| {
-                    if let (Some(input), FieldValue::Choice(value)) =
-                        (weak.upgrade(), read(get(source)))
-                    {
+                self.sync(&input, move |input, source| {
+                    if let FieldValue::Choice(value) = read(get(source)) {
                         input.set_selected(value);
                     }
-                }));
+                });
                 Box::new(input)
             }
             FieldKind::Custom => return None,

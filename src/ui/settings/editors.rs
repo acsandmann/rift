@@ -16,27 +16,7 @@ fn editor_sheet(
     let Some(parent) = model.window.borrow().load() else {
         return;
     };
-    let base = model.source.borrow().clone();
-    let draft = Rc::new(Model {
-        source: RefCell::new(base.clone()),
-        source_revision: Cell::new(0),
-        requests: model.requests.clone(),
-        syncing: Cell::new(false),
-        sheet: RefCell::new(None),
-        sheet_page: RefCell::new(None),
-        sheet_model: RefCell::new(None),
-        draft_changed: RefCell::new(None),
-        draft_base: Some(base.clone()),
-        window: RefCell::new(model.window.borrow().clone()),
-        displays: RefCell::new(model.displays.borrow().clone()),
-        config_path: model.config_path.clone(),
-        applications: RefCell::new(model.applications.borrow().clone()),
-        installed_applications: RefCell::new(model.installed_applications.borrow().clone()),
-        application_inventory: RefCell::new(Vec::new()),
-        page_title: model.page_title.clone(),
-        toolbar: RefCell::new(Weak::new()),
-    });
-    draft.rebuild_applications();
+    let draft = model.draft();
     let page = Rc::new(build(&draft));
     page.synchronize(&draft);
     *draft.sheet_page.borrow_mut() = Some(page.clone());
@@ -44,12 +24,11 @@ fn editor_sheet(
     let cancel = Rc::new(SheetActions::new(&ui));
     cancel.set_on_cancel(move || {
         if let Some(model) = weak.upgrade() {
-            model.sheet.borrow_mut().take();
-            model.sheet_page.borrow_mut().take();
-            model.sheet_model.borrow_mut().take();
+            model.close_sheet();
         }
     });
-    cancel.set_changed(*draft.source.borrow() != base);
+    cancel
+        .set_changed(draft.draft_base.as_ref().is_some_and(|base| *draft.source.borrow() != *base));
     let dirty_cancel = Rc::downgrade(&cancel);
     *draft.draft_changed.borrow_mut() = Some(Box::new(move |dirty| {
         if let Some(cancel) = dirty_cancel.upgrade() {
@@ -73,15 +52,13 @@ fn editor_sheet(
         let value = draft.source.borrow().clone();
         let base = draft.draft_base.clone().unwrap();
         if value == base {
-            model.sheet.borrow_mut().take();
-            model.sheet_page.borrow_mut().take();
-            model.sheet_model.borrow_mut().take();
+            model.close_sheet();
             return;
         }
         let weak = Rc::downgrade(&model);
         let error = error.clone();
-        let _ = model.requests.send(Request {
-            action: Action::Edit(Box::new(move |source| {
+        model.submit_edit(
+            Box::new(move |source| {
                 if *source != base {
                     return Err(
                         "Settings changed elsewhere. Cancel and reopen this editor to try again."
@@ -90,14 +67,12 @@ fn editor_sheet(
                 }
                 *source = value;
                 Ok(())
-            })),
-            finish: Box::new(move |result| {
+            }),
+            Box::new(move |result| {
                 if let Some(model) = weak.upgrade() {
                     match result {
                         Ok(()) => {
-                            model.sheet.borrow_mut().take();
-                            model.sheet_page.borrow_mut().take();
-                            model.sheet_model.borrow_mut().take();
+                            model.close_sheet();
                         }
                         Err(text) => {
                             if let Some(error) = error.upgrade() {
@@ -107,7 +82,7 @@ fn editor_sheet(
                     }
                 }
             }),
-        });
+        );
     });
     let body: Rc<dyn NativeView> = if scrolling {
         let scroll = ScrollView::new(&ui, page.view.clone());
@@ -159,7 +134,7 @@ fn workspace_editor(
                 &format!("Workspace {}", index + 1),
                 |draft| {
                     if index == draft.source.borrow().virtual_workspaces.default_workspace_count {
-                        resize_workspaces(&mut draft.source.borrow_mut(), index + 1);
+                        draft.source.borrow_mut().virtual_workspaces.resize(index + 1);
                     }
                     detail(ui, draft, index)
                 },
@@ -205,7 +180,7 @@ fn workspace_editor(
             })
             .on_remove(move || {
                 if let Some(index) = remove_selected.get() {
-                    FormBuilder::submit(
+                    Model::submit(
                         &weak_remove,
                         Box::new(move |s| remove(s, index)),
                         remove_error.clone(),
@@ -251,7 +226,12 @@ fn workspace_editor(
 
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut section = f.schema_section("Virtual Workspaces", "", |s| &s.virtual_workspaces, |s| &mut s.virtual_workspaces);
+    let mut section = f.schema_section(
+        "Virtual Workspaces",
+        "",
+        |s| &s.virtual_workspaces,
+        |s| &mut s.virtual_workspaces,
+    );
     let defaults = workspace_popup(
         &mut f,
         "Default workspace",
@@ -357,7 +337,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
             if i == 0 {
                 return Err("Keep at least one workspace.".into());
             }
-            resize_workspaces(s, i);
+            s.virtual_workspaces.resize(i);
             Ok(())
         },
     );
@@ -372,27 +352,6 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     page
 }
 
-fn resize_workspaces(s: &mut ConfigSource, count: usize) {
-    let w = &mut s.virtual_workspaces;
-    w.default_workspace_count = count;
-    // Invalid counts are left for the shared validator, without large allocations.
-    if !(1..=MAX_WORKSPACES).contains(&count) {
-        return;
-    }
-    let removed = w.workspace_names.iter().skip(count).cloned().collect::<Vec<_>>();
-    w.workspace_names.truncate(count);
-    w.default_workspace = w.default_workspace.min(count - 1);
-    let removed_selector = |v: &WorkspaceSelector| match v {
-        WorkspaceSelector::Index(i) => *i >= count,
-        WorkspaceSelector::Name(n) => removed.contains(n),
-    };
-    w.workspace_rules.retain(|r| !removed_selector(&r.workspace));
-    for r in &mut w.app_rules {
-        if r.workspace.as_ref().is_some_and(removed_selector) {
-            r.workspace = None;
-        }
-    }
-}
 fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) -> bool {
     match selector {
         WorkspaceSelector::Index(index) => *index == i,
@@ -437,7 +396,7 @@ fn workspace_popup(
         } else {
             Some(WorkspaceSelector::Index(i - usize::from(optional)))
         };
-        FormBuilder::submit(
+        Model::submit(
             &model,
             Box::new(move |s| {
                 set(s, target);
@@ -515,7 +474,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             let weak = Rc::downgrade(model);
             let error = Rc::downgrade(&message);
             move |from, to| {
-                FormBuilder::submit(
+                Model::submit(
                     &weak,
                     Box::new(move |s| {
                         let rules = &mut s.virtual_workspaces.app_rules;
@@ -560,7 +519,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let error = Rc::downgrade(&message);
     let remove_rule: Rc<dyn Fn()> = Rc::new(move || {
         if let Some(index) = weak_table.upgrade().and_then(|table| table.selection()) {
-            FormBuilder::submit(
+            Model::submit(
                 &weak,
                 Box::new(move |s| {
                     if index < s.virtual_workspaces.app_rules.len() {
@@ -992,7 +951,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let (picker_view, picker) = app_picker(ui, model, existing, move |target| {
-        FormBuilder::submit(
+        Model::submit(
             &weak,
             Box::new(move |s| {
                 let rule =
@@ -1221,7 +1180,7 @@ pub(super) fn strings(
             }
             let mut values = get(&model.source.borrow());
             values.push(value);
-            FormBuilder::submit(
+            Model::submit(
                 &weak,
                 Box::new(move |s| {
                     set(s, values);
@@ -1243,7 +1202,7 @@ pub(super) fn strings(
                     if i < values.len() {
                         values.remove(i);
                     }
-                    FormBuilder::submit(
+                    Model::submit(
                         &weak,
                         Box::new(move |s| {
                             set(s, values);
@@ -1408,46 +1367,49 @@ fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
         for axis in 0..if outer { 4 } else { 2 } {
             let id = uuid.clone();
             let edit_id = uuid.clone();
-            let row = f.gap(
-                if outer {
-                    ["Top", "Left", "Bottom", "Right"][axis]
-                } else {
-                    ["Horizontal", "Vertical"][axis]
-                },
-                move |s| {
-                    let effective = s.settings.layout.gaps.effective_for_display(Some(&id));
+            let row = f
+                .gap(
                     if outer {
-                        [
-                            effective.outer.top,
-                            effective.outer.left,
-                            effective.outer.bottom,
-                            effective.outer.right,
-                        ][axis]
+                        ["Top", "Left", "Bottom", "Right"][axis]
                     } else {
-                        [effective.inner.horizontal, effective.inner.vertical][axis]
-                    }
-                },
-                move |s, v| {
-                    let base = s.settings.layout.gaps.effective_for_display(Some(&edit_id));
-                    let o = s.settings.layout.gaps.per_display.entry(edit_id.clone()).or_default();
-                    if outer {
-                        let g = o.outer.get_or_insert(base.outer);
-                        match axis {
-                            0 => g.top = v,
-                            1 => g.left = v,
-                            2 => g.bottom = v,
-                            _ => g.right = v,
-                        }
-                    } else {
-                        let g = o.inner.get_or_insert(base.inner);
-                        if axis == 0 {
-                            g.horizontal = v;
+                        ["Horizontal", "Vertical"][axis]
+                    },
+                    move |s| {
+                        let effective = s.settings.layout.gaps.effective_for_display(Some(&id));
+                        if outer {
+                            [
+                                effective.outer.top,
+                                effective.outer.left,
+                                effective.outer.bottom,
+                                effective.outer.right,
+                            ][axis]
                         } else {
-                            g.vertical = v;
+                            [effective.inner.horizontal, effective.inner.vertical][axis]
                         }
-                    }
-                },
-            ).suffix("pt");
+                    },
+                    move |s, v| {
+                        let base = s.settings.layout.gaps.effective_for_display(Some(&edit_id));
+                        let o =
+                            s.settings.layout.gaps.per_display.entry(edit_id.clone()).or_default();
+                        if outer {
+                            let g = o.outer.get_or_insert(base.outer);
+                            match axis {
+                                0 => g.top = v,
+                                1 => g.left = v,
+                                2 => g.bottom = v,
+                                _ => g.right = v,
+                            }
+                        } else {
+                            let g = o.inner.get_or_insert(base.inner);
+                            if axis == 0 {
+                                g.horizontal = v;
+                            } else {
+                                g.vertical = v;
+                            }
+                        }
+                    },
+                )
+                .suffix("pt");
             // Preserve Rust callback ownership in the stack.
             group.add(row);
         }
@@ -1459,7 +1421,7 @@ fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
         let row = Rc::new(
             OverrideRow::new(&ui, group, "Use Default").on_change(move |custom| {
                 let id = edit_id.clone();
-                FormBuilder::submit(
+                Model::submit(
                     &weak,
                     Box::new(move |s| {
                         let base = s.settings.layout.gaps.effective_for_display(None);

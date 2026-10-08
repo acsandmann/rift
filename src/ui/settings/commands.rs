@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use rift_protocol::{
     Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R, ResizeOrientation,
 };
@@ -186,23 +184,7 @@ fn action_name(cmd: &WmCommand) -> String {
         format!("{title} {argument}")
     }
 }
-fn keymap<'a>(s: &'a ConfigSource, mode: &str) -> Option<&'a BTreeMap<String, WmCommand>> {
-    if mode == "default" {
-        Some(&s.keys)
-    } else {
-        s.binding_modes.get(mode)
-    }
-}
-fn keymap_mut<'a>(
-    s: &'a mut ConfigSource,
-    mode: &str,
-) -> Result<&'a mut BTreeMap<String, WmCommand>, String> {
-    if mode == "default" {
-        Ok(&mut s.keys)
-    } else {
-        s.binding_modes.get_mut(mode).ok_or_else(|| "Keymap no longer exists".into())
-    }
-}
+
 fn glyphs(key: &str, s: &ConfigSource) -> String {
     fn tokens(key: &str) -> String {
         key.split('+')
@@ -269,7 +251,10 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let mode_edit = mode.clone();
     let edit_binding: Rc<dyn Fn(usize)> = Rc::new(move |i| {
         if let Some(model) = weak_model.upgrade() {
-            let item = keymap(&model.source.borrow(), &mode_edit.borrow())
+            let item = model
+                .source
+                .borrow()
+                .keymap(&mode_edit.borrow())
                 .and_then(|m| m.iter().nth(i).map(|(k, c)| (k.clone(), c.clone())));
             if let Some((key, cmd)) = item {
                 binding_sheet(ui, &model, mode_edit.borrow().clone(), Some(key), cmd);
@@ -363,12 +348,12 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             if let Some(i) = table.selection() {
                 let name = selected_mode.borrow().clone();
                 let key =
-                    keymap(&model.source.borrow(), &name).and_then(|m| m.keys().nth(i).cloned());
+                    model.source.borrow().keymap(&name).and_then(|m| m.keys().nth(i).cloned());
                 if let Some(key) = key {
-                    FormBuilder::submit(
+                    Model::submit(
                         &weak_model,
                         Box::new(move |s| {
-                            keymap_mut(s, &name)?.remove(&key);
+                            s.keymap_mut(&name)?.remove(&key);
                             Ok(())
                         }),
                         weak_error.clone(),
@@ -395,7 +380,10 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             {
                 let mode = duplicate_mode.borrow().clone();
                 let command = table.selection().and_then(|index| {
-                    keymap(&model.source.borrow(), &mode)
+                    model
+                        .source
+                        .borrow()
+                        .keymap(&mode)
                         .and_then(|map| map.values().nth(index).cloned())
                 });
                 if let Some(command) = command {
@@ -420,9 +408,9 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let menu = Menu::new(&ui);
     let mut managed = Vec::new();
     for (title, operation) in [
-        ("New Shortcut Set…", 0),
-        ("Rename Shortcut Set…", 1),
-        ("Delete Shortcut Set…", 2),
+        ("New Shortcut Set…", KeymapOperation::Create),
+        ("Rename Shortcut Set…", KeymapOperation::Rename),
+        ("Delete Shortcut Set…", KeymapOperation::Delete),
     ] {
         let weak_model = Rc::downgrade(model);
         let mode = mode.clone();
@@ -431,7 +419,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                 mode_sheet(ui, &model, mode.borrow().clone(), operation);
             }
         });
-        if operation != 0 {
+        if operation != KeymapOperation::Create {
             managed.push(objc2::rc::Weak::new(item.ns_menu_item()));
         }
         menu.add(item);
@@ -469,7 +457,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     )
 }
 fn binding_rows(s: &ConfigSource, mode: &str) -> Vec<(String, String)> {
-    keymap(s, mode)
+    s.keymap(mode)
         .into_iter()
         .flat_map(|m| m.iter().map(|(key, cmd)| (glyphs(key, s), action_name(cmd))))
         .collect()
@@ -482,29 +470,24 @@ fn save_sheet(model: &Weak<Model>, edit: SourceEdit, message: &Rc<ValidationMess
     if let Some(model) = model.upgrade() {
         let weak = Rc::downgrade(&model);
         let error = Rc::downgrade(message);
-        let _ = model.requests.send(Request {
-            action: Action::Edit(edit),
-            finish: Box::new(move |result| {
+        model.submit_edit(
+            edit,
+            Box::new(move |result| {
                 if let Some(message) = error.upgrade() {
                     message.set_validation(&match &result {
                         Ok(_) => Validation::None,
                         Err(e) => Validation::Error(e.clone()),
                     });
                 }
-                if result.is_err() {
-                    if let Some(model) = weak.upgrade() {
-                        if let Some(sheet) = model.sheet.borrow().as_ref() {
-                            sheet.fit_content();
-                        }
-                    }
-                }
-                if let (Some(model), Ok(())) = (weak.upgrade(), result) {
-                    if let Some(sheet) = model.sheet.borrow().as_ref() {
-                        sheet.end();
+                if let Some(model) = weak.upgrade() {
+                    if result.is_ok() {
+                        model.close_sheet();
+                    } else if let Some(sheet) = model.sheet.borrow().as_ref() {
+                        sheet.fit_content();
                     }
                 }
             }),
-        });
+        );
     }
 }
 fn show_sheet(ui: Ui, model: &Rc<Model>, title: &str, content: impl NativeView) {
@@ -521,9 +504,7 @@ fn sheet_actions(ui: Ui, model: &Rc<Model>) -> Rc<SheetActions> {
     let actions = Rc::new(SheetActions::new(&ui));
     actions.set_on_cancel(move || {
         if let Some(model) = weak.upgrade() {
-            if let Some(sheet) = model.sheet.borrow().as_ref() {
-                sheet.end();
-            }
+            model.close_sheet();
         }
     });
     actions
@@ -612,7 +593,7 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
         save_sheet(
             &weak_model,
             Box::new(move |s| {
-                let bindings = keymap_mut(s, &mode)?;
+                let bindings = s.keymap_mut(&mode)?;
                 if old.as_ref() != Some(&key) && bindings.contains_key(&key) {
                     return Err("This shortcut is already assigned in this shortcut set".into());
                 }
@@ -897,14 +878,21 @@ fn argument_editor(
     view
 }
 
-fn mode_sheet(ui: Ui, model: &Rc<Model>, old: String, operation: usize) {
-    if operation != 0 && old == "default" {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeymapOperation {
+    Create,
+    Rename,
+    Delete,
+}
+
+fn mode_sheet(ui: Ui, model: &Rc<Model>, old: String, operation: KeymapOperation) {
+    if operation != KeymapOperation::Create && old == "default" {
         return;
     }
     let cancel = sheet_actions(ui, model);
-    cancel.set_changed(operation == 2);
+    cancel.set_changed(operation == KeymapOperation::Delete);
     let weak_cancel = Rc::downgrade(&cancel);
-    let initial = if operation == 1 {
+    let initial = if operation == KeymapOperation::Rename {
         old.clone()
     } else {
         String::new()
@@ -918,7 +906,7 @@ fn mode_sheet(ui: Ui, model: &Rc<Model>, old: String, operation: usize) {
     let weak_input = Rc::downgrade(&input);
     let error = Rc::downgrade(&message);
     let weak_model = Rc::downgrade(model);
-    cancel.set_primary_title(if operation == 2 {
+    cancel.set_primary_title(if operation == KeymapOperation::Delete {
         "Delete Keymap"
     } else {
         "Save"
@@ -931,60 +919,10 @@ fn mode_sheet(ui: Ui, model: &Rc<Model>, old: String, operation: usize) {
         let old = old.clone();
         save_sheet(
             &weak_model,
-            Box::new(move |s| {
-                if operation != 2
-                    && (name.is_empty()
-                        || name == "default"
-                        || s.binding_modes.contains_key(&name) && name != old)
-                {
-                    return Err("Choose a unique keymap name".into());
-                }
-                if operation == 0 {
-                    s.binding_modes.insert(name, BTreeMap::new());
-                } else {
-                    let bindings = s
-                        .binding_modes
-                        .remove(&old)
-                        .ok_or_else(|| "Mode no longer exists".to_string())?;
-                    let target = if operation == 2 {
-                        "default".into()
-                    } else {
-                        name.clone()
-                    };
-                    for command in s
-                        .keys
-                        .values_mut()
-                        .chain(s.binding_modes.values_mut().flat_map(|m| m.values_mut()))
-                    {
-                        match command {
-                            WmCommand::Wm(WmCmd::BindingMode(mode)) if *mode == old => {
-                                *mode = target.clone()
-                            }
-                            WmCommand::ReactorCommand(Command::Reactor(R::BindingMode(mode)))
-                                if *mode == old =>
-                            {
-                                *mode = target.clone()
-                            }
-                            _ => {}
-                        }
-                    }
-                    if operation != 2 {
-                        let mut bindings = bindings;
-                        for command in bindings.values_mut() {
-                            match command {
-                                WmCommand::Wm(WmCmd::BindingMode(mode)) if *mode == old => {
-                                    *mode = name.clone()
-                                }
-                                WmCommand::ReactorCommand(Command::Reactor(R::BindingMode(
-                                    mode,
-                                ))) if *mode == old => *mode = name.clone(),
-                                _ => {}
-                            }
-                        }
-                        s.binding_modes.insert(name, bindings);
-                    }
-                }
-                Ok(())
+            Box::new(move |s| match operation {
+                KeymapOperation::Create => s.create_keymap(name),
+                KeymapOperation::Rename => s.rename_keymap(&old, name),
+                KeymapOperation::Delete => s.delete_keymap(&old),
             }),
             &message,
         );
@@ -995,7 +933,7 @@ fn mode_sheet(ui: Ui, model: &Rc<Model>, old: String, operation: usize) {
         bottom: 20.0,
         right: 20.0,
     });
-    if operation == 2 {
+    if operation == KeymapOperation::Delete {
         content = content.push(Label::new(
             &ui,
             "Delete this keymap and its shortcuts? References will switch to Default.",
@@ -1032,7 +970,7 @@ fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> VStack {
         if let Some(name) = weak_name.upgrade() {
             let name = name.get_value().trim().to_string();
             let value = modifiers.borrow().clone();
-            FormBuilder::submit(
+            Model::submit(
                 &weak_model,
                 Box::new(move |s| {
                     if name.is_empty() || name.contains('+') || value.is_empty() {
@@ -1054,7 +992,7 @@ fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> VStack {
                 if let Some(model) = weak_model.upgrade() {
                     let name = model.source.borrow().modifier_combinations.keys().nth(i).cloned();
                     if let Some(name) = name {
-                        FormBuilder::submit(
+                        Model::submit(
                             &weak_model,
                             Box::new(move |s| {
                                 s.modifier_combinations.remove(&name);

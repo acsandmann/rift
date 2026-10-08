@@ -568,7 +568,7 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     let error = Rc::downgrade(&message);
     let weak_model = f.model.clone();
     let path = Rc::new(PathField::new(&ui).directories().on_change(move |path| {
-        FormBuilder::submit(
+        Model::submit(
             &weak_model,
             Box::new(move |s| {
                 s.settings.ui.menu_bar.layout_folder = path;
@@ -706,7 +706,7 @@ impl FormBuilder {
                     v.blueComponent(),
                     v.alphaComponent(),
                 );
-                Self::submit(
+                Model::submit(
                     &model,
                     Box::new(move |s| {
                         set(s, color);
@@ -753,7 +753,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
             .and_then(super::commands::recorded_key)
             .and_then(|v| v.parse::<Hotkey>().ok())
             .map(HotkeySpec::Hotkey);
-        FormBuilder::submit(
+        Model::submit(
             &model,
             Box::new(move |s| {
                 s.settings.focus_follows_mouse_disable_hotkey = value;
@@ -767,7 +767,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
     let modifier_recorder = Rc::new(ModifierRecorder::new(&ui).on_change(move |flags| {
         let value =
             (!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly { modifiers: modifiers(flags) });
-        FormBuilder::submit(
+        Model::submit(
             &model,
             Box::new(move |s| {
                 s.settings.focus_follows_mouse_disable_hotkey = value;
@@ -811,7 +811,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
     let model = f.model.clone();
     let error = Rc::downgrade(&message);
     let clear = Button::new(&ui, "Clear").on_click(move || {
-        FormBuilder::submit(
+        Model::submit(
             &model,
             Box::new(|s| {
                 s.settings.focus_follows_mouse_disable_hotkey = None;

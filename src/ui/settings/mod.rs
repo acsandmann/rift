@@ -14,8 +14,8 @@ mod applications;
 mod commands;
 mod editors;
 mod pages;
-mod search;
 mod schema;
+mod search;
 pub(crate) mod updates;
 
 pub enum Action {
@@ -57,6 +57,77 @@ pub(super) struct Page {
 }
 
 impl Model {
+    fn submit(model: &Weak<Self>, edit: SourceEdit, error: Weak<ValidationMessage>) {
+        if let Some(model) = model.upgrade() {
+            model.submit_edit(
+                edit,
+                Box::new(move |result| {
+                    if let Some(label) = error.upgrade() {
+                        label.set_validation(
+                            &result.map_or_else(Validation::Error, |_| Validation::None),
+                        );
+                    }
+                }),
+            );
+        }
+    }
+
+    fn close_sheet(&self) {
+        self.sheet.borrow_mut().take();
+        self.sheet_page.borrow_mut().take();
+        self.sheet_model.borrow_mut().take();
+    }
+
+    fn draft(&self) -> Rc<Self> {
+        let base = self.source.borrow().clone();
+        let draft = Rc::new(Self {
+            source: RefCell::new(base.clone()),
+            source_revision: Cell::new(0),
+            requests: self.requests.clone(),
+            syncing: Cell::new(false),
+            sheet: RefCell::new(None),
+            sheet_page: RefCell::new(None),
+            sheet_model: RefCell::new(None),
+            draft_changed: RefCell::new(None),
+            draft_base: Some(base),
+            window: RefCell::new(self.window.borrow().clone()),
+            displays: RefCell::new(self.displays.borrow().clone()),
+            config_path: self.config_path.clone(),
+            applications: RefCell::new(self.applications.borrow().clone()),
+            installed_applications: RefCell::new(self.installed_applications.borrow().clone()),
+            application_inventory: RefCell::new(Vec::new()),
+            page_title: self.page_title.clone(),
+            toolbar: RefCell::new(Weak::new()),
+        });
+        draft.rebuild_applications();
+        draft
+    }
+
+    fn submit_edit(&self, edit: SourceEdit, finish: Box<dyn FnOnce(Result<(), String>)>) {
+        if self.syncing.get() {
+            return;
+        }
+        if let Some(base) = &self.draft_base {
+            let mut source = self.source.borrow().clone();
+            let result = edit(&mut source);
+            if result.is_ok() {
+                self.replace_source(source);
+                if let Some(page) = self.sheet_page.borrow().as_ref() {
+                    page.synchronize(self);
+                }
+                if let Some(changed) = self.draft_changed.borrow().as_ref() {
+                    changed(*self.source.borrow() != *base);
+                }
+            }
+            finish(result);
+        } else {
+            let _ = self.requests.send(Request {
+                action: Action::Edit(edit),
+                finish,
+            });
+        }
+    }
+
     fn rebuild_applications(&self) {
         *self.application_inventory.borrow_mut() = applications::inventory(
             &self.applications.borrow(),
@@ -83,6 +154,31 @@ impl Page {
         }
         model.syncing.set(syncing);
         self.synced_revision.set(Some(revision));
+    }
+}
+
+struct NavigationState {
+    history: Vec<usize>,
+    cursor: usize,
+}
+impl NavigationState {
+    fn select(&mut self, page: usize) {
+        if self.history[self.cursor] != page {
+            self.history.truncate(self.cursor + 1);
+            self.history.push(page);
+            self.cursor += 1;
+        }
+    }
+
+    fn step(&mut self, forward: bool) -> Option<usize> {
+        let next = if forward {
+            self.cursor + 1
+        } else {
+            self.cursor.checked_sub(1)?
+        };
+        let page = *self.history.get(next)?;
+        self.cursor = next;
+        Some(page)
     }
 }
 
@@ -151,16 +247,12 @@ impl Settings {
             symbol: symbol.into(),
         })
         .collect();
-        let history = Rc::new(RefCell::new(vec![0usize]));
-        let cursor = Rc::new(Cell::new(0usize));
-        let replaying = Rc::new(Cell::new(false));
+        let history = Rc::new(RefCell::new(NavigationState { history: vec![0], cursor: 0 }));
         let sidebar_slot = Rc::new(RefCell::new(Weak::<Sidebar<usize>>::new()));
         let search_slot = Rc::new(RefCell::new(Weak::<SearchField>::new()));
         let nav_slot = Rc::new(RefCell::new(Weak::<SegmentedControl>::new()));
-        let (h, c, r, b, q, n) = (
+        let (h, b, q, n) = (
             history.clone(),
-            cursor.clone(),
-            replaying.clone(),
             sidebar_slot.clone(),
             search_slot.clone(),
             nav_slot.clone(),
@@ -168,25 +260,21 @@ impl Settings {
         let all = entries.clone();
         let navigation = Rc::new(SegmentedControl::new(&ui, &["", ""]).on_change(
             move |direction| {
-                let next = if direction == 0 {
-                    c.get().checked_sub(1)
-                } else {
-                    Some(c.get() + 1).filter(|i| *i < h.borrow().len())
-                };
-                let Some(next) = next else { return };
                 if let Some(sidebar) = b.borrow().upgrade() {
-                    c.set(next);
-                    r.set(true);
+                    let Some(page) = h.borrow_mut().step(direction != 0) else {
+                        return;
+                    };
                     if let Some(search) = q.borrow().upgrade() {
                         search.set_value("");
                     }
                     sidebar.set_items(all.clone());
-                    sidebar.set_selected(h.borrow()[next]);
-                    r.set(false);
+                    sidebar.set_selected(page);
                     if let Some(nav) = n.borrow().upgrade() {
-                        nav.ns_segmented_control().setEnabled_forSegment(next > 0, 0);
-                        nav.ns_segmented_control()
-                            .setEnabled_forSegment(next + 1 < h.borrow().len(), 1);
+                        nav.ns_segmented_control().setEnabled_forSegment(h.borrow().cursor > 0, 0);
+                        nav.ns_segmented_control().setEnabled_forSegment(
+                            h.borrow().cursor + 1 < h.borrow().history.len(),
+                            1,
+                        );
                     }
                 }
             },
@@ -200,26 +288,19 @@ impl Settings {
         native.setToolTip_forSegment(Some(&objc2_foundation::NSString::from_str("Forward")), 1);
         native.setEnabled_forSegment(false, 0);
         native.setEnabled_forSegment(false, 1);
-        let (h, c, r, nav) = (
-            history.clone(),
-            cursor.clone(),
-            replaying.clone(),
-            Rc::downgrade(&navigation),
-        );
+        let (h, nav) = (history.clone(), Rc::downgrade(&navigation));
         let sidebar = Sidebar::new(&ui, entries.clone()).on_select(move |id| {
             if let (Some(model), Some(host), Some(pages)) =
                 (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
             {
                 if selected_page.replace(id) != id {
-                    if !r.get() {
-                        h.borrow_mut().truncate(c.get() + 1);
-                        h.borrow_mut().push(id);
-                        c.set(h.borrow().len() - 1);
-                    }
+                    h.borrow_mut().select(id);
                     if let Some(nav) = nav.upgrade() {
-                        nav.ns_segmented_control().setEnabled_forSegment(c.get() > 0, 0);
-                        nav.ns_segmented_control()
-                            .setEnabled_forSegment(c.get() + 1 < h.borrow().len(), 1);
+                        nav.ns_segmented_control().setEnabled_forSegment(h.borrow().cursor > 0, 0);
+                        nav.ns_segmented_control().setEnabled_forSegment(
+                            h.borrow().cursor + 1 < h.borrow().history.len(),
+                            1,
+                        );
                     }
                     Self::select(ui, &model, &host, &pages, id);
                 }
@@ -502,9 +583,7 @@ impl Settings {
 impl Drop for Settings {
     fn drop(&mut self) {
         // End the sheet while its weak parent still points to the live Settings window.
-        self.model.sheet.borrow_mut().take();
-        self.model.sheet_page.borrow_mut().take();
-        self.model.sheet_model.borrow_mut().take();
+        self.model.close_sheet();
         self._host.clear();
         self.pages.borrow_mut().clear();
     }
@@ -534,42 +613,6 @@ impl FormBuilder {
         }
     }
 
-    fn submit(model: &Weak<Model>, edit: SourceEdit, error: Weak<ValidationMessage>) {
-        let Some(model) = model.upgrade() else {
-            return;
-        };
-        if model.syncing.get() {
-            return;
-        }
-        let finish = Box::new(move |result: Result<(), String>| {
-            if let Some(label) = error.upgrade() {
-                label.set_validation(&match &result {
-                    Ok(_) => Validation::None,
-                    Err(e) => Validation::Error(e.clone()),
-                });
-            }
-        });
-        if let Some(base) = &model.draft_base {
-            let mut source = model.source.borrow().clone();
-            let result = edit(&mut source);
-            if result.is_ok() {
-                model.replace_source(source);
-                if let Some(page) = model.sheet_page.borrow().as_ref() {
-                    page.synchronize(&model);
-                }
-                if let Some(changed) = model.draft_changed.borrow().as_ref() {
-                    changed(*model.source.borrow() != *base);
-                }
-            }
-            finish(result);
-        } else {
-            let _ = model.requests.send(Request {
-                action: Action::Edit(edit),
-                finish,
-            });
-        }
-    }
-
     fn row(
         &self,
         title: &str,
@@ -591,6 +634,31 @@ impl FormBuilder {
         }
     }
 
+    fn sync<C: NativeView>(&mut self, input: &Rc<C>, update: impl Fn(&C, &ConfigSource) + 'static) {
+        let weak = Rc::downgrade(input);
+        self.sync.push(Box::new(move |source| {
+            if let Some(input) = weak.upgrade() {
+                update(&input, source);
+            }
+        }));
+    }
+
+    fn change<T: PartialEq + Send + 'static>(
+        &self,
+        get: impl Fn(&ConfigSource) -> T + Clone + 'static,
+        set: impl Fn(&mut ConfigSource, T) -> Result<(), String> + Send + Clone + 'static,
+        error: Weak<ValidationMessage>,
+    ) -> impl Fn(T) + Clone + 'static {
+        let model = self.model.clone();
+        move |value| {
+            if model.upgrade().is_some_and(|model| get(&model.source.borrow()) == value) {
+                return;
+            }
+            let set = set.clone();
+            Model::submit(&model, Box::new(move |source| set(source, value)), error.clone());
+        }
+    }
+
     fn switch(
         &mut self,
         title: &str,
@@ -599,29 +667,20 @@ impl FormBuilder {
     ) -> SettingsRow {
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
-        let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
-        let input = Rc::new(Switch::new(&self.ui).on_change(move |v| {
-            if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v) {
-                return;
-            }
-            let set = set.clone();
-            Self::submit(
-                &model,
-                Box::new(move |s| {
-                    set(s, v);
-                    Ok(())
-                }),
-                error.clone(),
-            );
-        }));
-        let weak = Rc::downgrade(&input);
-        self.sync.push(Box::new(move |s| {
-            if let Some(input) = weak.upgrade() {
-                input.set_value(get(s));
-            }
-        }));
+        let change = self.change(
+            move |s| current(s),
+            move |s, value| {
+                set(s, value);
+                Ok(())
+            },
+            error,
+        );
+        let input = Rc::new(Switch::new(&self.ui).on_change(change));
+        self.sync(&input, move |input, s| {
+            input.set_value(get(s));
+        });
         self.row(title, input, message)
     }
 
@@ -673,24 +732,18 @@ impl FormBuilder {
     ) -> (Option<Rc<Slider>>, Rc<NumberField>, Rc<ValidationMessage>) {
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
-        let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
         let set_preview = set.clone();
-        let commit = move |v: f64| {
-            if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v / scale) {
-                return;
-            }
-            let set = set.clone();
-            Self::submit(
-                &model,
-                Box::new(move |s| {
-                    set(s, v / scale);
-                    Ok(())
-                }),
-                error.clone(),
-            );
-        };
+        let change = self.change(
+            move |s| current(s),
+            move |s, value| {
+                set(s, value);
+                Ok(())
+            },
+            error,
+        );
+        let commit = move |value: f64| change(value / scale);
         let field = if integer {
             NumberField::new(&self.ui).integer()
         } else {
@@ -716,7 +769,11 @@ impl FormBuilder {
                 if let Some(model) = model.upgrade() {
                     let (min, max) = range(&model.source.borrow());
                     let value = if preview.is_some() {
-                        if integer { v.round() } else { (v * 10.0).round() / 10.0 }
+                        if integer {
+                            v.round()
+                        } else {
+                            (v * 10.0).round() / 10.0
+                        }
                     } else {
                         v.round()
                     }
@@ -807,17 +864,10 @@ impl FormBuilder {
     ) -> SettingsRow {
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
-        let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
-        let draft = model.upgrade().is_some_and(|m| m.draft_base.is_some());
-        let commit = move |v| {
-            if model.upgrade().is_some_and(|m| current(&m.source.borrow()) == v) {
-                return;
-            }
-            let set = set.clone();
-            Self::submit(&model, Box::new(move |s| set(s, v)), error.clone());
-        };
+        let draft = self.model.upgrade().is_some_and(|model| model.draft_base.is_some());
+        let commit = self.change(move |s| current(s), set, error);
         let field = TextField::new(&self.ui);
         let input = Rc::new(if draft {
             field.on_change(commit)
@@ -826,12 +876,9 @@ impl FormBuilder {
         });
         input.min_width(140.0);
         input.max_width(260.0);
-        let weak = Rc::downgrade(&input);
-        self.sync.push(Box::new(move |s| {
-            if let Some(input) = weak.upgrade() {
-                input.set_value(&get(s));
-            }
-        }));
+        self.sync(&input, move |input, s| {
+            input.set_value(&get(s));
+        });
         self.row(title, input, message)
     }
 
@@ -844,39 +891,26 @@ impl FormBuilder {
     ) -> SettingsRow {
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
-        let model = self.model.clone();
         let get = Rc::new(get);
         let current = get.clone();
-        let items: Vec<_> = values.iter().map(|(_, v)| v.clone()).collect();
+        let items: Vec<_> = values.iter().map(|(_, value)| value.clone()).collect();
         let choices = items.clone();
-        let input = Rc::new(
-            Popup::new(&self.ui).items(values.iter().map(|(label, _)| *label)).on_change(
-                move |index| {
-                    if model
-                        .upgrade()
-                        .is_some_and(|m| current(&m.source.borrow()) == choices[index].clone())
-                    {
-                        return;
-                    }
-                    let value = choices[index].clone();
-                    let set = set.clone();
-                    Self::submit(
-                        &model,
-                        Box::new(move |s| {
-                            set(s, value);
-                            Ok(())
-                        }),
-                        error.clone(),
-                    );
-                },
-            ),
+        let change = self.change(
+            move |s| current(s),
+            move |s, value| {
+                set(s, value);
+                Ok(())
+            },
+            error,
         );
-        let weak = Rc::downgrade(&input);
-        self.sync.push(Box::new(move |s| {
-            if let Some(input) = weak.upgrade() {
-                input.set_selected(items.iter().position(|v| *v == get(s)).unwrap_or(0));
-            }
-        }));
+        let input = Rc::new(
+            Popup::new(&self.ui)
+                .items(values.iter().map(|(label, _)| *label))
+                .on_change(move |index| change(choices[index].clone())),
+        );
+        self.sync(&input, move |input, s| {
+            input.set_selected(items.iter().position(|v| *v == get(s)).unwrap_or(0));
+        });
         self.row(title, input, message)
     }
 
@@ -911,7 +945,7 @@ impl FormBuilder {
             }
             drop(source);
             let set = set.clone();
-            Self::submit(
+            Model::submit(
                 &model,
                 Box::new(move |source| {
                     set(source, value);
@@ -920,18 +954,15 @@ impl FormBuilder {
                 error.clone(),
             );
         }));
-        let weak = Rc::downgrade(&input);
-        self.sync.push(Box::new(move |source| {
-            if let Some(input) = weak.upgrade() {
-                input.set_items(labels.iter().map(String::as_str));
-                let inherited = default(source);
-                for (index, item) in items.iter().enumerate() {
-                    input.set_item_badge(index, (*item == inherited).then_some("Default"));
-                }
-                let effective = get(source).unwrap_or(inherited);
-                input.set_selected(items.iter().position(|item| *item == effective).unwrap_or(0));
+        self.sync(&input, move |input, source| {
+            input.set_items(labels.iter().map(String::as_str));
+            let inherited = default(source);
+            for (index, item) in items.iter().enumerate() {
+                input.set_item_badge(index, (*item == inherited).then_some("Default"));
             }
-        }));
+            let effective = get(source).unwrap_or(inherited);
+            input.set_selected(items.iter().position(|item| *item == effective).unwrap_or(0));
+        });
         self.row(title, input, message)
     }
 
@@ -960,3 +991,25 @@ impl FormBuilder {
 
 #[cfg(test)]
 pub mod native_tests;
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    #[test]
+    fn history_revisits_pages_and_discards_forward_branch_on_new_selection() {
+        let mut history = NavigationState { history: vec![0], cursor: 0 };
+        assert_eq!(history.step(false), None);
+        history.select(1);
+        history.select(4);
+        assert_eq!(history.step(false), Some(1));
+        history.select(1); // Replaying a sidebar selection adds no entry.
+        assert_eq!(history.step(true), Some(4));
+        assert_eq!(history.step(true), None);
+        assert_eq!(history.step(false), Some(1));
+        history.select(3);
+        assert_eq!(history.step(true), None);
+        assert_eq!(history.step(false), Some(1));
+        assert_eq!(history.step(false), Some(0));
+        assert_eq!(history.step(false), None);
+    }
+}
