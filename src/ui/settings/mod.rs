@@ -11,6 +11,7 @@ use crate::actor::config::SourceEdit;
 use crate::common::config::ConfigSource;
 
 mod applications;
+pub(crate) use applications::installed as installed_applications;
 mod commands;
 mod editors;
 mod pages;
@@ -484,18 +485,13 @@ impl Settings {
         }
     }
 
-    pub async fn refresh_installed_applications(&self) {
-        if self.model.installed_applications.borrow().is_some() {
-            return;
-        }
-        let (send, receive) = tokio::sync::oneshot::channel();
-        std::thread::spawn(move || {
-            let _ = send.send(applications::installed());
-        });
-        if let Ok(apps) = receive.await {
-            *self.model.installed_applications.borrow_mut() = Some(apps);
-            self.model.rebuild_applications();
-        }
+    pub fn has_installed_applications(&self) -> bool {
+        self.model.installed_applications.borrow().is_some()
+    }
+
+    pub fn set_installed_applications(&self, apps: Vec<(String, String)>) {
+        *self.model.installed_applications.borrow_mut() = Some(apps);
+        self.model.rebuild_applications();
     }
 
     pub fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {

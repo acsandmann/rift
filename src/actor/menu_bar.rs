@@ -62,6 +62,8 @@ pub struct Menu {
     settings_source_revision: std::cell::Cell<Option<u64>>,
     settings_requests: tokio::sync::mpsc::UnboundedReceiver<crate::ui::settings::Request>,
     settings_request_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::settings::Request>,
+    /// Completions awaiting installed-application discovery; `Some` while a scan runs.
+    app_scan: Option<Vec<Box<dyn FnOnce(Result<(), String>)>>>,
     mtm: MainThreadMarker,
     config_path: std::path::PathBuf,
     last_signature: Option<u64>,
@@ -151,6 +153,7 @@ impl Menu {
             settings_source_revision: std::cell::Cell::new(None),
             settings_requests,
             settings_request_tx,
+            app_scan: None,
             config,
             rx,
             reactor_tx,
@@ -236,10 +239,7 @@ impl Menu {
                             continue;
                         }
                         crate::ui::settings::Action::RefreshRuntime => {
-                            if let Some(settings) = &self.settings {
-                                settings.refresh_installed_applications().await;
-                            }
-                            (request.finish)(Ok(()));
+                            self.discover_applications(Some(request.finish));
                             continue;
                         }
                         action => {
@@ -329,9 +329,8 @@ impl Menu {
                         },
                     ));
                 }
-                let settings = self.settings.as_ref().unwrap();
-                settings.show();
-                settings.refresh_installed_applications().await;
+                self.settings.as_ref().unwrap().show();
+                self.discover_applications(None);
             }
             Err(error) => {
                 tracing::error!(%error, "Could not open Settings");
@@ -341,6 +340,27 @@ impl Menu {
                     .runModal();
             }
         }
+    }
+
+    /// Scan installed applications off the main thread; the result returns as a `MenuAction`
+    /// so the menu actor keeps handling events and no closed window or model is retained.
+    fn discover_applications(&mut self, finish: Option<Box<dyn FnOnce(Result<(), String>)>>) {
+        if self.settings.as_ref().is_none_or(|settings| settings.has_installed_applications()) {
+            if let Some(finish) = finish {
+                finish(Ok(()));
+            }
+            return;
+        }
+        let actions = &self.action_tx;
+        let waiting = self.app_scan.get_or_insert_with(|| {
+            let actions = actions.clone();
+            std::thread::spawn(move || {
+                let apps = crate::ui::settings::installed_applications();
+                let _ = actions.send(MenuAction::InstalledApplications(apps));
+            });
+            Vec::new()
+        });
+        waiting.extend(finish);
     }
 
     async fn sync_settings(&self) {
@@ -477,7 +497,21 @@ impl Menu {
             }
             MenuAction::OpenSettings => {}
             // Run after windowWillClose returns, rather than dropping AppKit's active delegate.
-            MenuAction::SettingsClosed => self.settings = None,
+            MenuAction::SettingsClosed => {
+                self.settings = None;
+                // Keep the in-flight marker so reopening cannot start a duplicate scan.
+                if let Some(waiting) = &mut self.app_scan {
+                    waiting.clear();
+                }
+            }
+            // A scan finishing after close is dropped; after reopening it serves the new window.
+            MenuAction::InstalledApplications(apps) => {
+                let waiting = self.app_scan.take().unwrap_or_default();
+                if let Some(settings) = &self.settings {
+                    settings.set_installed_applications(apps);
+                    waiting.into_iter().for_each(|finish| finish(Ok(())));
+                }
+            }
             MenuAction::OpenConfig => {
                 Self::open_path_or_url(common::config::config_file());
             }

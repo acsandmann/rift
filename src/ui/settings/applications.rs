@@ -4,7 +4,7 @@ use objc2::runtime::AnyObject;
 use objc2_foundation::{NSDictionary, NSString};
 
 /// Read bundle metadata without launching apps or retaining NSBundle's global cache.
-pub(super) fn installed() -> Vec<(String, String)> {
+pub(crate) fn installed() -> Vec<(String, String)> {
     let mut apps = Vec::new();
     objc2::rc::autoreleasepool(|_| {
         for root in ["/Applications", "/System/Applications"] {

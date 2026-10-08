@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,9 @@ pub enum Event {
 pub struct ConfigActor {
     config: Config,
     document: ConfigDocument,
+    /// Exact file contents this actor last read or wrote; `None` when the file was absent.
+    /// Saves compare against it so external edits are never silently overwritten.
+    disk: Option<String>,
     source_revision: u64,
     reactor_tx: reactor::Sender,
     config_path: PathBuf,
@@ -65,23 +68,33 @@ impl ConfigActor {
         let (tx, rx) = actor::channel();
         std::thread::Builder::new()
             .name("config".to_string())
-            .spawn(move || {
-                let document = if config_path.exists() {
-                    ConfigDocument::read(&config_path).expect("startup config must parse")
-                } else {
-                    ConfigDocument::default()
-                };
-                let actor = ConfigActor {
-                    document,
-                    source_revision: 0,
-                    config,
-                    reactor_tx,
-                    config_path,
-                };
-                actor.run(rx);
-            })
+            .spawn(move || Self::load(config, reactor_tx, config_path).run(rx))
             .unwrap();
         tx
+    }
+
+    fn load(config: Config, reactor_tx: reactor::Sender, config_path: PathBuf) -> Self {
+        let disk = read_disk(&config_path).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Could not read config file");
+            None
+        });
+        // An unreadable startup file stays unknown, so later saves refuse to replace it.
+        let (document, disk) = match disk.as_deref().map(ConfigDocument::parse) {
+            Some(Ok(document)) => (document, disk),
+            Some(Err(error)) => {
+                tracing::warn!(%error, "Config file changed before the config actor started");
+                (ConfigDocument::default(), None)
+            }
+            None => (ConfigDocument::default(), None),
+        };
+        ConfigActor {
+            document,
+            disk,
+            source_revision: 0,
+            config,
+            reactor_tx,
+            config_path,
+        }
     }
 
     fn run(mut self, mut events: Receiver) {
@@ -139,14 +152,51 @@ impl ConfigActor {
             .update(|source| edit_result = edit(source))
             .map_err(|e| e.to_string())?;
         edit_result?;
-        // Persistence is part of the transaction: failed saves never publish or commit.
-        candidate.save(&self.config_path).map_err(|e| e.to_string())?;
         let source = candidate.source().map_err(|e| e.to_string())?;
+        // Persistence is part of the transaction: stale or failed saves never publish or commit.
+        self.persist(&candidate)?;
         self.document = candidate;
         self.config = config;
+        self.publish();
+        Ok(source)
+    }
+
+    fn publish(&mut self) {
         self.source_revision += 1;
         self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
-        Ok(source)
+    }
+
+    /// Atomically saves `document` only if the file still holds the last version this actor
+    /// knew. A missing file has nothing to lose and is recreated.
+    fn persist(&mut self, document: &ConfigDocument) -> Result<(), String> {
+        let current = read_disk(&self.config_path).map_err(|e| e.to_string())?;
+        if let Some(current) = current
+            && Some(&current) != self.disk.as_ref()
+        {
+            return Err(self.reject_stale(current));
+        }
+        document.save(&self.config_path).map_err(|e| e.to_string())?;
+        self.disk = Some(document.to_string());
+        Ok(())
+    }
+
+    /// Adopts a newer valid file so callers resynchronize; an invalid file is left untouched.
+    fn reject_stale(&mut self, text: String) -> String {
+        match parse_valid(&text) {
+            Ok((document, config)) => {
+                self.document = document;
+                self.config = config;
+                self.disk = Some(text);
+                self.publish();
+                "The config file changed on disk, so this change was not saved. Rift loaded \
+                 the newer file; review it and try again."
+                    .into()
+            }
+            Err(error) => format!(
+                "The config file changed on disk and is invalid ({error}). This change was not \
+                 saved; fix the file to continue."
+            ),
+        }
     }
 
     fn handle_config_command(&mut self, cmd: ConfigCommand) -> Result<(), String> {
@@ -160,11 +210,17 @@ impl ConfigActor {
                 );
                 return Ok(());
             }
-            ConfigCommand::SaveConfig => {
-                return self.save_config_to_file().map_err(|e| e.to_string());
-            }
+            ConfigCommand::SaveConfig => return self.persist(&self.document.clone()),
             ConfigCommand::ReloadConfig => {
-                self.config = self.load_config_from_file().map_err(|e| e.to_string())?;
+                let text = read_disk(&self.config_path)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Config file not found")?;
+                // The watcher also reports Rift's own saves; unchanged files publish nothing.
+                if self.disk.as_ref() == Some(&text) && self.document.to_string() == text {
+                    return Ok(());
+                }
+                (self.document, self.config) = parse_valid(&text)?;
+                self.disk = Some(text);
             }
             ConfigCommand::Set { key, value } => {
                 self.config = self.document.set(key, value).map_err(|e| e.to_string())?;
@@ -232,35 +288,27 @@ impl ConfigActor {
                     .map_err(|e| e.to_string())?;
             }
         }
-        self.source_revision += 1;
-        self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
+        self.publish();
         Ok(())
     }
+}
 
-    fn save_config_to_file(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config_path = &self.config_path;
-        self.document.save(config_path)?;
-        Ok(())
+fn read_disk(path: &Path) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
+}
 
-    fn load_config_from_file(
-        &mut self,
-    ) -> Result<crate::common::config::Config, Box<dyn std::error::Error>> {
-        let config_path = &self.config_path;
-
-        if config_path.exists() {
-            let document = ConfigDocument::read(config_path)?;
-            let new_config = document.runtime()?;
-            let issues = new_config.validate();
-            if !issues.is_empty() {
-                return Err(issues.join("; ").into());
-            }
-            self.document = document;
-            Ok(new_config)
-        } else {
-            Err("Config file not found".into())
-        }
+fn parse_valid(text: &str) -> Result<(ConfigDocument, Config), String> {
+    let document = ConfigDocument::parse(text).map_err(|e| e.to_string())?;
+    let config = document.runtime().map_err(|e| e.to_string())?;
+    let issues = config.validate();
+    if !issues.is_empty() {
+        return Err(issues.join("; "));
     }
+    Ok((document, config))
 }
 
 #[cfg(test)]
@@ -328,13 +376,7 @@ mod tests {
         let text = include_str!("../../rift.default.toml");
         std::fs::write(&path, text).unwrap();
         let (reactor_tx, _updates) = actor::channel();
-        let mut actor = ConfigActor {
-            config: Config::default(),
-            document: ConfigDocument::read(&path).unwrap(),
-            reactor_tx,
-            config_path: path.clone(),
-            source_revision: 0,
-        };
+        let mut actor = ConfigActor::load(Config::default(), reactor_tx, path.clone());
         actor.handle_config_command(ConfigCommand::SetAnimate(true)).unwrap();
         actor.handle_config_command(ConfigCommand::SaveConfig).unwrap();
         assert_eq!(
@@ -368,15 +410,8 @@ mod tests {
         let path = directory.path().join("config.toml");
         let text = "# personal settings\n[settings]\nanimate = false # retain this comment\n[virtual_workspaces]\nworkspace_names = [\"Main\", \"Code\"]\n[keys]\n";
         std::fs::write(&path, text).unwrap();
-        let document = ConfigDocument::read(&path).unwrap();
         let (reactor_tx, mut updates) = actor::channel();
-        let mut actor = ConfigActor {
-            config: document.runtime().unwrap(),
-            document,
-            reactor_tx,
-            config_path: path.clone(),
-            source_revision: 0,
-        };
+        let mut actor = ConfigActor::load(Config::read(&path).unwrap(), reactor_tx, path.clone());
         let source = actor
             .edit_source(Box::new(|s| {
                 s.settings.animate = true;
@@ -466,6 +501,92 @@ mod tests {
         assert_eq!(roundtrip.virtual_workspaces.app_rules.len(), 1);
         assert!(roundtrip.keys.is_empty());
         assert!(roundtrip.binding_modes.is_empty());
+    }
+
+    /// Toggles `animate`, returning the saved value.
+    fn toggle_animate(actor: &mut ConfigActor) -> Result<bool, String> {
+        let edit = Box::new(|s: &mut ConfigSource| {
+            s.settings.animate = !s.settings.animate;
+            Ok(())
+        });
+        actor.edit_source(edit).map(|source| source.settings.animate)
+    }
+
+    #[test]
+    fn stale_saves_never_overwrite_external_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "[settings]\nanimate = false\n[keys]\n").unwrap();
+        let (reactor_tx, mut updates) = actor::channel();
+        let mut actor = ConfigActor::load(Config::read(&path).unwrap(), reactor_tx, path.clone());
+
+        // Own saves succeed, and the watcher's echo of them publishes nothing.
+        assert!(toggle_animate(&mut actor).unwrap());
+        assert!(updates.try_recv().is_ok());
+        let revision = actor.source_revision;
+        actor.handle_config_command(ConfigCommand::ReloadConfig).unwrap();
+        assert_eq!(actor.source_revision, revision);
+        assert!(updates.try_recv().is_err());
+
+        // A valid external edit (same mtime-resolution window) wins and is adopted.
+        let external = "# edited elsewhere\n[settings]\nanimate = true\nfocus_follows_mouse = false\n[keys]\n\"Alt + Y\" = \"close_window\"\n";
+        std::fs::write(&path, external).unwrap();
+        let error = toggle_animate(&mut actor).unwrap_err();
+        assert!(error.contains("changed on disk"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        assert!(!actor.config.settings.focus_follows_mouse);
+        assert!(actor.source_revision > revision, "UI must resynchronize to the newer file");
+        assert!(updates.try_recv().is_ok());
+        // Retrying against the adopted file preserves its comments and custom bindings.
+        assert!(!toggle_animate(&mut actor).unwrap());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with("# edited elsewhere\n") && saved.contains("\"Alt + Y\""));
+        assert!(saved.contains("animate = false"));
+        assert!(updates.try_recv().is_ok());
+
+        // An invalid external edit is never replaced, by Settings or by `config save`.
+        let invalid = "[settings\nanimate = true\n";
+        std::fs::write(&path, invalid).unwrap();
+        let revision = actor.source_revision;
+        assert!(toggle_animate(&mut actor).unwrap_err().contains("invalid"));
+        actor.handle_config_command(ConfigCommand::SetAnimate(true)).unwrap();
+        assert!(actor.handle_config_command(ConfigCommand::SaveConfig).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        assert!(actor.handle_config_command(ConfigCommand::ReloadConfig).is_err());
+        assert!(toggle_animate(&mut actor).is_err(), "rejection must persist until fixed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        assert_eq!(actor.source_revision, revision + 1, "only the CLI set published");
+
+        // Once fixed, the next save adopts the file instead of reverting the repair.
+        std::fs::write(&path, "[settings]\nanimate = false\n[keys]\n").unwrap();
+        assert!(toggle_animate(&mut actor).is_err());
+        assert!(!actor.config.settings.animate);
+        assert!(toggle_animate(&mut actor).unwrap());
+    }
+
+    #[test]
+    fn saves_recreate_missing_files_and_write_through_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("dotfiles.toml");
+        let path = directory.path().join("config.toml");
+        let (reactor_tx, _updates) = actor::channel();
+        let mut actor = ConfigActor::load(Config::default(), reactor_tx, path.clone());
+        toggle_animate(&mut actor).unwrap();
+        assert!(Config::read(&path).is_ok(), "an absent file is created");
+        std::fs::remove_file(&path).unwrap();
+        toggle_animate(&mut actor).unwrap();
+        assert!(path.exists(), "a deleted file has nothing to lose and is recreated");
+
+        std::fs::rename(&path, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        actor.handle_config_command(ConfigCommand::ReloadConfig).unwrap();
+        toggle_animate(&mut actor).unwrap();
+        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        let mut external = std::fs::read_to_string(&target).unwrap();
+        external.insert_str(0, "# edited through the link target\n");
+        std::fs::write(&target, &external).unwrap();
+        assert!(toggle_animate(&mut actor).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), external);
     }
 
     #[test]

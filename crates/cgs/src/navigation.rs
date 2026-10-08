@@ -570,9 +570,7 @@ impl Toolbar {
                 if let Some(search) = self.native.items().objectAtIndex(index).downcast_ref::<NSSearchToolbarItem>() {
                     search.setSearchField(&NSSearchField::new(ui.mtm()));
                 }
-                if let Some(glass) = self.native.items().objectAtIndex(index).view().and_then(|view| view.downcast::<NSGlassEffectView>().ok()) {
-                    glass.setContentView(None);
-                }
+                crate::view::detach_glass_content(self.native.items().objectAtIndex(index).view());
                 self.native.removeItemAtIndex(index as isize);
             }
             delegate.ivars().navigation.borrow_mut().retain(|item| item.itemIdentifier() != id);
@@ -642,7 +640,7 @@ impl Drop for Toolbar {
                 delegate.ivars().back.setAction(None);
                 for item in delegate.ivars().navigation.borrow().iter() {
                     if item.itemIdentifier().to_string() == "cgs.page-filter" {
-                        if let Some(glass) = item.view().and_then(|view| view.downcast::<NSGlassEffectView>().ok()) { glass.setContentView(None); }
+                        crate::view::detach_glass_content(item.view());
                         item.setView(None);
                     }
                     item.setTarget(None);

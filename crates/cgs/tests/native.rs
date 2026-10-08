@@ -524,14 +524,8 @@ fn page_headings_preserve_window_identity(ui: &Ui) {
         .expect("the page heading must be installed in the native toolbar");
     let heading = item.view().unwrap();
     title.set_text("Keyboard");
-    assert_eq!(
-        heading
-            .downcast_ref::<objc2_app_kit::NSTextField>()
-            .unwrap()
-            .stringValue()
-            .to_string(),
-        "Keyboard"
-    );
+    assert!(title.ns_text_field().isDescendantOf(&heading));
+    assert_eq!(title.ns_text_field().stringValue().to_string(), "Keyboard");
     assert_eq!(window.ns_window().title().to_string(), "Rift Settings");
 }
 
@@ -654,6 +648,13 @@ fn cached_pages_keep_their_mount_and_release_on_clear(ui: &Ui) {
 }
 
 fn main() {
+    // A single libtest-compatible case lets nextest list this harness without running AppKit.
+    if std::env::args().any(|arg| arg == "--list") {
+        if !std::env::args().any(|arg| arg == "--ignored") {
+            println!("native: test");
+        }
+        return;
+    }
     let ui =
         Ui::new(MainThreadMarker::new().expect("native tests must run on the macOS main thread"));
     let app = Application::shared(&ui);

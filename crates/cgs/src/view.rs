@@ -390,6 +390,15 @@ impl GlassEffectView {
         self.native.as_deref()
     }
 }
+/// Detach borrowed content from a glass wrapper. Resolving the class before macOS 26 aborts.
+pub(crate) fn detach_glass_content(view: Option<Retained<NSView>>) {
+    if objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some()
+        && let Some(glass) =
+            view.and_then(|view| view.downcast::<objc2_app_kit::NSGlassEffectView>().ok())
+    {
+        glass.setContentView(None);
+    }
+}
 impl NativeView for GlassEffectView {
     fn ns_view(&self) -> &NSView {
         self.native
