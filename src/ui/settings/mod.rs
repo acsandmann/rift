@@ -202,6 +202,7 @@ impl Settings {
         requests: UnboundedSender<Request>,
         on_close: impl FnMut() + 'static,
     ) -> Self {
+        let host = Rc::new(PageHost::new(&ui));
         let model = Rc::new(Model {
             source: RefCell::new(source),
             source_revision: Cell::new(0),
@@ -223,7 +224,6 @@ impl Settings {
             toolbar: RefCell::new(Weak::new()),
         });
         model.rebuild_applications();
-        let host = Rc::new(PageHost::new(&ui));
         let pages = Rc::new(RefCell::new((0..9).map(|_| None::<Page>).collect::<Vec<_>>()));
         let weak_model = Rc::downgrade(&model);
         let weak_host = Rc::downgrade(&host);
@@ -256,6 +256,7 @@ impl Settings {
         let navigate: Rc<dyn Fn(usize)> = Rc::new(move |id| {
             let (Some(model), Some(host), Some(pages)) =
                 (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade()) else { return; };
+            model.close_sheet();
             let previous = { let history = history_router.borrow(); history.history[history.cursor] };
             history_router.borrow_mut().select(id);
             let category = if id >= 9 { 1 } else { id };
@@ -853,8 +854,7 @@ impl FormBuilder {
         } else {
             field.on_commit(commit)
         });
-        input.min_width(140.0);
-        input.max_width(260.0);
+        input.width(220.0);
         self.sync(&input, move |input, s| {
             input.set_value(&get(s));
         });

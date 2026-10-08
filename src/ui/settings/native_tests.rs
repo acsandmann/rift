@@ -1,3 +1,4 @@
+use objc2::Message;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{
     NSControl, NSMenuToolbarItem, NSOutlineView, NSPopUpButton, NSSlider, NSSwitch, NSTableView, NSView,
@@ -15,6 +16,25 @@ fn find<T: objc2::DowncastTarget + 'static>(view: &NSView) -> Option<Retained<T>
 fn count<T: objc2::DowncastTarget + 'static>(view: &NSView) -> usize {
     usize::from(view.downcast_ref::<T>().is_some())
         + view.subviews().iter().map(|child| count::<T>(&child)).sum::<usize>()
+}
+
+fn editable(view: &NSView) -> Option<Retained<objc2_app_kit::NSTextField>> {
+    if let Some(field) = view.downcast_ref::<objc2_app_kit::NSTextField>() {
+        if field.isEditable() {
+            return Some(field.retain());
+        }
+    }
+    view.subviews().iter().find_map(|child| editable(&child))
+}
+fn change_text(field: &objc2_app_kit::NSTextField, text: &str) {
+    field.setStringValue(&objc2_foundation::NSString::from_str(text));
+    unsafe {
+        let note = objc2_foundation::NSNotification::notificationWithName_object(
+            &objc2_foundation::NSString::from_str("NSControlTextDidChangeNotification"),
+            Some(field),
+        );
+        let _: () = objc2::msg_send![&*field.delegate().unwrap(), controlTextDidChange: &*note];
+    }
 }
 
 pub fn run(ui: Ui) {
@@ -180,9 +200,73 @@ pub fn run(ui: Ui) {
             let table = find::<NSTableView>(page.view.ns_view()).unwrap();
             table.selectRowIndexes_byExtendingSelection(&objc2_foundation::NSIndexSet::indexSetWithIndex(0), false);
             assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
-            assert!(settings.model.sheet.borrow().is_some(), "first-click action opens the workspace editor");
+            assert!(settings.model.sheet.borrow().is_some(),
+                "first click opens a workspace sheet"
+            );
+            let draft = settings.model.sheet_model.borrow().as_ref().unwrap().clone();
+            let sheet = settings.model.sheet.borrow().as_ref().unwrap().ns_window().retain();
+            change_text(&editable(&sheet.contentView().unwrap()).unwrap(), "Draft name");
+            assert_eq!(
+                draft.source.borrow().virtual_workspaces.workspace_names[0],
+                "Draft name"
+            );
+            assert!(
+                *draft.source.borrow() != *settings.model.source.borrow(),
+                "draft changes remain transactional"
+            );
             settings.model.close_sheet();
-            assert!(pending.try_recv().is_err(), "opening an editor must not change config");
+            assert!(settings.model.sheet.borrow().is_none());
+            assert_ne!(
+                settings
+                    .model
+                    .source
+                    .borrow()
+                    .virtual_workspaces
+                    .workspace_names
+                    .first()
+                    .map(String::as_str),
+                Some("Draft name")
+            );
+            assert!(
+                pending.try_recv().is_err(),
+                "opening and cancelling an editor must not change config"
+            );
+        });
+        // Filtering must not change which command the selected visible row edits.
+        autoreleasepool(|_| {
+            use rift_protocol::LayoutCommand;
+
+            use crate::actor::reactor::Command;
+            use crate::actor::wm_controller::WmCommand;
+            let mut source = settings.model.source.borrow().clone();
+            source.keys.insert(
+                "Alt+a".into(),
+                WmCommand::ReactorCommand(Command::Layout(LayoutCommand::ToggleWindowFloating)),
+            );
+            source.keys.insert(
+                "Alt+f".into(),
+                WmCommand::ReactorCommand(Command::Layout(LayoutCommand::ToggleFullscreen)),
+            );
+            settings.model.replace_source(source);
+            let page = commands::keyboard(ui, &settings.model);
+            page.synchronize(&settings.model);
+            let search = find::<objc2_app_kit::NSSearchField>(page.view.ns_view()).unwrap();
+            change_text(&search, "fullscreen");
+            let table = find::<NSTableView>(page.view.ns_view()).unwrap();
+            assert_eq!(table.numberOfRows(), 1);
+            table.selectRowIndexes_byExtendingSelection(
+                &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
+                false,
+            );
+            assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
+            let window = settings.model.sheet.borrow().as_ref().unwrap().ns_window().retain();
+            let action = find::<NSPopUpButton>(&window.contentView().unwrap()).unwrap();
+            assert_eq!(
+                action.titleOfSelectedItem().unwrap().to_string(),
+                "Window · Fullscreen"
+            );
+            settings.model.close_sheet();
+            assert!(pending.try_recv().is_err());
         });
         // A spacing slider must edit the visible display override, not an ineffective global value.
         autoreleasepool(|_| {

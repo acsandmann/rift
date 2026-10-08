@@ -33,6 +33,7 @@ impl SplitView {
         };
         if sidebar {
             item.setAllowsFullHeightLayout(true);
+            item.setHoldingPriority(750.0);
         }
         self.native.addSplitViewItem(&item);
         self.children.push(controller);

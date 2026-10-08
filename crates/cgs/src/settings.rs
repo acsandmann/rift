@@ -264,10 +264,8 @@ impl SettingsGroup {
                 .setXPlacement(objc2_app_kit::NSGridCellPlacement::Fill);
             self.dividers.push(divider);
         }
-        if self.surface.is_none() {
-            if row.control_view().downcast_ref::<objc2_app_kit::NSPopUpButton>().is_some() {
+        if row.control_view().downcast_ref::<objc2_app_kit::NSPopUpButton>().is_some() {
                 row.control_view().widthAnchor().constraintEqualToConstant(220.0).setActive(true);
-            }
         }
         grid.addRowWithViews(&objc2_foundation::NSArray::from_slice(&row.take_form_cells()));
         grid.columnAtIndex(0).setXPlacement(objc2_app_kit::NSGridCellPlacement::Fill);
@@ -366,6 +364,7 @@ pub struct SettingsPage {
     top: Retained<objc2_app_kit::NSLayoutConstraint>,
     root: View,
     scroll_bottom: Retained<objc2_app_kit::NSLayoutConstraint>,
+    width: Retained<objc2_app_kit::NSLayoutConstraint>,
     footer: Option<Box<dyn NativeView>>,
 }
 impl SettingsPage {
@@ -398,7 +397,8 @@ impl SettingsPage {
             .widthAnchor()
             .constraintLessThanOrEqualToAnchor(&parent.widthAnchor())
             .setActive(true);
-        child.widthAnchor().constraintLessThanOrEqualToConstant(580.0).setActive(true);
+        let width = child.widthAnchor().constraintLessThanOrEqualToConstant(640.0);
+        width.setActive(true);
         let fill = child.widthAnchor().constraintEqualToAnchor(&parent.widthAnchor());
         fill.setPriority(750.0);
         fill.setActive(true);
@@ -429,6 +429,7 @@ impl SettingsPage {
             top,
             root,
             scroll_bottom,
+            width,
             footer: None,
         }
     }
@@ -451,6 +452,12 @@ impl SettingsPage {
     /// Adjust the rhythm of a compact visual editor without changing other panes.
     pub fn content_spacing(self, spacing: f64) -> Self {
         self.content.ns_stack_view().setSpacing(spacing);
+        self
+    }
+
+    /// Collections and visual editors need more room than short preference forms.
+    pub fn content_width(self, width: f64) -> Self {
+        self.width.setConstant(width);
         self
     }
 

@@ -32,6 +32,7 @@ struct WindowView {
     id: u64,
     view: LayerHost,
     frame: CGRect,
+    titlebar: objc2::rc::Retained<CALayer>,
 }
 
 /// A monochrome, bezel-free layout canvas with native window geometry animation.
@@ -116,9 +117,13 @@ impl LayoutPreview {
             let index = index.unwrap_or_else(|| {
                 let layer = CALayer::layer();
                 layer.setCornerRadius(5.0);
-                layer.setBackgroundColor(Some(&NSColor::tertiarySystemFillColor().CGColor()));
+                layer.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
                 layer.setBorderColor(Some(&NSColor::separatorColor().CGColor()));
                 layer.setBorderWidth(0.5);
+                layer.setMasksToBounds(true);
+                let titlebar = CALayer::layer();
+                titlebar.setBackgroundColor(Some(&NSColor::quaternarySystemFillColor().CGColor()));
+                layer.addSublayer(&titlebar);
                 let view = LayerHost::new(&self.ui, &layer);
                 view.ns_view().setTranslatesAutoresizingMaskIntoConstraints(true);
                 self.host.ns_view().addSubview(view.ns_view());
@@ -126,10 +131,15 @@ impl LayoutPreview {
                     id: window.id,
                     view,
                     frame: window.frame,
+                    titlebar,
                 });
                 windows.len() - 1
             });
             let pane = &mut windows[index];
+            pane.titlebar.setFrame(CGRect::new(
+                CGPoint::new(0.0, (frame.size.height - 12.0).max(0.0)),
+                CGSize::new(frame.size.width, frame.size.height.min(12.0)),
+            ));
             if existing && duration > 0.0 && pane.frame != window.frame {
                 unsafe {
                     let animator: objc2::rc::Retained<objc2::runtime::AnyObject> =

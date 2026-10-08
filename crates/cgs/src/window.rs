@@ -551,6 +551,7 @@ pub struct PathField {
 impl PathField {
     pub fn new(ui: &Ui) -> Self {
         let field = crate::TextField::new(ui);
+        field.min_width(160.0);
         let weak = Weak::new(field.ns_text_field());
         let ui_copy = *ui;
         let directories = Rc::new(Cell::new(false));

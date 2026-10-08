@@ -1,3 +1,4 @@
+
 use super::pages::{layouts, optional_number};
 use super::*;
 use crate::common::config::*;
@@ -6,7 +7,7 @@ use crate::common::config::*;
 type WorkspaceEntry = (usize, String, Option<LayoutMode>);
 
 /// Retain only the open editor, so its controls stay synchronized with ConfigActor.
-fn editor_sheet(
+fn record_editor(
     ui: Ui,
     model: &Rc<Model>,
     title: &str,
@@ -27,8 +28,7 @@ fn editor_sheet(
             model.close_sheet();
         }
     });
-    cancel
-        .set_changed(draft.draft_base.as_ref().is_some_and(|base| *draft.source.borrow() != *base));
+    cancel.set_changed(draft.draft_base.as_ref().is_some_and(|base| *draft.source.borrow() != *base));
     let dirty_cancel = Rc::downgrade(&cancel);
     *draft.draft_changed.borrow_mut() = Some(Box::new(move |dirty| {
         if let Some(cancel) = dirty_cancel.upgrade() {
@@ -128,10 +128,10 @@ fn workspace_editor(
     let weak = Rc::downgrade(model);
     let edit_workspace: Rc<dyn Fn(usize)> = Rc::new(move |index| {
         if let Some(model) = weak.upgrade() {
-            editor_sheet(
+            record_editor(
                 ui,
                 &model,
-                &format!("Workspace {}", index + 1),
+                &workspace_name(&model.source.borrow(), index),
                 |draft| {
                     if index == draft.source.borrow().virtual_workspaces.default_workspace_count {
                         draft.source.borrow_mut().virtual_workspaces.resize(index + 1);
@@ -227,7 +227,7 @@ fn workspace_editor(
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut section = f.schema_section(
-        "Virtual Workspaces",
+        "Workspace behavior",
         "",
         |s| &s.virtual_workspaces,
         |s| &mut s.virtual_workspaces,
@@ -345,6 +345,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     f.sync.extend(editor_sync);
     let page = f.finish(
         SettingsPage::new(&ui, "")
+            .content_width(760.0)
             .section(section)
             .section(editor.view)
             .bottom_bar(HStack::new(&ui).push(actions).spacer(&ui)),
@@ -448,7 +449,10 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
                 .get(index)
                 .map(|rule| rule_name(&model, rule))
                 .unwrap_or_else(|| "App Rule".into());
-            editor_sheet(ui, &model, &title, |draft| rule_detail(ui, draft, index), true);
+            record_editor(
+                ui, &model, &title, |draft| rule_detail(ui, draft, index),
+                true,
+            );
         }
     });
     let action = edit_rule.clone();
@@ -569,7 +573,8 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         }
     }));
     f.finish(SettingsPage::new(&ui, "")
-        .subtitle("Choose which windows Rift manages and where they open. Click a rule to edit it. Drag rules to change their order.")
+        .content_width(760.0)
+        .subtitle("Choose which windows Rift manages and where they open. Drag rules to change their order.")
         .section(table)
         .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
         .section(message)
@@ -937,8 +942,8 @@ fn rule_summary(r: &AppWorkspaceRule) -> String {
 }
 fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut matches = Section::new(&ui, "Application")
-        .description("Apply this rule to an app, or narrow it to windows with a particular title.");
+    let mut matches = Section::new(&ui, "Matching conditions")
+        .description("Match an application or window title.");
     let existing = model
         .source
         .borrow()
@@ -990,7 +995,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         }
     }));
     matches = matches.row(SettingsRow::new(&ui, "Application", picker_view)).footer(message);
-    let advanced = VStack::new(&ui).spacing(8.0);
+    let mut advanced = Section::new(&ui, "");
     for (title, field) in [
         ("Bundle identifier", 0),
         ("Application name", 1),
@@ -1034,7 +1039,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         if field == 2 {
             matches = matches.row(row);
         } else {
-            advanced.add(row);
+            advanced = advanced.row(row);
         }
     }
     matches = matches.content(Disclosure::new(&ui, "Advanced matching", advanced));
@@ -1085,14 +1090,7 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
                     r.manage = v;
                 }
             },
-        ));
-    let note = WrappingLabel::new(
-        &ui,
-        "Automatic manages normal windows and ignores special windows when appropriate. Manage always includes matching windows; Ignore excludes them.",
-    );
-    note.ns_text_field().setFont(Some(&Font::caption()));
-    note.ns_text_field().setTextColor(Some(&cgs::Color::secondary_label()));
-    let actions = actions.footer(note);
+        ).help("Automatic manages normal windows and ignores special windows when appropriate. Manage always includes matching windows; Ignore excludes them."));
     let mut geometry = Section::new(&ui, "Initial size and position").description(
         "Leave blank to use the existing geometry. Position applies to floating windows.",
     );
@@ -1285,7 +1283,7 @@ pub(super) fn display_overrides(
     .on_open(move |index| {
         if let Some(model) = weak.upgrade() {
             let (uuid, name) = &entries[index];
-            editor_sheet(
+            record_editor(
                 ui,
                 &model,
                 name,

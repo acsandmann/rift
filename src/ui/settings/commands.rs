@@ -239,6 +239,7 @@ pub(super) fn recorded_key(key: &KeyShortcut) -> Option<String> {
 pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mode = Rc::new(RefCell::new("default".to_string()));
+    let query = Rc::new(RefCell::new(String::new()));
     let table = SettingsList::<(String, String)>::new(
         &ui,
         |(_, action)| action.clone(),
@@ -249,13 +250,16 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     .empty_message("No shortcuts in this shortcut set");
     let weak_model = Rc::downgrade(model);
     let mode_edit = mode.clone();
+    let edit_query = query.clone();
     let edit_binding: Rc<dyn Fn(usize)> = Rc::new(move |i| {
         if let Some(model) = weak_model.upgrade() {
-            let item = model
+            let item = matching_bindings(
+                &model
                 .source
-                .borrow()
-                .keymap(&mode_edit.borrow())
-                .and_then(|m| m.iter().nth(i).map(|(k, c)| (k.clone(), c.clone())));
+                .borrow(),
+                &mode_edit.borrow(),
+                &edit_query.borrow(),
+            ).nth(i).map(|(key, command)| (key.clone(), command.clone()));
             if let Some((key, cmd)) = item {
                 binding_sheet(ui, &model, mode_edit.borrow().clone(), Some(key), cmd);
             }
@@ -280,17 +284,22 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let mode_names = names.clone();
     let weak_model = Rc::downgrade(model);
     let weak_table = Rc::downgrade(&table);
+    let mode_query = query.clone();
     let popup = Rc::new(Popup::new(&ui).on_change(move |i| {
         if let Some(name) = mode_names.borrow().get(i) {
             *selected_mode.borrow_mut() = name.clone();
         }
         if let (Some(model), Some(table)) = (weak_model.upgrade(), weak_table.upgrade()) {
-            refresh_bindings(&table, &model.source.borrow(), &selected_mode.borrow());
+            table.set_rows_if_changed(binding_rows(
+                &model.source.borrow(), &selected_mode.borrow(),
+                &mode_query.borrow(),
+            ));
         }
     }));
     let weak_popup = Rc::downgrade(&popup);
     let weak_table = Rc::downgrade(&table);
     let current_mode = mode.clone();
+    let sync_query = query.clone();
     let last = RefCell::new(Vec::new());
     f.sync.push(Box::new(move |s| {
         let mut modes = vec!["default".to_string()];
@@ -310,7 +319,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                 .set_selected(modes.iter().position(|v| v == &*current_mode.borrow()).unwrap_or(0));
         }
         *names.borrow_mut() = modes;
-        let rows = binding_rows(s, &current_mode.borrow());
+        let rows = binding_rows(s, &current_mode.borrow(), &sync_query.borrow());
         if *last.borrow() != rows {
             if let Some(table) = weak_table.upgrade() {
                 table.set_rows(rows.clone());
@@ -343,12 +352,12 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let weak_model = Rc::downgrade(model);
     let weak_table = Rc::downgrade(&table);
     let selected_mode = mode.clone();
+    let remove_query = query.clone();
     let remove_binding: Rc<dyn Fn()> = Rc::new(move || {
         if let (Some(model), Some(table)) = (weak_model.upgrade(), weak_table.upgrade()) {
             if let Some(i) = table.selection() {
                 let name = selected_mode.borrow().clone();
-                let key =
-                    model.source.borrow().keymap(&name).and_then(|m| m.keys().nth(i).cloned());
+                let key = matching_bindings(&model.source.borrow(), &name, &remove_query.borrow()).nth(i).map(|(key, _)| key.clone());
                 if let Some(key) = key {
                     Model::submit(
                         &weak_model,
@@ -368,6 +377,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let duplicate_table = Rc::downgrade(&table);
     let duplicate_model = Rc::downgrade(model);
     let duplicate_mode = mode.clone();
+    let duplicate_query = query.clone();
     let menu = Menu::new(&ui)
         .item(MenuItem::new(&ui, "Edit Shortcut…").on_click(move || {
             if let Some(index) = weak_table.upgrade().and_then(|table| table.selection()) {
@@ -380,11 +390,9 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             {
                 let mode = duplicate_mode.borrow().clone();
                 let command = table.selection().and_then(|index| {
-                    model
+                    matching_bindings(&model
                         .source
-                        .borrow()
-                        .keymap(&mode)
-                        .and_then(|map| map.values().nth(index).cloned())
+                        .borrow(), &mode, &duplicate_query.borrow()).nth(index).map(|(_, command)| command.clone())
                 });
                 if let Some(command) = command {
                     binding_sheet(ui, &model, mode, None, command);
@@ -435,14 +443,27 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let management = Popup::actions(&ui, "Shortcut Set Actions", menu);
     let mode_controls = HStack::new(&ui).push(popup).spacer(&ui).push(management);
     let combinations = modifier_combinations(&mut f, model);
+    let search_model = Rc::downgrade(model);
+    let search_table = Rc::downgrade(&table);
+    let search = SearchField::new(&ui).placeholder("Search shortcuts").on_change(move |value| {
+        *query.borrow_mut() = value.to_lowercase();
+        if let (Some(model), Some(table)) = (search_model.upgrade(), search_table.upgrade()) {
+            table.set_rows_if_changed(binding_rows(
+                &model.source.borrow(),
+                &mode.borrow(),
+                &query.borrow(),
+            ));
+        }
+    });
     f.finish(
         SettingsPage::new(&ui, "")
+            .content_width(760.0)
             .section(Section::new(&ui, "Shortcut set")
-                .description("Choose which shortcuts to edit. Rift starts with the Default set; a shortcut can switch to another set.")
+                .description("Rift starts with the Default set.")
                 .content(mode_controls))
             .section(
                 Section::new(&ui, "Keyboard shortcuts")
-                    .description("Click a shortcut to edit it. Use + to add one.")
+                    .content(search)
                     .content(table)
                     .footer(error)
                     .footer(Caption::new(&ui, "⌘ Command   ⌥ Option   ⌃ Control   ⇧ Shift")),
@@ -456,14 +477,25 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
 ,
     )
 }
-fn binding_rows(s: &ConfigSource, mode: &str) -> Vec<(String, String)> {
+fn matching_bindings<'a>(
+    s: &'a ConfigSource,
+    mode: &str,
+    query: &'a str,
+) -> impl Iterator<Item = (&'a String, &'a WmCommand)> {
     s.keymap(mode)
         .into_iter()
-        .flat_map(|m| m.iter().map(|(key, cmd)| (glyphs(key, s), action_name(cmd))))
-        .collect()
+        .flat_map(|map| map.iter())
+        .filter(move |(key, command)| {
+            query.is_empty()
+                || action_name(command).to_lowercase().contains(query)
+                || glyphs(key, s).to_lowercase().contains(query)
+                || key.to_lowercase().contains(query)
+        })
 }
-fn refresh_bindings(table: &SettingsList<(String, String)>, s: &ConfigSource, mode: &str) {
-    table.set_rows_if_changed(binding_rows(s, mode));
+fn binding_rows(s: &ConfigSource, mode: &str, query: &str) -> Vec<(String, String)> {
+    matching_bindings(s, mode, query)
+        .map(|(key, cmd)| (glyphs(key, s), action_name(cmd)))
+        .collect()
 }
 
 fn save_sheet(model: &Weak<Model>, edit: SourceEdit, message: &Rc<ValidationMessage>) {

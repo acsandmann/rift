@@ -78,6 +78,12 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
         });
     });
     let identity = HStack::new(&ui).spacing(16.0);
+    if let Some(icon) = NSApplication::sharedApplication(ui.mtm()).applicationIconImage() {
+        let icon = ImageView::new(&ui, &icon);
+        icon.width(64.0);
+        icon.height(64.0);
+        identity.add(icon);
+    }
     identity.add(
         VStack::new(&ui)
             .spacing(4.0)
@@ -118,14 +124,11 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
     });
     resources.set_rows(destinations);
     VStack::new(&ui)
-        .spacing(24.0)
+        .spacing(16.0)
         .push(identity)
         .push(
             Section::new(&ui, "")
-                .row(
-                    SettingsRow::new(&ui, "Software updates", check)
-                        .description("Find out if a newer release is available."),
-                )
+                .row(SettingsRow::new(&ui, "Software updates", check))
                 .footer(status),
         )
         .push(Section::new(&ui, "Resources").content(resources))
@@ -643,6 +646,7 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
     page = page.section(section.content(Disclosure::new(&ui, "Advanced swipe settings", tuning)));
     let mut section = Section::new(&ui, "Scrolling layout gestures")
         .description("These gestures navigate the Scrolling layout strip.");
+    let mut tuning = Section::new(&ui, "");
     for field in ScrollingGestureSettings::fields() {
         let row = if field.key == "animate" {
             let row = f.inherited_popup(
@@ -656,9 +660,15 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
         } else {
             f.schema_field(field, |s| &s.settings.layout.scrolling.gestures, |s| &mut s.settings.layout.scrolling.gestures)
         };
-        if let Some(row) = row { section = section.row(row); }
+        if let Some(row) = row {
+            if matches!(field.key, "vertical_tolerance" | "workspace_switch_threshold") {
+                tuning = tuning.row(row);
+            } else {
+                section = section.row(row);
+            }
+        }
     }
-    page = page.section(section);
+    page = page.section(section.content(Disclosure::new(&ui, "Advanced scrolling settings", tuning)));
     let section = f.schema_section("Drag & Drop", "", |s| &s.settings.drag_drop, |s| &mut s.settings.drag_drop);
     page = page.section(section);
     let section = Section::new(&ui, "Pointer movement").row(f.popup(
@@ -672,7 +682,11 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
         |s, v| s.settings.horizontal_mouse_warp = v,
     ));
     page = page.section(section);
-    page = page.section(focus_suspend(&mut f));
+    page = page.section(Disclosure::new(
+        &ui,
+        "Advanced focus settings",
+        focus_suspend(&mut f),
+    ));
     f.finish(page)
 }
 fn interface(ui: Ui, model: &Rc<Model>) -> Page {
@@ -704,7 +718,7 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     page = page.section(section.row(row));
     let section = f.schema_rows(Section::new(&ui, "Overview").description("Requires restarting Rift."), "", |s| &s.settings.ui.mission_control, |s| &mut s.settings.ui.mission_control);
     page = page.section(section);
-    let section = f.schema_rows(Section::new(&ui, "Stack Line").description("Experimental"), "", |s| &s.settings.ui.stack_line, |s| &mut s.settings.ui.stack_line);
+    let section = f.schema_rows(Section::new(&ui, "Stack Line").description("Experimental window indicators."), "", |s| &s.settings.ui.stack_line, |s| &mut s.settings.ui.stack_line);
     let section = section.row({
         let row = f.color(
             "Selected color",
@@ -738,23 +752,11 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
 fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
-    page = page.section(super::editors::strings(
-        &mut f,
-        "Startup commands",
-        |s| s.settings.run_on_start.clone(),
-        |s, v| s.settings.run_on_start = v,
-    ));
-    page = page.section(super::editors::strings(
-        &mut f,
-        "Autofocus blacklist",
-        |s| s.settings.auto_focus_blacklist.clone(),
-        |s, v| s.settings.auto_focus_blacklist = v,
-    ));
     let path = model.config_path.clone();
     let open = path.clone();
     let reveal = path.clone();
     let actions = HStack::new(&ui)
-        .push(Button::new(&ui, "Open Config File").on_click(move || {
+        .push(Button::new(&ui, "Open…").on_click(move || {
             let _ = std::process::Command::new("open").arg(&open).spawn();
         }))
         .push(Button::new(&ui, "Reveal in Finder").on_click(move || {
@@ -763,7 +765,7 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let weak_model = Rc::downgrade(model);
-    let reload = Button::new(&ui, "Reload From Disk").on_click(move || {
+    let reload = Button::new(&ui, "Reload").on_click(move || {
         if let Some(model) = weak_model.upgrade() {
             let error = error.clone();
             let _ = model.requests.send(Request {
@@ -779,12 +781,31 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
             });
         }
     });
+    let location = Label::new(&ui, &path.to_string_lossy()).wrapping();
+    location.ns_text_field().setSelectable(true);
+    location.ns_text_field().setMaximumNumberOfLines(1);
+    location.ns_view().setToolTip(Some(&objc2_foundation::NSString::from_str(
+        &path.to_string_lossy(),
+    )));
     page = page.section(
         Section::new(&ui, "Configuration file")
-            .description(&path.to_string_lossy())
+            .content(location)
             .row(f.schema_field(crate::common::config::Settings::field("hot_reload").unwrap(), |s| &s.settings, |s| &mut s.settings).unwrap())
             .content(actions.push(reload))
             .footer(message),
+    );
+    page = page.section(super::editors::strings(
+        &mut f,
+        "Startup commands",
+        |s| s.settings.run_on_start.clone(),
+        |s, v| s.settings.run_on_start = v,
+    ));
+    page = page.section(super::editors::strings(
+        &mut f,
+        "Autofocus blacklist",
+        |s| s.settings.auto_focus_blacklist.clone(),
+        |s, v| s.settings.auto_focus_blacklist = v,
+    ),
     );
     f.finish(page)
 }

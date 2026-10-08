@@ -651,6 +651,7 @@ pub struct EditableList<T: 'static> {
 impl<T: 'static> EditableList<T> {
     pub fn new(ui: &Ui, label: impl Fn(&T) -> String + 'static) -> Self {
         let controls = AddRemoveControl::new(ui);
+        controls.show_add(false);
         controls.set_remove_enabled(false);
         let selection: Rc<RefCell<Option<Selection>>> = Rc::new(RefCell::new(None));
         let cb = selection.clone();
@@ -711,6 +712,7 @@ impl<T: 'static> EditableList<T> {
     }
 
     pub fn on_add(mut self, f: impl FnMut() + 'static) -> Self {
+        self.controls.show_add(true);
         self.controls = self.controls.on_add(f);
         self
     }
@@ -1074,7 +1076,7 @@ impl<T: 'static> SettingsList<T> {
             };
             let total = (count as f64 * (table.rowHeight() + table.intercellSpacing().height)
                 + native_padding)
-                .max(if self.navigation.get() && count > 0 { table.rowHeight() } else { 64.0 });
+                .max(if count > 0 { table.rowHeight() } else { 64.0 });
             let fitted = total.min(*maximum);
             if height.constant() != fitted {
                 height.setConstant(fitted);

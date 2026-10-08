@@ -753,6 +753,15 @@ impl AddRemoveControl {
 
     pub fn set_remove_enabled(&self, value: bool) { self.remove.set_enabled(value); }
 
+    pub(crate) fn show_add(&self, visible: bool) {
+        self.add.set_hidden(!visible);
+        self.stack
+            .ns_stack_view()
+            .arrangedSubviews()
+            .objectAtIndex(1)
+            .setHidden(!visible);
+    }
+
     pub(crate) fn remove_button(&self) -> &NSButton { self.remove.ns_button() }
 }
 impl NativeView for AddRemoveControl {
