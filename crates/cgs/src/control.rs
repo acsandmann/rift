@@ -238,6 +238,12 @@ impl Popup {
         popup
     }
 
+    pub fn toolbar_style(self) -> Self {
+        self.native.setControlSize(NSControlSize::Regular);
+        self.native.setBezelStyle(action_button_bezel());
+        self
+    }
+
     pub fn items(self, values: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
         self.set_items(values);
         self

@@ -66,8 +66,10 @@ pub fn run(ui: Ui) {
             false,
         );
         let toolbar = settings.window.toolbar().ns_toolbar();
-        let back = toolbar.items().iter().find(|item| item.itemIdentifier().to_string() == "cgs.back").unwrap();
-        let forward = toolbar.items().iter().find(|item| item.itemIdentifier().to_string() == "cgs.forward").unwrap();
+        let history = toolbar.items().iter()
+            .find_map(|item| item.downcast::<objc2_app_kit::NSToolbarItemGroup>().ok()).unwrap();
+        let back = history.subitems().objectAtIndex(0);
+        let forward = history.subitems().objectAtIndex(1);
         assert!(back.isEnabled(), "enable Back after visiting a section");
         assert!(!forward.isEnabled(), "disable Forward at the latest destination");
         sidebar.selectRowIndexes_byExtendingSelection(

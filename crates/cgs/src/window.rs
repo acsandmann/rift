@@ -188,9 +188,11 @@ impl SettingsWindow {
     }
 
     pub fn page_title(mut self, ui: &Ui, title: Rc<crate::Label>) -> Self {
-        title.ns_text_field().setFont(Some(&crate::Font::section_title()));
+        title.ns_text_field().setFont(Some(&NSFont::systemFontOfSize_weight(
+            15.0, unsafe { NSFontWeightSemibold },
+        )));
         title.width(180.0);
-        title.height(22.0);
+        title.height(20.0);
         self.0.native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         let toolbar = crate::Toolbar::navigation_title(ui, "cgs.settings.pages", Some(title));
         toolbar.attach(&self.0.native);

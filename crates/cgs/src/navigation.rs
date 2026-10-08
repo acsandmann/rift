@@ -257,7 +257,10 @@ define_class!(
                             NSToolbarItem::alloc(self.mtm()),
                             identifier,
                         );
-                        item.setView(Some(title.ns_view()));
+                        let label = HStack::new(&Ui::new(self.mtm()))
+                            .insets(Insets { top: 0.0, left: 3.0, bottom: 0.0, right: 0.0 })
+                            .push(title.clone());
+                        item.setView(Some(label.ns_view()));
                         item.setBordered(false);
                         item
                     })
@@ -435,6 +438,14 @@ impl Toolbar {
             next.setTarget(Some(&self.forward_target));
             next.setAction(Some(objc2::sel!(invoke:)));
         }
+        let arrows = NSToolbarItemGroup::initWithItemIdentifier(
+            NSToolbarItemGroup::alloc(ui.mtm()), &NSString::from_str("cgs.history"));
+        arrows.setLabel(&NSString::from_str("Back and Forward"));
+        arrows.setNavigational(true);
+        arrows.setBordered(true);
+        arrows.setSelectionMode(NSToolbarItemGroupSelectionMode::Momentary);
+        arrows.setControlRepresentation(NSToolbarItemGroupControlRepresentation::Expanded);
+        arrows.setSubitems(&NSArray::from_retained_slice(&[delegate.ivars().back.clone(), next.clone()]));
         let title = NSMenuToolbarItem::initWithItemIdentifier(
             NSMenuToolbarItem::alloc(ui.mtm()),
             &NSString::from_str("cgs.page-menu"),
@@ -474,7 +485,7 @@ impl Toolbar {
         title.setAutovalidates(false);
         delegate.ivars().back.setBordered(false);
         delegate.ivars().back.setToolTip(Some(&NSString::from_str("Back")));
-        *delegate.ivars().navigation.borrow_mut() = vec![next, title.into_super()];
+        *delegate.ivars().navigation.borrow_mut() = vec![next, title.into_super(), arrows.into_super()];
         *self.menu.borrow_mut() = Some((menu, popup));
         let index = self
             .native
@@ -482,9 +493,9 @@ impl Toolbar {
             .iter()
             .position(|item| item.itemIdentifier().to_string() == "cgs.page-title")
             .unwrap_or(0);
-        for (offset, identifier) in ["cgs.back", "cgs.forward"].into_iter().enumerate() {
-            self.native.insertItemWithItemIdentifier_atIndex(&NSString::from_str(identifier), (index + offset) as isize);
-        }
+        self.native.insertItemWithItemIdentifier_atIndex(
+            &NSString::from_str("cgs.history"), index as isize);
+
     }
 
     pub fn update_navigation(&self, back: bool, forward: bool, title: &str, has_menu: bool) {
@@ -523,6 +534,43 @@ impl Toolbar {
             if let Some(index) = index { self.native.removeItemAtIndex(index as isize); }
         }
     }
+    /// Native trailing filter and search controls owned by the selected page.
+    pub fn set_page_controls(&self, ui: &Ui, controls: Option<(&NSPopUpButton, &NSSearchField)>) {
+        let Some(delegate) = &self.delegate else { return; };
+        for id in ["cgs.page-filter", "cgs.page-search"] {
+            let id = NSString::from_str(id);
+            if let Some(index) = self.native.items().iter().position(|item| item.itemIdentifier() == id) {
+                if let Some(glass) = self.native.items().objectAtIndex(index).view().and_then(|view| view.downcast::<NSGlassEffectView>().ok()) {
+                    glass.setContentView(None);
+                }
+                self.native.removeItemAtIndex(index as isize);
+            }
+            delegate.ivars().navigation.borrow_mut().retain(|item| item.itemIdentifier() != id);
+        }
+        if let Some((filter, search)) = controls {
+            let item = NSMenuToolbarItem::initWithItemIdentifier(
+                NSMenuToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.page-filter"));
+            item.setLabel(&NSString::from_str("Filter rules"));
+            let content: Retained<NSView> = unsafe { Retained::retain(filter as *const NSPopUpButton as *mut NSView).unwrap() };
+            let glass = GlassEffectView::new(ui, content).corner_radius(18.0);
+            glass.width(36.0);
+            glass.height(36.0);
+            item.setView(Some(glass.ns_view()));
+            if let Some(menu) = filter.menu() { item.setMenu(&menu); }
+            item.setShowsIndicator(false);
+            item.setBordered(false);
+            let search_item = NSSearchToolbarItem::initWithItemIdentifier(
+                NSSearchToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.page-search"));
+            search_item.setLabel(&NSString::from_str("Search rules"));
+            search_item.setSearchField(search);
+            search_item.setPreferredWidthForSearchField(216.0);
+            delegate.ivars().navigation.borrow_mut().extend([item.into_super(), search_item.into_super()]);
+            for id in ["cgs.page-filter", "cgs.page-search"] {
+                self.native.insertItemWithItemIdentifier_atIndex(&NSString::from_str(id), self.native.items().len() as isize);
+            }
+        }
+    }
+
     pub fn ns_toolbar(&self) -> &NSToolbar { &self.native }
 }
 
@@ -533,6 +581,10 @@ impl Drop for Toolbar {
                 delegate.ivars().back.setTarget(None);
                 delegate.ivars().back.setAction(None);
                 for item in delegate.ivars().navigation.borrow().iter() {
+                    if item.itemIdentifier().to_string() == "cgs.page-filter" {
+                        if let Some(glass) = item.view().and_then(|view| view.downcast::<NSGlassEffectView>().ok()) { glass.setContentView(None); }
+                        item.setView(None);
+                    }
                     item.setTarget(None);
                     item.setAction(None);
                 }

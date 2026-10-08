@@ -54,6 +54,7 @@ type SyncControl = Box<dyn Fn(&ConfigSource)>;
 pub(super) struct Page {
     view: Rc<dyn NativeView>,
     sync: Vec<SyncControl>,
+    header: Option<(Rc<Popup>, Rc<SearchField>)>,
     synced_revision: Cell<Option<u64>>,
 }
 
@@ -478,6 +479,9 @@ impl Settings {
         let page = pages[category].as_ref().unwrap();
         page.synchronize(model);
         host.set_cached_page(page.view.clone());
+        if let Some(toolbar) = model.toolbar.borrow().upgrade() {
+            toolbar.set_page_controls(&ui, page.header.as_ref().map(|(filter, search)| (filter.ns_popup_button(), search.ns_search_field())));
+        }
     }
 
     pub async fn refresh_installed_applications(&self) {
@@ -561,6 +565,7 @@ impl Drop for Settings {
     fn drop(&mut self) {
         // End the sheet while its weak parent still points to the live Settings window.
         self.model.close_sheet();
+        self.window.toolbar().set_page_controls(&Ui::new(self.window.ns_window().mtm()), None);
         self._host.clear();
         self.pages.borrow_mut().clear();
     }
@@ -586,6 +591,7 @@ impl FormBuilder {
         Page {
             view: Rc::new(view),
             sync: self.sync,
+            header: None,
             synced_revision: Cell::new(None),
         }
     }

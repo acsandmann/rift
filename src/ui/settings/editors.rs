@@ -437,6 +437,9 @@ fn workspace_popup(
 
 pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
+    let visible = Rc::new(RefCell::new(Vec::<usize>::new()));
+    let query = Rc::new(RefCell::new(String::new()));
+    let filter = Rc::new(Cell::new(0usize));
     let message = Rc::new(ValidationMessage::new(&ui));
     let weak = Rc::downgrade(model);
     let edit_rule: Rc<dyn Fn(usize)> = Rc::new(move |index| {
@@ -450,9 +453,20 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
                 .map(|rule| rule_name(&model, rule))
                 .unwrap_or_else(|| "App Rule".into());
             record_editor(
-                ui, &model, &title, |draft| rule_detail(ui, draft, index),
+                ui,
+                &model,
+                &title,
+                |draft| rule_detail(ui, draft, index),
                 true,
             );
+        }
+    });
+    let edit_record = edit_rule;
+    let next_editor = edit_record.clone();
+    let indices = visible.clone();
+    let edit_rule: Rc<dyn Fn(usize)> = Rc::new(move |row| {
+        if let Some(&index) = indices.borrow().get(row) {
+            edit_record(index);
         }
     });
     let action = edit_rule.clone();
@@ -469,15 +483,22 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             rule_behavior,
         )
         .full_length()
-        .empty_message("No app rules")
+        .empty_message("No matching rules")
         .symbol("app")
-        .images(application_icons(|rule: &AppWorkspaceRule| rule.app_id.clone()))
+        .images(application_icons(|rule: &AppWorkspaceRule| {
+            rule.app_id.clone()
+        }))
         .on_open(move |index| action(index))
         .reorderable(true)
         .on_reorder({
             let weak = Rc::downgrade(model);
             let error = Rc::downgrade(&message);
+            let indices = visible.clone();
             move |from, to| {
+                let indices = indices.borrow();
+                let (Some(&from), Some(&to)) = (indices.get(from), indices.get(to)) else {
+                    return;
+                };
                 Model::submit(
                     &weak,
                     Box::new(move |s| {
@@ -512,7 +533,6 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         }
     });
     let weak = Rc::downgrade(model);
-    let next_editor = edit_rule.clone();
     let controls = AddRemoveControl::new(&ui).on_add(move || {
         if let Some(model) = weak.upgrade() {
             add_rule(ui, &model, next_editor.clone());
@@ -521,8 +541,13 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     let weak = Rc::downgrade(model);
     let weak_table = Rc::downgrade(&table);
     let error = Rc::downgrade(&message);
+    let indices = visible.clone();
     let remove_rule: Rc<dyn Fn()> = Rc::new(move || {
-        if let Some(index) = weak_table.upgrade().and_then(|table| table.selection()) {
+        if let Some(index) = weak_table
+            .upgrade()
+            .and_then(|table| table.selection())
+            .and_then(|row| indices.borrow().get(row).copied())
+        {
             Model::submit(
                 &weak,
                 Box::new(move |s| {
@@ -560,25 +585,110 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         }
     });
     let weak_table = Rc::downgrade(&table);
-    let last = RefCell::new(Vec::new());
-    f.sync.push(Box::new(move |source| {
-        let rules = &source.virtual_workspaces.app_rules;
-        if *last.borrow() != *rules {
-            if let Some(table) = weak_table.upgrade() {
-                let selected = table.selection().filter(|index| *index < rules.len());
-                table.set_rows(rules.clone());
-                table.set_selected(selected);
+    let weak_model = Rc::downgrade(model);
+    let indices = visible.clone();
+    let search_query = query.clone();
+    let selected_filter = filter.clone();
+    let refresh: Rc<dyn Fn()> = Rc::new(move || {
+        let (Some(model), Some(table)) = (weak_model.upgrade(), weak_table.upgrade()) else {
+            return;
+        };
+        let source = model.source.borrow();
+        let query = search_query.borrow();
+        let matches: Vec<_> = source
+            .virtual_workspaces
+            .app_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| {
+                let kind = match selected_filter.get() {
+                    0 => true,
+                    index => match &rule.workspace {
+                        Some(WorkspaceSelector::Index(workspace)) => *workspace == index - 1,
+                        Some(WorkspaceSelector::Name(name)) => *name == workspace_name(&source, index - 1),
+                        None => false,
+                    },
+                };
+                kind && (query.is_empty()
+                    || format!(
+                        "{} {} {} {rule:?}",
+                        rule_name(&model, rule),
+                        rule_summary(rule),
+                        rule_behavior(rule)
+                    )
+                    .to_lowercase()
+                    .contains(query.as_str()))
+            })
+            .collect();
+        *indices.borrow_mut() = matches.iter().map(|(index, _)| *index).collect();
+        table.set_rows_if_changed(matches.into_iter().map(|(_, rule)| rule.clone()).collect());
+    });
+    let update = refresh.clone();
+    f.sync.push(Box::new(move |_| update()));
+    let update = refresh.clone();
+    let search = SearchField::new(&ui)
+        .placeholder("Search rules")
+        .on_change(move |value| {
+            *query.borrow_mut() = value.to_lowercase();
+            update();
+        });
+    let tint = Rc::new(RefCell::new(objc2::rc::Weak::<objc2_app_kit::NSPopUpButton>::default()));
+    let menu = Menu::new(&ui);
+    let mut filter_items = Vec::new();
+    let mut choices = vec!["All workspaces".to_owned()];
+    choices.extend(
+        (0..model
+            .source
+            .borrow()
+            .virtual_workspaces
+            .default_workspace_count)
+            .map(|index| workspace_name(&model.source.borrow(), index)),
+    );
+    for (index, title) in choices.into_iter().enumerate() {
+        let filter = filter.clone();
+        let update = refresh.clone();
+        let tint = tint.clone();
+        let item = MenuItem::new(&ui, &title).on_click(move || {
+            filter.set(index);
+            if let Some(button) = tint.borrow().load() {
+                let blue = objc2_app_kit::NSColor::systemBlueColor();
+                button.setContentTintColor(if index == 0 { None } else { Some(&blue) });
             }
-            *last.borrow_mut() = rules.clone();
+            update();
+        });
+        filter_items.push(objc2::rc::Weak::new(item.ns_menu_item()));
+        menu.add(item);
+    }
+    let menu = menu.on_tracking(move |_| {
+        for (index, item) in filter_items.iter().enumerate() {
+            if let Some(item) = item.load() {
+                item.setState(if filter.get() == index { 1 } else { 0 });
+            }
         }
-    }));
-    f.finish(SettingsPage::new(&ui, "")
+    });
+    let filters = Popup::actions(&ui, "Filter rules", menu).toolbar_style();
+    let filter_button = filters.ns_popup_button();
+    let symbol = Symbol::named("line.3.horizontal.decrease");
+    if let Some(header) = filter_button.menu().and_then(|menu| menu.itemAtIndex(0)) {
+        header.setImage(symbol.as_deref());
+    }
+    filter_button.setImage(symbol.as_deref());
+    filter_button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageOnly);
+    *tint.borrow_mut() = objc2::rc::Weak::new(filter_button);
+    filter_button.setBordered(false);
+    filters.width(36.0);
+    filters.height(36.0);
+    search.width(216.0);
+    let header = (Rc::new(filters), Rc::new(search));
+    let mut page = f.finish(SettingsPage::new(&ui, "")
         .content_width(760.0)
         .subtitle("Choose which windows Rift manages and where they open. Drag rules to change their order.")
         .section(table)
         .bottom_bar(HStack::new(&ui).push(controls).spacer(&ui).push(edit))
         .section(message)
-        )
+        );
+    page.header = Some(header);
+    page
 }
 
 fn rule_behavior(rule: &AppWorkspaceRule) -> String {
