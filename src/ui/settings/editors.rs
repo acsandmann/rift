@@ -13,9 +13,10 @@ fn record_editor(
     build: impl FnOnce(&Rc<Model>) -> Page,
     scrolling: bool,
 ) {
-    let Some(parent) = model.window.borrow().load() else {
+    let parent = model.window.borrow().clone();
+    if !parent.is_open() {
         return;
-    };
+    }
     let draft = model.draft();
     let page = Rc::new(build(&draft));
     page.synchronize(&draft);
@@ -43,10 +44,8 @@ fn record_editor(
         let (Some(model), Some(draft)) = (weak.upgrade(), weak_draft.upgrade()) else {
             return;
         };
-        if let Some(sheet) = model.sheet.borrow().as_ref() {
-            if !sheet.ns_window().makeFirstResponder(None) {
-                return;
-            }
+        if model.sheet.borrow().as_ref().is_some_and(|sheet| !sheet.end_editing()) {
+            return;
         }
         let value = draft.source.borrow().clone();
         let base = draft.draft_base.clone().unwrap();
@@ -508,7 +507,7 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             action: Action::RefreshRuntime,
             finish: Box::new(move |_| {
                 if let Some(table) = names.upgrade() {
-                    table.ns_table_view().reloadData();
+                    table.reload();
                 }
             }),
         });
@@ -562,14 +561,12 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     controls.set_remove_enabled(false);
     edit.set_enabled(false);
     let weak_controls = Rc::downgrade(&controls);
-    let weak_edit = objc2::rc::Weak::new(edit.ns_button());
+    let weak_edit = WeakView::new(&edit);
     table.set_on_select(move |selection| {
         if let Some(controls) = weak_controls.upgrade() {
             controls.set_remove_enabled(selection.is_some());
         }
-        if let Some(edit) = weak_edit.load() {
-            edit.setEnabled(selection.is_some());
-        }
+        weak_edit.set_enabled(selection.is_some());
     });
     let weak_table = Rc::downgrade(&table);
     let weak_model = Rc::downgrade(model);
@@ -636,14 +633,12 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
             }
             update();
         });
-        filter_items.push(objc2::rc::Weak::new(item.ns_menu_item()));
+        filter_items.push(item.weak());
         menu.add(item);
     }
     let menu = menu.on_tracking(move |_| {
         for (index, item) in filter_items.iter().enumerate() {
-            if let Some(item) = item.load() {
-                item.setState(if filter.get() == index { 1 } else { 0 });
-            }
+            item.set_checked(filter.get() == index);
         }
     });
     let header = Rc::new(HeaderControls::new(
@@ -702,17 +697,8 @@ fn filtered_applications(model: &Model, query: &str) -> Vec<(String, AppMatch)> 
         .collect()
 }
 
-fn application_icons<T>(
-    bundle_id: impl Fn(&T) -> Option<String>,
-) -> impl Fn(&T) -> Option<objc2::rc::Retained<objc2_app_kit::NSImage>> {
-    move |item| {
-        let id = bundle_id(item)?;
-        let workspace = objc2_app_kit::NSWorkspace::sharedWorkspace();
-        workspace
-            .URLForApplicationWithBundleIdentifier(&objc2_foundation::NSString::from_str(&id))
-            .and_then(|url| url.path())
-            .map(|path| workspace.iconForFile(&path))
-    }
+fn application_icons<T>(bundle_id: impl Fn(&T) -> Option<String>) -> impl Fn(&T) -> Option<Image> {
+    move |item| Application::icon_for_bundle(&bundle_id(item)?)
 }
 
 fn app_picker(
@@ -806,7 +792,7 @@ fn app_picker(
     let popover = Rc::new(Popover::new(&ui, content));
     *dismissal.borrow_mut() = Rc::downgrade(&popover);
     let button = Button::new(&ui, "Change…");
-    let anchor = objc2::rc::Weak::new(button.ns_view());
+    let anchor = WeakView::new(&button);
     let button = button.on_click(move || {
         if let Some(view) = anchor.load() {
             popover.show(&view);
@@ -994,8 +980,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
     content.min_width(380.0);
     let native = Sheet::new(&ui, "Add Rule", content);
     native.fit_content();
-    if let Some(window) = model.window.borrow().load() {
-        native.show(&window);
+    if native.show(&model.window.borrow()) {
         *model.sheet.borrow_mut() = Some(native);
     }
 }

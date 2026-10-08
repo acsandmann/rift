@@ -3,15 +3,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
 use cgs::*;
-use objc2::MainThreadOnly;
-use objc2_app_kit::NSApplication;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::actor::config::SourceEdit;
 use crate::common::config::ConfigSource;
 
 mod applications;
-pub(crate) use applications::installed as installed_applications;
 mod commands;
 mod editors;
 mod pages;
@@ -40,7 +37,7 @@ struct Model {
     sheet_model: RefCell<Option<Rc<Model>>>,
     draft_changed: RefCell<Option<Box<dyn Fn(bool)>>>,
     draft_base: Option<ConfigSource>,
-    window: RefCell<objc2::rc::Weak<objc2_app_kit::NSWindow>>,
+    window: RefCell<WindowRef>,
     displays: RefCell<Vec<crate::sys::screen::ScreenInfo>>,
     config_path: std::path::PathBuf,
     applications: RefCell<Vec<rift_protocol::ApplicationData>>,
@@ -185,6 +182,7 @@ impl NavigationState {
 }
 
 pub struct Settings {
+    ui: Ui,
     window: SettingsWindow,
     model: Rc<Model>,
     _host: Rc<PageHost>,
@@ -213,7 +211,7 @@ impl Settings {
             sheet_model: RefCell::new(None),
             draft_changed: RefCell::new(None),
             draft_base: None,
-            window: RefCell::new(objc2::rc::Weak::default()),
+            window: RefCell::new(WindowRef::default()),
             displays: RefCell::new(displays),
             config_path,
             applications: RefCell::new(applications),
@@ -307,8 +305,7 @@ impl Settings {
                 if let Some(navigate) = model.navigate.borrow().as_ref() {
                     navigate(id);
                 }
-                host.ns_view().layoutSubtreeIfNeeded();
-                search::reveal(host.ns_view(), destination.title, destination.location);
+                host.reveal(search::section(destination.location), destination.title);
             }
         }));
         let open_row = open_result.clone();
@@ -317,6 +314,7 @@ impl Settings {
         let destinations_for_selection = destinations.clone();
         let results = Rc::new(
             Table::new(&ui)
+                .source_list()
                 .column("setting", "", 0.0)
                 .cells(move |row: &search::Row, _| {
                     let content = VStack::new(&ui).spacing(3.0).insets(Insets {
@@ -330,8 +328,7 @@ impl Settings {
                             Box::new(content.push(SubsectionTitle::new(&ui, title))) as Box<dyn NativeView>
                         }
                         search::Row::Setting(result) => {
-                            let description = Caption::new(&ui, &result.description());
-                            description.ns_text_field().setMaximumNumberOfLines(2);
+                            let description = Caption::new(&ui, &result.description()).max_lines(2);
                             let title = Label::new(&ui, result.title);
                             Box::new(content.push(title).push(description))
                         }
@@ -361,10 +358,6 @@ impl Settings {
                     }
                 }),
         );
-        results.ns_table_view().setHeaderView(None);
-        results.ns_table_view().setFloatsGroupRows(false);
-        results.ns_table_view().setStyle(objc2_app_kit::NSTableViewStyle::SourceList);
-        results.ns_scroll_view().setDrawsBackground(false);
         let sidebar_content = Rc::new(PageHost::new(&ui));
         sidebar_content.set_cached_page(sidebar.clone());
         let weak_sidebar_content = Rc::downgrade(&sidebar_content);
@@ -396,7 +389,7 @@ impl Settings {
                     *search_rows.borrow_mut() = rows.clone();
                     results.set_rows(rows);
                     if !found.borrow().is_empty() {
-                        results.ns_table_view().scrollRowToVisible(0);
+                        results.scroll_to(0);
                     }
                     if found.borrow().is_empty() {
                         sidebar_content.set_cached_page(empty.clone());
@@ -428,24 +421,18 @@ impl Settings {
             .page_title(&ui, model.page_title.clone())
             .on_close(on_close)
             .content(NavigationSplitView::new(&ui, sidebar_pane, host.clone()));
-        window.ns_window().setInitialFirstResponder(Some(sidebar.ns_table_view()));
+        window.initial_focus(&*sidebar);
         let menu = Rc::new(Menu::new(&ui));
         let route = navigate.clone();
-        let overview = MenuItem::new(&ui, "All").on_click(move || route(1));
-        overview.ns_menu_item().setTag(1);
+        let overview = MenuItem::new(&ui, "All").tag(1).on_click(move || route(1));
         menu.add(overview);
         menu.add_separator();
         for (title, range) in [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)] {
-            menu.ns_menu().addItem(&objc2_app_kit::NSMenuItem::sectionHeaderWithTitle(
-                &objc2_foundation::NSString::from_str(title),
-                ui.mtm(),
-            ));
+            menu.add_section_header(title);
             for index in range {
                 let route = navigate.clone();
-                let item =
-                    MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).on_click(move || route(9 + index));
-                item.ns_menu_item().setTag((9 + index) as isize);
-                menu.add(item);
+                let item = MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).tag((9 + index) as isize);
+                menu.add(item.on_click(move || route(9 + index)));
             }
         }
         let history_back = history.clone();
@@ -470,11 +457,11 @@ impl Settings {
         );
         window.toolbar().update_navigation(false, false, "General", false);
         *model.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
-        *model.window.borrow_mut() = objc2::rc::Weak::new(window.ns_window());
-        window.ns_window().setContentSize(CGSize::new(880.0, 660.0));
-        window.ns_window().center();
+        *model.window.borrow_mut() = window.handle();
+        window.set_size_centered(CGSize::new(880.0, 660.0));
         Self::select(ui, &model, &host, &pages, 0);
         Self {
+            ui,
             window,
             model,
             _host: host,
@@ -557,24 +544,13 @@ impl Settings {
             if id < 9 {
                 return;
             }
-            Self::select(
-                Ui::new(self.window.ns_window().mtm()),
-                &self.model,
-                &self._host,
-                &self.pages,
-                id,
-            );
+            Self::select(self.ui, &self.model, &self._host, &self.pages, id);
         }
     }
 
-    pub fn show(&self) {
-        // Accessory applications need activation to accept keyboard input.
-        #[allow(deprecated)]
-        NSApplication::sharedApplication(self.window.ns_window().mtm()).activateIgnoringOtherApps(true);
-        self.window.show();
-    }
+    pub fn show(&self) { self.window.present(); }
 
-    pub fn visible(&self) -> bool { self.window.ns_window().isVisible() }
+    pub fn visible(&self) -> bool { self.window.is_visible() }
 
     pub fn synchronize(&self, source: ConfigSource) {
         self.model.replace_source(source);
@@ -596,9 +572,7 @@ impl Drop for Settings {
     fn drop(&mut self) {
         // End the sheet while its weak parent still points to the live Settings window.
         self.model.close_sheet();
-        self.window
-            .toolbar()
-            .set_page_controls(&Ui::new(self.window.ns_window().mtm()), None);
+        self.window.toolbar().set_page_controls(&self.ui, None);
         self._host.clear();
         self.pages.borrow_mut().clear();
     }
@@ -782,7 +756,9 @@ impl FormBuilder {
             let edit_preview = set_preview.clone();
             let preview_input = Rc::downgrade(&input);
             let mut local_preview = None::<ConfigSource>;
-            let slider = Rc::new(Slider::new(&self.ui).range(min, max).on_change(move |v| {
+            let app = Application::shared(&self.ui);
+            let slider = Slider::new(&self.ui).range(min, max).continuous(continuous);
+            let slider = Rc::new(slider.on_change(move |v| {
                 if let Some(model) = model.upgrade() {
                     let (min, max) = range(&model.source.borrow());
                     let value = if preview.is_some() {
@@ -802,16 +778,8 @@ impl FormBuilder {
                         if let Some(input) = preview_input.upgrade() {
                             input.set_value(value);
                         }
-                        let dragging = NSApplication::sharedApplication(model.page_title.ns_view().mtm())
-                            .currentEvent()
-                            .is_some_and(|event| {
-                                matches!(
-                                    event.r#type(),
-                                    objc2_app_kit::NSEventType::LeftMouseDragged
-                                        | objc2_app_kit::NSEventType::LeftMouseDown
-                                )
-                            });
-                        if dragging {
+                        // Preview while dragging; commit once on release.
+                        if app.is_mouse_dragging() {
                             return;
                         }
                     }
@@ -819,7 +787,6 @@ impl FormBuilder {
                     commit(value);
                 }
             }));
-            slider.ns_slider().setContinuous(continuous);
             slider.accessibility_label(title);
             slider
         });
@@ -834,8 +801,7 @@ impl FormBuilder {
                 if let Some(slider) = weak_slider.as_ref().and_then(Weak::upgrade) {
                     if let Some(range) = &slider_range {
                         let (min, max) = range(s);
-                        slider.ns_slider().setMinValue(min);
-                        slider.ns_slider().setMaxValue(max);
+                        slider.set_range(min, max);
                     }
                     slider.set_value(value);
                 }
@@ -855,22 +821,14 @@ impl FormBuilder {
         let slider = slider.unwrap();
         slider.width(120.0);
         input.width(44.0);
-        input.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Left);
-        let value_field = UnitField::new(&self.ui, input.ns_text_field(), "pt");
+        let value_field = input.unit_field(&self.ui, "pt");
         value_field.width(82.0);
-        let value = VStack::new(&self.ui).spacing(2.0).push(value_field).push(message);
-        // Keep the Rust field/delegate alive as well as its native view.
-        struct ValueCell {
-            view: VStack,
-            _input: Rc<NumberField>,
-        }
-        impl NativeView for ValueCell {
-            fn ns_view(&self) -> &objc2_app_kit::NSView { self.view.ns_view() }
-        }
+        // The bezel hosts the field's view; keep its Rust delegate alive with the cell.
+        let value = VStack::new(&self.ui).spacing(2.0).push(value_field).push(message).keep(input);
         vec![
             Box::new(Label::new(&self.ui, title)),
             Box::new(slider),
-            Box::new(ValueCell { view: value, _input: input }),
+            Box::new(value),
         ]
     }
 
@@ -984,23 +942,12 @@ impl FormBuilder {
     }
 
     fn enabled(&mut self, row: &SettingsRow, enabled: impl Fn(&ConfigSource) -> bool + 'static) {
-        let view = objc2::rc::Weak::new(row.control_view());
+        let view = row.control();
         let last = Cell::new(None);
         self.sync.push(Box::new(move |s| {
-            fn apply(view: &objc2_app_kit::NSView, value: bool) {
-                if let Some(control) = view.downcast_ref::<objc2_app_kit::NSControl>() {
-                    control.setEnabled(value);
-                }
-                for child in view.subviews() {
-                    apply(&child, value);
-                }
-            }
             let value = enabled(s);
-            if last.replace(Some(value)) == Some(value) {
-                return;
-            }
-            if let Some(view) = view.load() {
-                apply(&view, value);
+            if last.replace(Some(value)) != Some(value) {
+                view.set_enabled(value);
             }
         }));
     }

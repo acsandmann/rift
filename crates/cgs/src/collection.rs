@@ -472,6 +472,20 @@ impl<T: 'static> Table<T> {
 
     pub fn selection(&self) -> Option<usize> { usize::try_from(self.native.selectedRow()).ok() }
 
+    /// Headerless source-list styling for navigation and search results.
+    pub fn source_list(self) -> Self {
+        self.native.setHeaderView(None);
+        self.native.setFloatsGroupRows(false);
+        self.native.setStyle(NSTableViewStyle::SourceList);
+        self.ns_scroll_view().setDrawsBackground(false);
+        self
+    }
+
+    pub fn scroll_to(&self, row: usize) { self.native.scrollRowToVisible(row as isize); }
+
+    /// Redraw rows after external data their cells read has changed.
+    pub fn reload(&self) { self.native.reloadData(); }
+
     pub fn set_selected(&self, index: Option<usize>) {
         if self.selection() == index {
             return;
@@ -1120,7 +1134,7 @@ impl<T: 'static> SettingsList<T> {
     }
 
     /// Provide a native image, with the configured symbol as a fallback.
-    pub fn images(self, image: impl Fn(&T) -> Option<Retained<NSImage>> + 'static) -> Self {
+    pub fn images(self, image: impl Fn(&T) -> Option<crate::Image> + 'static) -> Self {
         *self.image.borrow_mut() = Some(Box::new(image));
         self
     }

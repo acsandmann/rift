@@ -3,7 +3,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
-use objc2::{MainThreadMarker, MainThreadOnly};
+use cgs::MainThreadMarker;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::actor::{config, reactor};
@@ -73,56 +73,6 @@ pub struct Menu {
 pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
-// Install window commands once; nil targets use the active window's responder chain.
-fn install_window_commands(ui: &cgs::Ui) {
-    use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem};
-    use objc2_foundation::NSString;
-    let app = objc2_app_kit::NSApplication::sharedApplication(ui.mtm());
-    let main = app.mainMenu().unwrap_or_else(|| NSMenu::new(ui.mtm()));
-    for (category, title, key, action) in [("File", "Close Window", "w", objc2::sel!(performClose:))] {
-        if main.itemArray().iter().filter_map(|item| item.submenu()).any(|menu| {
-            menu.itemArray().iter().any(|item| {
-                item.keyEquivalent().to_string() == key
-                    && item.keyEquivalentModifierMask() == NSEventModifierFlags::Command
-                    && item.action() == Some(action)
-                    && item.target().is_none()
-            })
-        }) {
-            continue;
-        }
-        let command = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(ui.mtm()),
-                &NSString::from_str(title),
-                Some(action),
-                &NSString::from_str(key),
-            )
-        };
-        command.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
-        let menu = main
-            .itemArray()
-            .iter()
-            .find(|item| item.title().to_string() == category)
-            .and_then(|item| item.submenu())
-            .unwrap_or_else(|| {
-                let menu = NSMenu::new(ui.mtm());
-                let item = unsafe {
-                    NSMenuItem::initWithTitle_action_keyEquivalent(
-                        NSMenuItem::alloc(ui.mtm()),
-                        &NSString::from_str(category),
-                        None,
-                        &NSString::from_str(""),
-                    )
-                };
-                item.setSubmenu(Some(&menu));
-                main.addItem(&item);
-                menu
-            });
-        menu.addItem(&command);
-    }
-    app.setMainMenu(Some(&main));
-}
-
 impl Menu {
     pub fn new(
         config: Config,
@@ -132,7 +82,7 @@ impl Menu {
         mtm: MainThreadMarker,
         config_path: std::path::PathBuf,
     ) -> Self {
-        install_window_commands(&cgs::Ui::new(mtm));
+        cgs::Application::shared(&cgs::Ui::new(mtm)).install_close_window_command();
         let (settings_request_tx, settings_requests) = tokio::sync::mpsc::unbounded_channel();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let layout_folder = config.settings.ui.menu_bar.resolved_layout_folder();
@@ -334,8 +284,7 @@ impl Menu {
                 tracing::error!(%error, "Could not open Settings");
                 cgs::Alert::new(&cgs::Ui::new(self.mtm), "Could not open Settings", &error)
                     .button("OK")
-                    .ns_alert()
-                    .runModal();
+                    .run_modal();
             }
         }
     }
@@ -357,7 +306,7 @@ impl Menu {
         let waiting = self.app_scan.get_or_insert_with(|| {
             let actions = actions.clone();
             std::thread::spawn(move || {
-                let apps = crate::ui::settings::installed_applications();
+                let apps = crate::sys::installed_apps::installed();
                 let _ = actions.send(MenuAction::InstalledApplications(apps));
             });
             Vec::new()

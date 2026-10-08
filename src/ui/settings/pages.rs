@@ -54,7 +54,7 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
     let weak_status = Rc::downgrade(&status);
     let weak_model = Rc::downgrade(model);
     let check = Button::new(&ui, "Check for Updates…");
-    let weak_button = objc2::rc::Weak::new(check.ns_button());
+    let weak_button = WeakView::new(&check);
     // Keep only weak view references in the pending request so closing Settings
     // releases the page even while the bounded network request is finishing.
     let check = check.on_click(move || {
@@ -62,9 +62,7 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
             status.set_hidden(false);
             status.set_text("Checking for updates…");
         }
-        if let Some(button) = weak_button.load() {
-            button.setEnabled(false);
-        }
+        weak_button.set_enabled(false);
         let Some(model) = weak_model.upgrade() else {
             return;
         };
@@ -75,15 +73,13 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
                 if let Some(status) = status.upgrade() {
                     status.set_text(&result.unwrap_or_else(|e| e));
                 }
-                if let Some(button) = button.load() {
-                    button.setEnabled(true);
-                }
+                button.set_enabled(true);
             })),
             finish: Box::new(|_| {}),
         });
     });
     let identity = HStack::new(&ui).spacing(16.0);
-    if let Some(icon) = NSApplication::sharedApplication(ui.mtm()).applicationIconImage() {
+    if let Some(icon) = Application::shared(&ui).icon() {
         let icon = ImageView::new(&ui, &icon);
         icon.width(64.0);
         icon.height(64.0);
@@ -313,13 +309,7 @@ fn set_spacing_gap(
 }
 
 fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
-    use crate::sys::screen::NSScreenExt;
-    let screen = model
-        .window
-        .borrow()
-        .load()
-        .and_then(|window| window.screen())
-        .and_then(|screen| screen.get_number().ok());
+    let screen = model.window.borrow().display_id().map(crate::sys::screen::ScreenId::new);
     let source = model.source.borrow();
     let display = model
         .displays
@@ -348,14 +338,7 @@ fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
     drop(source);
     let mut f = FormBuilder::new(ui, model);
     let preview = gap_preview(ui, &mut f, uuid.clone());
-    let form = |grid: Grid| {
-        grid.ns_grid_view().columnAtIndex(0).setWidth(128.0);
-        grid.ns_grid_view().columnAtIndex(1).setWidth(120.0);
-        grid.ns_grid_view().columnAtIndex(2).setWidth(82.0);
-        grid.ns_grid_view()
-            .setRowAlignment(objc2_app_kit::NSGridRowAlignment::FirstBaseline);
-        grid
-    };
+    let form = |grid: Grid| grid.column_widths(&[128.0, 120.0, 82.0]).first_baseline();
     let mut row = |name: &str, outer: bool, axis: Option<usize>| {
         let read = uuid.clone();
         let write = uuid.clone();
@@ -908,12 +891,8 @@ fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
             });
         }
     });
-    let location = Label::new(&ui, &path.to_string_lossy()).wrapping();
-    location.ns_text_field().setSelectable(true);
-    location.ns_text_field().setMaximumNumberOfLines(1);
-    location.ns_view().setToolTip(Some(&objc2_foundation::NSString::from_str(
-        &path.to_string_lossy(),
-    )));
+    let location = Label::new(&ui, &path.to_string_lossy()).wrapping().max_lines(1).selectable();
+    location.tooltip(&path.to_string_lossy());
     page = page.section(
         Section::new(&ui, "Configuration file")
             .content(location)
@@ -963,33 +942,25 @@ impl FormBuilder {
         get: impl Fn(&ConfigSource) -> Color + 'static,
         set: impl Fn(&mut ConfigSource, Color) + Send + Copy + 'static,
     ) -> SettingsRow {
-        use objc2_app_kit::{NSColor, NSColorSpace};
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
         let model = self.model.clone();
-        let input = Rc::new(ColorWell::new(&self.ui).on_change(move |v| {
-            if let Some(v) = v.colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()) {
-                let color = Color::new(
-                    v.redComponent(),
-                    v.greenComponent(),
-                    v.blueComponent(),
-                    v.alphaComponent(),
-                );
-                Model::submit(
-                    &model,
-                    Box::new(move |s| {
-                        set(s, color);
-                        Ok(())
-                    }),
-                    error.clone(),
-                );
-            }
+        let input = Rc::new(ColorWell::new(&self.ui).on_change(move |[r, g, b, a]| {
+            let color = Color::new(r, g, b, a);
+            Model::submit(
+                &model,
+                Box::new(move |s| {
+                    set(s, color);
+                    Ok(())
+                }),
+                error.clone(),
+            );
         }));
         let weak = Rc::downgrade(&input);
         self.sync.push(Box::new(move |s| {
             if let Some(input) = weak.upgrade() {
                 let c = get(s);
-                input.set_value(&NSColor::colorWithSRGBRed_green_blue_alpha(c.r, c.g, c.b, c.a));
+                input.set_value([c.r, c.g, c.b, c.a]);
             }
         }));
         self.row(title, input, message)
@@ -1050,9 +1021,7 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
         if let Some(recorder) = weak.upgrade() {
             recorder.set_value(None);
             if let Some(HotkeySpec::Hotkey(key)) = &s.settings.focus_follows_mouse_disable_hotkey {
-                recorder
-                    .ns_button()
-                    .setTitle(&objc2_foundation::NSString::from_str(&key.to_string()));
+                recorder.set_title(&key.to_string());
             }
             recorder.set_enabled(s.settings.focus_follows_mouse);
         }

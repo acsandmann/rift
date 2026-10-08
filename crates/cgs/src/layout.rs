@@ -11,6 +11,7 @@ use crate::{Insets, Metrics, NativeView, Ui, View};
 pub struct Stack {
     native: Retained<NSStackView>,
     children: RefCell<Vec<Box<dyn NativeView>>>,
+    owners: Vec<Box<dyn std::any::Any>>,
 }
 impl Stack {
     pub fn new(ui: &Ui, orientation: NSUserInterfaceLayoutOrientation) -> Self {
@@ -26,10 +27,18 @@ impl Stack {
         Self {
             native,
             children: RefCell::new(Vec::new()),
+            owners: Vec::new(),
         }
     }
 
     pub fn ns_stack_view(&self) -> &NSStackView { &self.native }
+
+    /// Keep a non-view owner, such as a control wrapper whose view sits in a composite,
+    /// alive for as long as the stack.
+    pub fn keep(mut self, owner: impl std::any::Any) -> Self {
+        self.owners.push(Box::new(owner));
+        self
+    }
 
     pub fn spacing(self, value: f64) -> Self {
         self.native.setSpacing(value);
@@ -105,6 +114,8 @@ macro_rules! stack {
 
             pub fn spacer(self, ui: &Ui) -> Self { Self(self.0.spacer(ui)) }
 
+            pub fn keep(self, owner: impl std::any::Any) -> Self { Self(self.0.keep(owner)) }
+
             pub fn ns_stack_view(&self) -> &NSStackView { self.0.ns_stack_view() }
         }
         impl NativeView for $name {
@@ -157,6 +168,20 @@ impl Grid {
     pub fn spacing(self, rows: f64, columns: f64) -> Self {
         self.native.setRowSpacing(rows);
         self.native.setColumnSpacing(columns);
+        self
+    }
+
+    /// Fixed column widths, leading columns first.
+    pub fn column_widths(self, widths: &[f64]) -> Self {
+        for (index, width) in widths.iter().enumerate() {
+            self.native.columnAtIndex(index as isize).setWidth(*width);
+        }
+        self
+    }
+
+    /// Align each row's cells on their first text baseline.
+    pub fn first_baseline(self) -> Self {
+        self.native.setRowAlignment(objc2_app_kit::NSGridRowAlignment::FirstBaseline);
         self
     }
 

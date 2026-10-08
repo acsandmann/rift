@@ -62,17 +62,42 @@ impl MenuItem {
         self
     }
 
-    pub fn set_enabled(&self, value: bool) { self.native.setEnabled(value); }
-
-    pub fn set_checked(&self, value: bool) {
-        self.native.setState(if value {
-            NSControlStateValueOn
-        } else {
-            NSControlStateValueOff
-        });
+    /// An integer the owner can use to identify the item.
+    pub fn tag(self, tag: isize) -> Self {
+        self.native.setTag(tag);
+        self
     }
 
+    pub fn set_enabled(&self, value: bool) { self.native.setEnabled(value); }
+
+    pub fn set_checked(&self, value: bool) { set_checked(&self.native, value); }
+
+    /// A handle for updating the item after its menu takes ownership of it.
+    pub fn weak(&self) -> WeakMenuItem { WeakMenuItem(objc2::rc::Weak::new(&self.native)) }
+
     pub fn ns_menu_item(&self) -> &NSMenuItem { &self.native }
+}
+fn set_checked(item: &NSMenuItem, value: bool) {
+    item.setState(if value {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+}
+
+pub struct WeakMenuItem(objc2::rc::Weak<NSMenuItem>);
+impl WeakMenuItem {
+    pub fn set_enabled(&self, value: bool) {
+        if let Some(item) = self.0.load() {
+            item.setEnabled(value);
+        }
+    }
+
+    pub fn set_checked(&self, value: bool) {
+        if let Some(item) = self.0.load() {
+            set_checked(&item, value);
+        }
+    }
 }
 impl Drop for MenuItem {
     fn drop(&mut self) {
@@ -118,6 +143,14 @@ impl Menu {
     }
 
     pub fn add_separator(&self) { self.native.addItem(&NSMenuItem::separatorItem(self.native.mtm())); }
+
+    /// A native, nonselectable heading for the items that follow.
+    pub fn add_section_header(&self, title: &str) {
+        self.native.addItem(&NSMenuItem::sectionHeaderWithTitle(
+            &NSString::from_str(title),
+            self.native.mtm(),
+        ));
+    }
 
     pub fn remove(&self, item: &NSMenuItem) {
         self.native.removeItem(item);

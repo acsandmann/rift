@@ -62,6 +62,17 @@ pub trait NativeView: 'static {
             value,
         );
     }
+    /// Fill spare vertical space, preferring at least `preferred` points but yielding it first
+    /// when the window is short.
+    fn flexible_height(&self, preferred: f64) {
+        let view = self.ns_view();
+        let constraint = view.heightAnchor().constraintGreaterThanOrEqualToConstant(preferred);
+        constraint.setPriority(750.0);
+        constraint.setActive(true);
+        let vertical = objc2_app_kit::NSLayoutConstraintOrientation::Vertical;
+        view.setContentCompressionResistancePriority_forOrientation(1.0, vertical);
+        view.setContentHuggingPriority_forOrientation(1.0, vertical);
+    }
     fn hugging_priority(&self, priority: f32, axis: objc2_app_kit::NSLayoutConstraintOrientation) {
         self.ns_view().setContentHuggingPriority_forOrientation(priority, axis);
     }
@@ -78,6 +89,31 @@ pub trait NativeView: 'static {
         );
     }
 }
+/// A weak handle for updating a view from callbacks without retaining it.
+#[derive(Clone, Default)]
+pub struct WeakView(pub(crate) objc2::rc::Weak<NSView>);
+impl WeakView {
+    pub fn new(view: &impl NativeView) -> Self { Self(objc2::rc::Weak::new(view.ns_view())) }
+
+    /// The live view, usable anywhere a `NativeView` is expected (for example as an anchor).
+    pub fn load(&self) -> Option<Retained<NSView>> { self.0.load() }
+
+    /// Enable or disable every control in the view, including the view itself.
+    pub fn set_enabled(&self, value: bool) {
+        fn apply(view: &NSView, value: bool) {
+            if let Some(control) = view.downcast_ref::<NSControl>() {
+                control.setEnabled(value);
+            }
+            for child in view.subviews() {
+                apply(&child, value);
+            }
+        }
+        if let Some(view) = self.0.load() {
+            apply(&view, value);
+        }
+    }
+}
+
 pub trait NativeControl: NativeView {
     fn ns_control(&self) -> &NSControl;
     fn set_enabled(&self, value: bool) {
@@ -339,6 +375,45 @@ impl PageHost {
             }
             live
         });
+    }
+
+    /// Scroll to and focus the visible control labelled `title`, preferring one inside the
+    /// section headed `section`. Parked pages are hidden and never match.
+    pub fn reveal(&self, section: &str, title: &str) {
+        use objc2_app_kit::{NSAccessibility, NSTextField};
+        fn find(view: &NSView, title: &str, labels: bool) -> Option<Retained<NSView>> {
+            if view.isHidden() {
+                return None;
+            }
+            if let Some(control) = view.downcast_ref::<NSControl>() {
+                let name = control.accessibilityLabel().map(|value| value.to_string());
+                let matches = name
+                    .as_deref()
+                    .is_some_and(|name| name == title || name.starts_with(&format!("{title} (")))
+                    || (labels
+                        && view
+                            .downcast_ref::<NSTextField>()
+                            .is_some_and(|field| field.stringValue().to_string() == title));
+                if matches {
+                    return Some(view.retain());
+                }
+            }
+            view.subviews().iter().find_map(|child| find(&child, title, labels))
+        }
+        let root = self.view.ns_view();
+        root.layoutSubtreeIfNeeded();
+        let section = find(root, section, true).and_then(|heading| unsafe { heading.superview() });
+        let root = section.as_deref().unwrap_or(root);
+        let Some(view) = find(root, title, false).or_else(|| find(root, title, true)) else {
+            return;
+        };
+        view.scrollRectToVisible(view.bounds());
+        let focusable = view.downcast_ref::<NSControl>().is_some_and(|control| {
+            control.isEnabled() && view.downcast_ref::<NSTextField>().is_none_or(|field| field.isEditable())
+        });
+        if focusable && let Some(window) = view.window() {
+            window.makeFirstResponder(Some(&view));
+        }
     }
 
     /// Unmount the current and all parked pages.

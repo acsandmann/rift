@@ -157,6 +157,22 @@ impl Drop for Window {
         self.native.setContentView(None);
     }
 }
+/// A weak, cloneable window reference for presenting sheets without retaining the window.
+#[derive(Clone, Default)]
+pub struct WindowRef(Weak<NSWindow>);
+impl WindowRef {
+    pub fn new(window: &NSWindow) -> Self { Self(Weak::new(window)) }
+
+    pub fn is_open(&self) -> bool { self.0.load().is_some() }
+
+    /// CoreGraphics ID of the display currently showing the window.
+    pub fn display_id(&self) -> Option<u32> {
+        let screen = self.0.load()?.screen()?;
+        let number = screen.deviceDescription().objectForKey(&NSString::from_str("NSScreenNumber"))?;
+        Some(number.downcast::<objc2_foundation::NSNumber>().ok()?.unsignedIntValue())
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub enum Appearance {
     #[default]
@@ -215,6 +231,26 @@ impl SettingsWindow {
     pub fn ns_window(&self) -> &NSWindow { self.0.ns_window() }
 
     pub fn on_close(self, f: impl FnMut() + 'static) -> Self { Self(self.0.on_close(f)) }
+
+    pub fn handle(&self) -> WindowRef { WindowRef::new(self.ns_window()) }
+
+    /// Bring the window forward; accessory apps must activate to accept keyboard input.
+    pub fn present(&self) {
+        #[allow(deprecated)]
+        NSApplication::sharedApplication(self.0.native.mtm()).activateIgnoringOtherApps(true);
+        self.show();
+    }
+
+    pub fn is_visible(&self) -> bool { self.ns_window().isVisible() }
+
+    pub fn initial_focus(&self, view: &impl NativeView) {
+        self.ns_window().setInitialFirstResponder(Some(view.ns_view()));
+    }
+
+    pub fn set_size_centered(&self, size: CGSize) {
+        self.ns_window().setContentSize(size);
+        self.ns_window().center();
+    }
 }
 pub struct Sheet {
     window: Window,
@@ -238,11 +274,19 @@ impl Sheet {
         }
     }
 
-    pub fn show(&self, parent: &NSWindow) {
-        *self.parent.borrow_mut() = Weak::new(parent);
+    /// Attach to `parent`; returns false when the parent window has already closed.
+    pub fn show(&self, parent: &WindowRef) -> bool {
+        let Some(parent) = parent.0.load() else {
+            return false;
+        };
+        *self.parent.borrow_mut() = Weak::new(&parent);
         parent.beginSheet_completionHandler(self.window.ns_window(), None);
         self.install_dismissal_monitor();
+        true
     }
+
+    /// Commit the active field editor; false when a field rejects its current text.
+    pub fn end_editing(&self) -> bool { self.window.ns_window().makeFirstResponder(None) }
 
     fn install_dismissal_monitor(&self) {
         self.remove_dismissal_monitor();
@@ -475,6 +519,9 @@ impl Alert {
         });
         self.0.beginSheetModalForWindow_completionHandler(parent, Some(&completion));
     }
+
+    /// Run as an app-modal alert, returning the chosen button's response.
+    pub fn run_modal(&self) -> isize { self.0.runModal() }
 
     pub fn ns_alert(&self) -> &NSAlert { &self.0 }
 }

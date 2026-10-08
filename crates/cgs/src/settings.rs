@@ -173,6 +173,9 @@ impl SettingsRow {
 
     pub fn control_view(&self) -> &NSView { self.control.ns_view() }
 
+    /// A weak handle to the row's control, for enabling it from sync callbacks.
+    pub fn control(&self) -> crate::WeakView { crate::WeakView(objc2::rc::Weak::new(self.control_view())) }
+
     fn take_form_cells(&self) -> [&NSView; 2] {
         if let Some(grid) = self.grid.get() {
             if grid.ns_grid_view().numberOfRows() > 0 {

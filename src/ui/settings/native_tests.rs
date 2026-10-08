@@ -1,6 +1,8 @@
 use objc2::Message;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2_app_kit::{NSControl, NSOutlineView, NSPopUpButton, NSSlider, NSSwitch, NSTableView, NSView};
+use objc2_app_kit::{
+    NSApplication, NSControl, NSOutlineView, NSPopUpButton, NSSlider, NSSwitch, NSTableView, NSView,
+};
 
 use super::*;
 

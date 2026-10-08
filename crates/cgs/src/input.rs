@@ -406,6 +406,9 @@ impl KeyRecorder {
 
     pub fn get_value(&self) -> Option<KeyShortcut> { self.native.ivars().value.borrow().clone() }
 
+    /// Show text in place of the recorded value, such as a shortcut it cannot represent.
+    pub fn set_title(&self, title: &str) { self.native.setTitle(&NSString::from_str(title)); }
+
     pub fn begin_recording(&self) { self.native.begin(); }
 
     pub fn cancel(&self) { self.native.cancel(); }

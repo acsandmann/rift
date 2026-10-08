@@ -487,8 +487,18 @@ macro_rules! numeric_control {
             }
 
             pub fn range(self, min: f64, max: f64) -> Self {
+                self.set_range(min, max);
+                self
+            }
+
+            pub fn set_range(&self, min: f64, max: f64) {
                 self.native.setMinValue(min);
                 self.native.setMaxValue(max);
+            }
+
+            /// Report every change while tracking, rather than only on release.
+            pub fn continuous(self, value: bool) -> Self {
+                self.native.setContinuous(value);
                 self
             }
 
@@ -545,6 +555,12 @@ pub struct NumberField {
 }
 impl NumberField {
     pub fn with_validation(self, ui: &Ui) -> crate::Validated<Self> { crate::Validated::new(ui, self) }
+
+    /// A leading-aligned value inside one bezel with a trailing unit, such as "pt".
+    pub fn unit_field(&self, ui: &Ui, unit: &str) -> crate::UnitField {
+        self.ns_text_field().setAlignment(NSTextAlignment::Left);
+        crate::UnitField::new(ui, self.ns_text_field(), unit)
+    }
 
     pub fn new(ui: &Ui) -> Self {
         let field = crate::TextField::new(ui);
@@ -705,16 +721,29 @@ impl ColorWell {
         Self { native, target }
     }
 
-    pub fn set_value(&self, color: &NSColor) {
-        if !self.native.color().isEqual(Some(color)) {
-            self.native.setColor(color);
+    /// Show an sRGB `[red, green, blue, alpha]` color.
+    pub fn set_value(&self, [r, g, b, a]: [f64; 4]) {
+        let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
+        if !self.native.color().isEqual(Some(&color)) {
+            self.native.setColor(&color);
         }
     }
 
-    pub fn on_change(self, mut f: impl FnMut(Retained<NSColor>) + 'static) -> Self {
+    /// Receive the chosen color as sRGB `[red, green, blue, alpha]`.
+    pub fn on_change(self, mut f: impl FnMut([f64; 4]) + 'static) -> Self {
         self.target.set(move |sender| {
-            if let Some(control) = sender.downcast_ref::<NSColorWell>() {
-                f(control.color());
+            let color = sender.downcast_ref::<NSColorWell>().and_then(|control| {
+                control
+                    .color()
+                    .colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace())
+            });
+            if let Some(c) = color {
+                f([
+                    c.redComponent(),
+                    c.greenComponent(),
+                    c.blueComponent(),
+                    c.alphaComponent(),
+                ]);
             }
         });
         self

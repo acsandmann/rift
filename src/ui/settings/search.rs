@@ -365,42 +365,8 @@ pub(super) fn results(query: &str) -> Vec<Result> {
     matches.into_iter().map(|(_, result)| result).collect()
 }
 
-pub(super) fn reveal(root: &objc2_app_kit::NSView, title: &str, location: &str) {
-    use objc2::Message;
-    use objc2_app_kit::{NSAccessibility, NSControl, NSTextField, NSView};
-    fn find(view: &NSView, title: &str, labels: bool) -> Option<objc2::rc::Retained<NSView>> {
-        if let Some(control) = view.downcast_ref::<NSControl>() {
-            let name = control.accessibilityLabel().map(|value| value.to_string());
-            let matches = name
-                .as_deref()
-                .is_some_and(|name| name == title || name.starts_with(&format!("{title} (")))
-                || (labels
-                    && view
-                        .downcast_ref::<NSTextField>()
-                        .is_some_and(|field| field.stringValue().to_string() == title));
-            if matches {
-                return Some(view.retain());
-            }
-        }
-        view.subviews().iter().find_map(|child| find(&child, title, labels))
-    }
-    // Scope repeated names such as “Enabled” to their documented section.
-    let section = location.rsplit(" › ").next().unwrap_or(location);
-    let section_view = find(root, section, true).and_then(|heading| unsafe { heading.superview() });
-    let root = section_view.as_deref().unwrap_or(root);
-    if let Some(view) = find(root, title, false).or_else(|| find(root, title, true)) {
-        view.scrollRectToVisible(view.bounds());
-        if let Some(control) = view.downcast_ref::<NSControl>() {
-            if control.isEnabled()
-                && view.downcast_ref::<NSTextField>().is_none_or(|field| field.isEditable())
-            {
-                if let Some(window) = view.window() {
-                    window.makeFirstResponder(Some(&view));
-                }
-            }
-        }
-    }
-}
+/// Scope repeated names such as “Enabled” to their documented section.
+pub(super) fn section(location: &str) -> &str { location.rsplit(" › ").next().unwrap_or(location) }
 
 #[cfg(test)]
 mod tests {

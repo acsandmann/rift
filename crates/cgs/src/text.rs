@@ -84,6 +84,18 @@ impl Label {
         self.0.setMaximumNumberOfLines(0);
         self
     }
+
+    /// Limit wrapping text to `lines` (0 is unlimited).
+    pub fn max_lines(self, lines: isize) -> Self {
+        self.0.setMaximumNumberOfLines(lines);
+        self
+    }
+
+    /// Allow selecting and copying the text.
+    pub fn selectable(self) -> Self {
+        self.0.setSelectable(true);
+        self
+    }
 }
 impl NativeView for Label {
     fn ns_view(&self) -> &NSView { &self.0 }
@@ -105,6 +117,8 @@ macro_rules! text_style {
             }
 
             pub fn set_text(&self, text: &str) { self.0.set_text(text); }
+
+            pub fn max_lines(self, lines: isize) -> Self { Self(self.0.max_lines(lines)) }
 
             pub fn ns_text_field(&self) -> &NSTextField { self.0.ns_text_field() }
         }

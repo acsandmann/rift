@@ -257,17 +257,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let action = edit_binding.clone();
     let table = Rc::new(table.on_open(move |i| action(i)));
     table.min_height(80.0);
-    let preferred = table.ns_view().heightAnchor().constraintGreaterThanOrEqualToConstant(160.0);
-    preferred.setPriority(750.0);
-    preferred.setActive(true);
-    table.ns_view().setContentCompressionResistancePriority_forOrientation(
-        1.0,
-        objc2_app_kit::NSLayoutConstraintOrientation::Vertical,
-    );
-    table.ns_view().setContentHuggingPriority_forOrientation(
-        1.0,
-        objc2_app_kit::NSLayoutConstraintOrientation::Vertical,
-    );
+    table.flexible_height(160.0);
     let names = Rc::new(RefCell::new(vec!["default".to_string()]));
     let selected_mode = mode.clone();
     let mode_names = names.clone();
@@ -387,14 +377,12 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     controls.set_remove_enabled(false);
     edit.set_enabled(false);
     let weak_controls = Rc::downgrade(&controls);
-    let weak_edit = objc2::rc::Weak::new(edit.ns_button());
+    let weak_edit = WeakView::new(&edit);
     table.set_on_select(move |selection| {
         if let Some(controls) = weak_controls.upgrade() {
             controls.set_remove_enabled(selection.is_some());
         }
-        if let Some(edit) = weak_edit.load() {
-            edit.setEnabled(selection.is_some());
-        }
+        weak_edit.set_enabled(selection.is_some());
     });
     let menu = Menu::new(&ui);
     let mut managed = Vec::new();
@@ -411,16 +399,14 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             }
         });
         if operation != KeymapOperation::Create {
-            managed.push(objc2::rc::Weak::new(item.ns_menu_item()));
+            managed.push(item.weak());
         }
         menu.add(item);
     }
     let current_mode = mode.clone();
     let menu = menu.on_tracking(move |_| {
         for item in &managed {
-            if let Some(item) = item.load() {
-                item.setEnabled(*current_mode.borrow() != "default");
-            }
+            item.set_enabled(*current_mode.borrow() != "default");
         }
     });
     let management = Popup::actions(&ui, "Shortcut Set Actions", menu);
@@ -504,11 +490,10 @@ fn save_sheet(model: &Weak<Model>, edit: SourceEdit, message: &Rc<ValidationMess
     }
 }
 fn show_sheet(ui: Ui, model: &Rc<Model>, title: &str, content: impl NativeView) {
-    if let Some(window) = model.window.borrow().load() {
-        content.min_width(460.0);
-        let sheet = Sheet::new(&ui, title, content);
-        sheet.fit_content();
-        sheet.show(&window);
+    content.min_width(460.0);
+    let sheet = Sheet::new(&ui, title, content);
+    sheet.fit_content();
+    if sheet.show(&model.window.borrow()) {
         *model.sheet.borrow_mut() = Some(sheet);
     }
 }
@@ -545,10 +530,7 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
         key_changed();
     });
     if let Some(old) = &old {
-        recorder.ns_button().setTitle(&objc2_foundation::NSString::from_str(&glyphs(
-            old,
-            &model.source.borrow(),
-        )));
+        recorder.set_title(&glyphs(old, &model.source.borrow()));
     }
     let host = Rc::new(PageHost::new(&ui));
     host.set_page(argument_editor(ui, model, &draft, &changed));
@@ -572,11 +554,8 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
             action_changed();
             if let (Some(host), Some(model)) = (weak_host.upgrade(), weak_model.upgrade()) {
                 host.set_page(argument_editor(ui, &model, &edited, &action_changed));
-                if let Some(window) = host.ns_view().window() {
-                    if let Some(content) = window.contentView() {
-                        content.layoutSubtreeIfNeeded();
-                        window.setContentSize(content.fittingSize());
-                    }
+                if let Some(sheet) = model.sheet.borrow().as_ref() {
+                    sheet.fit_content();
                 }
             }
         });
