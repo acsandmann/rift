@@ -399,6 +399,8 @@ impl From<&NSRunningApplication> for AppInfo {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WindowInfo {
+    #[serde(default)]
+    pub has_native_tabs: bool,
     pub is_standard: bool,
     #[serde(default)]
     pub is_root: bool,
@@ -492,6 +494,7 @@ impl WindowInfo {
         let max_size = server_info.map(|info| info.max_frame).or_else(|| None);
         let is_root = id.map(|id| window_parent(id).is_none()).unwrap_or(true);
         let info = WindowInfo {
+            has_native_tabs: is_standard && element.has_native_tabs(),
             is_standard,
             is_root,
             is_minimized,

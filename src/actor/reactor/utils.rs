@@ -113,6 +113,7 @@ mod tests {
 
     fn ax_window(subrole: &str, is_standard: bool) -> WindowInfo {
         WindowInfo {
+            has_native_tabs: false,
             is_standard,
             is_root: true,
             is_minimized: false,
