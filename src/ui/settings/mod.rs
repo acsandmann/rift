@@ -419,6 +419,7 @@ impl Settings {
         let overview = MenuItem::new(&ui, "All").on_click(move || route(1));
         overview.ns_menu_item().setTag(1);
         menu.add(overview);
+        menu.add_separator();
         for (title, range) in [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)] {
             menu.ns_menu().addItem(&objc2_app_kit::NSMenuItem::sectionHeaderWithTitle(
                 &objc2_foundation::NSString::from_str(title), ui.mtm()));

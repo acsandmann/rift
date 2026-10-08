@@ -439,7 +439,7 @@ impl Toolbar {
             &NSString::from_str("cgs.page-menu"),
         );
         title.setMenu(menu.ns_menu());
-        // Pull-down titles stay visible in an icon-only toolbar; the menu is entirely native.
+        // Keep an independent display label while the native menu tracks its selection.
         let placeholder = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(ui.mtm()),
@@ -454,13 +454,20 @@ impl Toolbar {
         let popup = NSPopUpButton::initWithFrame_pullsDown(
             NSPopUpButton::alloc(ui.mtm()),
             CGRect::ZERO,
-            true,
+            false,
         );
         popup.setBordered(true);
         popup.setBezelStyle(crate::control::action_button_bezel());
         popup.setImagePosition(NSCellImagePosition::ImageLeading);
-        popup.setFont(Some(&crate::Font::section_title()));
+        popup.setFont(Some(&crate::Font::body()));
         popup.setMenu(Some(menu.ns_menu()));
+        if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
+            cell.setUsesItemFromMenu(false);
+            cell.setMenuItem(Some(&placeholder));
+            cell.setAltersStateOfSelectedItem(false);
+            cell.setImage(Symbol::named("line.3.horizontal.decrease").as_deref());
+        }
+        unsafe { menu.ns_menu().setFont(Some(&crate::Font::body())); }
         title.setView(Some(&popup));
         title.setBordered(true);
         title.setAutovalidates(false);
@@ -500,7 +507,9 @@ impl Toolbar {
                         });
                     }
                 }
-                popup.setTitle(&NSString::from_str(title));
+                if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
+                    if let Some(display) = cell.menuItem() { display.setTitle(&NSString::from_str(title)); }
+                }
                 popup.sizeToFit();
                 item.setView(Some(popup));
             }
