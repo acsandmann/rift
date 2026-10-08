@@ -191,7 +191,7 @@ impl SettingsWindow {
         title.ns_text_field().setFont(Some(&NSFont::systemFontOfSize_weight(
             15.0, unsafe { NSFontWeightSemibold },
         )));
-        title.width(180.0);
+        title.max_width(180.0);
         title.height(20.0);
         self.0.native.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         let toolbar = crate::Toolbar::navigation_title(ui, "cgs.settings.pages", Some(title));

@@ -441,7 +441,6 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         }
     });
     let management = Popup::actions(&ui, "Shortcut Set Actions", menu);
-    let mode_controls = HStack::new(&ui).push(popup).spacer(&ui).push(management);
     let combinations = modifier_combinations(&mut f, model);
     let search_model = Rc::downgrade(model);
     let search_table = Rc::downgrade(&table);
@@ -455,15 +454,12 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             ));
         }
     });
-    f.finish(
+    let header = Rc::new(HeaderControls::selector("Shortcut set", popup, search).actions(management));
+    let mut page = f.finish(
         SettingsPage::new(&ui, "")
             .content_width(760.0)
-            .section(Section::new(&ui, "Shortcut set")
-                .description("Rift starts with the Default set.")
-                .content(mode_controls))
             .section(
                 Section::new(&ui, "Keyboard shortcuts")
-                    .content(search)
                     .content(table)
                     .footer(error)
                     .footer(Caption::new(&ui, "⌘ Command   ⌥ Option   ⌃ Control   ⇧ Shift")),
@@ -475,8 +471,11 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                 combinations,
             ))
 ,
-    )
+    );
+    page.header = Some(header);
+    page
 }
+
 fn matching_bindings<'a>(
     s: &'a ConfigSource,
     mode: &str,

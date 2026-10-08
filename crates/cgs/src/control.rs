@@ -209,7 +209,10 @@ native_control!(Checkbox, NSButton, ns_button);
 pub(crate) fn header_menu_style(button: &NSPopUpButton) {
     button.setControlSize(NSControlSize::Regular);
     button.setBezelStyle(action_button_bezel());
-    button.setFont(Some(&crate::Font::body()));
+    button.setFont(Some(&crate::Font::section_title()));
+    if let Some(menu) = button.menu() {
+        unsafe { menu.setFont(Some(&crate::Font::body())); }
+    }
 }
 
 pub struct Popup {

@@ -162,6 +162,13 @@ impl Symbol {
     pub fn named(name: &str) -> Option<Retained<NSImage>> {
         NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)
     }
+    /// Consistent symbol metrics for toolbar menus and header buttons.
+    pub fn header(name: &str) -> Option<Retained<NSImage>> {
+        let configuration = NSImageSymbolConfiguration::configurationWithPointSize_weight(
+            12.0, unsafe { NSFontWeightRegular });
+        Self::named(name)?.imageWithSymbolConfiguration(&configuration)
+    }
+
 }
 pub struct ImageView(Retained<NSImageView>);
 impl ImageView {

@@ -92,6 +92,7 @@ impl Menu {
     pub fn new(ui: &Ui) -> Self {
         let native = NSMenu::new(ui.mtm());
         native.setAutoenablesItems(false);
+        unsafe { native.setFont(Some(&crate::Font::body())); }
         Self {
             native,
             items: RefCell::new(Vec::new()),

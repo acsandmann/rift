@@ -122,9 +122,9 @@ pub fn run(ui: Ui) {
             let menu = toolbar
                 .items()
                 .iter()
-                .find_map(|item| item.downcast::<NSMenuToolbarItem>().ok())
+                .find_map(|item| item.view().and_then(|view| view.downcast::<NSPopUpButton>().ok()))
                 .unwrap()
-                .menu();
+                .menu().unwrap();
             autoreleasepool(|_| {
                 menu.performActionForItemAtIndex(
                     menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("Traditional")),
@@ -252,7 +252,10 @@ pub fn run(ui: Ui) {
             settings.model.replace_source(source);
             let page = commands::keyboard(ui, &settings.model);
             page.synchronize(&settings.model);
-            let search = find::<objc2_app_kit::NSSearchField>(page.view.ns_view()).unwrap();
+            settings.window.toolbar().set_page_controls(&ui, page.header.as_deref());
+            let search = toolbar.items().iter()
+                .find_map(|item| item.downcast::<objc2_app_kit::NSSearchToolbarItem>().ok())
+                .unwrap().searchField();
             change_text(&search, "fullscreen");
             let table = find::<NSTableView>(page.view.ns_view()).unwrap();
             assert_eq!(table.numberOfRows(), 1);
@@ -268,6 +271,7 @@ pub fn run(ui: Ui) {
                 "Window · Fullscreen"
             );
             settings.model.close_sheet();
+            settings.window.toolbar().set_page_controls(&ui, None);
             assert!(pending.try_recv().is_err());
         });
         // A spacing slider must edit the visible display override, not an ineffective global value.

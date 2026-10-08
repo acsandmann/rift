@@ -218,17 +218,20 @@ impl NativeView for MasterDetail {
 
 /// Page-owned native header controls. Toolbar presentation and glass remain in CGS.
 pub struct HeaderControls {
-    menu: Popup,
+    menu: Rc<Popup>,
     search: SearchField,
+    icon_only: bool,
+    actions: Option<Popup>,
     label: String,
 }
 impl HeaderControls {
     pub fn new(ui: &Ui, label: &str, symbol: &str, menu: Menu, search: SearchField) -> Self {
         let menu = Popup::actions(ui, label, menu).toolbar_style();
         let button = menu.ns_popup_button();
-        let image = Symbol::named(symbol);
+        let image = Symbol::header(symbol);
         if let Some(header) = button.menu().and_then(|menu| menu.itemAtIndex(0)) {
             header.setImage(image.as_deref());
+            header.setHidden(true);
         }
         button.setImage(image.as_deref());
         button.setImagePosition(NSCellImagePosition::ImageOnly);
@@ -236,7 +239,26 @@ impl HeaderControls {
         menu.width(36.0);
         menu.height(36.0);
         search.width(216.0);
-        Self { menu, search, label: label.into() }
+        Self { menu: Rc::new(menu), search, icon_only: true, actions: None, label: label.into() }
+    }
+
+    /// A native selection popup beside the same toolbar search field.
+    pub fn selector(label: &str, menu: Rc<Popup>, search: SearchField) -> Self {
+        crate::control::header_menu_style(menu.ns_popup_button());
+        menu.accessibility_label(label);
+        menu.ns_popup_button().setImageHugsTitle(false);
+        menu.min_width(100.0);
+        search.width(216.0);
+        Self { menu, search, icon_only: false, actions: None, label: label.into() }
+    }
+
+    /// Secondary actions adjacent to the header selector and search.
+    pub fn actions(mut self, actions: Popup) -> Self {
+        let actions = actions.toolbar_style();
+        actions.width(36.0);
+        actions.height(36.0);
+        self.actions = Some(actions);
+        self
     }
 
     /// Use the semantic blue tint while a filter is active.
@@ -476,45 +498,26 @@ impl Toolbar {
         arrows.setSelectionMode(NSToolbarItemGroupSelectionMode::Momentary);
         arrows.setControlRepresentation(NSToolbarItemGroupControlRepresentation::Expanded);
         arrows.setSubitems(&NSArray::from_retained_slice(&[delegate.ivars().back.clone(), next.clone()]));
-        let title = NSMenuToolbarItem::initWithItemIdentifier(
-            NSMenuToolbarItem::alloc(ui.mtm()),
-            &NSString::from_str("cgs.page-menu"),
-        );
-        title.setMenu(menu.ns_menu());
-        // Keep an independent display label while the native menu tracks its selection.
-        let placeholder = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(ui.mtm()),
-                &NSString::from_str(""),
-                None,
-                &NSString::from_str(""),
-            )
-        };
-        placeholder.setHidden(true);
-        placeholder.setImage(Symbol::named("line.3.horizontal.decrease").as_deref());
-        menu.ns_menu().insertItem_atIndex(&placeholder, 0);
-        let popup = NSPopUpButton::initWithFrame_pullsDown(
-            NSPopUpButton::alloc(ui.mtm()),
-            CGRect::ZERO,
-            false,
-        );
-        popup.setBordered(true);
+        let title = NSToolbarItem::initWithItemIdentifier(
+            NSToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.page-menu"));
+        let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(ui.mtm()), CGRect::ZERO, false);
         crate::control::header_menu_style(&popup);
         popup.setImagePosition(NSCellImagePosition::ImageLeading);
+        popup.setImageHugsTitle(false);
         popup.setMenu(Some(menu.ns_menu()));
+        let display = MenuItem::new(ui, "All");
+        display.ns_menu_item().setImage(Symbol::header("line.3.horizontal.decrease").as_deref());
         if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
             cell.setUsesItemFromMenu(false);
-            cell.setMenuItem(Some(&placeholder));
+            cell.setMenuItem(Some(display.ns_menu_item()));
             cell.setAltersStateOfSelectedItem(false);
-            cell.setImage(Symbol::named("line.3.horizontal.decrease").as_deref());
         }
-        unsafe { menu.ns_menu().setFont(Some(&crate::Font::body())); }
         title.setView(Some(&popup));
-        title.setBordered(true);
+        title.setBordered(false);
         title.setAutovalidates(false);
         delegate.ivars().back.setBordered(false);
         delegate.ivars().back.setToolTip(Some(&NSString::from_str("Back")));
-        *delegate.ivars().navigation.borrow_mut() = vec![next, title.into_super(), arrows.into_super()];
+        *delegate.ivars().navigation.borrow_mut() = vec![next, title, arrows.into_super()];
         *self.menu.borrow_mut() = Some((menu, popup));
         let index = self
             .native
@@ -536,25 +539,20 @@ impl Toolbar {
         if let Some(item) = items.first() {
             item.setEnabled(forward);
         }
-        if let Some(item) = items.get(1).and_then(|item| item.downcast_ref::<NSMenuToolbarItem>()) {
+        if let (Some(item), Some((menu, popup))) = (items.get(1), self.menu.borrow().as_ref()) {
             item.setLabel(&NSString::from_str(title));
-            if let Some((menu, popup)) = self.menu.borrow().as_ref() {
-                for entry in menu.ns_menu().itemArray() {
-                    if entry.tag() == 1 || entry.tag() >= 9 {
-                        entry.setState(if entry.title().to_string() == title {
-                            NSControlStateValueOn
-                        } else {
-                            NSControlStateValueOff
-                        });
-                    }
+            for entry in menu.ns_menu().itemArray() {
+                if entry.tag() == 1 || entry.tag() >= 9 {
+                    entry.setState(if entry.title().to_string() == title { NSControlStateValueOn } else { NSControlStateValueOff });
                 }
-                if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
-                    if let Some(display) = cell.menuItem() { display.setTitle(&NSString::from_str(title)); }
-                }
-                popup.sizeToFit();
-                item.setView(Some(popup));
             }
-            item.setShowsIndicator(true);
+            if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
+                if let Some(display) = cell.menuItem() { display.setTitle(&NSString::from_str(title)); }
+            }
+            popup.sizeToFit();
+            let mut frame = popup.frame();
+            frame.size.width = (frame.size.width + 12.0).max(80.0);
+            popup.setFrame(frame);
         }
         let index = self.native.items().iter().position(|item| item.itemIdentifier().to_string() == "cgs.page-menu");
         if has_menu && index.is_none() {
@@ -566,7 +564,7 @@ impl Toolbar {
     /// Native trailing filter and search controls owned by the selected page.
     pub fn set_page_controls(&self, ui: &Ui, controls: Option<&HeaderControls>) {
         let Some(delegate) = &self.delegate else { return; };
-        for id in ["cgs.page-filter", "cgs.page-search"] {
+        for id in ["cgs.page-filter", "cgs.page-actions", "cgs.page-search"] {
             let id = NSString::from_str(id);
             if let Some(index) = self.native.items().iter().position(|item| item.itemIdentifier() == id) {
                 if let Some(search) = self.native.items().objectAtIndex(index).downcast_ref::<NSSearchToolbarItem>() {
@@ -582,7 +580,8 @@ impl Toolbar {
         if let Some(controls) = controls {
             let filter = controls.menu.ns_popup_button();
             let search = controls.search.ns_search_field();
-            let item = NSMenuToolbarItem::initWithItemIdentifier(
+            let item: Retained<NSToolbarItem> = if controls.icon_only {
+                let item = NSMenuToolbarItem::initWithItemIdentifier(
                 NSMenuToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.page-filter"));
             item.setLabel(&NSString::from_str(&controls.label));
             let content: Retained<NSView> = unsafe { Retained::retain(filter as *const NSPopUpButton as *mut NSView).unwrap() };
@@ -593,14 +592,41 @@ impl Toolbar {
             if let Some(menu) = filter.menu() { item.setMenu(&menu); }
             item.setShowsIndicator(false);
             item.setBordered(false);
+                item.into_super()
+            } else {
+                filter.sizeToFit();
+                let mut frame = filter.frame();
+                frame.size.width = (frame.size.width + 12.0).max(100.0);
+                filter.setFrame(frame);
+                let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(ui.mtm()),
+                    &NSString::from_str("cgs.page-filter"));
+                item.setLabel(&NSString::from_str(&controls.label));
+                item.setView(Some(filter));
+                item.setBordered(false);
+                item
+            };
             let search_item = NSSearchToolbarItem::initWithItemIdentifier(
                 NSSearchToolbarItem::alloc(ui.mtm()), &NSString::from_str("cgs.page-search"));
             search_item.setLabel(&search.placeholderString().unwrap_or_else(|| NSString::from_str("Search")));
             search_item.setSearchField(search);
             search_item.setPreferredWidthForSearchField(216.0);
-            delegate.ivars().navigation.borrow_mut().extend([item.into_super(), search_item.into_super()]);
-            for id in ["cgs.page-filter", "cgs.page-search"] {
-                self.native.insertItemWithItemIdentifier_atIndex(&NSString::from_str(id), self.native.items().len() as isize);
+            item.setVisibilityPriority(1000);
+            search_item.setVisibilityPriority(-1000);
+            let mut items = vec![item];
+            if let Some(actions) = &controls.actions {
+                let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(ui.mtm()),
+                    &NSString::from_str("cgs.page-actions"));
+                item.setLabel(&NSString::from_str("Actions"));
+                item.setVisibilityPriority(1000);
+                item.setView(Some(actions.ns_view()));
+                item.setBordered(false);
+                items.push(item);
+            }
+            items.push(search_item.into_super());
+            let ids: Vec<_> = items.iter().map(|item| item.itemIdentifier()).collect();
+            delegate.ivars().navigation.borrow_mut().extend(items);
+            for id in ids {
+                self.native.insertItemWithItemIdentifier_atIndex(&id, self.native.items().len() as isize);
             }
         }
     }
