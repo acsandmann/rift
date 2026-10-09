@@ -114,6 +114,27 @@ impl DispatchExt for Unmanaged {
     }
 }
 
+/// Runs `exited` once on the reaper queue when `pid` exits; the watch lasts for this process.
+pub fn on_proc_exit(pid: pid_t, exited: impl FnOnce() + Send + 'static) {
+    type Exited = Option<Box<dyn FnOnce() + Send>>;
+    extern "C" fn handler(ctx: *mut c_void) {
+        if let Some(exited) = unsafe { &mut *(ctx as *mut Exited) }.take() {
+            exited();
+        }
+    }
+    let src = DSource::create(
+        dispatch_source_type_proc(),
+        pid as _,
+        DISPATCH_PROC_EXIT as _,
+        reaper_queue(),
+    );
+    let ctx = Box::into_raw(Box::new(Some(Box::new(exited) as Box<dyn FnOnce() + Send>)));
+    unsafe { dispatch_set_context(src.deref() as *const _ as *mut c_void, ctx.cast()) };
+    src.set_event_handler_f(handler);
+    src.resume();
+    std::mem::forget(src);
+}
+
 pub fn reap_on_exit_proc(pid: pid_t) {
     if pid <= 0 {
         return;

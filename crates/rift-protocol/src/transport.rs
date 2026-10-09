@@ -44,6 +44,15 @@ pub enum RiftRequest {
     GetMetrics,
     GetBindingMode,
     GetConfig,
+    /// The editable configuration source and its revision.
+    GetSettingsSource,
+    /// Replace the configuration source if it is still at `expected_revision`.
+    ApplySettingsSource {
+        expected_revision: u64,
+        source: Value,
+    },
+    /// Reload the configuration file and return the resulting source.
+    ReloadSettingsSource,
     ExecuteCommand {
         command: RiftCommand,
     },

@@ -53,6 +53,10 @@ impl DefaultCliExecutor {
                 env_vars.insert("RIFT_PREVIOUS_BINDING_MODE".into(), previous_mode.clone());
                 env_vars.insert("RIFT_BINDING_MODE".into(), mode.clone());
             }
+            BroadcastEvent::ConfigChanged { revision } => {
+                env_vars.insert("RIFT_EVENT_TYPE".into(), "config_changed".into());
+                env_vars.insert("RIFT_CONFIG_REVISION".into(), revision.to_string());
+            }
             BroadcastEvent::WorkspaceChanged {
                 workspace_id,
                 workspace_name,

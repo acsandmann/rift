@@ -83,9 +83,6 @@ pub enum MenuAction {
     OpenSponsor,
     OpenConfig,
     OpenSettings,
-    SettingsClosed,
-    /// Background Settings application discovery finished.
-    InstalledApplications(Vec<(String, String)>),
     ReloadConfig,
     QuitRift,
 }

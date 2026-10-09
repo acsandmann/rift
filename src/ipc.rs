@@ -31,6 +31,7 @@ struct ConfigJob {
 }
 
 const CONFIG_QUEUE_CAPACITY: usize = 8;
+const MAX_RESPONSE_SIZE: usize = 262_144;
 
 pub struct InstallRequest {
     config_tx: config_actor::Sender,
@@ -153,6 +154,9 @@ impl IpcRequestHandler {
 
         let response = match request {
             request @ (RiftRequest::GetConfig
+            | RiftRequest::GetSettingsSource
+            | RiftRequest::ApplySettingsSource { .. }
+            | RiftRequest::ReloadSettingsSource
             | RiftRequest::ExecuteCommand {
                 command: rift_protocol::RiftCommand::Config(_),
             }) => {
@@ -321,7 +325,12 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
 
         RiftRequest::GetMetrics => encode_success(reactor.query_metrics()),
 
-        RiftRequest::GetConfig => unreachable!("config requests run on config workers"),
+        RiftRequest::GetConfig
+        | RiftRequest::GetSettingsSource
+        | RiftRequest::ApplySettingsSource { .. }
+        | RiftRequest::ReloadSettingsSource => {
+            unreachable!("config requests run on config workers")
+        }
 
         RiftRequest::ExecuteCommand { command } => match command {
             rift_protocol::RiftCommand::Config(_) => {
@@ -366,6 +375,13 @@ struct ConfigRequestHandler {
 }
 
 impl ConfigRequestHandler {
+    fn snapshot(result: Result<Result<config_actor::SourceSnapshot, String>, String>) -> Vec<u8> {
+        match result.and_then(|snapshot| snapshot) {
+            Ok(snapshot) => encode_success(snapshot),
+            Err(message) => encode_error(serde_json::json!({ "message": message })),
+        }
+    }
+
     fn perform<T>(
         &self,
         make_event: impl FnOnce(SyncSender<T>) -> config_actor::Event,
@@ -406,6 +422,26 @@ impl ConfigRequestHandler {
                     "message": format!("Failed to apply config: {error}"),
                 })),
             },
+            RiftRequest::GetSettingsSource => {
+                Self::snapshot(self.perform(config_actor::Event::QuerySource))
+            }
+            RiftRequest::ReloadSettingsSource => {
+                Self::snapshot(self.perform(config_actor::Event::ReloadSource))
+            }
+            RiftRequest::ApplySettingsSource { expected_revision, source } => {
+                match serde_json::from_value(source) {
+                    Ok(source) => {
+                        Self::snapshot(self.perform(|response| config_actor::Event::ApplySource {
+                            expected_revision,
+                            source,
+                            response,
+                        }))
+                    }
+                    Err(error) => encode_error(serde_json::json!({
+                        "message": format!("Invalid configuration: {error}"),
+                    })),
+                }
+            }
             _ => unreachable!("only config requests are queued to config workers"),
         }
     }
@@ -481,6 +517,14 @@ fn encode_response<T: Serialize>(response: &RiftResponse<T>) -> Vec<u8> {
 }
 
 fn send_encoded_response(original_msg: *mut mach_msg_header_t, response_json: &[u8]) {
+    // An unsendable reply would leave the client waiting; report the size instead.
+    if response_json.len() > MAX_RESPONSE_SIZE {
+        let message = format!("Response exceeds the {MAX_RESPONSE_SIZE}-byte IPC limit");
+        return send_encoded_response(
+            original_msg,
+            &encode_error(serde_json::json!({ "message": message })),
+        );
+    }
     unsafe {
         if !send_mach_reply(
             original_msg,

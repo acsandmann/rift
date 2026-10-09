@@ -30,6 +30,10 @@ type MachMessageOption = u32;
 const KERN_SUCCESS: KernReturn = 0;
 const MACH_SEND_MSG: MachMessageOption = 0x0000_0001;
 const MACH_RCV_MSG: MachMessageOption = 0x0000_0002;
+const MACH_SEND_TIMEOUT: MachMessageOption = 0x0000_0010;
+const MACH_RCV_TIMEOUT: MachMessageOption = 0x0000_0100;
+// The config worker can wait five seconds for disk I/O; leave time for its error reply.
+const REQUEST_TIMEOUT_MS: u32 = 10_000;
 const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
 const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
@@ -91,13 +95,13 @@ impl RiftMachClient {
         service_port.is_some()
     }
 
-    /// Sends one request and blocks until Rift responds.
+    /// Sends one request with a ten-second limit on each send and reply wait.
     pub fn send_request(&self, request: &RiftRequest) -> Result<JsonRiftResponse, ClientError> {
         self.send_typed_request(request)
     }
 
     /// Sends one request and decodes its response payload into caller-provided
-    /// types.
+    /// types. Sending and waiting for the reply each time out after ten seconds.
     pub fn send_typed_request<T: DeserializeOwned>(
         &self,
         request: &RiftRequest,
@@ -269,7 +273,7 @@ impl RiftMachSubscription {
     /// Blocks until the next event arrives and decodes it into the requested
     /// type.
     pub fn recv_event_as<T: DeserializeOwned>(&self) -> Result<T, ClientError> {
-        let payload = unsafe { receive_message(self.reply_port.name)? };
+        let payload = unsafe { receive_message(self.reply_port.name, None)? };
         parse_json_payload(&payload, "event")
     }
 }
@@ -525,7 +529,17 @@ unsafe fn send_request(
     let header_ptr = unsafe { prepare_inline_send(&mut storage, header, payload) };
     let send_size = unsafe { (*header_ptr).size };
 
-    let result = unsafe { mach_msg(header_ptr, MACH_SEND_MSG, send_size, 0, 0, 0, 0) };
+    let result = unsafe {
+        mach_msg(
+            header_ptr,
+            MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+            send_size,
+            0,
+            0,
+            REQUEST_TIMEOUT_MS,
+            0,
+        )
+    };
     if result != KERN_SUCCESS {
         return Err(ClientError::Mach {
             operation: "mach_msg(send)",
@@ -533,10 +547,13 @@ unsafe fn send_request(
         });
     }
 
-    unsafe { receive_message(reply_port) }
+    unsafe { receive_message(reply_port, Some(REQUEST_TIMEOUT_MS)) }
 }
 
-unsafe fn receive_message(reply_port: MachPort) -> Result<Vec<u8>, ClientError> {
+unsafe fn receive_message(
+    reply_port: MachPort,
+    timeout: Option<u32>,
+) -> Result<Vec<u8>, ClientError> {
     // The kernel initializes the received header, payload, and trailer. Leave
     // the maximum-sized backing storage untouched until then.
     let mut buffer = MaybeUninit::<ReceiveBuffer>::uninit();
@@ -545,11 +562,16 @@ unsafe fn receive_message(reply_port: MachPort) -> Result<Vec<u8>, ClientError> 
     let result = unsafe {
         mach_msg(
             header_ptr,
-            MACH_RCV_MSG,
+            MACH_RCV_MSG
+                | if timeout.is_some() {
+                    MACH_RCV_TIMEOUT
+                } else {
+                    0
+                },
             0,
             size_of::<ReceiveBuffer>() as u32,
             reply_port,
-            0,
+            timeout.unwrap_or(0),
             0,
         )
     };
