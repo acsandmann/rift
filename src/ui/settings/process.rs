@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSApplicationDidChangeScreenParametersNotification,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSNotification, NSNotificationCenter};
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSProcessInfo, NSString};
 use rift_client::{
     ApplicationData, ClientError, DisplayData, EventKind, RiftEvent, RiftMachClient, RiftRequest,
 };
@@ -56,6 +56,23 @@ enum Message {
 }
 
 pub fn run(config_path: PathBuf) -> ! {
+    // Keep the same executable and signing identity, but distinguish the Settings child
+    // in OS process listings. Foundation's processName alone does not rename it in the kernel.
+    NSProcessInfo::processInfo().setProcessName(&NSString::from_str("rift-settings"));
+    let name = c"rift-settings";
+    // SAFETY: both strings are valid for this call; only the current process is renamed.
+    let result = unsafe {
+        nix::libc::sysctlbyname(
+            c"kern.procname".as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            name.as_ptr().cast_mut().cast(),
+            name.to_bytes().len(),
+        )
+    };
+    if result != 0 {
+        tracing::warn!(error = %std::io::Error::last_os_error(), "Could not name the Settings process");
+    }
     let mtm = MainThreadMarker::new().expect("Settings runs on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
