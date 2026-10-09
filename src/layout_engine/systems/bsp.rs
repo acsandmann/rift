@@ -828,7 +828,7 @@ mod tests {
         (system, layout)
     }
 
-    fn frames(
+    fn calculate_frames(
         system: &BspLayoutSystem,
         layout: LayoutId,
         size: CGSize,
@@ -930,7 +930,8 @@ mod tests {
                     (0.0, 500.0, 1000.0, 500.0),
                 ]
             };
-            let frames = frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
+            let frames =
+                calculate_frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
             for (index, (x, y, width, height)) in expected.into_iter().enumerate() {
                 assert_frame(
                     &frames,
@@ -957,7 +958,8 @@ mod tests {
         assert!(system.move_selection(layout, Direction::Left));
         assert_eq!(system.selected_window(layout), Some(w(3)));
 
-        let frames = frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
+        let frames =
+            calculate_frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
         assert_eq!(frames.len(), 3);
         for (window, x, width) in [
             (w(1), 0.0, 250.0),
@@ -1008,7 +1010,7 @@ mod tests {
             }
             .normalized(),
         );
-        let frames = frames(&system, layout, CGSize::new(1600.0, 900.0), &constraints);
+        let frames = calculate_frames(&system, layout, CGSize::new(1600.0, 900.0), &constraints);
         assert!((frames[&w(101)].size.width - 600.0).abs() < 1.0);
         assert!((frames[&w(102)].size.width - 1000.0).abs() < 1.0);
         assert!((frames[&w(102)].origin.x - 600.0).abs() < 1.0);
@@ -1024,7 +1026,7 @@ mod tests {
             }
             .normalized(),
         );
-        let frames = frames(&system, layout, CGSize::new(1200.0, 900.0), &constraints);
+        let frames = calculate_frames(&system, layout, CGSize::new(1200.0, 900.0), &constraints);
         assert!((frames[&w(106)].size.width - 600.0).abs() < 1.0);
         assert!((frames[&w(107)].size.width - 600.0).abs() < 1.0);
         assert!((frames[&w(107)].origin.x - 600.0).abs() < 1.0);
@@ -1045,7 +1047,7 @@ mod tests {
             }
             .normalized(),
         );
-        let frames = frames(&system, layout, CGSize::new(1200.0, 800.0), &constraints);
+        let frames = calculate_frames(&system, layout, CGSize::new(1200.0, 800.0), &constraints);
         assert!(frames[&w(103)].size.height <= 201.0);
         assert!(frames[&w(104)].size.height >= 399.0);
         assert!((frames[&w(105)].size.height - 400.0).abs() < 1.0);
