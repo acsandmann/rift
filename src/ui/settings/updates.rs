@@ -1,12 +1,9 @@
 //! A user-initiated release check. No timers or background checks.
 pub type Completion = Box<dyn FnOnce(Result<String, String>)>;
 
-pub fn start() -> tokio::sync::oneshot::Receiver<Result<String, String>> {
-    let (send, receive) = tokio::sync::oneshot::channel();
-    std::thread::spawn(move || {
-        let _ = send.send(latest());
-    });
-    receive
+/// Checks off the main thread and passes the result to `done` on the checking thread.
+pub fn start(done: impl FnOnce(Result<String, String>) + Send + 'static) {
+    std::thread::spawn(move || done(latest()));
 }
 
 fn latest() -> Result<String, String> {

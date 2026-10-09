@@ -110,6 +110,7 @@ impl From<RuntimeDisplayData> for protocol::DisplayData {
             name: value.info.name,
             screen_id: value.info.id.as_u32(),
             frame: protocol_rect(value.info.frame),
+            backing_scale: value.info.backing_scale,
             space: value.info.space.map(|space| space.get()),
             is_active_space: value.is_active_space,
             is_active_context: value.is_active_context,

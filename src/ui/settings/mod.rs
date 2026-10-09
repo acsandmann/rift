@@ -17,9 +17,10 @@ mod applications;
 mod commands;
 mod editors;
 mod pages;
+pub mod process;
 mod schema;
 mod search;
-pub(crate) mod updates;
+mod updates;
 
 pub type Finish = Box<dyn FnOnce(Result<(), String>)>;
 

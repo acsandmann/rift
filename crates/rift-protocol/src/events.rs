@@ -16,6 +16,7 @@ pub enum EventKind {
     LayoutChanged,
     SelectionChanged,
     BindingModeChanged,
+    ConfigChanged,
     #[serde(rename = "*")]
     All,
 }
@@ -31,6 +32,7 @@ impl EventKind {
             Self::LayoutChanged => "layout_changed",
             Self::SelectionChanged => "selection_changed",
             Self::BindingModeChanged => "binding_mode_changed",
+            Self::ConfigChanged => "config_changed",
             Self::All => "*",
         }
     }
@@ -50,6 +52,10 @@ pub enum RiftEvent {
     BindingModeChanged {
         previous_mode: String,
         mode: String,
+    },
+    /// The configuration changed; `revision` identifies the new source.
+    ConfigChanged {
+        revision: u64,
     },
     WorkspaceChanged {
         space_id: u64,
@@ -113,6 +119,7 @@ impl RiftEvent {
     pub const fn kind(&self) -> EventKind {
         match self {
             Self::BindingModeChanged { .. } => EventKind::BindingModeChanged,
+            Self::ConfigChanged { .. } => EventKind::ConfigChanged,
             Self::WorkspaceChanged { .. } => EventKind::WorkspaceChanged,
             Self::WindowsChanged { .. } => EventKind::WindowsChanged,
             Self::WindowTitleChanged { .. } => EventKind::WindowTitleChanged,
@@ -135,7 +142,7 @@ impl RiftEvent {
     /// Global events have no associated macOS space.
     pub const fn space_id_opt(&self) -> Option<u64> {
         match self {
-            Self::BindingModeChanged { .. } => None,
+            Self::BindingModeChanged { .. } | Self::ConfigChanged { .. } => None,
             Self::WorkspaceChanged { space_id, .. }
             | Self::WindowsChanged { space_id, .. }
             | Self::WindowTitleChanged { space_id, .. }
@@ -148,7 +155,7 @@ impl RiftEvent {
 
     pub fn display_uuid(&self) -> Option<&str> {
         match self {
-            Self::BindingModeChanged { .. } => None,
+            Self::BindingModeChanged { .. } | Self::ConfigChanged { .. } => None,
             Self::WorkspaceChanged { display_uuid, .. }
             | Self::WindowsChanged { display_uuid, .. }
             | Self::WindowTitleChanged { display_uuid, .. }

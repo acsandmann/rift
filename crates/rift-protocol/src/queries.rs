@@ -221,9 +221,13 @@ pub struct DisplayData {
     pub name: Option<String>,
     pub screen_id: u32,
     pub frame: Rect,
+    #[serde(default = "unit_scale")]
+    pub backing_scale: f64,
     pub space: Option<u64>,
     pub is_active_space: bool,
     pub is_active_context: bool,
     pub active_space_ids: Vec<u64>,
     pub inactive_space_ids: Vec<u64>,
 }
+
+fn unit_scale() -> f64 { 1.0 }

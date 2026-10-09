@@ -860,7 +860,9 @@ impl<'de> Deserialize<'de> for Hotkey {
     }
 }
 
+/// Serialized untagged so it reads back through the `Map` form below.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(untagged)]
 pub enum HotkeySpec {
     Hotkey(Hotkey),
     ModifiersOnly { modifiers: Modifiers },

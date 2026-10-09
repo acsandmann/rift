@@ -71,6 +71,10 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Internal: run only the Settings window, connected to the running daemon.
+    #[arg(long, hide = true)]
+    settings: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -103,6 +107,11 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 fn main() {
     sigpipe::reset();
     let opt = Cli::parse();
+
+    if opt.settings {
+        log::init_logging();
+        rift_wm::ui::settings::process::run(opt.config.unwrap_or_else(config_file));
+    }
 
     if let Some(Commands::Service { service }) = &opt.command {
         match handle_service_command(service) {
@@ -222,8 +231,12 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     );
     let events_tx = reactor.sender();
 
-    let config_tx =
-        ConfigActor::spawn_with_path(config.clone(), events_tx.clone(), config_path.clone());
+    let config_tx = ConfigActor::spawn_with_path(
+        config.clone(),
+        events_tx.clone(),
+        broadcast_tx.clone(),
+        config_path.clone(),
+    );
 
     ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
 

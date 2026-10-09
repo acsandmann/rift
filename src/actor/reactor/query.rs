@@ -175,7 +175,6 @@ pub enum QueryRequest {
         resp: SyncSender<Option<VirtualWorkspaceId>>,
     },
     Displays(SyncSender<Vec<RuntimeDisplayData>>),
-    DisplaysAsync(tokio::sync::oneshot::Sender<Vec<RuntimeDisplayData>>),
     WorkspaceLayouts {
         space_id: Option<SpaceId>,
         workspace_id: Option<usize>,
@@ -186,7 +185,6 @@ pub enum QueryRequest {
         resp: SyncSender<Option<RuntimeWindowData>>,
     },
     Applications(SyncSender<Vec<ApplicationData>>),
-    ApplicationsAsync(tokio::sync::oneshot::Sender<Vec<ApplicationData>>),
     LayoutState {
         space_id: Option<u64>,
         workspace_id: Option<usize>,
@@ -207,9 +205,6 @@ impl Reactor {
             QueryRequest::ActiveWorkspace { space_id, resp } => {
                 let _ = resp.send(self.query_active_workspace(space_id));
             }
-            QueryRequest::DisplaysAsync(resp) => {
-                let _ = resp.send(self.query_displays());
-            }
             QueryRequest::Displays(resp) => {
                 let _ = resp.send(self.query_displays());
             }
@@ -218,9 +213,6 @@ impl Reactor {
             }
             QueryRequest::WindowInfo { window_id, resp } => {
                 let _ = resp.send(self.query_window_info(window_id));
-            }
-            QueryRequest::ApplicationsAsync(resp) => {
-                let _ = resp.send(self.query_applications());
             }
             QueryRequest::Applications(resp) => {
                 let _ = resp.send(self.query_applications());

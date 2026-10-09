@@ -52,7 +52,7 @@ cargo run -p rift-client --example listen -- workspace_changed
 
 Supported event names are `workspace_changed`, `windows_changed`,
 `window_title_changed`, `focused_window_changed`, `stacks_changed`, and
-`layout_changed`, `selection_changed`, and `binding_mode_changed`. Use `*` to listen for all events.
+`layout_changed`, `selection_changed`, `binding_mode_changed`, and `config_changed`. Use `*` to listen for all events.
 
 For a more complete example, see the [dimmer example](examples/dimmer.rs),
 which dims unfocused windows and updates them as Rift events arrive:

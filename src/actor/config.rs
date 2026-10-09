@@ -6,6 +6,7 @@ use tracing::{debug, info};
 
 use crate::actor::{self, reactor};
 use crate::common::config::{Config, ConfigCommand, ConfigDocument, ConfigSource, MAX_WORKSPACES};
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 
 pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
@@ -13,24 +14,26 @@ pub type Receiver = actor::Receiver<Event>;
 /// A typed transaction executed only against the actor’s authoritative source.
 pub type SourceEdit = Box<dyn FnOnce(&mut ConfigSource) -> Result<(), String> + Send>;
 
+#[derive(Serialize, Deserialize)]
 pub struct SourceSnapshot {
     pub revision: u64,
     pub source: ConfigSource,
 }
 
+type SnapshotResponse = SyncSender<Result<SourceSnapshot, String>>;
+
 #[derive(Serialize, Deserialize)]
 pub enum Event {
     #[serde(skip)]
-    ReloadSource(tokio::sync::oneshot::Sender<Result<SourceSnapshot, String>>),
+    QuerySource(SnapshotResponse),
     #[serde(skip)]
-    QuerySourceSince {
-        revision: Option<u64>,
-        response: tokio::sync::oneshot::Sender<Result<Option<SourceSnapshot>, String>>,
-    },
+    ReloadSource(SnapshotResponse),
+    /// Replace the source only if no other change happened since `expected_revision`.
     #[serde(skip)]
-    EditSource {
-        edit: SourceEdit,
-        response: tokio::sync::oneshot::Sender<Result<SourceSnapshot, String>>,
+    ApplySource {
+        expected_revision: u64,
+        source: Box<ConfigSource>,
+        response: SnapshotResponse,
     },
     #[serde(skip)]
     QueryConfig(SyncSender<Config>),
@@ -50,28 +53,35 @@ pub struct ConfigActor {
     disk: Option<String>,
     source_revision: u64,
     reactor_tx: reactor::Sender,
+    events: BroadcastSender,
     config_path: PathBuf,
 }
 
 impl ConfigActor {
-    pub fn spawn(config: Config, reactor_tx: reactor::Sender) -> Sender {
-        Self::spawn_with_path(config, reactor_tx, crate::common::config::config_file())
+    pub fn spawn(config: Config, reactor_tx: reactor::Sender, events: BroadcastSender) -> Sender {
+        Self::spawn_with_path(config, reactor_tx, events, crate::common::config::config_file())
     }
 
     pub fn spawn_with_path(
         config: Config,
         reactor_tx: reactor::Sender,
+        events: BroadcastSender,
         config_path: PathBuf,
     ) -> Sender {
         let (tx, rx) = actor::channel();
         std::thread::Builder::new()
             .name("config".to_string())
-            .spawn(move || Self::load(config, reactor_tx, config_path).run(rx))
+            .spawn(move || Self::load(config, reactor_tx, events, config_path).run(rx))
             .unwrap();
         tx
     }
 
-    fn load(config: Config, reactor_tx: reactor::Sender, config_path: PathBuf) -> Self {
+    fn load(
+        config: Config,
+        reactor_tx: reactor::Sender,
+        events: BroadcastSender,
+        config_path: PathBuf,
+    ) -> Self {
         let disk = read_disk(&config_path).unwrap_or_else(|error| {
             tracing::warn!(%error, "Could not read config file");
             None
@@ -91,6 +101,7 @@ impl ConfigActor {
             source_revision: 0,
             config,
             reactor_tx,
+            events,
             config_path,
         }
     }
@@ -98,26 +109,21 @@ impl ConfigActor {
     fn run(mut self, mut events: Receiver) {
         while let Some((_span, event)) = events.blocking_recv() {
             match event {
+                Event::QuerySource(response) => {
+                    let _ = response.send(self.source_snapshot());
+                }
                 Event::ReloadSource(response) => {
                     let result = self
                         .handle_config_command(ConfigCommand::ReloadConfig)
                         .and_then(|()| self.source_snapshot());
                     let _ = response.send(result);
                 }
-                Event::QuerySourceSince { revision, response } => {
-                    let result = if revision == Some(self.source_revision) {
-                        Ok(None)
-                    } else {
-                        self.source_snapshot().map(Some)
-                    };
-                    let _ = response.send(result);
-                }
-                Event::EditSource { edit, response } => {
-                    let result = self.edit_source(edit).map(|source| SourceSnapshot {
-                        revision: self.source_revision,
-                        source,
-                    });
-                    let _ = response.send(result);
+                Event::ApplySource {
+                    expected_revision,
+                    source,
+                    response,
+                } => {
+                    let _ = response.send(self.apply_source(expected_revision, *source));
                 }
                 Event::QueryConfig(resp) => {
                     let _ = resp.send(self.config.clone());
@@ -140,6 +146,32 @@ impl ConfigActor {
             .map_err(|e| e.to_string())
     }
 
+    fn apply_source(
+        &mut self,
+        expected_revision: u64,
+        source: ConfigSource,
+    ) -> Result<SourceSnapshot, String> {
+        if expected_revision != self.source_revision {
+            return Err(
+                "The configuration changed elsewhere, so this change was not saved. \
+                        Settings now shows the latest configuration; try again."
+                    .into(),
+            );
+        }
+        let current = self.source_snapshot()?;
+        if current.source == source {
+            return Ok(current);
+        }
+        let source = self.edit_source(Box::new(move |current| {
+            *current = source;
+            Ok(())
+        }))?;
+        Ok(SourceSnapshot {
+            revision: self.source_revision,
+            source,
+        })
+    }
+
     fn edit_source(&mut self, edit: SourceEdit) -> Result<ConfigSource, String> {
         let edited = self
             .document
@@ -156,6 +188,8 @@ impl ConfigActor {
     fn publish(&mut self) {
         self.source_revision += 1;
         self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
+        self.events
+            .send(BroadcastEvent::ConfigChanged { revision: self.source_revision });
     }
 
     /// Atomically saves `document` only if the file still holds the last version this actor
@@ -310,54 +344,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_snapshots_skip_echoes_and_preserve_external_reload() {
+    fn source_transactions_check_revisions_and_skip_unchanged_sources() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
-        ConfigDocument::default().save(&path).unwrap();
+        std::fs::write(&path, "# keep me\n[settings]\nanimate = false\n[keys]\n").unwrap();
         let (reactor, _updates) = actor::channel();
-        let actor = ConfigActor::spawn_with_path(Config::default(), reactor, path.clone());
-        let query = |revision| {
-            let (response, result) = tokio::sync::oneshot::channel();
-            actor.send(Event::QuerySourceSince { revision, response });
-            result.blocking_recv().unwrap().unwrap()
+        let (events, mut changes) = actor::channel();
+        let actor = ConfigActor::spawn_with_path(Config::default(), reactor, events, path.clone());
+        let call = |event: fn(SnapshotResponse) -> Event| {
+            let (response, result) = sync_channel(1);
+            actor.send(event(response));
+            result.recv().unwrap()
         };
-        let initial = query(None).unwrap();
-        assert!(query(Some(initial.revision)).is_none());
-        let (response, result) = tokio::sync::oneshot::channel();
-        let animate = !initial.source.settings.animate;
-        actor.send(Event::EditSource {
-            edit: Box::new(move |s| {
-                s.settings.animate = animate;
-                Ok(())
-            }),
-            response,
-        });
-        let edited = result.blocking_recv().unwrap().unwrap();
-        assert!(edited.revision > initial.revision);
-        assert_eq!(edited.source.settings.animate, animate);
-        assert!(
-            query(Some(edited.revision)).is_none(),
-            "edit echo must not return another source"
+        let apply = |expected_revision, source: &ConfigSource| {
+            let (response, result) = sync_channel(1);
+            actor.send(Event::ApplySource {
+                expected_revision,
+                source: Box::new(source.clone()),
+                response,
+            });
+            result.recv().unwrap()
+        };
+        let initial = call(Event::QuerySource).unwrap();
+        // The child sends sources as JSON; the round trip must be lossless.
+        let json = serde_json::to_value(&initial.source).unwrap();
+        assert!(serde_json::from_value::<ConfigSource>(json).unwrap() == initial.source);
+        let unchanged = apply(initial.revision, &initial.source).unwrap();
+        assert_eq!(
+            unchanged.revision, initial.revision,
+            "no-op edits do not publish"
         );
-        let (response, result) = tokio::sync::oneshot::channel();
-        actor.send(Event::EditSource {
-            edit: Box::new(|_| Err("rejected".into())),
-            response,
-        });
-        assert!(result.blocking_recv().unwrap().is_err());
-        assert!(
-            query(Some(edited.revision)).is_none(),
-            "failed edit must not advance the source"
-        );
+        assert!(changes.try_recv().is_err());
+
+        let mut edited = initial.source.clone();
+        edited.settings.animate = true;
+        let saved = apply(initial.revision, &edited).unwrap();
+        assert_eq!(saved.revision, initial.revision + 1);
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("# keep me\n"));
+        let (_, event) = changes.try_recv().unwrap();
+        assert_eq!(event, BroadcastEvent::ConfigChanged { revision: saved.revision });
+
+        // A stale revision never overwrites a newer change.
+        let mut stale = initial.source.clone();
+        stale.settings.focus_follows_mouse = !stale.settings.focus_follows_mouse;
+        assert!(apply(initial.revision, &stale).err().unwrap().contains("changed elsewhere"));
+        assert!(call(Event::QuerySource).unwrap().source.settings.animate);
+
         let mut external = ConfigDocument::read(&path).unwrap();
-        external.update(|s| s.settings.animate = !animate).unwrap();
+        external.update(|s| s.settings.animate = false).unwrap();
         external.save(&path).unwrap();
-        let (response, result) = tokio::sync::oneshot::channel();
-        actor.send(Event::ReloadSource(response));
-        let reloaded = result.blocking_recv().unwrap().unwrap();
-        assert!(reloaded.revision > edited.revision);
-        assert_eq!(reloaded.source.settings.animate, !animate);
-        assert!(query(Some(edited.revision)).is_some());
+        let reloaded = call(Event::ReloadSource).unwrap();
+        assert!(reloaded.revision > saved.revision);
+        assert!(!reloaded.source.settings.animate);
+        assert!(
+            apply(saved.revision, &edited).is_err(),
+            "reloads invalidate older revisions"
+        );
+    }
+
+    /// Settings sends whole sources as JSON; every source must read back unchanged.
+    #[test]
+    fn sources_round_trip_through_json() {
+        let text = include_str!("../../rift.default.toml");
+        let mut source = ConfigDocument::load(text).unwrap().0.source().unwrap();
+        for spec in ["Alt", "Ctrl + Fn"] {
+            source.settings.focus_follows_mouse_disable_hotkey =
+                Some(serde_json::from_value(serde_json::json!(spec)).unwrap());
+            let json = serde_json::to_value(&source).unwrap();
+            assert!(serde_json::from_value::<ConfigSource>(json).unwrap() == source, "{spec}");
+        }
     }
 
     #[test]
@@ -367,7 +422,8 @@ mod tests {
         let text = include_str!("../../rift.default.toml");
         std::fs::write(&path, text).unwrap();
         let (reactor_tx, _updates) = actor::channel();
-        let mut actor = ConfigActor::load(Config::default(), reactor_tx, path.clone());
+        let mut actor =
+            ConfigActor::load(Config::default(), reactor_tx, actor::channel().0, path.clone());
         actor.handle_config_command(ConfigCommand::SetAnimate(true)).unwrap();
         actor.handle_config_command(ConfigCommand::SaveConfig).unwrap();
         assert_eq!(
@@ -402,7 +458,12 @@ mod tests {
         let text = "# personal settings\n[settings]\nanimate = false # retain this comment\n[virtual_workspaces]\nworkspace_names = [\"Main\", \"Code\"]\n[keys]\n";
         std::fs::write(&path, text).unwrap();
         let (reactor_tx, mut updates) = actor::channel();
-        let mut actor = ConfigActor::load(Config::read(&path).unwrap(), reactor_tx, path.clone());
+        let mut actor = ConfigActor::load(
+            Config::read(&path).unwrap(),
+            reactor_tx,
+            actor::channel().0,
+            path.clone(),
+        );
         let source = actor
             .edit_source(Box::new(|s| {
                 s.settings.animate = true;
@@ -509,7 +570,12 @@ mod tests {
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "[settings]\nanimate = false\n[keys]\n").unwrap();
         let (reactor_tx, mut updates) = actor::channel();
-        let mut actor = ConfigActor::load(Config::read(&path).unwrap(), reactor_tx, path.clone());
+        let mut actor = ConfigActor::load(
+            Config::read(&path).unwrap(),
+            reactor_tx,
+            actor::channel().0,
+            path.clone(),
+        );
 
         // Own saves succeed, and the watcher's echo of them publishes nothing.
         assert!(toggle_animate(&mut actor).unwrap());
@@ -567,7 +633,8 @@ mod tests {
         let target = directory.path().join("dotfiles.toml");
         let path = directory.path().join("config.toml");
         let (reactor_tx, _updates) = actor::channel();
-        let mut actor = ConfigActor::load(Config::default(), reactor_tx, path.clone());
+        let mut actor =
+            ConfigActor::load(Config::default(), reactor_tx, actor::channel().0, path.clone());
         toggle_animate(&mut actor).unwrap();
         assert!(Config::read(&path).is_ok(), "an absent file is created");
         std::fs::remove_file(&path).unwrap();
@@ -593,7 +660,7 @@ mod tests {
     fn unread_and_dropped_replies_do_not_stall_actor() {
         let (reactor_tx, _updates) = actor::channel();
         let config = Config::default();
-        let config_tx = ConfigActor::spawn(config.clone(), reactor_tx);
+        let config_tx = ConfigActor::spawn(config.clone(), reactor_tx, actor::channel().0);
         let (response, unread) = sync_channel(1);
         config_tx.try_send(Event::QueryConfig(response)).unwrap();
         let (response, dropped) = sync_channel(1);
