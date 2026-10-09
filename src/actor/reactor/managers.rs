@@ -209,24 +209,22 @@ pub struct LayoutManager {
 
 pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
 
+// macOS does not clip application windows to Rift's per-display scrolling viewport. Keep native
+// frames inside their owning display and let non-focused columns overlap behind the focused one;
+// otherwise a logical edge preview is rendered on an adjacent physical display.
 pub(super) fn bound_frame_to_screen(frame: CGRect, screen: CGRect) -> CGRect {
-    const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
-
     let screen_left = screen.origin.x;
     let screen_top = screen.origin.y;
     let screen_right = screen.max().x;
     let screen_bottom = screen.max().y;
+    let max_x = (screen_right - frame.size.width).max(screen_left);
     let max_y = (screen_bottom - frame.size.height).max(screen_top);
-    let x = if frame.max().x <= screen_left {
-        screen_left - frame.size.width + WINDOW_HIDDEN_THRESHOLD
-    } else if frame.origin.x >= screen_right {
-        screen_right - WINDOW_HIDDEN_THRESHOLD
-    } else {
-        frame.origin.x
-    };
 
     CGRect::new(
-        CGPoint::new(x, frame.origin.y.clamp(screen_top, max_y)),
+        CGPoint::new(
+            frame.origin.x.clamp(screen_left, max_x),
+            frame.origin.y.clamp(screen_top, max_y),
+        ),
         frame.size,
     )
 }
@@ -478,38 +476,52 @@ mod tests {
     }
 
     #[test]
-    fn bound_frame_to_screen_keeps_partial_overlap_for_strip_behavior() {
+    fn bound_frame_to_screen_contains_partially_visible_left_window() {
         let screen = rect(2000.0, 0.0, 1000.0, 800.0);
         let frame = rect(1500.0, 50.0, 700.0, 400.0);
         let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 1500.0);
+        assert_eq!(bounded.origin.x, 2000.0);
         assert_eq!(bounded.size.width, 700.0);
     }
 
     #[test]
-    fn bound_frame_to_screen_parks_fully_offscreen_windows_to_hidden_sliver() {
+    fn bound_frame_to_screen_contains_fully_offscreen_left_window() {
         let screen = rect(2000.0, 0.0, 1000.0, 800.0);
         let frame = rect(1200.0, 80.0, 600.0, 300.0);
         let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 1410.0);
+        assert_eq!(bounded.origin.x, 2000.0);
         assert_eq!(bounded.size.width, 600.0);
     }
 
     #[test]
-    fn bound_frame_to_screen_parks_right_offscreen_windows_to_hidden_sliver() {
+    fn bound_frame_to_screen_contains_fully_offscreen_right_window() {
         let screen = rect(2000.0, 0.0, 1000.0, 800.0);
         let frame = rect(3200.0, 80.0, 600.0, 300.0);
         let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 2990.0);
+        assert_eq!(bounded.origin.x, 2400.0);
         assert_eq!(bounded.size.width, 600.0);
     }
 
     #[test]
-    fn bound_frame_to_screen_does_not_park_partially_visible_right_windows() {
+    fn bound_frame_to_screen_contains_partially_visible_right_window() {
         let screen = rect(2000.0, 0.0, 1000.0, 800.0);
         let frame = rect(2998.0, 80.0, 600.0, 300.0);
         let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 2998.0);
+        assert_eq!(bounded.origin.x, 2400.0);
         assert_eq!(bounded.size.width, 600.0);
+    }
+
+    #[test]
+    fn contained_scrolling_columns_expose_both_edges_on_the_owning_display() {
+        let screen = rect(1728.0, 0.0, 2560.0, 1400.0);
+        let width = 2048.0;
+        let previous = bound_frame_to_screen(rect(-64.0, 0.0, width, 1400.0), screen);
+        let focused = bound_frame_to_screen(rect(1984.0, 0.0, width, 1400.0), screen);
+        let next = bound_frame_to_screen(rect(4032.0, 0.0, width, 1400.0), screen);
+
+        assert_eq!(
+            (previous.origin.x, focused.origin.x, next.origin.x),
+            (1728.0, 1984.0, 2240.0)
+        );
     }
 }
