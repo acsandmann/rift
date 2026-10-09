@@ -146,7 +146,7 @@ pub fn run(ui: Ui) {
                 )
             });
             let old =
-                objc2::rc::Weak::new(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view());
+                objc2::rc::Weak::new(settings.pages.borrow()[10].as_ref().unwrap().view.ns_view());
             assert_eq!(
                 autoreleasepool(|_| count::<NSSwitch>(settings._host.ns_view())),
                 1
@@ -156,7 +156,21 @@ pub fn run(ui: Ui) {
                     menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("BSP")),
                 )
             });
-            assert_eq!(count::<NSSwitch>(settings._host.ns_view()), 0);
+            autoreleasepool(|_| {
+                assert_eq!(count::<NSSwitch>(settings._host.ns_view()), 0);
+                assert!(old.load().is_some(), "switching layouts parks cached subpages");
+            });
+            // A display change rebuilds layout scopes, so parked copies must be released.
+            autoreleasepool(|_| {
+                settings.refresh_displays(vec![crate::sys::screen::ScreenInfo {
+                    id: crate::sys::screen::ScreenId::new(2),
+                    display_uuid: "replacement-display".into(),
+                    name: Some("Replacement display".into()),
+                    frame: Default::default(),
+                    backing_scale: 1.0,
+                    space: None,
+                }]);
+            });
             autoreleasepool(|_| {
                 root.layoutSubtreeIfNeeded();
                 objc2_foundation::NSRunLoop::currentRunLoop()
