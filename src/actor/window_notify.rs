@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use super::reactor::{self, Event};
 use super::spaces;
@@ -13,6 +13,7 @@ use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
 use crate::sys::window_server::{self, WindowIterator, WindowServerId};
+use crate::sys::window_notify::EventData;
 use crate::sys::{event, window_notify};
 
 #[derive(Default)]
@@ -90,11 +91,15 @@ impl FocusWakeSender {
 }
 
 pub struct WindowNotify {
-    events_tx: reactor::Sender,
-    spaces_tx: spaces::Sender,
     requests_rx: Option<Receiver>,
     subscribed: HashSet<CGSEventType>,
     initial_events: Vec<CGSEventType>,
+}
+
+/// Fans WindowServer notifications out to the actors that consume them.
+struct Dispatcher {
+    events_tx: reactor::Sender,
+    spaces_tx: spaces::Sender,
     tx_store: Option<WindowTxStore>,
     focus_wake: FocusWakeSender,
 }
@@ -109,14 +114,17 @@ impl WindowNotify {
     ) -> Self {
         let (focus_wake_tx, focus_wake_rx) = mpsc::sync_channel(1);
         Self::spawn_focus_resolver(events_tx.clone(), focus_wake_rx);
-        Self {
+        Dispatcher {
             events_tx,
             spaces_tx,
+            tx_store,
+            focus_wake: FocusWakeSender { wake: focus_wake_tx },
+        }
+        .spawn();
+        Self {
             requests_rx: Some(requests_rx),
             subscribed: HashSet::default(),
             initial_events: initial_events.iter().copied().collect(),
-            tx_store,
-            focus_wake: FocusWakeSender { wake: focus_wake_tx },
         }
     }
 
@@ -126,13 +134,7 @@ impl WindowNotify {
             None => return,
         };
         for event in self.initial_events.drain(..) {
-            match Self::subscribe(
-                event,
-                self.events_tx.clone(),
-                self.spaces_tx.clone(),
-                self.tx_store.clone(),
-                self.focus_wake.clone(),
-            ) {
+            match Self::subscribe(event) {
                 Ok(()) => {
                     self.subscribed.insert(event);
                     debug!("initial subscription succeeded for event {}", event);
@@ -162,13 +164,7 @@ impl WindowNotify {
                     debug!("already subscribed to event {}", event);
                     return;
                 }
-                match Self::subscribe(
-                    event,
-                    self.events_tx.clone(),
-                    self.spaces_tx.clone(),
-                    self.tx_store.clone(),
-                    self.focus_wake.clone(),
-                ) {
+                match Self::subscribe(event) {
                     Ok(()) => {
                         self.subscribed.insert(event);
                         debug!("subscribed to event {}", event);
@@ -186,135 +182,12 @@ impl WindowNotify {
         }
     }
 
-    fn subscribe(
-        event: CGSEventType,
-        events_tx: reactor::Sender,
-        spaces_tx: spaces::Sender,
-        tx_store: Option<WindowTxStore>,
-        focus_wake: FocusWakeSender,
-    ) -> Result<(), i32> {
-        let res = window_notify::init(event);
-        if res != 0 {
-            return Err(res);
+    /// Registers the WindowServer callback; delivery goes through the shared dispatcher thread.
+    fn subscribe(event: CGSEventType) -> Result<(), i32> {
+        match window_notify::init(event) {
+            0 => Ok(()),
+            res => Err(res),
         }
-
-        let mut rx = window_notify::take_receiver(event);
-
-        std::thread::spawn(move || {
-            while let Some((_span, evt)) = rx.blocking_recv() {
-                trace!(?event, ?evt, "got event");
-
-                match event {
-                    CGSEventType::Known(KnownCGSEvent::WindowClosed) => {
-                        let Some(window_id) = evt.window_id else {
-                            continue;
-                        };
-                        events_tx.send(Event::WindowClosed(WindowServerId::new(window_id)));
-                    }
-                    CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
-                        if let Some(space_id) = evt.space_id {
-                            spaces_tx.send(spaces::Event::SpaceDestroyed(SpaceId::new(space_id)));
-                        }
-                    }
-                    CGSEventType::Known(KnownCGSEvent::SpaceCreated) => {
-                        if let Some(space_id) = evt.space_id {
-                            spaces_tx.send(spaces::Event::SpaceCreated(SpaceId::new(space_id)));
-                        }
-                    }
-                    CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged) => {
-                        spaces_tx.send(spaces::Event::ActiveSpaceChanged);
-                    }
-                    CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)
-                    | CGSEventType::Known(
-                        KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged,
-                    ) => {
-                        spaces_tx.send(spaces::Event::SpaceInventoryChanged);
-                    }
-                    CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
-                        focus_wake.notify();
-                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
-                        else {
-                            continue;
-                        };
-                        // This is not just "window left the current active-space snapshot".
-                        // CGS emits SpaceWindowDestroyed when the window's connection drops
-                        // out of the WindowServer membership for that space.
-                        spaces_tx.send(spaces::Event::WindowServerDestroyed(
-                            WindowServerId::new(window_id),
-                            SpaceId::new(space_id),
-                        ))
-                    }
-                    CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
-                        focus_wake.notify();
-                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
-                        else {
-                            continue;
-                        };
-                        spaces_tx.send(spaces::Event::WindowServerAppeared(
-                            WindowServerId::new(window_id),
-                            SpaceId::new(space_id),
-                        ));
-                    }
-                    CGSEventType::Known(KnownCGSEvent::WindowReordered)
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged,
-                    )
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged,
-                    ) => focus_wake.notify(),
-                    CGSEventType::Known(
-                        KnownCGSEvent::WindowHidden | KnownCGSEvent::WindowUnhidden,
-                    ) => {
-                        focus_wake.notify();
-                        if let Some(window_id) = evt.window_id {
-                            let wsid = WindowServerId::new(window_id);
-                            events_tx.send(
-                                if matches!(
-                                    evt.event_type,
-                                    CGSEventType::Known(KnownCGSEvent::WindowUnhidden)
-                                ) {
-                                    Event::WindowServerUnhidden(wsid)
-                                } else {
-                                    Event::WindowServerHidden(wsid)
-                                },
-                            );
-                        }
-                    }
-                    CGSEventType::Known(KnownCGSEvent::WindowMoved)
-                    | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
-                        // TODO: suppress move/resize while Mission Control is active
-                        let mouse_state = event::get_mouse_state();
-                        let Some(window_id) = evt.window_id else {
-                            continue;
-                        };
-                        let wsid = WindowServerId::new(window_id);
-                        if let Some(query) = WindowIterator::new(&[wsid]) {
-                            if query.advance().is_none() {
-                                continue;
-                            }
-                            let bounds = query.bounds();
-                            let pid = query.pid();
-                            if let Some(idx) = NonZeroU32::new(window_id) {
-                                let last_seen = tx_store
-                                    .as_ref()
-                                    .and_then(|store| store.get(&wsid))
-                                    .map(|record| record.txid);
-                                events_tx.send(Event::WindowFrameChanged(
-                                    WindowId { idx, pid },
-                                    bounds,
-                                    last_seen,
-                                    Requested(false),
-                                    mouse_state,
-                                ));
-                            }
-                        };
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        Ok(())
     }
 
     fn spawn_focus_resolver(events_tx: reactor::Sender, focus_wake_rx: mpsc::Receiver<()>) {
@@ -358,6 +231,131 @@ impl WindowNotify {
                 }
             })
             .expect("failed to spawn WindowServer focus resolver");
+    }
+}
+
+impl Dispatcher {
+    fn spawn(self) {
+        let Some(mut rx) = window_notify::take_receiver() else {
+            warn!("WindowServer notification receiver already taken; not spawning dispatcher");
+            return;
+        };
+        std::thread::Builder::new()
+            .name("window-notify".to_string())
+            .spawn(move || {
+                while let Some((_span, evt)) = rx.blocking_recv() {
+                    self.dispatch(evt);
+                }
+            })
+            .expect("failed to spawn WindowServer notification dispatcher");
+    }
+
+    fn dispatch(&self, evt: EventData) {
+        let Self {
+            events_tx,
+            spaces_tx,
+            tx_store,
+            focus_wake,
+        } = self;
+        let event = evt.event_type;
+        trace!(?event, ?evt, "got event");
+
+        match event {
+            CGSEventType::Known(KnownCGSEvent::WindowClosed) => {
+                let Some(window_id) = evt.window_id else {
+                    return;
+                };
+                events_tx.send(Event::WindowClosed(WindowServerId::new(window_id)));
+            }
+            CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
+                if let Some(space_id) = evt.space_id {
+                    spaces_tx.send(spaces::Event::SpaceDestroyed(SpaceId::new(space_id)));
+                }
+            }
+            CGSEventType::Known(KnownCGSEvent::SpaceCreated) => {
+                if let Some(space_id) = evt.space_id {
+                    spaces_tx.send(spaces::Event::SpaceCreated(SpaceId::new(space_id)));
+                }
+            }
+            CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged) => {
+                spaces_tx.send(spaces::Event::ActiveSpaceChanged);
+            }
+            CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)
+            | CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged) => {
+                spaces_tx.send(spaces::Event::SpaceInventoryChanged);
+            }
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
+                focus_wake.notify();
+                let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id) else {
+                    return;
+                };
+                // This is not just "window left the current active-space snapshot".
+                // CGS emits SpaceWindowDestroyed when the window's connection drops
+                // out of the WindowServer membership for that space.
+                spaces_tx.send(spaces::Event::WindowServerDestroyed(
+                    WindowServerId::new(window_id),
+                    SpaceId::new(space_id),
+                ))
+            }
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
+                focus_wake.notify();
+                let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id) else {
+                    return;
+                };
+                spaces_tx.send(spaces::Event::WindowServerAppeared(
+                    WindowServerId::new(window_id),
+                    SpaceId::new(space_id),
+                ));
+            }
+            CGSEventType::Known(KnownCGSEvent::WindowReordered)
+            | CGSEventType::Known(KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged)
+            | CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged) => {
+                focus_wake.notify()
+            }
+            CGSEventType::Known(KnownCGSEvent::WindowHidden | KnownCGSEvent::WindowUnhidden) => {
+                focus_wake.notify();
+                if let Some(window_id) = evt.window_id {
+                    let wsid = WindowServerId::new(window_id);
+                    events_tx.send(
+                        if matches!(event, CGSEventType::Known(KnownCGSEvent::WindowUnhidden)) {
+                            Event::WindowServerUnhidden(wsid)
+                        } else {
+                            Event::WindowServerHidden(wsid)
+                        },
+                    );
+                }
+            }
+            CGSEventType::Known(KnownCGSEvent::WindowMoved)
+            | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+                // TODO: suppress move/resize while Mission Control is active
+                let mouse_state = event::get_mouse_state();
+                let Some(window_id) = evt.window_id else {
+                    return;
+                };
+                let wsid = WindowServerId::new(window_id);
+                if let Some(query) = WindowIterator::new(&[wsid]) {
+                    if query.advance().is_none() {
+                        return;
+                    }
+                    let bounds = query.bounds();
+                    let pid = query.pid();
+                    if let Some(idx) = NonZeroU32::new(window_id) {
+                        let last_seen = tx_store
+                            .as_ref()
+                            .and_then(|store| store.get(&wsid))
+                            .map(|record| record.txid);
+                        events_tx.send(Event::WindowFrameChanged(
+                            WindowId { idx, pid },
+                            bounds,
+                            last_seen,
+                            Requested(false),
+                            mouse_state,
+                        ));
+                    }
+                };
+            }
+            _ => {}
+        }
     }
 }
 

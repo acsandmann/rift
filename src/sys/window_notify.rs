@@ -34,8 +34,12 @@ pub struct EventData {
     pub len: usize,
 }
 
-static EVENT_RECEIVERS: Lazy<Mutex<HashMap<CGSEventType, Option<actor::Receiver<EventData>>>>> =
-    Lazy::new(|| Mutex::new(HashMap::default()));
+/// One channel carries every subscribed event type; `EventData::event_type` tells them apart.
+static EVENT_CHANNEL: Lazy<(actor::Sender<EventData>, Mutex<Option<actor::Receiver<EventData>>>)> =
+    Lazy::new(|| {
+        let (tx, rx) = actor::channel::<EventData>();
+        (tx, Mutex::new(Some(rx)))
+    });
 
 static REGISTERED_EVENTS: Lazy<Mutex<HashSet<CGSEventType>>> =
     Lazy::new(|| Mutex::new(HashSet::default()));
@@ -54,8 +58,7 @@ pub fn init(event: CGSEventType) -> i32 {
         return 1;
     }
 
-    let (tx, rx) = actor::channel::<EventData>();
-    EVENT_RECEIVERS.lock().insert(event, Some(rx));
+    let tx = EVENT_CHANNEL.0.clone();
 
     let mut callback_ctxs = CALLBACK_CTXS.write();
     let callback_ctx = callback_ctxs.entry(event).or_insert_with(|| {
@@ -83,15 +86,8 @@ pub fn init(event: CGSEventType) -> i32 {
     res
 }
 
-pub fn take_receiver(event: CGSEventType) -> actor::Receiver<EventData> {
-    if let Some(rx) = EVENT_RECEIVERS.lock().get_mut(&event)
-        && let Some(rxo) = rx.take()
-    {
-        rxo
-    } else {
-        panic!("window_notify::take_receiver({}) failed", event)
-    }
-}
+/// Receiver for every event registered through [`init`]. Returns `None` once taken.
+pub fn take_receiver() -> Option<actor::Receiver<EventData>> { EVENT_CHANNEL.1.lock().take() }
 
 pub fn update_window_notifications(window_ids: &[u32]) {
     unsafe {
