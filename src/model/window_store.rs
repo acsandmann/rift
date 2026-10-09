@@ -1389,9 +1389,11 @@ impl WindowStore {
             }
         }
         for (workspace, ids) in &self.workspace_windows {
-            debug_assert!(ids.iter().all(|wid| self.windows.get(wid).is_some_and(|record| {
-                record.state.is_some() && record.workspace == Some(*workspace)
-            })));
+            debug_assert!(ids.iter().all(|wid| {
+                self.windows.get(wid).is_some_and(|record| {
+                    record.state.is_some() && record.workspace == Some(*workspace)
+                })
+            }));
         }
     }
 }

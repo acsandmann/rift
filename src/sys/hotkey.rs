@@ -1344,6 +1344,17 @@ fn fallback_keycode_from_char(ch: &str) -> Option<KeyCode> {
         '7' => Digit7,
         '8' => Digit8,
         '9' => Digit9,
+        '`' => Backquote,
+        '-' => Minus,
+        '=' => Equal,
+        '[' => BracketLeft,
+        ']' => BracketRight,
+        '\\' => Backslash,
+        ';' => Semicolon,
+        '\'' => Quote,
+        ',' => Comma,
+        '.' => Period,
+        '/' => Slash,
         _ => return None,
     };
     Some(code)

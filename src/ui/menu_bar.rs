@@ -5,15 +5,15 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
+use cgs::{Canvas, Menu, MenuItem, OpenPanel, SavePanel, StatusItem, Ui};
+use objc2::Message;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2::{ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2_app_kit::{
     NSAlert, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
-    NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSGraphicsContext, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar,
-    NSStatusItem, NSVariableStatusItemLength, NSView,
+    NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSMenuItem, NSSavePanel, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
@@ -22,10 +22,9 @@ use objc2_core_graphics::{CGBlendMode, CGContext};
 use objc2_core_text::{CTLine, kCTForegroundColorFromContextAttributeName};
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSNumber,
-    NSObject, NSRect, NSSize, NSString, NSURL,
+    NSSize, NSString, NSURL,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::debug;
 
 use crate::actor::menu_bar::DisplayWorkspaces;
 use crate::actor::reactor::{
@@ -84,26 +83,30 @@ pub enum MenuAction {
     OpenMatrix,
     OpenSponsor,
     OpenConfig,
+    OpenSettings,
+    SettingsClosed,
+    /// Background Settings application discovery finished.
+    InstalledApplications(Vec<(String, String)>),
     ReloadConfig,
     QuitRift,
 }
 
 pub struct MenuIcon {
-    status_item: Retained<NSStatusItem>,
-    view: Retained<MenuIconView>,
-    _menu: Retained<NSMenu>,
-    menu_handler: Retained<MenuActionHandler>,
+    status_item: StatusItem,
+    view: MenuIconView,
+    _menu: Rc<Menu>,
+    menu_handler: Rc<MenuActionHandler>,
     layout_items: Vec<(LayoutMode, Retained<NSMenuItem>)>,
     workspace_item: Retained<NSMenuItem>,
-    workspace_submenu: Retained<NSMenu>,
+    workspace_submenu: Rc<Menu>,
     workspace_items: Vec<WorkspaceMenuItem>,
     next_workspace_item: Retained<NSMenuItem>,
     prev_workspace_item: Retained<NSMenuItem>,
     tiling_item: Retained<NSMenuItem>,
     reload_item: Retained<NSMenuItem>,
     quit_item: Retained<NSMenuItem>,
-    restore_workspace_menu: Retained<NSMenu>,
-    restore_space_menu: Retained<NSMenu>,
+    restore_workspace_menu: Rc<Menu>,
+    restore_space_menu: Rc<Menu>,
     layout_folder: PathBuf,
     mtm: MainThreadMarker,
     prev_width: f64,
@@ -144,16 +147,15 @@ impl MenuIcon {
         reactor_tx: ReactorSender,
         layout_folder: &Path,
     ) -> Self {
-        let status_bar = NSStatusBar::systemStatusBar();
-        let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
+        let status_item = StatusItem::new(&Ui::new(mtm));
         let view = MenuIconView::new(mtm);
-        let menu_handler = MenuActionHandler::new(mtm, action_tx, reactor_tx);
+        let menu_handler = MenuActionHandler::new(action_tx, reactor_tx);
         let built = build_static_menu(mtm, &menu_handler);
-        status_item.setMenu(Some(&built.menu));
-        if let Some(btn) = status_item.button(mtm) {
+        status_item.ns_status_item().setMenu(Some(built.menu.ns_menu()));
+        if let Some(btn) = status_item.ns_status_item().button(mtm) {
             btn.addSubview(&*view);
             view.setFrameSize(NSSize::new(0.0, 0.0));
-            status_item.setVisible(true);
+            status_item.ns_status_item().setVisible(true);
         }
 
         let mut this = Self {
@@ -221,7 +223,7 @@ impl MenuIcon {
         }
 
         for workspace in self.workspace_items.drain(..) {
-            self.workspace_submenu.removeItem(&workspace.item);
+            self.workspace_submenu.remove(&workspace.item);
         }
 
         let shortcuts = MenuShortcuts::from_hotkeys(hotkeys);
@@ -229,24 +231,25 @@ impl MenuIcon {
             let item = make_menu_item(
                 self.mtm,
                 &workspace_menu_title(workspace),
-                Some(sel!(onSwitchWorkspace:)),
+                Some(MenuActionHandler::on_switch_workspace),
                 Some(&self.menu_handler),
             );
-            item.setTag(workspace.index as isize);
-            set_menu_item_checked(&item, workspace.is_active);
+            item.ns_menu_item().setTag(workspace.index as isize);
+            set_menu_item_checked(item.ns_menu_item(), workspace.is_active);
             set_menu_item_hotkey(
-                &item,
+                item.ns_menu_item(),
                 shortcuts
                     .switch_workspace_by_index
                     .get(&workspace.index)
                     .or_else(|| shortcuts.switch_workspace_by_name.get(&workspace.name)),
             );
-            self.workspace_submenu.addItem(&item);
+            let native = item.ns_menu_item().retain();
+            self.workspace_submenu.add(item);
             self.workspace_items.push(WorkspaceMenuItem {
                 identity: workspace.id.clone(),
                 index: workspace.index,
                 name: workspace.name.clone(),
-                item,
+                item: native,
             });
         }
 
@@ -281,18 +284,18 @@ impl MenuIcon {
             &self.menu_handler,
             &self.restore_workspace_menu,
             &files,
-            sel!(onRestoreMasterFileWorkspace:),
-            sel!(onRestoreLibraryWorkspace:),
-            sel!(onRestoreWorkspace:),
+            MenuActionHandler::on_restore_master_file_workspace,
+            MenuActionHandler::on_restore_library_workspace,
+            MenuActionHandler::on_restore_workspace,
         );
         rebuild_restore_menu(
             self.mtm,
             &self.menu_handler,
             &self.restore_space_menu,
             &files,
-            sel!(onRestoreMasterFileSpace:),
-            sel!(onRestoreLibrarySpace:),
-            sel!(onRestoreSpace:),
+            MenuActionHandler::on_restore_master_file_space,
+            MenuActionHandler::on_restore_library_space,
+            MenuActionHandler::on_restore_space,
         );
     }
 
@@ -306,8 +309,8 @@ impl MenuIcon {
             self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
 
         if render_inputs.is_empty() {
-            if self.status_item.isVisible() {
-                self.status_item.setVisible(false);
+            if self.status_item.ns_status_item().isVisible() {
+                self.status_item.ns_status_item().setVisible(false);
             }
             self.prev_width = 0.0;
             if render_changed {
@@ -317,25 +320,22 @@ impl MenuIcon {
         }
 
         if render_changed {
-            let layout = {
-                let ivars = self.view.ivars();
-                build_layout(&render_inputs, ivars.text_attrs.as_ref())
-            };
+            let layout = { build_layout(&render_inputs, self.view.text_attrs.as_ref()) };
             self.view.set_layout(layout);
             self.render_key = Some(MenuIconRenderKey::from_inputs(&render_inputs));
         }
-        if !self.status_item.isVisible() {
-            self.status_item.setVisible(true);
+        if !self.status_item.ns_status_item().isVisible() {
+            self.status_item.ns_status_item().setVisible(true);
         }
 
-        let size = self.view.ivars().layout.borrow().size;
+        let size = self.view.layout.borrow().size;
         let width_changed = self.prev_width != size.width;
         if width_changed {
             self.prev_width = size.width;
-            self.status_item.setLength(size.width);
+            self.status_item.ns_status_item().setLength(size.width);
         }
 
-        if let Some(button) = self.status_item.button(self.mtm) {
+        if let Some(button) = self.status_item.ns_status_item().button(self.mtm) {
             if width_changed {
                 button.setNeedsLayout(true);
             }
@@ -352,15 +352,6 @@ impl MenuIcon {
                 self.view.setFrameOrigin(origin);
             }
         }
-    }
-}
-
-impl Drop for MenuIcon {
-    fn drop(&mut self) {
-        debug!("Removing menu bar icon");
-
-        let status_bar = NSStatusBar::systemStatusBar();
-        status_bar.removeStatusItem(&self.status_item);
     }
 }
 
@@ -510,8 +501,9 @@ struct CachedTextLine {
     descent: f64,
 }
 
-struct MenuIconViewIvars {
-    layout: RefCell<MenuIconLayout>,
+struct MenuIconView {
+    canvas: Canvas,
+    layout: Rc<RefCell<MenuIconLayout>>,
     text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
 }
 
@@ -571,57 +563,55 @@ fn layout_title(mode: &LayoutMode) -> &'static str {
     }
 }
 
-fn make_menu(mtm: MainThreadMarker, title: &str) -> Retained<NSMenu> {
-    let title = NSString::from_str(title);
-    unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*title] }
+type MenuCallback = fn(&MenuActionHandler, Option<&NSMenuItem>);
+
+fn make_menu(mtm: MainThreadMarker, title: &str) -> Rc<Menu> {
+    let menu = Menu::new(&Ui::new(mtm));
+    menu.ns_menu().setTitle(&NSString::from_str(title));
+    Rc::new(menu)
 }
 
 fn make_menu_item(
     mtm: MainThreadMarker,
     title: &str,
-    action: Option<objc2::runtime::Sel>,
-    target: Option<&MenuActionHandler>,
-) -> Retained<NSMenuItem> {
-    let title = NSString::from_str(title);
-    let empty = NSString::from_str("");
-    let item: Retained<NSMenuItem> = unsafe {
-        msg_send![NSMenuItem::alloc(mtm), initWithTitle: &*title, action: action, keyEquivalent: &*empty]
-    };
-    if let Some(target) = target {
-        unsafe { item.setTarget(Some(target)) };
+    action: Option<MenuCallback>,
+    target: Option<&Rc<MenuActionHandler>>,
+) -> MenuItem {
+    let item = MenuItem::new(&Ui::new(mtm), title);
+    if let (Some(action), Some(target)) = (action, target) {
+        let target = target.clone();
+        item.on_activate(move |sender| action(&target, Some(sender)))
+    } else {
+        item
     }
-    item
 }
 
 fn add_action_item(
-    menu: &NSMenu,
+    menu: &Menu,
     mtm: MainThreadMarker,
-    handler: &MenuActionHandler,
+    handler: &Rc<MenuActionHandler>,
     title: &str,
-    action: objc2::runtime::Sel,
+    action: MenuCallback,
 ) -> Retained<NSMenuItem> {
     let item = make_menu_item(mtm, title, Some(action), Some(handler));
-    menu.addItem(&item);
-    item
+    let native = item.ns_menu_item().retain();
+    menu.add(item);
+    native
 }
 
 fn add_submenu(
-    menu: &NSMenu,
+    menu: &Menu,
     mtm: MainThreadMarker,
     title: &str,
-) -> (Retained<NSMenuItem>, Retained<NSMenu>) {
-    let item = make_menu_item(mtm, title, None, None);
+) -> (Retained<NSMenuItem>, Rc<Menu>) {
     let submenu = make_menu(mtm, title);
-    item.setSubmenu(Some(&submenu));
-    menu.addItem(&item);
-    (item, submenu)
+    let item = MenuItem::new(&Ui::new(mtm), title).submenu(submenu.clone());
+    let native = item.ns_menu_item().retain();
+    menu.add(item);
+    (native, submenu)
 }
 
-fn add_separator(menu: &NSMenu) { menu.addItem(&menu_separator()); }
-
-fn menu_separator() -> Retained<NSMenuItem> {
-    unsafe { msg_send![NSMenuItem::class(), separatorItem] }
-}
+fn add_separator(menu: &Menu) { menu.add_separator(); }
 
 fn set_menu_item_checked(item: &NSMenuItem, checked: bool) {
     let state = if checked {
@@ -652,14 +642,14 @@ fn workspace_menu_title(workspace: &RuntimeWorkspaceData) -> String {
 
 fn rebuild_restore_menu(
     mtm: MainThreadMarker,
-    handler: &MenuActionHandler,
-    menu: &NSMenu,
+    handler: &Rc<MenuActionHandler>,
+    menu: &Menu,
     files: &[(String, PathBuf)],
-    master_action: objc2::runtime::Sel,
-    library_action: objc2::runtime::Sel,
-    picker_action: objc2::runtime::Sel,
+    master_action: MenuCallback,
+    library_action: MenuCallback,
+    picker_action: MenuCallback,
 ) {
-    menu.removeAllItems();
+    menu.clear();
     add_action_item(menu, mtm, handler, "Master Layout", master_action);
 
     if !files.is_empty() {
@@ -706,27 +696,39 @@ fn layout_library_files_in(directory: &Path) -> Vec<(String, PathBuf)> {
 }
 
 struct BuiltStatusMenu {
-    menu: Retained<NSMenu>,
+    menu: Rc<Menu>,
     layout_items: Vec<(LayoutMode, Retained<NSMenuItem>)>,
     workspace_item: Retained<NSMenuItem>,
-    workspace_submenu: Retained<NSMenu>,
+    workspace_submenu: Rc<Menu>,
     next_workspace_item: Retained<NSMenuItem>,
     prev_workspace_item: Retained<NSMenuItem>,
     tiling_item: Retained<NSMenuItem>,
     reload_item: Retained<NSMenuItem>,
     quit_item: Retained<NSMenuItem>,
-    restore_workspace_menu: Retained<NSMenu>,
-    restore_space_menu: Retained<NSMenu>,
+    restore_workspace_menu: Rc<Menu>,
+    restore_space_menu: Rc<Menu>,
 }
 
-fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> BuiltStatusMenu {
-    let menu = make_menu(mtm, "Rift");
+fn build_static_menu(mtm: MainThreadMarker, handler: &Rc<MenuActionHandler>) -> BuiltStatusMenu {
     // Focus-follows-mouse must stand down while this menu tracks, or the
     // pointer raises whatever window sits underneath and dismisses it.
-    menu.setDelegate(Some(ProtocolObject::from_ref(handler)));
+    let reactor = handler.reactor_tx.clone();
+    let menu = Rc::new(Menu::new(&Ui::new(mtm)).on_tracking(move |open| {
+        reactor.send(if open {
+            ReactorEvent::MenuOpened(own_pid())
+        } else {
+            ReactorEvent::MenuClosed(own_pid())
+        });
+    }));
+    menu.ns_menu().setTitle(&NSString::from_str("Rift"));
 
-    let tiling_item =
-        add_action_item(&menu, mtm, handler, "Tiling", sel!(onToggleSpaceActivation:));
+    let tiling_item = add_action_item(
+        &menu,
+        mtm,
+        handler,
+        "Tiling",
+        MenuActionHandler::on_toggle_space_activation,
+    );
     set_menu_item_checked(&tiling_item, false);
     add_separator(&menu);
 
@@ -736,14 +738,14 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         mtm,
         handler,
         "Next Workspace",
-        sel!(onNextWorkspace:),
+        MenuActionHandler::on_next_workspace,
     );
     let prev_workspace_item = add_action_item(
         &workspace_submenu,
         mtm,
         handler,
         "Previous Workspace",
-        sel!(onPrevWorkspace:),
+        MenuActionHandler::on_prev_workspace,
     );
     add_separator(&workspace_submenu);
     workspace_item.setEnabled(false);
@@ -759,12 +761,12 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         LayoutMode::Scrolling,
     ] {
         let action = match mode {
-            LayoutMode::Traditional => sel!(onSetLayoutTraditional:),
-            LayoutMode::Bsp => sel!(onSetLayoutBsp:),
-            LayoutMode::Floating => sel!(onSetLayoutFloating:),
-            LayoutMode::Stack => sel!(onSetLayoutStack:),
-            LayoutMode::MasterStack => sel!(onSetLayoutMasterStack:),
-            LayoutMode::Scrolling => sel!(onSetLayoutScrolling:),
+            LayoutMode::Traditional => MenuActionHandler::on_set_layout_traditional,
+            LayoutMode::Bsp => MenuActionHandler::on_set_layout_bsp,
+            LayoutMode::Floating => MenuActionHandler::on_set_layout_floating,
+            LayoutMode::Stack => MenuActionHandler::on_set_layout_stack,
+            LayoutMode::MasterStack => MenuActionHandler::on_set_layout_master_stack,
+            LayoutMode::Scrolling => MenuActionHandler::on_set_layout_scrolling,
         };
         let item = add_action_item(&layout_submenu, mtm, handler, layout_title(&mode), action);
         set_menu_item_checked(&item, false);
@@ -777,29 +779,46 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         mtm,
         handler,
         "Save Layout As…",
-        sel!(onSaveLayout:),
+        MenuActionHandler::on_save_layout,
     );
     add_action_item(
         &saved_layouts_menu,
         mtm,
         handler,
         "Update Master Layout",
-        sel!(onSaveMasterFile:),
+        MenuActionHandler::on_save_master_file,
     );
     add_separator(&saved_layouts_menu);
     let (_, restore_workspace_menu) = add_submenu(&saved_layouts_menu, mtm, "Restore Workspace");
     let (_, restore_space_menu) = add_submenu(&saved_layouts_menu, mtm, "Restore Space");
 
     add_separator(&menu);
-    let reload_item = add_action_item(&menu, mtm, handler, "Reload Config", sel!(onReloadConfig:));
-    add_action_item(&menu, mtm, handler, "Settings…", sel!(onOpenConfig:));
+    let reload_item = add_action_item(
+        &menu,
+        mtm,
+        handler,
+        "Reload Config",
+        MenuActionHandler::on_reload_config,
+    );
+    let settings_item = add_action_item(
+        &menu,
+        mtm,
+        handler,
+        "Settings…",
+        MenuActionHandler::on_open_settings,
+    );
+    settings_item.setKeyEquivalent(&NSString::from_str(","));
+    settings_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
 
     add_separator(&menu);
     let (_, help_menu) = add_submenu(&menu, mtm, "Help");
     for (title, action) in [
-        ("Documentation", sel!(onOpenDocumentation:)),
-        ("GitHub", sel!(onOpenGitHub:)),
-        ("Matrix", sel!(onOpenMatrix:)),
+        (
+            "Documentation",
+            MenuActionHandler::on_open_documentation as MenuCallback,
+        ),
+        ("GitHub", MenuActionHandler::on_open_github),
+        ("Matrix", MenuActionHandler::on_open_matrix),
     ] {
         add_action_item(&help_menu, mtm, handler, title, action);
     }
@@ -810,12 +829,13 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         mtm,
         handler,
         "Sponsor Rift on GitHub",
-        sel!(onOpenSponsor:),
+        MenuActionHandler::on_open_sponsor,
     );
     sponsor_item.setSubtitle(Some(&NSString::from_str("help fund continued development")));
 
     add_separator(&menu);
-    let quit_item = add_action_item(&menu, mtm, handler, "Quit Rift", sel!(onQuitRift:));
+    let quit_item =
+        add_action_item(&menu, mtm, handler, "Quit Rift", MenuActionHandler::on_quit_rift);
 
     BuiltStatusMenu {
         menu,
@@ -974,7 +994,7 @@ fn menu_hotkey_to_key_equivalent(hotkey: &Hotkey) -> Option<(&'static str, NSEve
 
 fn own_pid() -> i32 { std::process::id() as i32 }
 
-struct MenuActionHandlerIvars {
+struct MenuActionHandler {
     action_tx: UnboundedSender<MenuAction>,
     reactor_tx: ReactorSender,
     layout_files: RefCell<Vec<PathBuf>>,
@@ -982,35 +1002,28 @@ struct MenuActionHandlerIvars {
 }
 
 impl MenuActionHandler {
-    fn new(
-        mtm: MainThreadMarker,
-        action_tx: UnboundedSender<MenuAction>,
-        reactor_tx: ReactorSender,
-    ) -> Retained<Self> {
-        let this = mtm.alloc().set_ivars(MenuActionHandlerIvars {
+    fn new(action_tx: UnboundedSender<MenuAction>, reactor_tx: ReactorSender) -> Rc<Self> {
+        Rc::new(Self {
             action_tx,
             reactor_tx,
             layout_files: RefCell::new(Vec::new()),
             layout_folder: RefCell::new(PathBuf::new()),
-        });
-        unsafe { msg_send![super(this), init] }
+        })
     }
 
-    fn emit(&self, action: MenuAction) { let _ = self.ivars().action_tx.send(action); }
+    fn emit(&self, action: MenuAction) { let _ = self.action_tx.send(action); }
 
-    fn set_layout_files(&self, paths: Vec<PathBuf>) {
-        *self.ivars().layout_files.borrow_mut() = paths;
-    }
+    fn set_layout_files(&self, paths: Vec<PathBuf>) { *self.layout_files.borrow_mut() = paths; }
 
-    fn set_layout_folder(&self, path: PathBuf) { *self.ivars().layout_folder.borrow_mut() = path; }
+    fn set_layout_folder(&self, path: PathBuf) { *self.layout_folder.borrow_mut() = path; }
 
     fn layout_file_for_item(&self, item: Option<&NSMenuItem>) -> Option<PathBuf> {
         let index = usize::try_from(item?.tag()).ok()?;
-        self.ivars().layout_files.borrow().get(index).cloned()
+        self.layout_files.borrow().get(index).cloned()
     }
 
     fn set_default_layout_directory(&self, panel: &NSSavePanel) {
-        let directory = self.ivars().layout_folder.borrow();
+        let directory = self.layout_folder.borrow();
         if std::fs::create_dir_all(&*directory).is_ok() {
             let path = NSString::from_str(&directory.to_string_lossy());
             let url = NSURL::fileURLWithPath_isDirectory(&path, true);
@@ -1027,32 +1040,19 @@ impl MenuActionHandler {
     }
 
     fn choose_save_path(&self) -> Option<PathBuf> {
-        let mtm = MainThreadMarker::new()?;
-        let panel = NSSavePanel::savePanel(mtm);
-        self.set_default_layout_directory(&panel);
-        Self::restrict_to_layout_files(&panel);
-        panel.setCanCreateDirectories(true);
-        panel.setNameFieldStringValue(&NSString::from_str("layout.ron"));
-        (panel.runModal() == NSModalResponseOK)
-            .then(|| panel.URL())
-            .flatten()?
-            .path()
-            .map(|path| PathBuf::from(path.to_string()))
+        let panel = SavePanel::new(&Ui::new(MainThreadMarker::new()?)).filename("layout.ron");
+        self.set_default_layout_directory(panel.ns_save_panel());
+        Self::restrict_to_layout_files(panel.ns_save_panel());
+        panel.ns_save_panel().setCanCreateDirectories(true);
+        panel.choose()
     }
 
     fn choose_layout_path(&self) -> Option<PathBuf> {
-        let mtm = MainThreadMarker::new()?;
-        let panel = NSOpenPanel::openPanel(mtm);
-        self.set_default_layout_directory(&panel);
-        Self::restrict_to_layout_files(&panel);
-        panel.setCanChooseFiles(true);
-        panel.setCanChooseDirectories(false);
-        panel.setAllowsMultipleSelection(false);
-        (panel.runModal() == NSModalResponseOK)
-            .then(|| panel.URL())
-            .flatten()?
-            .path()
-            .map(|path| PathBuf::from(path.to_string()))
+        let panel = OpenPanel::new(&Ui::new(MainThreadMarker::new()?)).files();
+        self.set_default_layout_directory(panel.ns_open_panel());
+        Self::restrict_to_layout_files(panel.ns_open_panel());
+        panel.ns_open_panel().setAllowsMultipleSelection(false);
+        panel.choose()
     }
 
     fn validate_layout_path(path: PathBuf) -> Option<PathBuf> {
@@ -1073,195 +1073,134 @@ impl MenuActionHandler {
     }
 }
 
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "RiftMenuBarActionHandler"]
-    #[ivars = MenuActionHandlerIvars]
-    struct MenuActionHandler;
+impl MenuActionHandler {
+    fn on_set_layout_traditional(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SetLayout(LayoutMode::Traditional));
+    }
 
-    unsafe impl NSObjectProtocol for MenuActionHandler {}
+    fn on_set_layout_bsp(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SetLayout(LayoutMode::Bsp));
+    }
 
-    unsafe impl NSMenuDelegate for MenuActionHandler {
-        #[unsafe(method(menuWillOpen:))]
-        fn menu_will_open(&self, _menu: &NSMenu) {
-            self.ivars().reactor_tx.send(ReactorEvent::MenuOpened(own_pid()));
-        }
+    fn on_set_layout_floating(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SetLayout(LayoutMode::Floating));
+    }
 
-        #[unsafe(method(menuDidClose:))]
-        fn menu_did_close(&self, _menu: &NSMenu) {
-            self.ivars().reactor_tx.send(ReactorEvent::MenuClosed(own_pid()));
+    fn on_set_layout_stack(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SetLayout(LayoutMode::Stack));
+    }
+
+    fn on_set_layout_master_stack(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SetLayout(LayoutMode::MasterStack));
+    }
+
+    fn on_set_layout_scrolling(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SetLayout(LayoutMode::Scrolling));
+    }
+
+    fn on_toggle_space_activation(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::ToggleSpaceActivated);
+    }
+
+    fn on_next_workspace(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::NextWorkspace);
+    }
+
+    fn on_prev_workspace(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::PrevWorkspace);
+    }
+
+    fn on_switch_workspace(&self, sender: Option<&NSMenuItem>) {
+        if let Some(sender) = sender {
+            let tag = sender.tag();
+            if tag >= 0 {
+                self.emit(MenuAction::SwitchToWorkspace(tag as usize));
+            }
         }
     }
 
-    impl MenuActionHandler {
-        #[unsafe(method(onSetLayoutTraditional:))]
-        fn on_set_layout_traditional(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::SetLayout(LayoutMode::Traditional));
-        }
-
-        #[unsafe(method(onSetLayoutBsp:))]
-        fn on_set_layout_bsp(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::SetLayout(LayoutMode::Bsp));
-        }
-
-        #[unsafe(method(onSetLayoutFloating:))]
-        fn on_set_layout_floating(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::SetLayout(LayoutMode::Floating));
-        }
-
-        #[unsafe(method(onSetLayoutStack:))]
-        fn on_set_layout_stack(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::SetLayout(LayoutMode::Stack));
-        }
-
-        #[unsafe(method(onSetLayoutMasterStack:))]
-        fn on_set_layout_master_stack(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::SetLayout(LayoutMode::MasterStack));
-        }
-
-        #[unsafe(method(onSetLayoutScrolling:))]
-        fn on_set_layout_scrolling(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::SetLayout(LayoutMode::Scrolling));
-        }
-
-        #[unsafe(method(onToggleSpaceActivation:))]
-        fn on_toggle_space_activation(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::ToggleSpaceActivated);
-        }
-
-        #[unsafe(method(onNextWorkspace:))]
-        fn on_next_workspace(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::NextWorkspace);
-        }
-
-        #[unsafe(method(onPrevWorkspace:))]
-        fn on_prev_workspace(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::PrevWorkspace);
-        }
-
-        #[unsafe(method(onSwitchWorkspace:))]
-        fn on_switch_workspace(&self, sender: Option<&NSMenuItem>) {
-            if let Some(sender) = sender {
-                let tag = sender.tag();
-                if tag >= 0 {
-                    self.emit(MenuAction::SwitchToWorkspace(tag as usize));
-                }
-            }
-        }
-
-        #[unsafe(method(onRestoreWorkspace:))]
-        fn on_restore_workspace(&self, _sender: Option<&AnyObject>) {
-            if let Some(path) = self.choose_layout_path().and_then(Self::validate_layout_path) {
-                self.emit(MenuAction::RestoreLayout {
-                    path,
-                    scope: RestoreScope::Workspace,
-                    source: RestoreSource::SavedActiveSpace,
-                });
-            }
-        }
-
-        #[unsafe(method(onRestoreLibraryWorkspace:))]
-        fn on_restore_library_workspace(&self, sender: Option<&NSMenuItem>) {
-            if let Some(path) = self
-                .layout_file_for_item(sender)
-                .and_then(Self::validate_layout_path)
-            {
-                self.emit(MenuAction::RestoreLayout {
-                    path,
-                    scope: RestoreScope::Workspace,
-                    source: RestoreSource::SavedActiveSpace,
-                });
-            }
-        }
-
-        #[unsafe(method(onSaveLayout:))]
-        fn on_save_layout(&self, _sender: Option<&AnyObject>) {
-            if let Some(path) = self.choose_save_path() {
-                self.emit(MenuAction::SaveLayout(path));
-            }
-        }
-
-        #[unsafe(method(onSaveMasterFile:))]
-        fn on_save_master_file(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::SaveMasterFile);
-        }
-
-        #[unsafe(method(onRestoreMasterFileWorkspace:))]
-        fn on_restore_master_file_workspace(&self, _sender: Option<&AnyObject>) {
-            if Self::validate_layout_path(restore_file()).is_some() {
-                self.emit(MenuAction::RestoreMasterFile(RestoreScope::Workspace));
-            }
-        }
-
-        #[unsafe(method(onRestoreMasterFileSpace:))]
-        fn on_restore_master_file_space(&self, _sender: Option<&AnyObject>) {
-            if Self::validate_layout_path(restore_file()).is_some() {
-                self.emit(MenuAction::RestoreMasterFile(RestoreScope::Space));
-            }
-        }
-
-        #[unsafe(method(onRestoreSpace:))]
-        fn on_restore_space(&self, _sender: Option<&AnyObject>) {
-            if let Some(path) = self.choose_layout_path().and_then(Self::validate_layout_path) {
-                self.emit(MenuAction::RestoreLayout {
-                    path,
-                    scope: RestoreScope::Space,
-                    source: RestoreSource::SavedActiveSpace,
-                });
-            }
-        }
-
-        #[unsafe(method(onRestoreLibrarySpace:))]
-        fn on_restore_library_space(&self, sender: Option<&NSMenuItem>) {
-            if let Some(path) = self
-                .layout_file_for_item(sender)
-                .and_then(Self::validate_layout_path)
-            {
-                self.emit(MenuAction::RestoreLayout {
-                    path,
-                    scope: RestoreScope::Space,
-                    source: RestoreSource::SavedActiveSpace,
-                });
-            }
-        }
-
-        #[unsafe(method(onOpenConfig:))]
-        fn on_open_config(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::OpenConfig);
-        }
-
-        #[unsafe(method(onOpenDocumentation:))]
-        fn on_open_documentation(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::OpenDocumentation);
-        }
-
-        #[unsafe(method(onOpenGitHub:))]
-        fn on_open_github(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::OpenGitHub);
-        }
-
-        #[unsafe(method(onOpenMatrix:))]
-        fn on_open_matrix(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::OpenMatrix);
-        }
-
-        #[unsafe(method(onOpenSponsor:))]
-        fn on_open_sponsor(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::OpenSponsor);
-        }
-
-        #[unsafe(method(onReloadConfig:))]
-        fn on_reload_config(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::ReloadConfig);
-        }
-
-        #[unsafe(method(onQuitRift:))]
-        fn on_quit_rift(&self, _sender: Option<&AnyObject>) {
-            self.emit(MenuAction::QuitRift);
+    fn on_restore_workspace(&self, _sender: Option<&NSMenuItem>) {
+        if let Some(path) = self.choose_layout_path().and_then(Self::validate_layout_path) {
+            self.emit(MenuAction::RestoreLayout {
+                path,
+                scope: RestoreScope::Workspace,
+                source: RestoreSource::SavedActiveSpace,
+            });
         }
     }
-);
+
+    fn on_restore_library_workspace(&self, sender: Option<&NSMenuItem>) {
+        if let Some(path) = self.layout_file_for_item(sender).and_then(Self::validate_layout_path) {
+            self.emit(MenuAction::RestoreLayout {
+                path,
+                scope: RestoreScope::Workspace,
+                source: RestoreSource::SavedActiveSpace,
+            });
+        }
+    }
+
+    fn on_save_layout(&self, _sender: Option<&NSMenuItem>) {
+        if let Some(path) = self.choose_save_path() {
+            self.emit(MenuAction::SaveLayout(path));
+        }
+    }
+
+    fn on_save_master_file(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SaveMasterFile);
+    }
+
+    fn on_restore_master_file_workspace(&self, _sender: Option<&NSMenuItem>) {
+        if Self::validate_layout_path(restore_file()).is_some() {
+            self.emit(MenuAction::RestoreMasterFile(RestoreScope::Workspace));
+        }
+    }
+
+    fn on_restore_master_file_space(&self, _sender: Option<&NSMenuItem>) {
+        if Self::validate_layout_path(restore_file()).is_some() {
+            self.emit(MenuAction::RestoreMasterFile(RestoreScope::Space));
+        }
+    }
+
+    fn on_restore_space(&self, _sender: Option<&NSMenuItem>) {
+        if let Some(path) = self.choose_layout_path().and_then(Self::validate_layout_path) {
+            self.emit(MenuAction::RestoreLayout {
+                path,
+                scope: RestoreScope::Space,
+                source: RestoreSource::SavedActiveSpace,
+            });
+        }
+    }
+
+    fn on_restore_library_space(&self, sender: Option<&NSMenuItem>) {
+        if let Some(path) = self.layout_file_for_item(sender).and_then(Self::validate_layout_path) {
+            self.emit(MenuAction::RestoreLayout {
+                path,
+                scope: RestoreScope::Space,
+                source: RestoreSource::SavedActiveSpace,
+            });
+        }
+    }
+
+    fn on_open_settings(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::OpenSettings);
+    }
+
+    fn on_open_documentation(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::OpenDocumentation);
+    }
+
+    fn on_open_github(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::OpenGitHub); }
+
+    fn on_open_matrix(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::OpenMatrix); }
+
+    fn on_open_sponsor(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::OpenSponsor); }
+
+    fn on_reload_config(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::ReloadConfig);
+    }
+
+    fn on_quit_rift(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::QuitRift); }
+}
 
 #[cfg(test)]
 mod layout_library_tests {
@@ -1621,22 +1560,26 @@ fn build_cached_text_line(
 }
 
 impl MenuIconView {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker) -> Self {
         let font = NSFont::systemFontOfSize_weight(FONT_SIZE, unsafe { NSFontWeightMedium });
         let text_attrs = build_text_attrs(font.as_ref());
-
-        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
-        let view = mtm.alloc().set_ivars(MenuIconViewIvars {
-            layout: RefCell::new(MenuIconLayout::default()),
-            text_attrs,
+        let layout = Rc::new(RefCell::new(MenuIconLayout::default()));
+        let draw_layout = layout.clone();
+        let canvas = Canvas::new(&Ui::new(mtm), move |cg, bounds| {
+            draw_menu_icon(cg, bounds, &draw_layout.borrow())
         });
-        unsafe { msg_send![super(view), initWithFrame: frame] }
+        Self { canvas, layout, text_attrs }
     }
 
     fn set_layout(&self, layout: MenuIconLayout) {
-        *self.ivars().layout.borrow_mut() = layout;
-        self.setNeedsDisplay(true);
+        *self.layout.borrow_mut() = layout;
+        self.canvas.redraw();
     }
+}
+impl std::ops::Deref for MenuIconView {
+    type Target = NSView;
+
+    fn deref(&self) -> &NSView { self.canvas.ns_view() }
 }
 
 fn label_cell_width(text_width: f64) -> f64 {
@@ -1764,157 +1707,142 @@ fn add_rounded_rect(ctx: &CGContext, x: f64, y: f64, w: f64, h: f64, r: f64) {
     CGContext::close_path(ctx);
 }
 
-define_class!(
-    #[unsafe(super(NSView))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "RiftMenuBarIconView"]
-    #[ivars = MenuIconViewIvars]
-    struct MenuIconView;
+fn draw_menu_icon(cg: &CGContext, bounds: CGRect, layout: &MenuIconLayout) {
+    CGContext::clear_rect(Some(cg), bounds);
 
-    impl MenuIconView {
-        #[unsafe(method(viewDidChangeEffectiveAppearance))]
-        fn appearance_changed(&self) {
-            unsafe { let _: () = msg_send![super(self), viewDidChangeEffectiveAppearance]; }
-            self.setNeedsDisplay(true);
+    let y_offset = (bounds.size.height - layout.size.height) / 2.0;
+    // Resolve dynamic AppKit color at draw time, under the view's effective appearance.
+    let foreground = NSColor::labelColor();
+    CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+    CGContext::set_line_width(Some(cg), BORDER_WIDTH);
+
+    for workspace in layout.workspaces.iter() {
+        let is_label = workspace.label_line.is_some();
+        let corner_radius = if is_label {
+            LABEL_CORNER_RADIUS
+        } else {
+            CORNER_RADIUS
+        };
+        CGContext::set_line_width(
+            Some(cg),
+            if is_label {
+                LABEL_BORDER_WIDTH
+            } else {
+                BORDER_WIDTH
+            },
+        );
+        if is_label {
+            foreground.setStroke();
+            unsafe {
+                CGContext::begin_transparency_layer(Some(cg), None);
+            }
+        } else {
+            CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+        }
+        let rect = workspace.bg_rect;
+        let bg_y = rect.origin.y + y_offset;
+
+        if workspace.fill_alpha > 0.0 {
+            add_rounded_rect(
+                cg,
+                rect.origin.x,
+                bg_y,
+                rect.size.width,
+                rect.size.height,
+                corner_radius,
+            );
+            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, workspace.fill_alpha);
+            if is_label {
+                foreground.setFill();
+            }
+            CGContext::fill_path(Some(cg));
         }
 
-        #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _dirty_rect: NSRect) {
-            let layout = self.ivars().layout.borrow();
-            let bounds = self.bounds();
+        // SwiftUI's strokeBorder is entirely inside the cell; an active
+        // label is a solid shape without an additional outline.
+        if !is_label || workspace.fill_alpha == 0.0 {
+            let inset = if is_label {
+                LABEL_BORDER_WIDTH / 2.0
+            } else {
+                0.0
+            };
+            add_rounded_rect(
+                cg,
+                rect.origin.x + inset,
+                bg_y + inset,
+                rect.size.width - 2.0 * inset,
+                rect.size.height - 2.0 * inset,
+                corner_radius - inset,
+            );
+            CGContext::stroke_path(Some(cg));
+        }
 
-            if let Some(context) = NSGraphicsContext::currentContext() {
-                let cg_context = context.CGContext();
-                let cg = cg_context.as_ref();
-                CGContext::save_g_state(Some(cg));
-                CGContext::clear_rect(Some(cg), bounds);
+        for window in &workspace.windows {
+            add_rounded_rect(
+                cg,
+                window.origin.x,
+                window.origin.y + y_offset,
+                window.size.width,
+                window.size.height,
+                1.5,
+            );
+            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+            CGContext::fill_path(Some(cg));
 
-                let y_offset = (bounds.size.height - layout.size.height) / 2.0;
-                // Resolve dynamic AppKit color at draw time, under the view's effective appearance.
-                let foreground = NSColor::labelColor();
-                CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                CGContext::set_line_width(Some(cg), BORDER_WIDTH);
+            CGContext::save_g_state(Some(cg));
+            CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
+            CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+            CGContext::set_line_width(Some(cg), 1.5);
+            add_rounded_rect(
+                cg,
+                window.origin.x,
+                window.origin.y + y_offset,
+                window.size.width,
+                window.size.height,
+                1.5,
+            );
+            CGContext::stroke_path(Some(cg));
+            CGContext::restore_g_state(Some(cg));
+        }
 
-                for workspace in layout.workspaces.iter() {
-                    let is_label = workspace.label_line.is_some();
-                    let corner_radius = if is_label { LABEL_CORNER_RADIUS } else { CORNER_RADIUS };
-                    CGContext::set_line_width(Some(cg), if is_label { LABEL_BORDER_WIDTH } else { BORDER_WIDTH });
-                    if is_label {
-                        foreground.setStroke();
-                        unsafe { CGContext::begin_transparency_layer(Some(cg), None); }
-                    } else {
-                        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                    }
-                    let rect = workspace.bg_rect;
-                    let bg_y = rect.origin.y + y_offset;
+        if let Some(label_line) = &workspace.label_line {
+            let text_x = centered_origin(rect.origin.x, rect.size.width, label_line.width);
+            let baseline_y =
+                centered_origin(bg_y, rect.size.height, label_line.ascent + label_line.descent)
+                    + label_line.descent;
 
-                    if workspace.fill_alpha > 0.0 {
-                        add_rounded_rect(
-                            cg,
-                            rect.origin.x,
-                            bg_y,
-                            rect.size.width,
-                            rect.size.height,
-                            corner_radius,
-                        );
-                        CGContext::set_rgb_fill_color(
-                            Some(cg),
-                            1.0,
-                            1.0,
-                            1.0,
-                            workspace.fill_alpha,
-                        );
-                        if is_label { foreground.setFill(); }
-                        CGContext::fill_path(Some(cg));
-                    }
+            CGContext::save_g_state(Some(cg));
+            if workspace.fill_alpha > 0.0 {
+                CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
+                CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+            } else {
+                foreground.setFill();
+            }
+            CGContext::set_text_position(Some(cg), text_x as CGFloat, baseline_y as CGFloat);
+            let line_ref: &CTLine = label_line.line.as_ref();
+            unsafe { line_ref.draw(cg) };
+            CGContext::restore_g_state(Some(cg));
+        }
+        if is_label {
+            CGContext::end_transparency_layer(Some(cg));
+        }
+    }
 
-                    // SwiftUI's strokeBorder is entirely inside the cell; an active
-                    // label is a solid shape without an additional outline.
-                    if !is_label || workspace.fill_alpha == 0.0 {
-                        let inset = if is_label { LABEL_BORDER_WIDTH / 2.0 } else { 0.0 };
-                        add_rounded_rect(
-                            cg,
-                            rect.origin.x + inset,
-                            bg_y + inset,
-                            rect.size.width - 2.0 * inset,
-                            rect.size.height - 2.0 * inset,
-                            corner_radius - inset,
-                        );
-                        CGContext::stroke_path(Some(cg));
-                    }
-
-                    for window in &workspace.windows {
-                        add_rounded_rect(
-                            cg,
-                            window.origin.x,
-                            window.origin.y + y_offset,
-                            window.size.width,
-                            window.size.height,
-                            1.5,
-                        );
-                        CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                        CGContext::fill_path(Some(cg));
-
-                        CGContext::save_g_state(Some(cg));
-                        CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
-                        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                        CGContext::set_line_width(Some(cg), 1.5);
-                        add_rounded_rect(
-                            cg,
-                            window.origin.x,
-                            window.origin.y + y_offset,
-                            window.size.width,
-                            window.size.height,
-                            1.5,
-                        );
-                        CGContext::stroke_path(Some(cg));
-                        CGContext::restore_g_state(Some(cg));
-                    }
-
-                    if let Some(label_line) = &workspace.label_line {
-                        let text_x = centered_origin(
-                            rect.origin.x,
-                            rect.size.width,
-                            label_line.width,
-                        );
-                        let baseline_y = centered_origin(
-                            bg_y,
-                            rect.size.height,
-                            label_line.ascent + label_line.descent,
-                        ) + label_line.descent;
-
-                        CGContext::save_g_state(Some(cg));
-                        if workspace.fill_alpha > 0.0 {
-                            CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
-                            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                        } else {
-                            foreground.setFill();
-                        }
-                        CGContext::set_text_position(Some(cg), text_x as CGFloat, baseline_y as CGFloat);
-                        let line_ref: &CTLine = label_line.line.as_ref();
-                        unsafe { line_ref.draw(cg) };
-                        CGContext::restore_g_state(Some(cg));
-                    }
-                    if is_label { CGContext::end_transparency_layer(Some(cg)); }
-                }
-
-                if let Some(line) = &layout.separator_line {
-                    foreground.setFill();
-                    CGContext::set_alpha(Some(cg), 0.6);
-                    // Center the glyph plus bottom padding, as in AeroSpace's HStack.
-                    let baseline = centered_origin(
-                        y_offset,
-                        layout.size.height,
-                        line.ascent + line.descent + SEPARATOR_BOTTOM_PADDING,
-                    ) + line.descent + SEPARATOR_BOTTOM_PADDING;
-                    for &x in &layout.separators {
-                        CGContext::set_text_position(Some(cg), x, baseline);
-                        unsafe { line.line.draw(cg); }
-                    }
-                }
-
-                CGContext::restore_g_state(Some(cg));
+    if let Some(line) = &layout.separator_line {
+        foreground.setFill();
+        CGContext::set_alpha(Some(cg), 0.6);
+        // Center the glyph plus bottom padding, as in AeroSpace's HStack.
+        let baseline = centered_origin(
+            y_offset,
+            layout.size.height,
+            line.ascent + line.descent + SEPARATOR_BOTTOM_PADDING,
+        ) + line.descent
+            + SEPARATOR_BOTTOM_PADDING;
+        for &x in &layout.separators {
+            CGContext::set_text_position(Some(cg), x, baseline);
+            unsafe {
+                line.line.draw(cg);
             }
         }
     }
-);
+}

@@ -3308,9 +3308,9 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
         "Carbon activation should not enumerate every AX window: {activation_requests:?}"
     );
     assert!(
-        activation_requests
-            .iter()
-            .any(|request| matches!(request, Request::ApplicationGloballyActivated(pid) if *pid == activated.pid)),
+        activation_requests.iter().any(
+            |request| matches!(request, Request::ApplicationGloballyActivated(pid) if *pid == activated.pid)
+        ),
         "Carbon activation should be reconciled on the app thread: {activation_requests:?}"
     );
     assert!(raise_manager_rx.try_recv().is_err());
@@ -3620,9 +3620,9 @@ fn carbon_activation_is_replayed_when_it_arrives_before_app_registration() {
 
     let requests = apps.requests();
     assert!(
-        requests
-            .iter()
-            .any(|request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid)),
+        requests.iter().any(
+            |request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid)
+        ),
         "launching the current Carbon-frontmost app must replay activation on its app thread: {requests:?}"
     );
 }
@@ -3641,9 +3641,7 @@ fn duplicate_carbon_activation_is_forwarded_to_app_thread_once() {
     let activation_count = apps
         .requests()
         .iter()
-        .filter(|request| {
-            matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid)
-        })
+        .filter(|request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid))
         .count();
     assert_eq!(activation_count, 1);
 }
@@ -3658,11 +3656,9 @@ fn carbon_activation_is_forwarded_during_refresh_quarantine() {
     reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
 
     reactor.handle_event(Event::ApplicationGloballyActivated(pid));
-    assert!(
-        apps.requests()
-            .iter()
-            .any(|request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid))
-    );
+    assert!(apps.requests().iter().any(
+        |request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid)
+    ));
 }
 
 #[test]
@@ -3717,13 +3713,30 @@ fn mouse_hit_missing_from_inventory_refreshes_its_owner_once() {
         max_frame: CGSize::ZERO,
     });
     reactor.handle_event(Event::MouseMoved(wsid));
-    assert!(matches!(
-        app_rx.try_recv().unwrap().1,
-        Request::RefreshWindowInventory(_)
-    ));
+    let (_, Request::RefreshWindowInventory(token)) = app_rx.try_recv().unwrap() else {
+        panic!("expected inventory refresh");
+    };
     reactor.handle_event(Event::MouseMoved(wsid));
     assert!(app_rx.try_recv().is_err());
     assert!(!reactor.window_inventory_manager.pending.contains(&pid));
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid,
+        token,
+        successful: true,
+        new: vec![],
+        known_visible: vec![],
+    });
+    // A modal surface absent from AXWindows must not trigger a new scan on
+    // every mouse event after the previous inventory request has completed.
+    while app_rx.try_recv().is_ok() {}
+    reactor.handle_event(Event::MouseMoved(wsid));
+    assert!(app_rx.try_recv().is_err());
+    reactor.handle_event(Event::MouseMoved(WindowServerId::new(911)));
+    reactor.handle_event(Event::MouseMoved(wsid));
+    assert!(matches!(
+        app_rx.try_recv(),
+        Ok((_, Request::RefreshWindowInventory(_)))
+    ));
 }
 
 #[test]
@@ -6826,10 +6839,13 @@ fn native_tab_departure_keeps_recovery_without_a_native_successor() {
         let raises: Vec<_> = std::iter::from_fn(|| raise_rx.try_recv().ok())
             .map(|(_, request)| request)
             .collect();
-        assert!(raises.iter().any(|request| matches!(request,
-            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
-                if *wid != old_tab
-        )), "{successor_state} native focus must not suppress recovery: {raises:?}");
+        assert!(
+            raises.iter().any(|request| matches!(request,
+                raise_manager::Event::RaiseRequest(RaiseRequest { focus_window: Some((wid, _)), .. })
+                    if *wid != old_tab
+            )),
+            "{successor_state} native focus must not suppress recovery: {raises:?}"
+        );
     }
 }
 

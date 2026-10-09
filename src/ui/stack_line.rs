@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use cgs::{CgsWindow, CgsWindowError, render_layer_to_cgs_window, with_disabled_actions};
 use objc2::rc::Retained;
 use objc2_app_kit::NSNormalWindowLevel;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -9,9 +10,7 @@ use tracing::warn;
 
 use crate::actor::app::WindowId;
 use crate::common::config::{HorizontalPlacement, VerticalPlacement};
-use crate::sys::cgs_window::{CgsWindow, CgsWindowError};
 use crate::sys::screen::SpaceId;
-use crate::ui::common::{render_layer_to_cgs_window, with_disabled_actions};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color {

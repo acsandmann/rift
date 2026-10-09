@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cgs::G_CONNECTION;
 use nix::libc::{RTLD_DEFAULT, dlsym};
 use objc2_app_kit::NSWindowLevel;
 use objc2_application_services::AXError;
@@ -34,7 +35,6 @@ use crate::sys::process::ProcessSerialNumber;
 use crate::sys::screen::{ScreenInfo, SpaceId};
 use crate::sys::skylight::*;
 
-static G_CONNECTION: Lazy<i32> = Lazy::new(|| unsafe { SLSMainConnectionID() });
 static LAST_WINDOWSERVER_ACTIVITY_US: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 thread_local! {
@@ -656,29 +656,42 @@ fn find_window_at_point(point: &mut CGPoint, below_window_id: Option<u32>) -> Op
 
 fn is_own_window(cid: i32) -> bool { *G_CONNECTION == cid }
 
+/// Settings is Rift's only document window; its sheets are modal windows.
+/// Floating surfaces (menus/popovers) and compositor overlays are not targets.
+fn is_ignored_own_window(wid: u32, cid: i32) -> bool {
+    if !is_own_window(cid) {
+        return false;
+    }
+    let query = WindowIterator::new(&[WindowServerId::new(wid)]);
+    let tags = query
+        .as_ref()
+        .and_then(|q| q.advance())
+        .map(|w| SLSWindowTags::from_bits_retain(w.tags()));
+    !tags.is_some_and(|tags| tags.intersects(SLSWindowTags::DOCUMENT | SLSWindowTags::MODAL))
+}
+
 pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
     let (mut wid, mut cid) = find_window_at_point(&mut point, None)?;
-    while is_own_window(cid) {
+    while is_ignored_own_window(wid, cid) {
         (wid, cid) = find_window_at_point(&mut point, Some(wid))?;
     }
     Some(WindowServerId(wid))
 }
 
-/// Returns `true` if an external application window at normal level or above
+/// Returns `true` if an application window at normal level or above
 /// occludes the given screen point.
 ///
-/// Walks down the window stack at `point`, skipping all Rift-owned CGS
-/// windows (there may be more than one at the same point), until a non-Rift
-/// window is found. Desktop/wallpaper windows sit well below
+/// Walks down the window stack at `point`, skipping Rift-owned surfaces except
+/// Settings and its sheets. Desktop/wallpaper windows sit well below
 /// `NSNormalWindowLevel` and are not considered occluders.
 pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
     use objc2_app_kit::NSNormalWindowLevel;
 
     let mut hit = find_window_at_point(&mut point, None);
 
-    // Skip past any Rift-owned windows stacked at this point.
+    // Skip other Rift surfaces without looking through Settings or its sheets.
     while let Some((wid, cid)) = hit {
-        if !is_own_window(cid) {
+        if !is_ignored_own_window(wid, cid) {
             let level = window_level(wid).unwrap_or(NSWindowLevel::MIN);
             return level >= NSNormalWindowLevel;
         }
@@ -946,7 +959,7 @@ pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> 
 }
 
 pub fn allow_hide_mouse() -> Result<(), CGError> {
-    let cid = unsafe { SLSMainConnectionID() };
+    let cid = cgs::main_connection();
     let property = CFString::from_str("SetsCursorInBackground");
     let value = CFBoolean::retain(unsafe { kCFBooleanTrue.unwrap_unchecked() });
 

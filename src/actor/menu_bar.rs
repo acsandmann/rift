@@ -1,9 +1,8 @@
 use std::path::Path;
-use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
-use objc2::MainThreadMarker;
+use cgs::MainThreadMarker;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::actor::{config, reactor};
@@ -12,7 +11,13 @@ use crate::layout_engine::LayoutCommand;
 use crate::model::server::RuntimeWorkspaceData;
 use crate::sys::screen::SpaceId;
 use crate::ui::menu_bar::{MenuAction, MenuIcon};
+use crate::ui::settings::{Action, Finish, Request};
 use crate::{actor, common};
+
+type UpdateCheck = (
+    tokio::sync::oneshot::Receiver<Result<String, String>>,
+    crate::ui::settings::updates::Completion,
+);
 
 /// Menu-bar-only projection; workspace indices remain local to each space.
 #[derive(Debug, Clone)]
@@ -40,8 +45,9 @@ impl Update {
 }
 
 pub enum Event {
+    OpenSettings,
     Update(Update),
-    ConfigUpdated(Config),
+    ConfigUpdated(Box<Config>),
 }
 
 enum DebounceCommand {
@@ -57,7 +63,14 @@ pub struct Menu {
     action_tx: UnboundedSender<MenuAction>,
     action_rx: tokio::sync::mpsc::UnboundedReceiver<MenuAction>,
     icon: Option<MenuIcon>,
+    settings: Option<crate::ui::settings::Settings>,
+    settings_source_revision: std::cell::Cell<Option<u64>>,
+    settings_requests: tokio::sync::mpsc::UnboundedReceiver<crate::ui::settings::Request>,
+    settings_request_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::settings::Request>,
+    /// Completions awaiting installed-application discovery; `Some` while a scan runs.
+    app_scan: Option<Vec<Finish>>,
     mtm: MainThreadMarker,
+    config_path: std::path::PathBuf,
     last_signature: Option<u64>,
     last_update: Option<Update>,
 }
@@ -72,7 +85,10 @@ impl Menu {
         reactor_tx: reactor::Sender,
         config_tx: config::Sender,
         mtm: MainThreadMarker,
+        config_path: std::path::PathBuf,
     ) -> Self {
+        cgs::Application::shared(&cgs::Ui::new(mtm)).install_close_window_command();
+        let (settings_request_tx, settings_requests) = tokio::sync::mpsc::unbounded_channel();
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let layout_folder = config.settings.ui.menu_bar.resolved_layout_folder();
         let mut icon = config
@@ -86,6 +102,11 @@ impl Menu {
         }
         Self {
             icon,
+            settings: None,
+            settings_source_revision: std::cell::Cell::new(None),
+            settings_requests,
+            settings_request_tx,
+            app_scan: None,
             config,
             rx,
             reactor_tx,
@@ -93,6 +114,7 @@ impl Menu {
             action_tx,
             action_rx,
             mtm,
+            config_path,
             last_signature: None,
             last_update: None,
         }
@@ -105,8 +127,19 @@ impl Menu {
         let (tick_tx, mut tick_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let debounce_tx = Self::spawn_debouncer(DEBOUNCE, tick_tx);
 
+        let mut update_check: Option<UpdateCheck> = None;
         loop {
             tokio::select! {
+                result = async {
+                    match &mut update_check {
+                        Some((receive, _)) => receive.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Some((_, done)) = update_check.take() {
+                        done(result.unwrap_or_else(|_| Err("Couldn’t check for updates. Try again.".into())));
+                    }
+                }
                 maybe_tick = tick_rx.recv() => {
                     if maybe_tick.is_none() {
                         if let Some(ev) = pending.take() {
@@ -129,7 +162,13 @@ impl Menu {
                                     pending = Some(event);
                                     let _ = debounce_tx.send(DebounceCommand::Arm);
                                 }
-                                Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
+                                Event::ConfigUpdated(cfg) => {
+                                    self.handle_config_updated(*cfg);
+                                    if self.settings.is_some() {
+                                        self.sync_settings().await;
+                                    }
+                                }
+                                Event::OpenSettings => self.open_settings().await,
                             }
                         }
                         None => {
@@ -142,19 +181,170 @@ impl Menu {
                     }
                 }
 
+                Some(request) = self.settings_requests.recv() => {
+                    self.handle_settings_request(request, &mut update_check).await;
+                }
                 maybe_action = self.action_rx.recv() => {
                     if let Some(action) = maybe_action {
-                        self.handle_action(action);
+                        if matches!(action, MenuAction::OpenSettings) { self.open_settings().await; }
+                        else { self.handle_action(action); }
                     }
                 }
             }
         }
     }
 
+    async fn handle_settings_request(
+        &mut self,
+        request: Request,
+        update_check: &mut Option<UpdateCheck>,
+    ) {
+        let (response, receive) = tokio::sync::oneshot::channel();
+        match request.action {
+            Action::CheckUpdates(done) => {
+                *update_check = Some((crate::ui::settings::updates::start(), done));
+                (request.finish)(Ok(()));
+                return;
+            }
+            Action::RefreshRuntime => {
+                self.discover_applications(Some(request.finish));
+                return;
+            }
+            Action::Edit(edit) => self.config_tx.send(config::Event::EditSource { edit, response }),
+            Action::Reload => self.config_tx.send(config::Event::ReloadSource(response)),
+        }
+        let result = receive
+            .await
+            .unwrap_or_else(|_| Err("Configuration service unavailable".into()));
+        let failed = result.is_err();
+        (request.finish)(result.map(|snapshot| {
+            self.settings_source_revision.set(Some(snapshot.revision));
+            if let Some(settings) = &self.settings {
+                settings.synchronize(snapshot.source);
+            }
+        }));
+        if failed {
+            self.sync_settings().await;
+        }
+    }
+
+    async fn source_snapshot(&self) -> Result<crate::common::config::ConfigSource, String> {
+        let (response, result) = tokio::sync::oneshot::channel();
+        self.config_tx
+            .send(config::Event::QuerySourceSince { revision: None, response });
+        let snapshot = result
+            .await
+            .map_err(|_| "Configuration service unavailable".to_string())??
+            .ok_or_else(|| "Missing configuration snapshot".to_string())?;
+        self.settings_source_revision.set(Some(snapshot.revision));
+        Ok(snapshot.source)
+    }
+
+    async fn settings_runtime(
+        &self,
+    ) -> (
+        Vec<crate::sys::screen::ScreenInfo>,
+        Vec<rift_protocol::ApplicationData>,
+    ) {
+        let (displays_tx, displays_rx) = tokio::sync::oneshot::channel();
+        let (apps_tx, apps_rx) = tokio::sync::oneshot::channel();
+        self.reactor_tx.send(reactor::Event::Query(reactor::QueryRequest::DisplaysAsync(
+            displays_tx,
+        )));
+        self.reactor_tx
+            .send(reactor::Event::Query(reactor::QueryRequest::ApplicationsAsync(
+                apps_tx,
+            )));
+        let (displays, applications) = tokio::join!(displays_rx, apps_rx);
+        (
+            displays.unwrap_or_default().into_iter().map(|d| d.info).collect(),
+            applications.unwrap_or_default(),
+        )
+    }
+
+    async fn open_settings(&mut self) {
+        match self.source_snapshot().await {
+            Ok(source) => {
+                let (displays, applications) = self.settings_runtime().await;
+                if let Some(settings) = &self.settings {
+                    settings.refresh_applications(applications);
+                    settings.synchronize(source);
+                    settings.refresh_displays(displays);
+                } else {
+                    self.settings = Some(crate::ui::settings::Settings::new(
+                        cgs::Ui::new(self.mtm),
+                        source,
+                        self.config_path.clone(),
+                        displays,
+                        applications,
+                        self.settings_request_tx.clone(),
+                        {
+                            let actions = self.action_tx.clone();
+                            move || {
+                                let _ = actions.send(MenuAction::SettingsClosed);
+                            }
+                        },
+                    ));
+                }
+                self.settings.as_ref().unwrap().show();
+                self.discover_applications(None);
+            }
+            Err(error) => {
+                tracing::error!(%error, "Could not open Settings");
+                cgs::Alert::new(&cgs::Ui::new(self.mtm), "Could not open Settings", &error)
+                    .button("OK")
+                    .run_modal();
+            }
+        }
+    }
+
+    /// Scan installed applications off the main thread; the result returns as a `MenuAction`
+    /// so the menu actor keeps handling events and no closed window or model is retained.
+    fn discover_applications(&mut self, finish: Option<Finish>) {
+        if self
+            .settings
+            .as_ref()
+            .is_none_or(|settings| settings.has_installed_applications())
+        {
+            if let Some(finish) = finish {
+                finish(Ok(()));
+            }
+            return;
+        }
+        let actions = &self.action_tx;
+        let waiting = self.app_scan.get_or_insert_with(|| {
+            let actions = actions.clone();
+            std::thread::spawn(move || {
+                let apps = crate::sys::installed_apps::installed();
+                let _ = actions.send(MenuAction::InstalledApplications(apps));
+            });
+            Vec::new()
+        });
+        waiting.extend(finish);
+    }
+
+    async fn sync_settings(&self) {
+        if self.settings.is_none() {
+            return;
+        }
+        let (response, result) = tokio::sync::oneshot::channel();
+        self.config_tx.send(config::Event::QuerySourceSince {
+            revision: self.settings_source_revision.get(),
+            response,
+        });
+        if let Ok(Ok(Some(snapshot))) = result.await {
+            self.settings_source_revision.set(Some(snapshot.revision));
+            if let Some(settings) = &self.settings {
+                settings.synchronize(snapshot.source);
+            }
+        }
+    }
+
     fn handle_event(&mut self, event: Event) {
         match event {
+            Event::OpenSettings => {}
             Event::Update(update) => self.handle_update(update),
-            Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
+            Event::ConfigUpdated(cfg) => self.handle_config_updated(*cfg),
         }
     }
 
@@ -265,6 +455,23 @@ impl Menu {
             MenuAction::OpenSponsor => {
                 Self::open_path_or_url("https://github.com/sponsors/acsandmann");
             }
+            MenuAction::OpenSettings => {}
+            // Run after windowWillClose returns, rather than dropping AppKit's active delegate.
+            MenuAction::SettingsClosed => {
+                self.settings = None;
+                // Keep the in-flight marker so reopening cannot start a duplicate scan.
+                if let Some(waiting) = &mut self.app_scan {
+                    waiting.clear();
+                }
+            }
+            // A scan finishing after close is dropped; after reopening it serves the new window.
+            MenuAction::InstalledApplications(apps) => {
+                let waiting = self.app_scan.take().unwrap_or_default();
+                if let Some(settings) = &self.settings {
+                    settings.set_installed_applications(apps);
+                    waiting.into_iter().for_each(|finish| finish(Ok(())));
+                }
+            }
             MenuAction::OpenConfig => {
                 Self::open_path_or_url(common::config::config_file());
             }
@@ -287,7 +494,7 @@ impl Menu {
     }
 
     fn open_path_or_url(target: impl AsRef<Path>) {
-        let _ = ProcessCommand::new("open").arg(target.as_ref()).spawn();
+        cgs::Application::open(&target.as_ref().to_string_lossy());
     }
 
     fn reload_config(&self) {

@@ -4,6 +4,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use block2::RcBlock;
+use cgs::{CgsWindow, LayerTransaction, WindowSurface, release_layer_tree, with_disabled_actions};
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -14,9 +15,7 @@ use objc2_core_graphics::{
     CGDisplayBounds, CGImage, CGImageAlphaInfo, CGPreflightScreenCaptureAccess,
 };
 use objc2_foundation::{MainThreadMarker, NSError};
-use objc2_quartz_core::{
-    CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CATextLayer, CATransaction,
-};
+use objc2_quartz_core::{CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CATextLayer};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
 };
@@ -28,33 +27,13 @@ use crate::actor::{self};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::MissionControlSettings;
 use crate::model::server::{RuntimeWindowData, RuntimeWorkspaceData};
-use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::screen::{NSScreenExt, ScreenInfo};
 use crate::sys::window_server::WindowServerId;
-use crate::sys::window_surface::WindowSurface;
-use crate::ui::common::with_disabled_actions;
 
 const GAP: f64 = 40.0;
 const CORNER: f64 = 8.0;
 const CAPTION: f64 = 48.0;
-
-/// All layer changes for one input/capture update reach the compositor together.
-/// Nested helpers may create transactions, but only this outer scope flushes.
-struct OverviewTransaction;
-impl OverviewTransaction {
-    fn begin() -> Self {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        Self
-    }
-}
-impl Drop for OverviewTransaction {
-    fn drop(&mut self) {
-        CATransaction::commit();
-        CATransaction::flush();
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
@@ -849,27 +828,9 @@ pub struct OverviewSession {
     pressed: Option<CGPoint>,
 }
 
-fn release_layer_tree(root: &CALayer) {
-    root.removeAllAnimations();
-    unsafe {
-        root.setContents(None);
-    }
-    unsafe {
-        root.setMask(None);
-    }
-    if let Some(children) = unsafe { root.sublayers() } {
-        // Core Animation may return a live array; snapshot before detaching siblings.
-        let children: Vec<_> = children.iter().collect();
-        for child in children {
-            release_layer_tree(&child);
-            child.removeFromSuperlayer();
-        }
-    }
-}
-
 impl Drop for OverviewSession {
     fn drop(&mut self) {
-        let _transaction = OverviewTransaction::begin();
+        let _transaction = LayerTransaction::disabled().flush_on_commit();
         // Close the receiver first so concurrent capture completions are discarded.
         self.previews.take();
         if let Some(drag) = self.end_drag() {
@@ -891,7 +852,7 @@ impl OverviewSession {
         generation: u64,
         cache: &mut Option<PreviewCache>,
     ) -> Option<Self> {
-        let _transaction = OverviewTransaction::begin();
+        let _transaction = LayerTransaction::disabled().flush_on_commit();
         let mut displays = Vec::new();
         let mut active = 0;
         let snapshot: Vec<_> = reactor
@@ -929,7 +890,7 @@ impl OverviewSession {
                 window.set_level(NSPopUpMenuWindowLevel as i32)?;
                 window.set_blur(24, None)?;
                 let surface = WindowSurface::new_scaled(window.id(), root.bounds(), &root, scale)?;
-                Ok::<_, crate::sys::cgs_window::CgsWindowError>((window, surface))
+                Ok::<_, cgs::CgsWindowError>((window, surface))
             })();
             let (window, surface) = match result {
                 Ok(r) => r,
@@ -1020,7 +981,7 @@ impl OverviewSession {
     }
 
     pub(crate) fn edge_tick(&mut self, cache: Option<&PreviewCache>) {
-        let _transaction = OverviewTransaction::begin();
+        let _transaction = LayerTransaction::disabled().flush_on_commit();
         let Some(point) = self.drag.as_ref().filter(|drag| drag.started).map(|drag| drag.point)
         else {
             return;
@@ -1042,7 +1003,7 @@ impl OverviewSession {
         cache: Option<&PreviewCache>,
         moved: Option<WindowId>,
     ) {
-        let _transaction = OverviewTransaction::begin();
+        let _transaction = LayerTransaction::disabled().flush_on_commit();
         self.end_drag();
         let selected = moved.or(self.selection.window);
         for (i, d) in self.displays.iter_mut().enumerate() {
@@ -1281,7 +1242,7 @@ impl OverviewSession {
         if generation != self.generation || !enabled {
             return;
         }
-        let _transaction = OverviewTransaction::begin();
+        let _transaction = LayerTransaction::disabled().flush_on_commit();
         self.previews = PreviewSession::open(enabled, generation, wake);
         self.request_previews(cache);
     }
@@ -1383,7 +1344,7 @@ impl OverviewSession {
             drag.point = *point;
             return None;
         }
-        let _transaction = OverviewTransaction::begin();
+        let _transaction = LayerTransaction::disabled().flush_on_commit();
         let pointer = match &input {
             Input::Move(point)
             | Input::Click(point)
@@ -1654,7 +1615,7 @@ impl OverviewSession {
         current: Option<&crate::model::server::RuntimeWindowData>,
         cache: &mut Option<PreviewCache>,
     ) {
-        let _transaction = OverviewTransaction::begin();
+        let _transaction = LayerTransaction::disabled().flush_on_commit();
         let Some(previews) = &mut self.previews else {
             return;
         };
@@ -1773,7 +1734,7 @@ static CAPTURE_JOBS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn outstanding_preview_captures() -> usize { CAPTURE_JOBS.load(Ordering::Acquire) }
 
 fn acquire_capture_slot(jobs: &AtomicUsize) -> bool {
-    jobs.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
+    jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
         .is_ok()
 }
 
@@ -1816,7 +1777,9 @@ impl PreviewSession {
             deliver(callback_tx.clone(), PreviewEvent::Content(generation, content));
         });
         unsafe {
-            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(true,false,&callback);
+            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                true, false, &callback,
+            );
         }
         Self {
             wake,
@@ -2660,7 +2623,7 @@ mod tests {
                 set_image(&sibling, Some(&image));
                 root.addSublayer(&sibling);
                 assert!(cf.retain_count() > baseline);
-                let _transaction = OverviewTransaction::begin();
+                let _transaction = LayerTransaction::disabled().flush_on_commit();
                 release_layer_tree(&root);
                 assert!(unsafe { child.contents() }.is_none());
                 assert_eq!(cf.retain_count(), baseline);

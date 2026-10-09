@@ -582,3 +582,25 @@ mod native_identity_tests {
         assert!(responses.next().is_none());
     }
 }
+
+/// Self-targeted AppKit windows have reliable local focus state even when
+/// process activation notifications lag. A sheet belongs to its parent target.
+pub(crate) fn is_own_window_focused(window: crate::actor::app::WindowId) -> bool {
+    if window.pid != std::process::id() as crate::actor::app::pid_t {
+        return false;
+    }
+    let Some(main_thread) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+    if !app.isActive() {
+        return false;
+    }
+    let Some(key) = app.keyWindow() else {
+        return false;
+    };
+    key.windowNumber() == window.idx.get() as isize
+        || key
+            .sheetParent()
+            .is_some_and(|parent| parent.windowNumber() == window.idx.get() as isize)
+}

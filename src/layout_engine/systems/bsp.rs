@@ -1788,7 +1788,9 @@ impl LayoutSystem for BspLayoutSystem {
                 true
             }
             crate::layout_engine::WindowDropAction::Swap
-            | crate::layout_engine::WindowDropAction::Move(_) => unreachable!(),
+            | crate::layout_engine::WindowDropAction::Move(_) => {
+                unreachable!()
+            }
         }
     }
 

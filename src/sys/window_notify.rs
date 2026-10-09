@@ -5,16 +5,15 @@
 
 // https://github.com/asmagill/hs._asm.undocumented.spaces/blob/0b5321fc336f75488fb4bbb524677bb8291050bd/CGSConnection.h#L153
 // https://github.com/NUIKit/CGSInternal/blob/c4f6f559d624dc1cfc2bf24c8c19dbf653317fcf/CGSEvent.h#L21
-
 use std::ffi::c_void;
 
+use cgs::G_CONNECTION;
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
 use tracing::{debug, trace, warn};
 
 use super::skylight::{
-    CGSEventType, SLSMainConnectionID, SLSRegisterConnectionNotifyProc,
-    SLSRequestNotificationsForWindows, cid_t,
+    CGSEventType, SLSRegisterConnectionNotifyProc, SLSRequestNotificationsForWindows, cid_t,
 };
 use crate::actor;
 use crate::common::collections::{HashMap, HashSet};
@@ -37,8 +36,6 @@ pub struct EventData {
 
 static EVENT_RECEIVERS: Lazy<Mutex<HashMap<CGSEventType, Option<actor::Receiver<EventData>>>>> =
     Lazy::new(|| Mutex::new(HashMap::default()));
-
-static G_CONNECTION: Lazy<cid_t> = Lazy::new(|| unsafe { SLSMainConnectionID() });
 
 static REGISTERED_EVENTS: Lazy<Mutex<HashSet<CGSEventType>>> =
     Lazy::new(|| Mutex::new(HashSet::default()));

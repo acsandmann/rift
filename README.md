@@ -38,6 +38,7 @@
 - focus follows the mouse with auto raise
 <!-- - drag windows over one another to swap positions -->
 - does **not** require disabling SIP
+- native macOS tab support
 - performant animations <sup>(as seen in the [demo](#rift))</sup>
 - switch to next/previous workspace with trackpad gestures <sup>(just like native macOS)</sup>
 - hot reloadable configuration

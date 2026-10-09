@@ -902,7 +902,12 @@ impl AnimationManager {
         self.retire();
         match message {
             Message::Camera(mut camera) => {
-                let old = self.motions.iter().position(|m| matches!(m, Motion::Viewport(c) if c.identity.space == camera.identity.space))
+                let old = self
+                    .motions
+                    .iter()
+                    .position(
+                        |m| matches!(m, Motion::Viewport(c) if c.identity.space == camera.identity.space),
+                    )
                     .map(|idx| self.motions.swap_remove(idx));
                 camera.replace(old.map(|m| {
                     let Motion::Viewport(c) = m else { unreachable!() };

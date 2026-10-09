@@ -1,5 +1,9 @@
 use std::sync::LazyLock;
 
+use cgs::{
+    CgsWindow, CgsWindowError, WindowSurface, WindowTransaction, backdrop_blur,
+    with_disabled_actions,
+};
 use objc2::rc::Retained;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGColor;
@@ -7,12 +11,7 @@ use objc2_quartz_core::{CALayer, CATransaction};
 
 use crate::actor::drag::{DropTarget, preview_frame};
 use crate::layout_engine::WindowDropAction;
-use crate::sys::backdrop_layer::backdrop_blur;
-use crate::sys::cgs_window::{CgsWindow, CgsWindowError};
 use crate::sys::geometry::SameAs;
-use crate::sys::window_surface::WindowSurface;
-use crate::sys::window_transaction::WindowTransaction;
-use crate::ui::common::with_disabled_actions;
 
 static FILL: LazyLock<Retained<CGColor>> =
     LazyLock::new(|| CGColor::new_generic_rgb(0.13, 0.62, 1.0, 0.18).into());
