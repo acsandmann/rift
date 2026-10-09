@@ -9,131 +9,135 @@ use crate::common::config::{ConfigSource, WorkspaceSelector};
 
 fn layout(cmd: L) -> WmCommand { WmCommand::ReactorCommand(Command::Layout(cmd)) }
 fn reactor(cmd: R) -> WmCommand { WmCommand::ReactorCommand(Command::Reactor(cmd)) }
-fn actions() -> Vec<(&'static str, WmCommand)> {
-    vec![
-        ("Focus · Move focus", layout(L::MoveFocus(Direction::Left))),
-        ("Focus · Next window", layout(L::NextWindow)),
-        ("Focus · Previous window", layout(L::PrevWindow)),
-        ("Focus · Ascend", layout(L::Ascend)),
-        ("Focus · Descend", layout(L::Descend)),
-        ("Window · Move window", layout(L::MoveNode(Direction::Left))),
-        ("Window · Join window", layout(L::JoinWindow(Direction::Left))),
-        (
-            "Window · Consume or expel",
-            layout(L::ConsumeOrExpelWindow(Direction::Left)),
-        ),
-        ("Window · Toggle floating", layout(L::ToggleWindowFloating)),
-        ("Window · Toggle focus floating", layout(L::ToggleFocusFloating)),
-        ("Window · Fullscreen", layout(L::ToggleFullscreen)),
-        (
-            "Window · Fullscreen within gaps",
-            layout(L::ToggleFullscreenWithinGaps),
-        ),
-        (
-            "Window · Grow",
-            layout(L::ResizeWindowGrow(ResizeOrientation::Smart)),
-        ),
-        (
-            "Window · Shrink",
-            layout(L::ResizeWindowShrink(ResizeOrientation::Smart)),
-        ),
-        ("Window · Resize by", layout(L::ResizeWindowBy { amount: 10.0 })),
-        ("Window · Center selection", layout(L::CenterSelection)),
-        ("Window · Close", WmCommand::Wm(WmCmd::CloseWindow)),
-        (
-            "Workspace · Switch workspace",
-            WmCommand::Wm(WmCmd::SwitchToWorkspace(WorkspaceSelector::Index(0))),
-        ),
-        (
-            "Workspace · Move window to workspace",
-            WmCommand::Wm(WmCmd::MoveWindowToWorkspace(WorkspaceSelector::Index(0))),
-        ),
-        ("Workspace · Next", WmCommand::Wm(WmCmd::NextWorkspace)),
-        ("Workspace · Previous", WmCommand::Wm(WmCmd::PrevWorkspace)),
-        ("Workspace · Create", WmCommand::Wm(WmCmd::CreateWorkspace)),
-        (
-            "Workspace · Last workspace",
-            WmCommand::Wm(WmCmd::SwitchToLastWorkspace),
-        ),
-        (
-            "Workspace · Set layout",
-            layout(L::SetWorkspaceLayout {
-                workspace: None,
-                mode: rift_protocol::LayoutMode::Traditional,
-            }),
-        ),
-        (
-            "Display · Focus display",
-            reactor(R::FocusDisplay(DisplaySelector::Direction(Direction::Left))),
-        ),
-        (
-            "Display · Move window to display",
-            reactor(R::MoveWindowToDisplay {
-                selector: DisplaySelector::Direction(Direction::Left),
-                window_id: None,
-            }),
-        ),
-        (
-            "Display · Move workspace to display",
-            reactor(R::MoveWorkspaceToDisplay {
-                selector: DisplaySelector::Direction(Direction::Left),
-                wrap_around: false,
-            }),
-        ),
-        (
-            "Display · Move pointer to display",
-            reactor(R::MoveMouseToDisplay(DisplaySelector::Direction(
-                Direction::Left,
-            ))),
-        ),
-        (
-            "Space · Switch macOS space",
-            reactor(R::SwitchSpace(Direction::Left)),
-        ),
-        (
-            "Space · Toggle tiling",
-            WmCommand::Wm(WmCmd::ToggleSpaceActivated),
-        ),
-        ("Layout · Toggle stack", layout(L::ToggleStack)),
-        ("Layout · Toggle orientation", layout(L::ToggleOrientation)),
-        ("Layout · Unjoin windows", layout(L::UnjoinWindows)),
-        ("Layout · Scroll strip", layout(L::ScrollStrip { delta: 100.0 })),
-        ("Layout · Snap strip", layout(L::SnapStrip)),
-        (
-            "Layout · Next preset width",
-            WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth),
-        ),
-        (
-            "Layout · Adjust master ratio",
-            layout(L::AdjustMasterRatio(0.05)),
-        ),
-        (
-            "Layout · Adjust master count",
-            layout(L::AdjustMasterCount { delta: 1 }),
-        ),
-        ("Layout · Promote to master", layout(L::PromoteToMaster)),
-        ("Layout · Swap master and stack", layout(L::SwapMasterStack)),
-        (
-            "Overview · All workspaces",
-            WmCommand::Wm(WmCmd::ShowMissionControlAll),
-        ),
-        (
-            "Overview · Current workspace",
-            WmCommand::Wm(WmCmd::ShowMissionControlCurrent),
-        ),
-        ("Overview · Dismiss", WmCommand::Wm(WmCmd::DismissMissionControl)),
-        (
-            "Rift · Binding mode",
-            WmCommand::Wm(WmCmd::BindingMode("default".into())),
-        ),
-        (
-            "Rift · Run command",
-            WmCommand::Wm(WmCmd::Exec(ExecCmd::String(String::new()))),
-        ),
-        ("Rift · Reload config", WmCommand::Wm(WmCmd::ReloadConfig)),
-        ("Rift · Open Settings", reactor(R::OpenSettings)),
-        ("Rift · Save and exit", reactor(R::SaveAndExit)),
-    ]
+fn actions() -> &'static [(&'static str, WmCommand)] {
+    static ACTIONS: std::sync::LazyLock<Vec<(&'static str, WmCommand)>> =
+        std::sync::LazyLock::new(|| {
+            vec![
+                ("Focus · Move focus", layout(L::MoveFocus(Direction::Left))),
+                ("Focus · Next window", layout(L::NextWindow)),
+                ("Focus · Previous window", layout(L::PrevWindow)),
+                ("Focus · Ascend", layout(L::Ascend)),
+                ("Focus · Descend", layout(L::Descend)),
+                ("Window · Move window", layout(L::MoveNode(Direction::Left))),
+                ("Window · Join window", layout(L::JoinWindow(Direction::Left))),
+                (
+                    "Window · Consume or expel",
+                    layout(L::ConsumeOrExpelWindow(Direction::Left)),
+                ),
+                ("Window · Toggle floating", layout(L::ToggleWindowFloating)),
+                ("Window · Toggle focus floating", layout(L::ToggleFocusFloating)),
+                ("Window · Fullscreen", layout(L::ToggleFullscreen)),
+                (
+                    "Window · Fullscreen within gaps",
+                    layout(L::ToggleFullscreenWithinGaps),
+                ),
+                (
+                    "Window · Grow",
+                    layout(L::ResizeWindowGrow(ResizeOrientation::Smart)),
+                ),
+                (
+                    "Window · Shrink",
+                    layout(L::ResizeWindowShrink(ResizeOrientation::Smart)),
+                ),
+                ("Window · Resize by", layout(L::ResizeWindowBy { amount: 10.0 })),
+                ("Window · Center selection", layout(L::CenterSelection)),
+                ("Window · Close", WmCommand::Wm(WmCmd::CloseWindow)),
+                (
+                    "Workspace · Switch workspace",
+                    WmCommand::Wm(WmCmd::SwitchToWorkspace(WorkspaceSelector::Index(0))),
+                ),
+                (
+                    "Workspace · Move window to workspace",
+                    WmCommand::Wm(WmCmd::MoveWindowToWorkspace(WorkspaceSelector::Index(0))),
+                ),
+                ("Workspace · Next", WmCommand::Wm(WmCmd::NextWorkspace)),
+                ("Workspace · Previous", WmCommand::Wm(WmCmd::PrevWorkspace)),
+                ("Workspace · Create", WmCommand::Wm(WmCmd::CreateWorkspace)),
+                (
+                    "Workspace · Last workspace",
+                    WmCommand::Wm(WmCmd::SwitchToLastWorkspace),
+                ),
+                (
+                    "Workspace · Set layout",
+                    layout(L::SetWorkspaceLayout {
+                        workspace: None,
+                        mode: rift_protocol::LayoutMode::Traditional,
+                    }),
+                ),
+                (
+                    "Display · Focus display",
+                    reactor(R::FocusDisplay(DisplaySelector::Direction(Direction::Left))),
+                ),
+                (
+                    "Display · Move window to display",
+                    reactor(R::MoveWindowToDisplay {
+                        selector: DisplaySelector::Direction(Direction::Left),
+                        window_id: None,
+                    }),
+                ),
+                (
+                    "Display · Move workspace to display",
+                    reactor(R::MoveWorkspaceToDisplay {
+                        selector: DisplaySelector::Direction(Direction::Left),
+                        wrap_around: false,
+                    }),
+                ),
+                (
+                    "Display · Move pointer to display",
+                    reactor(R::MoveMouseToDisplay(DisplaySelector::Direction(
+                        Direction::Left,
+                    ))),
+                ),
+                (
+                    "Space · Switch macOS space",
+                    reactor(R::SwitchSpace(Direction::Left)),
+                ),
+                (
+                    "Space · Toggle tiling",
+                    WmCommand::Wm(WmCmd::ToggleSpaceActivated),
+                ),
+                ("Layout · Toggle stack", layout(L::ToggleStack)),
+                ("Layout · Toggle orientation", layout(L::ToggleOrientation)),
+                ("Layout · Unjoin windows", layout(L::UnjoinWindows)),
+                ("Layout · Scroll strip", layout(L::ScrollStrip { delta: 100.0 })),
+                ("Layout · Snap strip", layout(L::SnapStrip)),
+                (
+                    "Layout · Next preset width",
+                    WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth),
+                ),
+                (
+                    "Layout · Adjust master ratio",
+                    layout(L::AdjustMasterRatio(0.05)),
+                ),
+                (
+                    "Layout · Adjust master count",
+                    layout(L::AdjustMasterCount { delta: 1 }),
+                ),
+                ("Layout · Promote to master", layout(L::PromoteToMaster)),
+                ("Layout · Swap master and stack", layout(L::SwapMasterStack)),
+                (
+                    "Overview · All workspaces",
+                    WmCommand::Wm(WmCmd::ShowMissionControlAll),
+                ),
+                (
+                    "Overview · Current workspace",
+                    WmCommand::Wm(WmCmd::ShowMissionControlCurrent),
+                ),
+                ("Overview · Dismiss", WmCommand::Wm(WmCmd::DismissMissionControl)),
+                (
+                    "Rift · Binding mode",
+                    WmCommand::Wm(WmCmd::BindingMode("default".into())),
+                ),
+                (
+                    "Rift · Run command",
+                    WmCommand::Wm(WmCmd::Exec(ExecCmd::String(String::new()))),
+                ),
+                ("Rift · Reload config", WmCommand::Wm(WmCmd::ReloadConfig)),
+                ("Rift · Open Settings", reactor(R::OpenSettings)),
+                ("Rift · Save and exit", reactor(R::SaveAndExit)),
+            ]
+        });
+    &ACTIONS
 }
 fn same_action(a: &WmCommand, b: &WmCommand) -> bool {
     use std::mem::discriminant as d;
@@ -153,9 +157,9 @@ fn same_action(a: &WmCommand, b: &WmCommand) -> bool {
 }
 fn action_name(cmd: &WmCommand) -> String {
     let title = actions()
-        .into_iter()
+        .iter()
         .find(|(_, a)| same_action(a, cmd))
-        .map(|(name, _)| name.split_once(" · ").map_or(name, |(_, action)| action).to_string())
+        .map(|(name, _)| name.split_once(" · ").map_or(*name, |(_, action)| action).to_string())
         .unwrap_or("Custom command".into());
     let argument = match cmd {
         WmCommand::ReactorCommand(Command::Layout(
@@ -219,15 +223,54 @@ fn glyphs(key: &str, s: &ConfigSource) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+const MODIFIER_NAMES: [(Modifiers, &str); 4] = [
+    (Modifiers::Control, "Ctrl"),
+    (Modifiers::Option, "Alt"),
+    (Modifiers::Shift, "Shift"),
+    (Modifiers::Command, "Meta"),
+];
+
+pub(super) fn to_rift_modifiers(flags: Modifiers) -> crate::sys::hotkey::Modifiers {
+    let mut result = crate::sys::hotkey::Modifiers::empty();
+    for (native, rift) in modifier_flags() {
+        if flags.contains(native) {
+            result.insert(rift);
+        }
+    }
+    result
+}
+
+pub(super) fn from_rift_modifiers(flags: crate::sys::hotkey::Modifiers) -> Modifiers {
+    let mut result = Modifiers::empty();
+    for (native, rift) in modifier_flags() {
+        if flags.intersects(rift) {
+            result.insert(native);
+        }
+    }
+    result
+}
+
+fn modifier_flags() -> [(Modifiers, crate::sys::hotkey::Modifiers); 4] {
+    use crate::sys::hotkey::Modifiers as M;
+    [
+        (Modifiers::Control, M::CONTROL),
+        (Modifiers::Option, M::ALT),
+        (Modifiers::Shift, M::SHIFT),
+        (Modifiers::Command, M::META),
+    ]
+}
+
+#[derive(Clone, PartialEq)]
+struct BindingRow {
+    key: String,
+    shortcut: String,
+    action: String,
+}
+
 pub(super) fn recorded_key(key: &KeyShortcut) -> Option<String> {
     let code = crate::sys::hotkey::cg_keycode_to_keycode(key.key.code)?;
     let mut modifiers = Vec::new();
-    for (flag, name) in [
-        (Modifiers::Control, "Ctrl"),
-        (Modifiers::Option, "Alt"),
-        (Modifiers::Shift, "Shift"),
-        (Modifiers::Command, "Meta"),
-    ] {
+    for (flag, name) in MODIFIER_NAMES {
         if key.modifiers.contains(flag) {
             modifiers.push(name.to_string());
         }
@@ -240,26 +283,29 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let mode = Rc::new(RefCell::new("default".to_string()));
     let query = Rc::new(RefCell::new(String::new()));
-    let table = SettingsList::<(String, String)>::new(
-        &ui,
-        |(_, action)| action.clone(),
-        |(key, _)| key.clone(),
-    )
-    .full_length()
-    .trailing_summary()
-    .empty_message("No shortcuts in this shortcut set");
+    let table =
+        SettingsList::<BindingRow>::new(&ui, |row| row.action.clone(), |row| row.shortcut.clone())
+            .full_length()
+            .trailing_summary()
+            .empty_message("No shortcuts in this shortcut set");
     let weak_model = Rc::downgrade(model);
     let mode_edit = mode.clone();
-    let edit_query = query.clone();
+    let editing_table = Rc::new(RefCell::new(Weak::<SettingsList<BindingRow>>::new()));
+    let weak_editing_table = editing_table.clone();
     let edit_binding: Rc<dyn Fn(usize)> = Rc::new(move |i| {
         if let Some(model) = weak_model.upgrade() {
-            let item = matching_bindings(
-                &model.source.borrow(),
-                &mode_edit.borrow(),
-                &edit_query.borrow(),
-            )
-            .nth(i)
-            .map(|(key, command)| (key.clone(), command.clone()));
+            let item =
+                weak_editing_table.borrow().upgrade().and_then(|table| table.row(i)).and_then(
+                    |row| {
+                        model
+                            .source
+                            .borrow()
+                            .keymap(&mode_edit.borrow())
+                            .and_then(|map| map.get(&row.key))
+                            .cloned()
+                            .map(|cmd| (row.key, cmd))
+                    },
+                );
             if let Some((key, cmd)) = item {
                 binding_sheet(ui, &model, mode_edit.borrow().clone(), Some(key), cmd);
             }
@@ -267,6 +313,7 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     });
     let action = edit_binding.clone();
     let table = Rc::new(table.on_open(move |i| action(i)));
+    *editing_table.borrow_mut() = Rc::downgrade(&table);
     table.min_height(80.0);
     table.flexible_height(160.0);
     let names = Rc::new(RefCell::new(vec!["default".to_string()]));
@@ -291,7 +338,6 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let weak_table = Rc::downgrade(&table);
     let current_mode = mode.clone();
     let sync_query = query.clone();
-    let last = RefCell::new(Vec::new());
     f.sync.push(Box::new(move |s| {
         let mut modes = vec!["default".to_string()];
         modes.extend(s.binding_modes.keys().cloned());
@@ -311,11 +357,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         }
         *names.borrow_mut() = modes;
         let rows = binding_rows(s, &current_mode.borrow(), &sync_query.borrow());
-        if *last.borrow() != rows {
-            if let Some(table) = weak_table.upgrade() {
-                table.set_rows(rows.clone());
-            }
-            *last.borrow_mut() = rows;
+        if let Some(table) = weak_table.upgrade() {
+            table.set_rows_if_changed(rows);
         }
     }));
     let weak_model = Rc::downgrade(model);
@@ -343,26 +386,22 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let weak_model = Rc::downgrade(model);
     let weak_table = Rc::downgrade(&table);
     let selected_mode = mode.clone();
-    let remove_query = query.clone();
     let remove_binding: Rc<dyn Fn()> = Rc::new(move || {
-        if let (Some(model), Some(table)) = (weak_model.upgrade(), weak_table.upgrade()) {
-            if let Some(i) = table.selection() {
-                let name = selected_mode.borrow().clone();
-                let key = matching_bindings(&model.source.borrow(), &name, &remove_query.borrow())
-                    .nth(i)
-                    .map(|(key, _)| key.clone());
-                if let Some(key) = key {
-                    Model::submit(
-                        &weak_model,
-                        Box::new(move |s| {
-                            s.keymap_mut(&name)?.remove(&key);
-                            Ok(())
-                        }),
-                        weak_error.clone(),
-                    );
-                }
-            }
-        }
+        let Some(table) = weak_table.upgrade() else {
+            return;
+        };
+        let Some(row) = table.selection().and_then(|i| table.row(i)) else {
+            return;
+        };
+        let name = selected_mode.borrow().clone();
+        Model::submit(
+            &weak_model,
+            Box::new(move |s| {
+                s.keymap_mut(&name)?.remove(&row.key);
+                Ok(())
+            }),
+            weak_error.clone(),
+        );
     });
     let action = remove_binding.clone();
     let controls = Rc::new(controls.on_remove(move || action()));
@@ -370,7 +409,6 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     let duplicate_table = Rc::downgrade(&table);
     let duplicate_model = Rc::downgrade(model);
     let duplicate_mode = mode.clone();
-    let duplicate_query = query.clone();
     let menu = Menu::new(&ui)
         .item(MenuItem::new(&ui, "Edit Shortcut…").on_click(move || {
             if let Some(index) = weak_table.upgrade().and_then(|table| table.selection()) {
@@ -383,9 +421,14 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             {
                 let mode = duplicate_mode.borrow().clone();
                 let command = table.selection().and_then(|index| {
-                    matching_bindings(&model.source.borrow(), &mode, &duplicate_query.borrow())
-                        .nth(index)
-                        .map(|(_, command)| command.clone())
+                    table.row(index).and_then(|row| {
+                        model
+                            .source
+                            .borrow()
+                            .keymap(&mode)
+                            .and_then(|map| map.get(&row.key))
+                            .cloned()
+                    })
                 });
                 if let Some(command) = command {
                     binding_sheet(ui, &model, mode, None, command);
@@ -465,24 +508,23 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     page
 }
 
-fn matching_bindings<'a>(
-    s: &'a ConfigSource,
-    mode: &str,
-    query: &'a str,
-) -> impl Iterator<Item = (&'a String, &'a WmCommand)> {
+fn binding_rows(s: &ConfigSource, mode: &str, query: &str) -> Vec<BindingRow> {
     s.keymap(mode)
         .into_iter()
         .flat_map(|map| map.iter())
-        .filter(move |(key, command)| {
-            query.is_empty()
-                || action_name(command).to_lowercase().contains(query)
-                || glyphs(key, s).to_lowercase().contains(query)
-                || key.to_lowercase().contains(query)
+        .filter_map(|(key, cmd)| {
+            let action = action_name(cmd);
+            let shortcut = glyphs(key, s);
+            (query.is_empty()
+                || action.to_lowercase().contains(query)
+                || shortcut.to_lowercase().contains(query)
+                || key.to_lowercase().contains(query))
+            .then(|| BindingRow {
+                key: key.clone(),
+                shortcut,
+                action,
+            })
         })
-}
-fn binding_rows(s: &ConfigSource, mode: &str, query: &str) -> Vec<(String, String)> {
-    matching_bindings(s, mode, query)
-        .map(|(key, cmd)| (glyphs(key, s), action_name(cmd)))
         .collect()
 }
 
@@ -493,12 +535,7 @@ fn save_sheet(model: &Weak<Model>, edit: SourceEdit, message: &Rc<ValidationMess
         model.submit_edit(
             edit,
             Box::new(move |result| {
-                if let Some(message) = error.upgrade() {
-                    message.set_validation(&match &result {
-                        Ok(_) => Validation::None,
-                        Err(e) => Validation::Error(e.clone()),
-                    });
-                }
+                report(&error, &result);
                 if let Some(model) = weak.upgrade() {
                     if result.is_ok() {
                         model.close_sheet();
@@ -514,7 +551,7 @@ fn show_sheet(ui: Ui, model: &Rc<Model>, title: &str, content: impl NativeView) 
     content.min_width(460.0);
     let sheet = Sheet::new(&ui, title, content);
     sheet.fit_content();
-    if sheet.show(&model.window.borrow()) {
+    if sheet.show(&model.env.window.borrow()) {
         *model.sheet.borrow_mut() = Some(sheet);
     }
 }
@@ -559,7 +596,7 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
     let weak_model = Rc::downgrade(model);
     let edited = draft.clone();
     let action_changed = changed.clone();
-    let mut descriptors = actions();
+    let mut descriptors = actions().to_vec();
     let current =
         descriptors
             .iter()
@@ -593,10 +630,10 @@ fn binding_sheet(ui: Ui, model: &Rc<Model>, mode: String, old: Option<String>, c
         };
         let Some(key) = key.borrow().clone() else {
             message.set_validation(&Validation::Error("Record a shortcut first".into()));
-            if let Some(model) = weak_model.upgrade() {
-                if let Some(sheet) = model.sheet.borrow().as_ref() {
-                    sheet.fit_content();
-                }
+            if let Some(model) = weak_model.upgrade()
+                && let Some(sheet) = model.sheet.borrow().as_ref()
+            {
+                sheet.fit_content();
             }
             return;
         };
@@ -774,7 +811,7 @@ fn argument_editor(
                 "Up".into(),
                 "Down".into(),
             ];
-            for display in model.displays.borrow().iter() {
+            for display in model.env.displays.borrow().iter() {
                 values.push(DisplaySelector::Uuid(display.display_uuid.clone()));
                 names.push(
                     display
@@ -963,12 +1000,7 @@ fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> VStack {
     let changed = modifiers.clone();
     let recorder = ModifierRecorder::new(&ui).on_change(move |flags| {
         let mut tokens = Vec::new();
-        for (flag, name) in [
-            (Modifiers::Control, "Ctrl"),
-            (Modifiers::Option, "Alt"),
-            (Modifiers::Shift, "Shift"),
-            (Modifiers::Command, "Meta"),
-        ] {
+        for (flag, name) in MODIFIER_NAMES {
             if flags.contains(flag) {
                 tokens.push(name);
             }

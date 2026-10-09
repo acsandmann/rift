@@ -1,13 +1,24 @@
+use std::ops::Range;
+
 use super::*;
 use crate::common::config::{Color, *};
 use crate::layout_engine::Orientation;
 
-pub(super) fn layouts() -> Vec<(&'static str, LayoutMode)> {
-    LayoutMode::CONFIG_CHOICES
-        .iter()
-        .enumerate()
-        .map(|(index, choice)| (choice.0, LayoutMode::from_config_choice(index).unwrap()))
-        .collect()
+/// Popup choices for every layout mode.
+pub(super) fn layouts() -> &'static [(&'static str, LayoutMode)] {
+    static LAYOUTS: std::sync::LazyLock<Vec<(&'static str, LayoutMode)>> =
+        std::sync::LazyLock::new(|| {
+            LayoutMode::CONFIG_CHOICES
+                .iter()
+                .enumerate()
+                .map(|(index, choice)| (choice.0, LayoutMode::from_config_choice(index).unwrap()))
+                .collect()
+        });
+    &LAYOUTS
+}
+
+pub(super) fn layout_title(mode: LayoutMode) -> &'static str {
+    LayoutMode::CONFIG_CHOICES[mode.config_choice_index()].0
 }
 
 fn insertion() -> Vec<(&'static str, WindowInsertionPoint)> {
@@ -30,12 +41,11 @@ pub(super) fn build(ui: Ui, model: &Rc<Model>, id: usize) -> Page {
         1 => layout(ui, model),
         2 => super::editors::workspaces(ui, model),
         3 => super::editors::rules(ui, model),
-        4 => super::editors::keyboard(ui, model),
+        4 => super::commands::keyboard(ui, model),
         5 => input(ui, model),
         6 => interface(ui, model),
-        8 => {
-            FormBuilder::new(ui, model).finish(SettingsPage::new(&ui, "").section(about(ui, model)))
-        }
+        8 => FormBuilder::new(ui, model)
+            .finish(SettingsPage::new(&ui, "").section(about(ui, &model.env))),
         _ => advanced(ui, model),
     }
 }
@@ -50,35 +60,36 @@ fn general(ui: Ui, model: &Rc<Model>) -> Page {
     );
     f.finish(SettingsPage::new(&ui, "").section(section))
 }
-fn about(ui: Ui, model: &Rc<Model>) -> VStack {
+
+fn about(ui: Ui, env: &Rc<Env>) -> VStack {
     let status = Rc::new(Label::new(&ui, "").color(&cgs::Color::secondary_label()).wrapping());
     status.set_hidden(true);
     let weak_status = Rc::downgrade(&status);
-    let weak_model = Rc::downgrade(model);
+    let weak_env = Rc::downgrade(env);
     let check = Button::new(&ui, "Check for Updates…");
     let weak_button = WeakView::new(&check);
     // Keep only weak view references in the pending request so closing Settings
     // releases the page even while the bounded network request is finishing.
     let check = check.on_click(move || {
+        let Some(env) = weak_env.upgrade() else {
+            return;
+        };
         if let Some(status) = weak_status.upgrade() {
             status.set_hidden(false);
             status.set_text("Checking for updates…");
         }
         weak_button.set_enabled(false);
-        let Some(model) = weak_model.upgrade() else {
-            return;
-        };
         let status = weak_status.clone();
         let button = weak_button.clone();
-        let _ = model.requests.send(Request {
-            action: Action::CheckUpdates(Box::new(move |result| {
+        env.send(
+            Action::CheckUpdates(Box::new(move |result| {
                 if let Some(status) = status.upgrade() {
                     status.set_text(&result.unwrap_or_else(|e| e));
                 }
                 button.set_enabled(true);
             })),
-            finish: Box::new(|_| {}),
-        });
+            Box::new(|_| {}),
+        );
     });
     let identity = HStack::new(&ui).spacing(16.0);
     if let Some(icon) = Application::shared(&ui).icon() {
@@ -97,7 +108,7 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
                 &format!("Version {}", env!("CARGO_PKG_VERSION")),
             )),
     );
-    let destinations = vec![
+    const RESOURCES: [(&str, &str, &str); 3] = [
         (
             "Documentation",
             "book",
@@ -110,7 +121,6 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
         ),
         ("Sponsor Rift", "heart", "https://github.com/sponsors/acsandmann"),
     ];
-    let links = destinations.clone();
     let resources = SettingsList::new(
         &ui,
         |item: &(&str, &str, &str)| item.0.to_string(),
@@ -120,12 +130,12 @@ fn about(ui: Ui, model: &Rc<Model>) -> VStack {
     .navigation()
     .trailing_summary()
     .symbols(|item| item.1.to_string())
-    .on_open(move |index| {
-        if let Some(item) = links.get(index) {
-            let _ = std::process::Command::new("open").arg(item.2).spawn();
+    .on_open(|index| {
+        if let Some(item) = RESOURCES.get(index) {
+            Application::open(item.2);
         }
     });
-    resources.set_rows(destinations);
+    resources.set_rows(RESOURCES.to_vec());
     VStack::new(&ui)
         .spacing(16.0)
         .push(identity)
@@ -148,12 +158,15 @@ pub(super) const LAYOUT_PAGES: [(&str, &str); 9] = [
     ("Spacing", "arrow.up.left.and.arrow.down.right"),
     ("Displays", "display"),
 ];
+/// How the Layouts overview and toolbar menu group `LAYOUT_PAGES`.
+pub(super) const LAYOUT_SECTIONS: [(&str, Range<usize>); 3] =
+    [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)];
 
 fn layout(ui: Ui, model: &Rc<Model>) -> Page {
     let f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "Layouts");
-    for (title, range) in [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)] {
-        let weak = Rc::downgrade(model);
+    for (title, range) in LAYOUT_SECTIONS {
+        let env = Rc::downgrade(&model.env);
         let start = range.start;
         let list = SettingsList::new(
             &ui,
@@ -165,10 +178,8 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
         .trailing_summary()
         .symbols(|index| LAYOUT_PAGES[*index].1.into())
         .on_open(move |index| {
-            if let Some(model) = weak.upgrade() {
-                if let Some(navigate) = model.navigate.borrow().as_ref() {
-                    navigate(9 + start + index);
-                }
+            if let Some(env) = env.upgrade() {
+                env.navigate(scope_page(start + index));
             }
         });
         list.set_rows(range.collect());
@@ -180,12 +191,11 @@ fn layout(ui: Ui, model: &Rc<Model>) -> Page {
 pub(super) fn layout_scope(ui: Ui, model: &Rc<Model>, index: usize) -> Page {
     match index {
         0 => layout_defaults(ui, model),
-        1..=6 => layout_options(ui, model, layouts()[index - 1].1),
+        1..=6 => layout_options(ui, model, LayoutMode::from_config_choice(index - 1).unwrap()),
         7 => layout_spacing(ui, model),
         _ => {
             let mut f = FormBuilder::new(ui, model);
-            let page = SettingsPage::new(&ui, "");
-            let page = super::editors::display_overrides(&mut f, page, model);
+            let page = super::editors::display_overrides(&mut f, SettingsPage::new(&ui, ""), model);
             f.finish(page)
         }
     }
@@ -193,17 +203,9 @@ pub(super) fn layout_scope(ui: Ui, model: &Rc<Model>, index: usize) -> Page {
 
 fn layout_defaults(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "");
     let section = Section::form(&ui, "Default behavior")
         .description("Used by workspaces that don’t have their own layout.")
-        .row(
-            f.schema_field(
-                LayoutSettings::field("mode").unwrap(),
-                |s| &s.settings.layout,
-                |s| &mut s.settings.layout,
-            )
-            .unwrap(),
-        )
+        .row(f.field("mode", |s| &s.settings.layout, |s| &mut s.settings.layout))
         .row(f.inherited_popup(
             "New window position",
             insertion(),
@@ -211,8 +213,7 @@ fn layout_defaults(ui: Ui, model: &Rc<Model>) -> Page {
             |_| WindowInsertionPoint::default(),
             |s, v| s.settings.layout.base.window_insertion_point = v,
         ));
-    page = page.section(section);
-    f.finish(page)
+    f.finish(SettingsPage::new(&ui, "").section(section))
 }
 
 pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) -> impl NativeView {
@@ -225,33 +226,24 @@ pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) 
         let size = illustration.canvas_size();
         let gaps = s.settings.layout.gaps.effective_for_display(display.as_deref());
         // A representative desktop, scaled to keep even large gaps legible.
-        let edge = |v: f64| v.clamp(0.0, 200.0) * 0.25;
-        let left = edge(gaps.outer.left);
-        let top = edge(gaps.outer.top);
-        let width = (size.width - left - edge(gaps.outer.right)).max(24.0);
-        let height = (size.height - top - edge(gaps.outer.bottom)).max(24.0);
-        let horizontal = gaps.inner.horizontal.clamp(0.0, 200.0) * 0.25;
-        let vertical = gaps.inner.vertical.clamp(0.0, 200.0) * 0.25;
+        let scaled = |v: f64| v.clamp(0.0, 200.0) * 0.25;
+        let left = scaled(gaps.outer.left);
+        let top = scaled(gaps.outer.top);
+        let width = (size.width - left - scaled(gaps.outer.right)).max(24.0);
+        let height = (size.height - top - scaled(gaps.outer.bottom)).max(24.0);
+        let horizontal = scaled(gaps.inner.horizontal);
+        let vertical = scaled(gaps.inner.vertical);
         let half = ((width - horizontal) / 2.0).max(8.0);
         let right = left + half + horizontal;
         let half_height = ((height - vertical) / 2.0).max(8.0);
+        let window = |id, x, y, height| {
+            PreviewWindow::new(id, CGRect::new(CGPoint::new(x, y), CGSize::new(half, height)))
+        };
         illustration.set_windows(
             &[
-                PreviewWindow::new(
-                    0,
-                    CGRect::new(CGPoint::new(left, top), CGSize::new(half, height)),
-                ),
-                PreviewWindow::new(
-                    1,
-                    CGRect::new(CGPoint::new(right, top), CGSize::new(half, half_height)),
-                ),
-                PreviewWindow::new(
-                    2,
-                    CGRect::new(
-                        CGPoint::new(right, top + half_height + vertical),
-                        CGSize::new(half, half_height),
-                    ),
-                ),
+                window(0, left, top, height),
+                window(1, right, top, half_height),
+                window(2, right, top + half_height + vertical, half_height),
             ],
             PreviewAnimation::default(),
         );
@@ -262,58 +254,72 @@ pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) 
     preview
 }
 
-fn set_spacing_gap(
+/// Screen edges, in the order spacing editors list them.
+pub(super) const EDGES: [&str; 4] = ["Top", "Right", "Bottom", "Left"];
+/// Directions between windows.
+pub(super) const AXES: [&str; 2] = ["Horizontal", "Vertical"];
+
+/// An outer edge (`EDGES`) or inner axis (`AXES`) of the effective spacing.
+/// `None` reads the first and writes every one.
+pub(super) fn spacing_gap(
+    source: &ConfigSource,
+    display: Option<&str>,
+    outer: bool,
+    axis: Option<usize>,
+) -> f64 {
+    let gaps = source.settings.layout.gaps.effective_for_display(display);
+    let axis = axis.unwrap_or(0);
+    if outer {
+        [
+            gaps.outer.top,
+            gaps.outer.right,
+            gaps.outer.bottom,
+            gaps.outer.left,
+        ][axis]
+    } else {
+        [gaps.inner.horizontal, gaps.inner.vertical][axis]
+    }
+}
+
+/// Writes global spacing, or a display override seeded from the effective values.
+pub(super) fn set_spacing_gap(
     source: &mut ConfigSource,
     display: Option<&str>,
     outer: bool,
     axis: Option<usize>,
     value: f64,
 ) {
-    let mut gaps = source.settings.layout.gaps.effective_for_display(display);
-    if outer {
-        if let Some(axis) = axis {
-            match axis {
-                0 => gaps.outer.top = value,
-                1 => gaps.outer.right = value,
-                2 => gaps.outer.bottom = value,
-                _ => gaps.outer.left = value,
-            }
-        } else {
-            gaps.outer = OuterGaps {
-                top: value,
-                right: value,
-                bottom: value,
-                left: value,
-            };
-        }
-    } else if let Some(axis) = axis {
-        if axis == 0 {
-            gaps.inner.horizontal = value;
-        } else {
-            gaps.inner.vertical = value;
-        }
+    let gaps = &mut source.settings.layout.gaps;
+    let mut effective = gaps.effective_for_display(display);
+    let slots = if outer {
+        let o = &mut effective.outer;
+        vec![&mut o.top, &mut o.right, &mut o.bottom, &mut o.left]
     } else {
-        gaps.inner.horizontal = value;
-        gaps.inner.vertical = value;
+        let i = &mut effective.inner;
+        vec![&mut i.horizontal, &mut i.vertical]
+    };
+    for (index, slot) in slots.into_iter().enumerate() {
+        if axis.is_none_or(|axis| axis == index) {
+            *slot = value;
+        }
     }
-    if let Some(display) = display {
-        let entry = source.settings.layout.gaps.per_display.entry(display.to_owned()).or_default();
-        if outer {
-            entry.outer = Some(gaps.outer);
-        } else {
-            entry.inner = Some(gaps.inner);
+    match (display, outer) {
+        (Some(display), true) => {
+            gaps.per_display.entry(display.to_owned()).or_default().outer = Some(effective.outer)
         }
-    } else if outer {
-        source.settings.layout.gaps.outer = gaps.outer;
-    } else {
-        source.settings.layout.gaps.inner = gaps.inner;
+        (Some(display), false) => {
+            gaps.per_display.entry(display.to_owned()).or_default().inner = Some(effective.inner)
+        }
+        (None, true) => gaps.outer = effective.outer,
+        (None, false) => gaps.inner = effective.inner,
     }
 }
 
 fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
-    let screen = model.window.borrow().display_id().map(crate::sys::screen::ScreenId::new);
+    let screen = model.env.window.borrow().display_id().map(crate::sys::screen::ScreenId::new);
     let source = model.source.borrow();
     let display = model
+        .env
         .displays
         .borrow()
         .iter()
@@ -331,7 +337,7 @@ fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
                     .unwrap_or_else(|| format!("Display {}", display.id.as_u32())),
             )
         });
-    let uuid = display.as_ref().map(|(uuid, _)| uuid.clone());
+    let uuid: Option<String> = display.as_ref().map(|(uuid, _)| uuid.clone());
     let gaps = source.settings.layout.gaps.effective_for_display(uuid.as_deref());
     let custom = gaps.outer.top != gaps.outer.bottom
         || gaps.outer.top != gaps.outer.left
@@ -339,26 +345,13 @@ fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
         || gaps.inner.horizontal != gaps.inner.vertical;
     drop(source);
     let mut f = FormBuilder::new(ui, model);
-    let preview = gap_preview(ui, &mut f, uuid.clone());
+    let preview = gap_preview(ui, &mut f, uuid.as_deref().map(str::to_owned));
     let form = |grid: Grid| grid.column_widths(&[128.0, 120.0, 82.0]).first_baseline();
     let mut row = |name: &str, outer: bool, axis: Option<usize>| {
-        let read = uuid.clone();
-        let write = uuid.clone();
+        let (read, write) = (uuid.clone(), uuid.clone());
         f.gap_cells(
             name,
-            move |source| {
-                let gaps = source.settings.layout.gaps.effective_for_display(read.as_deref());
-                if outer {
-                    [
-                        gaps.outer.top,
-                        gaps.outer.right,
-                        gaps.outer.bottom,
-                        gaps.outer.left,
-                    ][axis.unwrap_or(0)]
-                } else {
-                    [gaps.inner.horizontal, gaps.inner.vertical][axis.unwrap_or(0)]
-                }
-            },
+            move |source| spacing_gap(source, read.as_deref(), outer, axis),
             move |source, value| set_spacing_gap(source, write.as_deref(), outer, axis, value),
         )
     };
@@ -370,22 +363,20 @@ fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
         )),
     ));
     let mut edges = Grid::new(&ui).spacing(8.0, 12.0);
-    for (axis, name) in ["Top", "Right", "Bottom", "Left"].into_iter().enumerate() {
+    for (axis, name) in EDGES.into_iter().enumerate() {
         edges = edges.row(row(name, true, Some(axis)));
     }
-    let between = form(
-        Grid::new(&ui)
-            .spacing(8.0, 12.0)
-            .row(row("Horizontal", false, Some(0)))
-            .row(row("Vertical", false, Some(1))),
-    );
+    let mut between = Grid::new(&ui).spacing(8.0, 12.0);
+    for (axis, name) in AXES.into_iter().enumerate() {
+        between = between.row(row(name, false, Some(axis)));
+    }
     let custom_form = Rc::new(
         VStack::new(&ui)
             .spacing(10.0)
             .push(SubsectionTitle::new(&ui, "Screen edges"))
             .push(form(edges))
             .push(SubsectionTitle::new(&ui, "Between windows"))
-            .push(between),
+            .push(form(between)),
     );
     simple.set_hidden(custom);
     custom_form.set_hidden(!custom);
@@ -420,59 +411,54 @@ fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
     f.finish(page.section(editor))
 }
 
-fn percentage_text(ratio: f64) -> String {
+/// A ratio as a percentage, without float noise such as `56.99999999999999`.
+pub(super) fn percentage_text(ratio: f64) -> String {
     format!("{:.2}", ratio * 100.0)
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_string()
 }
 
-fn layout_description(mode: LayoutMode) -> &'static str {
-    LayoutMode::CONFIG_CHOICES[mode.config_choice_index()].1
-}
-
 fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
     let mut f = FormBuilder::new(ui, model);
+    let subsection = |title: &str| Section::form(&ui, "").content(SubsectionTitle::new(&ui, title));
     let options = || {
-        Section::form(&ui, "").content(SubsectionTitle::new(&ui, match mode {
+        subsection(match mode {
             LayoutMode::Stack => "Arrangement",
             LayoutMode::MasterStack => "Master area",
             LayoutMode::Scrolling => "Column sizing",
             _ => "Window arrangement",
-        }))
+        })
     };
+    macro_rules! insertion_point {
+        ($layout:ident) => {
+            f.inherited_popup(
+                "New window position",
+                insertion(),
+                |s| s.settings.layout.$layout.base.window_insertion_point,
+                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
+                |s, v| s.settings.layout.$layout.base.window_insertion_point = v,
+            )
+        };
+    }
     let mut page = VStack::new(&ui)
         .spacing(10.0)
-        .push(SectionTitle::new(
+        .push(SectionTitle::new(&ui, layout_title(mode)))
+        .push(Caption::new(
             &ui,
-            layouts().into_iter().find(|(_, value)| *value == mode).unwrap().0,
-        ))
-        .push(Caption::new(&ui, layout_description(mode)));
+            LayoutMode::CONFIG_CHOICES[mode.config_choice_index()].1,
+        ));
     let section = match mode {
-        LayoutMode::Traditional => options()
-            .row(
-                f.schema_field(
-                    TraditionalLayoutSettings::field("equalize_nodes").unwrap(),
-                    |s| &s.settings.layout.traditional,
-                    |s| &mut s.settings.layout.traditional,
-                )
-                .unwrap(),
+        LayoutMode::Traditional => f
+            .fields(
+                options(),
+                &["equalize_nodes"],
+                |s| &s.settings.layout.traditional,
+                |s| &mut s.settings.layout.traditional,
             )
-            .row(f.inherited_popup(
-                "New window position",
-                insertion(),
-                |s| s.settings.layout.traditional.base.window_insertion_point,
-                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
-                |s, v| s.settings.layout.traditional.base.window_insertion_point = v,
-            )),
+            .row(insertion_point!(traditional)),
         LayoutMode::Bsp => options()
-            .row(f.inherited_popup(
-                "New window position",
-                insertion(),
-                |s| s.settings.layout.bsp.base.window_insertion_point,
-                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
-                |s, v| s.settings.layout.bsp.base.window_insertion_point = v,
-            ))
+            .row(insertion_point!(bsp))
             .row(f.text(
                 "Single window aspect ratio",
                 |s| {
@@ -492,107 +478,72 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                         };
                     Ok(())
                 },
+            ))
+            .footer(WrappingLabel::new(
+                &ui,
+                "Automatic fills the available space when only one window is open. Enter a width-to-height ratio, such as 1.78 for 16:9, to keep that window at a fixed shape.",
             )),
-        LayoutMode::Stack => options()
-            .row(
-                f.schema_field(
-                    StackSettings::field("stack_offset").unwrap(),
-                    |s| &s.settings.layout.stack,
-                    |s| &mut s.settings.layout.stack,
-                )
-                .unwrap(),
+        LayoutMode::Stack => f
+            .fields(
+                options(),
+                &["stack_offset", "default_orientation"],
+                |s| &s.settings.layout.stack,
+                |s| &mut s.settings.layout.stack,
             )
-            .row(
-                f.schema_field(
-                    StackSettings::field("default_orientation").unwrap(),
-                    |s| &s.settings.layout.stack,
-                    |s| &mut s.settings.layout.stack,
+            .row(insertion_point!(stack)),
+        LayoutMode::MasterStack => {
+            let master = options().row(
+                f.percentage(
+                    "Master width",
+                    |_| (5.0, 95.0),
+                    |s| s.settings.layout.master_stack.master_ratio,
+                    |s, v| s.settings.layout.master_stack.master_ratio = v,
                 )
-                .unwrap(),
+                .suffix("%"),
+            );
+            page = page.push(f.fields(
+                master,
+                &["master_count", "master_side"],
+                |s| &s.settings.layout.master_stack,
+                |s| &mut s.settings.layout.master_stack,
+            ));
+            let natural = |s: &ConfigSource| match s.settings.layout.master_stack.master_side {
+                MasterStackSide::Left | MasterStackSide::Right => Orientation::Vertical,
+                MasterStackSide::Top | MasterStackSide::Bottom => Orientation::Horizontal,
+            };
+            f.fields(
+                subsection("Arrangement"),
+                &["new_window_placement"],
+                |s| &s.settings.layout.master_stack,
+                |s| &mut s.settings.layout.master_stack,
             )
             .row(f.inherited_popup(
-                "New window position",
-                insertion(),
-                |s| s.settings.layout.stack.base.window_insertion_point,
-                |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
-                |s, v| s.settings.layout.stack.base.window_insertion_point = v,
-            )),
-        LayoutMode::MasterStack => {
-            let section = options()
-                .row(
-                    f.percentage(
-                        "Master width",
-                        |_| (5.0, 95.0),
-                        |s| s.settings.layout.master_stack.master_ratio,
-                        |s, v| s.settings.layout.master_stack.master_ratio = v,
-                    )
-                    .suffix("%"),
-                )
-                .row(
-                    f.schema_field(
-                        MasterStackSettings::field("master_count").unwrap(),
-                        |s| &s.settings.layout.master_stack,
-                        |s| &mut s.settings.layout.master_stack,
-                    )
-                    .unwrap(),
-                )
-                .row(
-                    f.schema_field(
-                        MasterStackSettings::field("master_side").unwrap(),
-                        |s| &s.settings.layout.master_stack,
-                        |s| &mut s.settings.layout.master_stack,
-                    )
-                    .unwrap(),
-                );
-            page = page.push(section);
-            Section::form(&ui, "")
-                .content(SubsectionTitle::new(&ui, "Arrangement"))
-                .row(
-                    f.schema_field(
-                        MasterStackSettings::field("new_window_placement").unwrap(),
-                        |s| &s.settings.layout.master_stack,
-                        |s| &mut s.settings.layout.master_stack,
-                    )
-                    .unwrap(),
-                )
-                .row(f.inherited_popup(
-                    "Master arrangement",
-                    arrangement(),
-                    |s| s.settings.layout.master_stack.master_arrangement,
-                    |s| match s.settings.layout.master_stack.master_side {
-                        MasterStackSide::Left | MasterStackSide::Right => Orientation::Vertical,
-                        MasterStackSide::Top | MasterStackSide::Bottom => Orientation::Horizontal,
-                    },
-                    |s, v| s.settings.layout.master_stack.master_arrangement = v,
-                ))
-                .row(f.inherited_popup(
-                    "Stack arrangement",
-                    arrangement(),
-                    |s| s.settings.layout.master_stack.stack_arrangement,
-                    |s| match s.settings.layout.master_stack.master_side {
-                        MasterStackSide::Left | MasterStackSide::Right => Orientation::Vertical,
-                        MasterStackSide::Top | MasterStackSide::Bottom => Orientation::Horizontal,
-                    },
-                    |s, v| s.settings.layout.master_stack.stack_arrangement = v,
-                ))
-                .row(f.inherited_popup(
-                    "New window position",
-                    insertion(),
-                    |s| s.settings.layout.master_stack.base.window_insertion_point,
-                    |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
-                    |s, v| s.settings.layout.master_stack.base.window_insertion_point = v,
-                ))
+                "Master arrangement",
+                arrangement(),
+                |s| s.settings.layout.master_stack.master_arrangement,
+                natural,
+                |s, v| s.settings.layout.master_stack.master_arrangement = v,
+            ))
+            .row(f.inherited_popup(
+                "Stack arrangement",
+                arrangement(),
+                |s| s.settings.layout.master_stack.stack_arrangement,
+                natural,
+                |s, v| s.settings.layout.master_stack.stack_arrangement = v,
+            ))
+            .row(insertion_point!(master_stack))
         }
         LayoutMode::Scrolling => {
-            let section = options()
+            let sizing = options()
                 .description("Column widths are percentages of the screen width.")
                 .row(
                     f.percentage(
                         "Default column width",
                         |s| {
+                            let scrolling = &s.settings.layout.scrolling;
                             (
-                                s.settings.layout.scrolling.min_column_width_ratio * 100.0,
-                                s.settings.layout.scrolling.max_column_width_ratio * 100.0,
+                                scrolling.min_column_width_ratio * 100.0,
+                                scrolling.max_column_width_ratio * 100.0,
                             )
                         },
                         |s| s.settings.layout.scrolling.column_width_ratio,
@@ -633,51 +584,23 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                         s.settings.layout.scrolling.preset_column_widths = widths;
                         Ok(())
                     },
-                ))
-                .row(
-                    f.schema_field(
-                        ScrollingLayoutSettings::field("preserve_window_sizes").unwrap(),
-                        |s| &s.settings.layout.scrolling,
-                        |s| &mut s.settings.layout.scrolling,
-                    )
-                    .unwrap(),
-                )
-                .row(
-                    f.schema_field(
-                        ScrollingLayoutSettings::field("min_column_width_ratio").unwrap(),
-                        |s| &s.settings.layout.scrolling,
-                        |s| &mut s.settings.layout.scrolling,
-                    )
-                    .unwrap()
-                    .suffix("%"),
-                )
-                .row(
-                    f.schema_field(
-                        ScrollingLayoutSettings::field("max_column_width_ratio").unwrap(),
-                        |s| &s.settings.layout.scrolling,
-                        |s| &mut s.settings.layout.scrolling,
-                    )
-                    .unwrap()
-                    .suffix("%"),
-                );
-            page = page.push(section);
-            let section = Section::form(&ui, "")
-                .content(SubsectionTitle::new(&ui, "Navigation"))
-                .row(
-                    f.schema_field(
-                        ScrollingLayoutSettings::field("alignment").unwrap(),
-                        |s| &s.settings.layout.scrolling,
-                        |s| &mut s.settings.layout.scrolling,
-                    )
-                    .unwrap(),
-                )
-                .row(
-                    f.schema_field(
-                        ScrollingLayoutSettings::field("focus_navigation_style").unwrap(),
-                        |s| &s.settings.layout.scrolling,
-                        |s| &mut s.settings.layout.scrolling,
-                    )
-                    .unwrap(),
+                ));
+            page = page.push(f.fields(
+                sizing,
+                &[
+                    "preserve_window_sizes",
+                    "min_column_width_ratio",
+                    "max_column_width_ratio",
+                ],
+                |s| &s.settings.layout.scrolling,
+                |s| &mut s.settings.layout.scrolling,
+            ));
+            let navigation = f
+                .fields(
+                    subsection("Navigation"),
+                    &["alignment", "focus_navigation_style"],
+                    |s| &s.settings.layout.scrolling,
+                    |s| &mut s.settings.layout.scrolling,
                 )
                 .row(f.inherited_popup(
                     "Animate navigation",
@@ -686,16 +609,8 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                     |_| true,
                     |s, v| s.settings.layout.scrolling.animate = v,
                 ));
-            page = page.push(section);
-            Section::form(&ui, "")
-                .content(SubsectionTitle::new(&ui, "Window placement"))
-                .row(f.inherited_popup(
-                    "New window position",
-                    insertion(),
-                    |s| s.settings.layout.scrolling.base.window_insertion_point,
-                    |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
-                    |s, v| s.settings.layout.scrolling.base.window_insertion_point = v,
-                ))
+            page = page.push(navigation);
+            subsection("Window placement").row(insertion_point!(scrolling))
         }
         LayoutMode::Floating => {
             return f.finish(SettingsPage::new(&ui, "").section(page.push(Caption::new(
@@ -703,12 +618,6 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                 "Floating does not have any additional layout options.",
             ))));
         }
-    };
-    let section = if mode == LayoutMode::Bsp {
-        section.footer(WrappingLabel::new(&ui,
-            "Automatic fills the available space when only one window is open. Enter a width-to-height ratio, such as 1.78 for 16:9, to keep that window at a fixed shape."))
-    } else {
-        section
     };
     f.finish(SettingsPage::new(&ui, "").section(page.push(section)))
 }
@@ -786,7 +695,22 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
     ));
     f.finish(page)
 }
+
 fn interface(ui: Ui, model: &Rc<Model>) -> Page {
+    type ColorField = (
+        &'static str,
+        fn(&StackLineSettings) -> Color,
+        fn(&mut StackLineSettings) -> &mut Color,
+    );
+    const COLORS: [ColorField; 3] = [
+        ("Selected color", |s| s.selected_color, |s| &mut s.selected_color),
+        (
+            "Unselected color",
+            |s| s.unselected_color,
+            |s| &mut s.unselected_color,
+        ),
+        ("Border color", |s| s.border_color, |s| &mut s.border_color),
+    ];
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
     let section = f.schema_section(
@@ -808,12 +732,9 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
             error.clone(),
         )
     }));
-    let weak_path = Rc::downgrade(&path);
-    f.sync.push(Box::new(move |s| {
-        if let Some(path) = weak_path.upgrade() {
-            path.set_value(&s.settings.ui.menu_bar.layout_folder);
-        }
-    }));
+    f.sync(&path, |path, s| {
+        path.set_value(&s.settings.ui.menu_bar.layout_folder)
+    });
     let field = MenuBarSettings::field("layout_folder").unwrap();
     let row = f.row(field.title, path, message);
     let row = f.schema_metadata(row, field, |s| &s.settings.ui.menu_bar);
@@ -825,103 +746,67 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
         |s| &mut s.settings.ui.mission_control,
     );
     page = page.section(section);
-    let section = f.schema_rows(
+    let mut section = f.schema_rows(
         Section::new(&ui, "Stack Line").description("Experimental window indicators."),
         "",
         |s| &s.settings.ui.stack_line,
         |s| &mut s.settings.ui.stack_line,
     );
-    let section = section.row({
+    for (title, get, set) in COLORS {
         let row = f.color(
-            "Selected color",
-            |s| s.settings.ui.stack_line.selected_color,
-            |s, v| s.settings.ui.stack_line.selected_color = v,
+            title,
+            move |s| get(&s.settings.ui.stack_line),
+            move |s, v| *set(&mut s.settings.ui.stack_line) = v,
         );
         f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-        row
-    });
-    let section = section.row({
-        let row = f.color(
-            "Unselected color",
-            |s| s.settings.ui.stack_line.unselected_color,
-            |s, v| s.settings.ui.stack_line.unselected_color = v,
-        );
-        f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-        row
-    });
-    let section = section.row({
-        let row = f.color(
-            "Border color",
-            |s| s.settings.ui.stack_line.border_color,
-            |s, v| s.settings.ui.stack_line.border_color = v,
-        );
-        f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-        row
-    });
+        section = section.row(row);
+    }
     page = page.section(section);
     f.finish(page)
 }
+
 fn advanced(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "");
-    let path = model.config_path.clone();
-    let open = path.clone();
-    let reveal = path.clone();
-    let actions = HStack::new(&ui)
-        .push(Button::new(&ui, "Open…").on_click(move || {
-            let _ = std::process::Command::new("open").arg(&open).spawn();
-        }))
-        .push(Button::new(&ui, "Reveal in Finder").on_click(move || {
-            let _ = std::process::Command::new("open").arg("-R").arg(&reveal).spawn();
-        }));
+    let path = model.env.config_path.to_string_lossy().into_owned();
+    let (open, reveal) = (path.clone(), path.clone());
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
-    let weak_model = Rc::downgrade(model);
-    let reload = Button::new(&ui, "Reload").on_click(move || {
-        if let Some(model) = weak_model.upgrade() {
-            let error = error.clone();
-            let _ = model.requests.send(Request {
-                action: Action::Reload,
-                finish: Box::new(move |result| {
-                    if let Some(message) = error.upgrade() {
-                        message.set_validation(&match &result {
-                            Ok(_) => Validation::None,
-                            Err(e) => Validation::Error(e.clone()),
-                        });
-                    }
-                }),
-            });
-        }
-    });
-    let location = Label::new(&ui, &path.to_string_lossy()).wrapping().max_lines(1).selectable();
-    location.tooltip(&path.to_string_lossy());
-    page = page.section(
-        Section::new(&ui, "Configuration file")
-            .content(location)
-            .row(
-                f.schema_field(
-                    crate::common::config::Settings::field("hot_reload").unwrap(),
-                    |s| &s.settings,
-                    |s| &mut s.settings,
-                )
-                .unwrap(),
-            )
-            .content(actions.push(reload))
-            .footer(message),
-    );
-    page = page.section(super::editors::strings(
+    let env = Rc::downgrade(&model.env);
+    let actions = HStack::new(&ui)
+        .push(Button::new(&ui, "Open…").on_click(move || {
+            Application::open(&open);
+        }))
+        .push(Button::new(&ui, "Reveal in Finder").on_click(move || Application::reveal(&reveal)))
+        .push(Button::new(&ui, "Reload").on_click(move || {
+            if let Some(env) = env.upgrade() {
+                let error = error.clone();
+                env.send(Action::Reload, Box::new(move |result| report(&error, &result)));
+            }
+        }));
+    let location = Label::new(&ui, &path).wrapping().max_lines(1).selectable();
+    location.tooltip(&path);
+    let file = f
+        .fields(
+            Section::new(&ui, "Configuration file").content(location),
+            &["hot_reload"],
+            |s| &s.settings,
+            |s| &mut s.settings,
+        )
+        .content(actions)
+        .footer(message);
+    let startup = super::editors::strings(
         &mut f,
         "Startup commands",
         |s| s.settings.run_on_start.clone(),
-        |s, v| s.settings.run_on_start = v,
-    ));
-    page = page.section(super::editors::strings(
+        |s, values| s.settings.run_on_start = values,
+    );
+    let blacklist = super::editors::strings(
         &mut f,
         "Autofocus blacklist",
         |s| s.settings.auto_focus_blacklist.clone(),
-        |s, v| s.settings.auto_focus_blacklist = v,
-    ));
-    f.finish(page)
+        |s, values| s.settings.auto_focus_blacklist = values,
+    );
+    f.finish(SettingsPage::new(&ui, "").section(file).section(startup).section(blacklist))
 }
 
 pub(super) fn optional_number(value: &str) -> Result<Option<f64>, String> {
@@ -958,108 +843,64 @@ impl FormBuilder {
                 error.clone(),
             );
         }));
-        let weak = Rc::downgrade(&input);
-        self.sync.push(Box::new(move |s| {
-            if let Some(input) = weak.upgrade() {
-                let c = get(s);
-                input.set_value([c.r, c.g, c.b, c.a]);
-            }
-        }));
+        self.sync(&input, move |input, s| {
+            let c = get(s);
+            input.set_value([c.r, c.g, c.b, c.a]);
+        });
         self.row(title, input, message)
     }
 }
 
 fn focus_suspend(f: &mut FormBuilder) -> Section {
-    use crate::sys::hotkey::{Hotkey, HotkeySpec, Modifiers as RiftModifiers};
-    fn modifiers(flags: Modifiers) -> RiftModifiers {
-        let mut value = RiftModifiers::empty();
-        for (flag, bits) in [
-            (Modifiers::Control, RiftModifiers::CONTROL),
-            (Modifiers::Option, RiftModifiers::ALT),
-            (Modifiers::Shift, RiftModifiers::SHIFT),
-            (Modifiers::Command, RiftModifiers::META),
-        ] {
-            if flags.contains(flag) {
-                value.insert(bits);
-            }
-        }
-        value
-    }
+    use super::commands::{from_rift_modifiers, recorded_key, to_rift_modifiers};
+    use crate::sys::hotkey::{Hotkey, HotkeySpec};
     let ui = f.ui;
     let message = Rc::new(ValidationMessage::new(&ui));
-    let error = Rc::downgrade(&message);
-    let model = f.model.clone();
+    let submit = {
+        let model = f.model.clone();
+        let error = Rc::downgrade(&message);
+        move |value: Option<HotkeySpec>| {
+            Model::submit(
+                &model,
+                Box::new(move |s| {
+                    s.settings.focus_follows_mouse_disable_hotkey = value;
+                    Ok(())
+                }),
+                error.clone(),
+            )
+        }
+    };
+    let record = submit.clone();
     let recorder = Rc::new(KeyRecorder::new(&ui).on_change(move |value| {
-        let value = value
-            .as_ref()
-            .and_then(super::commands::recorded_key)
-            .and_then(|v| v.parse::<Hotkey>().ok())
-            .map(HotkeySpec::Hotkey);
-        Model::submit(
-            &model,
-            Box::new(move |s| {
-                s.settings.focus_follows_mouse_disable_hotkey = value;
-                Ok(())
-            }),
-            error.clone(),
+        record(
+            value
+                .as_ref()
+                .and_then(recorded_key)
+                .and_then(|v| v.parse::<Hotkey>().ok())
+                .map(HotkeySpec::Hotkey),
         );
     }));
-    let error = Rc::downgrade(&message);
-    let model = f.model.clone();
+    let record = submit.clone();
     let modifier_recorder = Rc::new(ModifierRecorder::new(&ui).on_change(move |flags| {
-        let value =
-            (!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly { modifiers: modifiers(flags) });
-        Model::submit(
-            &model,
-            Box::new(move |s| {
-                s.settings.focus_follows_mouse_disable_hotkey = value;
-                Ok(())
-            }),
-            error.clone(),
-        );
+        record((!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly {
+            modifiers: to_rift_modifiers(flags),
+        }));
     }));
-    let weak = Rc::downgrade(&recorder);
-    let weak_modifiers = Rc::downgrade(&modifier_recorder);
-    f.sync.push(Box::new(move |s| {
-        if let Some(recorder) = weak.upgrade() {
-            recorder.set_value(None);
-            if let Some(HotkeySpec::Hotkey(key)) = &s.settings.focus_follows_mouse_disable_hotkey {
-                recorder.set_title(&key.to_string());
-            }
-            recorder.set_enabled(s.settings.focus_follows_mouse);
+    f.sync(&recorder, |recorder, s| {
+        recorder.set_value(None);
+        if let Some(HotkeySpec::Hotkey(key)) = &s.settings.focus_follows_mouse_disable_hotkey {
+            recorder.set_title(&key.to_string());
         }
-        if let Some(recorder) = weak_modifiers.upgrade() {
-            let mut flags = Modifiers::empty();
-            if let Some(HotkeySpec::ModifiersOnly { modifiers }) =
-                &s.settings.focus_follows_mouse_disable_hotkey
-            {
-                for (bits, flag) in [
-                    (RiftModifiers::CONTROL, Modifiers::Control),
-                    (RiftModifiers::ALT, Modifiers::Option),
-                    (RiftModifiers::SHIFT, Modifiers::Shift),
-                    (RiftModifiers::META, Modifiers::Command),
-                ] {
-                    if modifiers.intersects(bits) {
-                        flags |= flag;
-                    }
-                }
-            }
-            recorder.set_value(flags);
-            recorder.set_enabled(s.settings.focus_follows_mouse);
-        }
-    }));
-    let model = f.model.clone();
-    let error = Rc::downgrade(&message);
-    let clear = Button::new(&ui, "Clear").on_click(move || {
-        Model::submit(
-            &model,
-            Box::new(|s| {
-                s.settings.focus_follows_mouse_disable_hotkey = None;
-                Ok(())
-            }),
-            error.clone(),
-        )
+        recorder.set_enabled(s.settings.focus_follows_mouse);
     });
+    f.sync(&modifier_recorder, |recorder, s| {
+        recorder.set_value(match &s.settings.focus_follows_mouse_disable_hotkey {
+            Some(HotkeySpec::ModifiersOnly { modifiers }) => from_rift_modifiers(*modifiers),
+            _ => Modifiers::empty(),
+        });
+        recorder.set_enabled(s.settings.focus_follows_mouse);
+    });
+    let clear = Button::new(&ui, "Clear").on_click(move || submit(None));
     Section::new(&ui, "Suspend pointer focus while held")
         .description("Record either a shortcut or modifiers. Recording one replaces the other.")
         .row(SettingsRow::new(&ui, "Shortcut", recorder))

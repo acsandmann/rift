@@ -23,10 +23,10 @@ fn count<T: objc2::DowncastTarget + 'static>(view: &NSView) -> usize {
 }
 
 fn editable(view: &NSView) -> Option<Retained<objc2_app_kit::NSTextField>> {
-    if let Some(field) = view.downcast_ref::<objc2_app_kit::NSTextField>() {
-        if field.isEditable() {
-            return Some(field.retain());
-        }
+    if let Some(field) = view.downcast_ref::<objc2_app_kit::NSTextField>()
+        && field.isEditable()
+    {
+        return Some(field.retain());
     }
     view.subviews().iter().find_map(|child| editable(&child))
 }
@@ -85,9 +85,9 @@ pub fn run(ui: Ui) {
         );
         drop(sidebar);
 
-        Settings::select(ui, &settings.model, &settings._host, &settings.pages, 4);
-        settings.history.borrow_mut().select(4);
-        let keyboard = settings.pages.borrow()[4].as_ref().unwrap().view.clone();
+        settings.router.navigate(4);
+        settings.router.history.borrow_mut().select(4);
+        let keyboard = settings.router.pages.borrow()[4].as_ref().unwrap().view.clone();
         settings.refresh_displays(vec![crate::sys::screen::ScreenInfo {
             id: crate::sys::screen::ScreenId::new(1),
             display_uuid: "test-display".into(),
@@ -97,7 +97,8 @@ pub fn run(ui: Ui) {
             space: None,
         }]);
         let visible: Vec<_> = settings
-            ._host
+            .router
+            .host
             .ns_view()
             .subviews()
             .iter()
@@ -114,34 +115,47 @@ pub fn run(ui: Ui) {
             is_frontmost: false,
             window_count: 1,
         }]);
-        *settings.model.installed_applications.borrow_mut() = Some(vec![
+        *settings.router.model.env.installed_applications.borrow_mut() = Some(vec![
             ("Editor".into(), "dev.test.Editor".into()),
             ("Utility".into(), "dev.test.Utility".into()),
         ]);
-        settings.model.rebuild_applications();
-        assert_eq!(settings.model.application_inventory.borrow().len(), 2);
+        settings.router.model.env.rebuild_applications();
+        assert_eq!(settings.router.model.env.inventory.borrow().len(), 2);
         assert!(
             settings
+                .router
                 .model
-                .application_inventory
+                .env
+                .inventory
                 .borrow()
+                .choices
                 .iter()
                 .any(|app| app.search.contains("dev.test.editor"))
         );
         // An open editor holds a draft copy, which must receive later discovery results.
-        let draft = settings.model.draft();
-        *settings.model.sheet_model.borrow_mut() = Some(draft.clone());
+        let draft = settings.router.model.draft();
+        *settings.router.model.sheet_model.borrow_mut() = Some(draft.clone());
         settings.set_installed_applications(vec![("Late".into(), "dev.test.Late".into())]);
         assert!(
-            draft.application_inventory.borrow().iter().any(|app| app.search.contains("dev.test.late")),
+            draft
+                .env
+                .inventory
+                .borrow()
+                .choices
+                .iter()
+                .any(|app| app.search.contains("dev.test.late")),
             "installed applications reach the open editor"
         );
         settings.refresh_applications(Vec::new());
-        assert_eq!(draft.application_inventory.borrow().len(), 1, "runtime refresh reaches the open editor");
-        settings.model.sheet_model.borrow_mut().take();
+        assert_eq!(
+            draft.env.inventory.borrow().len(),
+            1,
+            "runtime refresh reaches the open editor"
+        );
+        settings.router.model.sheet_model.borrow_mut().take();
         // The native menu switches layouts, history returns to the overview, and no secondary sidebar remains.
         autoreleasepool(|_| {
-            let navigate = settings.model.navigate.borrow().as_ref().unwrap().clone();
+            let navigate = settings.router.model.env.navigate.borrow().as_ref().unwrap().clone();
             navigate(1);
             assert_eq!(count::<NSOutlineView>(&root), 1, "one persistent sidebar");
             let menu = toolbar
@@ -156,10 +170,11 @@ pub fn run(ui: Ui) {
                     menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("Traditional")),
                 )
             });
-            let old =
-                objc2::rc::Weak::new(settings.pages.borrow()[10].as_ref().unwrap().view.ns_view());
+            let old = objc2::rc::Weak::new(
+                settings.router.pages.borrow()[10].as_ref().unwrap().view.ns_view(),
+            );
             assert_eq!(
-                autoreleasepool(|_| count::<NSSwitch>(settings._host.ns_view())),
+                autoreleasepool(|_| count::<NSSwitch>(settings.router.host.ns_view())),
                 1
             );
             autoreleasepool(|_| {
@@ -168,7 +183,7 @@ pub fn run(ui: Ui) {
                 )
             });
             autoreleasepool(|_| {
-                assert_eq!(count::<NSSwitch>(settings._host.ns_view()), 0);
+                assert_eq!(count::<NSSwitch>(settings.router.host.ns_view()), 0);
                 assert!(old.load().is_some(), "switching layouts parks cached subpages");
             });
             // A display change rebuilds layout scopes, so parked copies must be released.
@@ -189,7 +204,7 @@ pub fn run(ui: Ui) {
             });
             assert!(old.load().is_none(), "release replaced subpages");
             assert_eq!(
-                settings.history.borrow().history[settings.history.borrow().cursor],
+                settings.router.history.borrow().history[settings.router.history.borrow().cursor],
                 11
             );
             assert!(unsafe {
@@ -200,7 +215,7 @@ pub fn run(ui: Ui) {
                 )
             });
             assert_eq!(
-                count::<NSSwitch>(settings._host.ns_view()),
+                count::<NSSwitch>(settings.router.host.ns_view()),
                 1,
                 "Back restores Traditional"
             );
@@ -212,7 +227,9 @@ pub fn run(ui: Ui) {
                 )
             });
             assert_eq!(
-                count::<NSOutlineView>(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view()),
+                count::<NSOutlineView>(
+                    settings.router.pages.borrow()[1].as_ref().unwrap().view.ns_view()
+                ),
                 0
             );
             assert!(forward.isEnabled());
@@ -224,7 +241,7 @@ pub fn run(ui: Ui) {
                 )
             });
             assert_eq!(
-                count::<NSSwitch>(settings._host.ns_view()),
+                count::<NSSwitch>(settings.router.host.ns_view()),
                 1,
                 "Forward restores Traditional"
             );
@@ -237,8 +254,8 @@ pub fn run(ui: Ui) {
         });
         // A normal collection row's first click opens its editor without changing configuration.
         autoreleasepool(|_| {
-            let page = editors::workspaces(ui, &settings.model);
-            page.synchronize(&settings.model);
+            let page = editors::workspaces(ui, &settings.router.model);
+            page.synchronize(&settings.router.model);
             let table = find::<NSTableView>(page.view.ns_view()).unwrap();
             table.selectRowIndexes_byExtendingSelection(
                 &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
@@ -246,24 +263,25 @@ pub fn run(ui: Ui) {
             );
             assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
             assert!(
-                settings.model.sheet.borrow().is_some(),
+                settings.router.model.sheet.borrow().is_some(),
                 "first click opens a workspace sheet"
             );
-            let draft = settings.model.sheet_model.borrow().as_ref().unwrap().clone();
-            let sheet = settings.model.sheet.borrow().as_ref().unwrap().ns_window().retain();
+            let draft = settings.router.model.sheet_model.borrow().as_ref().unwrap().clone();
+            let sheet = settings.router.model.sheet.borrow().as_ref().unwrap().ns_window().retain();
             change_text(&editable(&sheet.contentView().unwrap()).unwrap(), "Draft name");
             assert_eq!(
                 draft.source.borrow().virtual_workspaces.workspace_names[0],
                 "Draft name"
             );
             assert!(
-                *draft.source.borrow() != *settings.model.source.borrow(),
+                *draft.source.borrow() != *settings.router.model.source.borrow(),
                 "draft changes remain transactional"
             );
-            settings.model.close_sheet();
-            assert!(settings.model.sheet.borrow().is_none());
+            settings.router.model.close_sheet();
+            assert!(settings.router.model.sheet.borrow().is_none());
             assert_ne!(
                 settings
+                    .router
                     .model
                     .source
                     .borrow()
@@ -284,7 +302,7 @@ pub fn run(ui: Ui) {
 
             use crate::actor::reactor::Command;
             use crate::actor::wm_controller::WmCommand;
-            let mut source = settings.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().clone();
             source.keys.insert(
                 "Alt+a".into(),
                 WmCommand::ReactorCommand(Command::Layout(LayoutCommand::ToggleWindowFloating)),
@@ -293,9 +311,9 @@ pub fn run(ui: Ui) {
                 "Alt+f".into(),
                 WmCommand::ReactorCommand(Command::Layout(LayoutCommand::ToggleFullscreen)),
             );
-            settings.model.replace_source(source);
-            let page = commands::keyboard(ui, &settings.model);
-            page.synchronize(&settings.model);
+            settings.router.model.replace_source(source);
+            let page = commands::keyboard(ui, &settings.router.model);
+            page.synchronize(&settings.router.model);
             settings.window.toolbar().set_page_controls(&ui, page.header.as_deref());
             let search = toolbar
                 .items()
@@ -311,13 +329,14 @@ pub fn run(ui: Ui) {
                 false,
             );
             assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
-            let window = settings.model.sheet.borrow().as_ref().unwrap().ns_window().retain();
+            let window =
+                settings.router.model.sheet.borrow().as_ref().unwrap().ns_window().retain();
             let action = find::<NSPopUpButton>(&window.contentView().unwrap()).unwrap();
             assert_eq!(
                 action.titleOfSelectedItem().unwrap().to_string(),
                 "Window · Fullscreen"
             );
-            settings.model.close_sheet();
+            settings.router.model.close_sheet();
             settings.window.toolbar().set_page_controls(&ui, None);
             assert!(pending.try_recv().is_err());
         });
@@ -333,7 +352,7 @@ pub fn run(ui: Ui) {
                 backing_scale: 1.0,
                 space: None,
             }]);
-            let mut source = settings.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().clone();
             let global = source.settings.layout.gaps.outer.clone();
             source
                 .settings
@@ -348,9 +367,9 @@ pub fn run(ui: Ui) {
                 bottom: 12.0,
                 left: 12.0,
             });
-            settings.model.replace_source(source);
-            let page = pages::layout_scope(ui, &settings.model, 7);
-            page.synchronize(&settings.model);
+            settings.router.model.replace_source(source);
+            let page = pages::layout_scope(ui, &settings.router.model, 7);
+            page.synchronize(&settings.router.model);
             let slider = find::<NSSlider>(page.view.ns_view()).unwrap();
             assert_eq!(
                 slider.doubleValue(),
@@ -363,7 +382,7 @@ pub fn run(ui: Ui) {
             let Action::Edit(edit) = request.action else {
                 panic!("expected spacing edit")
             };
-            let mut source = settings.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().clone();
             edit(&mut source).unwrap();
             assert_eq!(
                 source.settings.layout.gaps.outer, global,
@@ -381,9 +400,9 @@ pub fn run(ui: Ui) {
                 [24.0; 4]
             );
         });
-        let model = Rc::downgrade(&settings.model);
-        let host = objc2::rc::Weak::new(settings._host.ns_view());
-        let mut form = FormBuilder::new(ui, &settings.model);
+        let model = Rc::downgrade(&settings.router.model);
+        let host = objc2::rc::Weak::new(settings.router.host.ns_view());
+        let mut form = FormBuilder::new(ui, &settings.router.model);
         let row = form.inherited_popup(
             "Position",
             vec![
@@ -409,7 +428,7 @@ pub fn run(ui: Ui) {
         );
         let popup = find::<NSPopUpButton>(row.control_view()).unwrap();
         let page = form.finish(row);
-        page.synchronize(&settings.model);
+        page.synchronize(&settings.router.model);
         assert_eq!(
             popup.titleOfSelectedItem().unwrap().to_string(),
             "Next to selection"
@@ -441,17 +460,17 @@ pub fn run(ui: Ui) {
             let Action::Edit(edit) = request.action else {
                 panic!("expected config edit")
             };
-            let mut source = settings.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().clone();
             edit(&mut source).unwrap();
             assert_eq!(source.settings.layout.base.window_insertion_point, expected);
-            settings.model.replace_source(source);
-            page.synchronize(&settings.model);
+            settings.router.model.replace_source(source);
+            page.synchronize(&settings.router.model);
         }
-        let mut source = settings.model.source.borrow().clone();
+        let mut source = settings.router.model.source.borrow().clone();
         source.settings.layout.stack.base.window_insertion_point =
             Some(crate::common::config::WindowInsertionPoint::EndOfTree);
-        settings.model.replace_source(source);
-        page.synchronize(&settings.model);
+        settings.router.model.replace_source(source);
+        page.synchronize(&settings.router.model);
         assert_eq!(popup.titleOfSelectedItem().unwrap().to_string(), "End of layout");
         assert!(popup.itemAtIndex(0).unwrap().badge().is_none());
         assert_eq!(

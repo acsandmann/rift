@@ -21,8 +21,6 @@ pub struct SourceSnapshot {
 #[derive(Serialize, Deserialize)]
 pub enum Event {
     #[serde(skip)]
-    QuerySource(tokio::sync::oneshot::Sender<Result<ConfigSource, String>>),
-    #[serde(skip)]
     ReloadSource(tokio::sync::oneshot::Sender<Result<SourceSnapshot, String>>),
     #[serde(skip)]
     QuerySourceSince {
@@ -114,9 +112,6 @@ impl ConfigActor {
                     };
                     let _ = response.send(result);
                 }
-                Event::QuerySource(response) => {
-                    let _ = response.send(self.document.source().map_err(|e| e.to_string()));
-                }
                 Event::EditSource { edit, response } => {
                     let result = self.edit_source(edit).map(|source| SourceSnapshot {
                         revision: self.source_revision,
@@ -146,19 +141,16 @@ impl ConfigActor {
     }
 
     fn edit_source(&mut self, edit: SourceEdit) -> Result<ConfigSource, String> {
-        let mut candidate = self.document.clone();
-        let mut edit_result = Ok(());
-        let config = candidate
-            .update(|source| edit_result = edit(source))
+        let edited = self
+            .document
+            .edited(|source| edit(source).map_err(anyhow::Error::msg))
             .map_err(|e| e.to_string())?;
-        edit_result?;
-        let source = candidate.source().map_err(|e| e.to_string())?;
         // Persistence is part of the transaction: stale or failed saves never publish or commit.
-        self.persist(&candidate)?;
-        self.document = candidate;
-        self.config = config;
+        self.persist(&edited.document)?;
+        self.document = edited.document;
+        self.config = edited.config;
         self.publish();
-        Ok(source)
+        Ok(edited.source)
     }
 
     fn publish(&mut self) {
@@ -302,8 +294,7 @@ fn read_disk(path: &Path) -> std::io::Result<Option<String>> {
 }
 
 fn parse_valid(text: &str) -> Result<(ConfigDocument, Config), String> {
-    let document = ConfigDocument::parse(text).map_err(|e| e.to_string())?;
-    let config = document.runtime().map_err(|e| e.to_string())?;
+    let (document, config) = ConfigDocument::load(text).map_err(|e| e.to_string())?;
     let issues = config.validate();
     if !issues.is_empty() {
         return Err(issues.join("; "));

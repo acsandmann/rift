@@ -1,12 +1,15 @@
 //! Lazy main-thread Settings composition. ConfigActor owns all mutations and persistence.
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
 use cgs::*;
+use rift_protocol::ApplicationData;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::actor::config::SourceEdit;
-use crate::common::config::ConfigSource;
+use crate::common::config::{ConfigSchema, ConfigSource};
+use crate::sys::screen::ScreenInfo;
 
 mod applications;
 mod commands;
@@ -16,6 +19,8 @@ mod schema;
 mod search;
 pub(crate) mod updates;
 
+pub type Finish = Box<dyn FnOnce(Result<(), String>)>;
+
 pub enum Action {
     Edit(SourceEdit),
     Reload,
@@ -24,28 +29,106 @@ pub enum Action {
 }
 pub struct Request {
     pub action: Action,
-    pub finish: Box<dyn FnOnce(Result<(), String>)>,
+    pub finish: Finish,
+}
+
+/// Sidebar categories; a category's index is its page id.
+pub(super) const CATEGORIES: [(&str, &str); 9] = [
+    ("General", "gearshape"),
+    ("Layouts", "rectangle.split.2x2"),
+    ("Workspaces", "square.grid.2x2"),
+    ("Rules", "line.3.horizontal.decrease"),
+    ("Keyboard", "keyboard"),
+    ("Mouse & Trackpad", "computermouse"),
+    ("Interface", "macwindow"),
+    ("Advanced", "slider.horizontal.3"),
+    ("About", "info.circle"),
+];
+const LAYOUTS: usize = 1;
+/// Layout scopes follow the categories in the page table.
+const SCOPES: usize = CATEGORIES.len();
+const PAGE_COUNT: usize = SCOPES + pages::LAYOUT_PAGES.len();
+
+fn scope_page(scope: usize) -> usize { SCOPES + scope }
+
+fn category(id: usize) -> usize { if id >= SCOPES { LAYOUTS } else { id } }
+
+/// Show an edit's outcome under the control that made it.
+fn report(message: &Weak<ValidationMessage>, result: &Result<(), String>) {
+    if let Some(message) = message.upgrade() {
+        message.set_validation(&match result {
+            Ok(()) => Validation::None,
+            Err(error) => Validation::Error(error.clone()),
+        });
+    }
+}
+
+type Navigate = Rc<dyn Fn(usize)>;
+type DraftChanged = Box<dyn Fn(bool)>;
+type Preview = Rc<dyn Fn(&ConfigSource)>;
+
+/// Runtime context shared by the window model and its sheet drafts.
+struct Env {
+    requests: UnboundedSender<Request>,
+    window: RefCell<WindowRef>,
+    displays: RefCell<Vec<ScreenInfo>>,
+    config_path: PathBuf,
+    applications: RefCell<Vec<ApplicationData>>,
+    installed_applications: RefCell<Option<Vec<(String, String)>>>,
+    inventory: RefCell<applications::Inventory>,
+    navigate: RefCell<Option<Navigate>>,
+}
+
+impl Env {
+    fn send(&self, action: Action, finish: Finish) {
+        let _ = self.requests.send(Request { action, finish });
+    }
+
+    fn navigate(&self, id: usize) {
+        let navigate = self.navigate.borrow().clone();
+        if let Some(navigate) = navigate {
+            navigate(id);
+        }
+    }
+
+    fn rebuild_applications(&self) {
+        *self.inventory.borrow_mut() = applications::Inventory::new(
+            &self.applications.borrow(),
+            self.installed_applications.borrow().as_deref().unwrap_or(&[]),
+        );
+    }
+
+    fn set_installed_applications(&self, apps: Vec<(String, String)>) {
+        *self.installed_applications.borrow_mut() = Some(apps);
+        self.rebuild_applications();
+    }
+
+    fn refresh_applications(&self, applications: Vec<ApplicationData>) {
+        let changed = applications::running(&self.applications.borrow())
+            .ne(applications::running(&applications));
+        *self.applications.borrow_mut() = applications;
+        if changed {
+            self.rebuild_applications();
+        }
+    }
+}
+
+/// An editor sheet's uncommitted copy of the source.
+struct Draft {
+    base: ConfigSource,
+    page: RefCell<Option<Rc<Page>>>,
+    changed: RefCell<Option<DraftChanged>>,
 }
 
 struct Model {
+    env: Rc<Env>,
     source: RefCell<ConfigSource>,
     source_revision: Cell<u64>,
-    requests: UnboundedSender<Request>,
     syncing: Cell<bool>,
+    /// The open sheet and the draft it edits; only the window model opens sheets.
     sheet: RefCell<Option<Sheet>>,
-    sheet_page: RefCell<Option<Rc<Page>>>,
     sheet_model: RefCell<Option<Rc<Model>>>,
-    draft_changed: RefCell<Option<Box<dyn Fn(bool)>>>,
-    draft_base: Option<ConfigSource>,
-    window: RefCell<WindowRef>,
-    displays: RefCell<Vec<crate::sys::screen::ScreenInfo>>,
-    config_path: std::path::PathBuf,
-    applications: RefCell<Vec<rift_protocol::ApplicationData>>,
-    installed_applications: RefCell<Option<Vec<(String, String)>>>,
-    application_inventory: RefCell<Vec<applications::Choice>>,
-    page_title: Rc<Label>,
-    navigate: RefCell<Option<Rc<dyn Fn(usize)>>>,
-    toolbar: RefCell<Weak<Toolbar>>,
+    draft: Option<Draft>,
 }
 
 type SyncControl = Box<dyn Fn(&ConfigSource)>;
@@ -57,109 +140,64 @@ pub(super) struct Page {
 }
 
 impl Model {
+    fn new(env: Rc<Env>, source: ConfigSource, draft: Option<Draft>) -> Rc<Self> {
+        Rc::new(Self {
+            env,
+            source: RefCell::new(source),
+            source_revision: Cell::new(0),
+            syncing: Cell::new(false),
+            sheet: RefCell::new(None),
+            sheet_model: RefCell::new(None),
+            draft,
+        })
+    }
+
     fn submit(model: &Weak<Self>, edit: SourceEdit, error: Weak<ValidationMessage>) {
         if let Some(model) = model.upgrade() {
-            model.submit_edit(
-                edit,
-                Box::new(move |result| {
-                    if let Some(label) = error.upgrade() {
-                        label.set_validation(
-                            &result.map_or_else(Validation::Error, |_| Validation::None),
-                        );
-                    }
-                }),
-            );
+            model.submit_edit(edit, Box::new(move |result| report(&error, &result)));
         }
     }
 
+    fn is_draft(&self) -> bool { self.draft.is_some() }
+
     fn close_sheet(&self) {
         self.sheet.borrow_mut().take();
-        self.sheet_page.borrow_mut().take();
         self.sheet_model.borrow_mut().take();
     }
 
     fn draft(&self) -> Rc<Self> {
         let base = self.source.borrow().clone();
-        let draft = Rc::new(Self {
-            source: RefCell::new(base.clone()),
-            source_revision: Cell::new(0),
-            requests: self.requests.clone(),
-            syncing: Cell::new(false),
-            sheet: RefCell::new(None),
-            sheet_page: RefCell::new(None),
-            sheet_model: RefCell::new(None),
-            draft_changed: RefCell::new(None),
-            draft_base: Some(base),
-            window: RefCell::new(self.window.borrow().clone()),
-            displays: RefCell::new(self.displays.borrow().clone()),
-            config_path: self.config_path.clone(),
-            applications: RefCell::new(self.applications.borrow().clone()),
-            installed_applications: RefCell::new(self.installed_applications.borrow().clone()),
-            application_inventory: RefCell::new(Vec::new()),
-            page_title: self.page_title.clone(),
-            navigate: RefCell::new(None),
-            toolbar: RefCell::new(Weak::new()),
-        });
-        draft.rebuild_applications();
-        draft
+        Self::new(
+            self.env.clone(),
+            base.clone(),
+            Some(Draft {
+                base,
+                page: RefCell::new(None),
+                changed: RefCell::new(None),
+            }),
+        )
     }
 
-    fn submit_edit(&self, edit: SourceEdit, finish: Box<dyn FnOnce(Result<(), String>)>) {
+    fn submit_edit(&self, edit: SourceEdit, finish: Finish) {
         if self.syncing.get() {
             return;
         }
-        if let Some(base) = &self.draft_base {
-            let mut source = self.source.borrow().clone();
-            let result = edit(&mut source);
-            if result.is_ok() {
-                self.replace_source(source);
-                if let Some(page) = self.sheet_page.borrow().as_ref() {
-                    page.synchronize(self);
-                }
-                if let Some(changed) = self.draft_changed.borrow().as_ref() {
-                    changed(*self.source.borrow() != *base);
-                }
-            }
-            finish(result);
-        } else {
-            let _ = self.requests.send(Request {
-                action: Action::Edit(edit),
-                finish,
-            });
-        }
-    }
-
-    fn rebuild_applications(&self) {
-        *self.application_inventory.borrow_mut() = applications::inventory(
-            &self.applications.borrow(),
-            self.installed_applications.borrow().as_deref().unwrap_or(&[]),
-        );
-    }
-
-    /// The open editor works on a draft copy, so discovery results must reach it too.
-    fn set_installed_applications(&self, apps: Vec<(String, String)>) {
-        if let Some(draft) = self.sheet_model.borrow().as_ref() {
-            draft.set_installed_applications(apps.clone());
-        }
-        *self.installed_applications.borrow_mut() = Some(apps);
-        self.rebuild_applications();
-    }
-
-    fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
-        if let Some(draft) = self.sheet_model.borrow().as_ref() {
-            draft.refresh_applications(applications.clone());
-        }
-        let running = |apps: &[rift_protocol::ApplicationData]| {
-            apps.iter()
-                .filter(|app| app.window_count > 0)
-                .map(|app| (app.name.clone(), app.bundle_id.clone()))
-                .collect::<Vec<_>>()
+        let Some(draft) = &self.draft else {
+            self.env.send(Action::Edit(edit), finish);
+            return;
         };
-        let changed = running(&self.applications.borrow()) != running(&applications);
-        *self.applications.borrow_mut() = applications;
-        if changed {
-            self.rebuild_applications();
+        let mut source = self.source.borrow().clone();
+        let result = edit(&mut source);
+        if result.is_ok() {
+            self.replace_source(source);
+            if let Some(page) = draft.page.borrow().as_ref() {
+                page.synchronize(self);
+            }
+            if let Some(changed) = draft.changed.borrow().as_ref() {
+                changed(*self.source.borrow() != draft.base);
+            }
         }
+        finish(result);
     }
 
     fn replace_source(&self, source: ConfigSource) {
@@ -189,8 +227,10 @@ struct NavigationState {
     cursor: usize,
 }
 impl NavigationState {
+    fn current(&self) -> usize { self.history[self.cursor] }
+
     fn select(&mut self, page: usize) {
-        if self.history[self.cursor] != page {
+        if self.current() != page {
             self.history.truncate(self.cursor + 1);
             self.history.push(page);
             self.cursor += 1;
@@ -209,379 +249,223 @@ impl NavigationState {
     }
 }
 
-pub struct Settings {
+/// Page cache, history, and the window chrome that follows the current page.
+struct Router {
     ui: Ui,
-    window: SettingsWindow,
     model: Rc<Model>,
-    _host: Rc<PageHost>,
-    pages: Rc<RefCell<Vec<Option<Page>>>>,
-    history: Rc<RefCell<NavigationState>>,
+    host: Rc<PageHost>,
+    /// Built lazily and kept while the window is open.
+    pages: RefCell<Vec<Option<Page>>>,
+    history: RefCell<NavigationState>,
+    title: Rc<Label>,
+    toolbar: RefCell<Weak<Toolbar>>,
+    sidebar: RefCell<Weak<Sidebar<usize>>>,
+    /// Set while the router itself moves the sidebar selection.
+    routing: Cell<bool>,
+}
+
+impl Router {
+    fn current(&self) -> usize { self.history.borrow().current() }
+
+    fn navigate(&self, id: usize) {
+        self.model.close_sheet();
+        self.history.borrow_mut().select(id);
+        self.routing.set(true);
+        if let Some(sidebar) = self.sidebar.borrow().upgrade() {
+            sidebar.set_selected(category(id));
+        }
+        self.routing.set(false);
+        self.show(id);
+        if let Some(toolbar) = self.toolbar.borrow().upgrade() {
+            let history = self.history.borrow();
+            toolbar.update_navigation(
+                history.cursor > 0,
+                history.cursor + 1 < history.history.len(),
+                if id >= SCOPES {
+                    pages::LAYOUT_PAGES[id - SCOPES].0
+                } else {
+                    "All"
+                },
+                category(id) == LAYOUTS,
+            );
+        }
+    }
+
+    fn step(&self, forward: bool) {
+        let id = self.history.borrow_mut().step(forward);
+        if let Some(id) = id {
+            self.navigate(id);
+        }
+    }
+
+    fn show(&self, id: usize) {
+        self.title.set_text(CATEGORIES[category(id)].0);
+        if self.pages.borrow()[id].is_none() {
+            let page = if id >= SCOPES {
+                pages::layout_scope(self.ui, &self.model, id - SCOPES)
+            } else {
+                pages::build(self.ui, &self.model, id)
+            };
+            self.pages.borrow_mut()[id] = Some(page);
+        }
+        let pages = self.pages.borrow();
+        let page = pages[id].as_ref().unwrap();
+        page.synchronize(&self.model);
+        self.host.set_cached_page(page.view.clone());
+        if let Some(toolbar) = self.toolbar.borrow().upgrade() {
+            toolbar.set_page_controls(&self.ui, page.header.as_deref());
+        }
+    }
+}
+
+pub struct Settings {
+    window: SettingsWindow,
+    router: Rc<Router>,
 }
 
 impl Settings {
     pub fn new(
         ui: Ui,
         source: ConfigSource,
-        config_path: std::path::PathBuf,
-        displays: Vec<crate::sys::screen::ScreenInfo>,
-        applications: Vec<rift_protocol::ApplicationData>,
+        config_path: PathBuf,
+        displays: Vec<ScreenInfo>,
+        applications: Vec<ApplicationData>,
         requests: UnboundedSender<Request>,
         on_close: impl FnMut() + 'static,
     ) -> Self {
-        let host = Rc::new(PageHost::new(&ui));
-        let model = Rc::new(Model {
-            source: RefCell::new(source),
-            source_revision: Cell::new(0),
+        let env = Rc::new(Env {
             requests,
-            syncing: Cell::new(false),
-            sheet: RefCell::new(None),
-            sheet_page: RefCell::new(None),
-            sheet_model: RefCell::new(None),
-            draft_changed: RefCell::new(None),
-            draft_base: None,
             window: RefCell::new(WindowRef::default()),
             displays: RefCell::new(displays),
             config_path,
             applications: RefCell::new(applications),
             installed_applications: RefCell::new(None),
-            application_inventory: RefCell::new(Vec::new()),
-            page_title: Rc::new(Label::new(&ui, "General")),
+            inventory: RefCell::default(),
             navigate: RefCell::new(None),
+        });
+        env.rebuild_applications();
+        let host = Rc::new(PageHost::new(&ui));
+        let router = Rc::new(Router {
+            ui,
+            model: Model::new(env.clone(), source, None),
+            host: host.clone(),
+            pages: RefCell::new((0..PAGE_COUNT).map(|_| None).collect()),
+            history: RefCell::new(NavigationState { history: vec![0], cursor: 0 }),
+            title: Rc::new(Label::new(&ui, CATEGORIES[0].0)),
             toolbar: RefCell::new(Weak::new()),
+            sidebar: RefCell::new(Weak::new()),
+            routing: Cell::new(false),
         });
-        model.rebuild_applications();
-        // Slots 0..9 are sidebar categories and 9..18 layout scopes; both are cached while open.
-        let pages = Rc::new(RefCell::new((0..18).map(|_| None::<Page>).collect::<Vec<_>>()));
-        let weak_model = Rc::downgrade(&model);
-        let weak_host = Rc::downgrade(&host);
-        let weak_pages = Rc::downgrade(&pages);
-        let entries: Vec<_> = [
-            ("General", "gearshape"),
-            ("Layouts", "rectangle.split.2x2"),
-            ("Workspaces", "square.grid.2x2"),
-            ("Rules", "line.3.horizontal.decrease"),
-            ("Keyboard", "keyboard"),
-            ("Mouse & Trackpad", "computermouse"),
-            ("Interface", "macwindow"),
-            ("Advanced", "slider.horizontal.3"),
-            ("About", "info.circle"),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(id, (title, symbol))| SidebarItem {
-            id,
-            title: title.into(),
-            symbol: symbol.into(),
-        })
-        .collect();
-        let history = Rc::new(RefCell::new(NavigationState { history: vec![0], cursor: 0 }));
-        let sidebar_slot = Rc::new(RefCell::new(Weak::<Sidebar<usize>>::new()));
-        let routing = Rc::new(Cell::new(false));
-        let history_router = history.clone();
-        let sidebar_router = sidebar_slot.clone();
-        let routing_router = routing.clone();
-        let navigate: Rc<dyn Fn(usize)> = Rc::new(move |id| {
-            let (Some(model), Some(host), Some(pages)) =
-                (weak_model.upgrade(), weak_host.upgrade(), weak_pages.upgrade())
-            else {
-                return;
-            };
-            model.close_sheet();
-            history_router.borrow_mut().select(id);
-            let category = if id >= 9 { 1 } else { id };
-            routing_router.set(true);
-            if let Some(sidebar) = sidebar_router.borrow().upgrade() {
-                sidebar.set_selected(category);
-            }
-            routing_router.set(false);
-            Self::select(ui, &model, &host, &pages, id);
-            if let Some(toolbar) = model.toolbar.borrow().upgrade() {
-                let history = history_router.borrow();
-                toolbar.update_navigation(
-                    history.cursor > 0,
-                    history.cursor + 1 < history.history.len(),
-                    if id >= 9 {
-                        pages::LAYOUT_PAGES[id - 9].0
-                    } else {
-                        "All"
-                    },
-                    id == 1 || id >= 9,
-                );
-            }
-        });
-        *model.navigate.borrow_mut() = Some(navigate.clone());
-        let route = navigate.clone();
-        let sidebar = Sidebar::new(&ui, entries.clone()).on_select(move |id| {
-            if !routing.get() {
-                route(id);
-            }
-        });
-        let sidebar = Rc::new(sidebar);
-        sidebar.set_selected(0);
-        *sidebar_slot.borrow_mut() = Rc::downgrade(&sidebar);
-        let found = Rc::new(RefCell::new(Vec::<search::Result>::new()));
-        let destinations = found.clone();
-        let opening_destinations = destinations.clone();
-        let weak_model = Rc::downgrade(&model);
-        let weak_host = Rc::downgrade(&host);
-        let open_result = Rc::new(RefCell::new(move |index: usize| {
-            let Some(destination) = opening_destinations.borrow().get(index).cloned() else {
-                return;
-            };
-            if let (Some(model), Some(host)) = (weak_model.upgrade(), weak_host.upgrade()) {
-                let id = destination.scope.map_or(destination.page, |scope| 9 + scope);
-                if let Some(navigate) = model.navigate.borrow().as_ref() {
-                    navigate(id);
+        let navigate: Rc<dyn Fn(usize)> = {
+            let router = Rc::downgrade(&router);
+            Rc::new(move |id| {
+                if let Some(router) = router.upgrade() {
+                    router.navigate(id);
                 }
-                host.reveal(search::section(destination.location), destination.title);
+            })
+        };
+        *env.navigate.borrow_mut() = Some(navigate.clone());
+
+        let entries = CATEGORIES
+            .iter()
+            .enumerate()
+            .map(|(id, (title, symbol))| SidebarItem {
+                id,
+                title: (*title).into(),
+                symbol: (*symbol).into(),
+            })
+            .collect();
+        let weak_router = Rc::downgrade(&router);
+        let sidebar = Rc::new(Sidebar::new(&ui, entries).on_select(move |id| {
+            if let Some(router) = weak_router.upgrade()
+                && !router.routing.get()
+            {
+                router.navigate(id);
             }
         }));
-        let open_row = open_result.clone();
-        let search_rows = Rc::new(RefCell::new(Vec::<search::Row>::new()));
-        let selected_rows = search_rows.clone();
-        let destinations_for_selection = destinations.clone();
-        let results = Rc::new(
-            Table::new(&ui)
-                .source_list()
-                .column("setting", "", 0.0)
-                .cells(move |row: &search::Row, _| {
-                    let content = VStack::new(&ui).spacing(3.0).insets(Insets {
-                        top: 6.0,
-                        left: 12.0,
-                        bottom: 6.0,
-                        right: 12.0,
-                    });
-                    match row {
-                        search::Row::Heading(title) => {
-                            Box::new(content.push(SubsectionTitle::new(&ui, title)))
-                                as Box<dyn NativeView>
-                        }
-                        search::Row::Setting(result) => {
-                            let description = Caption::new(&ui, &result.description()).max_lines(2);
-                            let title = Label::new(&ui, result.title);
-                            Box::new(content.push(title).push(description))
-                        }
-                    }
-                })
-                .group_rows(|row| matches!(row, search::Row::Heading(_)))
-                .selectable(|row| matches!(row, search::Row::Setting(_)))
-                .row_heights(|row| {
-                    if matches!(row, search::Row::Heading(_)) {
-                        30.0
-                    } else {
-                        54.0
-                    }
-                })
-                .on_select(move |index| {
-                    let destination =
-                        index.and_then(|index| selected_rows.borrow().get(index).cloned());
-                    if let Some(search::Row::Setting(result)) = destination {
-                        let index = destinations_for_selection.borrow().iter().position(|entry| {
-                            entry.title == result.title
-                                && entry.page == result.page
-                                && entry.scope == result.scope
-                                && entry.location == result.location
-                        });
-                        if let Some(index) = index {
-                            (open_row.borrow_mut())(index);
-                        }
-                    }
-                }),
-        );
-        let sidebar_content = Rc::new(PageHost::new(&ui));
-        sidebar_content.set_cached_page(sidebar.clone());
-        let weak_sidebar_content = Rc::downgrade(&sidebar_content);
-        let normal_sidebar = sidebar.clone();
-        let empty = Rc::new(
-            VStack::new(&ui)
-                .insets(Insets {
-                    top: 12.0,
-                    left: 12.0,
-                    bottom: 12.0,
-                    right: 12.0,
-                })
-                .push(Caption::new(&ui, "No matching settings")),
-        );
-        let search = Rc::new(
-            SearchField::new(&ui)
-                .placeholder("Search")
-                .on_change(move |query| {
-                    let Some(sidebar_content) = weak_sidebar_content.upgrade() else {
-                        return;
-                    };
-                    if query.trim().is_empty() {
-                        sidebar_content.set_cached_page(normal_sidebar.clone());
-                        return;
-                    }
-                    let matches = search::results(&query);
-                    *found.borrow_mut() = matches.clone();
-                    let rows = search::grouped(&matches);
-                    *search_rows.borrow_mut() = rows.clone();
-                    results.set_rows(rows);
-                    if !found.borrow().is_empty() {
-                        results.scroll_to(0);
-                    }
-                    if found.borrow().is_empty() {
-                        sidebar_content.set_cached_page(empty.clone());
-                    } else {
-                        sidebar_content.set_cached_page(results.clone());
-                    }
-                })
-                .on_commit(move |query| {
-                    if !query.trim().is_empty() {
-                        (open_result.borrow_mut())(0);
-                    }
-                }),
-        );
-        let sidebar_pane = VStack::new(&ui)
-            .spacing(8.0)
-            .push(
-                HStack::new(&ui)
-                    .insets(Insets {
-                        top: 6.0,
-                        left: 10.0,
-                        bottom: 0.0,
-                        right: 10.0,
-                    })
-                    .push(search),
-            )
-            .push(sidebar_content);
-        let sidebar_pane = View::new(&ui).safe_area_content(sidebar_pane);
+        sidebar.set_selected(0);
+        *router.sidebar.borrow_mut() = Rc::downgrade(&sidebar);
+
         let window = SettingsWindow::new(&ui, "Rift Settings")
-            .page_title(&ui, model.page_title.clone())
+            .page_title(&ui, router.title.clone())
             .on_close(on_close)
-            .content(NavigationSplitView::new(&ui, sidebar_pane, host.clone()));
+            .content(NavigationSplitView::new(
+                &ui,
+                sidebar_pane(ui, &router, sidebar.clone()),
+                host,
+            ));
         window.initial_focus(&*sidebar);
         let menu = Rc::new(Menu::new(&ui));
         let route = navigate.clone();
-        let overview = MenuItem::new(&ui, "All").tag(1).on_click(move || route(1));
-        menu.add(overview);
+        menu.add(MenuItem::new(&ui, "All").tag(LAYOUTS as isize).on_click(move || route(LAYOUTS)));
         menu.add_separator();
-        for (title, range) in [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)] {
+        for (title, range) in pages::LAYOUT_SECTIONS {
             menu.add_section_header(title);
-            for index in range {
+            for scope in range {
                 let route = navigate.clone();
-                let item =
-                    MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).tag((9 + index) as isize);
-                menu.add(item.on_click(move || route(9 + index)));
+                let id = scope_page(scope);
+                let item = MenuItem::new(&ui, pages::LAYOUT_PAGES[scope].0).tag(id as isize);
+                menu.add(item.on_click(move || route(id)));
             }
         }
-        let history_back = history.clone();
-        let route_back = navigate.clone();
-        let route_forward = navigate.clone();
-        let history_forward = history.clone();
+        let (back, forward) = (Rc::downgrade(&router), Rc::downgrade(&router));
         window.toolbar().set_navigation(
             &ui,
             move || {
-                let id = history_back.borrow_mut().step(false);
-                if let Some(id) = id {
-                    route_back(id);
+                if let Some(router) = back.upgrade() {
+                    router.step(false);
                 }
             },
             move || {
-                let id = history_forward.borrow_mut().step(true);
-                if let Some(id) = id {
-                    route_forward(id);
+                if let Some(router) = forward.upgrade() {
+                    router.step(true);
                 }
             },
             menu,
         );
-        window.toolbar().update_navigation(false, false, "General", false);
-        *model.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
-        *model.window.borrow_mut() = window.handle();
+        window.toolbar().update_navigation(false, false, CATEGORIES[0].0, false);
+        *router.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
+        *env.window.borrow_mut() = window.handle();
         window.set_size_centered(CGSize::new(880.0, 660.0));
-        Self::select(ui, &model, &host, &pages, 0);
-        Self {
-            ui,
-            window,
-            model,
-            _host: host,
-            pages,
-            history,
-        }
+        router.show(0);
+        Self { window, router }
     }
 
-    fn select(
-        ui: Ui,
-        model: &Rc<Model>,
-        host: &Rc<PageHost>,
-        pages: &Rc<RefCell<Vec<Option<Page>>>>,
-        id: usize,
-    ) {
-        let title = if id >= 9 {
-            pages::LAYOUT_PAGES[id - 9].0
-        } else {
-            [
-                "General",
-                "Layouts",
-                "Workspaces",
-                "Rules",
-                "Keyboard",
-                "Mouse & Trackpad",
-                "Interface",
-                "Advanced",
-                "About",
-            ][id]
-        };
-        model.page_title.set_text(if id >= 9 { "Layouts" } else { title });
-        if pages.borrow()[id].is_none() {
-            let page = if id >= 9 {
-                pages::layout_scope(ui, model, id - 9)
-            } else {
-                pages::build(ui, model, id)
-            };
-            pages.borrow_mut()[id] = Some(page);
-        }
-        let pages = pages.borrow();
-        let page = pages[id].as_ref().unwrap();
-        page.synchronize(model);
-        host.set_cached_page(page.view.clone());
-        if let Some(toolbar) = model.toolbar.borrow().upgrade() {
-            toolbar.set_page_controls(&ui, page.header.as_deref());
-        }
-    }
+    fn model(&self) -> &Rc<Model> { &self.router.model }
 
     pub fn has_installed_applications(&self) -> bool {
-        self.model.installed_applications.borrow().is_some()
+        self.model().env.installed_applications.borrow().is_some()
     }
 
     pub fn set_installed_applications(&self, apps: Vec<(String, String)>) {
-        self.model.set_installed_applications(apps);
+        self.model().env.set_installed_applications(apps);
     }
 
-    pub fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
-        self.model.refresh_applications(applications);
+    pub fn refresh_applications(&self, applications: Vec<ApplicationData>) {
+        self.model().env.refresh_applications(applications);
     }
 
-    pub fn refresh_displays(&self, displays: Vec<crate::sys::screen::ScreenInfo>) {
-        if *self.model.displays.borrow() != displays {
-            *self.model.displays.borrow_mut() = displays;
-            // Layout scopes read the display list; parked copies unmount once replaced.
-            self.pages.borrow_mut()[9..].fill_with(|| None);
-            let id = self.history.borrow().history[self.history.borrow().cursor];
-            if id < 9 {
-                return;
-            }
-            Self::select(self.ui, &self.model, &self._host, &self.pages, id);
+    pub fn refresh_displays(&self, displays: Vec<ScreenInfo>) {
+        let env = &self.model().env;
+        if *env.displays.borrow() == displays {
+            return;
+        }
+        *env.displays.borrow_mut() = displays;
+        // Layout scopes read the display list; parked copies unmount once replaced.
+        self.router.pages.borrow_mut()[SCOPES..].fill_with(|| None);
+        let id = self.router.current();
+        if id >= SCOPES {
+            self.router.show(id);
         }
     }
 
     pub fn show(&self) { self.window.present(); }
 
-    pub fn visible(&self) -> bool { self.window.is_visible() }
-
+    /// Updates the current page even while hidden or minimized; other pages sync when shown.
     pub fn synchronize(&self, source: ConfigSource) {
-        self.model.replace_source(source);
-        if self.visible() {
-            if let Some(page) = self.model.sheet_page.borrow().as_ref() {
-                if let Some(draft) = self.model.sheet_model.borrow().as_ref() {
-                    page.synchronize(draft);
-                }
-            }
-            let id = self.history.borrow().history[self.history.borrow().cursor];
-            if let Some(page) = &self.pages.borrow()[id] {
-                page.synchronize(&self.model);
-            }
+        self.model().replace_source(source);
+        if let Some(page) = &self.router.pages.borrow()[self.router.current()] {
+            page.synchronize(self.model());
         }
     }
 }
@@ -589,24 +473,127 @@ impl Settings {
 impl Drop for Settings {
     fn drop(&mut self) {
         // End the sheet while its weak parent still points to the live Settings window.
-        self.model.close_sheet();
-        self.window.toolbar().set_page_controls(&self.ui, None);
-        self._host.clear();
-        self.pages.borrow_mut().clear();
+        self.model().close_sheet();
+        self.window.toolbar().set_page_controls(&self.router.ui, None);
+        self.router.host.clear();
+        self.router.pages.borrow_mut().clear();
     }
 }
+
+/// The sidebar, replaced by search results while a query is entered.
+fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<Sidebar<usize>>) -> View {
+    let content = Rc::new(PageHost::new(&ui));
+    content.set_cached_page(sidebar.clone());
+    let weak_router = Rc::downgrade(router);
+    let open = Rc::new(move |entry: &'static search::Entry| {
+        if let Some(router) = weak_router.upgrade() {
+            router.navigate(entry.page_id());
+            router.host.reveal(search::section(&entry.location), entry.title);
+        }
+    });
+    let pick = open.clone();
+    let results = Rc::new(
+        Table::new(&ui)
+            .source_list()
+            .column("setting", "", 0.0)
+            .cells(move |row: &search::Row, _| {
+                let content = VStack::new(&ui).spacing(3.0).insets(Insets {
+                    top: 6.0,
+                    left: 12.0,
+                    bottom: 6.0,
+                    right: 12.0,
+                });
+                match row {
+                    search::Row::Heading(title) => {
+                        Box::new(content.push(SubsectionTitle::new(&ui, title)))
+                            as Box<dyn NativeView>
+                    }
+                    search::Row::Setting(entry) => Box::new(
+                        content
+                            .push(Label::new(&ui, entry.title))
+                            .push(Caption::new(&ui, &entry.description).max_lines(2)),
+                    ),
+                }
+            })
+            .group_rows(|row| matches!(row, search::Row::Heading(_)))
+            .selectable(|row| matches!(row, search::Row::Setting(_)))
+            .row_heights(|row| {
+                if matches!(row, search::Row::Heading(_)) {
+                    30.0
+                } else {
+                    54.0
+                }
+            })
+            .on_select_item(move |row| {
+                if let Some(search::Row::Setting(entry)) = row {
+                    pick(entry);
+                }
+            }),
+    );
+    let empty = Rc::new(
+        VStack::new(&ui)
+            .insets(uniform_insets(12.0))
+            .push(Caption::new(&ui, "No matching settings")),
+    );
+    let first = Rc::new(Cell::new(None::<&'static search::Entry>));
+    let top = first.clone();
+    let weak_content = Rc::downgrade(&content);
+    let search = SearchField::new(&ui)
+        .placeholder("Search")
+        .on_change(move |query| {
+            let Some(content) = weak_content.upgrade() else {
+                return;
+            };
+            let hits = search::results(&query);
+            top.set(hits.first().copied());
+            if hits.is_empty() {
+                content.set_cached_page(if query.trim().is_empty() {
+                    sidebar.clone()
+                } else {
+                    empty.clone()
+                });
+                return;
+            }
+            results.set_rows(search::grouped(&hits));
+            results.scroll_to(0);
+            content.set_cached_page(results.clone());
+        })
+        .on_commit(move |_| {
+            if let Some(entry) = first.get() {
+                open(entry);
+            }
+        });
+    let pane = VStack::new(&ui)
+        .spacing(8.0)
+        .push(
+            HStack::new(&ui)
+                .insets(Insets {
+                    top: 6.0,
+                    left: 10.0,
+                    bottom: 0.0,
+                    right: 10.0,
+                })
+                .push(search),
+        )
+        .push(content);
+    View::new(&ui).safe_area_content(pane)
+}
+
+type SliderRange = Rc<dyn Fn(&ConfigSource) -> (f64, f64)>;
 
 pub(super) struct FormBuilder {
     ui: Ui,
     model: Weak<Model>,
+    draft: bool,
     sync: Vec<SyncControl>,
-    gap_preview: Option<Rc<dyn Fn(&ConfigSource)>>,
+    gap_preview: Option<Preview>,
 }
 impl FormBuilder {
     fn new(ui: Ui, model: &Rc<Model>) -> Self {
         Self {
             ui,
             model: Rc::downgrade(model),
+            draft: model.is_draft(),
             sync: Vec::new(),
             gap_preview: None,
         }
@@ -651,13 +638,15 @@ impl FormBuilder {
         }));
     }
 
+    /// Submit `value` unless the source already holds it.
     fn change<T: PartialEq + Send + 'static>(
         &self,
-        get: impl Fn(&ConfigSource) -> T + Clone + 'static,
+        get: impl Fn(&ConfigSource) -> T + 'static,
         set: impl Fn(&mut ConfigSource, T) -> Result<(), String> + Send + Clone + 'static,
         error: Weak<ValidationMessage>,
     ) -> impl Fn(T) + Clone + 'static {
         let model = self.model.clone();
+        let get = Rc::new(get);
         move |value| {
             if model.upgrade().is_some_and(|model| get(&model.source.borrow()) == value) {
                 return;
@@ -667,6 +656,48 @@ impl FormBuilder {
         }
     }
 
+    /// `change` for setters that cannot fail.
+    fn assign<T: PartialEq + Send + 'static>(
+        &self,
+        get: impl Fn(&ConfigSource) -> T + 'static,
+        set: impl Fn(&mut ConfigSource, T) + Send + Clone + 'static,
+        error: Weak<ValidationMessage>,
+    ) -> impl Fn(T) + Clone + 'static {
+        self.change(
+            get,
+            move |source, value| {
+                set(source, value);
+                Ok(())
+            },
+            error,
+        )
+    }
+
+    /// Schema rows for `keys`, in order.
+    fn fields<T: ConfigSchema>(
+        &mut self,
+        mut section: Section,
+        keys: &[&str],
+        get: fn(&ConfigSource) -> &T,
+        set: fn(&mut ConfigSource) -> &mut T,
+    ) -> Section {
+        for key in keys {
+            section = section.row(self.field(key, get, set));
+        }
+        section
+    }
+
+    fn field<T: ConfigSchema>(
+        &mut self,
+        key: &str,
+        get: fn(&ConfigSource) -> &T,
+        set: fn(&mut ConfigSource) -> &mut T,
+    ) -> SettingsRow {
+        let field = T::field(key).unwrap_or_else(|| panic!("unknown setting `{key}`"));
+        self.schema_field(field, get, set)
+            .unwrap_or_else(|| panic!("setting `{key}` needs a custom editor"))
+    }
+
     fn switch(
         &mut self,
         title: &str,
@@ -674,21 +705,11 @@ impl FormBuilder {
         set: impl Fn(&mut ConfigSource, bool) + Send + Clone + 'static,
     ) -> SettingsRow {
         let message = Rc::new(ValidationMessage::new(&self.ui));
-        let error = Rc::downgrade(&message);
         let get = Rc::new(get);
         let current = get.clone();
-        let change = self.change(
-            move |s| current(s),
-            move |s, value| {
-                set(s, value);
-                Ok(())
-            },
-            error,
-        );
+        let change = self.assign(move |s| current(s), set, Rc::downgrade(&message));
         let input = Rc::new(Switch::new(&self.ui).on_change(change));
-        self.sync(&input, move |input, s| {
-            input.set_value(get(s));
-        });
+        self.sync(&input, move |input, s| input.set_value(get(s)));
         self.row(title, input, message)
     }
 
@@ -716,7 +737,7 @@ impl FormBuilder {
         title: &str,
         scale: f64,
         integer: bool,
-        slider_range: Option<Rc<dyn Fn(&ConfigSource) -> (f64, f64)>>,
+        slider_range: Option<SliderRange>,
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
@@ -741,76 +762,60 @@ impl FormBuilder {
         title: &str,
         scale: f64,
         integer: bool,
-        slider_range: Option<Rc<dyn Fn(&ConfigSource) -> (f64, f64)>>,
+        slider_range: Option<SliderRange>,
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> (Option<Rc<Slider>>, Rc<NumberField>, Rc<ValidationMessage>) {
         let message = Rc::new(ValidationMessage::new(&self.ui));
-        let error = Rc::downgrade(&message);
         let get = Rc::new(get);
         let current = get.clone();
-        let set_preview = set.clone();
-        let change = self.change(
-            move |s| current(s),
-            move |s, value| {
-                set(s, value);
-                Ok(())
-            },
-            error,
-        );
+        let edit_preview = set.clone();
+        let change = self.assign(move |s| current(s), set, Rc::downgrade(&message));
         let commit = move |value: f64| change(value / scale);
         let field = if integer {
             NumberField::new(&self.ui).integer()
         } else {
             NumberField::new(&self.ui)
         };
-        let draft = self.model.upgrade().is_some_and(|m| m.draft_base.is_some());
-        let input = Rc::new(if draft {
+        let input = Rc::new(if self.draft {
             field.on_edit(commit.clone())
         } else {
             field.on_change(commit.clone())
         });
         let slider = slider_range.as_ref().map(|range| {
-            let source = self.model.upgrade().unwrap();
-            let (min, max) = range(&source.source.borrow());
-            let range = range.clone();
             let model = self.model.clone();
+            let (min, max) = range(&model.upgrade().unwrap().source.borrow());
+            let range = range.clone();
             let preview = self.gap_preview.clone();
-            let continuous = preview.is_some();
-            let edit_preview = set_preview.clone();
             let preview_input = Rc::downgrade(&input);
             let mut local_preview = None::<ConfigSource>;
             let app = Application::shared(&self.ui);
-            let slider = Slider::new(&self.ui).range(min, max).continuous(continuous);
+            let slider = Slider::new(&self.ui).range(min, max).continuous(preview.is_some());
             let slider = Rc::new(slider.on_change(move |v| {
-                if let Some(model) = model.upgrade() {
-                    let (min, max) = range(&model.source.borrow());
-                    let value = if preview.is_some() {
-                        if integer {
-                            v.round()
-                        } else {
-                            (v * 10.0).round() / 10.0
-                        }
-                    } else {
-                        v.round()
-                    }
-                    .clamp(min, max);
-                    if let Some(preview) = &preview {
-                        let local =
-                            local_preview.get_or_insert_with(|| model.source.borrow().clone());
-                        edit_preview(local, value / scale);
-                        preview(local);
-                        if let Some(input) = preview_input.upgrade() {
-                            input.set_value(value);
-                        }
-                        // Preview while dragging; commit once on release.
-                        if app.is_mouse_dragging() {
-                            return;
-                        }
-                    }
-                    local_preview = None;
-                    commit(value);
+                let Some(model) = model.upgrade() else {
+                    return;
+                };
+                let (min, max) = range(&model.source.borrow());
+                let value = if preview.is_some() && !integer {
+                    (v * 10.0).round() / 10.0
+                } else {
+                    v.round()
                 }
+                .clamp(min, max);
+                if let Some(preview) = &preview {
+                    let local = local_preview.get_or_insert_with(|| model.source.borrow().clone());
+                    edit_preview(local, value / scale);
+                    preview(local);
+                    if let Some(input) = preview_input.upgrade() {
+                        input.set_value(value);
+                    }
+                    // Preview while dragging; commit once on release.
+                    if app.is_mouse_dragging() {
+                        return;
+                    }
+                }
+                local_preview = None;
+                commit(value);
             }));
             slider.accessibility_label(title);
             slider
@@ -820,16 +825,17 @@ impl FormBuilder {
         let weak = Rc::downgrade(&input);
         let weak_slider = slider.as_ref().map(Rc::downgrade);
         self.sync.push(Box::new(move |s| {
-            if let Some(input) = weak.upgrade() {
-                let value = get(s) * scale;
-                input.set_value(value);
-                if let Some(slider) = weak_slider.as_ref().and_then(Weak::upgrade) {
-                    if let Some(range) = &slider_range {
-                        let (min, max) = range(s);
-                        slider.set_range(min, max);
-                    }
-                    slider.set_value(value);
+            let Some(input) = weak.upgrade() else {
+                return;
+            };
+            let value = get(s) * scale;
+            input.set_value(value);
+            if let Some(slider) = weak_slider.as_ref().and_then(Weak::upgrade) {
+                if let Some(range) = &slider_range {
+                    let (min, max) = range(s);
+                    slider.set_range(min, max);
                 }
+                slider.set_value(value);
             }
         }));
         (slider, input, message)
@@ -864,21 +870,17 @@ impl FormBuilder {
         set: impl Fn(&mut ConfigSource, String) -> Result<(), String> + Send + Clone + 'static,
     ) -> SettingsRow {
         let message = Rc::new(ValidationMessage::new(&self.ui));
-        let error = Rc::downgrade(&message);
         let get = Rc::new(get);
         let current = get.clone();
-        let draft = self.model.upgrade().is_some_and(|model| model.draft_base.is_some());
-        let commit = self.change(move |s| current(s), set, error);
+        let commit = self.change(move |s| current(s), set, Rc::downgrade(&message));
         let field = TextField::new(&self.ui);
-        let input = Rc::new(if draft {
+        let input = Rc::new(if self.draft {
             field.on_change(commit)
         } else {
             field.on_commit(commit)
         });
         input.width(220.0);
-        self.sync(&input, move |input, s| {
-            input.set_value(&get(s));
-        });
+        self.sync(&input, move |input, s| input.set_value(&get(s)));
         self.row(title, input, message)
     }
 
@@ -890,19 +892,11 @@ impl FormBuilder {
         set: impl Fn(&mut ConfigSource, T) + Send + Clone + 'static,
     ) -> SettingsRow {
         let message = Rc::new(ValidationMessage::new(&self.ui));
-        let error = Rc::downgrade(&message);
         let get = Rc::new(get);
         let current = get.clone();
-        let items: Vec<_> = values.iter().map(|(_, value)| value.clone()).collect();
+        let items: Rc<[T]> = values.iter().map(|(_, value)| value.clone()).collect();
         let choices = items.clone();
-        let change = self.change(
-            move |s| current(s),
-            move |s, value| {
-                set(s, value);
-                Ok(())
-            },
-            error,
-        );
+        let change = self.assign(move |s| current(s), set, Rc::downgrade(&message));
         let input = Rc::new(
             Popup::new(&self.ui)
                 .items(values.iter().map(|(label, _)| *label))
@@ -919,15 +913,16 @@ impl FormBuilder {
         title: &str,
         values: Vec<(&str, T)>,
         get: impl Fn(&ConfigSource) -> Option<T> + 'static,
-        default: impl Fn(&ConfigSource) -> T + Send + Clone + 'static,
+        default: impl Fn(&ConfigSource) -> T + 'static,
         set: impl Fn(&mut ConfigSource, Option<T>) + Send + Clone + 'static,
     ) -> SettingsRow {
         let message = Rc::new(ValidationMessage::new(&self.ui));
         let error = Rc::downgrade(&message);
         let model = self.model.clone();
         let get = Rc::new(get);
+        let default = Rc::new(default);
         let current = get.clone();
-        let items: Vec<_> = values.iter().map(|(_, value)| value.clone()).collect();
+        let items: Rc<[T]> = values.iter().map(|(_, value)| value.clone()).collect();
         let labels: Vec<String> = values.iter().map(|(label, _)| (*label).into()).collect();
         let choices = items.clone();
         let inherited = default.clone();
@@ -938,12 +933,14 @@ impl FormBuilder {
             let Some(owner) = model.upgrade() else {
                 return;
             };
-            let source = owner.source.borrow();
-            let value = (choice != inherited(&source)).then_some(choice);
-            if current(&source) == value {
-                return;
-            }
-            drop(source);
+            let value = {
+                let source = owner.source.borrow();
+                let value = (choice != inherited(&source)).then_some(choice);
+                if current(&source) == value {
+                    return;
+                }
+                value
+            };
             let set = set.clone();
             Model::submit(
                 &model,

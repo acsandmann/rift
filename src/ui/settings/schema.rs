@@ -44,7 +44,7 @@ impl FormBuilder {
             move |source, value| write(set(source), value),
             error,
         );
-        let draft = self.model.upgrade().is_some_and(|model| model.draft_base.is_some());
+        let draft = self.draft;
         let control: Box<dyn NativeView> = match field.kind {
             FieldKind::Bool => {
                 let input = Rc::new(

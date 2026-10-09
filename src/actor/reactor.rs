@@ -2759,7 +2759,8 @@ impl Reactor {
                 warn!(%error, "failed to update stack line config");
             }
             if let Some(tx) = &self.menu_manager.menu_tx
-                && let Err(error) = tx.try_send(menu_bar::Event::ConfigUpdated(config.clone()))
+                && let Err(error) =
+                    tx.try_send(menu_bar::Event::ConfigUpdated(Box::new(config.clone())))
             {
                 warn!(%error, "failed to update menu bar config");
             }

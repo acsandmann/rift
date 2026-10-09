@@ -1093,6 +1093,7 @@ pub struct ScrollingLayoutSettings {
     #[setting(
         label = "Minimum width",
         scale = 100.0,
+        unit = "%",
         aliases = "minimum column width sizing percentages tiling"
     )]
     pub min_column_width_ratio: f64,
@@ -1101,6 +1102,7 @@ pub struct ScrollingLayoutSettings {
     #[setting(
         label = "Maximum width",
         scale = 100.0,
+        unit = "%",
         aliases = "maximum column width sizing percentages tiling"
     )]
     pub max_column_width_ratio: f64,

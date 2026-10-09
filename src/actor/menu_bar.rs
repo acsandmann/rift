@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
@@ -12,7 +11,13 @@ use crate::layout_engine::LayoutCommand;
 use crate::model::server::RuntimeWorkspaceData;
 use crate::sys::screen::SpaceId;
 use crate::ui::menu_bar::{MenuAction, MenuIcon};
+use crate::ui::settings::{Action, Finish, Request};
 use crate::{actor, common};
+
+type UpdateCheck = (
+    tokio::sync::oneshot::Receiver<Result<String, String>>,
+    crate::ui::settings::updates::Completion,
+);
 
 /// Menu-bar-only projection; workspace indices remain local to each space.
 #[derive(Debug, Clone)]
@@ -42,7 +47,7 @@ impl Update {
 pub enum Event {
     OpenSettings,
     Update(Update),
-    ConfigUpdated(Config),
+    ConfigUpdated(Box<Config>),
 }
 
 enum DebounceCommand {
@@ -63,7 +68,7 @@ pub struct Menu {
     settings_requests: tokio::sync::mpsc::UnboundedReceiver<crate::ui::settings::Request>,
     settings_request_tx: tokio::sync::mpsc::UnboundedSender<crate::ui::settings::Request>,
     /// Completions awaiting installed-application discovery; `Some` while a scan runs.
-    app_scan: Option<Vec<Box<dyn FnOnce(Result<(), String>)>>>,
+    app_scan: Option<Vec<Finish>>,
     mtm: MainThreadMarker,
     config_path: std::path::PathBuf,
     last_signature: Option<u64>,
@@ -122,10 +127,7 @@ impl Menu {
         let (tick_tx, mut tick_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let debounce_tx = Self::spawn_debouncer(DEBOUNCE, tick_tx);
 
-        let mut update_check: Option<(
-            tokio::sync::oneshot::Receiver<Result<String, String>>,
-            crate::ui::settings::updates::Completion,
-        )> = None;
+        let mut update_check: Option<UpdateCheck> = None;
         loop {
             tokio::select! {
                 result = async {
@@ -161,8 +163,8 @@ impl Menu {
                                     let _ = debounce_tx.send(DebounceCommand::Arm);
                                 }
                                 Event::ConfigUpdated(cfg) => {
-                                    self.handle_config_updated(cfg);
-                                    if self.settings.as_ref().is_some_and(|s| s.visible()) {
+                                    self.handle_config_updated(*cfg);
+                                    if self.settings.is_some() {
                                         self.sync_settings().await;
                                     }
                                 }
@@ -180,34 +182,7 @@ impl Menu {
                 }
 
                 Some(request) = self.settings_requests.recv() => {
-                    let result = match request.action {
-                        crate::ui::settings::Action::CheckUpdates(done) => {
-                            update_check = Some((crate::ui::settings::updates::start(), done));
-                            (request.finish)(Ok(()));
-                            continue;
-                        }
-                        crate::ui::settings::Action::RefreshRuntime => {
-                            self.discover_applications(Some(request.finish));
-                            continue;
-                        }
-                        action => {
-                            let (response, result) = tokio::sync::oneshot::channel();
-                            self.config_tx.send(match action {
-                                crate::ui::settings::Action::Edit(edit) => config::Event::EditSource { edit, response },
-                                crate::ui::settings::Action::Reload => config::Event::ReloadSource(response),
-                                crate::ui::settings::Action::RefreshRuntime | crate::ui::settings::Action::CheckUpdates(_) => unreachable!(),
-                            });
-                            result.await.unwrap_or_else(|_| Err("Configuration service unavailable".into())).map(|snapshot| {
-                                self.settings_source_revision.set(Some(snapshot.revision));
-                                snapshot.source
-                            })
-                        }
-                    };
-                    let failed = result.is_err();
-                    (request.finish)(result.map(|source| {
-                        if let Some(settings) = &self.settings { settings.synchronize(source); }
-                    }));
-                    if failed { self.sync_settings().await; }
+                    self.handle_settings_request(request, &mut update_check).await;
                 }
                 maybe_action = self.action_rx.recv() => {
                     if let Some(action) = maybe_action {
@@ -216,6 +191,40 @@ impl Menu {
                     }
                 }
             }
+        }
+    }
+
+    async fn handle_settings_request(
+        &mut self,
+        request: Request,
+        update_check: &mut Option<UpdateCheck>,
+    ) {
+        let (response, receive) = tokio::sync::oneshot::channel();
+        match request.action {
+            Action::CheckUpdates(done) => {
+                *update_check = Some((crate::ui::settings::updates::start(), done));
+                (request.finish)(Ok(()));
+                return;
+            }
+            Action::RefreshRuntime => {
+                self.discover_applications(Some(request.finish));
+                return;
+            }
+            Action::Edit(edit) => self.config_tx.send(config::Event::EditSource { edit, response }),
+            Action::Reload => self.config_tx.send(config::Event::ReloadSource(response)),
+        }
+        let result = receive
+            .await
+            .unwrap_or_else(|_| Err("Configuration service unavailable".into()));
+        let failed = result.is_err();
+        (request.finish)(result.map(|snapshot| {
+            self.settings_source_revision.set(Some(snapshot.revision));
+            if let Some(settings) = &self.settings {
+                settings.synchronize(snapshot.source);
+            }
+        }));
+        if failed {
+            self.sync_settings().await;
         }
     }
 
@@ -291,7 +300,7 @@ impl Menu {
 
     /// Scan installed applications off the main thread; the result returns as a `MenuAction`
     /// so the menu actor keeps handling events and no closed window or model is retained.
-    fn discover_applications(&mut self, finish: Option<Box<dyn FnOnce(Result<(), String>)>>) {
+    fn discover_applications(&mut self, finish: Option<Finish>) {
         if self
             .settings
             .as_ref()
@@ -335,7 +344,7 @@ impl Menu {
         match event {
             Event::OpenSettings => {}
             Event::Update(update) => self.handle_update(update),
-            Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
+            Event::ConfigUpdated(cfg) => self.handle_config_updated(*cfg),
         }
     }
 
@@ -485,7 +494,7 @@ impl Menu {
     }
 
     fn open_path_or_url(target: impl AsRef<Path>) {
-        let _ = ProcessCommand::new("open").arg(target.as_ref()).spawn();
+        cgs::Application::open(&target.as_ref().to_string_lossy());
     }
 
     fn reload_config(&self) {
