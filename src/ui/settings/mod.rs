@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
 use cgs::*;
+use objc2::rc::Retained;
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventModifierFlags, NSMenu};
 use rift_protocol::ApplicationData;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -321,6 +323,33 @@ impl Router {
 pub struct Settings {
     window: SettingsWindow,
     router: Rc<Router>,
+    activation: Rc<SettingsActivation>,
+}
+
+/// Keep menu-bar ownership for the whole window lifetime, including its sheets.
+struct SettingsActivation {
+    ui: Ui,
+    menu: Menu,
+    previous: RefCell<Option<(NSApplicationActivationPolicy, Option<Retained<NSMenu>>)>>,
+}
+
+impl SettingsActivation {
+    fn activate(&self) {
+        let app = NSApplication::sharedApplication(self.ui.mtm());
+        if self.previous.borrow().is_none() {
+            *self.previous.borrow_mut() = Some((app.activationPolicy(), app.mainMenu()));
+        }
+        app.setMainMenu(Some(self.menu.ns_menu()));
+        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    }
+
+    fn restore(&self) {
+        if let Some((policy, menu)) = self.previous.borrow_mut().take() {
+            let app = NSApplication::sharedApplication(self.ui.mtm());
+            app.setMainMenu(menu.as_deref());
+            app.setActivationPolicy(policy);
+        }
+    }
 }
 
 impl Settings {
@@ -331,7 +360,7 @@ impl Settings {
         displays: Vec<ScreenInfo>,
         applications: Vec<ApplicationData>,
         requests: UnboundedSender<Request>,
-        on_close: impl FnMut() + 'static,
+        mut on_close: impl FnMut() + 'static,
     ) -> Self {
         let env = Rc::new(Env {
             requests,
@@ -386,15 +415,36 @@ impl Settings {
         sidebar.set_selected(0);
         *router.sidebar.borrow_mut() = Rc::downgrade(&sidebar);
 
+        let activation = Rc::new(SettingsActivation {
+            ui,
+            menu: Menu::new(&ui),
+            previous: RefCell::new(None),
+        });
+        let close_activation = activation.clone();
         let window = SettingsWindow::new(&ui, "Rift Settings")
             .page_title(&ui, router.title.clone())
-            .on_close(on_close)
+            .on_close(move || {
+                close_activation.restore();
+                on_close();
+            })
             .content(NavigationSplitView::new(
                 &ui,
                 sidebar_pane(ui, &router, sidebar.clone()),
                 host,
             ));
         window.initial_focus(&*sidebar);
+        let app_menu = Rc::new(Menu::new(&ui));
+        let close_window = objc2::rc::Weak::new(window.ns_window());
+        app_menu.add(
+            MenuItem::new(&ui, "Close Settings")
+                .shortcut("w", NSEventModifierFlags::Command)
+                .on_click(move || {
+                    if let Some(window) = close_window.load() {
+                        window.performClose(None);
+                    }
+                }),
+        );
+        activation.menu.add(MenuItem::new(&ui, "Rift").submenu(app_menu));
         let menu = Rc::new(Menu::new(&ui));
         let route = navigate.clone();
         menu.add(MenuItem::new(&ui, "All").tag(LAYOUTS as isize).on_click(move || route(LAYOUTS)));
@@ -428,7 +478,7 @@ impl Settings {
         *env.window.borrow_mut() = window.handle();
         window.set_size_centered(CGSize::new(880.0, 660.0));
         router.show(0);
-        Self { window, router }
+        Self { window, router, activation }
     }
 
     fn model(&self) -> &Rc<Model> { &self.router.model }
@@ -459,7 +509,10 @@ impl Settings {
         }
     }
 
-    pub fn show(&self) { self.window.present(); }
+    pub fn show(&self) {
+        self.activation.activate();
+        self.window.present();
+    }
 
     /// Updates the current page even while hidden or minimized; other pages sync when shown.
     pub fn synchronize(&self, source: ConfigSource) {
@@ -477,6 +530,7 @@ impl Drop for Settings {
         self.window.toolbar().set_page_controls(&self.router.ui, None);
         self.router.host.clear();
         self.router.pages.borrow_mut().clear();
+        self.activation.restore();
     }
 }
 
