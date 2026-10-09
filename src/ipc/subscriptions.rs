@@ -189,13 +189,7 @@ impl ServerState {
     }
 
     pub fn publish(&self, event: BroadcastEvent) {
-        self.forward_event_to_cli_subscribers(&event);
-        self.forward_event_to_subscribers(&event);
-    }
-
-    fn forward_event_to_subscribers(&self, event: &BroadcastEvent) {
         let event_name = event.kind().as_str();
-
         let mut targets: HashSet<ClientPort> = HashSet::default();
         if let Some(clients) = self.subscriptions_by_event.get(event_name) {
             targets.extend(clients.iter().copied());
@@ -203,18 +197,38 @@ impl ServerState {
         if let Some(clients) = self.subscriptions_by_event.get("*") {
             targets.extend(clients.iter().copied());
         }
-
-        if targets.is_empty() {
+        // Snapshot registrations before executing commands; never hold subscription
+        // locks across serialization or process creation.
+        let mut relevant: Vec<CliSubscription> = Vec::new();
+        {
+            let guard = self.cli_subscriptions.lock();
+            if let Some(list) = guard.get(event_name) {
+                relevant.extend(list.iter().cloned());
+            }
+            if let Some(list) = guard.get("*") {
+                relevant.extend(list.iter().cloned());
+            }
+        }
+        if targets.is_empty() && relevant.is_empty() {
             return;
         }
-
-        let event_json = match serde_json::to_string(event) {
+        let event_json = match serde_json::to_string(&event) {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to serialize broadcast event: {}", e);
                 return;
             }
         };
+        for subscription in relevant {
+            crate::ipc::cli_exec::execute_serialized_cli_subscription(
+                &event,
+                &event_json,
+                &subscription,
+            );
+        }
+        if targets.is_empty() {
+            return;
+        }
 
         let batch = DispatchBatch {
             event_json,
@@ -233,26 +247,6 @@ impl ServerState {
                     error!("Dropping IPC event batch: dispatch worker channel disconnected");
                 }
             }
-        }
-    }
-
-    fn forward_event_to_cli_subscribers(&self, event: &BroadcastEvent) {
-        let event_name = event.kind().as_str();
-
-        // Collect relevant subscriptions without full HashMap clone
-        let mut relevant: Vec<CliSubscription> = Vec::new();
-        {
-            let guard = self.cli_subscriptions.lock();
-            if let Some(list) = guard.get(event_name) {
-                relevant.extend(list.iter().cloned());
-            }
-            if let Some(list) = guard.get("*") {
-                relevant.extend(list.iter().cloned());
-            }
-        }
-
-        for subscription in relevant {
-            crate::ipc::cli_exec::execute_cli_subscription(event, &subscription);
         }
     }
 

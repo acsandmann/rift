@@ -9,7 +9,6 @@ use nix::libc::{
     posix_spawnattr_init, posix_spawnattr_setflags, posix_spawnattr_setpgroup, posix_spawnattr_t,
     posix_spawnp,
 };
-use tracing::error;
 
 use crate::common::collections::{HashMap, HashSet};
 use crate::ipc::subscriptions::CliSubscription;
@@ -33,6 +32,18 @@ impl CliExecutor for DefaultCliExecutor {
     fn execute(
         &self,
         event: &BroadcastEvent,
+        subscription: &CliSubscription,
+    ) -> Result<i32, std::io::Error> {
+        let event_json = serde_json::to_string(event).map_err(std::io::Error::other)?;
+        self.execute_serialized(event, &event_json, subscription)
+    }
+}
+
+impl DefaultCliExecutor {
+    fn execute_serialized(
+        &self,
+        event: &BroadcastEvent,
+        event_json: &str,
         subscription: &CliSubscription,
     ) -> Result<i32, std::io::Error> {
         let mut env_vars: HashMap<String, String> = HashMap::default();
@@ -171,28 +182,12 @@ impl CliExecutor for DefaultCliExecutor {
             }
         }
 
-        let event_json = match serde_json::to_string(event) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to serialize event for CLI executor: {}", e);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "serialization error",
-                ));
-            }
-        };
-        env_vars.insert("RIFT_EVENT_JSON".to_string(), event_json.clone());
-
-        let command = subscription.command.clone();
-        let mut args = subscription.args.clone();
-        args.push(event_json.clone());
-
-        let mut argv_storage: Vec<CString> = Vec::with_capacity(1 + args.len());
-        argv_storage.push(CString::new(command).map_err(|_| {
+        let mut argv_storage: Vec<CString> = Vec::with_capacity(2 + subscription.args.len());
+        argv_storage.push(CString::new(subscription.command.as_str()).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "command contains NUL")
         })?);
-        for a in args {
-            argv_storage.push(CString::new(a.as_str()).map_err(|_| {
+        for a in subscription.args.iter().map(String::as_str).chain(std::iter::once(event_json)) {
+            argv_storage.push(CString::new(a).map_err(|_| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "arg contains NUL")
             })?);
         }
@@ -201,27 +196,32 @@ impl CliExecutor for DefaultCliExecutor {
         argv.push(ptr::null_mut());
 
         let mut override_keys =
-            HashSet::<Vec<u8>>::with_capacity_and_hasher(env_vars.len(), Default::default());
-        for (k, _) in env_vars.clone() {
-            override_keys.insert(k.as_bytes().to_vec());
+            HashSet::<&[u8]>::with_capacity_and_hasher(env_vars.len() + 1, Default::default());
+        for k in env_vars.keys() {
+            override_keys.insert(k.as_bytes());
         }
+        override_keys.insert(b"RIFT_EVENT_JSON");
         let mut env_storage: Vec<CString> = Vec::new();
         for (k, v) in std::env::vars_os() {
-            let kb = k.as_bytes().to_vec();
-            if override_keys.contains(&kb) {
+            if override_keys.contains(k.as_bytes()) {
                 continue;
             }
-            let mut kv = kb;
+            let mut kv = k.as_bytes().to_vec();
             kv.push(b'=');
             kv.extend_from_slice(v.as_bytes());
             env_storage.push(CString::new(kv).unwrap());
         }
         for (k, v) in env_vars {
-            let mut kv = k.clone().into_bytes();
+            let mut kv = k.into_bytes();
             kv.push(b'=');
             kv.extend_from_slice(v.as_bytes());
             env_storage.push(CString::new(kv).unwrap());
         }
+        env_storage.push(
+            CString::new(format!("RIFT_EVENT_JSON={event_json}")).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "event JSON contains NUL")
+            })?,
+        );
         let mut envp: Vec<*mut c_char> =
             env_storage.iter_mut().map(|s| s.as_ptr() as *mut c_char).collect();
         envp.push(ptr::null_mut());
@@ -288,4 +288,14 @@ impl CliExecutor for DefaultCliExecutor {
 pub fn execute_cli_subscription(event: &BroadcastEvent, subscription: &CliSubscription) {
     let exec = DefaultCliExecutor::new();
     let _ = exec.execute(event, subscription);
+}
+
+/// Publish already serialized bytes to each command without serializing per target.
+pub(crate) fn execute_serialized_cli_subscription(
+    event: &BroadcastEvent,
+    event_json: &str,
+    subscription: &CliSubscription,
+) {
+    let exec = DefaultCliExecutor::new();
+    let _ = exec.execute_serialized(event, event_json, subscription);
 }
