@@ -35,5 +35,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Compile
         run: cargo check --locked
+      # settings_native drives real AppKit windows, which is flaky on headless CI runners.
+      # Run it locally with `cargo nextest run -E 'binary(settings_native)'`.
       - name: Test
-        run: cargo nextest run
+        run: cargo nextest run -E 'not binary(settings_native)'
