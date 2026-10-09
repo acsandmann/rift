@@ -10,6 +10,7 @@ use std::sync::mpsc;
 
 use block2::RcBlock;
 use cgs::{Alert, Application, Ui};
+use dispatchr::time::Time;
 use objc2::MainThreadMarker;
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::{
@@ -26,6 +27,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use super::{Action, Finish, Request, Settings, updates};
 use crate::actor::config::{SourceEdit, SourceSnapshot};
 use crate::common::config::ConfigSource;
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::executor::Executor;
 use crate::sys::screen::{ScreenId, ScreenInfo, SpaceId};
 
@@ -72,7 +74,8 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
         let _ = lost.send(Message::Lost("Rift quit.".into()));
     });
     if std::os::unix::process::parent_id() != daemon {
-        fail(mtm, "Rift quit.");
+        fail("Rift quit.");
+        return std::future::pending().await;
     }
     let (jobs, queue) = mpsc::channel();
     let worker = messages.clone();
@@ -85,12 +88,13 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
     let (mut snapshot, mut runtime, mut announced) = (None, None, 0);
     while snapshot.is_none() || runtime.is_none() {
         match inbox.recv().await {
-            Some(Message::Source(result)) => {
-                snapshot = Some(result.unwrap_or_else(|error| fail(mtm, &error)));
+            Some(Message::Source(Ok(source))) => snapshot = Some(source),
+            Some(Message::Source(Err(error)) | Message::Lost(error)) => {
+                fail(&error);
+                return std::future::pending().await;
             }
             Some(Message::Runtime(result)) => runtime = Some(result.unwrap_or_default()),
-            Some(Message::ConfigChanged(revision)) => announced = revision,
-            Some(Message::Lost(error)) => fail(mtm, &error),
+            Some(Message::ConfigChanged(revision)) => announced = announced.max(revision),
             _ => {}
         }
     }
@@ -139,6 +143,7 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
         edits: VecDeque::new(),
         in_flight: None,
         refresh: false,
+        stalled: None,
         runtime: (false, false),
         scan: None,
         update: None,
@@ -149,7 +154,16 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
             // Queue edits sent before the window closed ahead of the close itself.
             biased;
             Some(request) = pending.recv() => session.request(request),
-            Some(message) = inbox.recv() => session.handle(mtm, message),
+            Some(message) = inbox.recv() => {
+                if let Message::Lost(error) = message {
+                    if session.settings.is_none() {
+                        std::process::exit(1);
+                    }
+                    fail(&error);
+                    return std::future::pending().await;
+                }
+                session.handle(message);
+            }
         }
         // Closing leaves submitted edits to finish; then nothing remains to wait for.
         if session.settings.is_none() && session.in_flight.is_none() && session.edits.is_empty() {
@@ -158,12 +172,18 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
     }
 }
 
-fn fail(mtm: MainThreadMarker, error: &str) -> ! {
+/// Reports `error`, then exits. The alert runs from the main queue rather than inside the
+/// executor's poll, whose run-loop source would otherwise re-enter during the modal loop.
+/// Callers stop handling messages until then.
+fn fail(error: &str) {
     tracing::error!(%error, "Settings cannot reach Rift");
-    Alert::new(&Ui::new(mtm), "Rift Settings can’t reach Rift", error)
-        .button("OK")
-        .run_modal();
-    std::process::exit(1)
+    dispatchr::queue::main().after_f_s(Time::NOW, error.to_owned(), |error| {
+        let ui = Ui::new(MainThreadMarker::new().expect("main queue"));
+        Alert::new(&ui, "Rift Settings can’t reach Rift", &error)
+            .button("OK")
+            .run_modal();
+        std::process::exit(1)
+    });
 }
 
 struct Session {
@@ -181,6 +201,9 @@ struct Session {
     in_flight: Option<Option<Finish>>,
     /// Re-read the source before the next edit.
     refresh: bool,
+    /// The announced revision when a refresh last failed. Until a newer announcement, refreshes
+    /// are retried only for user edits, so a persistent failure cannot loop.
+    stalled: Option<u64>,
     /// Runtime query (in flight, outdated by a later notification).
     runtime: (bool, bool),
     /// Completions awaiting installed-application discovery; `Some` while a scan runs.
@@ -206,15 +229,13 @@ impl Session {
         self.pump();
     }
 
-    fn handle(&mut self, mtm: MainThreadMarker, message: Message) {
+    fn handle(&mut self, message: Message) {
         match message {
             Message::Source(result) => {
                 let finish = self.in_flight.take().flatten();
                 match result {
                     Ok(snapshot) => {
-                        if finish.is_none() {
-                            self.announced = snapshot.revision;
-                        }
+                        self.stalled = None;
                         self.adopt(*snapshot);
                         if let Some(finish) = finish {
                             finish(Ok(()));
@@ -226,7 +247,7 @@ impl Session {
                             self.refresh = true;
                             finish(Err(error));
                         }
-                        None => tracing::warn!(%error, "Could not refresh Settings"),
+                        None => self.stall(error),
                     },
                 }
                 self.pump();
@@ -260,15 +281,20 @@ impl Session {
             }
             // Runs after windowWillClose returns, rather than dropping AppKit's active delegate.
             Message::Closed => autoreleasepool(|_| drop(self.settings.take())),
-            Message::Lost(error) if self.settings.is_some() => fail(mtm, &error),
-            Message::Lost(_) => std::process::exit(1),
+            Message::Lost(_) => unreachable!("handled by the session loop"),
         }
     }
 
     /// Starts the next configuration request unless one is in flight.
     fn pump(&mut self) {
         while self.in_flight.is_none() {
-            if self.refresh || self.announced > self.revision {
+            if self.stalled.is_some_and(|announced| self.announced > announced) {
+                self.stalled = None;
+            }
+            let outdated = self.refresh || self.announced > self.revision;
+            if (outdated && self.stalled.is_none())
+                || (self.stalled.is_some() && !self.edits.is_empty())
+            {
                 self.refresh = false;
                 return self.send(Job::Source, None);
             }
@@ -291,6 +317,22 @@ impl Session {
                     Err(error) => finish(Err(error.to_string())),
                 }
             }
+        }
+    }
+
+    /// A refresh failed: edits queued behind it would apply to an unknown source, so reject
+    /// them, and report the first failure of a stall.
+    fn stall(&mut self, error: String) {
+        tracing::warn!(%error, "Could not refresh Settings");
+        let first = self.stalled.replace(self.announced).is_none();
+        for (_, finish) in std::mem::take(&mut self.edits) {
+            finish(Err(error.clone()));
+        }
+        if let (true, Some(settings)) = (first, &self.settings) {
+            let ui = settings.router.ui;
+            Alert::new(&ui, "Settings can’t load the latest configuration", &error)
+                .button("OK")
+                .show_sheet(settings.window.ns_window(), |_| {});
         }
     }
 
