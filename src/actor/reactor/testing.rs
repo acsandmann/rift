@@ -66,6 +66,14 @@ impl Reactor {
             .expect("test window should have a WindowServer identity")
     }
 
+    /// End the grace period of every cross-display move rift started.
+    pub fn expire_display_moves_for_test(&mut self) {
+        let expired = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        for (_, deadline) in self.in_flight_display_moves.values_mut() {
+            *deadline = expired;
+        }
+    }
+
     pub fn test_active_workspace_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.layout_manager
             .layout_engine
@@ -684,4 +692,17 @@ pub fn next_test_topology_revision() -> u64 {
         revision.set(next);
         next
     })
+}
+
+/// A 1000x1000 display at the origin: the left one of two side by side.
+pub fn left_screen() -> CGRect { CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)) }
+
+/// A 1000x1000 display just right of [`left_screen`].
+pub fn right_screen() -> CGRect { CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)) }
+
+/// Deliver the snapshot that follows connecting exactly these displays.
+pub fn connect_displays(reactor: &mut Reactor, frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) {
+    reactor.handle_event(space_state_event_with(frames, spaces, |state| {
+        state.display_set_changed = true
+    }));
 }

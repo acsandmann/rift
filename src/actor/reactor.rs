@@ -15,6 +15,7 @@ mod query;
 mod replay;
 pub mod transaction_manager;
 mod utils;
+mod workspace_bindings;
 
 #[cfg(test)]
 mod testing;
@@ -433,6 +434,12 @@ pub struct Reactor {
     pub animation_tx: Option<AnimationSender>,
     viewport_gesture: Option<gesture::ViewportSession>,
     presentations: HashMap<SpaceId, animation::ViewportHandle>,
+    /// Cross-display moves rift started that macOS may not have caught up with:
+    /// window -> (target space, end of the grace period).
+    in_flight_display_moves: HashMap<WindowServerId, (SpaceId, Instant)>,
+    /// Workspace display bindings need re-applying once the current event's
+    /// outcome has settled window membership.
+    bindings_need_check: bool,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
     #[cfg(test)]
@@ -444,6 +451,11 @@ pub struct Reactor {
 }
 
 impl Reactor {
+    /// How long a window rift moved to another display is held there against reports
+    /// of its old display. Those reports lag the move while macOS and the app catch up,
+    /// and following them makes the window flip back and forth between displays.
+    const DISPLAY_MOVE_GRACE: Duration = Duration::from_secs(2);
+
     pub fn spawn(
         config: Config,
         layout_engine: LayoutEngine,
@@ -570,6 +582,8 @@ impl Reactor {
             animation_tx: None,
             viewport_gesture: None,
             presentations: HashMap::default(),
+            in_flight_display_moves: HashMap::default(),
+            bindings_need_check: false,
             #[cfg(test)]
             event_outcome_phase_trace: Vec::new(),
             #[cfg(test)]
@@ -1196,6 +1210,7 @@ impl Reactor {
                     outcome = outcome.with_focused_window_broadcast(focused_window);
                 }
                 self.apply_event_outcome(outcome);
+                self.apply_pending_display_bindings();
                 if may_make_ready
                     && self.startup_ready.is_some()
                     && let Some(space) = self.default_query_space()
@@ -1892,6 +1907,9 @@ impl Reactor {
                 let Some(index) = workspaces.iter().position(|(id, _)| *id == workspace) else {
                     return Ok(EventOutcome::no_change());
                 };
+                if let Some(routed) = self.route_overview_workspace_selection(space, index) {
+                    return routed;
+                }
                 // Change display context without first focusing its old workspace's window.
                 if let Some(screen) = self.space_state.screen_by_space(space) {
                     if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
@@ -1945,6 +1963,9 @@ impl Reactor {
                 if !changed {
                     return Ok(EventOutcome::no_change());
                 }
+                // A drop onto a display's copy of a workspace bound elsewhere sends
+                // the window on to that workspace's display.
+                self.check_display_bindings_later();
                 let source_space = source.unwrap().space;
                 let destination = destination.unwrap();
                 let mut outcome = EventOutcome::layout_changed(false);
@@ -1958,6 +1979,7 @@ impl Reactor {
                     {
                         self.state.windows.set_window_server_space(server_id, Some(destination));
                     }
+                    self.note_display_move_in_flight(intent.window, destination);
                     let frame = intent.frame.unwrap_or_else(|| {
                         let destination = self
                             .space_state
@@ -2117,13 +2139,18 @@ impl Reactor {
                 return Ok(system_workflow::handle_raise_timeout(sequence_id)?);
             }
             Event::ConfigUpdated(new_cfg) => {
-                return command_workflow::handle_config_updated(
+                let outcome = command_workflow::handle_config_updated(
                     &mut self.config,
                     &mut self.layout_manager,
                     &self.state,
                     &mut self.drag_manager,
                     new_cfg,
-                );
+                )?;
+                // Bindings may have changed.
+                let screens = self.space_state.screens.clone();
+                self.refresh_display_bindings(&screens);
+                self.check_display_bindings_later();
+                return Ok(outcome);
             }
             Event::Command(Command::Metrics(cmd)) => {
                 return command_workflow::handle_command_metrics(cmd);
@@ -2279,51 +2306,27 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
-                let screen = self.screen_for_selector(&selector, None).cloned();
-                let focus_window = screen.as_ref().and_then(|screen| {
-                    let space = screen.space?;
-                    self.last_focused_window_in_space(space).or_else(|| {
-                        self.layout_manager
-                            .layout_engine
-                            .workspaces()
-                            .windows_in_active_workspace(&self.state.windows, space)
-                            .into_iter()
-                            .next()
-                    })
-                });
-                let target_is_active = screen
-                    .as_ref()
-                    .and_then(|screen| screen.space)
-                    .is_none_or(|space| self.is_space_active(space));
-                if target_is_active
-                    && let Some(screen) = screen.as_ref().filter(|screen| screen.space.is_some())
-                {
-                    if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
-                        self.space_state.menu_bar_space = screen.space;
-                    }
-                    // Honor explicit display selection before the native notification arrives,
-                    // even on activation failure. Later spaces-actor updates remain authoritative.
-                    self.space_state.command_space = screen.space;
-                }
-                let focus_window_center = focus_window
-                    .and_then(|wid| self.state.windows.window(wid))
-                    .map(|window| window.frame_monotonic.mid());
-                return command_workflow::handle_focus_display(
-                    &self.app_manager,
-                    command_workflow::DisplayFocusPayload {
-                        screen,
-                        target_is_active,
-                        focus_window,
-                        focus_window_center,
-                    },
-                );
+                return self.focus_display_by_selector(&selector);
             }
             Event::Command(Command::Layout(command)) => {
+                if let Some(routed) = self.route_bound_workspace_command(&command) {
+                    return routed;
+                }
                 let post_arrange_mouse_warp =
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
+                let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
+                // A move-node can carry the windows of the command display elsewhere.
+                let moved_candidates: Vec<WindowId> = match command_space {
+                    Some(space) if is_move_node => self
+                        .layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .windows_in_active_workspace(&self.state.windows, space),
+                    _ => Vec::new(),
+                };
                 let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
-                return command_workflow::handle_command_layout(
+                let outcome = command_workflow::handle_command_layout(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -2334,7 +2337,18 @@ impl Reactor {
                         visible_space_frames,
                         post_arrange_mouse_warp,
                     },
-                );
+                )?;
+                if is_move_node {
+                    for window in moved_candidates {
+                        if let Some(space) = self.assigned_space_for_window_id(window)
+                            && Some(space) != command_space
+                        {
+                            self.note_display_move_in_flight(window, space);
+                        }
+                    }
+                    self.follow_focused_window_to_its_display(command_space);
+                }
+                return Ok(outcome);
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
                 selector,
@@ -2418,7 +2432,7 @@ impl Reactor {
                 // presentation work before the transfer installs its destination frame.
                 self.cancel_window_presentations(vec![window]);
                 let target_frame = Self::center_frame_on_screen(window_frame, target_screen.frame);
-                return command_workflow::handle_command_reactor_move_window_to_display(
+                let outcome = command_workflow::handle_command_reactor_move_window_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
                     command_workflow::MoveWindowToDisplayPayload {
@@ -2428,8 +2442,12 @@ impl Reactor {
                         target_space,
                         target_screen: target_screen.frame,
                         target_frame,
+                        target_workspace: None,
+                        follow: false,
                     },
-                );
+                )?;
+                self.note_display_move_in_flight(window, target_space);
+                return Ok(outcome);
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWorkspaceToDisplay {
                 selector,
@@ -2472,6 +2490,13 @@ impl Reactor {
                 if source_space == target_space {
                     return Ok(EventOutcome::no_change());
                 }
+                if self.bound_workspace_blocks_display_move(source_space, target_space) {
+                    warn!(
+                        ?selector,
+                        "Move workspace to display ignored: the workspace is bound to its display"
+                    );
+                    return Ok(EventOutcome::no_change());
+                }
 
                 let windows = self
                     .layout_manager
@@ -2500,7 +2525,9 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 }
 
-                return command_workflow::handle_command_reactor_move_workspace_to_display(
+                let moved: Vec<WindowId> =
+                    moves.iter().map(|window_move| window_move.window).collect();
+                let outcome = command_workflow::handle_command_reactor_move_workspace_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -2510,7 +2537,11 @@ impl Reactor {
                         target_space,
                         target_screen: target_screen.frame,
                     },
-                );
+                )?;
+                for window in moved {
+                    self.note_display_move_in_flight(window, target_space);
+                }
+                return Ok(outcome);
             }
             _ => (),
         }
@@ -2579,6 +2610,7 @@ impl Reactor {
                 }
                 if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                    self.place_new_window_on_configured_display(window, space);
                 }
             }
         }
@@ -3243,6 +3275,9 @@ impl Reactor {
             active_window_spaces,
             ..
         } = space_state;
+        // Before any new native space gets its workspaces: start each display on a
+        // workspace it owns.
+        self.refresh_display_bindings(&screens);
         self.space_state.active_window_spaces = active_window_spaces;
         self.space_state.membership_complete = membership_complete;
         let activation_config = self.activation_cfg();
@@ -3349,6 +3384,10 @@ impl Reactor {
         self.try_apply_pending_space_change();
         if should_force_refresh_layout {
             outcome = outcome.with_arrange_passes(1);
+        }
+        if display_set_changed || should_force_refresh_layout {
+            // A display joined, left or moved.
+            self.check_display_bindings_later();
         }
         Ok(outcome)
     }
@@ -3689,7 +3728,36 @@ impl Reactor {
         self.state.windows.workspace_info_for_window(wid).map(|info| info.space)
     }
 
+    /// Record that rift just moved `window` onto `target`'s display.
+    fn note_display_move_in_flight(&mut self, window: WindowId, target: SpaceId) {
+        if self.assigned_space_for_window_id(window) != Some(target) {
+            return;
+        }
+        let Some(wsid) = self.state.windows.window(window).and_then(|state| state.info.sys_id)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        self.in_flight_display_moves.retain(|_, (_, deadline)| *deadline > now);
+        self.in_flight_display_moves
+            .insert(wsid, (target, now + Self::DISPLAY_MOVE_GRACE));
+    }
+
+    /// Target of a cross-display move rift started for `wsid`, while it is still in
+    /// its grace period and the window is still assigned there.
+    fn in_flight_display_move_target(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        let (target, deadline) = *self.in_flight_display_moves.get(&wsid)?;
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let wid = self.state.windows.tracked_window_id(wsid)?;
+        (self.assigned_space_for_window_id(wid) == Some(target)).then_some(target)
+    }
+
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        if let Some(target) = self.in_flight_display_move_target(wsid) {
+            return Some(target);
+        }
         let wid = self.state.windows.tracked_window_id(wsid)?;
         let target_frame = self.transaction_manager.get_target_frame(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
@@ -3822,9 +3890,12 @@ impl Reactor {
             })
             .collect();
         for (wid, authoritative_space) in windows {
+            // A window keeps its workspace number when its display went away, or when
+            // it is returning to the display its workspace is bound to.
             let preserve_ordinal = self
                 .assigned_space_for_window_id(wid)
-                .is_some_and(|space| invalidated_spaces.contains(&space));
+                .is_some_and(|space| invalidated_spaces.contains(&space))
+                || self.window_returns_to_bound_display(wid, authoritative_space);
             self.reassign_window_to_authoritative_space(wid, authoritative_space, preserve_ordinal);
         }
     }
@@ -3861,6 +3932,12 @@ impl Reactor {
         wsid: WindowServerId,
         observation: Option<SpaceId>,
     ) -> Option<SpaceId> {
+        if let Some(target) = self.in_flight_display_move_target(wsid) {
+            // Rift just moved this window to another display. Reports of its old
+            // display, even from a live query, are lag rather than the user moving it.
+            trace!(?wsid, ?observation, ?target, "Holding window on its new display");
+            return Some(target);
+        }
         let pending = self.pending_target_space_for_window_server_id(wsid);
         let live =
             if observation.is_none() || pending.is_some_and(|target| observation != Some(target)) {
@@ -4084,6 +4161,15 @@ impl Reactor {
         }
         if focus_desktop && let Some(space) = self.workspace_command_space() {
             self.focus_desktop_if_active_workspace_empty(space);
+        }
+        if matches!(
+            event_clone,
+            LayoutEvent::WindowAdded(..)
+                | LayoutEvent::WindowObserved(..)
+                | LayoutEvent::WindowDiscoveryCompleted(..)
+        ) {
+            // A new or rediscovered window may sit in a workspace bound elsewhere.
+            self.check_display_bindings_later();
         }
         for space in self.space_state.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
@@ -5291,17 +5377,143 @@ impl Reactor {
         CGRect::new(origin, frame.size)
     }
 
-    fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
-        let mut screens: Vec<&ScreenInfo> = self.space_state.screens.iter().collect();
-        screens.sort_by(|a, b| {
-            let x_order = a.frame.origin.x.total_cmp(&b.frame.origin.x);
-            if x_order == std::cmp::Ordering::Equal {
-                a.frame.origin.y.total_cmp(&b.frame.origin.y)
-            } else {
-                x_order
+    /// Move a newly created window to the display `settings.new_window_display`
+    /// names when macOS put it on another one. A window whose app rule names a
+    /// workspace stays where the rule put it.
+    fn place_new_window_on_configured_display(&mut self, window: WindowId, space: SpaceId) {
+        use crate::common::config::NewWindowDisplay;
+        let target_space = match self.config.settings.new_window_display {
+            NewWindowDisplay::Default => return,
+            NewWindowDisplay::Focused => self.workspace_command_space(),
+            NewWindowDisplay::Cursor => window_server::current_cursor_location()
+                .ok()
+                .and_then(|point| self.screen_for_point(point))
+                .and_then(|screen| screen.space),
+        };
+        let Some(target_space) =
+            target_space.filter(|target| *target != space && self.is_space_active(*target))
+        else {
+            return;
+        };
+        let Some(state) = self.state.windows.window(window) else {
+            return;
+        };
+        if !state.is_admitted() || !state.info.is_standard {
+            return;
+        }
+        let app_info = self.app_manager.apps.get(&window.pid).map(|app| app.info.clone());
+        let names_workspace = self.layout_manager.layout_engine.app_rule_names_workspace(
+            crate::model::WindowRuleContext {
+                app_bundle_id: app_info.as_ref().and_then(|info| info.bundle_id.as_deref()),
+                app_name: app_info.as_ref().and_then(|info| info.localized_name.as_deref()),
+                window_title: Some(state.info.title.as_str()),
+                ax_role: state.info.ax_role.as_deref(),
+                ax_subrole: state.info.ax_subrole.as_deref(),
+            },
+        );
+        if names_workspace {
+            return;
+        }
+        let Some(target_screen) = self.space_state.screen_by_space(target_space).cloned() else {
+            return;
+        };
+        let window_server_id = state.info.sys_id;
+        let target_frame = Self::center_frame_on_screen(state.frame_monotonic, target_screen.frame);
+        match command_workflow::handle_command_reactor_move_window_to_display(
+            &mut self.state,
+            &mut self.layout_manager,
+            command_workflow::MoveWindowToDisplayPayload {
+                window,
+                window_server_id,
+                source_space: space,
+                target_space,
+                target_screen: target_screen.frame,
+                target_frame,
+                target_workspace: None,
+                follow: false,
+            },
+        ) {
+            Ok(outcome) => {
+                self.note_display_move_in_flight(window, target_space);
+                self.apply_event_outcome(outcome);
             }
+            Err(error) => {
+                warn!(?window, %error, "Could not open new window on the configured display")
+            }
+        }
+    }
+
+    /// After a layout command carried the focused window onto another display, make
+    /// that display the command context, as an explicit `focus_display` would. macOS
+    /// moves its active display along with the key window only later, and until then
+    /// the next command would still act on the display the window just left.
+    fn follow_focused_window_to_its_display(&mut self, previous_space: Option<SpaceId>) {
+        let Some(window) = self.layout_manager.layout_engine.focused_window() else {
+            return;
+        };
+        let Some(space) = self.assigned_space_for_window_id(window) else {
+            return;
+        };
+        if Some(space) == previous_space || !self.is_space_active(space) {
+            return;
+        }
+        let Some(display_uuid) = self.display_uuid_for_space(space) else {
+            return;
+        };
+        if crate::sys::screen::set_active_menu_bar_display_uuid(&display_uuid) {
+            self.space_state.menu_bar_space = Some(space);
+        }
+        self.space_state.command_space = Some(space);
+    }
+
+    /// Focus the display `selector` names: make it the command and menu-bar
+    /// context and focus its last focused window.
+    fn focus_display_by_selector(
+        &mut self,
+        selector: &DisplaySelector,
+    ) -> anyhow::Result<EventOutcome> {
+        let screen = self.screen_for_selector(selector, None).cloned();
+        let focus_window = screen.as_ref().and_then(|screen| {
+            let space = screen.space?;
+            self.last_focused_window_in_space(space).or_else(|| {
+                self.layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .windows_in_active_workspace(&self.state.windows, space)
+                    .into_iter()
+                    .next()
+            })
         });
-        screens
+        let target_is_active = screen
+            .as_ref()
+            .and_then(|screen| screen.space)
+            .is_none_or(|space| self.is_space_active(space));
+        if target_is_active
+            && let Some(screen) = screen.as_ref().filter(|screen| screen.space.is_some())
+        {
+            if crate::sys::screen::set_active_menu_bar_display_uuid(&screen.display_uuid) {
+                self.space_state.menu_bar_space = screen.space;
+            }
+            // Honor explicit display selection before the native notification arrives,
+            // even on activation failure. Later spaces-actor updates remain authoritative.
+            self.space_state.command_space = screen.space;
+        }
+        let focus_window_center = focus_window
+            .and_then(|wid| self.state.windows.window(wid))
+            .map(|window| window.frame_monotonic.mid());
+        command_workflow::handle_focus_display(
+            &self.app_manager,
+            command_workflow::DisplayFocusPayload {
+                screen,
+                target_is_active,
+                focus_window,
+                focus_window_center,
+            },
+        )
+    }
+
+    fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
+        workspace_bindings::physical_order(&self.space_state.screens)
     }
 
     fn store_current_floating_positions(&mut self, space: SpaceId) {

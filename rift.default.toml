@@ -26,6 +26,14 @@ animation_fps = 100.0
 focus_follows_mouse = true
 mouse_follows_focus = true
 mouse_hides_on_focus = true
+# Which display a newly created window opens on:
+# - "default": wherever macOS and the app put it
+# - "focused": the display holding keyboard focus when the window appears
+# - "cursor": the display under the mouse cursor when the window appears. Useful
+#   when a launcher activates an app whose other windows live on another display
+#   before asking it for a new window.
+# A window whose app rule names a workspace always goes where the rule says.
+new_window_display = "default"
 # Treat displays stacked in macOS as a horizontal mouse crossing chain when
 # they are physically side-by-side. At a left/right edge, the cursor enters
 # the logical neighbor at the same vertical offset, if that point exists.
@@ -301,11 +309,26 @@ prevent_wrapping = false
 reapply_app_rules_on_title_change = false
 
 # Workspace-specific rules
-# - workspace: target workspace by index (integer) or name (string)
+# - workspace: target workspace by index (integer) or name (string); unnamed
+#   workspaces are named "Workspace N"
 # - layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling", "floating")
+# - display: the display the workspace lives on, as a display UUID (recommended:
+#   stable across reconnects, see `rift-cli query displays`) or a 0-based index in
+#   physical order (left to right, then top to bottom)
+#
+# A workspace bound to a display lives there while the display is connected:
+#   - switch_to_workspace focuses that display and switches the workspace there
+#   - move_window_to_workspace sends the window to that display
+#   - app_rules targeting the workspace place new windows on that display
+#   - when the display is disconnected the workspace falls back to the current
+#     display; once it reconnects, windows parked there are moved back
+# Where several rules match a workspace, the last one giving a setting wins.
+#
 # workspace_rules = [
 #   { workspace = 1, layout = "bsp" },
-#   { workspace = "second", layout = "scrolling" }
+#   { workspace = "second", layout = "scrolling" },
+#   { workspace = "web", display = "37D8832A-2D66-02CA-B9F7-8F30A301B230" },
+#   { workspace = 4, display = 1 },
 # ]
 workspace_rules = []
 
