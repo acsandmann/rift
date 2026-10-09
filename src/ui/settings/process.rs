@@ -47,7 +47,7 @@ enum Message {
     /// `None` when the daemon could not answer this time.
     Runtime(Option<Runtime>),
     ConfigChanged(u64),
-    RefreshRuntime,
+    RefreshSettings,
     Installed(Vec<(String, String)>),
     Updated(Result<String, String>),
     Closed,
@@ -139,7 +139,7 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
     } {
         let messages = messages.clone();
         let refresh = RcBlock::new(move |_: NonNull<NSNotification>| {
-            let _ = messages.send(Message::RefreshRuntime);
+            let _ = messages.send(Message::RefreshSettings);
         });
         let _ = unsafe {
             NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
@@ -273,7 +273,14 @@ impl Session {
                 self.announced = self.announced.max(revision);
                 self.pump();
             }
-            Message::RefreshRuntime => self.refresh_runtime(),
+            Message::RefreshSettings => {
+                // Broadcasts are best-effort. Refocusing also recovers a missed revision or
+                // retries a previous failed refresh without creating a retry loop.
+                self.refresh = true;
+                self.stalled = None;
+                self.pump();
+                self.refresh_runtime();
+            }
             Message::Runtime(runtime) => {
                 if let (Some((displays, applications)), Some(settings)) = (runtime, &self.settings)
                 {
@@ -406,11 +413,20 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
     std::thread::Builder::new()
         .name("settings-events".into())
         .spawn(move || {
-            while let Ok(event) = subscription.recv_event() {
-                if let RiftEvent::ConfigChanged { revision } = event
-                    && events.send(Message::ConfigChanged(revision)).is_err()
-                {
-                    return;
+            loop {
+                match subscription.recv_event() {
+                    Ok(RiftEvent::ConfigChanged { revision }) => {
+                        if events.send(Message::ConfigChanged(revision)).is_err() {
+                            return;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        // Do not leave a window silently disconnected from future updates.
+                        // Reopening Settings creates a fresh subscription.
+                        let _ = events.send(Message::Lost(error.to_string()));
+                        return;
+                    }
                 }
             }
         })
