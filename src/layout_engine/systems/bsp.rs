@@ -819,75 +819,91 @@ mod tests {
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
-    #[test]
-    fn window_in_direction_prefers_leftmost_when_moving_right() {
+    fn tiled(windows: &[u32]) -> (BspLayoutSystem, LayoutId) {
         let mut system = BspLayoutSystem::default();
         let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
+        for &window in windows {
+            system.add_window_after_selection(layout, w(window));
+        }
+        (system, layout)
+    }
 
-        assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
-        assert_eq!(system.window_in_direction(layout, Direction::Left), Some(w(2)));
+    fn frames(
+        system: &BspLayoutSystem,
+        layout: LayoutId,
+        size: CGSize,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+    ) -> HashMap<WindowId, CGRect> {
+        system
+            .calculate_layout(
+                layout,
+                CGRect::new(CGPoint::new(0.0, 0.0), size),
+                0.0,
+                constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect()
+    }
+
+    fn assert_frame(
+        frames: &HashMap<WindowId, CGRect>,
+        window: WindowId,
+        rect: (f64, f64, f64, f64),
+    ) {
+        let (x, y, width, height) = rect;
+        assert_eq!(
+            frames[&window],
+            CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+        );
     }
 
     #[test]
-    fn shared_window_remains_present_in_each_layout() {
-        let mut system = BspLayoutSystem::default();
-        let first = system.create_layout();
-        let second = system.create_layout();
-        system.add_window_after_selection(first, w(1));
-        system.add_window_after_selection(second, w(1));
+    fn insertion_alternates_splits_and_navigation_follows_orientation() {
+        let (mut system, layout) = tiled(&[1, 2]);
+        assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
+        assert_eq!(system.window_in_direction(layout, Direction::Left), Some(w(2)));
+        system.toggle_tile_orientation(layout);
+        assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
+        assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
 
-        assert!(system.contains_window(first, w(1)));
-        assert!(system.contains_window(second, w(1)));
+        let (mut spiral, layout) = tiled(&[1]);
+        for (window, horizontal, vertical) in [(2, 1, 0), (3, 1, 1), (4, 2, 1), (5, 2, 2)] {
+            spiral.add_window_after_selection(layout, w(window));
+            let tree = spiral.draw_tree(layout);
+            assert_eq!(tree.matches("Horizontal").count(), horizontal);
+            assert_eq!(tree.matches("Vertical").count(), vertical);
+        }
+    }
+
+    #[test]
+    fn focus_raises_only_its_target_and_layout_membership_is_independent() {
+        let (mut system, first) = tiled(&[1, 2, 3]);
+        assert_eq!(
+            system.move_focus(first, Direction::Left),
+            (Some(w(1)), vec![w(1)])
+        );
+        let second = system.create_layout();
+        system.add_window_after_selection(second, w(1));
         system.set_windows_for_app(first, w(1).pid, vec![w(1)]);
         assert_eq!(system.all_windows_in_layout(first), vec![w(1)]);
         assert_eq!(system.all_windows_in_layout(second), vec![w(1)]);
     }
 
     #[test]
-    fn move_focus_raises_only_the_focus_target() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
-        system.add_window_after_selection(layout, w(3));
-
-        let (focus, raise_windows) = system.move_focus(layout, Direction::Left);
-
-        assert_eq!(focus, Some(w(1)));
-        assert_eq!(
-            raise_windows,
-            vec![w(1)],
-            "BSP windows never overlap; raising the other visible windows fronts every app in turn"
-        );
-    }
-
-    #[test]
-    fn window_in_direction_prefers_top_for_down_direction_after_orientation_toggle() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
-        system.toggle_tile_orientation(layout);
-
-        assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
-        assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
-    }
-
-    #[test]
-    fn directional_move_reinserts_window_outside_its_old_split() {
+    fn directional_moves_retile_in_all_axes_and_stop_at_the_edge() {
         for direction in [
             Direction::Left,
             Direction::Right,
             Direction::Up,
             Direction::Down,
         ] {
-            let mut system = BspLayoutSystem::default();
-            let layout = system.create_layout();
-            system.add_window_after_selection(layout, w(1));
-            system.add_window_after_selection(layout, w(2));
             let vertical = matches!(direction, Direction::Up | Direction::Down);
+            let backwards = matches!(direction, Direction::Left | Direction::Up);
+            let (mut system, layout) = tiled(&[1, 2]);
             if vertical {
                 system.toggle_tile_orientation(layout);
             }
@@ -895,26 +911,12 @@ mod tests {
             if vertical {
                 system.toggle_tile_orientation(layout);
             }
-            let backwards = matches!(direction, Direction::Left | Direction::Up);
+
             let moving = if backwards { w(3) } else { w(1) };
             assert!(system.select_window(layout, moving));
             assert!(system.move_selection(layout, direction));
             assert_eq!(system.selected_window(layout), Some(moving));
 
-            let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
-            let frames: HashMap<_, _> = system
-                .calculate_layout(
-                    layout,
-                    screen,
-                    0.0,
-                    &Default::default(),
-                    &Default::default(),
-                    0.0,
-                    Default::default(),
-                    Default::default(),
-                )
-                .into_iter()
-                .collect();
             let expected = if backwards {
                 [
                     (250.0, 0.0, 250.0, 1000.0),
@@ -928,222 +930,93 @@ mod tests {
                     (0.0, 500.0, 1000.0, 500.0),
                 ]
             };
-            assert_eq!(frames.len(), 3);
+            let frames = frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
             for (index, (x, y, width, height)) in expected.into_iter().enumerate() {
-                let (x, y, width, height) = if vertical {
-                    (y, x, height, width)
-                } else {
-                    (x, y, width, height)
-                };
-                assert_eq!(
-                    frames[&w(index as u32 + 1)],
-                    CGRect::new(CGPoint::new(x, y), CGSize::new(width, height)),
-                    "{direction:?}"
+                assert_frame(
+                    &frames,
+                    w(index as u32 + 1),
+                    if vertical {
+                        (y, x, height, width)
+                    } else {
+                        (x, y, width, height)
+                    },
                 );
             }
-            assert!(
-                !system.move_selection(layout, direction),
-                "movement at the outer edge must remain available for cross-display handling"
-            );
+            assert!(!system.move_selection(layout, direction));
             assert_eq!(system.selected_window(layout), Some(moving));
         }
     }
 
     #[test]
-    fn directional_move_keeps_stack_members_and_fullscreen_with_the_leaf() {
-        for sibling in [false, true] {
-            let mut system = BspLayoutSystem::default();
-            let layout = system.create_layout();
-            system.add_window_after_selection(layout, w(1));
-            system.add_window_after_selection(layout, w(2));
-            if !sibling {
-                system.add_window_after_selection(layout, w(3));
-            }
-            let source = if sibling { w(2) } else { w(3) };
-            system.add_window_after_selection(layout, w(4));
-            system.add_window_after_selection(layout, w(5));
-            assert!(system.apply_window_drop(
-                layout,
-                w(4),
-                source,
-                crate::layout_engine::WindowDropAction::Stack
-            ));
-            assert!(system.apply_window_drop(
-                layout,
-                w(5),
-                w(1),
-                crate::layout_engine::WindowDropAction::Stack
-            ));
-            assert!(system.select_window(layout, w(4)));
-            system.toggle_fullscreen_of_selection(layout);
-
-            assert!(system.move_selection(layout, Direction::Left));
-            assert_eq!(system.selected_window(layout), Some(w(4)));
-            assert_eq!(system.stack_members(layout, w(4)), vec![source, w(4)]);
-            assert_eq!(system.stack_members(layout, w(5)), vec![w(1), w(5)]);
-            assert!(system.has_any_fullscreen_node(layout));
-            system.toggle_fullscreen_of_selection(layout);
-            assert!(!system.has_any_fullscreen_node(layout));
-
-            let mut windows = system.all_windows_in_layout(layout);
-            windows.sort();
-            let expected = if sibling {
-                vec![w(1), w(2), w(4), w(5)]
-            } else {
-                vec![w(1), w(2), w(3), w(4), w(5)]
-            };
-            assert_eq!(windows, expected);
-            for window in windows {
-                assert!(system.select_window(layout, window));
-                assert_eq!(system.selected_window(layout), Some(window));
-                system.remove_window(window);
-                assert!(!system.contains_window(layout, window));
-            }
-            assert!(system.all_windows_in_layout(layout).is_empty());
-        }
-    }
-
-    #[test]
-    fn directional_move_fills_empty_slot_and_reclaims_old_split() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-        for window in [w(1), w(2), w(3)] {
-            system.add_window_after_selection(layout, window);
-        }
+    fn directional_move_fills_an_empty_slot_and_collapses_the_old_split() {
+        let (mut system, layout) = tiled(&[1, 2, 3]);
         assert!(system.select_window(layout, w(1)));
         system.split_selection(layout, LayoutKind::Horizontal);
         assert!(!system.move_selection(layout, Direction::Right));
         assert!(system.select_window(layout, w(3)));
         assert!(system.move_selection(layout, Direction::Left));
         assert_eq!(system.selected_window(layout), Some(w(3)));
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
-        let frames: HashMap<_, _> = system
-            .calculate_layout(
-                layout,
-                screen,
-                0.0,
-                &Default::default(),
-                &Default::default(),
-                0.0,
-                Default::default(),
-                Default::default(),
-            )
-            .into_iter()
-            .collect();
+
+        let frames = frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
         assert_eq!(frames.len(), 3);
         for (window, x, width) in [
             (w(1), 0.0, 250.0),
             (w(3), 250.0, 250.0),
             (w(2), 500.0, 500.0),
         ] {
-            assert_eq!(
-                frames[&window],
-                CGRect::new(CGPoint::new(x, 0.0), CGSize::new(width, 1000.0))
-            );
+            assert_frame(&frames, window, (x, 0.0, width, 1000.0));
         }
     }
 
     #[test]
-    fn fibonacci_spiral_alternates_split_orientation() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
+    fn moving_a_stack_keeps_its_membership_and_fullscreen_state() {
+        use crate::layout_engine::WindowDropAction::Stack;
 
-        // Add first window - it takes the full layout
-        system.add_window_after_selection(layout, w(1));
+        for (windows, source) in [(&[1, 2, 3][..], w(3)), (&[1, 2][..], w(2))] {
+            let (mut system, layout) = tiled(windows);
+            for window in [4, 5] {
+                system.add_window_after_selection(layout, w(window));
+            }
+            assert!(system.apply_window_drop(layout, w(4), source, Stack));
+            assert!(system.apply_window_drop(layout, w(5), w(1), Stack));
+            assert!(system.select_window(layout, w(4)));
+            system.toggle_fullscreen_of_selection(layout);
+            assert!(system.move_selection(layout, Direction::Left));
 
-        // Add second window - should split horizontally (depth 0)
-        system.add_window_after_selection(layout, w(2));
-        let tree = system.draw_tree(layout);
-        assert!(
-            tree.contains("Horizontal"),
-            "Second window should create horizontal split at depth 0"
-        );
-
-        // Add third window - should split vertically (depth 1)
-        system.add_window_after_selection(layout, w(3));
-        let tree = system.draw_tree(layout);
-        let horizontal_count = tree.matches("Horizontal").count();
-        let vertical_count = tree.matches("Vertical").count();
-        assert_eq!(horizontal_count, 1, "Should have 1 horizontal split");
-        assert_eq!(vertical_count, 1, "Should have 1 vertical split");
-
-        // Add fourth window - should split horizontally (depth 2)
-        system.add_window_after_selection(layout, w(4));
-        let tree = system.draw_tree(layout);
-        let horizontal_count = tree.matches("Horizontal").count();
-        let vertical_count = tree.matches("Vertical").count();
-        assert_eq!(horizontal_count, 2, "Should have 2 horizontal splits");
-        assert_eq!(vertical_count, 1, "Should have 1 vertical split");
-
-        // Add fifth window - should split vertically (depth 3)
-        system.add_window_after_selection(layout, w(5));
-        let tree = system.draw_tree(layout);
-        let horizontal_count = tree.matches("Horizontal").count();
-        let vertical_count = tree.matches("Vertical").count();
-        assert_eq!(horizontal_count, 2, "Should have 2 horizontal splits");
-        assert_eq!(vertical_count, 2, "Should have 2 vertical splits");
+            assert_eq!(system.stack_members(layout, w(4)), vec![source, w(4)]);
+            assert_eq!(system.stack_members(layout, w(5)), vec![w(1), w(5)]);
+            assert!(system.has_any_fullscreen_node(layout));
+            system.toggle_fullscreen_of_selection(layout);
+            assert!(!system.has_any_fullscreen_node(layout));
+            for window in system.all_windows_in_layout(layout) {
+                system.remove_window(window);
+            }
+            assert!(system.all_windows_in_layout(layout).is_empty());
+        }
     }
 
     #[test]
-    fn max_only_width_cap_reclaims_space_for_sibling() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-
-        let w1 = w(101);
-        let w2 = w(102);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
-
+    fn split_constraints_stay_local_and_nonbinding_minima_keep_equal_halves() {
+        let (system, layout) = tiled(&[101, 102]);
         let mut constraints = HashMap::default();
         constraints.insert(
-            w1,
+            w(101),
             WindowLayoutConstraints {
                 is_resizable: true,
-                locked_width: 0.0,
-                locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
                 max_width: 600.0,
-                max_height: 0.0,
+                ..Default::default()
             }
             .normalized(),
         );
+        let frames = frames(&system, layout, CGSize::new(1600.0, 900.0), &constraints);
+        assert!((frames[&w(101)].size.width - 600.0).abs() < 1.0);
+        assert!((frames[&w(102)].size.width - 1000.0).abs() < 1.0);
+        assert!((frames[&w(102)].origin.x - 600.0).abs() < 1.0);
 
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 900.0));
-        let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(
-                layout,
-                screen,
-                0.0,
-                &constraints,
-                &Default::default(),
-                0.0,
-                Default::default(),
-                Default::default(),
-            )
-            .into_iter()
-            .collect();
-
-        let f1 = frames.get(&w1).copied().expect("w1 frame missing");
-        let f2 = frames.get(&w2).copied().expect("w2 frame missing");
-        assert!((f1.size.width - 600.0).abs() < 1.0);
-        assert!((f2.size.width - 1000.0).abs() < 1.0);
-        assert!((f2.origin.x - 600.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn non_binding_window_minimum_keeps_half_split_centered() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-
-        let browser = w(106);
-        let finder = w(107);
-        system.add_window_after_selection(layout, browser);
-        system.add_window_after_selection(layout, finder);
-
-        let mut constraints = HashMap::default();
+        let (system, layout) = tiled(&[106, 107]);
+        constraints.clear();
         constraints.insert(
-            finder,
+            w(107),
             WindowLayoutConstraints {
                 is_resizable: true,
                 min_width: 400.0,
@@ -1151,90 +1024,31 @@ mod tests {
             }
             .normalized(),
         );
+        let frames = frames(&system, layout, CGSize::new(1200.0, 900.0), &constraints);
+        assert!((frames[&w(106)].size.width - 600.0).abs() < 1.0);
+        assert!((frames[&w(107)].size.width - 600.0).abs() < 1.0);
+        assert!((frames[&w(107)].origin.x - 600.0).abs() < 1.0);
 
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 900.0));
-        let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(
-                layout,
-                screen,
-                0.0,
-                &constraints,
-                &Default::default(),
-                0.0,
-                Default::default(),
-                Default::default(),
-            )
-            .into_iter()
-            .collect();
-
-        let browser_frame = frames.get(&browser).copied().expect("browser frame missing");
-        let finder_frame = frames.get(&finder).copied().expect("Finder frame missing");
-        assert!((browser_frame.size.width - 600.0).abs() < 1.0);
-        assert!((finder_frame.size.width - 600.0).abs() < 1.0);
-        assert!((finder_frame.origin.x - 600.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn max_only_height_does_not_cap_cross_axis_subtree() {
-        let mut system = BspLayoutSystem::default();
-        let layout = system.create_layout();
-
-        let constrained = w(103);
-        let unconstrained = w(104);
-        let sibling = w(105);
-        system.add_window_after_selection(layout, constrained);
+        let (mut system, layout) = tiled(&[103]);
         system.split_selection(layout, LayoutKind::Vertical);
-        system.add_window_after_selection(layout, sibling);
-        assert!(system.select_window(layout, constrained));
+        system.add_window_after_selection(layout, w(105));
+        assert!(system.select_window(layout, w(103)));
         system.split_selection(layout, LayoutKind::Horizontal);
-        system.add_window_after_selection(layout, unconstrained);
-
-        let mut constraints = HashMap::default();
+        system.add_window_after_selection(layout, w(104));
+        constraints.clear();
         constraints.insert(
-            constrained,
+            w(103),
             WindowLayoutConstraints {
                 is_resizable: true,
-                locked_width: 0.0,
-                locked_height: 0.0,
-                min_width: 0.0,
-                min_height: 0.0,
-                max_width: 0.0,
                 max_height: 200.0,
+                ..Default::default()
             }
             .normalized(),
         );
-
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
-        let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(
-                layout,
-                screen,
-                0.0,
-                &constraints,
-                &Default::default(),
-                0.0,
-                Default::default(),
-                Default::default(),
-            )
-            .into_iter()
-            .collect();
-
-        let constrained_frame = frames.get(&constrained).copied().expect("constrained frame");
-        let unconstrained_frame = frames.get(&unconstrained).copied().expect("unconstrained frame");
-        let sibling_frame = frames.get(&sibling).copied().expect("sibling frame");
-
-        assert!(
-            constrained_frame.size.height <= 201.0,
-            "constrained leaf should still honor its own max height"
-        );
-        assert!(
-            unconstrained_frame.size.height >= 399.0,
-            "unconstrained child in the orthogonal subtree should keep the subtree's full height"
-        );
-        assert!(
-            (sibling_frame.size.height - 400.0).abs() < 1.0,
-            "orthogonal max-only constraint should not change the parent split allocation"
-        );
+        let frames = frames(&system, layout, CGSize::new(1200.0, 800.0), &constraints);
+        assert!(frames[&w(103)].size.height <= 201.0);
+        assert!(frames[&w(104)].size.height >= 399.0);
+        assert!((frames[&w(105)].size.height - 400.0).abs() < 1.0);
     }
 }
 
