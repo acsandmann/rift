@@ -117,8 +117,10 @@ const WINDOW_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
     ),
 ];
 
-const WINDOW_ANIMATION_NOTIFICATIONS: &[AxNotificationKind] =
-    &[AxNotificationKind::WindowMoved, AxNotificationKind::WindowResized];
+const WINDOW_ANIMATION_NOTIFICATIONS: &[AxNotificationKind] = &[
+    AxNotificationKind::WindowMoved,
+    AxNotificationKind::WindowResized,
+];
 
 /// An identifier representing a window.
 ///
@@ -156,16 +158,19 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
             where E: serde::de::Error {
-                WindowId::from_debug_string(v).ok_or_else(|| E::custom("invalid WindowId debug string"))
+                WindowId::from_debug_string(v)
+                    .ok_or_else(|| E::custom("invalid WindowId debug string"))
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<WindowId, A::Error>
             where A: serde::de::SeqAccess<'de> {
-                let pid: pid_t =
-                    seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let pid: pid_t = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
 
-                let idx_u32: u32 =
-                    seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                let idx_u32: u32 = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
 
                 let idx = std::num::NonZeroU32::new(idx_u32)
                     .ok_or_else(|| serde::de::Error::custom("idx must be non-zero"))?;
@@ -282,7 +287,10 @@ fn encode_notification_data(kind: AxNotificationKind, wid: Option<WindowId>) -> 
     (idx << KIND_BITS) | kind as usize
 }
 
-fn decode_notification_data(pid: pid_t, data: usize) -> Option<(AxNotificationKind, Option<WindowId>)> {
+fn decode_notification_data(
+    pid: pid_t,
+    data: usize,
+) -> Option<(AxNotificationKind, Option<WindowId>)> {
     const KIND_MASK: usize = (1 << 8) - 1;
     let kind = AxNotificationKind::from_tag((data & KIND_MASK) as u8)?;
     let idx = NonZeroU32::new((data >> 8) as u32);
@@ -351,7 +359,13 @@ mod interactive_frame_tests {
         handle.interactive_frames.0.lock().unwrap().latest.reserve(8);
         let capacity = handle.interactive_frames.0.lock().unwrap().latest.capacity();
 
-        handle.send_interactive_frame(window, first, true, TransactionId::default(), FrameSource::Drag);
+        handle.send_interactive_frame(
+            window,
+            first,
+            true,
+            TransactionId::default(),
+            FrameSource::Drag,
+        );
         handle.send_interactive_frame(
             window,
             latest,
@@ -368,7 +382,13 @@ mod interactive_frame_tests {
         assert_eq!(received, vec![(window, latest, true)]);
         assert_eq!(queue.0.lock().unwrap().latest.capacity(), capacity);
 
-        handle.send_interactive_frame(window, first, false, TransactionId::default(), FrameSource::Drag);
+        handle.send_interactive_frame(
+            window,
+            first,
+            false,
+            TransactionId::default(),
+            FrameSource::Drag,
+        );
         let (_, Request::InteractiveFramesPending(old_wake)) = rx.try_recv().unwrap() else {
             panic!("wake");
         };
@@ -637,7 +657,9 @@ fn frame_write_order(current: Option<CGRect>, target: CGRect) -> FrameWriteOrder
     let Some(current) = current else {
         return FrameWriteOrder::SizeThenPosition;
     };
-    if target.size.width > current.size.width + 0.5 || target.size.height > current.size.height + 0.5 {
+    if target.size.width > current.size.width + 0.5
+        || target.size.height > current.size.height + 0.5
+    {
         FrameWriteOrder::PositionThenSize
     } else {
         FrameWriteOrder::SizeThenPosition
@@ -673,7 +695,8 @@ fn is_transient_menu_role(role: Option<&str>) -> bool {
 }
 
 fn is_menu_backing_window(elem: &AXUIElement, info: &WindowInfo) -> bool {
-    if info.ax_role.as_deref() != Some("AXWindow") || info.ax_subrole.as_deref() != Some("AXDialog") {
+    if info.ax_role.as_deref() != Some("AXWindow") || info.ax_subrole.as_deref() != Some("AXDialog")
+    {
         return false;
     }
 
@@ -711,14 +734,15 @@ impl State {
         for (elem, mut identity) in window_elems {
             let wsid = identity.resolve(|| WindowServerId::try_from(&elem).ok());
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
-            let mut info = match WindowInfo::from_ax_element_with_identity(&elem, hint, &mut identity) {
-                Ok((info, _)) => info,
-                Err(err) => {
-                    let id = self.id_with_identity(&elem, &mut identity).ok();
-                    trace!(?id, ?err, "Failed to refresh window info; will retry later");
-                    continue;
-                }
-            };
+            let mut info =
+                match WindowInfo::from_ax_element_with_identity(&elem, hint, &mut identity) {
+                    Ok((info, _)) => info,
+                    Err(err) => {
+                        let id = self.id_with_identity(&elem, &mut identity).ok();
+                        trace!(?id, ?err, "Failed to refresh window info; will retry later");
+                        continue;
+                    }
+                };
             if self.should_ignore_window_info(&elem, &info) {
                 continue;
             }
@@ -728,14 +752,13 @@ impl State {
                 continue;
             }
 
-            let Some((wid, info)) = self
-                .id_with_identity(&elem, &mut identity)
-                .ok()
-                .map(|wid| (wid, info))
-                .or_else(|| {
-                    self.register_window_with_identity(elem.clone(), hint, &mut identity)
-                        .map(|(registered_info, wid, _)| (wid, registered_info))
-                })
+            let Some((wid, info)) =
+                self.id_with_identity(&elem, &mut identity).ok().map(|wid| (wid, info)).or_else(
+                    || {
+                        self.register_window_with_identity(elem.clone(), hint, &mut identity)
+                            .map(|(registered_info, wid, _)| (wid, registered_info))
+                    },
+                )
             else {
                 continue;
             };
@@ -896,7 +919,11 @@ impl State {
         should_terminate
     }
 
-    fn apply_interactive_frame(&mut self, wid: WindowId, pending: PendingFrame) -> Result<(), AxError> {
+    fn apply_interactive_frame(
+        &mut self,
+        wid: WindowId,
+        pending: PendingFrame,
+    ) -> Result<(), AxError> {
         let PendingFrame {
             span,
             frame,
@@ -911,7 +938,9 @@ impl State {
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
         window.last_animation_frame = Some(frame);
-        if set_size || (source != FrameSource::Drag && !window.last_known_frame.size.same_as(frame.size)) {
+        if set_size
+            || (source != FrameSource::Drag && !window.last_known_frame.size.same_as(frame.size))
+        {
             write_frame(&window.elem, Some(window.last_known_frame), frame);
             window.last_known_frame = frame;
         } else {
@@ -947,7 +976,9 @@ impl State {
         let extended_timeout_prefixes = ["com.jetbrains.", "org.gnu.Emacs"];
         let timeout = Instant::now()
             + match info.bundle_id.as_deref() {
-                Some(id) if extended_timeout_prefixes.iter().any(|prefix| id.starts_with(prefix)) => {
+                Some(id)
+                    if extended_timeout_prefixes.iter().any(|prefix| id.starts_with(prefix)) =>
+                {
                     Duration::from_secs(60)
                 }
 
@@ -1017,7 +1048,9 @@ impl State {
                 trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
                 continue;
             }
-            let Some((info, wid, _)) = self.register_window_with_identity(elem, hint, &mut identity) else {
+            let Some((info, wid, _)) =
+                self.register_window_with_identity(elem, hint, &mut identity)
+            else {
                 continue;
             };
             windows.push((wid, info));
@@ -1123,13 +1156,14 @@ impl State {
                         window.last_known_frame = desired;
                     }
 
-                    let frame = match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => {
-                            self.window_mut(wid)?.last_known_frame = frame;
-                            frame
-                        }
-                        None => continue,
-                    };
+                    let frame =
+                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
+                            Some(frame) => {
+                                self.window_mut(wid)?.last_known_frame = frame;
+                                frame
+                            }
+                            None => continue,
+                        };
 
                     self.send_event(Event::WindowFrameChanged(
                         wid,
@@ -1175,7 +1209,8 @@ impl State {
                 {
                     warn!(?wid, ?err, "Failed to flush animation frame on end");
                 }
-                let (elem, last_seen_txid, last_animation_frame, ended_animation) = match self.window_mut(wid)
+                let (elem, last_seen_txid, last_animation_frame, ended_animation) = match self
+                    .window_mut(wid)
                 {
                     Ok(window) => {
                         window.frame_source = FrameSource::Ordinary;
@@ -1205,10 +1240,11 @@ impl State {
                     self.enhanced_ui.release(&app);
                     self.restart_notifications_after_animation(&elem);
                 }
-                let mut frame = match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                    Some(frame) => frame,
-                    None => return Ok(false),
-                };
+                let mut frame =
+                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
+                        Some(frame) => frame,
+                        None => return Ok(false),
+                    };
                 // Intermediate AX writes can be clamped while a growing column
                 // still overlaps the screen edge. The intended-frame cache is
                 // only a hint: repair against observed geometry once motion ends.
@@ -1220,10 +1256,11 @@ impl State {
                     } else {
                         write_frame(&elem, Some(frame), target);
                     }
-                    frame = match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame,
-                        None => return Ok(false),
-                    };
+                    frame =
+                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
+                            Some(frame) => frame,
+                            None => return Ok(false),
+                        };
                 }
                 self.window_mut(wid)?.last_known_frame = frame;
                 self.send_event(Event::WindowFrameChanged(
@@ -1252,9 +1289,8 @@ impl State {
         match notif {
             AxNotificationKind::ApplicationHidden => self.on_application_hidden(),
             AxNotificationKind::ApplicationShown => self.on_application_shown(),
-            AxNotificationKind::ApplicationActivated | AxNotificationKind::ApplicationDeactivated => {
-                _ = self.on_ax_activation_changed()
-            }
+            AxNotificationKind::ApplicationActivated
+            | AxNotificationKind::ApplicationDeactivated => _ = self.on_ax_activation_changed(),
             AxNotificationKind::MainWindowChanged => {
                 // `AXWindows` is filtered to the current macOS space, so using it as
                 // a membership list here will incorrectly "destroy" windows that
@@ -1271,11 +1307,12 @@ impl State {
                 if self.id(&elem).is_ok() {
                     return;
                 }
-                let Some((window, wid, window_server_info)) = self.register_window(elem, None) else {
+                let Some((window, wid, window_server_info)) = self.register_window(elem, None)
+                else {
                     return;
                 };
-                let window_server_info =
-                    window_server_info.or_else(|| window.sys_id.and_then(window_server::get_window));
+                let window_server_info = window_server_info
+                    .or_else(|| window.sys_id.and_then(window_server::get_window));
                 self.send_event(Event::WindowCreated(
                     wid,
                     window,
@@ -1386,7 +1423,8 @@ impl State {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
-                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem) else {
+                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
+                else {
                     trace!(?wid, "Ignoring miniaturize for superseded AX element");
                     return;
                 };
@@ -1397,7 +1435,8 @@ impl State {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
-                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem) else {
+                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
+                else {
                     trace!(?wid, "Ignoring deminiaturize for superseded AX element");
                     return;
                 };
@@ -1478,7 +1517,8 @@ impl State {
 
         check_cancel()?;
 
-        static MUTEX: LazyLock<parking_lot::Mutex<()>> = LazyLock::new(|| parking_lot::Mutex::new(()));
+        static MUTEX: LazyLock<parking_lot::Mutex<()>> =
+            LazyLock::new(|| parking_lot::Mutex::new(()));
         let mut mutex_guard = Some(MUTEX.lock());
         check_cancel()?;
         let mut this = this_ref.borrow_mut();
@@ -1510,7 +1550,8 @@ impl State {
             }
             Err(err) => return Err(err.into()),
         };
-        let make_key_result = window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
+        let make_key_result =
+            window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
         if let Some(Err(err)) = &make_key_result {
             warn!(?this.pid, ?err, "Failed to activate app");
         }
@@ -1607,7 +1648,11 @@ impl State {
                 if !allow_register {
                     info!(?self.pid, "Got MainWindowChanged on unknown window; clearing main window");
                     if self.main_window.take().is_some() {
-                        self.send_event(Event::ApplicationMainWindowChanged(self.pid, None, Quiet::No));
+                        self.send_event(Event::ApplicationMainWindowChanged(
+                            self.pid,
+                            None,
+                            Quiet::No,
+                        ));
                     }
                     return None;
                 }
@@ -1799,7 +1844,11 @@ impl State {
         elem: AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
     ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
-        self.register_window_with_identity(elem, server_info_hint, &mut NativeWindowIdentity::default())
+        self.register_window_with_identity(
+            elem,
+            server_info_hint,
+            &mut NativeWindowIdentity::default(),
+        )
     }
 
     fn register_window_with_identity(
@@ -1968,7 +2017,9 @@ impl State {
     ) -> HashMap<WindowServerId, WindowServerInfo> {
         let wsids: Vec<WindowServerId> = window_elements
             .iter_mut()
-            .filter_map(|(elem, identity)| identity.resolve(|| WindowServerId::try_from(&*elem).ok()))
+            .filter_map(|(elem, identity)| {
+                identity.resolve(|| WindowServerId::try_from(&*elem).ok())
+            })
             .collect();
         collect_visible_window_server_info(
             window_server::get_windows(&wsids),
@@ -2051,8 +2102,8 @@ impl State {
                 // it can be managed.
                 if let Some(parent_id) = window_server::window_parent(wsid) {
                     if let Some(parent_info) = window_server::get_window(parent_id) {
-                        let on_screen =
-                            parent_info.frame.size.width > 1.0 && parent_info.frame.size.height > 1.0;
+                        let on_screen = parent_info.frame.size.width > 1.0
+                            && parent_info.frame.size.height > 1.0;
                         if !on_screen {
                             info.is_root = true;
                         }
@@ -2234,7 +2285,9 @@ impl State {
 /// An ID-targeted WindowServer query can return a retained record even after the user closes an
 /// Electron window and WindowServer orders it out. Treat only an explicit negative ordering result
 /// as authoritative: a failed private query remains inconclusive during display/lifecycle churn.
-fn window_server_peer_is_visible(ordered_in: Option<bool>) -> bool { !matches!(ordered_in, Some(false)) }
+fn window_server_peer_is_visible(ordered_in: Option<bool>) -> bool {
+    !matches!(ordered_in, Some(false))
+}
 
 fn collect_visible_window_server_info(
     infos: Vec<WindowServerInfo>,
@@ -2332,7 +2385,11 @@ pub(crate) async fn run_app(
     state.run(info, handle, requests_rx, notifications_rx, raises_rx).await;
 }
 
-fn trace<T>(desc: &str, elem: &AXUIElement, f: impl FnOnce() -> Result<T, AxError>) -> Result<T, AxError> {
+fn trace<T>(
+    desc: &str,
+    elem: &AXUIElement,
+    f: impl FnOnce() -> Result<T, AxError>,
+) -> Result<T, AxError> {
     let start = Instant::now();
     let out = f();
     let end = Instant::now();

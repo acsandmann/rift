@@ -19,19 +19,16 @@ fn action(control: &NSControl) {
 fn callbacks_survive_composition_and_release_with_the_page(ui: &Ui) {
     let changes = Rc::new(RefCell::new(Vec::new()));
     let host = PageHost::new(ui);
-    let native = autoreleasepool(|_| {
-        let received = changes.clone();
-        let switch = Switch::new(ui).on_change(move |value| received.borrow_mut().push(value));
-        let native = Weak::new(switch.ns_switch());
-        host.set_page(
-            SettingsPage::new(ui, "General").section(Section::new(ui, "Behavior").row(SwitchRow::new(
-                ui,
-                "Animations",
-                switch,
-            ))),
-        );
-        native
-    });
+    let native =
+        autoreleasepool(|_| {
+            let received = changes.clone();
+            let switch = Switch::new(ui).on_change(move |value| received.borrow_mut().push(value));
+            let native = Weak::new(switch.ns_switch());
+            host.set_page(SettingsPage::new(ui, "General").section(
+                Section::new(ui, "Behavior").row(SwitchRow::new(ui, "Animations", switch)),
+            ));
+            native
+        });
     autoreleasepool(|_| {
         let switch = native.load().unwrap();
         switch.setState(NSControlStateValueOn);
@@ -232,12 +229,17 @@ define_class!(
         fn slide(&self, _point: CGPoint) {}
 
         #[unsafe(method_id(namesOfPromisedFilesDroppedAtDestination:))]
-        fn promised_files(&self, _url: &objc2_foundation::NSURL) -> Option<Retained<NSArray<NSString>>> {
+        fn promised_files(
+            &self,
+            _url: &objc2_foundation::NSURL,
+        ) -> Option<Retained<NSArray<NSString>>> {
             None
         }
 
         #[unsafe(method(draggingFormation))]
-        fn formation(&self) -> objc2_app_kit::NSDraggingFormation { objc2_app_kit::NSDraggingFormation::None }
+        fn formation(&self) -> objc2_app_kit::NSDraggingFormation {
+            objc2_app_kit::NSDraggingFormation::None
+        }
 
         #[unsafe(method(setDraggingFormation:))]
         fn set_formation(&self, _value: objc2_app_kit::NSDraggingFormation) {}
@@ -295,11 +297,9 @@ fn local_reordering_uses_final_indices_and_rejects_other_tables(ui: &Ui) {
     let data_source = unsafe { table.ns_table_view().dataSource() }.unwrap();
     let item = data_source.tableView_pasteboardWriterForRow(table.ns_table_view(), 0).unwrap();
     let pasteboard = NSPasteboard::pasteboardWithUniqueName();
-    assert!(
-        pasteboard.writeObjects(&NSArray::<ProtocolObject<dyn NSPasteboardWriting>>::from_slice(
-            &[&*item]
-        ))
-    );
+    assert!(pasteboard.writeObjects(
+        &NSArray::<ProtocolObject<dyn NSPasteboardWriting>>::from_slice(&[&*item])
+    ));
     let drag = DragInfo::alloc(ui.mtm()).set_ivars(DragState {
         source: table.ns_table_view().retain().into(),
         pasteboard,
@@ -566,9 +566,13 @@ fn navigation_uses_native_toolbar_items_and_responder_chain(ui: &Ui) {
             &NSString::from_str("["),
         )
     };
-    let validated = ProtocolObject::<dyn objc2_app_kit::NSValidatedUserInterfaceItem>::from_ref(&*command);
+    let validated =
+        ProtocolObject::<dyn objc2_app_kit::NSValidatedUserInterfaceItem>::from_ref(&*command);
     assert!(
-        objc2_app_kit::NSUserInterfaceValidations::validateUserInterfaceItem(window.ns_window(), validated)
+        objc2_app_kit::NSUserInterfaceValidations::validateUserInterfaceItem(
+            window.ns_window(),
+            validated
+        )
     );
     window.show();
     assert!(unsafe {
@@ -581,7 +585,10 @@ fn navigation_uses_native_toolbar_items_and_responder_chain(ui: &Ui) {
     assert_eq!(calls.get(), 1);
     toolbar.set_back(None);
     assert!(
-        !objc2_app_kit::NSUserInterfaceValidations::validateUserInterfaceItem(window.ns_window(), validated)
+        !objc2_app_kit::NSUserInterfaceValidations::validateUserInterfaceItem(
+            window.ns_window(),
+            validated
+        )
     );
     assert_eq!(toolbar.ns_toolbar() as *const _, original);
     assert!(
@@ -599,7 +606,8 @@ fn cached_pages_keep_their_mount_and_release_on_clear(ui: &Ui) {
     let (first, second) = autoreleasepool(|_| {
         let field = Rc::new(TextField::new(ui));
         field.set_value("Retained edit");
-        let mut rows = Section::new(ui, "Cached page").row(SettingsRow::new(ui, "Name", field.clone()));
+        let mut rows =
+            Section::new(ui, "Cached page").row(SettingsRow::new(ui, "Name", field.clone()));
         for _ in 0..30 {
             rows = rows.row(SwitchRow::new(ui, "Option", Switch::new(ui)));
         }
@@ -664,7 +672,8 @@ fn main() {
         }
         return;
     }
-    let ui = Ui::new(MainThreadMarker::new().expect("native tests must run on the macOS main thread"));
+    let ui =
+        Ui::new(MainThreadMarker::new().expect("native tests must run on the macOS main thread"));
     let app = Application::shared(&ui);
     app.ns_application()
         .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);

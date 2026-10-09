@@ -6,7 +6,9 @@ mod surface;
 mod transaction;
 mod window;
 pub use backdrop::backdrop_blur;
-pub use layer::{LayerTransaction, release_layer_tree, render_layer_to_cgs_window, with_disabled_actions};
+pub use layer::{
+    LayerTransaction, release_layer_tree, render_layer_to_cgs_window, with_disabled_actions,
+};
 pub use surface::WindowSurface;
 pub use transaction::WindowTransaction;
 pub use window::{CgsWindow, CgsWindowError};

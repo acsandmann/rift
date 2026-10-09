@@ -159,8 +159,9 @@ fn set_brightness(cid: ConnID, changes: impl IntoIterator<Item = (WinID, f32)>) 
         return Ok(());
     }
 
-    let result =
-        unsafe { SLSSetWindowListBrightness(cid, windows.as_ptr(), levels.as_ptr(), windows.len() as isize) };
+    let result = unsafe {
+        SLSSetWindowListBrightness(cid, windows.as_ptr(), levels.as_ptr(), windows.len() as isize)
+    };
 
     if result == 0 {
         Ok(())

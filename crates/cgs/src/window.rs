@@ -168,7 +168,8 @@ impl WindowRef {
     /// CoreGraphics ID of the display currently showing the window.
     pub fn display_id(&self) -> Option<u32> {
         let screen = self.0.load()?.screen()?;
-        let number = screen.deviceDescription().objectForKey(&NSString::from_str("NSScreenNumber"))?;
+        let number =
+            screen.deviceDescription().objectForKey(&NSString::from_str("NSScreenNumber"))?;
         Some(number.downcast::<objc2_foundation::NSNumber>().ok()?.unsignedIntValue())
     }
 }
@@ -318,7 +319,8 @@ impl Sheet {
             {
                 return event.as_ptr();
             }
-            let cancel = sheet.contentView().and_then(|view| sheet_button(&view, "cgs.sheet-cancel"));
+            let cancel =
+                sheet.contentView().and_then(|view| sheet_button(&view, "cgs.sheet-cancel"));
             if !escape && cancel.as_ref().is_some_and(|button| !button.isHidden()) {
                 if let Some(button) =
                     sheet.contentView().and_then(|view| sheet_button(&view, "cgs.sheet-primary"))

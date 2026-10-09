@@ -60,7 +60,11 @@ impl ConfigActor {
         Self::spawn_with_path(config, reactor_tx, crate::common::config::config_file())
     }
 
-    pub fn spawn_with_path(config: Config, reactor_tx: reactor::Sender, config_path: PathBuf) -> Sender {
+    pub fn spawn_with_path(
+        config: Config,
+        reactor_tx: reactor::Sender,
+        config_path: PathBuf,
+    ) -> Sender {
         let (tx, rx) = actor::channel();
         std::thread::Builder::new()
             .name("config".to_string())
@@ -223,7 +227,9 @@ impl ConfigActor {
             }
             _ => {
                 let range = match &cmd {
-                    ConfigCommand::SetAnimationDuration(v) => Some(("animation_duration", *v, 0.0, 5.0)),
+                    ConfigCommand::SetAnimationDuration(v) => {
+                        Some(("animation_duration", *v, 0.0, 5.0))
+                    }
                     ConfigCommand::SetAnimationFps(v) => Some(("animation_fps", *v, 0.0, 240.0)),
                     ConfigCommand::SetStackOffset(v) => Some(("stack_offset", *v, 0.0, 200.0)),
                     _ => None,
@@ -248,13 +254,23 @@ impl ConfigActor {
                         let settings = &mut source.settings;
                         match cmd {
                             ConfigCommand::SetAnimate(v) => settings.animate = v,
-                            ConfigCommand::SetAnimationDuration(v) => settings.animation_duration = v,
+                            ConfigCommand::SetAnimationDuration(v) => {
+                                settings.animation_duration = v
+                            }
                             ConfigCommand::SetAnimationFps(v) => settings.animation_fps = v,
                             ConfigCommand::SetAnimationEasing(v) => settings.animation_easing = v,
-                            ConfigCommand::SetMouseFollowsFocus(v) => settings.mouse_follows_focus = v,
-                            ConfigCommand::SetMouseHidesOnFocus(v) => settings.mouse_hides_on_focus = v,
-                            ConfigCommand::SetFocusFollowsMouse(v) => settings.focus_follows_mouse = v,
-                            ConfigCommand::SetStackOffset(v) => settings.layout.stack.stack_offset = v,
+                            ConfigCommand::SetMouseFollowsFocus(v) => {
+                                settings.mouse_follows_focus = v
+                            }
+                            ConfigCommand::SetMouseHidesOnFocus(v) => {
+                                settings.mouse_hides_on_focus = v
+                            }
+                            ConfigCommand::SetFocusFollowsMouse(v) => {
+                                settings.focus_follows_mouse = v
+                            }
+                            ConfigCommand::SetStackOffset(v) => {
+                                settings.layout.stack.stack_offset = v
+                            }
                             ConfigCommand::SetOuterGaps { top, left, bottom, right } => {
                                 settings.layout.gaps.outer =
                                     crate::common::config::OuterGaps { top, left, bottom, right };
@@ -387,7 +403,9 @@ mod tests {
     #[test]
     fn settings_transactions_save_source_and_rollback_validation_and_io_failures() {
         use crate::actor::wm_controller::{WmCmd, WmCommand};
-        use crate::common::config::{AppWorkspaceRule, LayoutMode, WorkspaceLayoutRule, WorkspaceSelector};
+        use crate::common::config::{
+            AppWorkspaceRule, LayoutMode, WorkspaceLayoutRule, WorkspaceSelector,
+        };
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         let text = "# personal settings\n[settings]\nanimate = false # retain this comment\n[virtual_workspaces]\nworkspace_names = [\"Main\", \"Code\"]\n[keys]\n";
@@ -425,7 +443,11 @@ mod tests {
             }))
             .unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.starts_with("# personal settings\n[settings]\nanimate = true # retain this comment"));
+        assert!(
+            saved.starts_with(
+                "# personal settings\n[settings]\nanimate = true # retain this comment"
+            )
+        );
         assert!(!saved.contains("animation_duration"));
         assert_eq!(source.virtual_workspaces.workspace_names[1], "Development");
         assert_eq!(

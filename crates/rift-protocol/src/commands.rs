@@ -5,8 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::{
-    Direction, DisplaySelector, LayoutMode, ResizeOrientation, RestoreScope, RestoreSource, WindowId,
-    WorkspaceSelector,
+    Direction, DisplaySelector, LayoutMode, ResizeOrientation, RestoreScope, RestoreSource,
+    WindowId, WorkspaceSelector,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -173,7 +173,15 @@ pub enum ConfigCommand {
 }
 
 #[derive(
-    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, rift_config_derive::ConfigEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    rift_config_derive::ConfigEnum,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AnimationEasing {
@@ -271,8 +279,14 @@ where E: DeError {
         .map_err(|error| E::custom(format!("invalid legacy command JSON: {error}")))?
     {
         LegacyCommand::Config(command) => Ok(RiftCommand::Config(command)),
-        LegacyCommand::Reactor(LegacyReactorCommand::Layout(command)) => Ok(RiftCommand::Layout(command)),
-        LegacyCommand::Reactor(LegacyReactorCommand::Metrics(command)) => Ok(RiftCommand::Metrics(command)),
-        LegacyCommand::Reactor(LegacyReactorCommand::Reactor(command)) => Ok(RiftCommand::Reactor(command)),
+        LegacyCommand::Reactor(LegacyReactorCommand::Layout(command)) => {
+            Ok(RiftCommand::Layout(command))
+        }
+        LegacyCommand::Reactor(LegacyReactorCommand::Metrics(command)) => {
+            Ok(RiftCommand::Metrics(command))
+        }
+        LegacyCommand::Reactor(LegacyReactorCommand::Reactor(command)) => {
+            Ok(RiftCommand::Reactor(command))
+        }
     }
 }

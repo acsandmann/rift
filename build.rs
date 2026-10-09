@@ -28,7 +28,9 @@ fn main() {
     let tagged = git(&["tag", "--points-at", "HEAD"])
         .is_some_and(|tags| tags.lines().any(|tag| tag == release_tag || tag == version));
     let dirty = git(&["diff", "HEAD", "--quiet"]).is_none();
-    let display_version = if (tagged && !dirty) || git(&["rev-parse", "--is-inside-work-tree"]).is_none() {
+    let display_version = if (tagged && !dirty)
+        || git(&["rev-parse", "--is-inside-work-tree"]).is_none()
+    {
         version
     } else {
         let commit = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());

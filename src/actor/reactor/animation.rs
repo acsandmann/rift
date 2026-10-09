@@ -11,7 +11,9 @@ use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, Window
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::{HashMap, HashSet};
-use crate::layout_engine::systems::scrolling::{CameraSpring, PresentedViewport, ViewportPresentation};
+use crate::layout_engine::systems::scrolling::{
+    CameraSpring, PresentedViewport, ViewportPresentation,
+};
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
@@ -105,7 +107,12 @@ type Frame = (WindowId, CGRect, bool, TransactionId, FrameSource);
 #[derive(Debug, Default)]
 struct FrameBatch(HashMap<pid_t, (AppThreadHandle, Vec<Frame>)>);
 impl FrameBatch {
-    fn extend(&mut self, handle: &AppThreadHandle, pid: pid_t, frames: impl Iterator<Item = Frame>) {
+    fn extend(
+        &mut self,
+        handle: &AppThreadHandle,
+        pid: pid_t,
+        frames: impl Iterator<Item = Frame>,
+    ) {
         let (actor, pending) = self.0.entry(pid).or_insert_with(|| (handle.clone(), Vec::new()));
         if !actor.same_actor(handle) {
             *actor = handle.clone();
@@ -419,8 +426,8 @@ impl CameraAnimation {
         let distance = self.windows.iter().fold(0.0_f64, |distance, window| {
             distance.max(window.move_from.x.abs()).max(window.move_from.y.abs())
         });
-        self.movement =
-            (distance > 0.25 / self.scale).then(|| (CameraSpring::new(1.0, 0.0, 0.0, now), distance));
+        self.movement = (distance > 0.25 / self.scale)
+            .then(|| (CameraSpring::new(1.0, 0.0, 0.0, now), distance));
     }
 
     fn begin(&mut self) {
@@ -629,7 +636,10 @@ impl Reactor {
             self.viewport_gesture
                 .as_ref()
                 .filter(|s| {
-                    presentation.gesturing() && !s.released && s.workspace == workspace && s.layout == layout
+                    presentation.gesturing()
+                        && !s.released
+                        && s.workspace == workspace
+                        && s.layout == layout
                 })
                 .map(|s| (s.context.clone(), s.control.clone(), s.applied, s.timestamp))
         });
@@ -730,7 +740,8 @@ impl AnimationManager {
                 .filter(|d| d.manager.has_work())
                 .map(|d| d.fallback_deadline)
                 .min();
-            let timeout = deadline.map_or(Duration::MAX, |t| t.saturating_duration_since(Instant::now()));
+            let timeout =
+                deadline.map_or(Duration::MAX, |t| t.saturating_duration_since(Instant::now()));
             crossbeam_channel::select! {
                 recv(rx) -> message => {
                     let Ok(message) = message else { break };
@@ -812,17 +823,21 @@ impl AnimationManager {
                     continue;
                 }
                 let native = link.latest();
-                let sample = native.map(|(_, target)| target).or_else(|| (now >= *deadline).then_some(now));
+                let sample =
+                    native.map(|(_, target)| target).or_else(|| (now >= *deadline).then_some(now));
                 if let Some(sample) = sample {
-                    let delay = manager.tick_at(sample).unwrap_or(Duration::from_secs_f64(1.0 / 60.0));
+                    let delay =
+                        manager.tick_at(sample).unwrap_or(Duration::from_secs_f64(1.0 / 60.0));
                     // Resume fallback after three missing native refreshes.
                     *deadline = if let Some((tick, _)) = native {
                         sample
-                            + Duration::try_from_secs_f64(3.0 * (tick.target_timestamp - tick.timestamp))
-                                .ok()
-                                .filter(|d| !d.is_zero())
-                                .unwrap_or(delay)
-                                .min(Duration::from_millis(250))
+                            + Duration::try_from_secs_f64(
+                                3.0 * (tick.target_timestamp - tick.timestamp),
+                            )
+                            .ok()
+                            .filter(|d| !d.is_zero())
+                            .unwrap_or(delay)
+                            .min(Duration::from_millis(250))
                     } else {
                         now + delay
                     };
@@ -864,7 +879,8 @@ impl AnimationManager {
 
     fn publish_frames(&self, shared: &mut PresenterControl, initialize: bool) {
         for w in self.motions.iter().flat_map(Motion::windows) {
-            let (handle, frame) = shared.frames.entry(w.wid).or_insert_with(|| (w.handle.clone(), w.frame));
+            let (handle, frame) =
+                shared.frames.entry(w.wid).or_insert_with(|| (w.handle.clone(), w.frame));
             *frame = w.frame;
             if initialize {
                 *handle = w.handle.clone();
@@ -976,7 +992,8 @@ impl AnimationManager {
                 .collect();
             reactor.cancel_window_presentations(windows);
         }
-        let Some(active_ws) = reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
+        let Some(active_ws) =
+            reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
         else {
             return false;
         };
@@ -1010,8 +1027,8 @@ impl AnimationManager {
             };
             let current_frame = window.frame_monotonic;
             let window_server_id = window.info.sys_id;
-            let pending =
-                window_server_id.and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
+            let pending = window_server_id
+                .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
             // Matching the observed frame cannot cancel an older, different target.
             if pending.is_some_and(|frame| frame.same_as(target_frame))
                 || (pending.is_none() && target_frame.same_as(current_frame))
@@ -1176,7 +1193,8 @@ impl AnimationManager {
             let txid = first_wsid
                 .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
                 .unwrap_or_default();
-            for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid)) {
+            for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid))
+            {
                 if let Some(window) = reactor.state.windows.window(*wid)
                     && let Some(wsid) = window.info.sys_id
                 {
@@ -1186,7 +1204,8 @@ impl AnimationManager {
             let requests = [
                 (!positions.is_empty())
                     .then(|| Request::SetWindowFrames(positions, txid, FrameMode::Position, true)),
-                (!frames.is_empty()).then(|| Request::SetWindowFrames(frames, txid, FrameMode::Full, true)),
+                (!frames.is_empty())
+                    .then(|| Request::SetWindowFrames(frames, txid, FrameMode::Full, true)),
             ];
             for request in requests.into_iter().flatten() {
                 if let Err(e) = handle.send(request) {
@@ -1276,8 +1295,8 @@ impl Motion {
                 {
                     return Some(a.next_sample - now);
                 }
-                let missed =
-                    now.saturating_duration_since(a.next_sample).as_nanos() / a.animation.interval.as_nanos();
+                let missed = now.saturating_duration_since(a.next_sample).as_nanos()
+                    / a.animation.interval.as_nanos();
                 a.next_sample += a.animation.interval.mul_f64((missed + 1) as f64);
                 a.send_frame(now, frames);
                 (!a.is_complete()).then_some(a.animation.interval)
@@ -1747,7 +1766,8 @@ mod tests {
                 windows: frames
                     .into_iter()
                     .map(|(wid, world, fixed)| {
-                        let frame = control.frame(wid, native.iter().find(|(id, _)| *id == wid).unwrap().1);
+                        let frame =
+                            control.frame(wid, native.iter().find(|(id, _)| *id == wid).unwrap().1);
                         PresentedWindow {
                             handle: handle.clone(),
                             wid,
@@ -1875,7 +1895,8 @@ mod tests {
         manager.publish_frames(&mut control, false);
         manager.retire();
         assert!(manager.motions.is_empty());
-        let before: Vec<_> = control.frames.iter().map(|(wid, (_, frame))| (*wid, *frame)).collect();
+        let before: Vec<_> =
+            control.frames.iter().map(|(wid, (_, frame))| (*wid, *frame)).collect();
         assert!(system.move_selection(layout, Direction::Left));
         let started = Instant::now();
         let mut next = make_camera(&system, &before, &control);
@@ -1895,7 +1916,8 @@ mod tests {
         system.add_window_after_selection(layout, WindowId::new(1, 3));
         system.select_window(layout, visible);
         let before: Vec<_> =
-            crate::layout_engine::systems::scrolling::tests::presented_frames(&system, layout).collect();
+            crate::layout_engine::systems::scrolling::tests::presented_frames(&system, layout)
+                .collect();
         let mut old = make_camera(&system, &before, &PresenterControl::default());
         old.replace(None);
         old.sample(Instant::now() + Duration::from_secs(2));
@@ -1916,7 +1938,8 @@ mod tests {
         next.sample(started + Duration::from_millis(40));
         let neighbor = next.windows.iter().find(|w| w.wid == WindowId::new(1, 3)).unwrap();
         assert!(
-            neighbor.frame.origin.x < before.iter().find(|(id, _)| *id == neighbor.wid).unwrap().1.origin.x
+            neighbor.frame.origin.x
+                < before.iter().find(|(id, _)| *id == neighbor.wid).unwrap().1.origin.x
         );
 
         // Removing a preceding column rebases an in-flight camera. Preserve
@@ -2054,7 +2077,13 @@ mod tests {
             panic!("cancel");
         };
         let dragged = rect(12.0, 34.0, 10.0, 10.0);
-        handle.send_interactive_frame(wid, dragged, false, TransactionId::default(), FrameSource::Drag);
+        handle.send_interactive_frame(
+            wid,
+            dragged,
+            false,
+            TransactionId::default(),
+            FrameSource::Drag,
+        );
         camera_mut(&mut manager).unwrap().sample(now + Duration::from_secs(1));
         assert!(!manager.has_work());
         assert!(rx.try_recv().is_err());
@@ -2094,7 +2123,9 @@ mod tests {
             panic!("frame");
         };
         assert_eq!(frame.origin.x.fract().abs(), 0.5);
-        assert!(matches!(requests[1], Observed::Request(Request::EndWindowAnimation(id)) if id == wid));
+        assert!(
+            matches!(requests[1], Observed::Request(Request::EndWindowAnimation(id)) if id == wid)
+        );
 
         // A completed camera must wake semantic reconciliation and leave the
         // presenter even when no new reactor command arrives.
@@ -2124,7 +2155,9 @@ mod tests {
         assert_ne!(from, target, "next camera must start at the displayed position");
         camera.sample(restarted + Duration::from_millis(50));
         let current = camera.presentation.offset();
-        assert!((current - from) * (target - from) > 0.0 && (target - current) * (target - from) > 0.0);
+        assert!(
+            (current - from) * (target - from) > 0.0 && (target - current) * (target - from) > 0.0
+        );
         camera.sample(restarted + Duration::from_secs(1));
         assert!(!camera.active);
         assert_eq!(camera.presentation.offset(), target);
@@ -2326,15 +2359,15 @@ mod tests {
         drop(sender);
         runner.join().unwrap();
         let requests = collect_requests(&mut rx);
-        assert!(
-            requests
-                .iter()
-                .any(|r| matches!(r, Observed::Request(Request::CancelWindowAnimation(id, _)) if *id == wid))
-        );
+        assert!(requests.iter().any(
+            |r| matches!(r, Observed::Request(Request::CancelWindowAnimation(id, _)) if *id == wid)
+        ));
         assert!(
             requests.iter().all(|r| matches!(
                 r,
-                Observed::Request(Request::BeginWindowAnimation(_) | Request::CancelWindowAnimation(..))
+                Observed::Request(
+                    Request::BeginWindowAnimation(_) | Request::CancelWindowAnimation(..)
+                )
             )),
             "cancelled frames and the target cannot be replayed: {requests:?}"
         );

@@ -144,7 +144,8 @@ impl SettingsRow {
                 field.removeFromSuperview();
                 let unit = crate::UnitField::new(&self.ui, &field, text);
                 parent.insertArrangedSubview_atIndex(unit.ns_view(), index as isize);
-                if parent.orientation() == objc2_app_kit::NSUserInterfaceLayoutOrientation::Vertical {
+                if parent.orientation() == objc2_app_kit::NSUserInterfaceLayoutOrientation::Vertical
+                {
                     unit.ns_view()
                         .widthAnchor()
                         .constraintEqualToAnchor(&parent.widthAnchor())
@@ -174,7 +175,9 @@ impl SettingsRow {
     pub fn control_view(&self) -> &NSView { self.control.ns_view() }
 
     /// A weak handle to the row's control, for enabling it from sync callbacks.
-    pub fn control(&self) -> crate::WeakView { crate::WeakView(objc2::rc::Weak::new(self.control_view())) }
+    pub fn control(&self) -> crate::WeakView {
+        crate::WeakView(objc2::rc::Weak::new(self.control_view()))
+    }
 
     fn take_form_cells(&self) -> [&NSView; 2] {
         if let Some(grid) = self.grid.get() {
@@ -303,7 +306,9 @@ impl SettingsGroup {
     }
 }
 impl NativeView for SettingsGroup {
-    fn ns_view(&self) -> &NSView { self.surface.as_ref().map_or(self.grid.ns_view(), NativeView::ns_view) }
+    fn ns_view(&self) -> &NSView {
+        self.surface.as_ref().map_or(self.grid.ns_view(), NativeView::ns_view)
+    }
 }
 
 pub struct Section {

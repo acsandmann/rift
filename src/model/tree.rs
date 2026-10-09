@@ -93,7 +93,9 @@ impl OwnedNode {
 impl Deref for OwnedNode {
     type Target = NodeId;
 
-    fn deref(&self) -> &Self::Target { self.0.as_ref().expect("OwnedNode deref on removed OwnedNode") }
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("OwnedNode deref on removed OwnedNode")
+    }
 }
 
 impl DerefMut for OwnedNode {
@@ -127,7 +129,9 @@ impl NodeId {
     }
 
     #[track_caller]
-    pub fn parent(self, map: &NodeMap) -> Option<NodeId> { map.map.get(self).and_then(|n| n.parent) }
+    pub fn parent(self, map: &NodeMap) -> Option<NodeId> {
+        map.map.get(self).and_then(|n| n.parent)
+    }
 
     #[track_caller]
     pub fn children(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
@@ -168,7 +172,10 @@ impl NodeId {
 
     /// Returns an iterator over all ancestors of the current node, including itself.
     #[track_caller]
-    pub fn ancestors_with_parent(self, map: &NodeMap) -> impl Iterator<Item = (NodeId, Option<NodeId>)> + '_ {
+    pub fn ancestors_with_parent(
+        self,
+        map: &NodeMap,
+    ) -> impl Iterator<Item = (NodeId, Option<NodeId>)> + '_ {
         let mut next = Some(self);
         std::iter::from_fn(move || {
             let node = next;
@@ -215,7 +222,9 @@ impl NodeId {
     }
 
     #[track_caller]
-    pub fn last_child(self, map: &NodeMap) -> Option<NodeId> { map.map.get(self).and_then(|n| n.last_child) }
+    pub fn last_child(self, map: &NodeMap) -> Option<NodeId> {
+        map.map.get(self).and_then(|n| n.last_child)
+    }
 
     #[track_caller]
     pub fn is_empty(self, map: &NodeMap) -> bool {
@@ -348,7 +357,11 @@ impl<'a, O: Observer> DetachedNode<'a, O> {
         }
     }
 
-    fn attach_with(mut self, new_parent: NodeId, attach: impl FnOnce(&mut Self)) -> ReattachedNode<'a, O> {
+    fn attach_with(
+        mut self,
+        new_parent: NodeId,
+        attach: impl FnOnce(&mut Self),
+    ) -> ReattachedNode<'a, O> {
         let old_parent = self.id.parent(&self.tree.map);
         if old_parent.is_some() && old_parent != Some(new_parent) {
             self.tree.data.removing_from_parent(&self.tree.map, self.id);
@@ -744,7 +757,9 @@ mod tests {
             t
         }
 
-        fn get_children(&self, node: NodeId) -> Vec<NodeId> { node.children(&self.tree.map).collect() }
+        fn get_children(&self, node: NodeId) -> Vec<NodeId> {
+            node.children(&self.tree.map).collect()
+        }
 
         fn get_children_rev(&self, node: NodeId) -> Vec<NodeId> {
             node.children_rev(&self.tree.map).collect()
@@ -799,16 +814,23 @@ mod tests {
     struct Events(Vec<TreeEvent>);
 
     impl Observer for Events {
-        fn added_to_forest(&mut self, _map: &NodeMap, node: NodeId) { self.0.push(AddedToForest(node)) }
+        fn added_to_forest(&mut self, _map: &NodeMap, node: NodeId) {
+            self.0.push(AddedToForest(node))
+        }
 
-        fn added_to_parent(&mut self, _map: &NodeMap, node: NodeId) { self.0.push(AddedToParent(node)) }
+        fn added_to_parent(&mut self, _map: &NodeMap, node: NodeId) {
+            self.0.push(AddedToParent(node))
+        }
 
         fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId) {
-            let parent = node.parent(map).expect("removing_from_parent called on node without parent");
+            let parent =
+                node.parent(map).expect("removing_from_parent called on node without parent");
             self.0.push(RemovingFromParent(node, parent))
         }
 
-        fn removed_child(tree: &mut Tree<Self>, parent: NodeId) { tree.data.0.push(RemovedChild(parent)) }
+        fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {
+            tree.data.0.push(RemovedChild(parent))
+        }
 
         fn removed_from_forest(&mut self, _map: &NodeMap, node: NodeId) {
             self.0.push(RemovedFromForest(node))

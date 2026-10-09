@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource, CGEventSourceStateID,
-    CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt, CGEventTapProxy, CGEventType,
+    CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
+    CGEventSourceStateID, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
+    CGEventTapProxy, CGEventType,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -21,12 +22,13 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
-    BindingModeSpecs, Config, DragDropSettings, HorizontalMouseWarp, LayoutMode, MouseAction, MouseModifier,
-    StackLineHoverMode,
+    BindingModeSpecs, Config, DragDropSettings, HorizontalMouseWarp, LayoutMode, MouseAction,
+    MouseModifier, StackLineHoverMode,
 };
 use crate::sys::event::{self, Hotkey, KeyCode};
 use crate::sys::hotkey::{
-    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active, modifiers_from_flags_with_keys,
+    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active,
+    modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::{gesture, power, window_server};
@@ -167,7 +169,8 @@ impl Input {
     fn desired_event_mask(&self) -> CGEventMask {
         let state = self.state.borrow();
         let disable_hotkey = self.disable_hotkey.borrow();
-        let keyed_disable = disable_hotkey.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
+        let keyed_disable =
+            disable_hotkey.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
         let hotkeys_enabled = self.hotkeys.borrow().iter().any(|map| !map.is_empty());
         let mut mask = build_event_mask(
             hotkeys_enabled || keyed_disable || self.mission_control_active.get(),
@@ -176,9 +179,11 @@ impl Input {
                 && (state.stack_line_enabled
                     || state.mouse_hides_on_focus
                     || self.horizontal_mouse_warp.get().is_some()
-                    || (state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled)))
+                    || (state.focus_follows_mouse_config_enabled
+                        && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
-            state.event_processing_enabled && (state.stack_line_enabled || state.mouse_hides_on_focus),
+            state.event_processing_enabled
+                && (state.stack_line_enabled || state.mouse_hides_on_focus),
             // Mouse-up delivery is part of the stable configured mask. Drag
             // start/stop is frequent enough that rebuilding the WindowServer
             // tap costs more than filtering these releases in the callback.
@@ -196,14 +201,17 @@ impl Input {
         }
         if state.event_processing_enabled && state.mouse_features_enabled {
             if state.mouse_settings.action1 != MouseAction::None {
-                mask |= (1u64 << CGEventType::LeftMouseDown.0) | (1u64 << CGEventType::LeftMouseDragged.0);
+                mask |= (1u64 << CGEventType::LeftMouseDown.0)
+                    | (1u64 << CGEventType::LeftMouseDragged.0);
             }
             if state.mouse_settings.action2 != MouseAction::None {
-                mask |= (1u64 << CGEventType::RightMouseDown.0) | (1u64 << CGEventType::RightMouseDragged.0);
+                mask |= (1u64 << CGEventType::RightMouseDown.0)
+                    | (1u64 << CGEventType::RightMouseDragged.0);
             }
         }
         if state.event_processing_enabled && self.horizontal_mouse_warp.get().is_some() {
-            mask |= (1u64 << CGEventType::LeftMouseDragged.0) | (1u64 << CGEventType::RightMouseDragged.0);
+            mask |= (1u64 << CGEventType::LeftMouseDragged.0)
+                | (1u64 << CGEventType::RightMouseDragged.0);
         }
         if state.gesture_settings.enabled() {
             mask |= gesture::EVENT_MASK;
@@ -247,7 +255,10 @@ impl Input {
         tap
     }
 
-    fn rebuild_event_tap_mask_if_needed(&self, recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>) {
+    fn rebuild_event_tap_mask_if_needed(
+        &self,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
         let next_mask = self.desired_event_mask();
         if next_mask == self.event_mask.get() && (next_mask == 0 || self.tap.borrow().is_some()) {
             return;
@@ -397,7 +408,11 @@ impl Input {
         }
     }
 
-    fn on_request(&self, request: Request, recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>) {
+    fn on_request(
+        &self,
+        request: Request,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
         let reset_gestures = match &request {
             Request::SpaceStateUpdated(snapshot, _) => !snapshot
                 .screens
@@ -411,15 +426,20 @@ impl Input {
                         .iter()
                         .any(|(space, mode)| state.layout_mode_by_space.get(space) != Some(mode))
             }
-            Request::SetEventProcessing(enabled) => *enabled != self.state.borrow().event_processing_enabled,
-            Request::SetMissionControlActive(active) => *active != self.mission_control_active.get(),
+            Request::SetEventProcessing(enabled) => {
+                *enabled != self.state.borrow().event_processing_enabled
+            }
+            Request::SetMissionControlActive(active) => {
+                *active != self.mission_control_active.get()
+            }
             Request::ConfigUpdated(_) | Request::ReleaseMissionControl => true,
             _ => false,
         };
         if reset_gestures {
             self.reset_gestures();
         }
-        let configure_gestures = reset_gestures || matches!(&request, Request::SpaceStateUpdated(..));
+        let configure_gestures =
+            reset_gestures || matches!(&request, Request::SpaceStateUpdated(..));
         let mut should_rebuild_mask = false;
         let mut state = self.state.borrow_mut();
         match request {
@@ -535,7 +555,8 @@ impl Input {
                 *self.disable_hotkey.borrow_mut() = disable_hotkey;
                 {
                     let prev_mouse_hides_on_focus = state.mouse_hides_on_focus;
-                    let prev_focus_follows_mouse_config_enabled = state.focus_follows_mouse_config_enabled;
+                    let prev_focus_follows_mouse_config_enabled =
+                        state.focus_follows_mouse_config_enabled;
                     let prev_stack_line_enabled = state.stack_line_enabled;
                     let prev_stack_line_hover_mode = state.stack_line_hover_mode;
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
@@ -560,14 +581,18 @@ impl Input {
                         state.reset(true);
                         self.reset_mouse_move_sample_gate();
                     }
-                    if prev_focus_follows_mouse_config_enabled != state.focus_follows_mouse_config_enabled
+                    if prev_focus_follows_mouse_config_enabled
+                        != state.focus_follows_mouse_config_enabled
                         || prev_stack_line_enabled != state.stack_line_enabled
                         || prev_stack_line_hover_mode != state.stack_line_hover_mode
                     {
                         state.reset_mouse_sampling();
                         self.reset_mouse_move_sample_gate();
                     }
-                    if prev_mouse_hides_on_focus && !state.mouse_hides_on_focus && state.hide_count > 0 {
+                    if prev_mouse_hides_on_focus
+                        && !state.mouse_hides_on_focus
+                        && state.hide_count > 0
+                    {
                         debug!("Showing mouse after disabling mouse_hides_on_focus");
                         state.show_mouse();
                     }
@@ -652,7 +677,12 @@ impl Input {
         self.refresh_disable_hotkey_state(&mut self.state.borrow_mut());
     }
 
-    fn on_event(&self, event_type: CGEventType, event: &CGEvent, proxy: Option<CGEventTapProxy>) -> bool {
+    fn on_event(
+        &self,
+        event_type: CGEventType,
+        event: &CGEvent,
+        proxy: Option<CGEventTapProxy>,
+    ) -> bool {
         match event_type {
             ty if ty.0 == gesture::CGS_EVENT_GESTURE || ty.0 == gesture::CGS_EVENT_DOCK_CONTROL => {
                 self.native_gesture_forward(ty, event, proxy)
@@ -662,11 +692,14 @@ impl Input {
                     return true;
                 }
                 if event_type == CGEventType::KeyDown && self.mission_control_active.get() {
-                    let keycode =
-                        CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode) as u16;
-                    if let Some(input) =
-                        super::mission_control::Input::from_keycode(keycode, CGEvent::flags(Some(event)))
-                    {
+                    let keycode = CGEvent::integer_value_field(
+                        Some(event),
+                        CGEventField::KeyboardEventKeycode,
+                    ) as u16;
+                    if let Some(input) = super::mission_control::Input::from_keycode(
+                        keycode,
+                        CGEvent::flags(Some(event)),
+                    ) {
                         self.send_overview(super::mission_control::Event::Input(input));
                         return false;
                     }
@@ -674,9 +707,10 @@ impl Input {
                 self.handle_keyboard_event(event_type, event, &mut self.state.borrow_mut())
             }
             CGEventType::ScrollWheel if self.mission_control_active.get() => {
-                let continuous =
-                    CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventIsContinuous)
-                        != 0;
+                let continuous = CGEvent::integer_value_field(
+                    Some(event),
+                    CGEventField::ScrollWheelEventIsContinuous,
+                ) != 0;
                 let (x, y, scale) = if continuous {
                     (
                         CGEventField::ScrollWheelEventPointDeltaAxis2,
@@ -707,7 +741,8 @@ impl Input {
             CGEventType::ScrollWheel => self.native_gesture_forward(event_type, event, proxy),
             CGEventType::MouseMoved => self.on_mouse_moved(event, CGEvent::location(Some(event))),
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
-                if self.mission_control_active.get() && event_type == CGEventType::LeftMouseDragged {
+                if self.mission_control_active.get() && event_type == CGEventType::LeftMouseDragged
+                {
                     self.send_overview(super::mission_control::Event::Input(
                         super::mission_control::Input::PointerDrag(CGEvent::location(Some(event))),
                     ));
@@ -720,8 +755,10 @@ impl Input {
                         super::mission_control::Input::Scroll {
                             point: CGEvent::location(Some(event)),
                             delta: CGPoint::new(
-                                CGEvent::integer_value_field(Some(event), CGEventField::MouseEventDeltaX)
-                                    as f64,
+                                CGEvent::integer_value_field(
+                                    Some(event),
+                                    CGEventField::MouseEventDeltaX,
+                                ) as f64,
                                 0.0,
                             ),
                         },
@@ -905,7 +942,9 @@ impl Input {
         true
     }
 
-    fn on_mouse_focus(&self, loc: CGPoint) { _ = self.mouse_focus_publisher.publish(&self.events_tx, loc); }
+    fn on_mouse_focus(&self, loc: CGPoint) {
+        _ = self.mouse_focus_publisher.publish(&self.events_tx, loc);
+    }
 
     fn maybe_horizontal_mouse_warp(&self, event: &CGEvent) -> Option<CGPoint> {
         self.horizontal_mouse_warp.get()?;
@@ -938,7 +977,12 @@ impl Input {
         Some(CGEvent::location(Some(event)))
     }
 
-    fn handle_keyboard_event(&self, event_type: CGEventType, event: &CGEvent, state: &mut State) -> bool {
+    fn handle_keyboard_event(
+        &self,
+        event_type: CGEventType,
+        event: &CGEvent,
+        state: &mut State,
+    ) -> bool {
         let key_code_opt = key_code_from_event(event);
 
         // FlagsChanged must be interpreted using the flags from this event,
@@ -979,8 +1023,10 @@ impl Input {
                     // execute a command over and over. This is especially
                     // surprising for workspace_auto_back_and_forth, where
                     // each repeat toggles back to the other workspace.
-                    let is_repeat =
-                        CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventAutorepeat) != 0;
+                    let is_repeat = CGEvent::integer_value_field(
+                        Some(event),
+                        CGEventField::KeyboardEventAutorepeat,
+                    ) != 0;
                     if is_repeat {
                         return false;
                     }
@@ -1416,7 +1462,11 @@ mod tests {
                 0,
             )
             .unwrap();
-            CGEvent::set_integer_value_field(Some(&event), CGEventField::ScrollWheelEventScrollPhase, phase);
+            CGEvent::set_integer_value_field(
+                Some(&event),
+                CGEventField::ScrollWheelEventScrollPhase,
+                phase,
+            );
             event
         };
         assert!(!input.native_gesture_forward(CGEventType::ScrollWheel, &event(1), None));
@@ -1433,7 +1483,8 @@ mod tests {
 
     #[test]
     fn horizontal_warp_geometry() {
-        let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), objc2_core_foundation::CGSize::new(w, h));
+        let rect =
+            |x, y, w, h| CGRect::new(CGPoint::new(x, y), objc2_core_foundation::CGSize::new(w, h));
         let top = rect(100.0, 0.0, 100.0, 100.0);
         let middle = rect(-50.0, 100.0, 80.0, 70.0);
         let bottom = rect(300.0, 170.0, 100.0, 100.0);
@@ -1589,7 +1640,9 @@ mod tests {
         assert_eq!(result, event_ptr.as_ptr());
         assert!(matches!(
             rx.try_recv().unwrap().1,
-            super::super::mission_control::Event::Input(super::super::mission_control::Input::Move(_))
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::Move(_)
+            )
         ));
         CGEvent::set_timestamp(Some(&event), 1001);
         let result = unsafe {
@@ -1629,15 +1682,21 @@ mod tests {
         }
         assert!(matches!(
             rx.try_recv().unwrap().1,
-            super::super::mission_control::Event::Input(super::super::mission_control::Input::PointerDown(_))
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::PointerDown(_)
+            )
         ));
         assert!(matches!(
             rx.try_recv().unwrap().1,
-            super::super::mission_control::Event::Input(super::super::mission_control::Input::PointerDrag(_))
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::PointerDrag(_)
+            )
         ));
         assert!(matches!(
             rx.try_recv().unwrap().1,
-            super::super::mission_control::Event::Input(super::super::mission_control::Input::PointerUp(_))
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::PointerUp(_)
+            )
         ));
         assert!(rx.try_recv().is_err());
         assert!(native_rx.try_recv().is_err());
@@ -1674,10 +1733,9 @@ mod tests {
         }
         let (
             _,
-            super::super::mission_control::Event::Input(super::super::mission_control::Input::Scroll {
-                delta,
-                ..
-            }),
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::Scroll { delta, .. },
+            ),
         ) = rx.try_recv().unwrap()
         else {
             panic!("horizontal Overview pan")
@@ -1737,10 +1795,9 @@ mod tests {
         assert!(!input.on_event(CGEventType::ScrollWheel, &event, None));
         let (
             _,
-            super::super::mission_control::Event::Input(super::super::mission_control::Input::Scroll {
-                point,
-                delta,
-            }),
+            super::super::mission_control::Event::Input(
+                super::super::mission_control::Input::Scroll { point, delta },
+            ),
         ) = rx.try_recv().unwrap()
         else {
             panic!("expected Overview scroll")
@@ -1836,7 +1893,8 @@ mod tests {
         input.mission_control_active.set(false);
         *input.disable_hotkey.borrow_mut() = Some(Hotkey::new(Modifiers::empty(), KeyCode::KeyA));
         assert_ne!(input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0), 0);
-        *input.disable_hotkey.borrow_mut() = Some(Hotkey::new(Modifiers::empty(), KeyCode::ShiftLeft));
+        *input.disable_hotkey.borrow_mut() =
+            Some(Hotkey::new(Modifiers::empty(), KeyCode::ShiftLeft));
         assert_eq!(input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0), 0);
     }
 
@@ -1878,7 +1936,11 @@ mod tests {
         CGEvent::set_integer_value_field(Some(&event), CGEventField::KeyboardEventAutorepeat, 1);
         assert!(!input.on_event(CGEventType::KeyDown, &event, None));
         assert!(wm_rx.try_recv().is_err());
-        CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, 0x5249_4654);
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::EventSourceUserData,
+            0x5249_4654,
+        );
         assert!(input.on_event(CGEventType::KeyDown, &event, None));
         assert!(wm_rx.try_recv().is_err());
     }
@@ -2013,16 +2075,12 @@ mod tests {
         input.install_binding_specs(specs);
         assert_eq!(input.active_mode.get(), 0);
         let maps = input.hotkeys.borrow();
-        assert!(
-            maps[0]
-                .keys()
-                .any(|key| { key.key_code == KeyCode::KeyA && !key.modifiers.has_generic_modifiers() })
-        );
-        assert!(
-            maps[1]
-                .keys()
-                .any(|key| { key.key_code == KeyCode::KeyB && !key.modifiers.has_generic_modifiers() })
-        );
+        assert!(maps[0].keys().any(|key| {
+            key.key_code == KeyCode::KeyA && !key.modifiers.has_generic_modifiers()
+        }));
+        assert!(maps[1].keys().any(|key| {
+            key.key_code == KeyCode::KeyB && !key.modifiers.has_generic_modifiers()
+        }));
     }
 
     #[test]
@@ -2107,7 +2165,8 @@ mod tests {
             let (input, _, _) = input();
             input.state.borrow_mut().captured_button = Some(button);
             let event =
-                CGEvent::new_mouse_event(None, event_type, CGPoint::new(99.0, 20.0), cg_button).unwrap();
+                CGEvent::new_mouse_event(None, event_type, CGPoint::new(99.0, 20.0), cg_button)
+                    .unwrap();
             let target = CGPoint::new(6.0, 920.0);
             // Horizontal warping rewrites the event before the drag publisher sees it.
             CGEvent::set_location(Some(&event), target);

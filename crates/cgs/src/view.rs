@@ -5,7 +5,8 @@ use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAutoresizingMaskOptions, NSControl, NSControlSize, NSLayoutAttribute,
-    NSLayoutConstraint, NSLayoutRelation, NSUserInterfaceItemIdentification, NSView, NSViewController,
+    NSLayoutConstraint, NSLayoutRelation, NSUserInterfaceItemIdentification, NSView,
+    NSViewController,
 };
 use objc2_foundation::NSString;
 
@@ -20,7 +21,9 @@ pub trait NativeView: 'static {
         }
     }
     fn tooltip(&self, text: &str) { self.ns_view().setToolTip(Some(&NSString::from_str(text))); }
-    fn identifier(&self, text: &str) { self.ns_view().setIdentifier(Some(&NSString::from_str(text))); }
+    fn identifier(&self, text: &str) {
+        self.ns_view().setIdentifier(Some(&NSString::from_str(text)));
+    }
     fn accessibility_label(&self, text: &str) {
         self.ns_view().setAccessibilityLabel(Some(&NSString::from_str(text)));
     }
@@ -76,7 +79,11 @@ pub trait NativeView: 'static {
     fn hugging_priority(&self, priority: f32, axis: objc2_app_kit::NSLayoutConstraintOrientation) {
         self.ns_view().setContentHuggingPriority_forOrientation(priority, axis);
     }
-    fn compression_resistance(&self, priority: f32, axis: objc2_app_kit::NSLayoutConstraintOrientation) {
+    fn compression_resistance(
+        &self,
+        priority: f32,
+        axis: objc2_app_kit::NSLayoutConstraintOrientation,
+    ) {
         self.ns_view()
             .setContentCompressionResistancePriority_forOrientation(priority, axis);
     }
@@ -142,7 +149,12 @@ impl<T: NativeControl> NativeControl for std::rc::Rc<T> {
     fn ns_control(&self) -> &NSControl { (**self).ns_control() }
 }
 
-pub(crate) fn dimension(view: &NSView, attribute: NSLayoutAttribute, relation: NSLayoutRelation, value: f64) {
+pub(crate) fn dimension(
+    view: &NSView,
+    attribute: NSLayoutAttribute,
+    relation: NSLayoutRelation,
+    value: f64,
+) {
     view.setTranslatesAutoresizingMaskIntoConstraints(false);
     unsafe {
         NSLayoutConstraint::constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant(
@@ -312,7 +324,8 @@ impl PageHost {
             return;
         }
         self.leave();
-        let index = self.parked.borrow().iter().position(|p| std::ptr::eq(&*p.view, page.ns_view()));
+        let index =
+            self.parked.borrow().iter().position(|p| std::ptr::eq(&*p.view, page.ns_view()));
         if let Some(index) = index {
             self.parked.borrow_mut().remove(index);
             self.fill(page.ns_view());
@@ -327,7 +340,8 @@ impl PageHost {
 
     fn fill(&self, view: &NSView) {
         view.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         view.setFrame(self.view.ns_view().bounds());
     }
@@ -409,7 +423,8 @@ impl PageHost {
         };
         view.scrollRectToVisible(view.bounds());
         let focusable = view.downcast_ref::<NSControl>().is_some_and(|control| {
-            control.isEnabled() && view.downcast_ref::<NSTextField>().is_none_or(|field| field.isEditable())
+            control.isEnabled()
+                && view.downcast_ref::<NSTextField>().is_none_or(|field| field.isEditable())
         });
         if focusable && let Some(window) = view.window() {
             window.makeFirstResponder(Some(&view));
@@ -554,8 +569,9 @@ impl GlassEffectView {
     /// Interactive glass is available on macOS 27 and newer.
     pub fn interactive(self, interactive: bool) -> Self {
         if let Some(view) = &self.native {
-            let supported: bool =
-                unsafe { msg_send![view, respondsToSelector: objc2::sel!(setEffectIsInteractive:)] };
+            let supported: bool = unsafe {
+                msg_send![view, respondsToSelector: objc2::sel!(setEffectIsInteractive:)]
+            };
             if supported {
                 let _: () = unsafe { msg_send![view, setEffectIsInteractive: interactive] };
             }
@@ -563,12 +579,15 @@ impl GlassEffectView {
         self
     }
 
-    pub fn ns_glass_effect_view(&self) -> Option<&objc2_app_kit::NSGlassEffectView> { self.native.as_deref() }
+    pub fn ns_glass_effect_view(&self) -> Option<&objc2_app_kit::NSGlassEffectView> {
+        self.native.as_deref()
+    }
 }
 /// Detach borrowed content from a glass wrapper. Resolving the class before macOS 26 aborts.
 pub(crate) fn detach_glass_content(view: Option<Retained<NSView>>) {
     if objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some()
-        && let Some(glass) = view.and_then(|view| view.downcast::<objc2_app_kit::NSGlassEffectView>().ok())
+        && let Some(glass) =
+            view.and_then(|view| view.downcast::<objc2_app_kit::NSGlassEffectView>().ok())
     {
         glass.setContentView(None);
     }

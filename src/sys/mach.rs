@@ -266,8 +266,11 @@ unsafe extern "C" {
         special_port: *mut mach_port_t,
     ) -> kern_return_t;
 
-    fn mach_port_allocate(task: mach_port_name_t, right: c_int, name: *mut mach_port_name_t)
-    -> kern_return_t;
+    fn mach_port_allocate(
+        task: mach_port_name_t,
+        right: c_int,
+        name: *mut mach_port_name_t,
+    ) -> kern_return_t;
 
     fn mach_port_insert_right(
         task: mach_port_name_t,
@@ -303,7 +306,11 @@ unsafe extern "C" {
         count: u32,
     ) -> kern_return_t;
 
-    fn mach_port_type(task: mach_port_name_t, name: mach_port_name_t, ptype: *mut u32) -> kern_return_t;
+    fn mach_port_type(
+        task: mach_port_name_t,
+        name: mach_port_name_t,
+        ptype: *mut u32,
+    ) -> kern_return_t;
 
     pub fn mach_msg(
         msg: *mut mach_msg_header_t,
@@ -321,8 +328,11 @@ unsafe extern "C" {
     fn mig_dealloc_special_reply_port(reply_port: mach_port_name_t);
     pub static NDR_record: ndr_record_t;
 
-    fn bootstrap_look_up(bp: mach_port_t, service_name: *const c_char, sp: *mut mach_port_t)
-    -> kern_return_t;
+    fn bootstrap_look_up(
+        bp: mach_port_t,
+        service_name: *const c_char,
+        sp: *mut mach_port_t,
+    ) -> kern_return_t;
 
     fn bootstrap_check_in(
         bp: mach_port_t,
@@ -330,7 +340,11 @@ unsafe extern "C" {
         sp: *mut mach_port_t,
     ) -> kern_return_t;
 
-    fn bootstrap_register(bp: mach_port_t, service_name: *const c_char, sp: mach_port_t) -> kern_return_t;
+    fn bootstrap_register(
+        bp: mach_port_t,
+        service_name: *const c_char,
+        sp: mach_port_t,
+    ) -> kern_return_t;
 
     fn bootstrap_register2(
         bp: mach_port_t,
@@ -469,7 +483,10 @@ fn segname_eq(segname: &[c_char; 16], rhs: &[u8]) -> bool {
     segname.iter().take(end).map(|&c| c as u8).eq(rhs.iter().copied())
 }
 
-unsafe fn macho_find_image_header(target_name: &[u8], slide: &mut isize) -> Option<*const mach_header_64> {
+unsafe fn macho_find_image_header(
+    target_name: &[u8],
+    slide: &mut isize,
+) -> Option<*const mach_header_64> {
     let image_count = _dyld_image_count();
     for index in 0..image_count {
         let image_name = _dyld_get_image_name(index);
@@ -482,7 +499,9 @@ unsafe fn macho_find_image_header(target_name: &[u8], slide: &mut isize) -> Opti
     None
 }
 
-unsafe fn macho_find_linkedit_segment(header: *const mach_header_64) -> Option<*const segment_command_64> {
+unsafe fn macho_find_linkedit_segment(
+    header: *const mach_header_64,
+) -> Option<*const segment_command_64> {
     if header.is_null() {
         return None;
     }
@@ -503,7 +522,9 @@ unsafe fn macho_find_linkedit_segment(header: *const mach_header_64) -> Option<*
     None
 }
 
-unsafe fn macho_find_symtab_command(header: *const mach_header_64) -> Option<*const symtab_command> {
+unsafe fn macho_find_symtab_command(
+    header: *const mach_header_64,
+) -> Option<*const symtab_command> {
     if header.is_null() {
         return None;
     }
@@ -521,7 +542,10 @@ unsafe fn macho_find_symtab_command(header: *const mach_header_64) -> Option<*co
     None
 }
 
-pub unsafe fn macho_find_symbol(target_image: &[u8], target_symbol: &[u8]) -> Option<*const c_void> {
+pub unsafe fn macho_find_symbol(
+    target_image: &[u8],
+    target_symbol: &[u8],
+) -> Option<*const c_void> {
     if target_symbol.is_empty() || *target_symbol.last().unwrap() != 0 {
         return None;
     }
@@ -531,8 +555,8 @@ pub unsafe fn macho_find_symbol(target_image: &[u8], target_symbol: &[u8]) -> Op
     let linkedit_segment = macho_find_linkedit_segment(header)?;
     let symtab_command = macho_find_symtab_command(header)?;
     let symbol_count = (*symtab_command).nsyms as usize;
-    let linkedit_base =
-        ((*linkedit_segment).vmaddr as isize - (*linkedit_segment).fileoff as isize + slide) as usize;
+    let linkedit_base = ((*linkedit_segment).vmaddr as isize - (*linkedit_segment).fileoff as isize
+        + slide) as usize;
     let symbol_str = (linkedit_base + (*symtab_command).stroff as usize) as *const c_char;
     let symbol_sym = (linkedit_base + (*symtab_command).symoff as usize) as *const nlist_64;
     let target = &target_symbol[..target_symbol.len() - 1];
@@ -575,7 +599,11 @@ unsafe fn create_connection_server_port() -> mach_port_t {
     let local_port = core::ptr::read_unaligned(core::ptr::addr_of!(msg.0.header.msgh_local_port));
     let _ = mach_msg(
         header_ptr,
-        MACH_SEND_MSG | MACH_SEND_SYNC_OVERRIDE | MACH_SEND_PROPAGATE_QOS | MACH_RCV_MSG | MACH_RCV_SYNC_WAIT,
+        MACH_SEND_MSG
+            | MACH_SEND_SYNC_OVERRIDE
+            | MACH_SEND_PROPAGATE_QOS
+            | MACH_RCV_MSG
+            | MACH_RCV_SYNC_WAIT,
         size_of::<create_connection_server_port_message_t>() as u32,
         CONNECTION_SERVER_PORT_RECV_SIZE,
         local_port,
@@ -618,14 +646,20 @@ pub unsafe fn mach_get_window_sub_level(wid: u32) -> c_int {
     msg.0.info.header.msgh_id = request;
     msg.0.payload.wid = wid as i32;
 
-    let send_size = (size_of::<window_sub_level_info_t>() + size_of::<window_sub_level_payload_t>()) as u32;
+    let send_size =
+        (size_of::<window_sub_level_info_t>() + size_of::<window_sub_level_payload_t>()) as u32;
     let recv_size = size_of::<get_window_sub_level_message_t>() as u32;
 
     let header_ptr = core::ptr::addr_of_mut!(msg.0.info.header);
-    let local_port = core::ptr::read_unaligned(core::ptr::addr_of!(msg.0.info.header.msgh_local_port));
+    let local_port =
+        core::ptr::read_unaligned(core::ptr::addr_of!(msg.0.info.header.msgh_local_port));
     let error = mach_msg(
         header_ptr,
-        MACH_SEND_MSG | MACH_SEND_SYNC_OVERRIDE | MACH_SEND_PROPAGATE_QOS | MACH_RCV_MSG | MACH_RCV_SYNC_WAIT,
+        MACH_SEND_MSG
+            | MACH_SEND_SYNC_OVERRIDE
+            | MACH_SEND_PROPAGATE_QOS
+            | MACH_RCV_MSG
+            | MACH_RCV_SYNC_WAIT,
         send_size,
         recv_size,
         local_port,
@@ -648,7 +682,8 @@ pub unsafe fn mach_get_window_sub_level(wid: u32) -> c_int {
 
     if msg.0.info.header.msgh_id != response {
         if !window_sub_level_invalid_msg_logged {
-            let received_id = core::ptr::read_unaligned(core::ptr::addr_of!(msg.0.info.header.msgh_id));
+            let received_id =
+                core::ptr::read_unaligned(core::ptr::addr_of!(msg.0.info.header.msgh_id));
             eprintln!(
                 "SubLevel: Invalid message received (id=0x{:x}, expected=0x{:x}).",
                 received_id, response
@@ -870,7 +905,8 @@ unsafe fn receive_message_on_port(
         return false;
     }
 
-    let inline_len = (*header_ptr).msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32) as usize;
+    let inline_len =
+        (*header_ptr).msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32) as usize;
 
     response_buf.clear();
     if inline_len > 0 {
@@ -890,7 +926,10 @@ pub unsafe fn mach_send_message(
     await_response: bool,
     response_buf: Option<&mut Vec<u8>>,
 ) -> bool {
-    if message.is_null() || port == 0 || len > MAX_MESSAGE_SIZE || (await_response && response_buf.is_none())
+    if message.is_null()
+        || port == 0
+        || len > MAX_MESSAGE_SIZE
+        || (await_response && response_buf.is_none())
     {
         error!(
             "mach_send_message: invalid input args message={:?} port={} len={} await_response={}",
@@ -916,7 +955,8 @@ pub unsafe fn mach_send_message(
             MACH_PORT_LIMITS_INFO_COUNT,
         );
 
-        let ir = mach_port_insert_right(task, reply_port, reply_port, MACH_MSG_TYPE_MAKE_SEND as c_int);
+        let ir =
+            mach_port_insert_right(task, reply_port, reply_port, MACH_MSG_TYPE_MAKE_SEND as c_int);
         if ir != KERN_SUCCESS {
             error!(
                 "mach_send_message: mach_port_insert_right failed for reply port (kr={})",
@@ -1076,7 +1116,11 @@ pub unsafe fn mach_send_message_with_reply_port(
     receive_message_on_port(reply_port, response_buf, "mach_send_message_with_reply_port")
 }
 
-pub unsafe fn mach_send_request(message: *const c_char, len: u32, response_buf: &mut Vec<u8>) -> bool {
+pub unsafe fn mach_send_request(
+    message: *const c_char,
+    len: u32,
+    response_buf: &mut Vec<u8>,
+) -> bool {
     if message.is_null() || len > MAX_MESSAGE_SIZE {
         error!(
             "mach_send_request: invalid args message={:?} len={}",
@@ -1151,7 +1195,10 @@ pub unsafe fn mach_send_request_with_reply_port(
     mach_send_message_with_reply_port(service_port, message, len, reply_port, response_buf)
 }
 
-pub unsafe fn mach_receive_message_on_port(reply_port: mach_port_t, response_buf: &mut Vec<u8>) -> bool {
+pub unsafe fn mach_receive_message_on_port(
+    reply_port: mach_port_t,
+    response_buf: &mut Vec<u8>,
+) -> bool {
     if reply_port == 0 {
         error!("mach_receive_message_on_port: invalid reply_port=0");
         return false;
@@ -1219,7 +1266,8 @@ extern "C" fn mach_message_callback(
             }
 
             if header_val.msgh_size as usize >= size_of::<DeadNameNotification>() {
-                let notification = core::ptr::read_unaligned(message as *const DeadNameNotification);
+                let notification =
+                    core::ptr::read_unaligned(message as *const DeadNameNotification);
                 if let Some(handler) = mach_server.dead_name_handler {
                     handler(mach_server.context, notification.port);
                 }
@@ -1236,8 +1284,8 @@ extern "C" fn mach_message_callback(
         let mut payload_len: u32 = 0;
 
         if (header_val.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 {
-            let body_ptr =
-                (message as *const u8).add(size_of::<mach_msg_header_t>()) as *const mach_msg_body_t;
+            let body_ptr = (message as *const u8).add(size_of::<mach_msg_header_t>())
+                as *const mach_msg_body_t;
             let body_val = core::ptr::read_unaligned(body_ptr);
             if body_val.msgh_descriptor_count >= 1 {
                 let desc_ptr = ((body_ptr as usize + size_of::<mach_msg_body_t>() + 7) & !7)
@@ -1246,12 +1294,15 @@ extern "C" fn mach_message_callback(
                 payload_ptr = desc_val.address as *mut c_char;
                 payload_len = desc_val.size;
                 if payload_ptr.is_null() || payload_len == 0 {
-                    payload_len = header_val.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
-                    payload_ptr = (message as *mut u8).add(size_of::<mach_msg_header_t>()) as *mut c_char;
+                    payload_len =
+                        header_val.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
+                    payload_ptr =
+                        (message as *mut u8).add(size_of::<mach_msg_header_t>()) as *mut c_char;
                 }
             }
         } else {
-            payload_len = header_val.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
+            payload_len =
+                header_val.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
             payload_ptr = (message as *mut u8).add(size_of::<mach_msg_header_t>()) as *mut c_char;
         }
 
@@ -1271,7 +1322,8 @@ pub unsafe fn mach_server_begin(
 ) -> bool {
     mach_server.task = mach_task_self();
 
-    if task_get_special_port(mach_server.task, TASK_BOOTSTRAP_PORT, &mut mach_server.bs_port) != KERN_SUCCESS
+    if task_get_special_port(mach_server.task, TASK_BOOTSTRAP_PORT, &mut mach_server.bs_port)
+        != KERN_SUCCESS
     {
         error!("mach_server_begin: task_get_special_port failed");
         return false;
@@ -1527,8 +1579,9 @@ mod tests {
             msgh_id: 17,
         };
         let mut storage = MaybeUninit::<mach_message_t>::uninit();
-        let header_ptr =
-            unsafe { prepare_inline_send(&mut storage, header, payload.as_ptr(), payload.len() as u32) };
+        let header_ptr = unsafe {
+            prepare_inline_send(&mut storage, header, payload.as_ptr(), payload.len() as u32)
+        };
 
         unsafe {
             assert_eq!((*header_ptr).msgh_bits, 7);
@@ -1553,7 +1606,8 @@ mod tests {
             received_header.msgh_remote_port = reply_port;
             received_header.msgh_id = 42;
 
-            let mut destination = OwnedMachReply::retain(&received_header).expect("retain reply destination");
+            let mut destination =
+                OwnedMachReply::retain(&received_header).expect("retain reply destination");
 
             // Simulate mach_msg_destroy consuming the send right carried by
             // the received message after the CFMachPort callback returns.

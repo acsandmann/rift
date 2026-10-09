@@ -12,8 +12,8 @@ use crate::actor::app::WindowId;
 use crate::common::config::{DragDropSettings, MouseAction, MouseDropAction};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
-    DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent, DropTarget,
-    DropZone,
+    DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
+    DropTarget, DropZone,
 };
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -255,7 +255,9 @@ impl DragActor {
         {
             return false;
         }
-        if intent.window == session.source.window && !matches!(intent.action, WindowDropAction::Move(_)) {
+        if intent.window == session.source.window
+            && !matches!(intent.action, WindowDropAction::Move(_))
+        {
             return false;
         }
         if let Some(preview_area) = preview_area {
@@ -295,14 +297,26 @@ impl DragActor {
         id
     }
 
-    pub fn await_native(&mut self, window: WindowId) -> u64 { self.await_start(StartKind::Native { window }) }
+    pub fn await_native(&mut self, window: WindowId) -> u64 {
+        self.await_start(StartKind::Native { window })
+    }
 
-    pub fn await_modifier(&mut self, button: MouseButton, point: CGPoint, action: MouseAction) -> u64 {
+    pub fn await_modifier(
+        &mut self,
+        button: MouseButton,
+        point: CGPoint,
+        action: MouseAction,
+    ) -> u64 {
         self.await_start(StartKind::Modifier { button, point, action })
     }
 
     /// Complete source resolution. Stale results are ignored by session id.
-    pub fn resolve_start(&mut self, session_id: u64, source: Option<DragSource>, scene: DragScene) -> bool {
+    pub fn resolve_start(
+        &mut self,
+        session_id: u64,
+        source: Option<DragSource>,
+        scene: DragScene,
+    ) -> bool {
         let State::AwaitingSource(pending) = self.state else {
             return false;
         };
@@ -354,7 +368,12 @@ impl DragActor {
     /// Updates an existing native drag without rebuilding its immutable scene.
     ///
     /// Returns `true` when `window` owns the active native drag session.
-    pub fn update_native(&mut self, window: WindowId, frame: CGRect, current_space: Option<SpaceId>) -> bool {
+    pub fn update_native(
+        &mut self,
+        window: WindowId,
+        frame: CGRect,
+        current_space: Option<SpaceId>,
+    ) -> bool {
         let State::Dragging(session) = &mut self.state else {
             return false;
         };
@@ -452,7 +471,8 @@ impl DragActor {
         let State::Dragging(session) = &mut self.state else {
             return None;
         };
-        (session.kind == DragKind::ModifierMove).then_some((session.source.window, session.source.last_frame))
+        (session.kind == DragKind::ModifierMove)
+            .then_some((session.source.window, session.source.last_frame))
     }
 
     pub fn finish(&mut self, button: MouseButton) -> Option<DragCommit> {
@@ -590,7 +610,11 @@ pub fn hit_test(
 }
 
 /// Projected scenes include the source for presentation; it is not a relative drop target.
-pub fn hit_test_projected(scene: &DragScene, source: WindowId, point: CGPoint) -> Option<DropIntent> {
+pub fn hit_test_projected(
+    scene: &DragScene,
+    source: WindowId,
+    point: CGPoint,
+) -> Option<DropIntent> {
     if scene
         .targets
         .iter()
@@ -687,7 +711,9 @@ fn hit_test_available(
     }
 
     let nearest = scene.targets.iter().enumerate().filter(|(_, target)| {
-        Some(target.window) != excluded && target.frame.size.width > 0.0 && target.frame.size.height > 0.0
+        Some(target.window) != excluded
+            && target.frame.size.width > 0.0
+            && target.frame.size.height > 0.0
     });
     if unavailable.is_empty() {
         let (_, target) = nearest.min_by(|(a_order, a), (b_order, b)| {
@@ -1045,7 +1071,8 @@ mod tests {
     fn overlapping_targets_prefer_scene_order() {
         let visible = w(2);
         let scene = scene_with(vec![target(2, rect()), target(3, rect())]);
-        let intent = hit_test(&scene, point(100.0, 50.0), 0.25, MouseDropAction::Swap, None).unwrap();
+        let intent =
+            hit_test(&scene, point(100.0, 50.0), 0.25, MouseDropAction::Swap, None).unwrap();
         assert_eq!(intent.window, visible);
     }
 

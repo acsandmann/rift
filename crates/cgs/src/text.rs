@@ -10,7 +10,9 @@ pub struct Font;
 impl Font {
     pub fn body() -> Retained<NSFont> { NSFont::systemFontOfSize(NSFont::systemFontSize()) }
 
-    pub fn body_emphasized() -> Retained<NSFont> { NSFont::boldSystemFontOfSize(NSFont::systemFontSize()) }
+    pub fn body_emphasized() -> Retained<NSFont> {
+        NSFont::boldSystemFontOfSize(NSFont::systemFontSize())
+    }
 
     pub fn caption() -> Retained<NSFont> { NSFont::systemFontOfSize(NSFont::smallSystemFontSize()) }
 
@@ -23,11 +25,15 @@ impl Font {
     }
 
     pub fn subsection_title() -> Retained<NSFont> {
-        NSFont::systemFontOfSize_weight(NSFont::smallSystemFontSize(), unsafe { NSFontWeightSemibold })
+        NSFont::systemFontOfSize_weight(NSFont::smallSystemFontSize(), unsafe {
+            NSFontWeightSemibold
+        })
     }
 
     pub fn monospaced() -> Retained<NSFont> {
-        NSFont::monospacedSystemFontOfSize_weight(NSFont::systemFontSize(), unsafe { NSFontWeightRegular })
+        NSFont::monospacedSystemFontOfSize_weight(NSFont::systemFontSize(), unsafe {
+            NSFontWeightRegular
+        })
     }
 }
 pub struct Color;
@@ -140,7 +146,11 @@ impl Link {
     pub fn new(ui: &Ui, text: &str, url: &str) -> Self {
         let label = Label::new(ui, text);
         if let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) {
-            let attrs = NSDictionary::from_slices(&[unsafe { NSLinkAttributeName }], &[&*url as &AnyObject]);
+            let attrs =
+                NSDictionary::from_slices(
+                    &[unsafe { NSLinkAttributeName }],
+                    &[&*url as &AnyObject],
+                );
             let text = unsafe {
                 NSAttributedString::initWithString_attributes(
                     NSAttributedString::alloc(),
@@ -169,9 +179,10 @@ impl Symbol {
 
     /// Consistent symbol metrics for toolbar menus and header buttons.
     pub fn header(name: &str) -> Option<Retained<NSImage>> {
-        let configuration = NSImageSymbolConfiguration::configurationWithPointSize_weight(12.0, unsafe {
-            NSFontWeightRegular
-        });
+        let configuration =
+            NSImageSymbolConfiguration::configurationWithPointSize_weight(12.0, unsafe {
+                NSFontWeightRegular
+            });
         Self::named(name)?.imageWithSymbolConfiguration(&configuration)
     }
 }

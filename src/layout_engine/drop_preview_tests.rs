@@ -36,7 +36,12 @@ fn calculated_source<S: LayoutSystem>(system: &S, layout: LayoutId, source: Wind
         .expect("source frame after successful drop")
 }
 
-fn verify_actions(baseline: &LayoutSystemKind, layout: LayoutId, source: WindowId, target: WindowId) {
+fn verify_actions(
+    baseline: &LayoutSystemKind,
+    layout: LayoutId,
+    source: WindowId,
+    target: WindowId,
+) {
     let before = format!("{baseline:?}");
     for action in ACTIONS {
         let mut preview_copy = baseline.preview_clone().unwrap();
@@ -106,9 +111,19 @@ fn traditional_target_relative_down_stays_in_the_target_container() {
     for window in [w(1), w(2), w(3)] {
         system.add_window_after_selection(layout, window);
     }
-    assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Insert(Direction::Down),));
+    assert!(system.apply_window_drop(
+        layout,
+        w(3),
+        w(2),
+        WindowDropAction::Insert(Direction::Down),
+    ));
     system.toggle_tile_orientation(layout);
-    assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Insert(Direction::Down),));
+    assert!(system.apply_window_drop(
+        layout,
+        w(3),
+        w(2),
+        WindowDropAction::Insert(Direction::Down),
+    ));
     assert_eq!(
         calculated_source(&system, layout, w(1)),
         CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(600.0, 800.0)),
@@ -136,7 +151,8 @@ fn move_drop_matches_keyboard_move_without_mutating_preview_source() {
         let before = format!("{system:?}");
         let mut preview = system.preview_clone().unwrap();
         let mut keyboard = system.preview_clone().unwrap();
-        let moved = preview.apply_window_drop(layout, w(2), w(2), WindowDropAction::Move(Direction::Right));
+        let moved =
+            preview.apply_window_drop(layout, w(2), w(2), WindowDropAction::Move(Direction::Right));
         assert!(keyboard.select_window(layout, w(2)));
         assert_eq!(moved, keyboard.move_selection(layout, Direction::Right));
         assert_eq!(format!("{preview:?}"), format!("{keyboard:?}"));
@@ -182,7 +198,12 @@ fn stack_drop_actions_are_arbitrary_swaps() {
 
     let source = expected[1];
     let target = expected[2];
-    assert!(system.apply_window_drop(layout, source, target, WindowDropAction::Insert(Direction::Left),));
+    assert!(system.apply_window_drop(
+        layout,
+        source,
+        target,
+        WindowDropAction::Insert(Direction::Left),
+    ));
     expected.swap(1, 2);
     assert_eq!(system.all_windows_in_layout(layout), expected);
     assert_eq!(system.selected_window(layout), Some(source));
@@ -200,7 +221,12 @@ fn drop_slot_identity_uses_topology_in_traditional_and_bsp() {
     assert_eq!(same.window_slot(layout, w(2)), Some(source_slot.clone()));
 
     let mut reordered = traditional.preview_clone().unwrap();
-    assert!(reordered.apply_window_drop(layout, w(2), w(1), WindowDropAction::Insert(Direction::Left)));
+    assert!(reordered.apply_window_drop(
+        layout,
+        w(2),
+        w(1),
+        WindowDropAction::Insert(Direction::Left)
+    ));
     assert_ne!(reordered.window_slot(layout, w(2)), Some(source_slot));
 
     let mut bsp = LayoutSystemKind::Bsp(BspLayoutSystem::default());

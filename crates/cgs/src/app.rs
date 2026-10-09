@@ -27,7 +27,8 @@ impl Application {
     /// The Finder icon of an installed application.
     pub fn icon_for_bundle(bundle_id: &str) -> Option<Image> {
         let workspace = NSWorkspace::sharedWorkspace();
-        let url = workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle_id))?;
+        let url =
+            workspace.URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle_id))?;
         Some(workspace.iconForFile(&*url.path()?))
     }
 

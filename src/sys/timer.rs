@@ -93,8 +93,8 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use objc2_core_foundation::{
-    CFAbsoluteTime, CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer, CFRunLoopTimerContext,
-    CFTimeInterval, kCFAllocatorDefault, kCFRunLoopCommonModes,
+    CFAbsoluteTime, CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer,
+    CFRunLoopTimerContext, CFTimeInterval, kCFAllocatorDefault, kCFRunLoopCommonModes,
 };
 use parking_lot::Mutex;
 use tokio_stream::Stream;
@@ -218,7 +218,10 @@ impl Timer {
             unsafe { Arc::decrement_strong_count(info.cast::<Weak<Mutex<TimerState>>>()) };
         }
 
-        unsafe extern "C-unwind" fn timer_fire_callback(_timer: *mut CFRunLoopTimer, info: *mut c_void) {
+        unsafe extern "C-unwind" fn timer_fire_callback(
+            _timer: *mut CFRunLoopTimer,
+            info: *mut c_void,
+        ) {
             if info.is_null() {
                 return;
             }
@@ -297,7 +300,9 @@ impl Timer {
     }
 
     /// Convenience method to get the next timer event.
-    pub fn next(&mut self) -> impl Future<Output = Option<()>> { tokio_stream::StreamExt::next(self) }
+    pub fn next(&mut self) -> impl Future<Output = Option<()>> {
+        tokio_stream::StreamExt::next(self)
+    }
 }
 
 impl Stream for Timer {

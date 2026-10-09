@@ -357,8 +357,12 @@ pub fn handle_window_frame_changed(
                 if let Some(server) = server_id {
                     state.windows.observe_native_space(server, space, true);
                 }
-                if new_space_active && state.windows.window(wid).is_some_and(WindowState::is_admitted) {
-                    if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space) {
+                if new_space_active
+                    && state.windows.window(wid).is_some_and(WindowState::is_admitted)
+                {
+                    if let Some(workspace) =
+                        layout.layout_engine.workspaces().active_workspace(space)
+                    {
                         let _ = layout.layout_engine.workspaces_mut().assign_window_to_workspace(
                             &mut state.windows,
                             space,

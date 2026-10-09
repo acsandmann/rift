@@ -142,7 +142,9 @@ impl Menu {
         self
     }
 
-    pub fn add_separator(&self) { self.native.addItem(&NSMenuItem::separatorItem(self.native.mtm())); }
+    pub fn add_separator(&self) {
+        self.native.addItem(&NSMenuItem::separatorItem(self.native.mtm()));
+    }
 
     /// A native, nonselectable heading for the items that follow.
     pub fn add_section_header(&self, title: &str) {

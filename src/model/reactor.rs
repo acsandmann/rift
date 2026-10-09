@@ -114,7 +114,9 @@ impl WindowState {
     }
 
     /// The single admission policy used by every layout-facing caller.
-    pub(crate) fn is_admitted(&self) -> bool { self.is_admitted_with_override(self.manage_override) }
+    pub(crate) fn is_admitted(&self) -> bool {
+        self.is_admitted_with_override(self.manage_override)
+    }
 
     pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
         !self.info.is_minimized && manage_override.unwrap_or(self.is_manageable)

@@ -18,7 +18,8 @@ pub struct WindowTransaction {
 impl WindowTransaction {
     pub fn new() -> Result<Self, CgsWindowError> {
         let transaction = unsafe { SLSTransactionCreate(*G_CONNECTION) };
-        let transaction = NonNull::new(transaction).ok_or(CgsWindowError::Surface(CGError(1000)))?;
+        let transaction =
+            NonNull::new(transaction).ok_or(CgsWindowError::Surface(CGError(1000)))?;
         Ok(Self {
             transaction: unsafe { CFRetained::from_raw(transaction) },
         })
@@ -31,8 +32,8 @@ impl WindowTransaction {
         frame: CGRect,
         corner_radius: f64,
     ) -> Result<(), CgsWindowError> {
-        let region =
-            CFRegion::from_rounded_rect(frame.size, corner_radius).map_err(CgsWindowError::Region)?;
+        let region = CFRegion::from_rounded_rect(frame.size, corner_radius)
+            .map_err(CgsWindowError::Region)?;
         unsafe {
             SLSTransactionSetWindowShape(
                 self.as_ptr(),

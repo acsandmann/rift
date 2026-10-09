@@ -21,7 +21,9 @@ pub(super) const DEPRECATED_MAP: &[(&str, &str)] = &[
 
 pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
 pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
-pub fn config_file() -> PathBuf { dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml") }
+pub fn config_file() -> PathBuf {
+    dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
 #[serde(deny_unknown_fields)]
@@ -32,7 +34,11 @@ pub struct VirtualWorkspaceSettings {
     pub enabled: bool,
     #[serde(default = "default_workspace_count")]
     /// Number of virtual workspaces.
-    #[setting(label = "Workspace count", custom, aliases = "workspace count number desktops spaces")]
+    #[setting(
+        label = "Workspace count",
+        custom,
+        aliases = "workspace count number desktops spaces"
+    )]
     pub default_workspace_count: usize,
     #[serde(default = "yes")]
     /// Automatically assign new windows to a workspace.
@@ -332,7 +338,9 @@ impl VirtualWorkspaceSettings {
             if let Some(ref title_re) = rule.title_regex {
                 if title_re.is_empty() {
                     issues.push(format!("App rule {} has empty title_regex", index));
-                } else if let Err(error) = RegexBuilder::new(title_re).case_insensitive(true).build() {
+                } else if let Err(error) =
+                    RegexBuilder::new(title_re).case_insensitive(true).build()
+                {
                     issues.push(format!(
                         "App rule {} has invalid title_regex '{}': {}",
                         index, title_re, error
@@ -393,7 +401,8 @@ pub struct ConfigSource {
     pub settings: Settings,
     pub keys: std::collections::BTreeMap<String, WmCommand>,
     #[serde(default)]
-    pub binding_modes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, WmCommand>>,
+    pub binding_modes:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, WmCommand>>,
     #[serde(default)]
     pub virtual_workspaces: VirtualWorkspaceSettings,
     /// Modifier combinations that can be reused in key bindings
@@ -422,7 +431,11 @@ unsafe impl Sync for Config {}
 pub struct Settings {
     #[serde(default)]
     /// Animate windows when their layout changes.
-    #[setting(label = "Animate window changes", group = "general", aliases = "animation transitions motion")]
+    #[setting(
+        label = "Animate window changes",
+        group = "general",
+        aliases = "animation transitions motion"
+    )]
     pub animate: bool,
     #[serde(default = "default_animation_duration")]
     /// Duration of a window animation, in seconds.
@@ -527,7 +540,12 @@ pub struct Settings {
 
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
-    #[setting(label = "Startup commands", group = "advanced", custom, aliases = "launch run shell exec")]
+    #[setting(
+        label = "Startup commands",
+        group = "advanced",
+        custom,
+        aliases = "launch run shell exec"
+    )]
     pub run_on_start: Vec<String>,
 
     /// Enable hot-reloading of the config file when it changes
@@ -1039,15 +1057,27 @@ pub struct ScrollingLayoutSettings {
     /// Whether to animate windows moving in the scrolling layout
     /// HIGHLY RECOMMENDED to leave this enabled.
     #[serde(default = "default_scrolling_animate")]
-    #[setting(label = "Animate navigation", custom, aliases = "animation transitions motion")]
+    #[setting(
+        label = "Animate navigation",
+        custom,
+        aliases = "animation transitions motion"
+    )]
     pub animate: Option<bool>,
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
-    #[setting(label = "Default column width", custom, aliases = "column width sizing percentages tiling")]
+    #[setting(
+        label = "Default column width",
+        custom,
+        aliases = "column width sizing percentages tiling"
+    )]
     pub column_width_ratio: f64,
     /// Proportional column widths cycled in configured order.
     #[serde(default = "default_scrolling_preset_column_widths")]
-    #[setting(label = "Width presets", custom, aliases = "column width presets cycle sizes")]
+    #[setting(
+        label = "Width presets",
+        custom,
+        aliases = "column width presets cycle sizes"
+    )]
     pub preset_column_widths: Vec<f64>,
     /// Keep a window's existing column width when it enters scrolling layout.
     #[serde(default = "yes")]
@@ -1611,7 +1641,9 @@ fn yes() -> bool { true }
 
 fn default_stack_offset() -> f64 { 40.0 }
 
-pub fn default_stack_orientation() -> StackDefaultOrientation { StackDefaultOrientation::Perpendicular }
+pub fn default_stack_orientation() -> StackDefaultOrientation {
+    StackDefaultOrientation::Perpendicular
+}
 
 fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement {
     MasterStackNewWindowPlacement::Master
@@ -1671,7 +1703,9 @@ impl ConfigSource {
     }
 
     fn check_keymap_name(&self, name: &str, old: Option<&str>) -> Result<(), String> {
-        if name.is_empty() || name == "default" || self.binding_modes.contains_key(name) && old != Some(name)
+        if name.is_empty()
+            || name == "default"
+            || self.binding_modes.contains_key(name) && old != Some(name)
         {
             Err("Choose a unique keymap name".into())
         } else {

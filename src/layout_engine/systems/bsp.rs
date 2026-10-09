@@ -6,7 +6,9 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
-use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints, reconcile_app_membership};
+use crate::layout_engine::systems::{
+    LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
+};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
@@ -153,7 +155,12 @@ impl BspLayoutSystem {
         false
     }
 
-    fn split_leaf_in_direction(&mut self, leaf: NodeId, direction: Direction, new_window: WindowId) {
+    fn split_leaf_in_direction(
+        &mut self,
+        leaf: NodeId,
+        direction: Direction,
+        new_window: WindowId,
+    ) {
         if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(leaf).cloned() {
             let existing_stack = self.stacks.remove(&leaf);
             let orientation = direction.orientation();
@@ -430,7 +437,11 @@ impl BspLayoutSystem {
             .map(|s| self.tree.data.selection.current_selection(s.root))
     }
 
-    fn insert_window_at_selection(&mut self, layout: crate::layout_engine::LayoutId, wid: WindowId) {
+    fn insert_window_at_selection(
+        &mut self,
+        layout: crate::layout_engine::LayoutId,
+        wid: WindowId,
+    ) {
         let Some(state) = self.layouts.get(layout).copied() else {
             return;
         };
@@ -543,10 +554,14 @@ impl BspLayoutSystem {
                         && let Some(c) = constraints.get(w).copied()
                     {
                         let c = c.normalized();
-                        let desired_w =
-                            c.fixed_for_axis(true).unwrap_or(target.size.width).max(c.min_for_axis(true));
-                        let desired_h =
-                            c.fixed_for_axis(false).unwrap_or(target.size.height).max(c.min_for_axis(false));
+                        let desired_w = c
+                            .fixed_for_axis(true)
+                            .unwrap_or(target.size.width)
+                            .max(c.min_for_axis(true));
+                        let desired_h = c
+                            .fixed_for_axis(false)
+                            .unwrap_or(target.size.height)
+                            .max(c.min_for_axis(false));
                         let desired_w = if c.max_for_axis(true) > 0.0 {
                             desired_w.min(c.max_for_axis(true))
                         } else {
@@ -571,40 +586,41 @@ impl BspLayoutSystem {
                     let mut it = node.children(&self.tree.map);
                     let first = it.next();
                     let second = it.next();
-                    let (first_w, second_w) = if let (Some(first_node), Some(second_node)) = (first, second) {
-                        let (first_min, first_fixed, first_max, first_can_grow) =
-                            self.subtree_axis_constraints(first_node, true, constraints, gaps);
-                        let (second_min, second_fixed, second_max, second_can_grow) =
-                            self.subtree_axis_constraints(second_node, true, constraints, gaps);
-                        let solved = solve_axis_lengths(
-                            &[
-                                AxisConstraints {
-                                    min: first_min,
-                                    fixed: first_fixed,
-                                    max: first_max,
-                                    weight: (*ratio as f64).max(0.0),
-                                    can_grow: first_can_grow,
-                                },
-                                AxisConstraints {
-                                    min: second_min,
-                                    fixed: second_fixed,
-                                    max: second_max,
-                                    weight: (1.0 - *ratio as f64).max(0.0),
-                                    can_grow: second_can_grow,
-                                },
-                            ],
-                            available,
-                        );
-                        (
-                            solved.first().copied().unwrap_or(available * (*ratio as f64)),
-                            solved.get(1).copied().unwrap_or(0.0),
-                        )
-                    } else {
-                        let first_w_f = available * (*ratio as f64);
-                        let first_w = first_w_f.max(0.0);
-                        let second_w = (available - first_w).max(0.0);
-                        (first_w, second_w)
-                    };
+                    let (first_w, second_w) =
+                        if let (Some(first_node), Some(second_node)) = (first, second) {
+                            let (first_min, first_fixed, first_max, first_can_grow) =
+                                self.subtree_axis_constraints(first_node, true, constraints, gaps);
+                            let (second_min, second_fixed, second_max, second_can_grow) =
+                                self.subtree_axis_constraints(second_node, true, constraints, gaps);
+                            let solved = solve_axis_lengths(
+                                &[
+                                    AxisConstraints {
+                                        min: first_min,
+                                        fixed: first_fixed,
+                                        max: first_max,
+                                        weight: (*ratio as f64).max(0.0),
+                                        can_grow: first_can_grow,
+                                    },
+                                    AxisConstraints {
+                                        min: second_min,
+                                        fixed: second_fixed,
+                                        max: second_max,
+                                        weight: (1.0 - *ratio as f64).max(0.0),
+                                        can_grow: second_can_grow,
+                                    },
+                                ],
+                                available,
+                            );
+                            (
+                                solved.first().copied().unwrap_or(available * (*ratio as f64)),
+                                solved.get(1).copied().unwrap_or(0.0),
+                            )
+                        } else {
+                            let first_w_f = available * (*ratio as f64);
+                            let first_w = first_w_f.max(0.0);
+                            let second_w = (available - first_w).max(0.0);
+                            (first_w, second_w)
+                        };
                     let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
                     let r2 = CGRect::new(
                         CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
@@ -625,40 +641,41 @@ impl BspLayoutSystem {
                     let mut it = node.children(&self.tree.map);
                     let first = it.next();
                     let second = it.next();
-                    let (first_h, second_h) = if let (Some(first_node), Some(second_node)) = (first, second) {
-                        let (first_min, first_fixed, first_max, first_can_grow) =
-                            self.subtree_axis_constraints(first_node, false, constraints, gaps);
-                        let (second_min, second_fixed, second_max, second_can_grow) =
-                            self.subtree_axis_constraints(second_node, false, constraints, gaps);
-                        let solved = solve_axis_lengths(
-                            &[
-                                AxisConstraints {
-                                    min: first_min,
-                                    fixed: first_fixed,
-                                    max: first_max,
-                                    weight: (*ratio as f64).max(0.0),
-                                    can_grow: first_can_grow,
-                                },
-                                AxisConstraints {
-                                    min: second_min,
-                                    fixed: second_fixed,
-                                    max: second_max,
-                                    weight: (1.0 - *ratio as f64).max(0.0),
-                                    can_grow: second_can_grow,
-                                },
-                            ],
-                            available,
-                        );
-                        (
-                            solved.first().copied().unwrap_or(available * (*ratio as f64)),
-                            solved.get(1).copied().unwrap_or(0.0),
-                        )
-                    } else {
-                        let first_h_f = available * (*ratio as f64);
-                        let first_h = first_h_f.max(0.0);
-                        let second_h = (available - first_h).max(0.0);
-                        (first_h, second_h)
-                    };
+                    let (first_h, second_h) =
+                        if let (Some(first_node), Some(second_node)) = (first, second) {
+                            let (first_min, first_fixed, first_max, first_can_grow) =
+                                self.subtree_axis_constraints(first_node, false, constraints, gaps);
+                            let (second_min, second_fixed, second_max, second_can_grow) = self
+                                .subtree_axis_constraints(second_node, false, constraints, gaps);
+                            let solved = solve_axis_lengths(
+                                &[
+                                    AxisConstraints {
+                                        min: first_min,
+                                        fixed: first_fixed,
+                                        max: first_max,
+                                        weight: (*ratio as f64).max(0.0),
+                                        can_grow: first_can_grow,
+                                    },
+                                    AxisConstraints {
+                                        min: second_min,
+                                        fixed: second_fixed,
+                                        max: second_max,
+                                        weight: (1.0 - *ratio as f64).max(0.0),
+                                        can_grow: second_can_grow,
+                                    },
+                                ],
+                                available,
+                            );
+                            (
+                                solved.first().copied().unwrap_or(available * (*ratio as f64)),
+                                solved.get(1).copied().unwrap_or(0.0),
+                            )
+                        } else {
+                            let first_h_f = available * (*ratio as f64);
+                            let first_h = first_h_f.max(0.0);
+                            let second_h = (available - first_h).max(0.0);
+                            (first_h, second_h)
+                        };
                     let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
                     let r2 = CGRect::new(
                         CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
@@ -730,8 +747,10 @@ impl BspLayoutSystem {
                 if axis_aligned {
                     let gap_total = inner_gap * (fixed_parts.len().saturating_sub(1) as f64);
                     let min_total = mins.iter().sum::<f64>() + gap_total;
-                    let fixed_total =
-                        fixed_parts.iter().copied().try_fold(0.0, |acc, part| part.map(|p| acc + p));
+                    let fixed_total = fixed_parts
+                        .iter()
+                        .copied()
+                        .try_fold(0.0, |acc, part| part.map(|p| acc + p));
                     let max_total =
                         max_parts.iter().copied().try_fold(0.0, |acc, part| part.map(|p| acc + p));
                     (
@@ -741,8 +760,9 @@ impl BspLayoutSystem {
                         any_grow,
                     )
                 } else {
-                    let min_max =
-                        mins.into_iter().fold(0.0, |acc, value| if value > acc { value } else { acc });
+                    let min_max = mins
+                        .into_iter()
+                        .fold(0.0, |acc, value| if value > acc { value } else { acc });
                     let fixed_max = fixed_parts.into_iter().try_fold(0.0, |acc, part| match part {
                         Some(value) => Some(if value > acc { value } else { acc }),
                         None => None,
@@ -1187,7 +1207,11 @@ impl LayoutSystem for BspLayoutSystem {
                         frame: Default::default(),
                         layout_kind: stacked.then_some(rift_protocol::LayoutKind::HorizontalStack),
                         weight,
-                        window_id: if stacked { None } else { window.map(Into::into) },
+                        window_id: if stacked {
+                            None
+                        } else {
+                            window.map(Into::into)
+                        },
                         is_selected: node == selected,
                         is_fullscreen: *fullscreen,
                         is_fullscreen_within_gaps: *fullscreen_within_gaps,
@@ -1239,7 +1263,8 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = compute_tiling_area(screen, gaps);
             self.calculate_layout_recursive(state.root, rect, screen, constraints, gaps, &mut out);
-            if let (Some(ratio), [(_, frame)]) = (self.single_window_aspect_ratio, out.as_mut_slice())
+            if let (Some(ratio), [(_, frame)]) =
+                (self.single_window_aspect_ratio, out.as_mut_slice())
                 && matches!(
                     self.kind.get(state.root),
                     Some(NodeKind::Leaf {
@@ -1341,7 +1366,11 @@ impl LayoutSystem for BspLayoutSystem {
         false
     }
 
-    fn move_focus(&mut self, layout: LayoutId, direction: Direction) -> (Option<WindowId>, Vec<WindowId>) {
+    fn move_focus(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+    ) -> (Option<WindowId>, Vec<WindowId>) {
         if self.visible_windows_in_layout(layout).is_empty() {
             return (None, vec![]);
         }
@@ -1435,7 +1464,8 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn remove_windows_for_app(&mut self, pid: pid_t) {
-        let windows: Vec<_> = self.window_to_node.keys().copied().filter(|w| w.pid == pid).collect();
+        let windows: Vec<_> =
+            self.window_to_node.keys().copied().filter(|w| w.pid == pid).collect();
         for w in windows {
             self.remove_window(w);
         }
@@ -1548,7 +1578,8 @@ impl LayoutSystem for BspLayoutSystem {
 
                 let mut current = node;
                 while let Some(parent) = current.parent(&self.tree.map) {
-                    let Some(NodeKind::Split { orientation, ratio }) = self.kind.get_mut(parent) else {
+                    let Some(NodeKind::Split { orientation, ratio }) = self.kind.get_mut(parent)
+                    else {
                         current = parent;
                         continue;
                     };
@@ -1726,7 +1757,9 @@ impl LayoutSystem for BspLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
-        if source == target || !self.contains_window(layout, source) || !self.contains_window(layout, target)
+        if source == target
+            || !self.contains_window(layout, source)
+            || !self.contains_window(layout, target)
         {
             return false;
         }
@@ -1761,7 +1794,11 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn move_selection_to_layout_after_selection(&mut self, from_layout: LayoutId, to_layout: LayoutId) {
+    fn move_selection_to_layout_after_selection(
+        &mut self,
+        from_layout: LayoutId,
+        to_layout: LayoutId,
+    ) {
         let sel = self.selected_window(from_layout);
         if let Some(w) = sel {
             self.remove_window_internal(from_layout, w);
@@ -1943,7 +1980,12 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64, orientation: ResizeOrientation) {
+    fn resize_selection_by(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    ) {
         let sel_snapshot = self.selection_of_layout(layout);
         let Some(mut node) = sel_snapshot else {
             return;

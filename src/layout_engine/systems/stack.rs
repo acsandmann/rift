@@ -4,9 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
-use crate::common::config::{StackDefaultOrientation, WindowInsertionPoint, default_stack_orientation};
+use crate::common::config::{
+    StackDefaultOrientation, WindowInsertionPoint, default_stack_orientation,
+};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem};
+use crate::layout_engine::{
+    Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem,
+};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct StackLayoutSystem {
@@ -274,7 +278,11 @@ impl LayoutSystem for StackLayoutSystem {
         self.inner.select_window(layout, source)
     }
 
-    fn move_selection_to_layout_after_selection(&mut self, from_layout: LayoutId, to_layout: LayoutId) {
+    fn move_selection_to_layout_after_selection(
+        &mut self,
+        from_layout: LayoutId,
+        to_layout: LayoutId,
+    ) {
         self.inner.move_selection_to_layout_after_selection(from_layout, to_layout);
         self.normalize_layout(from_layout);
         self.normalize_layout(to_layout);
@@ -294,9 +302,17 @@ impl LayoutSystem for StackLayoutSystem {
         self.inner.layout(root).is_stacked()
     }
 
-    fn resize_selection_by(&mut self, _layout: LayoutId, _amount: f64, _orientation: ResizeOrientation) {}
+    fn resize_selection_by(
+        &mut self,
+        _layout: LayoutId,
+        _amount: f64,
+        _orientation: ResizeOrientation,
+    ) {
+    }
 
-    fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.toggle_root_stack_orientation(layout); }
+    fn toggle_tile_orientation(&mut self, layout: LayoutId) {
+        self.toggle_root_stack_orientation(layout);
+    }
 }
 
 #[cfg(test)]

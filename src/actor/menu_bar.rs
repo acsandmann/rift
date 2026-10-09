@@ -387,9 +387,8 @@ impl Menu {
 
     fn handle_action(&mut self, action: MenuAction) {
         match action {
-            MenuAction::SetLayout(mode) => {
-                self.send_layout_command(LayoutCommand::SetWorkspaceLayout { workspace: None, mode })
-            }
+            MenuAction::SetLayout(mode) => self
+                .send_layout_command(LayoutCommand::SetWorkspaceLayout { workspace: None, mode }),
             MenuAction::NextWorkspace => {
                 self.send_layout_command(LayoutCommand::NextWorkspace(None));
             }
@@ -498,7 +497,10 @@ impl Menu {
         self.config_tx.send(msg);
     }
 
-    fn spawn_debouncer(period: Duration, tick_tx: UnboundedSender<()>) -> mpsc::Sender<DebounceCommand> {
+    fn spawn_debouncer(
+        period: Duration,
+        tick_tx: UnboundedSender<()>,
+    ) -> mpsc::Sender<DebounceCommand> {
         let (cmd_tx, cmd_rx) = mpsc::channel::<DebounceCommand>();
 
         std::thread::spawn(move || {

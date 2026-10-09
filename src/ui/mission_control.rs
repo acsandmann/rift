@@ -11,8 +11,8 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSColor, NSFont, NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen};
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGContext, CGDisplayBounds,
-    CGImage, CGImageAlphaInfo, CGPreflightScreenCaptureAccess,
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGContext,
+    CGDisplayBounds, CGImage, CGImageAlphaInfo, CGPreflightScreenCaptureAccess,
 };
 use objc2_foundation::{MainThreadMarker, NSError};
 use objc2_quartz_core::{CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CATextLayer};
@@ -59,7 +59,8 @@ struct WorkspaceProjection {
 fn preview_frame(size: CGSize) -> CGRect {
     let available_width = (size.width - 12.0).max(1.0);
     let available_height = (size.height - CAPTION - 6.0).max(1.0);
-    let ratio = (available_width / size.width.max(1.0)).min(available_height / size.height.max(1.0));
+    let ratio =
+        (available_width / size.width.max(1.0)).min(available_height / size.height.max(1.0));
     let width = size.width.max(1.0) * ratio;
     let height = size.height.max(1.0) * ratio;
     rect((size.width - width) / 2.0, 6.0, width, height)
@@ -132,9 +133,18 @@ fn update_heading(heading: &CATextLayer, data: &RuntimeWorkspaceData) {
     }
 }
 
-fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect { CGRect::new(CGPoint::new(x, y), CGSize::new(w, h)) }
-fn scrolled_workspace_offset(centered: usize, offset: f64, delta: f64, stride: f64, count: usize) -> f64 {
-    (centered as f64 + offset - delta / stride).clamp(0.0, count.saturating_sub(1) as f64) - centered as f64
+fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+    CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+}
+fn scrolled_workspace_offset(
+    centered: usize,
+    offset: f64,
+    delta: f64,
+    stride: f64,
+    count: usize,
+) -> f64 {
+    (centered as f64 + offset - delta / stride).clamp(0.0, count.saturating_sub(1) as f64)
+        - centered as f64
 }
 
 fn filter_workspaces(workspaces: &mut Vec<RuntimeWorkspaceData>, show_empty: bool) {
@@ -223,7 +233,8 @@ fn project(
         .filter_map(|(source, ws)| {
             let frame = rect(
                 0.0,
-                overview.height / 2.0 + (source as f64 - centered as f64 - workspace_offset) * stride
+                overview.height / 2.0
+                    + (source as f64 - centered as f64 - workspace_offset) * stride
                     - height / 2.0,
                 overview.width,
                 height,
@@ -245,14 +256,13 @@ fn project(
                         w.size.width * scale,
                         w.size.height * scale,
                     );
-                    intersects(projected, rect(0.0, 0.0, frame.size.width, frame.size.height)).then_some(
-                        WindowProjection {
+                    intersects(projected, rect(0.0, 0.0, frame.size.width, frame.size.height))
+                        .then_some(WindowProjection {
                             id: window.id,
                             floating: window.is_floating,
                             source,
                             frame: projected,
-                        },
-                    )
+                        })
                 })
                 .collect();
             windows.sort_by_key(|w| w.floating);
@@ -433,7 +443,9 @@ fn set_preview_border(image: &CALayer, width: f64) {
     }
 }
 
-fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> { CGColor::new_generic_rgb(r, g, b, a) }
+fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
+    CGColor::new_generic_rgb(r, g, b, a)
+}
 fn layer(frame: CGRect, scale: f64) -> Retained<CALayer> {
     let l = CALayer::layer();
     l.setFrame(frame);
@@ -467,7 +479,8 @@ impl DisplayOverview {
         let Some(w) = ws.windows.iter().find(|w| w.id == window) else {
             return false;
         };
-        let scale = ((self.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) / self.info.frame.size.height;
+        let scale =
+            ((self.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) / self.info.frame.size.height;
         let base = (self.bounds.size.width - self.info.frame.size.width * scale) / 2.0;
         let frame = w.layout_frame.unwrap_or(w.info.frame);
         let x = base + (frame.origin.x - self.info.frame.origin.x) * scale;
@@ -522,9 +535,10 @@ impl DisplayOverview {
                 });
                 view.layer.setFrame(pixel_aligned(ws.frame, self.scale));
                 let mut heading = view.heading.frame();
-                heading.origin.y = pixel_aligned(rect(0.0, ws.frame.origin.y - 26.0, 1.0, 20.0), self.scale)
-                    .origin
-                    .y;
+                heading.origin.y =
+                    pixel_aligned(rect(0.0, ws.frame.origin.y - 26.0, 1.0, 20.0), self.scale)
+                        .origin
+                        .y;
                 view.heading.setFrame(heading);
             }
         });
@@ -551,11 +565,13 @@ impl DisplayOverview {
             return;
         }
         with_disabled_actions(|| {
-            for ((view, projected), previous) in self.views.iter().zip(&next).zip(&self.projection) {
+            for ((view, projected), previous) in self.views.iter().zip(&next).zip(&self.projection)
+            {
                 view.layer.setFrame(pixel_aligned(projected.frame, self.scale));
                 view.heading.setFrame(workspace_heading(projected, self.scale));
                 view.backdrop.setFrame(pixel_aligned(workspace_backdrop(projected), self.scale));
-                for ((card, window), old) in view.cards.iter().zip(&projected.windows).zip(&previous.windows)
+                for ((card, window), old) in
+                    view.cards.iter().zip(&projected.windows).zip(&previous.windows)
                 {
                     if window.frame != old.frame {
                         card.set_frame(window.frame, self.scale);
@@ -620,7 +636,8 @@ impl DisplayOverview {
                     (view.layer, view.heading, view.empty, view.backdrop)
                 } else {
                     let container = layer(ws.frame, self.scale);
-                    let backdrop = layer(pixel_aligned(workspace_backdrop(ws), self.scale), self.scale);
+                    let backdrop =
+                        layer(pixel_aligned(workspace_backdrop(ws), self.scale), self.scale);
                     backdrop.setCornerRadius(16.0);
                     backdrop.setBackgroundColor(Some(&color(1.0, 1.0, 1.0, 0.035)));
                     container.addSublayer(&backdrop);
@@ -633,8 +650,9 @@ impl DisplayOverview {
                     unsafe {
                         heading.setAlignmentMode(objc2_quartz_core::kCAAlignmentLeft);
                     }
-                    let font =
-                        unsafe { NSFont::systemFontOfSize_weight(13.0, objc2_app_kit::NSFontWeightMedium) };
+                    let font = unsafe {
+                        NSFont::systemFontOfSize_weight(13.0, objc2_app_kit::NSFontWeightMedium)
+                    };
                     unsafe {
                         heading.setFont(Some(&*(Retained::as_ptr(&font) as *const CFType)));
                     }
@@ -677,24 +695,31 @@ impl DisplayOverview {
                                 previous.origin.y - ws.frame.origin.y + previous.size.height / 2.0,
                             );
                             unsafe {
-                                animation
-                                    .setFromValue(Some(&*objc2_foundation::NSValue::valueWithPoint(from)));
+                                animation.setFromValue(Some(
+                                    &*objc2_foundation::NSValue::valueWithPoint(from),
+                                ));
                             }
-                            animation.setPreferredFrameRateRange(CAFrameRateRange::new(60.0, 120.0, 120.0));
+                            animation.setPreferredFrameRateRange(CAFrameRateRange::new(
+                                60.0, 120.0, 120.0,
+                            ));
                             animation.setDuration(0.16);
                             card.layer.addAnimation_forKey(&animation, None);
                             let resize = CABasicAnimation::animationWithKeyPath(Some(
                                 &objc2_foundation::NSString::from_str("bounds"),
                             ));
                             unsafe {
-                                resize.setFromValue(Some(&*objc2_foundation::NSValue::valueWithRect(rect(
-                                    0.0,
-                                    0.0,
-                                    previous.size.width,
-                                    previous.size.height,
-                                ))));
+                                resize.setFromValue(Some(
+                                    &*objc2_foundation::NSValue::valueWithRect(rect(
+                                        0.0,
+                                        0.0,
+                                        previous.size.width,
+                                        previous.size.height,
+                                    )),
+                                ));
                             }
-                            resize.setPreferredFrameRateRange(CAFrameRateRange::new(60.0, 120.0, 120.0));
+                            resize.setPreferredFrameRateRange(CAFrameRateRange::new(
+                                60.0, 120.0, 120.0,
+                            ));
                             resize.setDuration(0.16);
                             card.layer.addAnimation_forKey(&resize, None);
                         }
@@ -702,9 +727,17 @@ impl DisplayOverview {
                         continue;
                     }
                     let icon = self.icons.entry(data.id.pid).or_insert_with(|| {
-                        let app = NSRunningApplication::runningApplicationWithProcessIdentifier(data.id.pid)?;
+                        let app = NSRunningApplication::runningApplicationWithProcessIdentifier(
+                            data.id.pid,
+                        )?;
                         let icon = app.icon()?;
-                        unsafe { icon.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
+                        unsafe {
+                            icon.CGImageForProposedRect_context_hints(
+                                std::ptr::null_mut(),
+                                None,
+                                None,
+                            )
+                        }
                     });
                     let image = cache.and_then(|c| c.get(data));
                     let card = unsafe {
@@ -713,7 +746,8 @@ impl DisplayOverview {
                             w.frame,
                             self.scale,
                             image.map(|i| &*(i.as_ref() as *const CGImage as *const AnyObject)),
-                            icon.as_ref().map(|i| &*(i.as_ref() as *const CGImage as *const AnyObject)),
+                            icon.as_ref()
+                                .map(|i| &*(i.as_ref() as *const CGImage as *const AnyObject)),
                         )
                     };
                     container.addSublayer(&card.layer);
@@ -750,7 +784,13 @@ struct OverviewDrag {
     indicator: Retained<CALayer>,
 }
 
-fn floating_drop_frame(display: CGRect, ribbon: CGRect, card: CGSize, point: CGPoint, offset: f64) -> CGRect {
+fn floating_drop_frame(
+    display: CGRect,
+    ribbon: CGRect,
+    card: CGSize,
+    point: CGPoint,
+    offset: f64,
+) -> CGRect {
     let scale = ribbon.size.height / display.size.height;
     let base = (ribbon.size.width - display.size.width * scale) / 2.0;
     let width = (card.width / scale).min(display.size.width);
@@ -925,21 +965,25 @@ impl OverviewSession {
 
     pub(crate) fn is_empty(&self) -> bool { self.displays.is_empty() }
 
-    pub(crate) fn take_drop(&mut self) -> Option<crate::actor::reactor::OverviewDrop> { self.drop.take() }
+    pub(crate) fn take_drop(&mut self) -> Option<crate::actor::reactor::OverviewDrop> {
+        self.drop.take()
+    }
 
     pub(crate) fn edge_active(&self) -> bool {
         self.drag.as_ref().is_some_and(|drag| {
             drag.started
                 && self.displays.iter().any(|d| {
                     contains(d.bounds, drag.point)
-                        && edge_direction(d.bounds.size.height, drag.point.y - d.bounds.origin.y) != 0.0
+                        && edge_direction(d.bounds.size.height, drag.point.y - d.bounds.origin.y)
+                            != 0.0
                 })
         })
     }
 
     pub(crate) fn edge_tick(&mut self, cache: Option<&PreviewCache>) {
         let _transaction = LayerTransaction::disabled().flush_on_commit();
-        let Some(point) = self.drag.as_ref().filter(|drag| drag.started).map(|drag| drag.point) else {
+        let Some(point) = self.drag.as_ref().filter(|drag| drag.started).map(|drag| drag.point)
+        else {
             return;
         };
         if let Some(d) = self.displays.iter_mut().find(|d| contains(d.bounds, point)) {
@@ -1121,7 +1165,8 @@ impl OverviewSession {
                 drag.size.height,
             ));
             drag.indicator.setHidden(true);
-            let Some(ws) = d.projection.iter().find(|ws| contains(workspace_hit_frame(ws), local)) else {
+            let Some(ws) = d.projection.iter().find(|ws| contains(workspace_hit_frame(ws), local))
+            else {
                 return;
             };
             let data = &d.workspaces[ws.source];
@@ -1155,24 +1200,26 @@ impl OverviewSession {
                     image.size.width,
                     2.0,
                 );
-            } else if let Some(target) = crate::actor::drag::hit_test_projected(&ws.scene, drag.window, p) {
+            } else if let Some(target) =
+                crate::actor::drag::hit_test_projected(&ws.scene, drag.window, p)
+            {
                 let action = target.action;
                 intent.target = Some((target.window, action));
                 indicator = target.frame;
                 indicator.origin.y += ws.frame.origin.y;
                 match action {
-                    crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Left) => {
-                        indicator.size.width = 4.0
-                    }
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Left,
+                    ) => indicator.size.width = 4.0,
                     crate::layout_engine::WindowDropAction::Insert(
                         crate::layout_engine::Direction::Right,
                     ) => {
                         indicator.origin.x += indicator.size.width - 4.0;
                         indicator.size.width = 4.0;
                     }
-                    crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Up) => {
-                        indicator.size.height = 4.0
-                    }
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Up,
+                    ) => indicator.size.height = 4.0,
                     _ => {
                         indicator.origin.y += indicator.size.height - 4.0;
                         indicator.size.height = 4.0;
@@ -1225,7 +1272,11 @@ impl OverviewSession {
         for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
             set_preview_border(
                 &card.image,
-                if Some(card.id) == self.hovered { 1.5 } else { 0.0 },
+                if Some(card.id) == self.hovered {
+                    1.5
+                } else {
+                    0.0
+                },
             );
         }
     }
@@ -1238,7 +1289,8 @@ impl OverviewSession {
                 .map(|(d, s)| (d, s, 0.5))
                 .chain(std::iter::once((self.active, self.selection, 2.0)))
             {
-                if let Some(ws) = self.displays[display].views.iter().find(|w| w.index == selection.workspace)
+                if let Some(ws) =
+                    self.displays[display].views.iter().find(|w| w.index == selection.workspace)
                 {
                     ws.backdrop.setBackgroundColor(Some(&color(
                         1.0,
@@ -1266,7 +1318,11 @@ impl OverviewSession {
         });
     }
 
-    pub(crate) fn input(&mut self, input: Input, cache: Option<&PreviewCache>) -> Option<OverviewAction> {
+    pub(crate) fn input(
+        &mut self,
+        input: Input,
+        cache: Option<&PreviewCache>,
+    ) -> Option<OverviewAction> {
         // Most sampled motion stays in the same card: no layer writes or compositor flush.
         if let Input::Move(point) = &input {
             if self.drag.is_some() {
@@ -1274,7 +1330,8 @@ impl OverviewSession {
             }
             let target = self.pointer_target(*point);
             let hovered = target.and_then(|(_, selection)| selection.window);
-            if hovered == self.hovered && target.is_none_or(|target| target == (self.active, self.selection))
+            if hovered == self.hovered
+                && target.is_none_or(|target| target == (self.active, self.selection))
             {
                 return None;
             }
@@ -1374,12 +1431,19 @@ impl OverviewSession {
                         window: None,
                     };
                 } else {
-                    let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
+                    let local =
+                        CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
                     let target = hit(&d.workspaces, &d.projection, local)?;
                     let ws = d.workspaces.iter().find(|w| w.index == target.workspace)?;
                     let offset = d.offsets.entry(ws.index).or_default();
                     let previous = *offset;
-                    *offset = scrolled_horizontal_offset(d.info.frame, d.bounds.size, ws, *offset, delta.x);
+                    *offset = scrolled_horizontal_offset(
+                        d.info.frame,
+                        d.bounds.size,
+                        ws,
+                        *offset,
+                        delta.x,
+                    );
                     reprojected = *offset != previous;
                     self.selection = target;
                 }
@@ -1487,8 +1551,8 @@ impl OverviewSession {
             let mut ribbons: Vec<_> =
                 display.projection.iter().filter(|ws| intersects(ws.frame, viewport)).collect();
             ribbons.sort_by_key(|ws| {
-                ((ws.source as f64 - display.centered as f64 - display.workspace_offset).abs() * 1000.0)
-                    as usize
+                ((ws.source as f64 - display.centered as f64 - display.workspace_offset).abs()
+                    * 1000.0) as usize
             });
             for ws in ribbons {
                 for w in &ws.windows {
@@ -1685,7 +1749,11 @@ pub(crate) struct PreviewSession {
 }
 
 impl PreviewSession {
-    fn open(enabled: bool, generation: u64, wake: crate::actor::mission_control::Sender) -> Option<Self> {
+    fn open(
+        enabled: bool,
+        generation: u64,
+        wake: crate::actor::mission_control::Sender,
+    ) -> Option<Self> {
         if !enabled {
             return None;
         }
@@ -1771,7 +1839,8 @@ impl PreviewSession {
                 let result = if tx.is_closed() {
                     None
                 } else {
-                    let image = NonNull::new(image).map(|image| unsafe { CFRetained::retain(image) });
+                    let image =
+                        NonNull::new(image).map(|image| unsafe { CFRetained::retain(image) });
                     Some(PreviewEvent::Image(generation, request.clone(), image))
                 };
                 // One main-thread handoff for both completion and scheduling the next capture.
@@ -1790,7 +1859,9 @@ impl PreviewSession {
                 }
                 // The retained image and local preview channel are consumed on main.
                 let ctx = Box::into_raw(Box::new((tx.clone(), wake.clone(), result))).cast();
-                unsafe { dispatchr::queue::main().after_f(dispatchr::time::Time::NOW, ctx, complete) };
+                unsafe {
+                    dispatchr::queue::main().after_f(dispatchr::time::Time::NOW, ctx, complete)
+                };
             });
             unsafe {
                 SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
@@ -1841,7 +1912,9 @@ fn preview_is_current(
 ) -> bool {
     generation == current_generation
         && window.is_some_and(|w| {
-            w.id == request.id && w.info.sys_id == Some(request.sys_id) && w.info.bundle_id == request.bundle
+            w.id == request.id
+                && w.info.sys_id == Some(request.sys_id)
+                && w.info.bundle_id == request.bundle
         })
 }
 
@@ -1936,16 +2009,18 @@ impl PreviewCache {
         self.entries
             .iter()
             .find(|e| {
-                e.id == window.id && Some(e.sys_id) == window.info.sys_id && e.bundle == window.info.bundle_id
+                e.id == window.id
+                    && Some(e.sys_id) == window.info.sys_id
+                    && e.bundle == window.info.bundle_id
             })
             .map(|e| &e.image)
     }
 
     fn prune<'a>(&mut self, windows: impl Iterator<Item = &'a RuntimeWindowData> + Clone) {
         self.entries.retain(|e| {
-            let keep = windows
-                .clone()
-                .any(|w| w.id == e.id && w.info.sys_id == Some(e.sys_id) && w.info.bundle_id == e.bundle);
+            let keep = windows.clone().any(|w| {
+                w.id == e.id && w.info.sys_id == Some(e.sys_id) && w.info.bundle_id == e.bundle
+            });
             if !keep {
                 self.bytes -= image_bytes(&e.image);
             }
@@ -2146,7 +2221,8 @@ mod tests {
             center.origin.y + center.size.height / 2.0,
         );
         let target =
-            crate::actor::drag::hit_test_projected(&ws.scene, WindowId::new(123, 99), center).unwrap();
+            crate::actor::drag::hit_test_projected(&ws.scene, WindowId::new(123, 99), center)
+                .unwrap();
         assert_eq!(target.window, WindowId::new(123, 1));
         assert!(crate::actor::drag::hit_test_projected(&ws.scene, target.window, center).is_none());
     }
@@ -2327,7 +2403,11 @@ mod tests {
 
     #[test]
     fn transparent_preview_gutters_select_workspace_instead_of_window() {
-        let workspaces = vec![workspace(1, vec![window(1, rect(0.0, 0.0, 400.0, 200.0), false)])];
+        let workspaces = vec![workspace(1, vec![window(
+            1,
+            rect(0.0, 0.0, 400.0, 200.0),
+            false,
+        )])];
         let projection = vec![WorkspaceProjection {
             source: 0,
             frame: rect(0.0, 100.0, 1200.0, 360.0),
@@ -2357,7 +2437,9 @@ mod tests {
             CGSize::new(800.0, 100.0),
         ] {
             let image = preview_frame(size);
-            assert!((image.size.width / image.size.height - size.width / size.height).abs() < 1e-10);
+            assert!(
+                (image.size.width / image.size.height - size.width / size.height).abs() < 1e-10
+            );
             assert!(image.origin.x >= 6.0);
             assert!(image.origin.y + image.size.height + CAPTION <= size.height + 1e-10);
             assert!((image.origin.x * 2.0 + image.size.width - size.width).abs() < 1e-10);
@@ -2424,7 +2506,11 @@ mod tests {
     #[test]
     fn ribbons_center_span_width_keep_empty_and_use_expected_stride() {
         let display = rect(0.0, 0.0, 1200.0, 800.0);
-        let workspaces = vec![workspace(0, vec![]), workspace(1, vec![]), workspace(2, vec![])];
+        let workspaces = vec![
+            workspace(0, vec![]),
+            workspace(1, vec![]),
+            workspace(2, vec![]),
+        ];
         let projection = project(display, display.size, &workspaces, 1, 0.0, &HashMap::default());
         assert_eq!(projection.len(), 3);
         assert_eq!(projection[1].frame, rect(0.0, 220.0, 1200.0, 360.0));

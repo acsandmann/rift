@@ -47,7 +47,9 @@ pub fn handle_cancel(drag: &mut DragManager) -> EventOutcome {
     let source = cancelled.source;
     match (cancelled.kind, source.tiled) {
         (crate::actor::drag::DragKind::ModifierMove, true) => EventOutcome::layout_changed(false),
-        (crate::actor::drag::DragKind::ModifierMove, false) if source.last_frame != source.origin_frame => {
+        (crate::actor::drag::DragKind::ModifierMove, false)
+            if source.last_frame != source.origin_frame =>
+        {
             EventOutcome::no_change().with_pre_layout_window_frame_write(
                 source.window,
                 source.origin_frame,
@@ -97,7 +99,9 @@ pub fn handle_mouse_up(
         if let Some(space) = payload.final_space
             && state.windows.window(window).is_some_and(WindowState::is_admitted)
         {
-            if let Some(server_id) = state.windows.window(window).and_then(|window| window.info.sys_id) {
+            if let Some(server_id) =
+                state.windows.window(window).and_then(|window| window.info.sys_id)
+            {
                 state.windows.observe_native_space(server_id, space, true);
             }
             if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)
@@ -126,9 +130,12 @@ pub fn handle_mouse_up(
             .workspace_for_window(space, window)
             .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
         {
-            layout
-                .layout_engine
-                .store_floating_position(space, workspace, window, commit.source.last_frame);
+            layout.layout_engine.store_floating_position(
+                space,
+                workspace,
+                window,
+                commit.source.last_frame,
+            );
         }
     }
 

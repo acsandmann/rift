@@ -28,7 +28,8 @@ fn record_editor(
             model.close_sheet();
         }
     });
-    cancel.set_changed(draft.draft_base.as_ref().is_some_and(|base| *draft.source.borrow() != *base));
+    cancel
+        .set_changed(draft.draft_base.as_ref().is_some_and(|base| *draft.source.borrow() != *base));
     let dirty_cancel = Rc::downgrade(&cancel);
     *draft.draft_changed.borrow_mut() = Some(Box::new(move |dirty| {
         if let Some(cancel) = dirty_cancel.upgrade() {
@@ -59,7 +60,8 @@ fn record_editor(
             Box::new(move |source| {
                 if *source != base {
                     return Err(
-                        "Settings changed elsewhere. Cancel and reopen this editor to try again.".into(),
+                        "Settings changed elsewhere. Cancel and reopen this editor to try again."
+                            .into(),
                     );
                 }
                 *source = value;
@@ -143,11 +145,15 @@ fn workspace_editor(
     let summary = Rc::new(summary);
     let primary = summary.clone();
     let table = Rc::new(
-        SettingsList::<WorkspaceEntry>::new(&ui, move |item| primary(item, 0), move |item| summary(item, 1))
-            .empty_message("No workspaces")
-            .full_length()
-            .symbol("rectangle.on.rectangle")
-            .on_open(move |index| edit_workspace(index)),
+        SettingsList::<WorkspaceEntry>::new(
+            &ui,
+            move |item| primary(item, 0),
+            move |item| summary(item, 1),
+        )
+        .empty_message("No workspaces")
+        .full_length()
+        .symbol("rectangle.on.rectangle")
+        .on_open(move |index| edit_workspace(index)),
     );
     let message = Rc::new(ValidationMessage::new(&ui));
     let weak = Rc::downgrade(model);
@@ -206,11 +212,9 @@ fn workspace_editor(
             *last.borrow_mut() = values;
         }
         if let Some(actions) = weak_actions.upgrade() {
-            actions.set_remove_enabled(
-                selected
-                    .get()
-                    .is_some_and(|i| i > 0 && i + 1 == source.virtual_workspaces.default_workspace_count),
-            );
+            actions.set_remove_enabled(selected.get().is_some_and(|i| {
+                i > 0 && i + 1 == source.virtual_workspaces.default_workspace_count
+            }));
         }
     }));
     (
@@ -297,7 +301,8 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
                             }
                         }
                     }
-                    while s.virtual_workspaces.workspace_names.last().is_some_and(String::is_empty) {
+                    while s.virtual_workspaces.workspace_names.last().is_some_and(String::is_empty)
+                    {
                         s.virtual_workspaces.workspace_names.pop();
                     }
                     Ok(())
@@ -589,7 +594,9 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
                     0 => true,
                     index => match &rule.workspace {
                         Some(WorkspaceSelector::Index(workspace)) => *workspace == index - 1,
-                        Some(WorkspaceSelector::Name(name)) => *name == workspace_name(&source, index - 1),
+                        Some(WorkspaceSelector::Name(name)) => {
+                            *name == workspace_name(&source, index - 1)
+                        }
                         None => false,
                     },
                 };
@@ -686,7 +693,9 @@ fn rule_behavior(rule: &AppWorkspaceRule) -> String {
 }
 
 type AppMatch = (Option<String>, Option<String>);
-fn application_choices(model: &Model) -> Vec<(String, AppMatch)> { filtered_applications(model, "") }
+fn application_choices(model: &Model) -> Vec<(String, AppMatch)> {
+    filtered_applications(model, "")
+}
 fn filtered_applications(model: &Model, query: &str) -> Vec<(String, AppMatch)> {
     model
         .application_inventory
@@ -818,13 +827,13 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         }
     });
     let weak_cancel = Rc::downgrade(&cancel);
-    let input = Rc::new(
-        TextField::new(&ui).placeholder("com.apple.Safari").on_change(move |value| {
+    let input = Rc::new(TextField::new(&ui).placeholder("com.apple.Safari").on_change(
+        move |value| {
             if let Some(cancel) = weak_cancel.upgrade() {
                 cancel.set_changed(!value.trim().is_empty());
             }
-        }),
-    );
+        },
+    ));
     let app_name = Rc::new(RefCell::new(None::<String>));
     let selected_name = app_name.clone();
     let weak_model = Rc::downgrade(model);
@@ -875,8 +884,13 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
                             if let Some(sheet) = model.sheet.borrow().as_ref() {
                                 sheet.end();
                             }
-                            let index =
-                                model.source.borrow().virtual_workspaces.app_rules.len().checked_sub(1);
+                            let index = model
+                                .source
+                                .borrow()
+                                .virtual_workspaces
+                                .app_rules
+                                .len()
+                                .checked_sub(1);
                             if let Some(index) = index {
                                 next(index);
                             }
@@ -1007,8 +1021,8 @@ fn rule_summary(r: &AppWorkspaceRule) -> String {
 }
 fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut matches =
-        Section::new(&ui, "Matching conditions").description("Match an application or window title.");
+    let mut matches = Section::new(&ui, "Matching conditions")
+        .description("Match an application or window title.");
     let existing = model
         .source
         .borrow()
@@ -1024,7 +1038,8 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         Model::submit(
             &weak,
             Box::new(move |s| {
-                let rule = s.virtual_workspaces.app_rules.get_mut(i).ok_or("Rule no longer exists")?;
+                let rule =
+                    s.virtual_workspaces.app_rules.get_mut(i).ok_or("Rule no longer exists")?;
                 rule.app_id = target.0;
                 rule.app_name = target.1;
                 Ok(())
@@ -1155,8 +1170,9 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
                 }
             },
         ).help("Automatic manages normal windows and ignores special windows when appropriate. Manage always includes matching windows; Ignore excludes them."));
-    let mut geometry = Section::new(&ui, "Initial size and position")
-        .description("Leave blank to use the existing geometry. Position applies to floating windows.");
+    let mut geometry = Section::new(&ui, "Initial size and position").description(
+        "Leave blank to use the existing geometry. Position applies to floating windows.",
+    );
     for (title, axis) in [
         ("Horizontal position (%)", 0),
         ("Vertical position (%)", 1),
@@ -1286,7 +1302,11 @@ pub(super) fn strings(
         .footer(message)
 }
 
-pub(super) fn display_overrides(f: &mut FormBuilder, page: SettingsPage, model: &Rc<Model>) -> SettingsPage {
+pub(super) fn display_overrides(
+    f: &mut FormBuilder,
+    page: SettingsPage,
+    model: &Rc<Model>,
+) -> SettingsPage {
     let ui = f.ui;
     let mut displays: Vec<_> = model
         .displays
@@ -1327,7 +1347,8 @@ pub(super) fn display_overrides(f: &mut FormBuilder, page: SettingsPage, model: 
     }
     let weak = Rc::downgrade(model);
     let entries = displays.clone();
-    let connected: Vec<_> = model.displays.borrow().iter().map(|d| d.display_uuid.clone()).collect();
+    let connected: Vec<_> =
+        model.displays.borrow().iter().map(|d| d.display_uuid.clone()).collect();
     let list = SettingsList::new(
         &ui,
         |entry: &(String, String)| entry.1.clone(),
@@ -1451,7 +1472,8 @@ fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
                     },
                     move |s, v| {
                         let base = s.settings.layout.gaps.effective_for_display(Some(&edit_id));
-                        let o = s.settings.layout.gaps.per_display.entry(edit_id.clone()).or_default();
+                        let o =
+                            s.settings.layout.gaps.per_display.entry(edit_id.clone()).or_default();
                         if outer {
                             let g = o.outer.get_or_insert(base.outer);
                             match axis {

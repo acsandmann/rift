@@ -17,10 +17,10 @@ use tracing::{debug, warn};
 use super::skylight::{
     CFRelease, CFUUIDCreateFromString, CFUUIDCreateString, CGDisplayCreateUUIDFromDisplayID,
     CGDisplayGetDisplayIDFromUUID, CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces,
-    CGSCopyManagedDisplays, CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace, CGSSpaceMask,
-    CoreDockGetAutoHideEnabled, CoreDockGetOrientationAndPinning, SLSCopyActiveMenuBarDisplayIdentifier,
-    SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason, SLSGetMenuBarAutohideEnabled,
-    SLSGetSpaceManagementMode,
+    CGSCopyManagedDisplays, CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace,
+    CGSSpaceMask, CoreDockGetAutoHideEnabled, CoreDockGetOrientationAndPinning,
+    SLSCopyActiveMenuBarDisplayIdentifier, SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason,
+    SLSGetMenuBarAutohideEnabled, SLSGetSpaceManagementMode,
 };
 use crate::common::collections::HashMap;
 use crate::sys::geometry::CGRectDef;
@@ -102,7 +102,9 @@ impl<S: System> ScreenCache<S> {
         }
     }
 
-    pub fn mark_dirty(&mut self) { self.pending_generation = self.pending_generation.wrapping_add(1); }
+    pub fn mark_dirty(&mut self) {
+        self.pending_generation = self.pending_generation.wrapping_add(1);
+    }
 
     pub fn mark_sleeping(&mut self, sleeping: bool) {
         self.sleeping = sleeping;
@@ -201,14 +203,13 @@ impl<S: System> ScreenCache<S> {
             .map(|(idx, &CGScreenInfo { cg_id, bounds })| {
                 let notch_height = self.system.notch_height(cg_id.as_u32());
                 let frame = constrain_display_bounds(cg_id.as_u32(), bounds, notch_height);
-                let display_uuid = uuid_strings
-                    .get(idx)
-                    .cloned()
-                    .filter(|uuid| !uuid.is_empty())
-                    .unwrap_or_else(|| {
-                        warn!("Missing cached UUID for {:?}; using fallback", cg_id);
-                        format!("cgdisplay-{}", cg_id.as_u32())
-                    });
+                let display_uuid =
+                    uuid_strings.get(idx).cloned().filter(|uuid| !uuid.is_empty()).unwrap_or_else(
+                        || {
+                            warn!("Missing cached UUID for {:?}; using fallback", cg_id);
+                            format!("cgdisplay-{}", cg_id.as_u32())
+                        },
+                    );
                 ScreenInfo {
                     id: cg_id,
                     frame,
@@ -748,8 +749,9 @@ pub fn managed_display_space_ids() -> HashMap<String, Vec<SpaceId>> {
                     let spaces = CFRetained::cast_unchecked::<CFArray<CFType>>(spaces);
                     for space_entry in spaces.iter() {
                         if let Ok(space_dict) = space_entry.downcast::<CFDictionary>() {
-                            let space_dict =
-                                CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(space_dict);
+                            let space_dict = CFRetained::cast_unchecked::<
+                                CFDictionary<CFString, CFType>,
+                            >(space_dict);
                             let space_id = space_dict
                                 .get(&managed_space_id_key)
                                 .and_then(|v| v.downcast::<CFNumber>().ok())
@@ -803,7 +805,9 @@ mod test {
     impl System for Stub {
         fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> { Ok(self.cg_screens.clone()) }
 
-        fn display_uuid(&self, _screen: &CGScreenInfo) -> CFRetained<CFString> { CFString::from_str("stub") }
+        fn display_uuid(&self, _screen: &CGScreenInfo) -> CFRetained<CFString> {
+            CFString::from_str("stub")
+        }
 
         fn ns_screens(&self) -> Vec<NSScreenInfo> { self.ns_screens.clone() }
 
@@ -867,14 +871,20 @@ mod test {
                     cg_id: ScreenId(3),
                     frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3840.0, 2160.0)),
                     backing_scale: 1.0,
-                    visible_frame: CGRect::new(CGPoint::new(0.0, 76.0), CGSize::new(3840.0, 2059.0)),
+                    visible_frame: CGRect::new(
+                        CGPoint::new(0.0, 76.0),
+                        CGSize::new(3840.0, 2059.0),
+                    ),
                     name: None,
                 },
                 NSScreenInfo {
                     cg_id: ScreenId(1),
                     frame: CGRect::new(CGPoint::new(3840.0, 98.0), CGSize::new(1512.0, 982.0)),
                     backing_scale: 2.0,
-                    visible_frame: CGRect::new(CGPoint::new(3840.0, 98.0), CGSize::new(1512.0, 950.0)),
+                    visible_frame: CGRect::new(
+                        CGPoint::new(3840.0, 98.0),
+                        CGSize::new(1512.0, 950.0),
+                    ),
                     name: None,
                 },
             ],

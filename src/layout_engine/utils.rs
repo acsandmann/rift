@@ -4,7 +4,10 @@ pub fn compute_tiling_area(screen: CGRect, gaps: &crate::common::config::GapSett
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use crate::sys::geometry::Round;
-    if gaps.outer.top == 0.0 && gaps.outer.left == 0.0 && gaps.outer.bottom == 0.0 && gaps.outer.right == 0.0
+    if gaps.outer.top == 0.0
+        && gaps.outer.left == 0.0
+        && gaps.outer.bottom == 0.0
+        && gaps.outer.right == 0.0
     {
         screen
     } else {

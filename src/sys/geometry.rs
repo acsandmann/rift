@@ -94,7 +94,8 @@ impl CGRectExt for ic::CGRect {
     }
 
     fn contains(&self, point: ic::CGPoint) -> bool {
-        (self.min().x..=self.max().x).contains(&point.x) && (self.min().y..=self.max().y).contains(&point.y)
+        (self.min().x..=self.max().x).contains(&point.x)
+            && (self.min().y..=self.max().y).contains(&point.y)
     }
 
     fn contains_rect(&self, other: Self) -> bool {

@@ -104,8 +104,10 @@ fn find_rift_executable() -> io::Result<PathBuf> {
 }
 
 fn plist_contents() -> io::Result<String> {
-    let user = env::var("USER").map_err(|_| io::Error::new(io::ErrorKind::Other, "env USER not set"))?;
-    let path_env = env::var("PATH").map_err(|_| io::Error::new(io::ErrorKind::Other, "env PATH not set"))?;
+    let user =
+        env::var("USER").map_err(|_| io::Error::new(io::ErrorKind::Other, "env USER not set"))?;
+    let path_env =
+        env::var("PATH").map_err(|_| io::Error::new(io::ErrorKind::Other, "env PATH not set"))?;
 
     let agent_exe = find_rift_executable()?;
     let exe_str = agent_exe
@@ -386,7 +388,8 @@ pub fn service_stop() -> io::Result<()> {
             ))
         }
     } else {
-        let code1 = run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], false)?;
+        let code1 =
+            run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], false)?;
         let code2 = run_launchctl(&["disable", &service_target], false)?;
 
         if code1 == 0 && code2 == 0 {

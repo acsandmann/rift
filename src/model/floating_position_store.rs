@@ -58,7 +58,10 @@ impl FloatingPositionStore {
         windows
     }
 
-    pub(crate) fn locations_for_window(&self, window: WindowId) -> Vec<(SpaceId, VirtualWorkspaceId)> {
+    pub(crate) fn locations_for_window(
+        &self,
+        window: WindowId,
+    ) -> Vec<(SpaceId, VirtualWorkspaceId)> {
         let mut locations = self
             .positions
             .keys()
@@ -91,7 +94,13 @@ impl FloatingPositionStore {
             .collect();
     }
 
-    pub fn store(&mut self, space: SpaceId, workspace: VirtualWorkspaceId, window: WindowId, frame: CGRect) {
+    pub fn store(
+        &mut self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        window: WindowId,
+        frame: CGRect,
+    ) {
         self.positions.insert((space, workspace, window), frame);
     }
 
@@ -105,7 +114,12 @@ impl FloatingPositionStore {
         self.positions.entry((space, workspace, window)).or_insert(frame);
     }
 
-    pub fn get(&self, space: SpaceId, workspace: VirtualWorkspaceId, window: WindowId) -> Option<CGRect> {
+    pub fn get(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        window: WindowId,
+    ) -> Option<CGRect> {
         self.positions.get(&(space, workspace, window)).copied()
     }
 
@@ -144,7 +158,11 @@ impl FloatingPositionStore {
     ///
     /// Layout restore treats workspace membership as singular. Floating frames must obey the
     /// same invariant or a stale frame can resurrect a window in a different workspace later.
-    pub fn retain_window_location(&mut self, window: WindowId, keep: (SpaceId, VirtualWorkspaceId)) {
+    pub fn retain_window_location(
+        &mut self,
+        window: WindowId,
+        keep: (SpaceId, VirtualWorkspaceId),
+    ) {
         self.positions.retain(|(space, workspace, stored_window), _| {
             *stored_window != window || (*space, *workspace) == keep
         });
@@ -160,8 +178,9 @@ impl FloatingPositionStore {
         target_space: SpaceId,
         target_workspace: VirtualWorkspaceId,
     ) {
-        self.positions
-            .retain(|(space, workspace, _), _| (*space, *workspace) != (target_space, target_workspace));
+        self.positions.retain(|(space, workspace, _), _| {
+            (*space, *workspace) != (target_space, target_workspace)
+        });
         for (window, frame) in source.workspace_positions(source_space, source_workspace) {
             self.store(target_space, target_workspace, window, frame);
         }
@@ -173,14 +192,17 @@ impl FloatingPositionStore {
         target_workspace: VirtualWorkspaceId,
         positions: Vec<(WindowId, CGRect)>,
     ) {
-        self.positions
-            .retain(|(space, workspace, _), _| (*space, *workspace) != (target_space, target_workspace));
+        self.positions.retain(|(space, workspace, _), _| {
+            (*space, *workspace) != (target_space, target_workspace)
+        });
         for (window, frame) in positions {
             self.store(target_space, target_workspace, window, frame);
         }
     }
 
-    pub fn remove_app(&mut self, pid: pid_t) { self.positions.retain(|(_, _, window), _| window.pid != pid); }
+    pub fn remove_app(&mut self, pid: pid_t) {
+        self.positions.retain(|(_, _, window), _| window.pid != pid);
+    }
 
     pub fn transfer_window_identity(&mut self, from: WindowId, to: WindowId) {
         if from == to {
@@ -249,7 +271,13 @@ mod tests {
 
         source.store(source_space, workspace(), source_window, frame());
         target.store(target_space, workspace(), stale_target_window, frame());
-        target.replace_workspace_from(&source, source_space, workspace(), target_space, workspace());
+        target.replace_workspace_from(
+            &source,
+            source_space,
+            workspace(),
+            target_space,
+            workspace(),
+        );
 
         assert_eq!(
             target.get(target_space, workspace(), source_window),

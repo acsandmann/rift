@@ -183,7 +183,12 @@ impl Control {
         r.epoch == epoch && r.enabled
     }
 
-    pub fn configure(&self, settings: Settings, enabled: bool, screens: Vec<(CGRect, SpaceId, LayoutMode)>) {
+    pub fn configure(
+        &self,
+        settings: Settings,
+        enabled: bool,
+        screens: Vec<(CGRect, SpaceId, LayoutMode)>,
+    ) {
         let mut r = self.routing.lock();
         r.settings = settings;
         r.enabled = enabled;
@@ -227,7 +232,13 @@ impl Control {
         self.begin_at(time, fingers, CGEvent::location(Some(&event)), epoch)
     }
 
-    fn begin_at(&self, time: Duration, fingers: usize, point: CGPoint, epoch: u64) -> Option<DeviceSession> {
+    fn begin_at(
+        &self,
+        time: Duration,
+        fingers: usize,
+        point: CGPoint,
+        epoch: u64,
+    ) -> Option<DeviceSession> {
         let mut r = self.routing.lock();
         if !r.enabled || r.ui_session != 0 || r.epoch != epoch {
             return None;
@@ -402,7 +413,8 @@ impl DeviceSession {
                     let x = f64::from(swipe.translation.x);
                     let y = f64::from(swipe.translation.y).abs();
                     if self.owner == Owner::Undecided {
-                        if y > c.action.tolerance || (y >= VERTICAL_INTENT_DISTANCE && y >= x.abs()) {
+                        if y > c.action.tolerance || (y >= VERTICAL_INTENT_DISTANCE && y >= x.abs())
+                        {
                             self.owner = Owner::System;
                         } else if y >= x.abs() {
                             // Like the old armed swipe handler, allow initial
@@ -428,8 +440,11 @@ impl DeviceSession {
                     if self.owner != Owner::Rift {
                         return;
                     }
-                    let total_x = (x - if c.action.scrolling { self.claim_x } else { 0.0 })
-                        * SCROLL_SENSITIVITY
+                    let total_x = (x - if c.action.scrolling {
+                        self.claim_x
+                    } else {
+                        0.0
+                    }) * SCROLL_SENSITIVITY
                         * if c.action.invert { -1.0 } else { 1.0 };
                     // Compare cumulative travel to the last accepted position:
                     // sensor wobble stays still, but slow sub-point steps accumulate.
@@ -520,7 +535,10 @@ impl DeviceInput {
         s.frame(contacts, count, time, tx, control);
         {
             let routing = control.routing.lock();
-            if routing.ui_session == s.sample.session && routing.epoch == s.context.epoch && routing.enabled {
+            if routing.ui_session == s.sample.session
+                && routing.epoch == s.context.epoch
+                && routing.enabled
+            {
                 let consume = s.context.consume
                     && (count == s.recognizer.required_finger_count || s.owner == Owner::Rift);
                 let mut owner = control.owner.lock();
@@ -790,7 +808,8 @@ mod tests {
             for x in [0.5, 0.4] {
                 DeviceInput::deliver(target, multitouch::ContactEvent::Frame(&frame(4, x, 0.5)));
             }
-            let Event::Gesture(Lifecycle::Workspace { context, .. }) = rx.try_recv().unwrap().1 else {
+            let Event::Gesture(Lifecycle::Workspace { context, .. }) = rx.try_recv().unwrap().1
+            else {
                 panic!("valid four-finger workspace action");
             };
             assert_eq!(context.action.fingers, 4);
@@ -973,7 +992,9 @@ mod tests {
                     assert!(rx.try_recv().is_err());
                 }
             }
-            let Event::Gesture(Lifecycle::Workspace { next, context, .. }) = rx.try_recv().unwrap().1 else {
+            let Event::Gesture(Lifecycle::Workspace { next, context, .. }) =
+                rx.try_recv().unwrap().1
+            else {
                 panic!("workspace action");
             };
             assert_eq!(next, !invert);

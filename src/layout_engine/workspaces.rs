@@ -12,7 +12,9 @@ pub(crate) struct WorkspaceLayoutState {
     pub(crate) last_saved: Option<LayoutId>,
 }
 
-#[derive(Serialize, Deserialize, Default, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug)]
+#[derive(
+    Serialize, Deserialize, Default, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Debug,
+)]
 pub(crate) struct Size {
     width: i32,
     height: i32,
@@ -28,7 +30,9 @@ impl From<CGSize> for Size {
 }
 
 impl WorkspaceLayoutState {
-    pub(crate) fn active(&self) -> Option<LayoutId> { self.configurations.get(&self.active_size).copied() }
+    pub(crate) fn active(&self) -> Option<LayoutId> {
+        self.configurations.get(&self.active_size).copied()
+    }
 
     pub(crate) fn active_size(&self) -> Option<CGSize> {
         self.active()

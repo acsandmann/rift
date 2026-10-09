@@ -9,12 +9,13 @@ use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2::rc::{Allocated, Retained};
 use objc2::{
-    AnyThread, ClassType, DeclaredClass, Encode, Encoding, MainThreadMarker, define_class, msg_send, sel,
+    AnyThread, ClassType, DeclaredClass, Encode, Encoding, MainThreadMarker, define_class,
+    msg_send, sel,
 };
 use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
 use objc2_foundation::{
-    NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationSuspensionBehavior,
-    NSObject, NSProcessInfo, NSString,
+    NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
+    NSNotificationSuspensionBehavior, NSObject, NSProcessInfo, NSString,
 };
 use tracing::{debug, info_span, trace, warn};
 
@@ -247,7 +248,10 @@ impl NotificationCenterInner {
 
     fn send_space_event(&self, event: spaces::Event) { self.ivars().spaces_tx.send(event); }
 
-    fn running_application(&self, notif: &NSNotification) -> Option<Retained<NSRunningApplication>> {
+    fn running_application(
+        &self,
+        notif: &NSNotification,
+    ) -> Option<Retained<NSRunningApplication>> {
         let info = notif.userInfo();
         let Some(info) = info else {
             warn!("Got app notification without user info: {notif:?}");
@@ -273,7 +277,11 @@ impl NotificationCenterInner {
         self.send_space_event(spaces::Event::ScreenRefreshRequested);
     }
 
-    unsafe extern "C" fn display_reconfig_callback(display_id: u32, flags: u32, user_info: *mut c_void) {
+    unsafe extern "C" fn display_reconfig_callback(
+        display_id: u32,
+        flags: u32,
+        user_info: *mut c_void,
+    ) {
         if user_info.is_null() {
             return;
         }
@@ -312,9 +320,15 @@ impl NotificationCenter {
         let handler = NotificationCenterInner::new(events_tx.clone(), spaces_tx);
 
         // SAFETY: Selector must have signature fn(&self, &NSNotification)
-        let register_unsafe = |selector, notif_name, center: &Retained<NSNotificationCenter>, object| unsafe {
-            center.addObserver_selector_name_object(&handler, selector, Some(notif_name), Some(object));
-        };
+        let register_unsafe =
+            |selector, notif_name, center: &Retained<NSNotificationCenter>, object| unsafe {
+                center.addObserver_selector_name_object(
+                    &handler,
+                    selector,
+                    Some(notif_name),
+                    Some(object),
+                );
+            };
 
         let workspace = &NSWorkspace::sharedWorkspace();
         let workspace_center = &workspace.notificationCenter();
@@ -436,7 +450,8 @@ impl NotificationCenter {
         self.inner.send_space_event(spaces::Event::ScreenRefreshRequested);
         self.inner.send_event(WmEvent::AppEventsRegistered);
         if let Some(app) = workspace.frontmostApplication() {
-            if app.bundle_id().as_deref().map(ToString::to_string).as_deref() == Some("com.apple.loginwindow")
+            if app.bundle_id().as_deref().map(ToString::to_string).as_deref()
+                == Some("com.apple.loginwindow")
             {
                 self.inner.enter_session_inactive();
             }

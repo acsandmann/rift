@@ -207,7 +207,9 @@ impl RiftMachClient {
     }
 
     /// Returns the current metrics payload.
-    pub fn get_metrics(&self) -> Result<Value, ClientError> { self.request(RiftRequest::GetMetrics) }
+    pub fn get_metrics(&self) -> Result<Value, ClientError> {
+        self.request(RiftRequest::GetMetrics)
+    }
 
     /// Returns the current configuration as JSON until the config model is
     /// moved into `rift-protocol`.
@@ -272,7 +274,10 @@ impl RiftMachSubscription {
     }
 }
 
-fn parse_json_payload<T: DeserializeOwned>(payload: &[u8], kind: &'static str) -> Result<T, ClientError> {
+fn parse_json_payload<T: DeserializeOwned>(
+    payload: &[u8],
+    kind: &'static str,
+) -> Result<T, ClientError> {
     if payload.is_empty() {
         return Err(ClientError::EmptyResponse);
     }
@@ -358,7 +363,8 @@ unsafe extern "C" {
         poly: MachPort,
         disposition: c_int,
     ) -> KernReturn;
-    fn mach_port_mod_refs(task: MachPort, name: MachPort, right: c_int, delta: c_int) -> KernReturn;
+    fn mach_port_mod_refs(task: MachPort, name: MachPort, right: c_int, delta: c_int)
+    -> KernReturn;
     fn mach_port_deallocate(task: MachPort, name: MachPort) -> KernReturn;
     fn mach_port_set_attributes(
         task: MachPort,
@@ -453,7 +459,9 @@ impl Drop for ReplyPort {
 
 unsafe fn lookup_service(name: &CStr) -> Result<MachPort, ClientError> {
     let mut bootstrap_port = 0;
-    let result = unsafe { task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &mut bootstrap_port) };
+    let result = unsafe {
+        task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &mut bootstrap_port)
+    };
     if result != KERN_SUCCESS {
         return Err(ClientError::Mach {
             operation: "task_get_special_port",
@@ -480,7 +488,10 @@ unsafe fn find_service_with_retry() -> Result<ServicePort, ClientError> {
     Err(ClientError::ServiceUnavailable)
 }
 
-unsafe fn send_request(payload: &[u8], subscription_port: Option<MachPort>) -> Result<Vec<u8>, ClientError> {
+unsafe fn send_request(
+    payload: &[u8],
+    subscription_port: Option<MachPort>,
+) -> Result<Vec<u8>, ClientError> {
     if payload.len() > MAX_MESSAGE_SIZE {
         return Err(ClientError::MessageTooLarge);
     }
@@ -549,8 +560,8 @@ unsafe fn receive_message(reply_port: MachPort) -> Result<Vec<u8>, ClientError> 
         });
     }
 
-    let payload_len =
-        unsafe { (*header_ptr).size }.saturating_sub(size_of::<MachMessageHeader>() as u32) as usize;
+    let payload_len = unsafe { (*header_ptr).size }
+        .saturating_sub(size_of::<MachMessageHeader>() as u32) as usize;
     if payload_len > MAX_MESSAGE_SIZE {
         unsafe { mach_msg_destroy(header_ptr) };
         return Err(ClientError::MessageTooLarge);
@@ -595,7 +606,8 @@ mod tests {
 
     #[test]
     fn parses_nul_terminated_response_with_alignment_padding() {
-        let response: RiftResponse = parse_json_payload(b"{\"data\":true}\0\0\0", "response").unwrap();
+        let response: RiftResponse =
+            parse_json_payload(b"{\"data\":true}\0\0\0", "response").unwrap();
         assert_eq!(response.into_result(), Ok(Value::Bool(true)));
     }
 

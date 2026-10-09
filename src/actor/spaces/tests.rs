@@ -32,7 +32,9 @@ fn make_screen_with(
     }
 }
 
-fn fullscreen_space_for(user_space: SpaceId) -> SpaceId { SpaceId::new(0x400000000 + user_space.get()) }
+fn fullscreen_space_for(user_space: SpaceId) -> SpaceId {
+    SpaceId::new(0x400000000 + user_space.get())
+}
 
 fn recv_wm(rx: &mut actor::Receiver<wm_controller::WmEvent>) -> wm_controller::WmEvent {
     rx.try_recv().expect("expected wm event").1
@@ -69,7 +71,11 @@ fn active_display_space_prefers_matching_display_uuid() {
     ];
 
     assert_eq!(
-        SpacesActor::resolve_active_display_space(&screens, Some("display-right"), Some(left_space),),
+        SpacesActor::resolve_active_display_space(
+            &screens,
+            Some("display-right"),
+            Some(left_space),
+        ),
         Some(right_space),
         "active display UUID should be authoritative over stale active-space fallback",
     );
@@ -725,7 +731,13 @@ fn wake_transient_cannot_steal_another_displays_space_history() {
     // WindowServer can publish this transient while the built-in display is
     // absent. The external display must not adopt the built-in display's space.
     actor.handle_event(Event::ScreenParametersChanged(
-        vec![make_screen_with(2, "external", 0.0, 1000.0, Some(builtin_space))],
+        vec![make_screen_with(
+            2,
+            "external",
+            0.0,
+            1000.0,
+            Some(builtin_space),
+        )],
         CoordinateConverter::from_height(800.0),
     ));
     let (state, _) = recv_snapshot(&mut wm_rx);
@@ -820,7 +832,9 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
     let _ = recv_wm(&mut wm_rx);
 
     crate::sys::window_server::set_space_window_list_for_space_override(space.get(), Some(vec![]));
-    actor.synthesize_topology_window_delta(9, actor.state.display_churn_flags, &[make_screen(Some(space))]);
+    actor.synthesize_topology_window_delta(9, actor.state.display_churn_flags, &[make_screen(
+        Some(space),
+    )]);
     crate::sys::window_server::set_space_window_list_for_space_override(space.get(), None);
     actor.forward_screen_parameters(
         vec![make_screen(Some(space))],
@@ -847,7 +861,10 @@ fn first_empty_post_wake_snapshot_preserves_known_visible_windows() {
             actor.state.recovering_membership = true;
         }
         window_server::set_space_membership_query_failed(space.get(), sample == 0);
-        actor.forward_screen_parameters(vec![make_screen(Some(space))], CoordinateConverter::default());
+        actor.forward_screen_parameters(
+            vec![make_screen(Some(space))],
+            CoordinateConverter::default(),
+        );
         let (state, _) = recv_snapshot(&mut wm_rx);
         assert!(state.authoritative);
         assert_eq!(state.membership_complete, sample >= 2);
@@ -889,7 +906,10 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
         new_space.get(),
         Some(vec![wsid.as_u32()]),
     );
-    crate::sys::window_server::set_space_window_list_for_space_override(old_space.get(), Some(vec![]));
+    crate::sys::window_server::set_space_window_list_for_space_override(
+        old_space.get(),
+        Some(vec![]),
+    );
     actor.synthesize_topology_window_delta(10, actor.state.display_churn_flags, &[
         make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
         make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
@@ -1247,7 +1267,10 @@ fn display_churn_stabilization_defers_while_sleeping() {
 
 #[test]
 fn display_churn_stabilization_defers_while_session_inactive() {
-    assert_display_churn_defers_until_resume(Event::SessionDidResignActive, Event::SessionDidBecomeActive);
+    assert_display_churn_defers_until_resume(
+        Event::SessionDidResignActive,
+        Event::SessionDidBecomeActive,
+    );
 }
 
 #[test]

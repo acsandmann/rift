@@ -37,7 +37,8 @@ pub struct EventData {
 static EVENT_RECEIVERS: Lazy<Mutex<HashMap<CGSEventType, Option<actor::Receiver<EventData>>>>> =
     Lazy::new(|| Mutex::new(HashMap::default()));
 
-static REGISTERED_EVENTS: Lazy<Mutex<HashSet<CGSEventType>>> = Lazy::new(|| Mutex::new(HashSet::default()));
+static REGISTERED_EVENTS: Lazy<Mutex<HashSet<CGSEventType>>> =
+    Lazy::new(|| Mutex::new(HashSet::default()));
 
 static CALLBACK_CTXS: Lazy<RwLock<HashMap<CGSEventType, Box<CallbackContext>>>> =
     Lazy::new(|| RwLock::new(HashMap::default()));
@@ -67,8 +68,9 @@ pub fn init(event: CGSEventType) -> i32 {
 
     let raw: u32 = event.into();
     let callback_ctx_ptr = (&mut **callback_ctx as *mut CallbackContext).cast::<c_void>();
-    let res =
-        unsafe { SLSRegisterConnectionNotifyProc(*G_CONNECTION, connection_callback, raw, callback_ctx_ptr) };
+    let res = unsafe {
+        SLSRegisterConnectionNotifyProc(*G_CONNECTION, connection_callback, raw, callback_ctx_ptr)
+    };
 
     if res == 0 {
         let mut registered = REGISTERED_EVENTS.lock();
@@ -93,8 +95,11 @@ pub fn take_receiver(event: CGSEventType) -> actor::Receiver<EventData> {
 
 pub fn update_window_notifications(window_ids: &[u32]) {
     unsafe {
-        let _ =
-            SLSRequestNotificationsForWindows(*G_CONNECTION, window_ids.as_ptr(), window_ids.len() as i32);
+        let _ = SLSRequestNotificationsForWindows(
+            *G_CONNECTION,
+            window_ids.as_ptr(),
+            window_ids.len() as i32,
+        );
     }
 }
 
@@ -223,7 +228,9 @@ extern "C" fn connection_callback(
             } else if let Some(wid) = read::<u32>(bytes, 0) {
                 window_id = Some(wid);
             } else if len != 0 {
-                warn!("Skylight event {kind} payload did not match expected space/window layout (len={len})");
+                warn!(
+                    "Skylight event {kind} payload did not match expected space/window layout (len={len})"
+                );
             }
         }
 

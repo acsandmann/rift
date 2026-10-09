@@ -211,8 +211,12 @@ unsafe fn switch_space_macos_27(direction: Direction) {
         Time::new_after(Time::NOW, K_GESTURE_DELAY_NS),
         (direction, begin_progress, end_velocity),
         |(direction, end_progress, end_velocity)| {
-            let end_event =
-                dock_control_gesture_event(direction, K_GESTURE_ENDED, end_progress, Some(end_velocity));
+            let end_event = dock_control_gesture_event(
+                direction,
+                K_GESTURE_ENDED,
+                end_progress,
+                Some(end_velocity),
+            );
             post_augmented_session_event(&end_event);
         },
     );
@@ -227,7 +231,11 @@ fn raw_marker_event() -> CFRetained<CGEvent> {
     event
 }
 
-fn raw_legacy_gesture_event(phase: i64, magnitude: f64, velocity_x: Option<f64>) -> CFRetained<CGEvent> {
+fn raw_legacy_gesture_event(
+    phase: i64,
+    magnitude: f64,
+    velocity_x: Option<f64>,
+) -> CFRetained<CGEvent> {
     let event = new_event();
     let magnitude_bits = (magnitude as f32).to_bits() as i64;
 
@@ -437,7 +445,10 @@ fn set_double_fields(event: &CGEvent, fields: &[(CGEventField, f64)]) {
     }
 }
 
-fn post_events<'a>(location: CGEventTapLocation, events: impl IntoIterator<Item = &'a CFRetained<CGEvent>>) {
+fn post_events<'a>(
+    location: CGEventTapLocation,
+    events: impl IntoIterator<Item = &'a CFRetained<CGEvent>>,
+) {
     for event in events {
         unsafe { CGEventPost(location, CFRetained::as_ptr(event).as_ptr().cast()) };
     }
@@ -524,7 +535,8 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::{
-        IOHIDFluidTouchGestureData, IOHIDSystemQueueElement, IOHIDVelocityEventData, double_to_fixed_16_16,
+        IOHIDFluidTouchGestureData, IOHIDSystemQueueElement, IOHIDVelocityEventData,
+        double_to_fixed_16_16,
     };
 
     #[test]

@@ -260,7 +260,10 @@ impl SpacesActor {
     }
 
     #[cfg(test)]
-    pub fn new_for_tests(reactor_tx: reactor::Sender, wm_tx: wm_controller::Sender) -> (Self, Sender) {
+    pub fn new_for_tests(
+        reactor_tx: reactor::Sender,
+        wm_tx: wm_controller::Sender,
+    ) -> (Self, Sender) {
         let mut state = AuthorityState::default();
         state.timers_enabled = false;
         Self::new_with_state(reactor_tx, wm_tx, state)
@@ -421,7 +424,8 @@ impl SpacesActor {
                             self.handle_event(Event::ReconcileWindowSpaces);
                             return;
                         }
-                        self.reactor_tx.send(reactor::Event::WindowServerDestroyed(wsid, sid, kind));
+                        self.reactor_tx
+                            .send(reactor::Event::WindowServerDestroyed(wsid, sid, kind));
                     }
                 }
             }
@@ -475,7 +479,8 @@ impl SpacesActor {
     }
 
     fn active_display_matches_state(&self, active_display_uuid: Option<&str>) -> bool {
-        active_display_uuid.is_some() && active_display_uuid == self.state.active_display_uuid.as_deref()
+        active_display_uuid.is_some()
+            && active_display_uuid == self.state.active_display_uuid.as_deref()
     }
 
     fn handle_active_space_changed(&mut self) {
@@ -546,7 +551,8 @@ impl SpacesActor {
     ) -> bool {
         self.state.last_converter = converter;
         let forwarded = self.build_forwarded_state(screens);
-        self.state.last_sent_spaces = Some(forwarded.screens.iter().map(|screen| screen.space).collect());
+        self.state.last_sent_spaces =
+            Some(forwarded.screens.iter().map(|screen| screen.space).collect());
         self.state.awaiting_space_switch_confirmation = false;
         let membership_complete = forwarded.membership_complete;
         self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
@@ -609,7 +615,8 @@ impl SpacesActor {
                 .get(screen.display_uuid.as_str())
                 .is_some_and(|previous| *previous != screen.frame)
         });
-        let topology_changed = display_set_changed || display_order_changed || display_geometry_changed;
+        let topology_changed =
+            display_set_changed || display_order_changed || display_geometry_changed;
         let should_force_refresh_layout =
             topology_changed && (self.state.has_seen_display_set || !previous_displays.is_empty());
 
@@ -621,8 +628,10 @@ impl SpacesActor {
                 let new_size = screen.frame.size;
                 match previous_sizes.get(&screen.id) {
                     Some(previous) => {
-                        let width_changed = previous.width.round() as i32 != new_size.width.round() as i32;
-                        let height_changed = previous.height.round() as i32 != new_size.height.round() as i32;
+                        let width_changed =
+                            previous.width.round() as i32 != new_size.width.round() as i32;
+                        let height_changed =
+                            previous.height.round() as i32 != new_size.height.round() as i32;
                         if width_changed || height_changed {
                             screen.space.map(|space| (space, new_size))
                         } else {
@@ -824,10 +833,9 @@ impl SpacesActor {
 
     fn null_non_user_spaces(&self, screens: &mut [ScreenInfo]) {
         for screen in screens {
-            if screen
-                .space
-                .is_some_and(|space| !Self::is_fullscreen_space(space) && !Self::is_user_space(space))
-            {
+            if screen.space.is_some_and(|space| {
+                !Self::is_fullscreen_space(space) && !Self::is_user_space(space)
+            }) {
                 screen.space = None;
             }
         }
@@ -873,7 +881,8 @@ impl SpacesActor {
                 continue;
             }
 
-            if let Some(previous_space) = self.state.last_user_space_by_display.get(display_uuid).copied()
+            if let Some(previous_space) =
+                self.state.last_user_space_by_display.get(display_uuid).copied()
                 && previous_space != space
             {
                 let source_is_now_owned_by_another_display = current_space_owners
@@ -927,7 +936,8 @@ impl SpacesActor {
                     .and_then(|screen| screen.space)
             })
             .or_else(|| {
-                active_space.filter(|space| screens.iter().any(|screen| screen.space == Some(*space)))
+                active_space
+                    .filter(|space| screens.iter().any(|screen| screen.space == Some(*space)))
             })
             .or_else(|| screens.iter().find_map(|screen| screen.space))
     }
@@ -1005,7 +1015,8 @@ impl SpacesActor {
         let mut visible = HashMap::default();
         let mut complete = true;
         for &space in &active_spaces {
-            let Some(ids) = window_server::try_space_window_list_for_connection(&[space.get()], 0, false)
+            let Some(ids) =
+                window_server::try_space_window_list_for_connection(&[space.get()], 0, false)
             else {
                 complete = false;
                 visible.extend(
@@ -1042,7 +1053,9 @@ impl SpacesActor {
                 self.state
                     .visible_window_spaces
                     .iter()
-                    .filter_map(|(&wsid, &space)| active_space_set.contains(&space).then_some((wsid, space)))
+                    .filter_map(|(&wsid, &space)| {
+                        active_space_set.contains(&space).then_some((wsid, space))
+                    })
                     .collect(),
                 false,
             )
@@ -1251,7 +1264,11 @@ impl SpacesActor {
         }
     }
 
-    fn try_forward_authoritative_snapshot(&mut self, force: bool, require_complete_spaces: bool) -> bool {
+    fn try_forward_authoritative_snapshot(
+        &mut self,
+        force: bool,
+        require_complete_spaces: bool,
+    ) -> bool {
         if self.state.refresh_pending
             || self.should_buffer_topology_updates()
             || self.state.recovering_membership
@@ -1262,20 +1279,22 @@ impl SpacesActor {
         let Some((screens, converter)) = self.collect_state() else {
             return false;
         };
-        if !Self::screen_snapshot_is_ready_for_authoritative_commit(&screens, require_complete_spaces) {
+        if !Self::screen_snapshot_is_ready_for_authoritative_commit(
+            &screens,
+            require_complete_spaces,
+        ) {
             return false;
         }
 
         // Membership can change before the display callback arrives. If the
         // refresh already sees physical churn, use the existing stabilization flow.
-        let physical_topology_changed = self.state.screens.len() != screens.len()
-            || screens.iter().any(|screen| {
-                !self
-                    .state
-                    .screens
-                    .iter()
-                    .any(|old| old.display_uuid == screen.display_uuid && old.frame == screen.frame)
-            });
+        let physical_topology_changed =
+            self.state.screens.len() != screens.len()
+                || screens.iter().any(|screen| {
+                    !self.state.screens.iter().any(|old| {
+                        old.display_uuid == screen.display_uuid && old.frame == screen.frame
+                    })
+                });
         if !self.state.screens.is_empty() && physical_topology_changed {
             let epoch = self.begin_display_churn(DisplayReconfigFlags::empty());
             self.schedule_display_stabilization_check(epoch);
@@ -1292,7 +1311,9 @@ impl SpacesActor {
         true
     }
 
-    fn schedule_screen_refresh(&mut self) { self.schedule_screen_refresh_after(REFRESH_DEFAULT_DELAY_NS, 0); }
+    fn schedule_screen_refresh(&mut self) {
+        self.schedule_screen_refresh_after(REFRESH_DEFAULT_DELAY_NS, 0);
+    }
 
     fn schedule_screen_refresh_after(&mut self, delay_ns: i64, attempt: u8) {
         if !self.state.timers_enabled {
@@ -1426,7 +1447,8 @@ impl SpacesActor {
                 existing.hits
             }
             _ => {
-                self.state.display_topology_state = Some(DisplayTopologyState { fingerprint, hits: 1 });
+                self.state.display_topology_state =
+                    Some(DisplayTopologyState { fingerprint, hits: 1 });
                 1
             }
         };

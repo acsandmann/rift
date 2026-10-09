@@ -55,7 +55,10 @@ impl DragManager {
         let active = self.actor.is_active()
             && matches!(
                 self.actor.kind(),
-                Some(crate::actor::drag::DragKind::NativeMove | crate::actor::drag::DragKind::NativeResize)
+                Some(
+                    crate::actor::drag::DragKind::NativeMove
+                        | crate::actor::drag::DragKind::NativeResize
+                )
             );
         self.native_motion_active.store(active, Ordering::Release);
     }
@@ -288,19 +291,21 @@ impl LayoutManager {
                 .layout_manager
                 .layout_engine
                 .update_space_display(space, display_uuid_opt.clone());
-            let mut layout = reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
-                &reactor.state.windows,
-                space,
-                screen.frame.clone(),
-                &gaps,
-                reactor.config.settings.ui.stack_line.thickness(),
-                reactor.config.settings.ui.stack_line.horiz_placement,
-                reactor.config.settings.ui.stack_line.vert_placement,
-                |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
-                &all_screen_frames,
-            );
+            let mut layout =
+                reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
+                    &reactor.state.windows,
+                    space,
+                    screen.frame.clone(),
+                    &gaps,
+                    reactor.config.settings.ui.stack_line.thickness(),
+                    reactor.config.settings.ui.stack_line.horiz_placement,
+                    reactor.config.settings.ui.stack_line.vert_placement,
+                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
+                    &all_screen_frames,
+                );
             if active_space_count > 1
-                && reactor.layout_manager.layout_engine.active_layout_mode_at(space) == LayoutMode::Scrolling
+                && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+                    == LayoutMode::Scrolling
             {
                 let active_workspace_windows: HashSet<WindowId> = reactor
                     .layout_manager
@@ -390,8 +395,11 @@ impl LayoutManager {
                 if let Some(workspace_id) =
                     reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
                 {
-                    let workspace_index =
-                        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space);
+                    let workspace_index = reactor
+                        .layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .active_workspace_idx(space);
                     let workspace_name = reactor
                         .layout_manager
                         .layout_engine
@@ -427,7 +435,8 @@ impl LayoutManager {
                             workspace_index,
                             workspace_name,
                             stacks,
-                            active_workspace_has_fullscreen: active_workspace_for_space_has_fullscreen,
+                            active_workspace_has_fullscreen:
+                                active_workspace_for_space_has_fullscreen,
                             space_id: space.get(),
                             display_uuid,
                         };
@@ -440,7 +449,8 @@ impl LayoutManager {
                 any_frame_changed |=
                     AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
-                any_frame_changed |= AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
+                any_frame_changed |=
+                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
             } else {
                 any_frame_changed |=
                     AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
@@ -462,7 +472,9 @@ mod tests {
 
     use super::bound_frame_to_screen;
 
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect { CGRect::new(CGPoint::new(x, y), CGSize::new(w, h)) }
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
 
     #[test]
     fn bound_frame_to_screen_keeps_partial_overlap_for_strip_behavior() {

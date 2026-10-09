@@ -75,7 +75,8 @@ fn label(name: &str) -> String {
         if c.is_uppercase()
             && i > 0
             && (chars[i - 1].is_lowercase()
-                || chars.get(i + 1).is_some_and(|c| c.is_lowercase()) && chars[i - 1].is_uppercase())
+                || chars.get(i + 1).is_some_and(|c| c.is_lowercase())
+                    && chars[i - 1].is_uppercase())
         {
             out.push(' ');
         }

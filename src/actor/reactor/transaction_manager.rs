@@ -42,7 +42,9 @@ impl TransactionManager {
     pub fn clear_target_for_window(&self, wsid: WindowServerId) { self.store.clear_target(&wsid); }
 
     /// Generates the next transaction ID for a window.
-    pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId { self.store.next_txid(wsid) }
+    pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId {
+        self.store.next_txid(wsid)
+    }
 
     /// Sets the last sent transaction ID for a window.
     pub fn set_last_sent_txid(&self, wsid: WindowServerId, txid: TransactionId) {
@@ -50,8 +52,12 @@ impl TransactionManager {
     }
 
     /// Gets the last sent transaction ID for a window.
-    pub fn get_last_sent_txid(&self, wsid: WindowServerId) -> TransactionId { self.store.last_txid(&wsid) }
+    pub fn get_last_sent_txid(&self, wsid: WindowServerId) -> TransactionId {
+        self.store.last_txid(&wsid)
+    }
 
     /// Gets the target frame for a window's transaction, if it exists.
-    pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> { self.store.get(&wsid)?.target }
+    pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> {
+        self.store.get(&wsid)?.target
+    }
 }

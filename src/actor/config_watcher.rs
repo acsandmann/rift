@@ -5,7 +5,9 @@ use std::time::Duration;
 use std::{fs, thread};
 
 use notify::RecursiveMode;
-use notify_debouncer_mini::{DebounceEventResult, DebouncedEvent, DebouncedEventKind, new_debouncer};
+use notify_debouncer_mini::{
+    DebounceEventResult, DebouncedEvent, DebouncedEventKind, new_debouncer,
+};
 use tracing::{debug, info, trace, warn};
 
 use crate::actor::config::{self as config_actor, Event as ConfigEvent};
@@ -51,15 +53,16 @@ impl ConfigWatcher {
     async fn run(mut self) -> notify::Result<()> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DebouncedEvent>();
 
-        let mut debouncer = new_debouncer(Duration::from_millis(250), move |res: DebounceEventResult| {
-            if let Ok(events) = res {
-                for e in events {
-                    if e.kind == DebouncedEventKind::Any {
-                        let _ = tx.send(e);
+        let mut debouncer =
+            new_debouncer(Duration::from_millis(250), move |res: DebounceEventResult| {
+                if let Ok(events) = res {
+                    for e in events {
+                        if e.kind == DebouncedEventKind::Any {
+                            let _ = tx.send(e);
+                        }
                     }
                 }
-            }
-        })?;
+            })?;
 
         let watcher = debouncer.watcher();
 

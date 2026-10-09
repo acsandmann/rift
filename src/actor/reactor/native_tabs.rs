@@ -42,7 +42,9 @@ impl Reactor {
                             .get_or_init(|| {
                                 #[cfg(not(test))]
                                 {
-                                    info.sys_id.and_then(window_server::get_window).map(|window| window.frame)
+                                    info.sys_id
+                                        .and_then(window_server::get_window)
+                                        .map(|window| window.frame)
                                 }
                                 #[cfg(test)]
                                 {
@@ -99,7 +101,8 @@ impl Reactor {
         #[cfg(test)]
         let successor = self.native_tab_successor;
         let Some((native, frame)) = successor else { return false };
-        if native.pid != old.pid || native == old || !same_tab_frame(window.frame_monotonic, frame) {
+        if native.pid != old.pid || native == old || !same_tab_frame(window.frame_monotonic, frame)
+        {
             return false;
         }
         let wsid = window.info.sys_id;

@@ -24,7 +24,8 @@ fn sync_existing_window_state(
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
 
     let is_minimized = info.is_minimized;
-    let rift_owns_geometry = info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
+    let rift_owns_geometry =
+        info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
     let needs_arrange;
     if let Some(existing) = state.windows.window_mut(wid) {
         let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
@@ -48,13 +49,15 @@ fn sync_existing_window_state(
     let mut admission_changed = false;
     let mut outcome = match (was_minimized, is_minimized) {
         (_, true) => window::handle_window_minimized(state, wid)?,
-        (true, false) => window::handle_window_deminiaturized(state, window::WindowDeminiaturizedPayload {
-            window: wid,
-            active_space,
-        })?,
+        (true, false) => {
+            window::handle_window_deminiaturized(state, window::WindowDeminiaturizedPayload {
+                window: wid,
+                active_space,
+            })?
+        }
         _ => {
-            let is_admitted =
-                utils::refresh_heuristic(state, wid).is_some_and(|transition| transition.is_admitted);
+            let is_admitted = utils::refresh_heuristic(state, wid)
+                .is_some_and(|transition| transition.is_admitted);
             admission_changed = was_manageable != is_admitted;
             if was_manageable && !is_admitted {
                 crate::actor::reactor::events::EventOutcome::default()
@@ -125,9 +128,12 @@ pub(crate) fn process_window_list(
             current_native_space,
             active_space,
         } = window;
-        if let Some(previous) = state.windows.reconcile_ax_identity(wid, info.sys_id, current_native_space) {
+        if let Some(previous) =
+            state.windows.reconcile_ax_identity(wid, info.sys_id, current_native_space)
+        {
             layout.layout_engine.transfer_persistent_window_identity(previous, wid);
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
+            outcome =
+                outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
         }
         if state.windows.contains_window(wid) {
             if let Ok(existing_outcome) =
@@ -277,21 +283,24 @@ pub(crate) fn emit_layout_events(
     for (space, mut windows_for_space) in app_windows {
         windows_for_space.sort_unstable();
         for wid in windows_for_space {
-            let (effects, removal) = assign_window(state, layout, wid, space, app_info.as_ref(), false);
+            let (effects, removal) =
+                assign_window(state, layout, wid, space, app_info.as_ref(), false);
             if let Some(event) = removal {
                 outcome = outcome.with_layout_event(event);
             }
             let Some(effects) = effects else {
                 continue;
             };
-            let Some(window) = state.windows.window(wid).filter(|window| window.is_admitted()) else {
+            let Some(window) = state.windows.window(wid).filter(|window| window.is_admitted())
+            else {
                 continue;
             };
             if active_spaces.contains(&space) {
-                outcome = outcome.with_layout_event(LayoutEvent::WindowObserved(space, ResolvedWindow {
-                    info: window.layout_info(wid),
-                    effects,
-                }));
+                outcome =
+                    outcome.with_layout_event(LayoutEvent::WindowObserved(space, ResolvedWindow {
+                        info: window.layout_info(wid),
+                        effects,
+                    }));
             }
         }
     }

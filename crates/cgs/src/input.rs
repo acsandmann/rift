@@ -60,20 +60,21 @@ macro_rules! text_input {
                 self.callbacks.borrow_mut()[index] = Some(Box::new(f));
                 if self.delegate.is_none() {
                     let callbacks = self.callbacks.clone();
-                    let bridge = DelegateBridge::new(&Ui::new(self.native.mtm()), move |event, sender| {
-                        let index = match event {
-                            Event::TextChanged => 0,
-                            Event::TextCommitted => 1,
-                            _ => return,
-                        };
-                        if let Some(control) = sender.downcast_ref::<$native>() {
-                            if let Ok(mut callbacks) = callbacks.try_borrow_mut() {
-                                if let Some(f) = callbacks[index].as_mut() {
-                                    f(control.stringValue().to_string());
+                    let bridge =
+                        DelegateBridge::new(&Ui::new(self.native.mtm()), move |event, sender| {
+                            let index = match event {
+                                Event::TextChanged => 0,
+                                Event::TextCommitted => 1,
+                                _ => return,
+                            };
+                            if let Some(control) = sender.downcast_ref::<$native>() {
+                                if let Ok(mut callbacks) = callbacks.try_borrow_mut() {
+                                    if let Some(f) = callbacks[index].as_mut() {
+                                        f(control.stringValue().to_string());
+                                    }
                                 }
                             }
-                        }
-                    });
+                        });
                     unsafe {
                         self.native.setDelegate(Some(ProtocolObject::from_ref(&*bridge)));
                     }
@@ -107,7 +108,9 @@ macro_rules! text_input {
 }
 text_input!(TextField, NSTextField, ns_text_field);
 impl TextField {
-    pub fn with_validation(self, ui: &Ui) -> crate::Validated<Self> { crate::Validated::new(ui, self) }
+    pub fn with_validation(self, ui: &Ui) -> crate::Validated<Self> {
+        crate::Validated::new(ui, self)
+    }
 }
 text_input!(SearchField, NSSearchField, ns_search_field);
 text_input!(TokenField, NSTokenField, ns_token_field);

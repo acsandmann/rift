@@ -8,13 +8,15 @@ pub mod tx_store;
 pub mod virtual_workspace;
 pub mod window_store;
 pub use app_rules::{
-    AppRuleDecision, AppRuleEffects, AppRuleEngine, AppRuleRejection, AppRuleResult, WindowRuleContext,
+    AppRuleDecision, AppRuleEffects, AppRuleEngine, AppRuleRejection, AppRuleResult,
+    WindowRuleContext,
 };
 pub use floating_position_store::FloatingPositionStore;
 pub use hidden_window_placement::{HiddenWindowPlacement, HideCorner};
 pub use virtual_workspace::{VirtualWorkspace, VirtualWorkspaceId, WorkspaceStore};
 pub use window_store::{
-    PendingWindowOperation, WindowPlacement, WindowRecord, WindowStore, WindowVisibility, WindowWorkspaceInfo,
+    PendingWindowOperation, WindowPlacement, WindowRecord, WindowStore, WindowVisibility,
+    WindowWorkspaceInfo,
 };
 pub mod broadcast;
 pub mod drag;

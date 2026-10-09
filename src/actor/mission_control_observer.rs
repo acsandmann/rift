@@ -133,7 +133,9 @@ impl State {
     #[instrument(skip(self))]
     fn handle_notification(&mut self, notification: &'static str) {
         match notification {
-            K_AX_EXPOSE_SHOW_ALL_WINDOWS | K_AX_EXPOSE_SHOW_FRONT_WINDOWS | K_AX_EXPOSE_SHOW_DESKTOP => {
+            K_AX_EXPOSE_SHOW_ALL_WINDOWS
+            | K_AX_EXPOSE_SHOW_FRONT_WINDOWS
+            | K_AX_EXPOSE_SHOW_DESKTOP => {
                 self.active.store(true, Ordering::SeqCst);
                 self.events_tx.send(Event::MissionControlNativeEntered);
             }
@@ -148,7 +150,8 @@ impl State {
 
 fn find_dock_pid() -> Option<pid_t> {
     let apps =
-        NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.dock")).to_vec();
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.dock"))
+            .to_vec();
     let [app] = apps.as_slice() else {
         return None;
     };

@@ -31,7 +31,9 @@ impl FloatingManager {
         self.floating_windows.iter().copied().collect()
     }
 
-    pub(crate) fn add_floating(&mut self, window_id: WindowId) { self.floating_windows.insert(window_id); }
+    pub(crate) fn add_floating(&mut self, window_id: WindowId) {
+        self.floating_windows.insert(window_id);
+    }
 
     pub(crate) fn remove_floating(&mut self, window_id: WindowId) {
         self.floating_windows.remove(&window_id);
@@ -42,7 +44,11 @@ impl FloatingManager {
         }
     }
 
-    pub(crate) fn set_fullscreen(&mut self, window_id: WindowId, kind: Option<FloatingFullscreenKind>) {
+    pub(crate) fn set_fullscreen(
+        &mut self,
+        window_id: WindowId,
+        kind: Option<FloatingFullscreenKind>,
+    ) {
         match kind {
             Some(k) => {
                 self.fullscreen_windows.insert(window_id, k);
@@ -128,7 +134,9 @@ impl FloatingManager {
             .unwrap_or_default()
     }
 
-    pub(crate) fn set_last_focus(&mut self, wid: Option<WindowId>) { self.last_floating_focus = wid; }
+    pub(crate) fn set_last_focus(&mut self, wid: Option<WindowId>) {
+        self.last_floating_focus = wid;
+    }
 
     pub(crate) fn last_focus(&self) -> Option<WindowId> { self.last_floating_focus }
 
@@ -164,7 +172,8 @@ impl FloatingManager {
     ) {
         let space_map = self.active_floating_windows.entry(space).or_default();
         space_map.clear();
-        for wid in windows_in_workspace.into_iter().filter(|&w| self.floating_windows.contains(&w)) {
+        for wid in windows_in_workspace.into_iter().filter(|&w| self.floating_windows.contains(&w))
+        {
             space_map.entry(wid.pid).or_default().insert(wid);
         }
     }

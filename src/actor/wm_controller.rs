@@ -267,7 +267,9 @@ impl WmController {
 
         let refresh_overview = matches!(
             &event,
-            Command(Wm(MoveWindowToWorkspace(_))) | Command(ReactorCommand(_)) | Command(ConfiguredLayout(_))
+            Command(Wm(MoveWindowToWorkspace(_)))
+                | Command(ReactorCommand(_))
+                | Command(ConfiguredLayout(_))
         );
         if matches!(&event, SpaceStateUpdated(..))
             && let Some(tx) = &self.mission_control_tx

@@ -177,7 +177,8 @@ impl StackLine {
         groups: Vec<GroupInfo>,
         space_has_fullscreen: bool,
     ) {
-        let active: crate::common::collections::HashSet<SpaceId> = active_space_ids.iter().copied().collect();
+        let active: crate::common::collections::HashSet<SpaceId> =
+            active_space_ids.iter().copied().collect();
 
         self.indicators.retain(|_node_id, indicator| match indicator.space_id() {
             Some(indicator_space_id) if !active.contains(&indicator_space_id) => {
@@ -200,7 +201,8 @@ impl StackLine {
         if !groups_unchanged {
             let _ = self.group_sigs_by_space.insert(space_id, sigs);
 
-            let group_nodes: std::collections::HashSet<NodeId> = groups.iter().map(|g| g.node_id).collect();
+            let group_nodes: std::collections::HashSet<NodeId> =
+                groups.iter().map(|g| g.node_id).collect();
             self.indicators.retain(|&node_id, indicator| match indicator.space_id() {
                 Some(indicator_space_id) if indicator_space_id == space_id => {
                     if group_nodes.contains(&node_id) {
@@ -245,7 +247,10 @@ impl StackLine {
         if old_enabled && !new_enabled {
             for indicator in self.indicators.values() {
                 if let Err(err) = indicator.clear() {
-                    tracing::warn!(?err, "failed to clear stack line indicator during config update");
+                    tracing::warn!(
+                        ?err,
+                        "failed to clear stack line indicator during config update"
+                    );
                 }
             }
             self.indicators.clear();
@@ -285,7 +290,8 @@ impl StackLine {
                 continue;
             }
 
-            let local_point = CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
+            let local_point =
+                CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
             if let Some(segment_index) = indicator.check_click(local_point) {
                 tracing::debug!(
                     ?node_id,
@@ -423,7 +429,8 @@ impl StackLine {
             match GroupIndicatorWindow::new(indicator_frame, config) {
                 Ok(indicator) => {
                     indicator.set_space_id(group.space_id);
-                    let indicator = self.attach_indicator(node_id, indicator, config, group_data.clone());
+                    let indicator =
+                        self.attach_indicator(node_id, indicator, config, group_data.clone());
                     self.indicators.insert(node_id, indicator);
                 }
                 Err(err) => {

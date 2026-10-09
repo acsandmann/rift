@@ -28,7 +28,8 @@ pub(crate) fn analyze_space_snapshot(
     activation_config: SpaceActivationConfig,
     incoming: &ForwardedSpaceState,
 ) -> SpaceSnapshotAnalysis {
-    let active_window_membership_changed = current.active_window_spaces != incoming.active_window_spaces;
+    let active_window_membership_changed =
+        current.active_window_spaces != incoming.active_window_spaces;
     let spaces = incoming.screens.iter().map(|screen| screen.space).collect();
     let display_uuids: Vec<Option<String>> =
         incoming.screens.iter().map(|screen| screen.display_uuid_owned()).collect();
@@ -116,7 +117,9 @@ pub fn handle_window_server_destroyed(
     } = observations;
     let mut outcome = EventOutcome::default();
     if matches!(kind, SpaceEventKind::Fullscreen) {
-        if let Some(wid) = state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, None) {
+        if let Some(wid) =
+            state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, None)
+        {
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
         }
         if let Some(wid) = state.windows.tracked_window_id(wsid) {
@@ -125,10 +128,13 @@ pub fn handle_window_server_destroyed(
 
         return Ok(outcome);
     } else if matches!(kind, SpaceEventKind::User) {
-        match state
-            .windows
-            .observe_native_departure(wsid, sid, resolved_space, &active_spaces, ordered_in)
-        {
+        match state.windows.observe_native_departure(
+            wsid,
+            sid,
+            resolved_space,
+            &active_spaces,
+            ordered_in,
+        ) {
             crate::model::window_store::NativeDeparture::Moved(window, space) => {
                 if let Some(wid) = window {
                     outcome = outcome.with_topology_reassignment(wid, space, false);
@@ -145,7 +151,8 @@ pub fn handle_window_server_destroyed(
             crate::model::window_store::NativeDeparture::Hidden { window, remove_projection } => {
                 if let Some(wid) = window {
                     if remove_projection {
-                        outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                        outcome = outcome
+                            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
                     }
                     outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
                 }
@@ -215,15 +222,17 @@ pub fn handle_window_server_appeared(
                 }
                 SpaceEventKind::Fullscreen => {
                     let tracked_window_id = state.windows.tracked_window_id(wsid);
-                    let owner_pid = tracked_window_id
-                        .map(|wid| wid.pid)
-                        .or_else(|| state.windows.get_window_server_info(wsid).map(|info| info.pid));
-                    if let Some(wid) =
-                        state
-                            .windows
-                            .observe_native_fullscreen(wsid, sid, last_known_user_space, owner_pid)
-                    {
-                        outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                    let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
+                        state.windows.get_window_server_info(wsid).map(|info| info.pid)
+                    });
+                    if let Some(wid) = state.windows.observe_native_fullscreen(
+                        wsid,
+                        sid,
+                        last_known_user_space,
+                        owner_pid,
+                    ) {
+                        outcome = outcome
+                            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
                     }
                     if tracked_window_id.is_none()
                         && let Some(pid) = owner_pid

@@ -33,7 +33,9 @@ pub(super) fn build(ui: Ui, model: &Rc<Model>, id: usize) -> Page {
         4 => super::editors::keyboard(ui, model),
         5 => input(ui, model),
         6 => interface(ui, model),
-        8 => FormBuilder::new(ui, model).finish(SettingsPage::new(&ui, "").section(about(ui, model))),
+        8 => {
+            FormBuilder::new(ui, model).finish(SettingsPage::new(&ui, "").section(about(ui, model)))
+        }
         _ => advanced(ui, model),
     }
 }
@@ -623,10 +625,9 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                                 {
                                     return Ok(*original);
                                 }
-                                value
-                                    .parse::<f64>()
-                                    .map(|v| v / 100.0)
-                                    .map_err(|_| "Enter percentages separated by commas".to_string())
+                                value.parse::<f64>().map(|v| v / 100.0).map_err(|_| {
+                                    "Enter percentages separated by commas".to_string()
+                                })
                             })
                             .collect::<Result<_, _>>()?;
                         s.settings.layout.scrolling.preset_column_widths = widths;
@@ -758,7 +759,8 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
             }
         }
     }
-    page = page.section(section.content(Disclosure::new(&ui, "Advanced scrolling settings", tuning)));
+    page =
+        page.section(section.content(Disclosure::new(&ui, "Advanced scrolling settings", tuning)));
     let section = f.schema_section(
         "Drag & Drop",
         "",
@@ -1005,7 +1007,8 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
     let error = Rc::downgrade(&message);
     let model = f.model.clone();
     let modifier_recorder = Rc::new(ModifierRecorder::new(&ui).on_change(move |flags| {
-        let value = (!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly { modifiers: modifiers(flags) });
+        let value =
+            (!flags.is_empty()).then(|| HotkeySpec::ModifiersOnly { modifiers: modifiers(flags) });
         Model::submit(
             &model,
             Box::new(move |s| {

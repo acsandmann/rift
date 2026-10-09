@@ -21,8 +21,8 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGBlendMode, CGContext};
 use objc2_core_text::{CTLine, kCTForegroundColorFromContextAttributeName};
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSNumber, NSSize,
-    NSString, NSURL,
+    MainThreadMarker, NSArray, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSNumber,
+    NSSize, NSString, NSURL,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -214,7 +214,9 @@ impl MenuIcon {
     ) {
         let unchanged = self.workspace_items.len() == workspaces.len()
             && self.workspace_items.iter().zip(workspaces).all(|(item, workspace)| {
-                item.identity == workspace.id && item.index == workspace.index && item.name == workspace.name
+                item.identity == workspace.id
+                    && item.index == workspace.index
+                    && item.name == workspace.name
             });
         if unchanged {
             return;
@@ -254,7 +256,11 @@ impl MenuIcon {
         self.workspace_item.setEnabled(!workspaces.is_empty());
     }
 
-    pub fn update_menu_state(&self, active_space_is_activated: bool, workspaces: &[RuntimeWorkspaceData]) {
+    pub fn update_menu_state(
+        &self,
+        active_space_is_activated: bool,
+        workspaces: &[RuntimeWorkspaceData],
+    ) {
         let active = workspaces.iter().find(|workspace| workspace.is_active);
         let active_layout = active.and_then(|workspace| parse_layout_mode(&workspace.layout_mode));
         let active_id = active.map(|workspace| workspace.id.as_str());
@@ -293,9 +299,14 @@ impl MenuIcon {
         );
     }
 
-    pub fn update_status_icon(&mut self, displays: &[DisplayWorkspaces], settings: &MenuBarSettings) {
+    pub fn update_status_icon(
+        &mut self,
+        displays: &[DisplayWorkspaces],
+        settings: &MenuBarSettings,
+    ) {
         let render_inputs = render_inputs(displays, settings);
-        let render_changed = self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
+        let render_changed =
+            self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
 
         if render_inputs.is_empty() {
             if self.status_item.ns_status_item().isVisible() {
@@ -427,7 +438,10 @@ impl MenuIconRenderKey {
                 label: input.label.to_string(),
                 show_windows: input.show_windows,
                 is_active: input.workspace.is_active,
-                window_count: input.show_windows.then_some(input.workspace.window_count).unwrap_or_default(),
+                window_count: input
+                    .show_windows
+                    .then_some(input.workspace.window_count)
+                    .unwrap_or_default(),
                 window_frames: input
                     .show_windows
                     .then(|| {
@@ -498,10 +512,15 @@ fn centered_origin(container_origin: f64, container_size: f64, content_size: f64
     container_origin + (container_size - content_size) / 2.0
 }
 
-fn workspace_label(workspace: &RuntimeWorkspaceData, label_style: ActiveWorkspaceLabel) -> Cow<'_, str> {
+fn workspace_label(
+    workspace: &RuntimeWorkspaceData,
+    label_style: ActiveWorkspaceLabel,
+) -> Cow<'_, str> {
     match label_style {
         ActiveWorkspaceLabel::Index => Cow::Owned((workspace.index + 1).to_string()),
-        ActiveWorkspaceLabel::Name if !workspace.name.is_empty() => Cow::Borrowed(workspace.name.as_str()),
+        ActiveWorkspaceLabel::Name if !workspace.name.is_empty() => {
+            Cow::Borrowed(workspace.name.as_str())
+        }
         ActiveWorkspaceLabel::Name => Cow::Owned((workspace.index + 1).to_string()),
     }
 }
@@ -517,7 +536,9 @@ fn workspace_cell_rect(x: f64, width: f64, height: f64) -> CGRect {
     )
 }
 
-fn as_any_object<T: Message>(obj: &T) -> &AnyObject { unsafe { &*(obj as *const T as *const AnyObject) } }
+fn as_any_object<T: Message>(obj: &T) -> &AnyObject {
+    unsafe { &*(obj as *const T as *const AnyObject) }
+}
 
 fn parse_layout_mode(layout_mode: &str) -> Option<LayoutMode> {
     match layout_mode {
@@ -578,7 +599,11 @@ fn add_action_item(
     native
 }
 
-fn add_submenu(menu: &Menu, mtm: MainThreadMarker, title: &str) -> (Retained<NSMenuItem>, Rc<Menu>) {
+fn add_submenu(
+    menu: &Menu,
+    mtm: MainThreadMarker,
+    title: &str,
+) -> (Retained<NSMenuItem>, Rc<Menu>) {
     let submenu = make_menu(mtm, title);
     let item = MenuItem::new(&Ui::new(mtm), title).submenu(submenu.clone());
     let native = item.ns_menu_item().retain();
@@ -809,7 +834,8 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &Rc<MenuActionHandler>) -> 
     sponsor_item.setSubtitle(Some(&NSString::from_str("help fund continued development")));
 
     add_separator(&menu);
-    let quit_item = add_action_item(&menu, mtm, handler, "Quit Rift", MenuActionHandler::on_quit_rift);
+    let quit_item =
+        add_action_item(&menu, mtm, handler, "Quit Rift", MenuActionHandler::on_quit_rift);
 
     BuiltStatusMenu {
         menu,
@@ -865,16 +891,24 @@ impl MenuShortcuts {
                 )) => {
                     out.toggle_space_activation.get_or_insert_with(|| hotkey.clone());
                 }
-                WmCommand::ReactorCommand(ReactorTopCommand::Layout(LayoutCommand::NextWorkspace(_))) => {
+                WmCommand::ReactorCommand(ReactorTopCommand::Layout(
+                    LayoutCommand::NextWorkspace(_),
+                )) => {
                     out.next_workspace.get_or_insert_with(|| hotkey.clone());
                 }
-                WmCommand::ReactorCommand(ReactorTopCommand::Layout(LayoutCommand::PrevWorkspace(_))) => {
+                WmCommand::ReactorCommand(ReactorTopCommand::Layout(
+                    LayoutCommand::PrevWorkspace(_),
+                )) => {
                     out.prev_workspace.get_or_insert_with(|| hotkey.clone());
                 }
-                WmCommand::ReactorCommand(ReactorTopCommand::Layout(LayoutCommand::SwitchToWorkspace(i))) => {
+                WmCommand::ReactorCommand(ReactorTopCommand::Layout(
+                    LayoutCommand::SwitchToWorkspace(i),
+                )) => {
                     out.switch_workspace_by_index.entry(*i).or_insert_with(|| hotkey.clone());
                 }
-                WmCommand::ReactorCommand(ReactorTopCommand::Reactor(ReactorCommand::SaveAndExit)) => {
+                WmCommand::ReactorCommand(ReactorTopCommand::Reactor(
+                    ReactorCommand::SaveAndExit,
+                )) => {
                     out.quit_rift.get_or_insert_with(|| hotkey.clone());
                 }
                 WmCommand::Wm(WmCmd::ReloadConfig) => {
@@ -1068,9 +1102,13 @@ impl MenuActionHandler {
         self.emit(MenuAction::ToggleSpaceActivated);
     }
 
-    fn on_next_workspace(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::NextWorkspace); }
+    fn on_next_workspace(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::NextWorkspace);
+    }
 
-    fn on_prev_workspace(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::PrevWorkspace); }
+    fn on_prev_workspace(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::PrevWorkspace);
+    }
 
     fn on_switch_workspace(&self, sender: Option<&NSMenuItem>) {
         if let Some(sender) = sender {
@@ -1107,7 +1145,9 @@ impl MenuActionHandler {
         }
     }
 
-    fn on_save_master_file(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::SaveMasterFile); }
+    fn on_save_master_file(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::SaveMasterFile);
+    }
 
     fn on_restore_master_file_workspace(&self, _sender: Option<&NSMenuItem>) {
         if Self::validate_layout_path(restore_file()).is_some() {
@@ -1141,7 +1181,9 @@ impl MenuActionHandler {
         }
     }
 
-    fn on_open_settings(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::OpenSettings); }
+    fn on_open_settings(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::OpenSettings);
+    }
 
     fn on_open_documentation(&self, _sender: Option<&NSMenuItem>) {
         self.emit(MenuAction::OpenDocumentation);
@@ -1153,7 +1195,9 @@ impl MenuActionHandler {
 
     fn on_open_sponsor(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::OpenSponsor); }
 
-    fn on_reload_config(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::ReloadConfig); }
+    fn on_reload_config(&self, _sender: Option<&NSMenuItem>) {
+        self.emit(MenuAction::ReloadConfig);
+    }
 
     fn on_quit_rift(&self, _sender: Option<&NSMenuItem>) { self.emit(MenuAction::QuitRift); }
 }
@@ -1162,7 +1206,13 @@ impl MenuActionHandler {
 mod layout_library_tests {
     use super::*;
 
-    fn workspace(id: &str, index: usize, name: &str, active: bool, layout: &str) -> RuntimeWorkspaceData {
+    fn workspace(
+        id: &str,
+        index: usize,
+        name: &str,
+        active: bool,
+        layout: &str,
+    ) -> RuntimeWorkspaceData {
         RuntimeWorkspaceData {
             workspace_id: crate::model::VirtualWorkspaceId::default(),
             space: crate::sys::screen::SpaceId::new(1),
@@ -1397,7 +1447,10 @@ mod layout_library_tests {
             if active_label == ActiveWorkspaceLabel::Index {
                 // A narrow single digit must not become a tall, cramped cell.
                 assert_eq!(layout.workspaces[0].bg_rect.size.width, LABEL_HEIGHT);
-                assert!(layout.workspaces[0].bg_rect.size.width < layout.workspaces[1].bg_rect.size.width);
+                assert!(
+                    layout.workspaces[0].bg_rect.size.width
+                        < layout.workspaces[1].bg_rect.size.width
+                );
             }
         }
     }
@@ -1469,7 +1522,9 @@ fn build_text_attrs(font: &NSFont) -> Retained<NSDictionary<NSAttributedStringKe
         );
         dict.setObject_forKeyedSubscript(
             Some(as_any_object(&*NSNumber::numberWithBool(true))),
-            ProtocolObject::from_ref::<NSString>(kCTForegroundColorFromContextAttributeName.as_ref()),
+            ProtocolObject::from_ref::<NSString>(
+                kCTForegroundColorFromContextAttributeName.as_ref(),
+            ),
         );
     }
     unsafe { Retained::cast_unchecked(dict) }
@@ -1561,7 +1616,8 @@ fn build_layout(
                 let line = separator_line.get_or_insert_with(|| {
                     // AeroSpace's largeTitle.bold pipe, rendered at half scale.
                     let font = NSFont::systemFontOfSize_weight(13.0, unsafe { NSFontWeightBold });
-                    build_cached_text_line("|", &build_text_attrs(&font)).expect("nonempty separator")
+                    build_cached_text_line("|", &build_text_attrs(&font))
+                        .expect("nonempty separator")
                 });
                 separators.push(width + SEPARATOR_SPACING);
                 2.0 * SEPARATOR_SPACING + line.width
@@ -1596,7 +1652,13 @@ fn build_layout(
         };
 
         let windows = if input.show_windows && !workspace.windows.is_empty() {
-            let layout = compute_window_layout_metrics(&workspace.windows, bg_rect, CONTENT_INSET, 1.0, None);
+            let layout = compute_window_layout_metrics(
+                &workspace.windows,
+                bg_rect,
+                CONTENT_INSET,
+                1.0,
+                None,
+            );
             if let Some(layout) = layout {
                 const MIN_TILE_SIZE: f64 = 2.0;
                 const WIN_GAP: f64 = 0.75;
@@ -1699,7 +1761,11 @@ fn draw_menu_icon(cg: &CGContext, bounds: CGRect, layout: &MenuIconLayout) {
         // SwiftUI's strokeBorder is entirely inside the cell; an active
         // label is a solid shape without an additional outline.
         if !is_label || workspace.fill_alpha == 0.0 {
-            let inset = if is_label { LABEL_BORDER_WIDTH / 2.0 } else { 0.0 };
+            let inset = if is_label {
+                LABEL_BORDER_WIDTH / 2.0
+            } else {
+                0.0
+            };
             add_rounded_rect(
                 cg,
                 rect.origin.x + inset,
@@ -1741,8 +1807,9 @@ fn draw_menu_icon(cg: &CGContext, bounds: CGRect, layout: &MenuIconLayout) {
 
         if let Some(label_line) = &workspace.label_line {
             let text_x = centered_origin(rect.origin.x, rect.size.width, label_line.width);
-            let baseline_y = centered_origin(bg_y, rect.size.height, label_line.ascent + label_line.descent)
-                + label_line.descent;
+            let baseline_y =
+                centered_origin(bg_y, rect.size.height, label_line.ascent + label_line.descent)
+                    + label_line.descent;
 
             CGContext::save_g_state(Some(cg));
             if workspace.fill_alpha > 0.0 {

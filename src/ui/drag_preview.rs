@@ -1,7 +1,8 @@
 use std::sync::LazyLock;
 
 use cgs::{
-    CgsWindow, CgsWindowError, WindowSurface, WindowTransaction, backdrop_blur, with_disabled_actions,
+    CgsWindow, CgsWindowError, WindowSurface, WindowTransaction, backdrop_blur,
+    with_disabled_actions,
 };
 use objc2::rc::Retained;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -85,7 +86,11 @@ impl DragPreview {
             tint.setBackgroundColor(Some(&FILL));
             root.addSublayer(&tint);
 
-            card.setOpacity(if style == PreviewStyle::Stack { 1.0 } else { 0.0 });
+            card.setOpacity(if style == PreviewStyle::Stack {
+                1.0
+            } else {
+                0.0
+            });
             card.setFrame(Self::card_frame(frame.size));
             card.setCornerRadius(8.0);
             card.setBackgroundColor(Some(&STACK_FILL));
@@ -159,7 +164,11 @@ impl DragPreview {
             CATransaction::begin();
             CATransaction::setAnimationDuration(FADE_DURATION);
             if style_changed {
-                self.card.setOpacity(if style == PreviewStyle::Stack { 1.0 } else { 0.0 });
+                self.card.setOpacity(if style == PreviewStyle::Stack {
+                    1.0
+                } else {
+                    0.0
+                });
             }
             if !self.visible {
                 self.root.setOpacity(1.0);

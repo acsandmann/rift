@@ -72,7 +72,10 @@ impl Stack {
             let insets = self.native.edgeInsets();
             view.ns_view()
                 .widthAnchor()
-                .constraintEqualToAnchor_constant(&self.native.widthAnchor(), -insets.left - insets.right)
+                .constraintEqualToAnchor_constant(
+                    &self.native.widthAnchor(),
+                    -insets.left - insets.right,
+                )
                 .setActive(true);
         }
         self.children.borrow_mut().push(Box::new(view));
@@ -94,11 +97,15 @@ macro_rules! stack {
     ($name:ident, $axis:ident) => {
         pub struct $name(Stack);
         impl $name {
-            pub fn new(ui: &Ui) -> Self { Self(Stack::new(ui, NSUserInterfaceLayoutOrientation::$axis)) }
+            pub fn new(ui: &Ui) -> Self {
+                Self(Stack::new(ui, NSUserInterfaceLayoutOrientation::$axis))
+            }
 
             pub fn spacing(self, value: f64) -> Self { Self(self.0.spacing(value)) }
 
-            pub fn alignment(self, value: NSLayoutAttribute) -> Self { Self(self.0.alignment(value)) }
+            pub fn alignment(self, value: NSLayoutAttribute) -> Self {
+                Self(self.0.alignment(value))
+            }
 
             pub fn distribution(self, value: NSStackViewDistribution) -> Self {
                 Self(self.0.distribution(value))

@@ -65,7 +65,9 @@ pub struct Sidebar<T: 'static> {
     outline: Outline<SidebarItem<T>>,
 }
 impl<T: Clone + 'static> Sidebar<T> {
-    pub fn new(ui: &Ui, items: Vec<SidebarItem<T>>) -> Self { Self::with_children(ui, items, |_| Vec::new()) }
+    pub fn new(ui: &Ui, items: Vec<SidebarItem<T>>) -> Self {
+        Self::with_children(ui, items, |_| Vec::new())
+    }
 
     pub fn with_children(
         ui: &Ui,
@@ -76,7 +78,8 @@ impl<T: Clone + 'static> Sidebar<T> {
         let content_width = items
             .iter()
             .map(|item| {
-                Label::new(ui, &item.title).ns_view().fittingSize().width + Metrics::CONTROL_SPACING * 6.0
+                Label::new(ui, &item.title).ns_view().fittingSize().width
+                    + Metrics::CONTROL_SPACING * 6.0
             })
             .fold(0.0, f64::max);
         let items = items
@@ -189,7 +192,9 @@ impl NavigationSplitView {
         Self(split)
     }
 
-    pub fn ns_split_view_controller(&self) -> &NSSplitViewController { self.0.ns_split_view_controller() }
+    pub fn ns_split_view_controller(&self) -> &NSSplitViewController {
+        self.0.ns_split_view_controller()
+    }
 }
 impl NativeView for NavigationSplitView {
     fn ns_view(&self) -> &NSView { self.0.ns_view() }
@@ -208,7 +213,9 @@ impl MasterDetail {
         Self(split)
     }
 
-    pub fn ns_split_view_controller(&self) -> &NSSplitViewController { self.0.ns_split_view_controller() }
+    pub fn ns_split_view_controller(&self) -> &NSSplitViewController {
+        self.0.ns_split_view_controller()
+    }
 }
 impl NativeView for MasterDetail {
     fn ns_view(&self) -> &NSView { self.0.ns_view() }
@@ -381,7 +388,10 @@ pub struct Toolbar {
 impl Toolbar {
     pub fn new(ui: &Ui, id: &str) -> Self {
         Self {
-            native: NSToolbar::initWithIdentifier(NSToolbar::alloc(ui.mtm()), &NSString::from_str(id)),
+            native: NSToolbar::initWithIdentifier(
+                NSToolbar::alloc(ui.mtm()),
+                &NSString::from_str(id),
+            ),
             delegate: None,
             back_target: crate::bridge::ActionTarget::new(ui),
             forward_target: crate::bridge::ActionTarget::new(ui),
@@ -409,13 +419,13 @@ impl Toolbar {
         }
         let delegate: Retained<NavigationToolbarDelegate> = unsafe {
             msg_send![
-                super(
-                    NavigationToolbarDelegate::alloc(ui.mtm()).set_ivars(NavigationToolbarItems {
+                super(NavigationToolbarDelegate::alloc(ui.mtm()).set_ivars(
+                    NavigationToolbarItems {
                         title,
                         back,
                         navigation: std::cell::RefCell::new(Vec::new())
-                    })
-                ),
+                    }
+                )),
                 init
             ]
         };
@@ -428,10 +438,14 @@ impl Toolbar {
     pub fn attach(&self, window: &NSWindow) {
         window.setToolbar(Some(&self.native));
         if self.native.items().is_empty() {
-            self.native
-                .insertItemWithItemIdentifier_atIndex(unsafe { NSToolbarToggleSidebarItemIdentifier }, 0);
-            self.native
-                .insertItemWithItemIdentifier_atIndex(unsafe { NSToolbarFlexibleSpaceItemIdentifier }, 1);
+            self.native.insertItemWithItemIdentifier_atIndex(
+                unsafe { NSToolbarToggleSidebarItemIdentifier },
+                0,
+            );
+            self.native.insertItemWithItemIdentifier_atIndex(
+                unsafe { NSToolbarFlexibleSpaceItemIdentifier },
+                1,
+            );
         }
         self.native.setVisible(true);
     }
@@ -458,11 +472,14 @@ impl Toolbar {
                     .iter()
                     .position(|item| {
                         item.itemIdentifier().to_string()
-                            == unsafe { NSToolbarSidebarTrackingSeparatorItemIdentifier }.to_string()
+                            == unsafe { NSToolbarSidebarTrackingSeparatorItemIdentifier }
+                                .to_string()
                     })
                     .map_or(1, |index| index + 1);
-                self.native
-                    .insertItemWithItemIdentifier_atIndex(&NSString::from_str("cgs.back"), index as isize);
+                self.native.insertItemWithItemIdentifier_atIndex(
+                    &NSString::from_str("cgs.back"),
+                    index as isize,
+                );
             }
         } else {
             item.setEnabled(false);
@@ -516,8 +533,11 @@ impl Toolbar {
             NSToolbarItem::alloc(ui.mtm()),
             &NSString::from_str("cgs.page-menu"),
         );
-        let popup =
-            NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(ui.mtm()), CGRect::ZERO, false);
+        let popup = NSPopUpButton::initWithFrame_pullsDown(
+            NSPopUpButton::alloc(ui.mtm()),
+            CGRect::ZERO,
+            false,
+        );
         crate::control::header_menu_style(&popup);
         popup.setImagePosition(NSCellImagePosition::ImageLeading);
         popup.setImageHugsTitle(false);
@@ -526,7 +546,8 @@ impl Toolbar {
         display
             .ns_menu_item()
             .setImage(Symbol::header("line.3.horizontal.decrease").as_deref());
-        if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
+        if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok())
+        {
             cell.setUsesItemFromMenu(false);
             cell.setMenuItem(Some(display.ns_menu_item()));
             cell.setAltersStateOfSelectedItem(false);
@@ -544,8 +565,10 @@ impl Toolbar {
             .iter()
             .position(|item| item.itemIdentifier().to_string() == "cgs.page-title")
             .unwrap_or(0);
-        self.native
-            .insertItemWithItemIdentifier_atIndex(&NSString::from_str("cgs.history"), index as isize);
+        self.native.insertItemWithItemIdentifier_atIndex(
+            &NSString::from_str("cgs.history"),
+            index as isize,
+        );
     }
 
     pub fn update_navigation(&self, back: bool, forward: bool, title: &str, has_menu: bool) {
@@ -568,7 +591,9 @@ impl Toolbar {
                     });
                 }
             }
-            if let Some(cell) = popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok()) {
+            if let Some(cell) =
+                popup.cell().and_then(|cell| cell.downcast::<NSPopUpButtonCell>().ok())
+            {
                 if let Some(display) = cell.menuItem() {
                     display.setTitle(&NSString::from_str(title));
                 }
@@ -602,7 +627,9 @@ impl Toolbar {
         };
         for id in ["cgs.page-filter", "cgs.page-actions", "cgs.page-search"] {
             let id = NSString::from_str(id);
-            if let Some(index) = self.native.items().iter().position(|item| item.itemIdentifier() == id) {
+            if let Some(index) =
+                self.native.items().iter().position(|item| item.itemIdentifier() == id)
+            {
                 if let Some(search) =
                     self.native.items().objectAtIndex(index).downcast_ref::<NSSearchToolbarItem>()
                 {
@@ -626,8 +653,9 @@ impl Toolbar {
                     &NSString::from_str("cgs.page-filter"),
                 );
                 item.setLabel(&NSString::from_str(&controls.label));
-                let content: Retained<NSView> =
-                    unsafe { Retained::retain(filter as *const NSPopUpButton as *mut NSView).unwrap() };
+                let content: Retained<NSView> = unsafe {
+                    Retained::retain(filter as *const NSPopUpButton as *mut NSView).unwrap()
+                };
                 let glass = GlassEffectView::new(ui, content).corner_radius(18.0);
                 glass.width(36.0);
                 glass.height(36.0);
@@ -656,7 +684,9 @@ impl Toolbar {
                 NSSearchToolbarItem::alloc(ui.mtm()),
                 &NSString::from_str("cgs.page-search"),
             );
-            search_item.setLabel(&search.placeholderString().unwrap_or_else(|| NSString::from_str("Search")));
+            search_item.setLabel(
+                &search.placeholderString().unwrap_or_else(|| NSString::from_str("Search")),
+            );
             search_item.setSearchField(search);
             search_item.setPreferredWidthForSearchField(216.0);
             item.setVisibilityPriority(1000);

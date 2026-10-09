@@ -11,12 +11,12 @@ use nix::libc::{RTLD_DEFAULT, dlsym};
 use objc2_app_kit::NSWindowLevel;
 use objc2_application_services::AXError;
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, Type,
-    kCFBooleanTrue,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect,
+    CGSize, Type, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
-    CGError, CGWindowID, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowLayer,
-    kCGWindowName, kCGWindowOwnerName,
+    CGError, CGWindowID, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
+    kCGWindowLayer, kCGWindowName, kCGWindowOwnerName,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -91,7 +91,9 @@ impl From<WindowId> for WindowServerId {
 }
 
 #[inline]
-fn now_us() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_micros() as u64 }
+fn now_us() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_micros() as u64
+}
 
 pub fn note_windowserver_activity(wsid: u32) {
     LAST_WINDOWSERVER_ACTIVITY_US.store(now_us(), Ordering::SeqCst);
@@ -113,7 +115,8 @@ fn cf_array_from_ids(ids: &[WindowServerId]) -> CFRetained<CFArray<CFNumber>> {
         let number = CFNumber::new_i64(id.as_u32() as i64);
         return CFArray::from_retained_objects(std::slice::from_ref(&number));
     }
-    let nums: Vec<CFRetained<CFNumber>> = ids.iter().map(|w| CFNumber::new_i64(w.as_u32() as i64)).collect();
+    let nums: Vec<CFRetained<CFNumber>> =
+        ids.iter().map(|w| CFNumber::new_i64(w.as_u32() as i64)).collect();
     CFArray::from_retained_objects(&nums)
 }
 
@@ -123,7 +126,8 @@ fn cf_array_from_u64s(ids: &[u64]) -> CFRetained<CFArray<CFNumber>> {
         let number = CFNumber::new_i64(*id as i64);
         return CFArray::from_retained_objects(std::slice::from_ref(&number));
     }
-    let nums: Vec<CFRetained<CFNumber>> = ids.iter().map(|&id| CFNumber::new_i64(id as i64)).collect();
+    let nums: Vec<CFRetained<CFNumber>> =
+        ids.iter().map(|&id| CFNumber::new_i64(id as i64)).collect();
     CFArray::from_retained_objects(&nums)
 }
 
@@ -212,7 +216,13 @@ impl WindowIterator {
 
         if min.width == 0.0 && min.height == 0.0 && max.width == 0.0 && max.height == 0.0 {
             unsafe {
-                SLSPackagesGetWindowConstraints(*G_CONNECTION, self.window_id(), &mut min, &mut max, &mut cur)
+                SLSPackagesGetWindowConstraints(
+                    *G_CONNECTION,
+                    self.window_id(),
+                    &mut min,
+                    &mut max,
+                    &mut cur,
+                )
             };
         }
 
@@ -276,7 +286,8 @@ static WINDOW_QUERY_KEYS: Lazy<Option<WindowQueryKeys>> = Lazy::new(|| {
         space_options: resolve_window_query_key(c"SLSWindowQueryKeySpaceListOptions").unwrap_or(0),
         // This key appeared later than the core query API. A missing value is
         // represented by zero and simply leaves the server default in place.
-        window_options: resolve_window_query_key(c"SLSWindowQueryKeyWorkspaceWindowListOptions").unwrap_or(0),
+        window_options: resolve_window_query_key(c"SLSWindowQueryKeyWorkspaceWindowListOptions")
+            .unwrap_or(0),
         include_tags: resolve_window_query_key(c"SLSWindowQueryKeyIncludeTags")?,
         exclude_tags: resolve_window_query_key(c"SLSWindowQueryKeyExcludeTags")?,
     })
@@ -298,7 +309,9 @@ unsafe fn set_window_query_value<T: Type>(query: *mut CFType, key: usize, value:
 fn window_query_run(filter: &WindowQueryFilter<'_>) -> Option<WindowIterator> {
     let keys = (*WINDOW_QUERY_KEYS)?;
     let uses_explicit_spaces = !filter.spaces.is_empty();
-    if (uses_explicit_spaces && keys.spaces == 0) || (!uses_explicit_spaces && keys.space_options == 0) {
+    if (uses_explicit_spaces && keys.spaces == 0)
+        || (!uses_explicit_spaces && keys.space_options == 0)
+    {
         return None;
     }
 
@@ -310,7 +323,8 @@ fn window_query_run(filter: &WindowQueryFilter<'_>) -> Option<WindowIterator> {
     let owner = CFNumber::new_i32(filter.owner);
     let include_tags = CFNumber::new_i64(filter.include_tags as i64);
     let exclude_tags = CFNumber::new_i64(filter.exclude_tags as i64);
-    let window_options = (keys.window_options != 0).then(|| CFNumber::new_i32(filter.window_list_options));
+    let window_options =
+        (keys.window_options != 0).then(|| CFNumber::new_i32(filter.window_list_options));
     unsafe {
         set_window_query_value(query, keys.owner, &owner);
         set_window_query_value(query, keys.include_tags, &include_tags);
@@ -321,7 +335,8 @@ fn window_query_run(filter: &WindowQueryFilter<'_>) -> Option<WindowIterator> {
     }
 
     let space_array = uses_explicit_spaces.then(|| cf_array_from_u64s(filter.spaces));
-    let space_options = (!uses_explicit_spaces).then(|| CFNumber::new_i32(filter.space_list_options));
+    let space_options =
+        (!uses_explicit_spaces).then(|| CFNumber::new_i32(filter.space_list_options));
     unsafe {
         if let Some(space_array) = &space_array {
             set_window_query_value(query, keys.spaces, space_array);
@@ -372,7 +387,9 @@ pub struct WindowServerInfo {
 /// ordinary native-space membership.
 pub fn mission_control_dock_overlay_visible() -> bool {
     #[cfg(test)]
-    if let Some(override_value) = TEST_MISSION_CONTROL_DOCK_OVERLAY_VISIBLE.with(|value| *value.borrow()) {
+    if let Some(override_value) =
+        TEST_MISSION_CONTROL_DOCK_OVERLAY_VISIBLE.with(|value| *value.borrow())
+    {
         return override_value;
     }
 
@@ -408,8 +425,9 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
 
 pub fn window_is_sticky(id: WindowServerId) -> bool {
     let cf_windows = cf_array_from_ids(&[id]);
-    let space_list_ref =
-        unsafe { SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr()) };
+    let space_list_ref = unsafe {
+        SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
+    };
     let Some(space_list_ref) = NonNull::new(space_list_ref) else {
         return false;
     };
@@ -426,8 +444,9 @@ pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
     }
 
     let cf_windows = cf_array_from_ids(&[id]);
-    let space_list_ref =
-        unsafe { SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr()) };
+    let space_list_ref = unsafe {
+        SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
+    };
     let Some(space_list_ref) = NonNull::new(space_list_ref) else {
         return Vec::new();
     };
@@ -465,7 +484,8 @@ pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
     }
 
     let mut ordered: u8 = 0;
-    if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) }) {
+    if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
+    {
         return Some(ordered != 0);
     }
 
@@ -570,7 +590,9 @@ pub fn focus_desktop_window(screen: &ScreenInfo) -> bool {
         let Some(info) = get_window(wsid) else {
             return false;
         };
-        info.layer < 0 && screen.frame.contains(info.frame.mid()) && make_key_window(info.pid, wsid).is_ok()
+        info.layer < 0
+            && screen.frame.contains(info.frame.mid())
+            && make_key_window(info.pid, wsid).is_ok()
     })
 }
 
@@ -722,7 +744,11 @@ fn iterator_window_suitable(iterator: *mut CFType) -> bool {
 }
 
 // credit to yabai
-pub fn space_window_list_for_connection(spaces: &[u64], owner: u32, include_minimized: bool) -> Vec<u32> {
+pub fn space_window_list_for_connection(
+    spaces: &[u64],
+    owner: u32,
+    include_minimized: bool,
+) -> Vec<u32> {
     try_space_window_list_for_connection(spaces, owner, include_minimized).unwrap_or_default()
 }
 
@@ -735,13 +761,15 @@ pub fn try_space_window_list_for_connection(
     #[cfg(test)]
     TEST_WINDOW_ORDER_QUERY_COUNT.with(|count| count.set(count.get() + 1));
     #[cfg(test)]
-    if TEST_FAILED_SPACE_QUERIES.with(|failed| spaces.iter().any(|space| failed.borrow().contains(space))) {
+    if TEST_FAILED_SPACE_QUERIES
+        .with(|failed| spaces.iter().any(|space| failed.borrow().contains(space)))
+    {
         return None;
     }
     #[cfg(test)]
     if spaces.len() == 1
-        && let Some(override_ids) =
-            TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE.with(|ids| ids.borrow().get(&spaces[0]).cloned())
+        && let Some(override_ids) = TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE
+            .with(|ids| ids.borrow().get(&spaces[0]).cloned())
     {
         let _ = (owner, include_minimized);
         return Some(override_ids);
@@ -898,7 +926,9 @@ pub fn app_window_suitability(id: WindowServerId) -> Option<bool> {
     }
 }
 
-pub fn app_window_suitable(id: WindowServerId) -> bool { app_window_suitability(id).unwrap_or(false) }
+pub fn app_window_suitable(id: WindowServerId) -> bool {
+    app_window_suitability(id).unwrap_or(false)
+}
 
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
@@ -962,10 +992,14 @@ mod tests {
 }
 
 #[cfg(test)]
-pub fn window_space_query_count() -> usize { TEST_WINDOW_SPACE_QUERY_COUNT.with(|count| count.get()) }
+pub fn window_space_query_count() -> usize {
+    TEST_WINDOW_SPACE_QUERY_COUNT.with(|count| count.get())
+}
 
 #[cfg(test)]
-pub fn window_order_query_count() -> usize { TEST_WINDOW_ORDER_QUERY_COUNT.with(|count| count.get()) }
+pub fn window_order_query_count() -> usize {
+    TEST_WINDOW_ORDER_QUERY_COUNT.with(|count| count.get())
+}
 
 #[cfg(test)]
 pub fn set_space_membership_query_failed(space: u64, failed: bool) {

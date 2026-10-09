@@ -44,8 +44,9 @@ impl RestorePlan {
             .map(SpaceId::new)
             .filter(|space| saved_spaces.contains(space));
         let preferred = match request.source {
-            RestoreSource::SavedActiveSpace => saved_active
-                .or_else(|| saved_spaces.contains(&request.active_space).then_some(request.active_space)),
+            RestoreSource::SavedActiveSpace => saved_active.or_else(|| {
+                saved_spaces.contains(&request.active_space).then_some(request.active_space)
+            }),
             RestoreSource::CurrentSpace => saved_spaces
                 .contains(&request.active_space)
                 .then_some(request.active_space)
@@ -113,19 +114,21 @@ impl RestorePlan {
                     .ok_or_else(|| anyhow::anyhow!("current space has no active workspace"))?;
                 let source_workspace = match request.source {
                     // A portable workspace file represents what was active when it was saved.
-                    RestoreSource::SavedActiveSpace => {
-                        source_active.ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?
-                    }
+                    RestoreSource::SavedActiveSpace => source_active
+                        .ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?,
                     // A master file represents the complete workspace catalog. Restoring S must
                     // therefore read S's ordinal from the saved native space, regardless of which
                     // workspace happened to be active when Rift last quit.
                     RestoreSource::CurrentSpace => {
-                        let target_workspaces = engine.workspaces.workspace_ids(request.active_space);
+                        let target_workspaces =
+                            engine.workspaces.workspace_ids(request.active_space);
                         let target_index = target_workspaces
                             .iter()
                             .position(|workspace| *workspace == target_workspace)
                             .ok_or_else(|| {
-                                anyhow::anyhow!("current active workspace is missing from its native space")
+                                anyhow::anyhow!(
+                                    "current active workspace is missing from its native space"
+                                )
                             })?;
                         snapshot
                             .workspaces
@@ -133,8 +136,10 @@ impl RestorePlan {
                             .get(target_index)
                             .copied()
                             .ok_or_else(|| {
-                                anyhow::anyhow!("saved space has no workspace at target index {target_index}")
-                            })?
+                            anyhow::anyhow!(
+                                "saved space has no workspace at target index {target_index}"
+                            )
+                        })?
                     }
                 };
                 vec![WorkspaceMapping {
@@ -175,9 +180,9 @@ impl RestorePlan {
                     .iter()
                     .copied()
                     .any(|location| {
-                        mappings
-                            .iter()
-                            .any(|mapping| location == (mapping.source_space, mapping.source_workspace))
+                        mappings.iter().any(|mapping| {
+                            location == (mapping.source_space, mapping.source_workspace)
+                        })
                     })
                     .then_some(*window)
             })
@@ -225,8 +230,9 @@ impl RestorePlan {
             for layout in target.layout_state.all_layouts() {
                 replaced_windows.extend(target.layout_system.all_windows_in_layout(layout));
             }
-            replaced_windows
-                .extend(window_store.workspace_windows(mapping.target_space, mapping.target_workspace));
+            replaced_windows.extend(
+                window_store.workspace_windows(mapping.target_space, mapping.target_workspace),
+            );
             let mut workspace = snapshot
                 .workspaces
                 .workspaces
@@ -295,7 +301,8 @@ impl RestorePlan {
         // Only identities imported by this transaction are restoration candidates. Deriving this
         // set from the whole live persistence map can arm unrelated windows which merely happen
         // to already occupy the target workspace.
-        let restored_candidates = self.fingerprints.iter().map(|(window, _)| *window).collect::<Vec<_>>();
+        let restored_candidates =
+            self.fingerprints.iter().map(|(window, _)| *window).collect::<Vec<_>>();
         for (window, fingerprint) in self.fingerprints {
             engine.persistence.record(window, fingerprint);
         }
@@ -385,9 +392,12 @@ impl RestorePlan {
                         window_store.workspace_for_window(live_space, live),
                         window_store.window(live),
                     ) {
-                        engine
-                            .floating_positions
-                            .store(live_space, workspace, live, window.frame_monotonic);
+                        engine.floating_positions.store(
+                            live_space,
+                            workspace,
+                            live,
+                            window.frame_monotonic,
+                        );
                     }
                 } else {
                     engine.floating.remove_floating(live);
@@ -476,7 +486,8 @@ impl LayoutEngine {
             .keys()
             .copied()
             .filter(|window| {
-                !live_windows.contains(window) && self.restored_locations_for_window(*window).is_empty()
+                !live_windows.contains(window)
+                    && self.restored_locations_for_window(*window).is_empty()
             })
             .collect::<Vec<_>>();
         for window in locationless {

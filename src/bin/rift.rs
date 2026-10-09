@@ -222,7 +222,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     );
     let events_tx = reactor.sender();
 
-    let config_tx = ConfigActor::spawn_with_path(config.clone(), events_tx.clone(), config_path.clone());
+    let config_tx =
+        ConfigActor::spawn_with_path(config.clone(), events_tx.clone(), config_path.clone());
 
     ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
 
@@ -256,7 +257,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         restore_file: restore_file(),
         config: config.clone(),
     };
-    let mc_channel = rift_wm::actor::mission_control::channel_if_enabled(&config.settings.ui.mission_control);
+    let mc_channel =
+        rift_wm::actor::mission_control::channel_if_enabled(&config.settings.ui.mission_control);
     let mc_tx = mc_channel.as_ref().map(|(tx, _)| tx.clone());
     let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
@@ -269,7 +271,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some(window_tx_store.clone()),
     );
 
-    let (spaces_actor, spaces_tx) = SpacesActor::new(events_tx.clone(), wm_controller_sender.clone());
+    let (spaces_actor, spaces_tx) =
+        SpacesActor::new(events_tx.clone(), wm_controller_sender.clone());
     events_tx.send(reactor::Event::RegisterSenders {
         wm: wm_controller_sender.clone(),
         spaces: spaces_tx.clone(),
@@ -303,7 +306,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some(window_tx_store.clone()),
     );
 
-    let notification_center = NotificationCenter::new(wm_controller_sender.clone(), spaces_tx.clone());
+    let notification_center =
+        NotificationCenter::new(wm_controller_sender.clone(), spaces_tx.clone());
 
     let process_actor = ProcessActor::new(wm_controller_sender.clone(), spaces_tx);
 

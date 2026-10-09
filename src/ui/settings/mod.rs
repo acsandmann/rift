@@ -63,7 +63,9 @@ impl Model {
                 edit,
                 Box::new(move |result| {
                     if let Some(label) = error.upgrade() {
-                        label.set_validation(&result.map_or_else(Validation::Error, |_| Validation::None));
+                        label.set_validation(
+                            &result.map_or_else(Validation::Error, |_| Validation::None),
+                        );
                     }
                 }),
             );
@@ -325,7 +327,8 @@ impl Settings {
                     });
                     match row {
                         search::Row::Heading(title) => {
-                            Box::new(content.push(SubsectionTitle::new(&ui, title))) as Box<dyn NativeView>
+                            Box::new(content.push(SubsectionTitle::new(&ui, title)))
+                                as Box<dyn NativeView>
                         }
                         search::Row::Setting(result) => {
                             let description = Caption::new(&ui, &result.description()).max_lines(2);
@@ -344,7 +347,8 @@ impl Settings {
                     }
                 })
                 .on_select(move |index| {
-                    let destination = index.and_then(|index| selected_rows.borrow().get(index).cloned());
+                    let destination =
+                        index.and_then(|index| selected_rows.borrow().get(index).cloned());
                     if let Some(search::Row::Setting(result)) = destination {
                         let index = destinations_for_selection.borrow().iter().position(|entry| {
                             entry.title == result.title
@@ -431,7 +435,8 @@ impl Settings {
             menu.add_section_header(title);
             for index in range {
                 let route = navigate.clone();
-                let item = MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).tag((9 + index) as isize);
+                let item =
+                    MenuItem::new(&ui, pages::LAYOUT_PAGES[index].0).tag((9 + index) as isize);
                 menu.add(item.on_click(move || route(9 + index)));
             }
         }
@@ -510,7 +515,9 @@ impl Settings {
         }
     }
 
-    pub fn has_installed_applications(&self) -> bool { self.model.installed_applications.borrow().is_some() }
+    pub fn has_installed_applications(&self) -> bool {
+        self.model.installed_applications.borrow().is_some()
+    }
 
     pub fn set_installed_applications(&self, apps: Vec<(String, String)>) {
         *self.model.installed_applications.borrow_mut() = Some(apps);
@@ -603,7 +610,12 @@ impl FormBuilder {
         }
     }
 
-    fn row(&self, title: &str, control: impl NativeView, message: Rc<ValidationMessage>) -> SettingsRow {
+    fn row(
+        &self,
+        title: &str,
+        control: impl NativeView,
+        message: Rc<ValidationMessage>,
+    ) -> SettingsRow {
         let (title, suffix) = if let Some(title) = title.strip_suffix(" (%)") {
             (title, Some("%"))
         } else if let Some(title) = title.strip_suffix(" (points)") {
@@ -697,7 +709,8 @@ impl FormBuilder {
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
-        let (slider, input, message) = self.numeric_controls(title, scale, integer, slider_range, get, set);
+        let (slider, input, message) =
+            self.numeric_controls(title, scale, integer, slider_range, get, set);
         if let Some(slider) = slider {
             slider.width(120.0);
             input.width(60.0);
@@ -772,7 +785,8 @@ impl FormBuilder {
                     }
                     .clamp(min, max);
                     if let Some(preview) = &preview {
-                        let local = local_preview.get_or_insert_with(|| model.source.borrow().clone());
+                        let local =
+                            local_preview.get_or_insert_with(|| model.source.borrow().clone());
                         edit_preview(local, value / scale);
                         preview(local);
                         if let Some(input) = preview_input.upgrade() {

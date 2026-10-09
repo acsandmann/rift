@@ -7,11 +7,11 @@ use objc2_core_graphics::{CGContext, CGError};
 use super::cg_ok;
 use super::private::{
     CGRegionCreateEmptyRegion, CGSNewRegionWithRect, CGSNewRegionWithRectList, G_CONNECTION,
-    SLSClearWindowTags, SLSFlushWindowContentRegion, SLSNewWindowWithOpaqueShapeAndContext, SLSOrderWindow,
-    SLSReleaseWindow, SLSSetWindowAlpha, SLSSetWindowBackgroundBlurRadius,
-    SLSSetWindowBackgroundBlurRadiusStyle, SLSSetWindowLevel, SLSSetWindowOpacity, SLSSetWindowProperty,
-    SLSSetWindowResolution, SLSSetWindowShape, SLSSetWindowSubLevel, SLSSetWindowTags, SLWindowContextCreate,
-    cid_t,
+    SLSClearWindowTags, SLSFlushWindowContentRegion, SLSNewWindowWithOpaqueShapeAndContext,
+    SLSOrderWindow, SLSReleaseWindow, SLSSetWindowAlpha, SLSSetWindowBackgroundBlurRadius,
+    SLSSetWindowBackgroundBlurRadiusStyle, SLSSetWindowLevel, SLSSetWindowOpacity,
+    SLSSetWindowProperty, SLSSetWindowResolution, SLSSetWindowShape, SLSSetWindowSubLevel,
+    SLSSetWindowTags, SLWindowContextCreate, cid_t,
 };
 
 type WindowId = u32;
@@ -62,7 +62,9 @@ impl CFRegion {
         }
 
         let mut region = ptr::null_mut();
-        cg_ok(unsafe { CGSNewRegionWithRectList(rects.as_ptr(), rects.len() as i32, &mut region) })?;
+        cg_ok(unsafe {
+            CGSNewRegionWithRectList(rects.as_ptr(), rects.len() as i32, &mut region)
+        })?;
         NonNull::new(region)
             .map(|region| Self(unsafe { CFRetained::from_raw(region) }))
             .ok_or(CGError(1000))
@@ -160,8 +162,8 @@ impl CgsWindow {
     pub fn new_compositor(frame: CGRect, corner_radius: f64) -> Result<Self, CgsWindowError> {
         unsafe {
             let connection = *G_CONNECTION;
-            let frame_region =
-                CFRegion::from_rounded_rect(frame.size, corner_radius).map_err(CgsWindowError::Region)?;
+            let frame_region = CFRegion::from_rounded_rect(frame.size, corner_radius)
+                .map_err(CgsWindowError::Region)?;
             let empty_region = CFRegion::empty().map_err(CgsWindowError::Region)?;
             let mut tags: u64 = (1 << 1) | (1 << 9) | (1 << 16);
             let mut wid: WindowId = 0;
@@ -213,12 +215,14 @@ impl CgsWindow {
 
     #[inline]
     pub fn set_alpha(&self, alpha: f32) -> Result<(), CgsWindowError> {
-        unsafe { cg_ok(SLSSetWindowAlpha(self.connection, self.id, alpha)) }.map_err(CgsWindowError::Alpha)
+        unsafe { cg_ok(SLSSetWindowAlpha(self.connection, self.id, alpha)) }
+            .map_err(CgsWindowError::Alpha)
     }
 
     #[inline]
     pub fn set_opacity(&self, opaque: bool) -> Result<(), CgsWindowError> {
-        unsafe { cg_ok(SLSSetWindowOpacity(self.connection, self.id, opaque)) }.map_err(CgsWindowError::Alpha)
+        unsafe { cg_ok(SLSSetWindowOpacity(self.connection, self.id, opaque)) }
+            .map_err(CgsWindowError::Alpha)
     }
 
     #[inline]

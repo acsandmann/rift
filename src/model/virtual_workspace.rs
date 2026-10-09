@@ -85,7 +85,11 @@ impl VirtualWorkspace {
         self.layout_state.ensure_active(size, &mut self.layout_system);
     }
 
-    pub(crate) fn replace_layout_mode(&mut self, mode: LayoutMode, settings: &LayoutSettings) -> LayoutId {
+    pub(crate) fn replace_layout_mode(
+        &mut self,
+        mode: LayoutMode,
+        settings: &LayoutSettings,
+    ) -> LayoutId {
         self.layout_mode = mode;
         self.layout_system = Self::create_layout_system(mode, settings);
         let layout = self.layout_system.create_layout();
@@ -97,17 +101,17 @@ impl VirtualWorkspace {
 
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
         match mode {
-            LayoutMode::Traditional => {
-                LayoutSystemKind::Traditional(crate::layout_engine::systems::TraditionalLayoutSystem::new(
+            LayoutMode::Traditional => LayoutSystemKind::Traditional(
+                crate::layout_engine::systems::TraditionalLayoutSystem::new(
                     settings.window_insertion_point_for(mode),
                     settings.traditional.equalize_nodes,
-                ))
-            }
-            LayoutMode::Floating => {
-                LayoutSystemKind::Floating(crate::layout_engine::systems::FloatingLayoutSystem::new(
+                ),
+            ),
+            LayoutMode::Floating => LayoutSystemKind::Floating(
+                crate::layout_engine::systems::FloatingLayoutSystem::new(
                     settings.window_insertion_point_for(mode),
-                ))
-            }
+                ),
+            ),
             LayoutMode::Bsp => {
                 let mut system = crate::layout_engine::systems::BspLayoutSystem::new(
                     settings.window_insertion_point_for(mode),
@@ -124,21 +128,23 @@ impl VirtualWorkspace {
             LayoutMode::MasterStack => {
                 let mut mode_settings = settings.master_stack.clone();
                 mode_settings.base = settings.resolved_base_for(mode);
-                LayoutSystemKind::MasterStack(crate::layout_engine::systems::MasterStackLayoutSystem::new(
-                    mode_settings,
-                ))
+                LayoutSystemKind::MasterStack(
+                    crate::layout_engine::systems::MasterStackLayoutSystem::new(mode_settings),
+                )
             }
             LayoutMode::Scrolling => {
                 let mut mode_settings = settings.scrolling.clone();
                 mode_settings.base = settings.resolved_base_for(mode);
-                LayoutSystemKind::Scrolling(crate::layout_engine::systems::ScrollingLayoutSystem::new(
-                    &mode_settings,
-                ))
+                LayoutSystemKind::Scrolling(
+                    crate::layout_engine::systems::ScrollingLayoutSystem::new(&mode_settings),
+                )
             }
         }
     }
 
-    pub fn set_last_focused(&mut self, window_id: Option<WindowId>) { self.last_focused = window_id; }
+    pub fn set_last_focused(&mut self, window_id: Option<WindowId>) {
+        self.last_focused = window_id;
+    }
 
     pub fn last_focused(&self) -> Option<WindowId> { self.last_focused }
 }
@@ -155,7 +161,8 @@ pub struct WorkspaceStore {
     pub(crate) workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
     #[serde(deserialize_with = "deserialize_workspace_order")]
     workspaces_by_space: HashMap<SpaceId, Vec<VirtualWorkspaceId>>,
-    pub active_workspace_per_space: HashMap<SpaceId, (Option<VirtualWorkspaceId>, VirtualWorkspaceId)>,
+    pub active_workspace_per_space:
+        HashMap<SpaceId, (Option<VirtualWorkspaceId>, VirtualWorkspaceId)>,
     workspace_counter: usize,
     #[cfg(test)]
     #[serde(skip)]
@@ -197,7 +204,9 @@ impl std::ops::Index<VirtualWorkspaceId> for WorkspaceStore {
 }
 
 impl std::ops::IndexMut<VirtualWorkspaceId> for WorkspaceStore {
-    fn index_mut(&mut self, id: VirtualWorkspaceId) -> &mut Self::Output { &mut self.workspaces[id] }
+    fn index_mut(&mut self, id: VirtualWorkspaceId) -> &mut Self::Output {
+        &mut self.workspaces[id]
+    }
 }
 
 impl Default for WorkspaceStore {
@@ -205,11 +214,18 @@ impl Default for WorkspaceStore {
 }
 
 impl WorkspaceStore {
-    pub(crate) fn active_layout(&self, space: SpaceId, workspace: VirtualWorkspaceId) -> Option<LayoutId> {
+    pub(crate) fn active_layout(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+    ) -> Option<LayoutId> {
         self.workspace_info(space, workspace)?.active_layout()
     }
 
-    pub(crate) fn active_layout_for_space(&self, space: SpaceId) -> Option<(VirtualWorkspaceId, LayoutId)> {
+    pub(crate) fn active_layout_for_space(
+        &self,
+        space: SpaceId,
+    ) -> Option<(VirtualWorkspaceId, LayoutId)> {
         let id = self.active_workspace(space)?;
         Some((id, self.workspaces.get(id)?.active_layout()?))
     }
@@ -287,7 +303,10 @@ impl WorkspaceStore {
         Self::new_with_config(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
     }
 
-    pub fn new_with_config(config: &VirtualWorkspaceSettings, layout_settings: &LayoutSettings) -> Self {
+    pub fn new_with_config(
+        config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) -> Self {
         let target_count = config.default_workspace_count.max(1).min(MAX_WORKSPACES);
         let default_workspace = config.default_workspace.min(target_count - 1);
 
@@ -310,7 +329,11 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn update_settings(&mut self, config: &VirtualWorkspaceSettings, layout_settings: &LayoutSettings) {
+    pub fn update_settings(
+        &mut self,
+        config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) {
         // Runtime-only limits are skipped by layout snapshots and therefore
         // deserialize to zero. Rehydrate them before doing count arithmetic.
         if self.max_workspaces == 0 {
@@ -479,7 +502,12 @@ impl WorkspaceStore {
         Ok(())
     }
 
-    pub fn remap_space(&mut self, window_store: &mut WindowStore, old_space: SpaceId, new_space: SpaceId) {
+    pub fn remap_space(
+        &mut self,
+        window_store: &mut WindowStore,
+        old_space: SpaceId,
+        new_space: SpaceId,
+    ) {
         if old_space == new_space || !self.workspaces_by_space.contains_key(&old_space) {
             return;
         }
@@ -587,7 +615,11 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn set_active_workspace(&mut self, space: SpaceId, workspace_id: VirtualWorkspaceId) -> bool {
+    pub fn set_active_workspace(
+        &mut self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> bool {
         trace_misc("set_active_workspace", || {
             let active = self.active_workspace_per_space.get(&space).map(|tuple| tuple.1);
 
@@ -679,10 +711,12 @@ impl WorkspaceStore {
             }
 
             let previous_assignment = window_store.workspace_info_for_window(window_id);
-            window_store.assign_window_to_workspace(window_id, WindowWorkspaceInfo { space, workspace_id });
+            window_store
+                .assign_window_to_workspace(window_id, WindowWorkspaceInfo { space, workspace_id });
             if let Some(previous_assignment) = previous_assignment
                 && previous_assignment.workspace_id != workspace_id
-                && let Some(previous_workspace) = self.workspaces.get_mut(previous_assignment.workspace_id)
+                && let Some(previous_workspace) =
+                    self.workspaces.get_mut(previous_assignment.workspace_id)
                 && previous_workspace.space == previous_assignment.space
                 && previous_workspace.last_focused() == Some(window_id)
             {
@@ -725,7 +759,11 @@ impl WorkspaceStore {
     }
 
     /// Gets all windows in the active virtual workspace for a given native space.
-    pub fn windows_in_active_workspace(&self, window_store: &WindowStore, space: SpaceId) -> Vec<WindowId> {
+    pub fn windows_in_active_workspace(
+        &self,
+        window_store: &WindowStore,
+        space: SpaceId,
+    ) -> Vec<WindowId> {
         if let Some(workspace_id) = self.active_workspace(space) {
             return self.workspace_windows(window_store, space, workspace_id);
         }
@@ -802,7 +840,11 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn last_focused_window(&self, space: SpaceId, workspace_id: VirtualWorkspaceId) -> Option<WindowId> {
+    pub fn last_focused_window(
+        &self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> Option<WindowId> {
         if self.workspaces.get(workspace_id).map(|w| w.space) == Some(space) {
             self.workspaces.get(workspace_id)?.last_focused()
         } else {
@@ -844,11 +886,17 @@ impl WorkspaceStore {
     pub(crate) fn persisted_focus_locations(&self) -> Vec<(SpaceId, VirtualWorkspaceId, WindowId)> {
         self.workspaces
             .iter()
-            .filter_map(|(workspace, info)| info.last_focused().map(|window| (info.space, workspace, window)))
+            .filter_map(|(workspace, info)| {
+                info.last_focused().map(|window| (info.space, workspace, window))
+            })
             .collect()
     }
 
-    pub(crate) fn retain_window_focus_location(&mut self, window: WindowId, keep: VirtualWorkspaceId) {
+    pub(crate) fn retain_window_focus_location(
+        &mut self,
+        window: WindowId,
+        keep: VirtualWorkspaceId,
+    ) {
         for (workspace_id, workspace) in self.workspaces.iter_mut() {
             if workspace_id != keep && workspace.last_focused() == Some(window) {
                 workspace.set_last_focused(None);
@@ -982,7 +1030,13 @@ impl WorkspaceStore {
         space: SpaceId,
         rule_decision: Option<AppRuleDecision>,
     ) -> Result<AppRuleResult, WorkspaceError> {
-        self.apply_app_rule_decision_with_policy(window_store, window_id, space, rule_decision, false)
+        self.apply_app_rule_decision_with_policy(
+            window_store,
+            window_id,
+            space,
+            rule_decision,
+            false,
+        )
     }
 
     pub(crate) fn apply_app_rule_decision_preserving_workspace(
@@ -992,7 +1046,13 @@ impl WorkspaceStore {
         space: SpaceId,
         rule_decision: Option<AppRuleDecision>,
     ) -> Result<AppRuleResult, WorkspaceError> {
-        self.apply_app_rule_decision_with_policy(window_store, window_id, space, rule_decision, true)
+        self.apply_app_rule_decision_with_policy(
+            window_store,
+            window_id,
+            space,
+            rule_decision,
+            true,
+        )
     }
 
     fn apply_app_rule_decision_with_policy(
@@ -1013,7 +1073,8 @@ impl WorkspaceStore {
             return Err(WorkspaceError::NoWorkspacesAvailable);
         }
 
-        let existing_assignment = self.preserved_workspace_assignment(window_store, window_id, space);
+        let existing_assignment =
+            self.preserved_workspace_assignment(window_store, window_id, space);
 
         let rule_override = rule_decision.as_ref().and_then(AppRuleDecision::management_override);
         let admitted = window_store
@@ -1051,7 +1112,8 @@ impl WorkspaceStore {
             preserve_existing,
         )?;
         let assignment = WindowWorkspaceInfo { space, workspace_id };
-        let workspace_changed = window_store.workspace_info_for_window(window_id) != Some(assignment);
+        let workspace_changed =
+            window_store.workspace_info_for_window(window_id) != Some(assignment);
         if !self.ensure_window_assignment(window_store, window_id, assignment) {
             error!("Failed to apply window workspace assignment");
             return Err(WorkspaceError::AssignmentFailed);
@@ -1092,7 +1154,10 @@ impl WorkspaceStore {
         self.apply_app_rule_decision(window_store, window_id, space, decision)
     }
 
-    fn get_default_workspace(&mut self, space: SpaceId) -> Result<VirtualWorkspaceId, WorkspaceError> {
+    fn get_default_workspace(
+        &mut self,
+        space: SpaceId,
+    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         self.ensure_space_initialized(space);
         if let Some(active_workspace_id) = self.active_workspace(space) {
             if self.workspaces.contains_key(active_workspace_id) {
@@ -1103,11 +1168,9 @@ impl WorkspaceStore {
             }
         }
 
-        let first_id = self
-            .workspace_ids(space)
-            .first()
-            .copied()
-            .ok_or_else(|| WorkspaceError::InconsistentState("No workspaces for space".to_string()))?;
+        let first_id = self.workspace_ids(space).first().copied().ok_or_else(|| {
+            WorkspaceError::InconsistentState("No workspaces for space".to_string())
+        })?;
 
         if self.set_active_workspace(space, first_id) {
             Ok(first_id)
@@ -1282,7 +1345,8 @@ mod tests {
         let old_space = SpaceId::new(1);
         let new_space = SpaceId::new(2);
         let migrated_ws = manager.create_workspace(old_space, Some("Old".to_string())).unwrap();
-        let transient_ws = manager.create_workspace(new_space, Some("Transient".to_string())).unwrap();
+        let transient_ws =
+            manager.create_workspace(new_space, Some("Transient".to_string())).unwrap();
         let migrated_window = WindowId::new(10, 1);
         let transient_window = WindowId::new(11, 1);
 
@@ -1693,7 +1757,12 @@ mod tests {
         );
 
         let window = WindowId::new(1, 1);
-        assert!(manager.assign_window_to_workspace(&mut window_store, space, window, workspaces[3].0));
+        assert!(manager.assign_window_to_workspace(
+            &mut window_store,
+            space,
+            window,
+            workspaces[3].0
+        ));
         assert_eq!(
             manager.next_workspace(&window_store, space, workspaces[1].0, Some(true)),
             Some(workspaces[3].0)
@@ -1921,7 +1990,8 @@ mod tests {
             None,
         )
         .workspace_id;
-        let coding_ws = manager.list_workspaces(space1).iter().find(|(_, n)| n == "coding").unwrap().0;
+        let coding_ws =
+            manager.list_workspaces(space1).iter().find(|(_, n)| n == "coding").unwrap().0;
         assert_eq!(ws_named, coding_ws);
 
         // 6. Reapplication updates both workspace and floating state.
@@ -1973,8 +2043,9 @@ mod tests {
         let right_neighbor = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(100.0, 100.0));
         let frame = CGRect::new(CGPoint::new(20.0, 25.0), CGSize::new(30.0, 20.0));
 
-        let hidden =
-            HiddenWindowPlacement::calculate(primary, frame, HideCorner::BottomRight, &[right_neighbor]);
+        let hidden = HiddenWindowPlacement::calculate(primary, frame, HideCorner::BottomRight, &[
+            right_neighbor,
+        ]);
 
         assert_eq!(hidden.origin.y, primary.max().y - 1.0);
         assert_eq!(hidden.origin.x, primary.origin.x - frame.size.width + 1.0);

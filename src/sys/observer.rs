@@ -8,7 +8,9 @@ use std::sync::Arc;
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2_application_services::{AXError, AXObserver, AXUIElement as RawAXUIElement};
-use objc2_core_foundation::{CFRetained, CFRunLoop, CFRunLoopMode, CFString, kCFRunLoopCommonModes};
+use objc2_core_foundation::{
+    CFRetained, CFRunLoop, CFRunLoopMode, CFString, kCFRunLoopCommonModes,
+};
 
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
@@ -44,7 +46,9 @@ impl Observer {
     ///
     /// Note that you must call [`ObserverBuilder::install`] on the result of
     /// this function and supply a callback for the observer to have any effect.
-    pub fn new<F: Fn(AXUIElement, usize) + 'static>(pid: pid_t) -> Result<ObserverBuilder<F>, AxError> {
+    pub fn new<F: Fn(AXUIElement, usize) + 'static>(
+        pid: pid_t,
+    ) -> Result<ObserverBuilder<F>, AxError> {
         let mut observer_ptr: *mut AXObserver = ptr::null_mut();
         let status = unsafe {
             AXObserver::create(
@@ -54,8 +58,9 @@ impl Observer {
             )
         };
         make_result(status)?;
-        let observer =
-            unsafe { CFRetained::from_raw(NonNull::new(observer_ptr).expect("observer must be non-null")) };
+        let observer = unsafe {
+            CFRetained::from_raw(NonNull::new(observer_ptr).expect("observer must be non-null"))
+        };
         Ok(ObserverBuilder(observer, PhantomData))
     }
 
@@ -76,8 +81,9 @@ impl Observer {
             )
         };
         make_result(status)?;
-        let observer =
-            unsafe { CFRetained::from_raw(NonNull::new(observer_ptr).expect("observer must be non-null")) };
+        let observer = unsafe {
+            CFRetained::from_raw(NonNull::new(observer_ptr).expect("observer must be non-null"))
+        };
         Ok(ObserverBuilder(observer, PhantomData))
     }
 }
@@ -85,7 +91,9 @@ impl Observer {
 impl<F: Fn(AXUIElement, usize) + 'static> ObserverBuilder<F> {
     /// Installs the observer with the supplied callback into the current
     /// thread's run loop.
-    pub fn install(self, callback: F) -> Observer { self.install_inner(Callback::Data(Arc::new(callback))) }
+    pub fn install(self, callback: F) -> Observer {
+        self.install_inner(Callback::Data(Arc::new(callback)))
+    }
 }
 
 impl<F: Fn(AXUIElement, &'static str) + 'static> ObserverBuilder<F> {
@@ -99,7 +107,8 @@ impl<F> ObserverBuilder<F> {
     fn install_inner(self, callback: Callback) -> Observer {
         let run_loop_source = unsafe { self.0.run_loop_source() };
         if let Some(run_loop) = CFRunLoop::current() {
-            let mode: &CFRunLoopMode = unsafe { kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes") };
+            let mode: &CFRunLoopMode =
+                unsafe { kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes") };
             run_loop.add_source(Some(run_loop_source.as_ref()), Some(mode));
         }
         Observer {
@@ -142,7 +151,11 @@ extern "C" fn add_notif_retry(ctx: *mut c_void) {
 }
 
 impl Observer {
-    pub fn add_notification(&self, elem: &AXUIElement, notification: &'static str) -> Result<(), AxError> {
+    pub fn add_notification(
+        &self,
+        elem: &AXUIElement,
+        notification: &'static str,
+    ) -> Result<(), AxError> {
         self.add_notification_with_data(elem, notification, 0)
     }
 
@@ -176,7 +189,8 @@ impl Observer {
             return Ok(());
         }
         if first == AXError::CannotComplete {
-            let retained_observer = unsafe { CFRetained::retain(CFRetained::as_ptr(&self.observer)) };
+            let retained_observer =
+                unsafe { CFRetained::retain(CFRetained::as_ptr(&self.observer)) };
             let ctx = Box::new(AddNotifRetryCtx {
                 observer: retained_observer,
                 elem: elem.clone(),
@@ -216,7 +230,11 @@ impl Observer {
         Arc::clone(ctx)
     }
 
-    pub fn remove_notification(&self, elem: &AXUIElement, notification: &'static str) -> Result<(), AxError> {
+    pub fn remove_notification(
+        &self,
+        elem: &AXUIElement,
+        notification: &'static str,
+    ) -> Result<(), AxError> {
         let notification_cf = CFString::from_static_str(notification);
         let observer: &AXObserver = &self.observer;
         let result = make_result(unsafe {

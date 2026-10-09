@@ -41,9 +41,12 @@ impl<'de> Deserialize<'de> for WindowId {
 
             fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
             where A: SeqAccess<'de> {
-                let pid = sequence.next_element()?.ok_or_else(|| de::Error::invalid_length(0, &self))?;
-                let idx = sequence.next_element()?.ok_or_else(|| de::Error::invalid_length(1, &self))?;
-                WindowId::new(pid, idx).ok_or_else(|| de::Error::custom("window id index must be non-zero"))
+                let pid =
+                    sequence.next_element()?.ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let idx =
+                    sequence.next_element()?.ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                WindowId::new(pid, idx)
+                    .ok_or_else(|| de::Error::custom("window id index must be non-zero"))
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -61,7 +64,8 @@ impl<'de> Deserialize<'de> for WindowId {
                 }
                 let pid = pid.ok_or_else(|| de::Error::missing_field("pid"))?;
                 let idx = idx.ok_or_else(|| de::Error::missing_field("idx"))?;
-                WindowId::new(pid, idx).ok_or_else(|| de::Error::custom("window id index must be non-zero"))
+                WindowId::new(pid, idx)
+                    .ok_or_else(|| de::Error::custom("window id index must be non-zero"))
             }
         }
 
@@ -71,10 +75,16 @@ impl<'de> Deserialize<'de> for WindowId {
 
 impl WindowId {
     pub const fn new(pid: i32, idx: u32) -> Option<Self> {
-        if idx == 0 { None } else { Some(Self { pid, idx }) }
+        if idx == 0 {
+            None
+        } else {
+            Some(Self { pid, idx })
+        }
     }
 
-    pub fn to_debug_string(self) -> String { format!("WindowId {{ pid: {}, idx: {} }}", self.pid, self.idx) }
+    pub fn to_debug_string(self) -> String {
+        format!("WindowId {{ pid: {}, idx: {} }}", self.pid, self.idx)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

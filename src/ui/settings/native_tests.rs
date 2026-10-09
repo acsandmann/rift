@@ -145,7 +145,8 @@ pub fn run(ui: Ui) {
                     menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("Traditional")),
                 )
             });
-            let old = objc2::rc::Weak::new(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view());
+            let old =
+                objc2::rc::Weak::new(settings.pages.borrow()[1].as_ref().unwrap().view.ns_view());
             assert_eq!(
                 autoreleasepool(|_| count::<NSSwitch>(settings._host.ns_view())),
                 1
@@ -343,7 +344,8 @@ pub fn run(ui: Ui) {
                 source.settings.layout.gaps.outer, global,
                 "preserve global spacing"
             );
-            let effective = source.settings.layout.gaps.effective_for_display(Some("focused-display"));
+            let effective =
+                source.settings.layout.gaps.effective_for_display(Some("focused-display"));
             assert_eq!(
                 [
                     effective.outer.top,
@@ -407,7 +409,9 @@ pub fn run(ui: Ui) {
         ] {
             popup.selectItemAtIndex(index);
             let control: &NSControl = &popup;
-            assert!(unsafe { control.sendAction_to(control.action(), control.target().as_deref()) });
+            assert!(unsafe {
+                control.sendAction_to(control.action(), control.target().as_deref())
+            });
             let request = pending.try_recv().unwrap();
             let Action::Edit(edit) = request.action else {
                 panic!("expected config edit")

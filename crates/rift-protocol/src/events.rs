@@ -192,8 +192,7 @@ mod tests {
             previous_mode: "default".into(),
             mode: "resize".into(),
         };
-        let json =
-            serde_json::json!({"type": "binding_mode_changed", "previous_mode": "default", "mode": "resize"});
+        let json = serde_json::json!({"type": "binding_mode_changed", "previous_mode": "default", "mode": "resize"});
         assert_eq!(serde_json::to_value(&event).unwrap(), json);
         assert_eq!(serde_json::from_value::<RiftEvent>(json).unwrap(), event);
         assert_eq!(event.kind().as_str(), "binding_mode_changed");

@@ -15,8 +15,13 @@ use crate::sys::timer::Timer;
 #[derive(Debug)]
 pub enum Event {
     RaiseRequest(RaiseRequest),
-    RaiseCompleted { window_id: WindowId, sequence_id: u64 },
-    RaiseTimeout { sequence_id: u64 },
+    RaiseCompleted {
+        window_id: WindowId,
+        sequence_id: u64,
+    },
+    RaiseTimeout {
+        sequence_id: u64,
+    },
 }
 
 /// A queued layout response waiting to be processed.
@@ -59,7 +64,11 @@ const TIMEOUT_DURATION: Duration = Duration::from_millis(250);
 
 impl RaiseManager {
     /// Run the raise manager task.
-    pub async fn run(mut rx: Receiver, events_tx: reactor::Sender, input_tx: Option<input::Sender>) {
+    pub async fn run(
+        mut rx: Receiver,
+        events_tx: reactor::Sender,
+        input_tx: Option<input::Sender>,
+    ) {
         let mut raise_manager = RaiseManager::new();
         raise_manager.input_tx = input_tx;
         let mut timeout_timer = Timer::manual();
@@ -451,7 +460,8 @@ mod tests {
             let mut raise_manager = RaiseManager::new();
             let (app_handles, _app_rx) = create_test_app_handles();
 
-            let layout_msg = create_layout_response(vec![WindowId::new(1, 1)], None, app_handles, Quiet::No);
+            let layout_msg =
+                create_layout_response(vec![WindowId::new(1, 1)], None, app_handles, Quiet::No);
 
             raise_manager.handle_message(layout_msg);
 

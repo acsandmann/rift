@@ -111,7 +111,9 @@ impl LayoutKind {
         }
     }
 
-    pub const fn is_stacked(self) -> bool { matches!(self, Self::HorizontalStack | Self::VerticalStack) }
+    pub const fn is_stacked(self) -> bool {
+        matches!(self, Self::HorizontalStack | Self::VerticalStack)
+    }
 
     pub const fn orientation(self) -> Orientation {
         match self {
@@ -124,7 +126,15 @@ impl LayoutKind {
 }
 
 #[derive(
-    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, rift_config_derive::ConfigEnum,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    rift_config_derive::ConfigEnum,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode {

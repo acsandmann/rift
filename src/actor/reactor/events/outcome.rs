@@ -124,8 +124,10 @@ impl EventOutcome {
         self.make_key_windows.append(&mut other.make_key_windows);
         self.mouse_warps.append(&mut other.mouse_warps);
         self.drop_haptic |= other.drop_haptic;
-        self.post_arrange_mouse_warp = other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
-        if !other.pre_layout_window_frame_writes.is_empty() || other.interactive_window_frame_write.is_some()
+        self.post_arrange_mouse_warp =
+            other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
+        if !other.pre_layout_window_frame_writes.is_empty()
+            || other.interactive_window_frame_write.is_some()
         {
             if let Some(write) = self.interactive_window_frame_write.take() {
                 self.pre_layout_window_frame_writes.push(write);
@@ -136,12 +138,14 @@ impl EventOutcome {
         }
         self.dispatch_mouse_up |= other.dispatch_mouse_up;
         self.close_window = other.close_window.or(self.close_window);
-        self.service_config_update = other.service_config_update.or(self.service_config_update.take());
+        self.service_config_update =
+            other.service_config_update.or(self.service_config_update.take());
         self.stdout_lines.append(&mut other.stdout_lines);
         self.reapply_app_rules.append(&mut other.reapply_app_rules);
         self.finalize_created_windows.append(&mut other.finalize_created_windows);
         self.window_title_broadcasts.append(&mut other.window_title_broadcasts);
-        self.focused_window_broadcast = other.focused_window_broadcast.or(self.focused_window_broadcast);
+        self.focused_window_broadcast =
+            other.focused_window_broadcast.or(self.focused_window_broadcast);
         self.broadcast_selection_changed |= other.broadcast_selection_changed;
         self.layout_events.append(&mut other.layout_events);
         self.layout_responses.append(&mut other.layout_responses);
@@ -373,8 +377,10 @@ mod tests {
         let first = WindowId::new(1, 1);
         let second = WindowId::new(1, 2);
         let frame = CGRect::default();
-        let mut outcome = EventOutcome::no_change().with_pre_layout_window_frame_write(first, frame, true);
-        let interactive = EventOutcome::no_change().with_interactive_window_frame_write(second, frame, false);
+        let mut outcome =
+            EventOutcome::no_change().with_pre_layout_window_frame_write(first, frame, true);
+        let interactive =
+            EventOutcome::no_change().with_interactive_window_frame_write(second, frame, false);
         assert_eq!(interactive.pre_layout_window_frame_writes.capacity(), 0);
         outcome.absorb(interactive);
         let ordered: Vec<_> = outcome
@@ -390,12 +396,17 @@ mod tests {
     fn absorbed_arrange_requests_keep_only_a_common_space_scope() {
         let first_space = SpaceId::new(1);
         let second_space = SpaceId::new(2);
-        let mut outcome = EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space));
+        let mut outcome =
+            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space));
 
-        outcome.absorb(EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space)));
+        outcome.absorb(
+            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space)),
+        );
         assert_eq!(outcome.arrange.space_scope, Some(first_space));
 
-        outcome.absorb(EventOutcome::layout_changed(false).with_arrange_space_scope(Some(second_space)));
+        outcome.absorb(
+            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(second_space)),
+        );
         assert_eq!(outcome.arrange.space_scope, None);
     }
 

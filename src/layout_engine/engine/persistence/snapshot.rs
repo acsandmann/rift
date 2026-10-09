@@ -7,7 +7,10 @@ fn legacy_schema_version() -> u32 { 0 }
 /// Pre-consolidation file representation. It is normalized before any runtime use.
 #[derive(Deserialize, Default)]
 pub(super) struct LegacyWorkspaceLayouts {
-    map: HashMap<(SpaceId, VirtualWorkspaceId), crate::layout_engine::workspaces::WorkspaceLayoutState>,
+    map: HashMap<
+        (SpaceId, VirtualWorkspaceId),
+        crate::layout_engine::workspaces::WorkspaceLayoutState,
+    >,
 }
 
 /// Owned, versioned representation of the layout file.
@@ -47,7 +50,9 @@ struct PersistedLayoutRef<'a> {
 }
 
 impl PersistedLayout {
-    pub(super) fn deserialize(buf: &str) -> Result<Self, ron::error::SpannedError> { ron::from_str(buf) }
+    pub(super) fn deserialize(buf: &str) -> Result<Self, ron::error::SpannedError> {
+        ron::from_str(buf)
+    }
 
     pub(super) fn serialize_engine(engine: &LayoutEngine) -> String {
         ron::ser::to_string(&PersistedLayoutRef {
@@ -65,7 +70,9 @@ impl PersistedLayout {
     pub(super) fn normalize_workspace_layouts(&mut self) -> anyhow::Result<()> {
         for ((space, id), state) in std::mem::take(&mut self.workspace_layouts.map) {
             let workspace = self.workspaces.workspaces.get_mut(id).ok_or_else(|| {
-                anyhow::anyhow!("invalid workspace layouts: layout state references missing workspace {id:?}")
+                anyhow::anyhow!(
+                    "invalid workspace layouts: layout state references missing workspace {id:?}"
+                )
             })?;
             if workspace.space != space {
                 return Err(anyhow::anyhow!(

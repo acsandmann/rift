@@ -366,7 +366,9 @@ pub(super) fn results(query: &str) -> Vec<Result> {
 }
 
 /// Scope repeated names such as “Enabled” to their documented section.
-pub(super) fn section(location: &str) -> &str { location.rsplit(" › ").next().unwrap_or(location) }
+pub(super) fn section(location: &str) -> &str {
+    location.rsplit(" › ").next().unwrap_or(location)
+}
 
 #[cfg(test)]
 mod tests {
