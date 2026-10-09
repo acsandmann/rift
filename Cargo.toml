@@ -48,6 +48,7 @@ doctest = false
 
 [features]
 default = []
+timing = ["dep:tracing-timing"]
 experimental = ["custom-event-loop", "disable-axuielement-destroyed"]
 custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
 disable-axuielement-destroyed = []
@@ -176,7 +177,7 @@ tempfile = { version = "3.17.1", default-features = false }
 toml = { version = "0.9.2", features = ["display", "parse", "serde"], default-features = false }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["std", "tracing", "env-filter"], default-features = false }
-tracing-timing = "0.7.0"
+tracing-timing = { version = "0.7.0", optional = true }
 tracing-tree = { version = "0.4.0", features = ["time"], default-features = false }
 regex = "1.11.0"
 enum_dispatch = "0.3.13"

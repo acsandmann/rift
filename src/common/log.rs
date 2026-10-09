@@ -1,18 +1,23 @@
-use std::time::{Duration, Instant};
+#[cfg(feature = "timing")]
+use std::time::Duration;
+use std::time::Instant;
 
 pub use rift_protocol::MetricsCommand;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
+#[cfg(feature = "timing")]
 use tracing_timing::{Histogram, group};
 use tracing_tree::time::UtcDateTime;
 
 pub fn init_logging() {
-    tracing_subscriber::registry()
-        .with(tree_layer())
-        .with(timing_layer())
-        .with(EnvFilter::from_default_env())
-        .init();
+    // Keep timing independent of output verbosity so profiling can run without
+    // synchronous trace output. Do not construct recorder storage in normal use.
+    let subscriber = tracing_subscriber::registry()
+        .with(tree_layer().with_filter(EnvFilter::from_default_env()));
+    #[cfg(feature = "timing")]
+    let subscriber = subscriber.with(timing_layer().with_filter(EnvFilter::new("trace")));
+    subscriber.init();
 }
 
 pub fn tree_layer() -> impl Layer<Registry> {
@@ -25,8 +30,10 @@ pub fn tree_layer() -> impl Layer<Registry> {
         .with_timer(UtcDateTime::default())
 }
 
+#[cfg(feature = "timing")]
 type TimingLayer = tracing_timing::TimingLayer<group::ByName, group::ByName>;
 
+#[cfg(feature = "timing")]
 fn timing_layer() -> TimingLayer {
     tracing_timing::Builder::default()
         // Formatted messages contain changing window IDs, frames, and pointer values.
@@ -42,12 +49,21 @@ pub fn handle_command(command: MetricsCommand) {
 }
 
 pub fn show_timing() {
+    #[cfg(feature = "timing")]
     tracing::dispatcher::get_default(|d| {
-        let timing_layer = d.downcast_ref::<TimingLayer>().unwrap();
-        print_histograms(timing_layer);
-    })
+        if let Some(timing_layer) = d.downcast_ref::<TimingLayer>() {
+            print_histograms(timing_layer);
+        } else {
+            println!("Timing collection is unavailable in the current tracing subscriber.");
+        }
+    });
+    #[cfg(not(feature = "timing"))]
+    println!(
+        "Timing collection is disabled. Build rift with --features timing to collect metrics."
+    );
 }
 
+#[cfg(feature = "timing")]
 fn print_histograms(timing_layer: &TimingLayer) {
     timing_layer.force_synchronize();
     timing_layer.with_histograms(|hs| {
