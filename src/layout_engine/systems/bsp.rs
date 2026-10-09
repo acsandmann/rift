@@ -50,6 +50,8 @@ pub struct BspLayoutSystem {
 
 impl BspLayoutSystem {
     fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
+        let (start, end) = self.span_across(from_leaf, direction);
+        let anchor = (start + end) / 2.0;
         let mut current = from_leaf;
 
         while let Some(parent) = current.parent(&self.tree.map) {
@@ -76,7 +78,9 @@ impl BspLayoutSystem {
                         };
 
                         if let Some(target) = target_child {
-                            return Some(self.find_closest_leaf_in_direction(target, direction));
+                            return Some(
+                                self.find_closest_leaf_in_direction(target, direction, anchor),
+                            );
                         }
                     }
                 }
@@ -87,7 +91,47 @@ impl BspLayoutSystem {
         None
     }
 
-    fn find_closest_leaf_in_direction(&self, root: NodeId, direction: Direction) -> NodeId {
+    /// Fraction of the layout the node covers across `direction`, from split ratios.
+    fn span_across(&self, node: NodeId, direction: Direction) -> (f64, f64) {
+        let axis = match direction.orientation() {
+            Orientation::Horizontal => Orientation::Vertical,
+            Orientation::Vertical => Orientation::Horizontal,
+        };
+        let path: Vec<_> = node.ancestors(&self.tree.map).collect();
+        let (mut start, mut end) = (0.0, 1.0);
+        for pair in path.windows(2).rev() {
+            let (child, parent) = (pair[0], pair[1]);
+            if let Some(NodeKind::Split { orientation, ratio }) = self.kind.get(parent)
+                && *orientation == axis
+            {
+                let mid = start + (end - start) * (*ratio as f64);
+                if parent.children(&self.tree.map).next() == Some(child) {
+                    end = mid;
+                } else {
+                    start = mid;
+                }
+            }
+        }
+        (start, end)
+    }
+
+    fn distance_across(&self, node: NodeId, direction: Direction, anchor: f64) -> f64 {
+        let (start, end) = self.span_across(node, direction);
+        if anchor < start {
+            start - anchor
+        } else if anchor > end {
+            anchor - end
+        } else {
+            0.0
+        }
+    }
+
+    fn find_closest_leaf_in_direction(
+        &self,
+        root: NodeId,
+        direction: Direction,
+        anchor: f64,
+    ) -> NodeId {
         match self.kind.get(root) {
             Some(NodeKind::Leaf { .. }) => root,
             Some(NodeKind::Split { orientation, .. }) => {
@@ -102,11 +146,15 @@ impl BspLayoutSystem {
                         Direction::Right | Direction::Down => children.first().copied(),
                     }
                 } else {
-                    children.first().copied()
+                    // Take the side lined up with where focus came from, not the first.
+                    children.iter().copied().min_by(|a, b| {
+                        self.distance_across(*a, direction, anchor)
+                            .total_cmp(&self.distance_across(*b, direction, anchor))
+                    })
                 };
 
                 if let Some(child) = target_child {
-                    self.find_closest_leaf_in_direction(child, direction)
+                    self.find_closest_leaf_in_direction(child, direction, anchor)
                 } else {
                     root
                 }
@@ -876,6 +924,64 @@ mod tests {
             let tree = spiral.draw_tree(layout);
             assert_eq!(tree.matches("Horizontal").count(), horizontal);
             assert_eq!(tree.matches("Vertical").count(), vertical);
+        }
+    }
+
+    #[test]
+    fn focus_into_a_perpendicular_split_picks_the_adjacent_window() {
+        let (mut system, layout) = tiled(&[1, 2]);
+        assert!(system.select_window(layout, w(1)));
+        system.add_window_after_selection(layout, w(3));
+        assert!(system.select_window(layout, w(2)));
+        system.add_window_after_selection(layout, w(4));
+        let frames =
+            calculate_frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
+        for (window, x, y) in [
+            (1, 0.0, 0.0),
+            (2, 500.0, 0.0),
+            (3, 0.0, 500.0),
+            (4, 500.0, 500.0),
+        ] {
+            assert_frame(&frames, w(window), (x, y, 500.0, 500.0));
+        }
+
+        for (from, direction, to) in [
+            (4, Direction::Left, 3),
+            (3, Direction::Right, 4),
+            (1, Direction::Right, 2),
+            (2, Direction::Left, 1),
+        ] {
+            assert!(system.select_window(layout, w(from)));
+            assert_eq!(system.move_focus(layout, direction).0, Some(w(to)));
+        }
+
+        let (mut system, layout) = tiled(&[1, 2]);
+        system.toggle_tile_orientation(layout);
+        for (anchor, new) in [(1, 3), (2, 4)] {
+            assert!(system.select_window(layout, w(anchor)));
+            system.add_window_after_selection(layout, w(new));
+            assert!(system.select_window(layout, w(new)));
+            system.toggle_tile_orientation(layout);
+        }
+        let frames =
+            calculate_frames(&system, layout, CGSize::new(1000.0, 1000.0), &Default::default());
+        for (window, x, y) in [
+            (1, 0.0, 0.0),
+            (3, 500.0, 0.0),
+            (2, 0.0, 500.0),
+            (4, 500.0, 500.0),
+        ] {
+            assert_frame(&frames, w(window), (x, y, 500.0, 500.0));
+        }
+
+        for (from, direction, to) in [
+            (4, Direction::Up, 3),
+            (3, Direction::Down, 4),
+            (1, Direction::Down, 2),
+            (2, Direction::Up, 1),
+        ] {
+            assert!(system.select_window(layout, w(from)));
+            assert_eq!(system.move_focus(layout, direction).0, Some(w(to)));
         }
     }
 
