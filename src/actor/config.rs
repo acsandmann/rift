@@ -411,7 +411,10 @@ mod tests {
             source.settings.focus_follows_mouse_disable_hotkey =
                 Some(serde_json::from_value(serde_json::json!(spec)).unwrap());
             let json = serde_json::to_value(&source).unwrap();
-            assert!(serde_json::from_value::<ConfigSource>(json).unwrap() == source, "{spec}");
+            assert!(
+                serde_json::from_value::<ConfigSource>(json).unwrap() == source,
+                "{spec}"
+            );
         }
     }
 

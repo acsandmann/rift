@@ -12,8 +12,8 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
-use crate::sys::window_server::{self, WindowIterator, WindowServerId};
 use crate::sys::window_notify::EventData;
+use crate::sys::window_server::{self, WindowIterator, WindowServerId};
 use crate::sys::{event, window_notify};
 
 #[derive(Default)]

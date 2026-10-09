@@ -35,11 +35,13 @@ pub struct EventData {
 }
 
 /// One channel carries every subscribed event type; `EventData::event_type` tells them apart.
-static EVENT_CHANNEL: Lazy<(actor::Sender<EventData>, Mutex<Option<actor::Receiver<EventData>>>)> =
-    Lazy::new(|| {
-        let (tx, rx) = actor::channel::<EventData>();
-        (tx, Mutex::new(Some(rx)))
-    });
+static EVENT_CHANNEL: Lazy<(
+    actor::Sender<EventData>,
+    Mutex<Option<actor::Receiver<EventData>>>,
+)> = Lazy::new(|| {
+    let (tx, rx) = actor::channel::<EventData>();
+    (tx, Mutex::new(Some(rx)))
+});
 
 static REGISTERED_EVENTS: Lazy<Mutex<HashSet<CGSEventType>>> =
     Lazy::new(|| Mutex::new(HashSet::default()));
