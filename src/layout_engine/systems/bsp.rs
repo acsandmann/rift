@@ -379,15 +379,24 @@ impl BspLayoutSystem {
         if children.len() != 2 {
             return parent_id;
         }
-        let sibling = if children[0] == node {
-            children[1]
-        } else {
-            children[0]
-        };
+        node.detach(&mut self.tree).remove();
+        self.kind.remove(node);
+        self.stacks.remove(&node);
+        self.collapse_split(parent_id);
+        parent_id
+    }
 
+    /// Promote the sole remaining child while keeping the layout's root stable.
+    fn collapse_split(&mut self, parent_id: NodeId) {
+        if !matches!(self.kind.get(parent_id), Some(NodeKind::Split { .. })) {
+            return;
+        }
+        let children: Vec<_> = parent_id.children(&self.tree.map).collect();
+        let [sibling] = children.as_slice() else { return };
+        let sibling = *sibling;
         let sibling_kind = match self.kind.get(sibling) {
             Some(k) => k.clone(),
-            None => return parent_id,
+            None => return,
         };
 
         self.kind.insert(parent_id, sibling_kind.clone());
@@ -422,13 +431,9 @@ impl BspLayoutSystem {
             }
         }
 
-        node.detach(&mut self.tree).remove();
         sibling.detach(&mut self.tree).remove();
-        self.kind.remove(node);
         self.kind.remove(sibling);
-        self.stacks.remove(&node);
         self.stacks.remove(&sibling);
-        parent_id
     }
 
     fn selection_of_layout(&self, layout: crate::layout_engine::LayoutId) -> Option<NodeId> {
@@ -868,6 +873,174 @@ mod tests {
 
         assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
+
+    #[test]
+    fn directional_move_reinserts_window_outside_its_old_split() {
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            let mut system = BspLayoutSystem::default();
+            let layout = system.create_layout();
+            system.add_window_after_selection(layout, w(1));
+            system.add_window_after_selection(layout, w(2));
+            let vertical = matches!(direction, Direction::Up | Direction::Down);
+            if vertical {
+                system.toggle_tile_orientation(layout);
+            }
+            system.add_window_after_selection(layout, w(3));
+            if vertical {
+                system.toggle_tile_orientation(layout);
+            }
+            let backwards = matches!(direction, Direction::Left | Direction::Up);
+            let moving = if backwards { w(3) } else { w(1) };
+            assert!(system.select_window(layout, moving));
+            assert!(system.move_selection(layout, direction));
+            assert_eq!(system.selected_window(layout), Some(moving));
+
+            let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+            let frames: HashMap<_, _> = system
+                .calculate_layout(
+                    layout,
+                    screen,
+                    0.0,
+                    &Default::default(),
+                    &Default::default(),
+                    0.0,
+                    Default::default(),
+                    Default::default(),
+                )
+                .into_iter()
+                .collect();
+            let expected = if backwards {
+                [
+                    (250.0, 0.0, 250.0, 1000.0),
+                    (500.0, 0.0, 500.0, 1000.0),
+                    (0.0, 0.0, 250.0, 1000.0),
+                ]
+            } else {
+                [
+                    (500.0, 0.0, 500.0, 500.0),
+                    (0.0, 0.0, 500.0, 500.0),
+                    (0.0, 500.0, 1000.0, 500.0),
+                ]
+            };
+            assert_eq!(frames.len(), 3);
+            for (index, (x, y, width, height)) in expected.into_iter().enumerate() {
+                let (x, y, width, height) = if vertical {
+                    (y, x, height, width)
+                } else {
+                    (x, y, width, height)
+                };
+                assert_eq!(
+                    frames[&w(index as u32 + 1)],
+                    CGRect::new(CGPoint::new(x, y), CGSize::new(width, height)),
+                    "{direction:?}"
+                );
+            }
+            assert!(
+                !system.move_selection(layout, direction),
+                "movement at the outer edge must remain available for cross-display handling"
+            );
+            assert_eq!(system.selected_window(layout), Some(moving));
+        }
+    }
+
+    #[test]
+    fn directional_move_keeps_stack_members_and_fullscreen_with_the_leaf() {
+        for sibling in [false, true] {
+            let mut system = BspLayoutSystem::default();
+            let layout = system.create_layout();
+            system.add_window_after_selection(layout, w(1));
+            system.add_window_after_selection(layout, w(2));
+            if !sibling {
+                system.add_window_after_selection(layout, w(3));
+            }
+            let source = if sibling { w(2) } else { w(3) };
+            system.add_window_after_selection(layout, w(4));
+            system.add_window_after_selection(layout, w(5));
+            assert!(system.apply_window_drop(
+                layout,
+                w(4),
+                source,
+                crate::layout_engine::WindowDropAction::Stack
+            ));
+            assert!(system.apply_window_drop(
+                layout,
+                w(5),
+                w(1),
+                crate::layout_engine::WindowDropAction::Stack
+            ));
+            assert!(system.select_window(layout, w(4)));
+            system.toggle_fullscreen_of_selection(layout);
+
+            assert!(system.move_selection(layout, Direction::Left));
+            assert_eq!(system.selected_window(layout), Some(w(4)));
+            assert_eq!(system.stack_members(layout, w(4)), vec![source, w(4)]);
+            assert_eq!(system.stack_members(layout, w(5)), vec![w(1), w(5)]);
+            assert!(system.has_any_fullscreen_node(layout));
+            system.toggle_fullscreen_of_selection(layout);
+            assert!(!system.has_any_fullscreen_node(layout));
+
+            let mut windows = system.all_windows_in_layout(layout);
+            windows.sort();
+            let expected = if sibling {
+                vec![w(1), w(2), w(4), w(5)]
+            } else {
+                vec![w(1), w(2), w(3), w(4), w(5)]
+            };
+            assert_eq!(windows, expected);
+            for window in windows {
+                assert!(system.select_window(layout, window));
+                assert_eq!(system.selected_window(layout), Some(window));
+                system.remove_window(window);
+                assert!(!system.contains_window(layout, window));
+            }
+            assert!(system.all_windows_in_layout(layout).is_empty());
+        }
+    }
+
+    #[test]
+    fn directional_move_fills_empty_slot_and_reclaims_old_split() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        assert!(system.select_window(layout, w(1)));
+        system.split_selection(layout, LayoutKind::Horizontal);
+        assert!(!system.move_selection(layout, Direction::Right));
+        assert!(system.select_window(layout, w(3)));
+        assert!(system.move_selection(layout, Direction::Left));
+        assert_eq!(system.selected_window(layout), Some(w(3)));
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let frames: HashMap<_, _> = system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &Default::default(),
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+        assert_eq!(frames.len(), 3);
+        for (window, x, width) in [
+            (w(1), 0.0, 250.0),
+            (w(3), 250.0, 250.0),
+            (w(2), 500.0, 500.0),
+        ] {
+            assert_eq!(
+                frames[&window],
+                CGRect::new(CGPoint::new(x, 0.0), CGSize::new(width, 1000.0))
+            );
+        }
     }
 
     #[test]
@@ -1626,37 +1799,59 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(sel) = sel_snapshot else {
+        let Some(sel) = self.selection_of_layout(layout) else {
             return false;
         };
-        let sel_leaf = self.descend_to_leaf(sel);
-        let Some(neighbor_leaf) = self.find_neighbor_leaf(sel_leaf, direction) else {
+        let moving = self.descend_to_leaf(sel);
+        if !matches!(
+            self.kind.get(moving),
+            Some(NodeKind::Leaf { window: Some(_), .. })
+        ) {
+            return false;
+        }
+        let Some(target) = self.find_neighbor_leaf(moving, direction) else {
             return false;
         };
-        let (mut a_window, mut b_window) = (None, None);
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
-            a_window = *window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
-            b_window = *window;
-        }
-        if a_window.is_none() && b_window.is_none() {
+        let Some(old_parent) = moving.parent(&self.tree.map) else {
             return false;
+        };
+
+        // Siblings already share the requested split: reorder them without
+        // resetting the split ratio or exchanging their window state.
+        if target.parent(&self.tree.map) == Some(old_parent) {
+            match direction {
+                Direction::Left | Direction::Up => {
+                    moving.detach(&mut self.tree).insert_before(target);
+                }
+                Direction::Right | Direction::Down => {
+                    moving.detach(&mut self.tree).push_back(old_parent);
+                }
+            }
+        } else if matches!(self.kind.get(target), Some(NodeKind::Leaf { window: None, .. })) {
+            // A pre-created empty slot receives the leaf directly.
+            moving.detach(&mut self.tree).insert_before(target);
+            target.detach(&mut self.tree).remove();
+            self.kind.remove(target);
+            self.collapse_split(old_parent);
+        } else {
+            // Transfer the entire leaf (including stacks and fullscreen state)
+            // onto a new split at the directional neighbor, then reclaim its
+            // old region for the sibling left behind.
+            let split = self.tree.mk_node().into_id();
+            self.kind.insert(split, NodeKind::Split {
+                orientation: direction.orientation(),
+                ratio: 0.5,
+            });
+            split.detach(&mut self.tree).insert_before(target);
+            let (first, second) = match direction {
+                Direction::Left | Direction::Up => (moving, target),
+                Direction::Right | Direction::Down => (target, moving),
+            };
+            first.detach(&mut self.tree).push_back(split);
+            second.detach(&mut self.tree).push_back(split);
+            self.collapse_split(old_parent);
         }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
-            *window = b_window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
-            *window = a_window;
-        }
-        if let Some(w) = a_window {
-            self.index_window(w, neighbor_leaf);
-        }
-        if let Some(w) = b_window {
-            self.index_window(w, sel_leaf);
-        }
-        self.tree.data.selection.select(&self.tree.map, neighbor_leaf);
+        self.tree.data.selection.select(&self.tree.map, moving);
         true
     }
 
