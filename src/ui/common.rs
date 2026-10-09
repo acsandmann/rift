@@ -1,7 +1,5 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
-use crate::model::server::RuntimeWindowData;
-
 #[derive(Clone, Copy, Debug)]
 pub struct WindowLayoutMetrics {
     pub scale: f64,
@@ -13,12 +11,12 @@ pub struct WindowLayoutMetrics {
 }
 
 impl WindowLayoutMetrics {
-    pub fn rect_for(&self, window: &RuntimeWindowData, min_size: f64, gap: f64) -> CGRect {
-        let wx = window.info.frame.origin.x - self.min_x;
-        let wy_top = window.info.frame.origin.y - self.min_y + window.info.frame.size.height;
+    pub fn rect_for(&self, window: &CGRect, min_size: f64, gap: f64) -> CGRect {
+        let wx = window.origin.x - self.min_x;
+        let wy_top = window.origin.y - self.min_y + window.size.height;
         let wy = self.disp_h - wy_top;
-        let ww = window.info.frame.size.width;
-        let wh = window.info.frame.size.height;
+        let ww = window.size.width;
+        let wh = window.size.height;
 
         let mut rx = self.x_offset + wx * self.scale;
         let mut ry = self.y_offset + wy * self.scale;
@@ -39,7 +37,7 @@ impl WindowLayoutMetrics {
 }
 
 pub fn compute_window_layout_metrics(
-    windows: &[RuntimeWindowData],
+    windows: &[CGRect],
     bounds: CGRect,
     inset: f64,
     scale_factor: f64,
@@ -55,10 +53,10 @@ pub fn compute_window_layout_metrics(
     let mut max_y = f64::NEG_INFINITY;
 
     for w in windows {
-        let x0 = w.info.frame.origin.x;
-        let y0 = w.info.frame.origin.y;
-        let x1 = x0 + w.info.frame.size.width;
-        let y1 = y0 + w.info.frame.size.height;
+        let x0 = w.origin.x;
+        let y0 = w.origin.y;
+        let x1 = x0 + w.size.width;
+        let y1 = y0 + w.size.height;
         if x0 < min_x {
             min_x = x0;
         }

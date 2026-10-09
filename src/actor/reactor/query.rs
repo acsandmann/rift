@@ -283,14 +283,117 @@ impl Reactor {
                 display_uuid,
                 space,
                 is_active_context: Some(space) == active_space,
-                workspaces: self.query_workspaces(Some(space)),
+                workspaces: self.menu_workspaces(space),
             })
             .collect();
 
-        menu_tx.send(menu_bar::Event::Update(menu_bar::Update {
+        let update = menu_bar::Update {
             active_space_is_activated,
             displays,
-        }));
+        };
+        let signature = menu_bar::sig(&update);
+        if self.menu_manager.last_projection_signature == Some(signature) {
+            return;
+        }
+        self.menu_manager.last_projection_signature = Some(signature);
+        menu_tx.send(menu_bar::Event::Update(update));
+    }
+
+    fn menu_workspaces(&mut self, space: SpaceId) -> Vec<menu_bar::Workspace> {
+        use crate::common::config::{MenuBarDisplayMode, WorkspaceDisplayStyle};
+        let settings = &self.config.settings.ui.menu_bar;
+        let show_layout =
+            settings.enabled && settings.display_style == WorkspaceDisplayStyle::Layout;
+        let active_only = settings.mode == MenuBarDisplayMode::Active;
+        let workspaces = self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
+        let active = self.layout_manager.layout_engine.workspaces().active_workspace(space);
+        workspaces
+            .into_iter()
+            .enumerate()
+            .map(|(index, (id, name))| {
+                let is_active = active == Some(id);
+                let mut windows = self.layout_manager.layout_engine.workspaces().workspace_windows(
+                    &self.state.windows,
+                    space,
+                    id,
+                );
+                windows.retain(|wid| {
+                    self.app_manager.apps.contains_key(&wid.pid)
+                        && self
+                            .state
+                            .windows
+                            .window(*wid)
+                            .is_some_and(|window| window.is_admitted())
+                });
+                let window_count = windows.len();
+                let mut frames = Vec::new();
+                if show_layout && (!active_only || is_active) && !windows.is_empty() {
+                    // Preserve scrolling visual order without rich per-window snapshots
+                    // or logical-frame maps that the menu never consumes.
+                    let positions = self.logical_window_positions_for(Some(space), Some(index));
+                    windows.sort_by_key(|wid| {
+                        let position =
+                            (!self.layout_manager.layout_engine.is_window_floating(*wid))
+                                .then(|| positions.get(wid))
+                                .flatten();
+                        position.map_or((1, usize::MAX, usize::MAX), |p| (0, p.column, p.row))
+                    });
+                    let predicted: std::collections::HashMap<WindowId, CGRect> = if !is_active {
+                        self.space_state
+                            .screen_by_space(space)
+                            .or_else(|| self.space_state.screens.first())
+                            .map(|screen| {
+                                let gaps = self
+                                    .config
+                                    .settings
+                                    .layout
+                                    .gaps
+                                    .effective_for_display(screen.display_uuid_opt());
+                                self.layout_manager
+                                    .layout_engine
+                                    .calculate_layout_for_workspace(
+                                        &self.state.windows,
+                                        space,
+                                        id,
+                                        screen.frame,
+                                        &gaps,
+                                        self.config.settings.ui.stack_line.thickness(),
+                                        self.config.settings.ui.stack_line.horiz_placement,
+                                        self.config.settings.ui.stack_line.vert_placement,
+                                    )
+                                    .into_iter()
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Default::default()
+                    };
+                    frames = windows
+                        .into_iter()
+                        .filter_map(|wid| {
+                            predicted.get(&wid).copied().or_else(|| {
+                                self.state.windows.window(wid).map(|w| w.frame_monotonic)
+                            })
+                        })
+                        .collect();
+                }
+                menu_bar::Workspace {
+                    id: format!("{id:?}"),
+                    index,
+                    name,
+                    is_active,
+                    window_count,
+                    windows: frames,
+                    layout_mode: self
+                        .layout_manager
+                        .layout_engine
+                        .workspaces()
+                        .workspace_info(space, id)
+                        .map(|ws| ws.layout_mode().to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                }
+            })
+            .collect()
     }
 
     fn resolve_menu_bar_space_with_preferred(

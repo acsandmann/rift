@@ -26,7 +26,7 @@ use objc2_foundation::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::actor::menu_bar::DisplayWorkspaces;
+use crate::actor::menu_bar::{DisplayWorkspaces, Workspace};
 use crate::actor::reactor::{
     Command as ReactorTopCommand, Event as ReactorEvent, ReactorCommand, Sender as ReactorSender,
 };
@@ -36,7 +36,6 @@ use crate::common::config::{
     WorkspaceSelector, restore_file,
 };
 use crate::layout_engine::{LayoutCommand, LayoutEngine, RestoreScope, RestoreSource};
-use crate::model::server::RuntimeWorkspaceData;
 use crate::sys::hotkey::{Hotkey, KeyCode, Modifiers};
 use crate::sys::screen::SpaceId;
 use crate::ui::common::compute_window_layout_metrics;
@@ -129,7 +128,7 @@ struct WorkspaceTopology {
 }
 
 #[cfg(test)]
-fn workspace_topology(workspaces: &[RuntimeWorkspaceData]) -> Vec<WorkspaceTopology> {
+fn workspace_topology(workspaces: &[Workspace]) -> Vec<WorkspaceTopology> {
     workspaces
         .iter()
         .map(|workspace| WorkspaceTopology {
@@ -209,7 +208,7 @@ impl MenuIcon {
 
     pub fn sync_workspace_topology(
         &mut self,
-        workspaces: &[RuntimeWorkspaceData],
+        workspaces: &[Workspace],
         hotkeys: &[(Hotkey, WmCommand)],
     ) {
         let unchanged = self.workspace_items.len() == workspaces.len()
@@ -256,11 +255,7 @@ impl MenuIcon {
         self.workspace_item.setEnabled(!workspaces.is_empty());
     }
 
-    pub fn update_menu_state(
-        &self,
-        active_space_is_activated: bool,
-        workspaces: &[RuntimeWorkspaceData],
-    ) {
+    pub fn update_menu_state(&self, active_space_is_activated: bool, workspaces: &[Workspace]) {
         let active = workspaces.iter().find(|workspace| workspace.is_active);
         let active_layout = active.and_then(|workspace| parse_layout_mode(&workspace.layout_mode));
         let active_id = active.map(|workspace| workspace.id.as_str());
@@ -373,7 +368,7 @@ struct WorkspaceRenderData {
 struct WorkspaceRenderInput<'a> {
     display_uuid: &'a str,
     space: SpaceId,
-    workspace: &'a RuntimeWorkspaceData,
+    workspace: &'a Workspace,
     label: Cow<'a, str>,
     show_windows: bool,
 }
@@ -450,7 +445,7 @@ impl MenuIconRenderKey {
                             .windows
                             .iter()
                             .map(|window| {
-                                let frame = window.info.frame;
+                                let frame = *window;
                                 [
                                     frame.origin.x.to_bits(),
                                     frame.origin.y.to_bits(),
@@ -480,7 +475,7 @@ impl MenuIconRenderKey {
                         || (key.window_frames.len() == input.workspace.windows.len()
                             && key.window_frames.iter().zip(&input.workspace.windows).all(
                                 |(frame_key, window)| {
-                                    let frame = window.info.frame;
+                                    let frame = *window;
                                     *frame_key
                                         == [
                                             frame.origin.x.to_bits(),
@@ -512,10 +507,7 @@ fn centered_origin(container_origin: f64, container_size: f64, content_size: f64
     container_origin + (container_size - content_size) / 2.0
 }
 
-fn workspace_label(
-    workspace: &RuntimeWorkspaceData,
-    label_style: ActiveWorkspaceLabel,
-) -> Cow<'_, str> {
+fn workspace_label(workspace: &Workspace, label_style: ActiveWorkspaceLabel) -> Cow<'_, str> {
     match label_style {
         ActiveWorkspaceLabel::Index => Cow::Owned((workspace.index + 1).to_string()),
         ActiveWorkspaceLabel::Name if !workspace.name.is_empty() => {
@@ -632,7 +624,7 @@ fn set_menu_item_hotkey(item: &NSMenuItem, hotkey: Option<&Hotkey>) {
     item.setKeyEquivalentModifierMask(modifiers);
 }
 
-fn workspace_menu_title(workspace: &RuntimeWorkspaceData) -> String {
+fn workspace_menu_title(workspace: &Workspace) -> String {
     if workspace.name.is_empty() {
         format!("Workspace {}", workspace.index + 1)
     } else {
@@ -1206,16 +1198,8 @@ impl MenuActionHandler {
 mod layout_library_tests {
     use super::*;
 
-    fn workspace(
-        id: &str,
-        index: usize,
-        name: &str,
-        active: bool,
-        layout: &str,
-    ) -> RuntimeWorkspaceData {
-        RuntimeWorkspaceData {
-            workspace_id: crate::model::VirtualWorkspaceId::default(),
-            space: crate::sys::screen::SpaceId::new(1),
+    fn workspace(id: &str, index: usize, name: &str, active: bool, layout: &str) -> Workspace {
+        Workspace {
             id: id.to_owned(),
             index,
             name: name.to_owned(),

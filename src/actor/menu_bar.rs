@@ -3,12 +3,12 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use cgs::MainThreadMarker;
+use objc2_core_foundation::CGRect;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::actor::{config, reactor};
 use crate::common::config::{Config, ConfigCommand};
 use crate::layout_engine::LayoutCommand;
-use crate::model::server::RuntimeWorkspaceData;
 use crate::sys::screen::SpaceId;
 use crate::ui::menu_bar::{MenuAction, MenuIcon};
 use crate::ui::settings::{Action, Finish, Request};
@@ -19,13 +19,26 @@ type UpdateCheck = (
     crate::ui::settings::updates::Completion,
 );
 
+/// Data consumed by the workspace menu and miniature layout indicator.
+/// Window titles, application metadata, and logical layout snapshots stay in IPC queries.
+#[derive(Debug, Clone)]
+pub struct Workspace {
+    pub id: String,
+    pub index: usize,
+    pub name: String,
+    pub layout_mode: String,
+    pub is_active: bool,
+    pub window_count: usize,
+    pub windows: Vec<CGRect>,
+}
+
 /// Menu-bar-only projection; workspace indices remain local to each space.
 #[derive(Debug, Clone)]
 pub struct DisplayWorkspaces {
     pub display_uuid: String,
     pub space: SpaceId,
     pub is_active_context: bool,
-    pub workspaces: Vec<RuntimeWorkspaceData>,
+    pub workspaces: Vec<Workspace>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +48,7 @@ pub struct Update {
 }
 
 impl Update {
-    pub fn context_workspaces(&self) -> &[RuntimeWorkspaceData] {
+    pub fn context_workspaces(&self) -> &[Workspace] {
         self.displays
             .iter()
             .find(|display| display.is_active_context)
@@ -538,7 +551,7 @@ impl Menu {
     }
 }
 
-fn sig(update: &Update) -> u64 {
+pub(crate) fn sig(update: &Update) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     update.active_space_is_activated.hash(&mut hash);
@@ -557,7 +570,7 @@ fn sig(update: &Update) -> u64 {
             workspace.window_count.hash(&mut hash);
             workspace.windows.len().hash(&mut hash);
             for window in &workspace.windows {
-                let frame = window.info.frame;
+                let frame = *window;
                 [
                     frame.origin.x.to_bits(),
                     frame.origin.y.to_bits(),
@@ -574,12 +587,9 @@ fn sig(update: &Update) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::server::RuntimeWorkspaceData;
 
-    fn workspace(layout_mode: &str) -> RuntimeWorkspaceData {
-        RuntimeWorkspaceData {
-            workspace_id: crate::model::VirtualWorkspaceId::default(),
-            space: crate::sys::screen::SpaceId::new(1),
+    fn workspace(layout_mode: &str) -> Workspace {
+        Workspace {
             id: "VirtualWorkspaceId(1v1)".to_string(),
             index: 0,
             name: "main".to_string(),
@@ -590,7 +600,7 @@ mod tests {
         }
     }
 
-    fn update(workspaces: Vec<RuntimeWorkspaceData>) -> Update {
+    fn update(workspaces: Vec<Workspace>) -> Update {
         Update {
             active_space_is_activated: true,
             displays: vec![DisplayWorkspaces {

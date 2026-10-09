@@ -137,6 +137,7 @@ pub struct NotificationManager {
 pub struct MenuManager {
     pub menu_state: super::MenuState,
     pub menu_tx: Option<menu_bar::Sender>,
+    pub last_projection_signature: Option<u64>,
 }
 
 /// Manages Mission Control state
