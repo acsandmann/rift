@@ -143,6 +143,14 @@ impl Menu {
         let mut update_check: Option<UpdateCheck> = None;
         loop {
             tokio::select! {
+                // A queued close must retire its owner before another open or UI request.
+                biased;
+                maybe_action = self.action_rx.recv() => {
+                    if let Some(action) = maybe_action {
+                        if matches!(action, MenuAction::OpenSettings) { self.open_settings().await; }
+                        else { self.handle_action(action); }
+                    }
+                }
                 result = async {
                     match &mut update_check {
                         Some((receive, _)) => receive.await,
@@ -197,12 +205,6 @@ impl Menu {
                 Some(request) = self.settings_requests.recv() => {
                     self.handle_settings_request(request, &mut update_check).await;
                 }
-                maybe_action = self.action_rx.recv() => {
-                    if let Some(action) = maybe_action {
-                        if matches!(action, MenuAction::OpenSettings) { self.open_settings().await; }
-                        else { self.handle_action(action); }
-                    }
-                }
             }
         }
     }
@@ -220,7 +222,7 @@ impl Menu {
                 return;
             }
             Action::RefreshRuntime => {
-                self.discover_applications(Some(request.finish));
+                self.discover_applications(request.finish);
                 return;
             }
             Action::Edit(edit) => self.config_tx.send(config::Event::EditSource { edit, response }),
@@ -300,7 +302,6 @@ impl Menu {
                     ));
                 }
                 self.settings.as_ref().unwrap().show();
-                self.discover_applications(None);
             }
             Err(error) => {
                 tracing::error!(%error, "Could not open Settings");
@@ -313,15 +314,13 @@ impl Menu {
 
     /// Scan installed applications off the main thread; the result returns as a `MenuAction`
     /// so the menu actor keeps handling events and no closed window or model is retained.
-    fn discover_applications(&mut self, finish: Option<Finish>) {
+    fn discover_applications(&mut self, finish: Finish) {
         if self
             .settings
             .as_ref()
             .is_none_or(|settings| settings.has_installed_applications())
         {
-            if let Some(finish) = finish {
-                finish(Ok(()));
-            }
+            finish(Ok(()));
             return;
         }
         let actions = &self.action_tx;
@@ -333,7 +332,7 @@ impl Menu {
             });
             Vec::new()
         });
-        waiting.extend(finish);
+        waiting.push(finish);
     }
 
     async fn sync_settings(&self) {
@@ -471,16 +470,20 @@ impl Menu {
             MenuAction::OpenSettings => {}
             // Run after windowWillClose returns, rather than dropping AppKit's active delegate.
             MenuAction::SettingsClosed => {
-                self.settings = None;
-                // Keep the in-flight marker so reopening cannot start a duplicate scan.
-                if let Some(waiting) = &mut self.app_scan {
-                    waiting.clear();
-                }
+                objc2::rc::autoreleasepool(|_| {
+                    drop(self.settings.take());
+                    // Keep the in-flight marker so reopening cannot start a duplicate scan.
+                    if let Some(waiting) = &mut self.app_scan {
+                        waiting.clear();
+                    }
+                });
             }
-            // A scan finishing after close is dropped; after reopening it serves the new window.
+            // A reopened window uses an in-flight scan only if it requested the inventory.
             MenuAction::InstalledApplications(apps) => {
                 let waiting = self.app_scan.take().unwrap_or_default();
-                if let Some(settings) = &self.settings {
+                if let Some(settings) = &self.settings
+                    && !waiting.is_empty()
+                {
                     settings.set_installed_applications(apps);
                     waiting.into_iter().for_each(|finish| finish(Ok(())));
                 }

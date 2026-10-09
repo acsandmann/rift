@@ -44,13 +44,7 @@ fn change_text(field: &objc2_app_kit::NSTextField, text: &str) {
 pub fn run(ui: Ui) {
     let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
     let (model, host) = autoreleasepool(|_| {
-        let mut source = ConfigSource {
-            settings: crate::common::config::Config::default().settings,
-            keys: Default::default(),
-            binding_modes: Default::default(),
-            virtual_workspaces: Default::default(),
-            modifier_combinations: Default::default(),
-        };
+        let mut source = source();
         source.settings.layout.base.window_insertion_point =
             Some(crate::common::config::WindowInsertionPoint::NextToSelection);
         let settings = Settings::new(
@@ -503,4 +497,112 @@ pub fn run(ui: Ui) {
             .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05))
     });
     assert!(host.load().is_none(), "closing must release the page host");
+    repeated_close(ui);
+}
+
+fn repeated_close(ui: Ui) {
+    let app = NSApplication::sharedApplication(ui.mtm());
+    let policy = app.activationPolicy();
+    for _ in 0..20 {
+        let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
+        let closed = Rc::new(Cell::new(false));
+        let on_close = closed.clone();
+        let mut completions = Vec::new();
+        let (model, router, env, window, toolbar, pages, sheet, draft) = autoreleasepool(|_| {
+            let settings = Settings::new(
+                ui,
+                source(),
+                "/tmp/native-settings-test.toml".into(),
+                vec![],
+                vec![],
+                requests,
+                move || on_close.set(true),
+            );
+            settings.show();
+            assert!(pending.try_recv().is_err(), "General does not need discovery");
+            for id in 0..PAGE_COUNT {
+                settings.router.navigate(id);
+            }
+            let discovery = pending.try_recv().unwrap();
+            assert!(matches!(discovery.action, Action::RefreshRuntime));
+            completions.push(discovery);
+            settings.router.navigate(8);
+            let about = settings.router.pages.borrow()[8].as_ref().unwrap().view.clone();
+            let check = find::<objc2_app_kit::NSButton>(about.ns_view()).unwrap();
+            assert_eq!(check.title().to_string(), "Check for Updates…");
+            assert!(unsafe { check.sendAction_to(check.action(), check.target().as_deref()) });
+            completions.push(pending.try_recv().unwrap());
+            // Leave discovery and update completions pending and a sheet open during teardown.
+            settings.router.navigate(2);
+            let page = settings.router.pages.borrow()[2].as_ref().unwrap().view.clone();
+            let table = find::<NSTableView>(page.ns_view()).unwrap();
+            table.selectRowIndexes_byExtendingSelection(
+                &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
+                false,
+            );
+            assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
+            let draft = Rc::downgrade(settings.router.model.sheet_model.borrow().as_ref().unwrap());
+            let sheet = objc2::rc::Weak::new(
+                settings.router.model.sheet.borrow().as_ref().unwrap().ns_window(),
+            );
+            let model = Rc::downgrade(&settings.router.model);
+            let router = Rc::downgrade(&settings.router);
+            let env = Rc::downgrade(&settings.router.model.env);
+            let window = objc2::rc::Weak::new(settings.window.ns_window());
+            let toolbar = objc2::rc::Weak::new(settings.window.toolbar().ns_toolbar());
+            let pages: Vec<_> = settings
+                .router
+                .pages
+                .borrow()
+                .iter()
+                .flatten()
+                .map(|page| objc2::rc::Weak::new(page.view.ns_view()))
+                .collect();
+            settings.window.ns_window().close();
+            assert!(closed.get(), "native close notifies the deferred owner");
+            assert!(model.upgrade().is_some(), "owner survives windowWillClose");
+            assert_eq!(
+                app.activationPolicy(),
+                policy,
+                "close restores activation policy"
+            );
+            autoreleasepool(|_| drop(settings));
+            (model, router, env, window, toolbar, pages, sheet, draft)
+        });
+        assert!(model.upgrade().is_none());
+        assert!(router.upgrade().is_none());
+        assert!(
+            env.upgrade().is_none(),
+            "pending completions must not retain the environment"
+        );
+        assert!(draft.upgrade().is_none(), "release the open sheet's draft");
+        // Late asynchronous completions must remain safe after native and Rust teardown.
+        for request in completions {
+            if let Action::CheckUpdates(done) = request.action {
+                done(Ok("Up to date".into()));
+            }
+            (request.finish)(Ok(()));
+        }
+        autoreleasepool(|_| {
+            objc2_foundation::NSRunLoop::currentRunLoop()
+                .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05));
+        });
+        assert!(window.load().is_none(), "release the native window");
+        assert!(toolbar.load().is_none(), "release the native toolbar");
+        assert!(sheet.load().is_none(), "release the attached sheet");
+        assert!(
+            pages.iter().all(|page| page.load().is_none()),
+            "release cached native pages"
+        );
+    }
+}
+
+fn source() -> ConfigSource {
+    ConfigSource {
+        settings: crate::common::config::Config::default().settings,
+        keys: Default::default(),
+        binding_modes: Default::default(),
+        virtual_workspaces: Default::default(),
+        modifier_combinations: Default::default(),
+    }
 }
