@@ -136,6 +136,32 @@ impl Model {
         );
     }
 
+    /// The open editor works on a draft copy, so discovery results must reach it too.
+    fn set_installed_applications(&self, apps: Vec<(String, String)>) {
+        if let Some(draft) = self.sheet_model.borrow().as_ref() {
+            draft.set_installed_applications(apps.clone());
+        }
+        *self.installed_applications.borrow_mut() = Some(apps);
+        self.rebuild_applications();
+    }
+
+    fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
+        if let Some(draft) = self.sheet_model.borrow().as_ref() {
+            draft.refresh_applications(applications.clone());
+        }
+        let running = |apps: &[rift_protocol::ApplicationData]| {
+            apps.iter()
+                .filter(|app| app.window_count > 0)
+                .map(|app| (app.name.clone(), app.bundle_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        let changed = running(&self.applications.borrow()) != running(&applications);
+        *self.applications.borrow_mut() = applications;
+        if changed {
+            self.rebuild_applications();
+        }
+    }
+
     fn replace_source(&self, source: ConfigSource) {
         if *self.source.borrow() != source {
             *self.source.borrow_mut() = source;
@@ -520,26 +546,11 @@ impl Settings {
     }
 
     pub fn set_installed_applications(&self, apps: Vec<(String, String)>) {
-        *self.model.installed_applications.borrow_mut() = Some(apps);
-        self.model.rebuild_applications();
+        self.model.set_installed_applications(apps);
     }
 
     pub fn refresh_applications(&self, applications: Vec<rift_protocol::ApplicationData>) {
-        let changed = self
-            .model
-            .applications
-            .borrow()
-            .iter()
-            .filter(|app| app.window_count > 0)
-            .map(|app| (&app.name, &app.bundle_id))
-            .ne(applications
-                .iter()
-                .filter(|app| app.window_count > 0)
-                .map(|app| (&app.name, &app.bundle_id)));
-        *self.model.applications.borrow_mut() = applications;
-        if changed {
-            self.model.rebuild_applications();
-        }
+        self.model.refresh_applications(applications);
     }
 
     pub fn refresh_displays(&self, displays: Vec<crate::sys::screen::ScreenInfo>) {

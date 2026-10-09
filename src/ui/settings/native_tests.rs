@@ -128,6 +128,17 @@ pub fn run(ui: Ui) {
                 .iter()
                 .any(|app| app.search.contains("dev.test.editor"))
         );
+        // An open editor holds a draft copy, which must receive later discovery results.
+        let draft = settings.model.draft();
+        *settings.model.sheet_model.borrow_mut() = Some(draft.clone());
+        settings.set_installed_applications(vec![("Late".into(), "dev.test.Late".into())]);
+        assert!(
+            draft.application_inventory.borrow().iter().any(|app| app.search.contains("dev.test.late")),
+            "installed applications reach the open editor"
+        );
+        settings.refresh_applications(Vec::new());
+        assert_eq!(draft.application_inventory.borrow().len(), 1, "runtime refresh reaches the open editor");
+        settings.model.sheet_model.borrow_mut().take();
         // The native menu switches layouts, history returns to the overview, and no secondary sidebar remains.
         autoreleasepool(|_| {
             let navigate = settings.model.navigate.borrow().as_ref().unwrap().clone();
