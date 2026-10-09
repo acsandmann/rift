@@ -55,7 +55,7 @@ disable-axuielement-destroyed = []
 
 [dependencies]
 rift-config-derive = { path = "crates/rift-config-derive" }
-cgs = { version = "0.1.9" }
+cgs = { version = "0.2.0" }
 anyhow = { version = "1.0.83", default-features = false }
 arc-swap = "1"
 ascii_tree = "0.1.1"

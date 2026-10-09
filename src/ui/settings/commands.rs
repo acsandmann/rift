@@ -520,7 +520,7 @@ fn binding_rows(s: &ConfigSource, mode: &str, query: &str) -> Vec<BindingRow> {
                 || shortcut.to_lowercase().contains(query)
                 || key.to_lowercase().contains(query))
             .then(|| BindingRow {
-                key: key.clone(),
+                key: key.to_string(),
                 shortcut,
                 action,
             })
