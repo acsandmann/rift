@@ -328,6 +328,33 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
 }
 
 #[test]
+fn full_save_accepts_workspaces_of_a_space_that_was_never_shown() {
+    let mut engine = test_engine();
+    let mut window_store = WindowStore::default();
+    let size = CGSize::new(1200.0, 800.0);
+    let shown = SpaceId::new(700);
+    let never_shown = SpaceId::new(701);
+    let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(shown, size));
+    // Window assignment and app rules initialize workspaces on Spaces Rift never lays out, such
+    // as a deactivated display or a Space ID left over from sleep.
+    engine.workspaces.ensure_space_initialized(never_shown);
+    let workspace = engine.workspaces.list_workspaces(never_shown)[0].0;
+    assert!(engine.workspaces[workspace].active_layout().is_none());
+    let path = std::env::temp_dir().join(format!(
+        "rift-never-shown-space-save-test-{}-{}.ron",
+        std::process::id(),
+        never_shown.get(),
+    ));
+
+    engine.save_current_layout(path.clone(), &window_store, Some(shown)).unwrap();
+    let mut loaded = LayoutEngine::load(path.clone()).unwrap();
+    let _ = std::fs::remove_file(path);
+    let _ = loaded.handle_event(&mut window_store, LayoutEvent::SpaceExposed(never_shown, size));
+
+    assert!(loaded.workspaces[workspace].active_layout().is_some());
+}
+
+#[test]
 fn load_does_not_arm_locationless_fingerprints() {
     let mut engine = test_engine();
     let orphan = WindowId::new(42, 8);
