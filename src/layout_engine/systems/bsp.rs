@@ -50,10 +50,12 @@ pub struct BspLayoutSystem {
 
 impl BspLayoutSystem {
     fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
+        // Track the source center across the movement axis, relative to each ancestor.
+        let mut anchor = 0.5;
         let mut current = from_leaf;
 
         while let Some(parent) = current.parent(&self.tree.map) {
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get(parent) {
+            if let Some(NodeKind::Split { orientation, ratio }) = self.kind.get(parent) {
                 if *orientation == direction.orientation() {
                     let children: Vec<_> = parent.children(&self.tree.map).collect();
                     if children.len() == 2 {
@@ -76,9 +78,18 @@ impl BspLayoutSystem {
                         };
 
                         if let Some(target) = target_child {
-                            return Some(self.find_closest_leaf_in_direction(target, direction));
+                            return Some(
+                                self.find_closest_leaf_in_direction(target, direction, anchor),
+                            );
                         }
                     }
+                } else {
+                    let ratio = f64::from(*ratio);
+                    anchor = if parent.first_child(&self.tree.map) == Some(current) {
+                        anchor * ratio
+                    } else {
+                        ratio + anchor * (1.0 - ratio)
+                    };
                 }
             }
             current = parent;
@@ -87,10 +98,15 @@ impl BspLayoutSystem {
         None
     }
 
-    fn find_closest_leaf_in_direction(&self, root: NodeId, direction: Direction) -> NodeId {
+    fn find_closest_leaf_in_direction(
+        &self,
+        root: NodeId,
+        direction: Direction,
+        mut anchor: f64,
+    ) -> NodeId {
         match self.kind.get(root) {
             Some(NodeKind::Leaf { .. }) => root,
-            Some(NodeKind::Split { orientation, .. }) => {
+            Some(NodeKind::Split { orientation, ratio }) => {
                 let children: Vec<_> = root.children(&self.tree.map).collect();
                 if children.is_empty() {
                     return root;
@@ -102,11 +118,19 @@ impl BspLayoutSystem {
                         Direction::Right | Direction::Down => children.first().copied(),
                     }
                 } else {
-                    children.first().copied()
+                    let ratio = f64::from(*ratio);
+                    // Choose the adjacent side and express the anchor within that child.
+                    if anchor <= ratio {
+                        anchor /= ratio;
+                        children.first().copied()
+                    } else {
+                        anchor = (anchor - ratio) / (1.0 - ratio);
+                        children.last().copied()
+                    }
                 };
 
                 if let Some(child) = target_child {
-                    self.find_closest_leaf_in_direction(child, direction)
+                    self.find_closest_leaf_in_direction(child, direction, anchor)
                 } else {
                     root
                 }
@@ -876,6 +900,44 @@ mod tests {
             let tree = spiral.draw_tree(layout);
             assert_eq!(tree.matches("Horizontal").count(), horizontal);
             assert_eq!(tree.matches("Vertical").count(), vertical);
+        }
+    }
+
+    #[test]
+    fn focus_into_perpendicular_splits_tracks_the_source_center() {
+        for vertical in [false, true] {
+            for (left_resize, right_resize, targets) in [
+                (0.0, 0.0, [2, 4, 1, 3]),
+                (-0.5, 0.5, [2, 2, 3, 3]),
+                (0.5, -0.5, [4, 4, 1, 1]),
+            ] {
+                let (mut system, layout) = tiled(&[1, 2]);
+                if vertical {
+                    system.toggle_tile_orientation(layout);
+                }
+                for (window, new, resize) in [(1, 3, left_resize), (2, 4, right_resize)] {
+                    assert!(system.select_window(layout, w(window)));
+                    system.add_window_after_selection(layout, w(new));
+                    if vertical {
+                        system.toggle_tile_orientation(layout);
+                    }
+                    assert!(system.select_window(layout, w(window)));
+                    system.resize_selection_by(layout, resize, ResizeOrientation::Smart);
+                }
+                let (forward, backward) = if vertical {
+                    (Direction::Down, Direction::Up)
+                } else {
+                    (Direction::Right, Direction::Left)
+                };
+                for ((from, direction), to) in
+                    [(1, forward), (3, forward), (2, backward), (4, backward)]
+                        .into_iter()
+                        .zip(targets)
+                {
+                    assert!(system.select_window(layout, w(from)));
+                    assert_eq!(system.move_focus(layout, direction), (Some(w(to)), vec![w(to)]));
+                }
+            }
         }
     }
 
