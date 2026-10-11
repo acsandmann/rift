@@ -54,17 +54,6 @@ Get up and running via the docs:
 [<kbd><br>quick start<br></kbd>][quick_start]
 <br>
 
-Enable native Liquid Glass tabs above stacked windows with:
-
-```toml
-[settings.ui.stack_line]
-enabled = true
-```
-
-The native tabs replace the old stack line. Remove its `style`, `hover`, `thickness`,
-`spacing`, placement, and color fields from this config section. The full-strip design
-follows [tabbed](https://github.com/ZimengXiong/tabbed).
-
 ## community
 
 Join [#rift:matrix.org](https://matrix.to/#/#rift:matrix.org) for discussion, support, and development.
