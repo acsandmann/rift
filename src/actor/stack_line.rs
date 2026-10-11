@@ -206,7 +206,7 @@ impl StackLine {
         for group in self.native_groups.values() {
             if let Some(frame) = converter.convert_rect(CGRect::new(
                 group.info.frame.origin,
-                CGSize::new(group.info.frame.size.width, 28.0),
+                CGSize::new(group.info.frame.size.width, cgs::TabBar::HEIGHT),
             )) {
                 group.bar.set_frame(frame);
             } else {
@@ -271,7 +271,7 @@ impl StackLine {
         let group = &self.native_groups[&node];
         if let Some(frame) = self.coordinate_converter.convert_rect(CGRect::new(
             group.info.frame.origin,
-            CGSize::new(group.info.frame.size.width, 28.0),
+            CGSize::new(group.info.frame.size.width, cgs::TabBar::HEIGHT),
         )) {
             group.bar.set_frame(frame);
         } else {
