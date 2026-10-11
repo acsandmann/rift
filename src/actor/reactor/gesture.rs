@@ -223,7 +223,9 @@ impl Reactor {
                 LayoutSystemKind::Scrolling(system) => system.gesture_overscroll(s.layout),
                 _ => 0.0,
             };
-        let next = (excess > 0.0) != s.context.action.invert;
+        // Samples are already inverted, so the overscroll is in strip space and
+        // the workspace switch follows the strip's direction.
+        let next = excess > 0.0;
         if !cancelled
             && s.context.action.propagate
             && excess != 0.0
@@ -714,8 +716,6 @@ mod tests {
                 let before = store.active_workspace(ctx.space);
                 let expected = if !enabled || skip_empty || fraction < 1.0 || reverse || cancelled {
                     before
-                } else if invert {
-                    store.next_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
                 } else {
                     store.prev_workspace(&r.state.windows, ctx.space, before.unwrap(), Some(false))
                 };
