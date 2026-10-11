@@ -40,6 +40,8 @@ pub enum Event {
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
         active_workspace_for_space_has_fullscreen: bool,
+        /// Native focus can raise the anchor without changing selection or geometry.
+        reorder: bool,
     },
     SpaceStateUpdated(CoordinateConverter, ForwardedSpaceState),
     ConfigUpdated(Config),
@@ -121,12 +123,14 @@ impl StackLine {
                 space_id,
                 groups,
                 active_workspace_for_space_has_fullscreen,
+                reorder,
             } => {
                 self.handle_groups_updated(
                     active_space_ids,
                     space_id,
                     groups,
                     active_workspace_for_space_has_fullscreen,
+                    reorder,
                 );
             }
             Event::SpaceStateUpdated(converter, space_state) => {
@@ -155,6 +159,7 @@ impl StackLine {
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
         space_has_fullscreen: bool,
+        reorder: bool,
     ) {
         let active: crate::common::collections::HashSet<SpaceId> =
             active_space_ids.iter().copied().collect();
@@ -164,11 +169,10 @@ impl StackLine {
                 && (g.info.space_id != space_id
                     || groups.iter().any(|info| info.node_id == g.info.node_id))
         });
-        for group in groups {
-            self.update_native_group(group);
-        }
-
-        for group in self.native_groups.values() {
+        for info in groups {
+            let node = info.node_id;
+            let changed = self.update_native_group(info);
+            let group = &self.native_groups[&node];
             if group.info.space_id == space_id {
                 if space_has_fullscreen {
                     group.bar.hide();
@@ -179,7 +183,9 @@ impl StackLine {
                         .get(group.info.selected_index)
                         .and_then(|tab| tab.window_server_id)
                     {
-                        group.bar.show_above(anchor.as_u32() as isize);
+                        if reorder || changed || !group.bar.is_visible() {
+                            group.bar.show_above(anchor.as_u32() as isize);
+                        }
                     } else {
                         group.bar.hide();
                     }
@@ -247,9 +253,9 @@ impl StackLine {
         group.bar.set_tabs(tabs, group.info.selected_index);
     }
 
-    fn update_native_group(&mut self, info: GroupInfo) {
+    fn update_native_group(&mut self, info: GroupInfo) -> bool {
         if self.native_groups.get(&info.node_id).is_some_and(|g| g.info == info) {
-            return;
+            return false;
         }
         let node = info.node_id;
         if let Some(group) = self.native_groups.get_mut(&node) {
@@ -271,6 +277,7 @@ impl StackLine {
         } else {
             group.bar.hide();
         }
+        true
     }
 }
 

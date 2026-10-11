@@ -8031,3 +8031,38 @@ fn topology_snapshot_preserves_workspace_placement_with_incomplete_delta() {
         }
     }
 }
+
+#[test]
+fn stack_tabs_follow_focus_without_arranging_windows() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.config.settings.ui.stack_line.enabled = true;
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(2)));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
+    apps.simulate_until_quiet(&mut reactor);
+    let (tx, mut rx) = actor::channel();
+    reactor.communication_manager.stack_line_tx = Some(tx);
+    let first = WindowId::new(1, 1);
+    let second = WindowId::new(1, 2);
+    for window in [second, first, first] {
+        reactor.handle_event(Event::WindowServerFocusChanged(window, space));
+        let (_, stack_line::Event::GroupsUpdated { groups, .. }) =
+            rx.try_recv().expect("focus-only changes must publish fresh tab selection")
+        else {
+            panic!("expected tab groups");
+        };
+        assert!(groups.iter().any(|group| {
+            group.tabs.get(group.selected_index).is_some_and(|tab| tab.window_id == window)
+        }));
+        assert!(
+            !apps
+                .requests()
+                .iter()
+                .any(|request| matches!(request, Request::SetWindowFrames(..))),
+            "focus must not arrange windows"
+        );
+    }
+}
