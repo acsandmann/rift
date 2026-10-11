@@ -123,8 +123,6 @@ impl StackLayoutSystem {
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         self.inner.collect_group_containers_in_selection_path(
             layout,
@@ -132,8 +130,6 @@ impl StackLayoutSystem {
             stack_offset,
             gaps,
             stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
         )
     }
 
@@ -144,8 +140,6 @@ impl StackLayoutSystem {
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         self.inner.collect_group_containers(
             layout,
@@ -153,8 +147,6 @@ impl StackLayoutSystem {
             stack_offset,
             gaps,
             stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
         )
     }
 }
@@ -189,8 +181,6 @@ impl LayoutSystem for StackLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         self.inner.calculate_layout(
             layout,
@@ -199,8 +189,6 @@ impl LayoutSystem for StackLayoutSystem {
             constraints,
             gaps,
             stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
         )
     }
 

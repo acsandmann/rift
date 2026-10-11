@@ -866,8 +866,6 @@ mod tests {
                 constraints,
                 &Default::default(),
                 0.0,
-                Default::default(),
-                Default::default(),
             )
             .into_iter()
             .collect()
@@ -1307,8 +1305,6 @@ impl LayoutSystem for BspLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line_thickness: f64,
-        _stack_line_horiz: crate::common::config::HorizontalPlacement,
-        _stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {

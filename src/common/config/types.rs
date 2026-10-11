@@ -819,79 +819,10 @@ impl Default for MenuBarSettings {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StackLineSettings {
+    /// Show native Liquid Glass tabs above stacked windows.
     #[serde(default)]
-    /// Show the experimental stack indicator.
     #[setting(label = "Enabled")]
     pub enabled: bool,
-    #[serde(default)]
-    /// Choose whether hovering or clicking selects a window.
-    #[setting(label = "Interaction", choices, enabled_by = "enabled")]
-    pub hover: StackLineHoverMode,
-    #[serde(default = "default_stack_line_thickness")]
-    /// Thickness of the stack indicator, in points.
-    #[setting(label = "Thickness (points)", enabled_by = "enabled")]
-    pub thickness: f64,
-    #[serde(default)]
-    /// Where to place a horizontal stack indicator.
-    #[setting(label = "Horizontal placement", choices, enabled_by = "enabled")]
-    pub horiz_placement: HorizontalPlacement,
-    #[serde(default)]
-    /// Where to place a vertical stack indicator.
-    #[setting(label = "Vertical placement", choices, enabled_by = "enabled")]
-    pub vert_placement: VerticalPlacement,
-    #[serde(default = "default_stack_line_spacing")]
-    /// Space between stack segments, in points.
-    #[setting(label = "Spacing (points)", enabled_by = "enabled")]
-    pub spacing: f64,
-    /// Color of the selected stack segment, with normalized RGBA components.
-    #[serde(default = "default_stack_line_selected_color")]
-    #[setting(label = "Selected color", custom)]
-    pub selected_color: Color,
-    /// Color of unselected stack segments, with normalized RGBA components.
-    #[serde(default = "default_stack_line_unselected_color")]
-    #[setting(label = "Unselected color", custom)]
-    pub unselected_color: Color,
-    /// Color of segment borders and separators, with normalized RGBA components.
-    #[serde(default = "default_stack_line_border_color")]
-    #[setting(label = "Border color", custom)]
-    pub border_color: Color,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
-#[serde(deny_unknown_fields)]
-pub struct Color {
-    #[serde(default)]
-    pub r: f64,
-    #[serde(default)]
-    pub g: f64,
-    #[serde(default)]
-    pub b: f64,
-    #[serde(default = "default_color_alpha")]
-    pub a: f64,
-}
-
-fn default_color_alpha() -> f64 { 1.0 }
-
-impl Color {
-    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self { Self { r, g, b, a } }
-}
-
-impl Default for Color {
-    fn default() -> Self { Self::new(0.0, 0.0, 0.0, 1.0) }
-}
-
-fn default_stack_line_selected_color() -> Color { Color::new(0.0, 0.5, 1.0, 1.0) }
-
-fn default_stack_line_unselected_color() -> Color { Color::new(0.8, 0.8, 0.8, 1.0) }
-
-fn default_stack_line_border_color() -> Color { Color::new(0.6, 0.6, 0.6, 1.0) }
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum StackLineHoverMode {
-    Click,
-    #[default]
-    Hover,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
@@ -936,24 +867,14 @@ fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 
 fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum HorizontalPlacement {
-    #[default]
-    Top,
-    Bottom,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum VerticalPlacement {
-    #[default]
-    Left,
-    Right,
-}
-
 impl StackLineSettings {
-    pub fn thickness(&self) -> f64 { if self.enabled { self.thickness } else { 0.0 } }
+    pub fn thickness(&self) -> f64 {
+        if self.enabled {
+            cgs::TabBar::HEIGHT
+        } else {
+            0.0
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
@@ -1674,9 +1595,6 @@ fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
 fn default_swipe_fingers() -> usize { 3 }
 fn default_distance_pct() -> f64 { 0.08 }
 fn default_overscroll_threshold() -> f64 { 0.55 }
-
-fn default_stack_line_spacing() -> f64 { 1.0 }
-fn default_stack_line_thickness() -> f64 { 20.0 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
 #[serde(rename_all = "snake_case")]

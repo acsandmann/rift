@@ -28,8 +28,6 @@ fn calculated_source<S: LayoutSystem>(system: &S, layout: LayoutId, source: Wind
             &HashMap::<WindowId, WindowLayoutConstraints>::default(),
             &GapSettings::default(),
             0.0,
-            Default::default(),
-            Default::default(),
         )
         .into_iter()
         .find_map(|(window, frame)| (window == source).then_some(frame))

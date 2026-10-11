@@ -350,8 +350,6 @@ impl Reactor {
                                         screen.frame,
                                         &gaps,
                                         self.config.settings.ui.stack_line.thickness(),
-                                        self.config.settings.ui.stack_line.horiz_placement,
-                                        self.config.settings.ui.stack_line.vert_placement,
                                     )
                                     .into_iter()
                                     .collect()
@@ -461,8 +459,6 @@ impl Reactor {
                             screen.frame,
                             &gaps,
                             self.config.settings.ui.stack_line.thickness(),
-                            self.config.settings.ui.stack_line.horiz_placement,
-                            self.config.settings.ui.stack_line.vert_placement,
                         )
                     } else {
                         vec![]
@@ -733,8 +729,6 @@ impl Reactor {
             screen.frame,
             &gaps,
             self.config.settings.ui.stack_line.thickness(),
-            self.config.settings.ui.stack_line.horiz_placement,
-            self.config.settings.ui.stack_line.vert_placement,
         );
         let target_frames: HashMap<WindowId, Rect> = target_frames
             .into_iter()

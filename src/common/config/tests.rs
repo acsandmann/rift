@@ -612,3 +612,12 @@ fn keymap_rename_and_delete_update_both_command_encodings_and_self_references() 
         matches!(source.keys.get("C"), Some(WmCommand::ReactorCommand(reactor::Command::Reactor(ReactorCommand::BindingMode(name)))) if name == "default")
     );
 }
+
+#[test]
+fn stack_tabs_have_fixed_height_and_release_the_reservation_when_disabled() {
+    let mut tabs: StackLineSettings = toml::from_str("enabled = true").unwrap();
+    assert_eq!(tabs.thickness(), 28.0);
+    tabs.enabled = false;
+    assert_eq!(tabs.thickness(), 0.0);
+    assert!(!StackLineSettings::default().enabled);
+}

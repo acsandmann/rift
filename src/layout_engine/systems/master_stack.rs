@@ -536,8 +536,6 @@ impl MasterStackLayoutSystem {
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         self.inner.collect_group_containers_in_selection_path(
             layout,
@@ -545,8 +543,6 @@ impl MasterStackLayoutSystem {
             stack_offset,
             gaps,
             stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
         )
     }
 
@@ -557,8 +553,6 @@ impl MasterStackLayoutSystem {
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         self.inner.collect_group_containers(
             layout,
@@ -566,8 +560,6 @@ impl MasterStackLayoutSystem {
             stack_offset,
             gaps,
             stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
         )
     }
 }
@@ -634,8 +626,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
         constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
@@ -655,8 +645,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
                     constraints,
                     gaps,
                     stack_line_thickness,
-                    stack_line_horiz,
-                    stack_line_vert,
                 );
             }
         }
@@ -667,8 +655,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
             constraints,
             gaps,
             stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
         )
     }
 

@@ -297,8 +297,6 @@ impl LayoutManager {
                     screen.frame.clone(),
                     &gaps,
                     reactor.config.settings.ui.stack_line.thickness(),
-                    reactor.config.settings.ui.stack_line.horiz_placement,
-                    reactor.config.settings.ui.stack_line.vert_placement,
                     |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
@@ -358,8 +356,6 @@ impl LayoutManager {
                     screen_frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.thickness(),
-                    reactor.config.settings.ui.stack_line.horiz_placement,
-                    reactor.config.settings.ui.stack_line.vert_placement,
                 );
 
                 // Keep internal stack-line UI actor fed from the same group snapshot.
@@ -371,11 +367,26 @@ impl LayoutManager {
                         .map(|g| crate::actor::stack_line::GroupInfo {
                             node_id: g.node_id,
                             space_id: space,
-                            container_kind: g.container_kind,
                             frame: g.frame,
-                            total_count: g.total_count,
                             selected_index: g.selected_index,
-                            window_ids: g.window_ids.clone(),
+                            tabs: g
+                                .window_ids
+                                .iter()
+                                .map(|&window_id| {
+                                    let info =
+                                        reactor.state.windows.window(window_id).map(|w| &w.info);
+                                    crate::actor::stack_line::TabInfo {
+                                        window_id,
+                                        title: info.map(|i| i.title.clone()).unwrap_or_default(),
+                                        bundle_id: info.and_then(|i| i.bundle_id.clone()),
+                                        window_server_id: reactor
+                                            .state
+                                            .windows
+                                            .record(window_id)
+                                            .and_then(|record| record.window_server_id()),
+                                    }
+                                })
+                                .collect(),
                         })
                         .collect();
                     let active_space_ids: Vec<crate::sys::screen::SpaceId> =
@@ -408,6 +419,7 @@ impl LayoutManager {
                     let stacks: Vec<StackInfo> = group_infos
                         .iter()
                         .map(|g| StackInfo {
+                            total_count: g.total_count,
                             container_kind: match g.container_kind {
                                 crate::layout_engine::LayoutKind::Horizontal => {
                                     rift_protocol::LayoutKind::Horizontal
@@ -422,7 +434,6 @@ impl LayoutManager {
                                     rift_protocol::LayoutKind::VerticalStack
                                 }
                             },
-                            total_count: g.total_count,
                             selected_index: g.selected_index,
                             windows: g.window_ids.iter().map(WindowId::to_debug_string).collect(),
                         })

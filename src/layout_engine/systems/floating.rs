@@ -392,8 +392,6 @@ impl LayoutSystem for FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line_thickness: f64,
-        _stack_line_horiz: crate::common::config::HorizontalPlacement,
-        _stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         let windows = self.inner.all_windows_in_layout(layout);
         let count = windows.len();
@@ -768,8 +766,6 @@ mod tests {
             &HashMap::default(),
             &Default::default(),
             0.,
-            Default::default(),
-            Default::default(),
         );
         assert_eq!(
             frames.iter().find(|(wid, _)| *wid == w(2)).unwrap().1,
