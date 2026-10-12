@@ -693,3 +693,21 @@ fn stack_tab_geometry_rejects_unusable_values() {
         assert_eq!(tabs.validate().len(), 1, "{text}");
     }
 }
+
+#[test]
+fn global_workspace_settings_parse_and_validate_display_counts() {
+    let config = Config::parse(
+        "[settings]\n[keys]\n[virtual_workspaces]\ndefault_workspace_count = 6\nglobal = true\ndisplay_workspace_counts = [3, 6]\n",
+    )
+    .unwrap();
+    assert!(config.virtual_workspaces.global);
+    assert_eq!(config.virtual_workspaces.display_workspace_counts, [3, 6]);
+    assert!(config.virtual_workspaces.validate().is_empty());
+    assert!(!Config::default().virtual_workspaces.global);
+
+    let mut settings = config.virtual_workspaces;
+    settings.display_workspace_counts = vec![0, 7];
+    let issues = settings.validate();
+    assert_eq!(issues.len(), 2, "{issues:?}");
+    assert!(issues.iter().all(|issue| issue.starts_with("display_workspace_counts[")));
+}

@@ -94,6 +94,31 @@ impl FloatingPositionStore {
             .collect();
     }
 
+    /// Re-keys one workspace's saved frames to the native space it moved to,
+    /// translating each frame onto the destination display.
+    pub fn rehome_workspace(
+        &mut self,
+        workspace: VirtualWorkspaceId,
+        old_space: SpaceId,
+        new_space: SpaceId,
+        translate: impl Fn(CGRect) -> CGRect,
+    ) {
+        if old_space == new_space {
+            return;
+        }
+        let old = std::mem::take(&mut self.positions);
+        self.positions = old
+            .into_iter()
+            .map(|((space, stored_workspace, window), frame)| {
+                if space == old_space && stored_workspace == workspace {
+                    ((new_space, workspace, window), translate(frame))
+                } else {
+                    ((space, stored_workspace, window), frame)
+                }
+            })
+            .collect();
+    }
+
     pub fn store(
         &mut self,
         space: SpaceId,

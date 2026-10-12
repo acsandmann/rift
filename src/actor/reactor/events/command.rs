@@ -485,6 +485,82 @@ pub fn handle_command_reactor_move_window_to_display(
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct MoveWindowToGlobalWorkspacePayload {
+    pub window: WindowId,
+    pub window_server_id: Option<WindowServerId>,
+    pub source_space: SpaceId,
+    pub target_space: SpaceId,
+    pub target_workspace: crate::model::VirtualWorkspaceId,
+    pub target_screen: objc2_core_foundation::CGRect,
+    pub target_frame: objc2_core_foundation::CGRect,
+    pub follow: bool,
+}
+
+/// Global workspace mode: moves a window into a numbered workspace that lives on
+/// another display.
+pub fn handle_command_reactor_move_window_to_global_workspace(
+    state: &mut RiftState,
+    layout: &mut LayoutManager,
+    workspace_switch: &mut WorkspaceSwitchManager,
+    payload: MoveWindowToGlobalWorkspacePayload,
+) -> anyhow::Result<EventOutcome> {
+    let Some(window) = state.windows.window_mut(payload.window) else {
+        warn!(window = ?payload.window, "Move window to workspace ignored: unknown window");
+        return Ok(EventOutcome::no_change());
+    };
+    let previous_frame = window.frame_monotonic;
+    window.frame_monotonic = payload.target_frame;
+
+    let response = layout.layout_engine.move_window_to_workspace_on_space(
+        &mut state.windows,
+        payload.source_space,
+        (payload.target_space, payload.target_workspace),
+        payload.target_screen.size,
+        payload.window,
+        payload.follow,
+    );
+    if !response.changed {
+        if let Some(window) = state.windows.window_mut(payload.window) {
+            window.frame_monotonic = previous_frame;
+        }
+        return Ok(EventOutcome::no_change());
+    }
+    if let Some(window_server_id) = payload.window_server_id {
+        state.windows.observe_native_space(window_server_id, payload.target_space, true);
+    }
+
+    let switch_space = payload.follow.then_some(payload.target_space);
+    if payload.follow {
+        workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
+    }
+    Ok(EventOutcome::layout_changed(false)
+        .with_layout_response(response, switch_space)
+        .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true))
+}
+
+/// Moves a frame by the offset between two screens' centers, kept inside the
+/// destination screen.
+fn translate_frame_between_screens(
+    frame: objc2_core_foundation::CGRect,
+    from: objc2_core_foundation::CGRect,
+    to: objc2_core_foundation::CGRect,
+) -> objc2_core_foundation::CGRect {
+    let center = |rect: objc2_core_foundation::CGRect| {
+        (
+            rect.origin.x + rect.size.width / 2.0,
+            rect.origin.y + rect.size.height / 2.0,
+        )
+    };
+    let ((from_x, from_y), (to_x, to_y)) = (center(from), center(to));
+    let max_x = (to.origin.x + to.size.width - frame.size.width).max(to.origin.x);
+    let max_y = (to.origin.y + to.size.height - frame.size.height).max(to.origin.y);
+    let mut moved = frame;
+    moved.origin.x = (frame.origin.x + to_x - from_x).clamp(to.origin.x, max_x);
+    moved.origin.y = (frame.origin.y + to_y - from_y).clamp(to.origin.y, max_y);
+    moved
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct WorkspaceWindowMove {
     pub window: WindowId,
     pub window_server_id: Option<WindowServerId>,
@@ -496,7 +572,10 @@ pub struct MoveWorkspaceToDisplayPayload {
     pub windows: Vec<WorkspaceWindowMove>,
     pub source_space: SpaceId,
     pub target_space: SpaceId,
+    pub source_screen: objc2_core_foundation::CGRect,
     pub target_screen: objc2_core_foundation::CGRect,
+    /// Global workspace mode moves the workspace itself instead of its windows.
+    pub global: bool,
 }
 
 pub fn handle_command_reactor_move_workspace_to_display(
@@ -509,7 +588,9 @@ pub fn handle_command_reactor_move_workspace_to_display(
         windows,
         source_space,
         target_space,
+        source_screen,
         target_screen,
+        global,
     } = payload;
 
     let moves = windows
@@ -527,13 +608,23 @@ pub fn handle_command_reactor_move_workspace_to_display(
         })
         .collect::<Vec<_>>();
     let window_ids = moves.iter().map(|window_move| window_move.window).collect::<Vec<_>>();
-    let response = layout.layout_engine.move_active_workspace_to_space(
-        &mut state.windows,
-        source_space,
-        target_space,
-        target_screen.size,
-        &window_ids,
-    );
+    let response = if global {
+        layout.layout_engine.rehome_active_workspace(
+            &mut state.windows,
+            source_space,
+            target_space,
+            target_screen.size,
+            |frame| translate_frame_between_screens(frame, source_screen, target_screen),
+        )
+    } else {
+        layout.layout_engine.move_active_workspace_to_space(
+            &mut state.windows,
+            source_space,
+            target_space,
+            target_screen.size,
+            &window_ids,
+        )
+    };
     if !response.changed {
         return Ok(EventOutcome::no_change());
     }

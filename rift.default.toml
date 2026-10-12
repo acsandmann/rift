@@ -297,6 +297,24 @@ workspace_auto_back_and_forth = false
 prevent_wrapping = false
 reapply_app_rules_on_title_change = false
 
+# Global workspaces (AeroSpace-style numbering across displays)
+# - global: when true, workspace numbers are shared by all displays instead of
+#   restarting on each one. Each display owns a range of numbers, left to right:
+#   with 4 workspaces per display, the left display has 0-3 and the next 4-7.
+#   switch_to_workspace = N focuses the display that has N and shows it there;
+#   move_window_to_workspace = N sends the window to that display. N is 0-based.
+#   move_workspace_to_display moves the workspace itself, so N follows it.
+#   next/prev workspace, workspace names, app_rules and workspace_rules still
+#   use per-display indices.
+# - display_workspace_counts: optional numbers owned per display, left to right.
+#   The last entry repeats for further displays; each must be between 1 and
+#   default_workspace_count. Workspaces beyond a display's range have no number.
+# Unplugging a display is not yet handled specially: its workspaces keep their
+# numbers but cannot be reached until the display returns. Using one macOS Space
+# per display is recommended.
+#global = true
+#display_workspace_counts = [3, 6]
+
 # Workspace-specific rules
 # - workspace: target workspace by index (integer) or name (string)
 # - layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling", "floating")

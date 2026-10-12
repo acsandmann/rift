@@ -249,6 +249,9 @@ impl Reactor {
             None => return,
         };
 
+        if self.global_workspaces_enabled() {
+            self.refresh_global_workspace_numbers();
+        }
         let active_space =
             self.resolve_menu_bar_space_with_preferred(self.space_state.menu_bar_space);
         let active_space_is_activated =
@@ -299,10 +302,20 @@ impl Reactor {
         let active_only = settings.mode == MenuBarDisplayMode::Active;
         let workspaces = self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
         let active = self.layout_manager.layout_engine.workspaces().active_workspace(space);
+        // In global mode the menu labels and switches by global number, and a
+        // workspace without one cannot be reached by number.
+        let global = self.global_workspaces_enabled();
         workspaces
             .into_iter()
             .enumerate()
-            .map(|(index, (id, name))| {
+            .filter_map(|(index, (id, name))| {
+                if !global {
+                    return Some((index, index, id, name));
+                }
+                let number = self.layout_manager.layout_engine.workspaces().global_index(id)?;
+                Some((index, number, id, name))
+            })
+            .map(|(index, label_index, id, name)| {
                 let is_active = active == Some(id);
                 let mut windows = self.layout_manager.layout_engine.workspaces().workspace_windows(
                     &self.state.windows,
@@ -369,7 +382,7 @@ impl Reactor {
                 }
                 menu_bar::Workspace {
                     id: format!("{id:?}"),
-                    index,
+                    index: label_index,
                     name,
                     is_active,
                     window_count,
@@ -410,6 +423,9 @@ impl Reactor {
         space_id_param: Option<SpaceId>,
     ) -> Vec<RuntimeWorkspaceData> {
         let mut workspaces = Vec::new();
+        if self.global_workspaces_enabled() {
+            self.refresh_global_workspace_numbers();
+        }
 
         let space_id = space_id_param.or_else(|| self.default_query_space());
         let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
@@ -530,6 +546,12 @@ impl Reactor {
                 window_count: windows.len(),
                 windows,
                 index,
+                global_index: self
+                    .global_workspaces_enabled()
+                    .then(|| {
+                        self.layout_manager.layout_engine.workspaces().global_index(*workspace_id)
+                    })
+                    .flatten(),
             });
         }
 

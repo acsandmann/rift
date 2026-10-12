@@ -90,6 +90,18 @@ pub struct VirtualWorkspaceSettings {
     /// Choose layouts for individual workspaces.
     #[setting(label = "Workspace rules", custom)]
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
+    #[serde(default)]
+    /// Number workspaces across all displays instead of per display. Switching to a
+    /// workspace on another display focuses that display, and moving a workspace to
+    /// another display keeps its number.
+    #[setting(ignore)]
+    pub global: bool,
+    #[serde(default)]
+    /// Global workspace numbers owned by each display, left to right. The last entry
+    /// applies to any further displays; when empty, each display owns
+    /// `default_workspace_count` numbers. Only used when `global` is enabled.
+    #[setting(ignore)]
+    pub display_workspace_counts: Vec<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -186,6 +198,8 @@ impl Default for VirtualWorkspaceSettings {
             reapply_app_rules_on_title_change: false,
             app_rules: Vec::new(),
             workspace_rules: Vec::new(),
+            global: false,
+            display_workspace_counts: Vec::new(),
         }
     }
 }
@@ -234,6 +248,15 @@ impl VirtualWorkspaceSettings {
                 "default_workspace ({}) must be less than default_workspace_count ({})",
                 self.default_workspace, self.default_workspace_count
             ));
+        }
+
+        for (display, &count) in self.display_workspace_counts.iter().enumerate() {
+            if count == 0 || count > self.default_workspace_count {
+                issues.push(format!(
+                    "display_workspace_counts[{display}] ({count}) must be between 1 and default_workspace_count ({})",
+                    self.default_workspace_count
+                ));
+            }
         }
 
         // Validate rules and check duplicates in a single pass

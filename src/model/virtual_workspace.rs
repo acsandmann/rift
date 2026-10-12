@@ -60,6 +60,9 @@ pub struct VirtualWorkspace {
     pub layout_mode: LayoutMode,
     #[serde(default)]
     pub(crate) layout_state: WorkspaceLayoutState,
+    /// Zero-based number shared across displays in global workspace mode.
+    #[serde(default)]
+    pub(crate) global_index: Option<usize>,
 }
 
 fn default_layout_system_kind() -> LayoutSystemKind {
@@ -76,6 +79,7 @@ impl VirtualWorkspace {
             layout_system,
             layout_mode: mode,
             layout_state: WorkspaceLayoutState::default(),
+            global_index: None,
         }
     }
 
@@ -556,6 +560,125 @@ impl WorkspaceStore {
         }
 
         window_store.remap_space(old_space, new_space);
+    }
+
+    /// Numbers the workspaces of the displays on screen for global workspace mode.
+    ///
+    /// `displays` holds each display's current native space, left to right, with
+    /// `None` for a display Rift does not manage. Every display reserves its range
+    /// of numbers either way, so activating a display does not shift the others.
+    /// A number stays with its workspace once assigned, which lets a workspace keep
+    /// its number after moving to another display; only unnumbered workspaces take
+    /// the free numbers of their display's range.
+    pub(crate) fn number_global_workspaces(
+        &mut self,
+        displays: &[Option<SpaceId>],
+        counts: &[usize],
+    ) {
+        let mut taken: HashSet<usize> = self
+            .workspaces
+            .values()
+            .filter_map(|workspace| workspace.global_index)
+            .collect();
+        let mut offset = 0;
+        for (position, space) in displays.iter().enumerate() {
+            let count = counts
+                .get(position)
+                .or(counts.last())
+                .copied()
+                .unwrap_or(self.default_workspace_count)
+                .max(1);
+            let range = offset..offset + count;
+            offset += count;
+            let Some(space) = *space else { continue };
+            self.ensure_space_initialized(space);
+            let free: Vec<usize> = range.filter(|number| !taken.contains(number)).collect();
+            let mut free = free.into_iter();
+            for id in self.workspace_ids(space).to_vec() {
+                if self.workspaces[id].global_index.is_some() {
+                    continue;
+                }
+                let Some(number) = free.next() else { break };
+                self.workspaces[id].global_index = Some(number);
+                taken.insert(number);
+            }
+        }
+    }
+
+    pub(crate) fn global_workspace(&self, number: usize) -> Option<(SpaceId, VirtualWorkspaceId)> {
+        self.workspaces
+            .iter()
+            .find(|(_, workspace)| workspace.global_index == Some(number))
+            .map(|(id, workspace)| (workspace.space, id))
+    }
+
+    pub(crate) fn global_index(&self, workspace_id: VirtualWorkspaceId) -> Option<usize> {
+        self.workspaces.get(workspace_id).and_then(|workspace| workspace.global_index)
+    }
+
+    /// Moves a workspace, with its layouts and windows, to another native space and
+    /// makes it active there.
+    ///
+    /// If the workspace was active on its source space, the source falls back to its
+    /// previous workspace, then its first remaining one, then a new empty one, so
+    /// every space keeps an active workspace.
+    pub(crate) fn rehome_workspace(
+        &mut self,
+        window_store: &mut WindowStore,
+        workspace_id: VirtualWorkspaceId,
+        target_space: SpaceId,
+    ) -> bool {
+        let Some(source_space) = self.workspaces.get(workspace_id).map(|ws| ws.space) else {
+            return false;
+        };
+        if source_space == target_space {
+            return false;
+        }
+        self.ensure_space_initialized(target_space);
+
+        if let Some(ids) = self.workspaces_by_space.get_mut(&source_space) {
+            ids.retain(|id| *id != workspace_id);
+        }
+        self.workspaces[workspace_id].space = target_space;
+        let ids = self.workspaces_by_space.entry(target_space).or_default();
+        ids.push(workspace_id);
+        ids.sort_unstable();
+
+        let windows: Vec<WindowId> = window_store
+            .iter_workspace_assignments()
+            .filter_map(|(window_id, assignment)| {
+                (assignment.workspace_id == workspace_id).then_some(window_id)
+            })
+            .collect();
+        for window_id in windows {
+            window_store.assign_window_to_workspace(window_id, WindowWorkspaceInfo {
+                space: target_space,
+                workspace_id,
+            });
+        }
+
+        if let Some(&(last, active)) = self.active_workspace_per_space.get(&source_space) {
+            let last = last.filter(|id| *id != workspace_id);
+            if active == workspace_id {
+                let remaining = self.workspace_ids(source_space).to_vec();
+                let fallback = last
+                    .filter(|id| remaining.contains(id))
+                    .or_else(|| remaining.first().copied())
+                    .or_else(|| self.create_workspace(source_space, None).ok());
+                match fallback {
+                    Some(id) => {
+                        self.active_workspace_per_space.insert(source_space, (None, id));
+                    }
+                    None => {
+                        self.active_workspace_per_space.remove(&source_space);
+                    }
+                }
+            } else {
+                self.active_workspace_per_space.insert(source_space, (last, active));
+            }
+        }
+
+        self.set_active_workspace(target_space, workspace_id)
     }
 
     pub fn create_workspace(
@@ -2049,5 +2172,106 @@ mod tests {
 
         assert_eq!(hidden.origin.y, primary.max().y - 1.0);
         assert_eq!(hidden.origin.x, primary.origin.x - frame.size.width + 1.0);
+    }
+
+    fn global_store(count: usize) -> WorkspaceStore {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: count,
+            workspace_names: Vec::new(),
+            ..VirtualWorkspaceSettings::default()
+        };
+        WorkspaceStore::new_with_config(&settings, &LayoutSettings::default())
+    }
+
+    fn global_numbers(manager: &WorkspaceStore, space: SpaceId) -> Vec<Option<usize>> {
+        manager
+            .workspace_ids(space)
+            .iter()
+            .map(|&id| manager.global_index(id))
+            .collect()
+    }
+
+    #[test]
+    fn global_numbering_concatenates_display_ranges_left_to_right() {
+        let mut manager = global_store(3);
+        let (left, right) = (SpaceId::new(1), SpaceId::new(2));
+        manager.number_global_workspaces(&[Some(left), Some(right)], &[]);
+
+        assert_eq!(global_numbers(&manager, left), [Some(0), Some(1), Some(2)]);
+        assert_eq!(global_numbers(&manager, right), [Some(3), Some(4), Some(5)]);
+        let right_second = manager.workspace_ids(right)[1];
+        assert_eq!(manager.global_workspace(4), Some((right, right_second)));
+        assert_eq!(manager.global_workspace(6), None);
+    }
+
+    #[test]
+    fn global_numbering_honors_uneven_counts_and_repeats_the_last() {
+        let mut manager = global_store(4);
+        let spaces = [SpaceId::new(1), SpaceId::new(2), SpaceId::new(3)];
+        manager.number_global_workspaces(&spaces.map(Some), &[1, 2]);
+
+        assert_eq!(global_numbers(&manager, spaces[0]), [Some(0), None, None, None]);
+        assert_eq!(
+            global_numbers(&manager, spaces[1]),
+            [Some(1), Some(2), None, None]
+        );
+        assert_eq!(
+            global_numbers(&manager, spaces[2]),
+            [Some(3), Some(4), None, None]
+        );
+    }
+
+    #[test]
+    fn global_numbering_reserves_ranges_of_unmanaged_displays() {
+        let mut manager = global_store(2);
+        let right = SpaceId::new(2);
+        manager.number_global_workspaces(&[None, Some(right)], &[]);
+
+        assert_eq!(global_numbers(&manager, right), [Some(2), Some(3)]);
+        assert!(manager.workspace_ids(SpaceId::new(1)).is_empty());
+    }
+
+    #[test]
+    fn rehomed_workspace_keeps_its_number_windows_and_activation() {
+        let mut manager = global_store(2);
+        let mut window_store = WindowStore::default();
+        let (left, right) = (SpaceId::new(1), SpaceId::new(2));
+        manager.number_global_workspaces(&[Some(left), Some(right)], &[]);
+        let [moved, remaining] = [0, 1].map(|i| manager.workspace_ids(left)[i]);
+        let window = WindowId::new(1, 1);
+        assert!(manager.assign_window_to_workspace(&mut window_store, left, window, moved));
+        assert!(manager.set_active_workspace(left, remaining));
+        assert!(manager.set_active_workspace(left, moved));
+
+        assert!(manager.rehome_workspace(&mut window_store, moved, right));
+
+        assert_eq!(manager.global_workspace(0), Some((right, moved)));
+        assert_eq!(manager.active_workspace(right), Some(moved));
+        assert_eq!(manager.active_workspace(left), Some(remaining));
+        assert_eq!(manager.workspace_ids(left), [remaining]);
+        assert_eq!(window_store.workspace_for_window(right, window), Some(moved));
+        assert_eq!(window_store.workspace_for_window(left, window), None);
+        manager.number_global_workspaces(&[Some(left), Some(right)], &[]);
+        assert_eq!(manager.global_index(moved), Some(0));
+        assert_eq!(manager.global_workspace(1), Some((left, remaining)));
+        manager.validate_persisted_topology().unwrap();
+    }
+
+    #[test]
+    fn rehoming_the_only_workspace_leaves_the_source_an_empty_one() {
+        let mut manager = global_store(1);
+        let mut window_store = WindowStore::default();
+        let (left, right) = (SpaceId::new(1), SpaceId::new(2));
+        manager.ensure_space_initialized(right);
+        manager.ensure_space_initialized(left);
+        let moved = manager.workspace_ids(left)[0];
+
+        assert!(manager.rehome_workspace(&mut window_store, moved, right));
+
+        let replacement = manager.active_workspace(left).expect("source keeps a workspace");
+        assert_ne!(replacement, moved);
+        assert_eq!(manager.workspace_ids(left), [replacement]);
+        assert_eq!(manager.workspace_ids(right).len(), 2);
+        assert!(!manager.rehome_workspace(&mut window_store, moved, right));
     }
 }

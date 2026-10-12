@@ -2090,6 +2090,7 @@ mod tests {
             space: crate::sys::screen::SpaceId::new(1),
             id: index.to_string(),
             index,
+            global_index: None,
             name: index.to_string(),
             layout_mode: "scrolling".into(),
             is_active: index == 1,

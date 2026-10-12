@@ -133,7 +133,11 @@ pub struct WindowData {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceData {
     pub id: String,
+    /// Position among the workspaces of this workspace's display.
     pub index: usize,
+    /// Number shared across displays, present in global workspace mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_index: Option<usize>,
     pub name: String,
     pub layout_mode: String,
     pub is_active: bool,

@@ -3159,6 +3159,126 @@ impl LayoutEngine {
         }
     }
 
+    /// Global workspace mode: assigns numbers to the workspaces of the displays on
+    /// screen. See [`WorkspaceStore::number_global_workspaces`].
+    pub fn number_global_workspaces(&mut self, displays: &[Option<SpaceId>], counts: &[usize]) {
+        self.workspaces.number_global_workspaces(displays, counts);
+    }
+
+    pub fn global_workspace(&self, number: usize) -> Option<(SpaceId, VirtualWorkspaceId)> {
+        self.workspaces.global_workspace(number)
+    }
+
+    /// Global workspace mode: moves the active workspace itself to another display,
+    /// keeping its number, layouts and windows, and makes it active there.
+    pub fn rehome_active_workspace(
+        &mut self,
+        window_store: &mut WindowStore,
+        source_space: SpaceId,
+        target_space: SpaceId,
+        target_screen_size: CGSize,
+        translate_frame: impl Fn(CGRect) -> CGRect,
+    ) -> EventResponse {
+        if source_space == target_space {
+            return EventResponse::default();
+        }
+        self.workspaces.ensure_space_initialized(source_space);
+        let Some(workspace_id) = self.workspaces.active_workspace(source_space) else {
+            return EventResponse::default();
+        };
+        let preferred_focus =
+            self.preferred_focus_for_workspace(window_store, source_space, workspace_id, None);
+        if !self.workspaces.rehome_workspace(window_store, workspace_id, target_space) {
+            return EventResponse::default();
+        }
+        self.floating_positions.rehome_workspace(
+            workspace_id,
+            source_space,
+            target_space,
+            translate_frame,
+        );
+        self.ensure_workspace_layouts(target_space, target_screen_size);
+        self.update_active_floating_windows(window_store, source_space);
+        self.update_active_floating_windows(window_store, target_space);
+
+        let moved = self.workspaces.workspace_windows(window_store, target_space, workspace_id);
+        let focus_window = preferred_focus
+            .filter(|window| moved.contains(window))
+            .or_else(|| moved.first().copied());
+        self.broadcast_workspace_changed(source_space);
+        self.broadcast_workspace_changed(target_space);
+        self.broadcast_windows_changed(window_store, source_space);
+        self.broadcast_windows_changed(window_store, target_space);
+        EventResponse {
+            changed: true,
+            raise_windows: moved,
+            focus_window,
+            boundary_hit: None,
+        }
+    }
+
+    /// Global workspace mode: moves a window into a specific workspace on another
+    /// display, optionally switching to it.
+    pub fn move_window_to_workspace_on_space(
+        &mut self,
+        window_store: &mut WindowStore,
+        source_space: SpaceId,
+        (target_space, target_workspace_id): (SpaceId, VirtualWorkspaceId),
+        target_screen_size: CGSize,
+        window_id: WindowId,
+        follow: bool,
+    ) -> EventResponse {
+        if source_space == target_space
+            || !self.workspaces.workspace_ids(target_space).contains(&target_workspace_id)
+        {
+            return EventResponse::default();
+        }
+        let Some(source_workspace_id) = window_store.workspace_for_window(source_space, window_id)
+        else {
+            return EventResponse::default();
+        };
+        let source_was_active =
+            self.workspaces.active_workspace(source_space) == Some(source_workspace_id);
+
+        self.ensure_workspace_layouts(target_space, target_screen_size);
+        if !self.relocate_window_to_workspace(
+            window_store,
+            (source_space, source_workspace_id),
+            (target_space, target_workspace_id),
+            window_id,
+            false,
+        ) {
+            return EventResponse::default();
+        }
+        // Relocation registers floating windows as visible on the target; the
+        // destination workspace may be hidden there.
+        self.update_active_floating_windows(window_store, target_space);
+        if source_was_active {
+            self.workspaces.set_last_focused_window(source_space, source_workspace_id, None);
+        }
+        self.workspaces
+            .set_last_focused_window(target_space, target_workspace_id, Some(window_id));
+        self.broadcast_windows_changed(window_store, source_space);
+        self.broadcast_windows_changed(window_store, target_space);
+
+        if follow {
+            return self.activate_workspace(
+                window_store,
+                target_space,
+                target_workspace_id,
+                Some(window_id),
+            );
+        }
+        let focus_window = source_was_active
+            .then(|| self.workspaces.windows_in_active_workspace(window_store, source_space))
+            .and_then(|remaining| remaining.first().copied());
+        EventResponse {
+            changed: true,
+            focus_window,
+            ..EventResponse::default()
+        }
+    }
+
     fn ensure_workspace_layouts(&mut self, space: SpaceId, screen_size: CGSize) {
         self.workspaces.ensure_space_initialized(space);
         self.sync_scrolling_widths_for_space(space);

@@ -8,6 +8,7 @@ mod animation;
 mod events;
 mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
+mod global_workspaces;
 mod main_window;
 mod managers;
 mod native_tabs;
@@ -2325,6 +2326,11 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Layout(command)) => {
+                if self.global_workspaces_enabled()
+                    && let Some(outcome) = self.route_global_workspace_command(&command)
+                {
+                    return outcome;
+                }
                 let post_arrange_mouse_warp =
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
@@ -2502,11 +2508,20 @@ impl Reactor {
                         })
                     })
                     .collect::<Vec<_>>();
-                if moves.is_empty() {
+                // A global workspace keeps its identity, so even an empty one can move.
+                let global = self.global_workspaces_enabled();
+                if moves.is_empty() && !global {
                     return Ok(EventOutcome::no_change());
                 }
+                let source_screen = self
+                    .space_state
+                    .screen_by_space(source_space)
+                    .map_or(target_screen.frame, |screen| screen.frame);
+                if global {
+                    self.refresh_global_workspace_numbers();
+                }
 
-                return command_workflow::handle_command_reactor_move_workspace_to_display(
+                let outcome = command_workflow::handle_command_reactor_move_workspace_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -2514,9 +2529,16 @@ impl Reactor {
                         windows: moves,
                         source_space,
                         target_space,
+                        source_screen,
                         target_screen: target_screen.frame,
+                        global,
                     },
-                );
+                )?;
+                if global && !outcome.layout_responses.is_empty() {
+                    // The moved workspace keeps focus, so its display becomes the context.
+                    self.focus_display_context(&target_screen);
+                }
+                return Ok(outcome);
             }
             _ => (),
         }

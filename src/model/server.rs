@@ -19,6 +19,7 @@ pub struct RuntimeWorkspaceData {
     pub space: SpaceId,
     pub id: String,
     pub index: usize,
+    pub global_index: Option<usize>,
     pub name: String,
     pub layout_mode: String,
     pub is_active: bool,
@@ -94,6 +95,7 @@ impl From<RuntimeWorkspaceData> for protocol::WorkspaceData {
         Self {
             id: value.id,
             index: value.index,
+            global_index: value.global_index,
             name: value.name,
             layout_mode: value.layout_mode,
             is_active: value.is_active,
