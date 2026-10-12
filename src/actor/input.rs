@@ -32,6 +32,7 @@ use crate::sys::hotkey::{
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
+use crate::sys::timer::Timer;
 use crate::sys::{gesture, power, window_server};
 
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 16_000_000; // 16ms ~= 62 Hz
@@ -422,17 +423,28 @@ impl Input {
             }
         }
 
+        // One reusable hold timer, rearmed only when the deadline changes.
+        let mut hold_timer = Timer::manual();
+        let mut armed = None;
         loop {
             let hold_deadline = this.gesture_filter.borrow().hold_deadline();
+            if hold_deadline != armed {
+                armed = hold_deadline;
+                hold_timer.set_next_fire(hold_deadline.map_or(Duration::MAX, |d| {
+                    d.saturating_duration_since(std::time::Instant::now())
+                }));
+            }
             tokio::select! {
-                _ = async { crate::sys::timer::Timer::sleep(hold_deadline.unwrap().saturating_duration_since(std::time::Instant::now())).await }, if hold_deadline.is_some() => {
+                Some(()) = hold_timer.next(), if armed.is_some() => {
+                    // Fires once per arm; rearm next turn even if the deadline is unchanged.
+                    armed = None;
                     let owner = this.gesture_control.ownership_guard();
                     this.gesture_filter.borrow_mut().release_expired(*owner);
                 }
 
                 // select evaluates disabled futures too; defer timer creation
                 // so healthy taps allocate no timer and schedule no wakeup.
-                _ = async { crate::sys::timer::Timer::sleep(Duration::from_secs(1)).await },
+                _ = async { Timer::sleep(Duration::from_secs(1)).with_tolerance(Duration::from_millis(100)).await },
                     if this.event_tap_missing() => {
                     let hid_missing = this.tap.borrow().is_none();
                     this.rebuild_event_taps_if_needed(&recovery_tx);

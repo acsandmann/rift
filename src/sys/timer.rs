@@ -274,14 +274,24 @@ impl Timer {
         Timer { inner }
     }
 
-    /// Sets the next time the timer will fire.
+    /// Lets the system fire up to `tolerance` late (never early) to coalesce
+    /// wakeups. Defaults to zero; kept across repeats and `set_next_fire`.
+    pub fn with_tolerance(self, tolerance: Duration) -> Self {
+        if let Some(cf_timer) = self.inner.lock().cf_timer.as_ref() {
+            unsafe { cf_timer.set_tolerance(tolerance.as_secs_f64()) };
+        }
+        self
+    }
+
+    /// Sets the next time the timer will fire, discarding any unconsumed fire.
     pub fn set_next_fire(&self, delay: Duration) {
         let mut state = self.inner.lock();
-        let Some(cf_timer) = state.cf_timer.as_mut() else {
+        let Some(cf_timer) = state.cf_timer.as_ref() else {
             return;
         };
         let fire_time = CFAbsoluteTimeGetCurrent() + delay.as_secs_f64();
         cf_timer.set_next_fire_date(fire_time);
+        state.status = TimerStatus::Pending;
     }
 
     /// Cancels the timer, preventing it from firing.
@@ -444,6 +454,41 @@ mod tests {
             assert!(elapsed1 >= Duration::from_millis(20 - 1));
             assert!(elapsed2 >= Duration::from_millis(30 - 1));
             assert!(elapsed3 >= Duration::from_millis(40 - 1));
+        });
+    }
+
+    #[test]
+    fn manual_timer_rearms_parks_and_cancels() {
+        Executor::run(async {
+            let mut timer = Timer::manual().with_tolerance(Duration::from_millis(5));
+            timer.set_next_fire(Duration::ZERO);
+            Timer::sleep(Duration::from_millis(10)).await; // stale, unconsumed fire
+            for ms in [30, 10] {
+                let start = Instant::now();
+                timer.set_next_fire(Duration::from_millis(ms));
+                timer.next().await;
+                assert!(start.elapsed() >= Duration::from_millis(ms - 1));
+            }
+            timer.set_next_fire(Duration::MAX);
+            tokio::select! {
+                _ = timer.next() => panic!("parked timer fired"),
+                _ = Timer::sleep(Duration::from_millis(30)) => {}
+            }
+            timer.cancel();
+            assert_eq!(timer.next().await, None);
+        });
+    }
+
+    #[test]
+    fn repeating_timer_with_tolerance_never_fires_early() {
+        Executor::run(async {
+            let start = Instant::now();
+            let mut timer = Timer::repeating(Duration::from_millis(20), Duration::from_millis(10))
+                .with_tolerance(Duration::from_millis(2));
+            for n in 0..3 {
+                timer.next().await;
+                assert!(start.elapsed() >= Duration::from_millis(20 + 10 * n - 1));
+            }
         });
     }
 }
