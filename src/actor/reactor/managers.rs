@@ -258,28 +258,40 @@ impl LayoutManager {
         {
             let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
                 .iter()
-                .map(|g| crate::actor::stack_line::GroupInfo {
-                    node_id: g.node_id,
-                    space_id: space,
-                    frame: g.frame,
-                    selected_index: g.selected_index,
-                    tabs: g
-                        .window_ids
-                        .iter()
-                        .map(|&window_id| {
-                            let info = reactor.state.windows.window(window_id).map(|w| &w.info);
-                            crate::actor::stack_line::TabInfo {
-                                window_id,
-                                title: info.map(|i| i.title.clone()).unwrap_or_default(),
-                                bundle_id: info.and_then(|i| i.bundle_id.clone()),
-                                window_server_id: reactor
-                                    .state
-                                    .windows
-                                    .record(window_id)
-                                    .and_then(|record| record.window_server_id()),
-                            }
-                        })
-                        .collect(),
+                .map(|g| {
+                    let horizontal =
+                        g.container_kind != crate::layout_engine::LayoutKind::VerticalStack;
+                    // Group info lists a vertical stack bottom-up; its bar reads top-down.
+                    let mut window_ids = g.window_ids.clone();
+                    let mut selected_index = g.selected_index;
+                    if !horizontal {
+                        window_ids.reverse();
+                        selected_index =
+                            window_ids.len().saturating_sub(1).saturating_sub(selected_index);
+                    }
+                    crate::actor::stack_line::GroupInfo {
+                        node_id: g.node_id,
+                        space_id: space,
+                        frame: g.frame,
+                        horizontal,
+                        selected_index,
+                        tabs: window_ids
+                            .into_iter()
+                            .map(|window_id| {
+                                let info = reactor.state.windows.window(window_id).map(|w| &w.info);
+                                crate::actor::stack_line::TabInfo {
+                                    window_id,
+                                    title: info.map(|i| i.title.clone()).unwrap_or_default(),
+                                    bundle_id: info.and_then(|i| i.bundle_id.clone()),
+                                    window_server_id: reactor
+                                        .state
+                                        .windows
+                                        .record(window_id)
+                                        .and_then(|record| record.window_server_id()),
+                                }
+                            })
+                            .collect(),
+                    }
                 })
                 .collect();
             let active_space_ids: Vec<crate::sys::screen::SpaceId> =
@@ -318,7 +330,7 @@ impl LayoutManager {
             space,
             frame,
             &gaps,
-            reactor.config.settings.ui.stack_line.thickness(),
+            reactor.config.settings.ui.stack_line.reserve(),
         );
         let fullscreen = reactor.workspace_command_space() == Some(space)
             && reactor
@@ -378,7 +390,7 @@ impl LayoutManager {
                     space,
                     screen.frame.clone(),
                     &gaps,
-                    reactor.config.settings.ui.stack_line.thickness(),
+                    reactor.config.settings.ui.stack_line.reserve(),
                     |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
@@ -437,7 +449,7 @@ impl LayoutManager {
                     space,
                     screen_frame,
                     &gaps,
-                    reactor.config.settings.ui.stack_line.thickness(),
+                    reactor.config.settings.ui.stack_line.reserve(),
                 );
 
                 Self::publish_stack_tabs(

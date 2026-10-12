@@ -3053,7 +3053,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
             space,
             screen,
             &gaps,
-            0.0,
+            Default::default(),
             |query_wid| {
                 reactor.state.windows.window(query_wid).map(|window| window.frame_monotonic)
             },
@@ -5337,14 +5337,17 @@ fn has_window_in_layout(
     reactor
         .layout_manager
         .layout_engine
-        .calculate_layout(space, screen, &gaps, 0.0)
+        .calculate_layout(space, screen, &gaps, Default::default())
         .iter()
         .any(|(layout_wid, _)| *layout_wid == wid)
 }
 
 fn test_layout(reactor: &mut Reactor, space: SpaceId, screen: CGRect) -> Vec<(WindowId, CGRect)> {
     let gaps = reactor.config.settings.layout.gaps.clone();
-    reactor.layout_manager.layout_engine.calculate_layout(space, screen, &gaps, 0.0)
+    reactor
+        .layout_manager
+        .layout_engine
+        .calculate_layout(space, screen, &gaps, Default::default())
 }
 
 fn make_active_app(
@@ -7355,7 +7358,7 @@ fn laid_out_frame(
             space,
             screen,
             &gaps,
-            0.0,
+            Default::default(),
             |q| reactor.state.windows.window(q).map(|w| w.frame_monotonic),
             &[screen],
         )

@@ -865,7 +865,7 @@ mod tests {
                 0.0,
                 constraints,
                 &Default::default(),
-                0.0,
+                Default::default(),
             )
             .into_iter()
             .collect()
@@ -1304,7 +1304,7 @@ impl LayoutSystem for BspLayoutSystem {
         _stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
-        _stack_line_thickness: f64,
+        _stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {

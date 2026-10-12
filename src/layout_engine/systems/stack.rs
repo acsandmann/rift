@@ -122,14 +122,14 @@ impl StackLayoutSystem {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         self.inner.collect_group_containers_in_selection_path(
             layout,
             screen,
             stack_offset,
             gaps,
-            stack_line_thickness,
+            stack_line,
         )
     }
 
@@ -139,15 +139,10 @@ impl StackLayoutSystem {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        self.inner.collect_group_containers(
-            layout,
-            screen,
-            stack_offset,
-            gaps,
-            stack_line_thickness,
-        )
+        self.inner
+            .collect_group_containers(layout, screen, stack_offset, gaps, stack_line)
     }
 }
 
@@ -180,16 +175,10 @@ impl LayoutSystem for StackLayoutSystem {
         stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        self.inner.calculate_layout(
-            layout,
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line_thickness,
-        )
+        self.inner
+            .calculate_layout(layout, screen, stack_offset, constraints, gaps, stack_line)
     }
 
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {

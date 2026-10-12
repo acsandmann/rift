@@ -816,13 +816,146 @@ impl Default for MenuBarSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StackLineSettings {
-    /// Show native Liquid Glass tabs above stacked windows.
+    /// Show native Liquid Glass tabs beside stacked windows.
     #[serde(default)]
     #[setting(label = "Enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    /// Select a tab by clicking it, or as soon as the pointer moves onto it.
+    #[setting(label = "Select tabs on", choices, enabled_by = "enabled")]
+    pub hover: StackLineHoverMode,
+    #[serde(default)]
+    /// Where the tabs sit for a horizontal stack.
+    #[setting(label = "Horizontal placement", choices, enabled_by = "enabled")]
+    pub horiz_placement: HorizontalPlacement,
+    #[serde(default)]
+    /// Where the tabs sit for a vertical stack, as a compact column of app icons.
+    #[setting(label = "Vertical placement", choices, enabled_by = "enabled")]
+    pub vert_placement: VerticalPlacement,
+    #[serde(default = "default_stack_line_thickness")]
+    /// Thickness of the tab bar, in points.
+    #[setting(label = "Thickness (points)", enabled_by = "enabled")]
+    pub thickness: f64,
+    #[serde(default)]
+    /// Space between the tab bar and its windows, in points.
+    #[setting(label = "Spacing (points)", enabled_by = "enabled")]
+    pub spacing: f64,
+}
+
+impl Default for StackLineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hover: StackLineHoverMode::default(),
+            horiz_placement: HorizontalPlacement::default(),
+            vert_placement: VerticalPlacement::default(),
+            thickness: default_stack_line_thickness(),
+            spacing: 0.0,
+        }
+    }
+}
+
+fn default_stack_line_thickness() -> f64 { cgs::TabBar::HEIGHT }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum StackLineHoverMode {
+    #[default]
+    Click,
+    Hover,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum HorizontalPlacement {
+    #[default]
+    Top,
+    Bottom,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum VerticalPlacement {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Space a stack gives up to its tab bar, and on which edge.
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub struct StackLineReserve {
+    pub thickness: f64,
+    pub spacing: f64,
+    pub horiz: HorizontalPlacement,
+    pub vert: VerticalPlacement,
+}
+
+impl StackLineReserve {
+    /// Thickness plus spacing; nothing when the bar is absent.
+    pub fn total(&self) -> f64 {
+        if self.thickness > 0.0 {
+            self.thickness + self.spacing.max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// The reservation along one axis of a node of `kind`. Horizontal stacks give up
+    /// height for a bar above or below; vertical stacks give up width for one beside.
+    pub fn on_axis(&self, kind: crate::layout_engine::LayoutKind, horizontal: bool) -> f64 {
+        use crate::layout_engine::LayoutKind::*;
+        match (kind, horizontal) {
+            (HorizontalStack, false) | (VerticalStack, true) => self.total(),
+            _ => 0.0,
+        }
+    }
+
+    /// Shrinks a stack's frame to leave room for its bar.
+    pub fn inset(
+        &self,
+        mut rect: objc2_core_foundation::CGRect,
+        horizontal_stack: bool,
+    ) -> objc2_core_foundation::CGRect {
+        let reserve = self.total();
+        if horizontal_stack {
+            let reserve = reserve.min(rect.size.height);
+            if self.horiz == HorizontalPlacement::Top {
+                rect.origin.y += reserve;
+            }
+            rect.size.height -= reserve;
+        } else {
+            let reserve = reserve.min(rect.size.width);
+            if self.vert == VerticalPlacement::Left {
+                rect.origin.x += reserve;
+            }
+            rect.size.width -= reserve;
+        }
+        rect
+    }
+
+    /// The bar's own frame along the reserved edge of a stack's frame.
+    pub fn bar(
+        &self,
+        rect: objc2_core_foundation::CGRect,
+        horizontal_stack: bool,
+    ) -> objc2_core_foundation::CGRect {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        let t = self.thickness;
+        let (o, s) = (rect.origin, rect.size);
+        match (horizontal_stack, self.horiz, self.vert) {
+            (true, HorizontalPlacement::Top, _) => CGRect::new(o, CGSize::new(s.width, t)),
+            (true, HorizontalPlacement::Bottom, _) => {
+                CGRect::new(CGPoint::new(o.x, o.y + s.height - t), CGSize::new(s.width, t))
+            }
+            (false, _, VerticalPlacement::Left) => CGRect::new(o, CGSize::new(t, s.height)),
+            (false, _, VerticalPlacement::Right) => {
+                CGRect::new(CGPoint::new(o.x + s.width - t, o.y), CGSize::new(t, s.height))
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
@@ -868,11 +1001,16 @@ fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
 
 impl StackLineSettings {
-    pub fn thickness(&self) -> f64 {
-        if self.enabled {
-            cgs::TabBar::HEIGHT
-        } else {
-            0.0
+    pub fn reserve(&self) -> StackLineReserve {
+        StackLineReserve {
+            thickness: if self.enabled {
+                self.thickness.max(0.0)
+            } else {
+                0.0
+            },
+            spacing: self.spacing,
+            horiz: self.horiz_placement,
+            vert: self.vert_placement,
         }
     }
 }

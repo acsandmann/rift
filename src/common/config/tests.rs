@@ -616,8 +616,17 @@ fn keymap_rename_and_delete_update_both_command_encodings_and_self_references() 
 #[test]
 fn stack_tabs_have_fixed_height_and_release_the_reservation_when_disabled() {
     let mut tabs: StackLineSettings = toml::from_str("enabled = true").unwrap();
-    assert_eq!(tabs.thickness(), 28.0);
+    assert_eq!(tabs.reserve().total(), 28.0);
+    tabs.spacing = 1.0;
+    assert_eq!(tabs.reserve().total(), 29.0);
     tabs.enabled = false;
-    assert_eq!(tabs.thickness(), 0.0);
+    assert_eq!(tabs.reserve().total(), 0.0);
     assert!(!StackLineSettings::default().enabled);
+}
+
+#[test]
+fn stack_tabs_select_on_click_unless_hover_is_chosen() {
+    assert_eq!(StackLineSettings::default().hover, StackLineHoverMode::Click);
+    let tabs: StackLineSettings = toml::from_str(r#"hover = "hover""#).unwrap();
+    assert_eq!(tabs.hover, StackLineHoverMode::Hover);
 }

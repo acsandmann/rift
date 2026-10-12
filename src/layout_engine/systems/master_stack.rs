@@ -535,14 +535,14 @@ impl MasterStackLayoutSystem {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         self.inner.collect_group_containers_in_selection_path(
             layout,
             screen,
             stack_offset,
             gaps,
-            stack_line_thickness,
+            stack_line,
         )
     }
 
@@ -552,15 +552,10 @@ impl MasterStackLayoutSystem {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        self.inner.collect_group_containers(
-            layout,
-            screen,
-            stack_offset,
-            gaps,
-            stack_line_thickness,
-        )
+        self.inner
+            .collect_group_containers(layout, screen, stack_offset, gaps, stack_line)
     }
 }
 
@@ -625,7 +620,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         stack_offset: f64,
         constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
@@ -644,18 +639,12 @@ impl LayoutSystem for MasterStackLayoutSystem {
                     stack_offset,
                     constraints,
                     gaps,
-                    stack_line_thickness,
+                    stack_line,
                 );
             }
         }
-        self.inner.calculate_layout(
-            layout,
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line_thickness,
-        )
+        self.inner
+            .calculate_layout(layout, screen, stack_offset, constraints, gaps, stack_line)
     }
 
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {

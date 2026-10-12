@@ -224,8 +224,18 @@ display_style = "layout"
 layout_folder = "~/.config/rift/layouts"
 
 [settings.ui.stack_line]
-# Native 28-point Liquid Glass tabs above horizontal and vertical stacks.
+# tabs beside stacked windows (defaults to off)
 enabled = false
+# how a tab is selected: "click", or "hover" to select it as soon as the pointer is over it
+hover = "click"
+# in a horizontal stack where the tabs will be (top/bottom)
+horiz_placement = "top"
+# in a vertical stack where the tabs will be (left/right), as a column of app icons
+vert_placement = "left"
+# how thick the tab bar will be (in points)
+thickness = 28.0
+# spacing between the tab bar and window edges (in points)
+spacing = 0.0
 
 # Trackpad gestures
 [settings.gestures]

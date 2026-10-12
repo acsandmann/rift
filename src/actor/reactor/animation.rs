@@ -2298,7 +2298,7 @@ mod tests {
                     space,
                     screens[index],
                     &gaps,
-                    0.,
+                    Default::default(),
                 );
                 assert_eq!(layout.iter().any(|(id, _)| *id == wid), index == target);
             }

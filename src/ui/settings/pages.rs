@@ -733,8 +733,7 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     );
     page = page.section(section);
     let section = f.schema_rows(
-        Section::new(&ui, "Stack Tabs")
-            .description("Native Liquid Glass tabs above stacked windows."),
+        Section::new(&ui, "Stack Tabs").description("tabs beside stacked windows."),
         "",
         |s| &s.settings.ui.stack_line,
         |s| &mut s.settings.ui.stack_line,

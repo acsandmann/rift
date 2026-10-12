@@ -1,5 +1,5 @@
 use objc2::MainThreadMarker;
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use tracing::instrument;
 
 use crate::actor::app::WindowId;
@@ -7,7 +7,9 @@ use crate::actor::reactor::{Command, ReactorCommand};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, reactor};
 use crate::common::collections::HashMap;
-use crate::common::config::Config;
+use crate::common::config::{
+    Config, HorizontalPlacement, StackLineHoverMode, VerticalPlacement,
+};
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 #[derive(Debug, Clone, PartialEq)]
@@ -15,6 +17,8 @@ pub struct GroupInfo {
     pub node_id: NodeId,
     pub space_id: SpaceId,
     pub frame: CGRect,
+    /// Horizontal stacks take a bar above or below; vertical stacks one beside them.
+    pub horizontal: bool,
     pub selected_index: usize,
     pub tabs: Vec<TabInfo>,
 }
@@ -204,14 +208,7 @@ impl StackLine {
     fn handle_space_state_updated(&mut self, converter: CoordinateConverter) {
         self.coordinate_converter = converter;
         for group in self.native_groups.values() {
-            if let Some(frame) = converter.convert_rect(CGRect::new(
-                group.info.frame.origin,
-                CGSize::new(group.info.frame.size.width, cgs::TabBar::HEIGHT),
-            )) {
-                group.bar.set_frame(frame);
-            } else {
-                group.bar.hide();
-            }
+            self.place(group);
         }
         tracing::debug!("Updated coordinate converter for group indicators");
     }
@@ -221,6 +218,29 @@ impl StackLine {
         if !self.is_enabled() {
             self.native_groups.clear();
             self.icons.clear();
+        }
+        for group in self.native_groups.values() {
+            self.place(group);
+        }
+    }
+
+    fn place(&self, group: &NativeGroup) {
+        let settings = &self.config.settings.ui.stack_line;
+        let reserve = settings.reserve();
+        group.bar.set_select_on_hover(settings.hover == StackLineHoverMode::Hover);
+        group.bar.set_edge(match (group.info.horizontal, settings.horiz_placement, settings.vert_placement) {
+            (true, HorizontalPlacement::Top, _) => cgs::TabBarEdge::Top,
+            (true, HorizontalPlacement::Bottom, _) => cgs::TabBarEdge::Bottom,
+            (false, _, VerticalPlacement::Left) => cgs::TabBarEdge::Left,
+            (false, _, VerticalPlacement::Right) => cgs::TabBarEdge::Right,
+        });
+        if let Some(frame) = self
+            .coordinate_converter
+            .convert_rect(reserve.bar(group.info.frame, group.info.horizontal))
+        {
+            group.bar.set_frame(frame);
+        } else {
+            group.bar.hide();
         }
     }
 
@@ -268,15 +288,7 @@ impl StackLine {
             self.native_groups.insert(node, NativeGroup { bar, info });
         }
         self.refresh_native_tabs(node);
-        let group = &self.native_groups[&node];
-        if let Some(frame) = self.coordinate_converter.convert_rect(CGRect::new(
-            group.info.frame.origin,
-            CGSize::new(group.info.frame.size.width, cgs::TabBar::HEIGHT),
-        )) {
-            group.bar.set_frame(frame);
-        } else {
-            group.bar.hide();
-        }
+        self.place(&self.native_groups[&node]);
         true
     }
 }

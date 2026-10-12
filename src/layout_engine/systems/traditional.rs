@@ -324,7 +324,7 @@ impl TraditionalLayoutSystem {
         stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let mut sizes = vec![];
         self.tree.data.layout.apply_with_gaps(
@@ -338,7 +338,7 @@ impl TraditionalLayoutSystem {
             stack_offset,
             constraints,
             gaps,
-            stack_line_thickness,
+            stack_line,
         );
         sizes
     }
@@ -648,7 +648,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let mut sizes = vec![];
         let tiling_area = compute_tiling_area(screen, gaps);
@@ -664,7 +664,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
             stack_offset,
             constraints,
             gaps,
-            stack_line_thickness,
+            stack_line,
         );
 
         sizes
@@ -1492,7 +1492,7 @@ impl TraditionalLayoutSystem {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         use crate::layout_engine::LayoutKind::*;
 
@@ -1541,7 +1541,7 @@ impl TraditionalLayoutSystem {
                     children.len(),
                     stack_offset,
                     is_horizontal,
-                    stack_line_thickness,
+                    stack_line,
                 );
                 rect = layout_res.get_frame_for_index(selected_index);
 
@@ -1572,7 +1572,7 @@ impl TraditionalLayoutSystem {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         use crate::layout_engine::LayoutKind::*;
 
@@ -1614,7 +1614,7 @@ impl TraditionalLayoutSystem {
                     children.len(),
                     stack_offset,
                     is_horizontal,
-                    stack_line_thickness,
+                    stack_line,
                 );
 
                 for (i, &child) in children.iter().enumerate().rev() {
@@ -2809,7 +2809,7 @@ impl Layout {
         node: NodeId,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         stack_offset: f64,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
         gaps: &crate::common::config::GapSettings,
         horizontal: bool,
     ) -> (f64, Option<f64>, Option<f64>, bool) {
@@ -2852,7 +2852,7 @@ impl Layout {
                 *child,
                 constraints,
                 stack_offset,
-                stack_line_thickness,
+                stack_line,
                 gaps,
                 horizontal,
             );
@@ -2864,11 +2864,7 @@ impl Layout {
         }
 
         if children.len() == 1 {
-            let reserve = if kind.is_stacked() && !horizontal {
-                stack_line_thickness.max(0.0)
-            } else {
-                0.0
-            };
+            let reserve = stack_line.on_axis(kind, horizontal);
             return (
                 mins[0] + reserve,
                 fixed_parts[0].map(|value| value + reserve),
@@ -2896,32 +2892,15 @@ impl Layout {
                         Some(value) => Some(acc.max(value)),
                         None => None,
                     });
+                let reserve = stack_line.on_axis(kind, horizontal);
                 return (
-                    required_focus
-                        + stack_span
-                        + if !horizontal {
-                            stack_line_thickness
-                        } else {
-                            0.0
-                        },
+                    required_focus + stack_span + reserve,
                     None,
-                    max_focus.map(|value| {
-                        value
-                            + stack_span
-                            + if !horizontal {
-                                stack_line_thickness
-                            } else {
-                                0.0
-                            }
-                    }),
+                    max_focus.map(|value| value + stack_span + reserve),
                     any_grow,
                 );
             }
-            let reserve = if horizontal {
-                0.0
-            } else {
-                stack_line_thickness.max(0.0)
-            };
+            let reserve = stack_line.on_axis(kind, horizontal);
             let fixed_max = fixed_parts.iter().copied().try_fold(0.0, |acc, part| match part {
                 Some(value) => Some(if value > acc { value } else { acc }),
                 None => None,
@@ -2976,7 +2955,7 @@ impl Layout {
         stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) {
         let info = &self.info[node];
         let rect = if info.is_fullscreen {
@@ -3025,7 +3004,7 @@ impl Layout {
                         focused_child,
                         constraints,
                         stack_offset,
-                        stack_line_thickness,
+                        stack_line,
                         gaps,
                         is_horizontal,
                     );
@@ -3048,7 +3027,7 @@ impl Layout {
                     children.len(),
                     effective_stack_offset,
                     is_horizontal,
-                    stack_line_thickness,
+                    stack_line,
                 );
                 for (idx, &child) in children.iter().enumerate() {
                     let frame = if idx == focused_idx {
@@ -3067,7 +3046,7 @@ impl Layout {
                         stack_offset,
                         constraints,
                         gaps,
-                        stack_line_thickness,
+                        stack_line,
                     );
                 }
             }
@@ -3083,7 +3062,7 @@ impl Layout {
                 constraints,
                 gaps,
                 true,
-                stack_line_thickness,
+                stack_line,
             ),
             Vertical => self.layout_axis(
                 map,
@@ -3097,7 +3076,7 @@ impl Layout {
                 constraints,
                 gaps,
                 false,
-                stack_line_thickness,
+                stack_line,
             ),
         }
     }
@@ -3115,7 +3094,7 @@ impl Layout {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         horizontal: bool,
-        stack_line_thickness: f64,
+        stack_line: crate::common::config::StackLineReserve,
     ) {
         use objc2_core_foundation::{CGPoint, CGSize};
         let children: Vec<_> = node.children(map).collect();
@@ -3173,7 +3152,7 @@ impl Layout {
                     child,
                     constraints,
                     stack_offset,
-                    stack_line_thickness,
+                    stack_line,
                     gaps,
                     horizontal,
                 );
@@ -3231,7 +3210,7 @@ impl Layout {
                 stack_offset,
                 constraints,
                 gaps,
-                stack_line_thickness,
+                stack_line,
             );
             offset += seg_len;
             if i < children.len() - 1 {
@@ -3254,13 +3233,14 @@ fn stack_layout_result(
     child_count: usize,
     stack_offset: f64,
     is_horizontal: bool,
-    stack_line_thickness: f64,
+    stack_line: crate::common::config::StackLineReserve,
 ) -> StackLayoutResult {
-    let reserve = stack_line_thickness.max(0.0);
-    let mut container_rect = rect;
-    container_rect.origin.y += reserve;
-    container_rect.size.height = (container_rect.size.height - reserve).max(0.0);
-    StackLayoutResult::new(container_rect, child_count, stack_offset, is_horizontal)
+    StackLayoutResult::new(
+        stack_line.inset(rect, is_horizontal),
+        child_count,
+        stack_offset,
+        is_horizontal,
+    )
 }
 
 #[cfg(test)]
@@ -3808,7 +3788,7 @@ mod tests {
                 0.0,
                 &HashMap::default(),
                 &Default::default(),
-                0.0,
+                Default::default(),
             )
             .into_iter()
             .collect();
@@ -4227,8 +4207,14 @@ mod tests {
         }
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(500.0, 300.0));
-        let positions =
-            system.calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0);
+        let positions = system.calculate_layout(
+            layout,
+            screen,
+            40.0,
+            &constraints,
+            &Default::default(),
+            Default::default(),
+        );
         let frames: HashMap<WindowId, CGRect> = positions.into_iter().collect();
         let stacked_w1 = frames.get(&w1).copied().expect("stacked window missing");
         let sibling_w3 = frames.get(&w3).copied().expect("sibling window missing");
@@ -4281,7 +4267,14 @@ mod tests {
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
         assert!(system.select_window(layout, settings));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -4336,13 +4329,27 @@ mod tests {
 
         assert!(system.select_window(layout, normal));
         let normal_frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
         assert!(system.select_window(layout, constrained));
         let constrained_frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -4398,8 +4405,14 @@ mod tests {
         );
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(420.0, 600.0));
-        let frames =
-            system.calculate_layout(layout, screen, 250.0, &constraints, &Default::default(), 0.0);
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            250.0,
+            &constraints,
+            &Default::default(),
+            Default::default(),
+        );
         let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
         let focused = frames.get(&w1).copied().expect("focused frame missing");
 
@@ -4446,8 +4459,14 @@ mod tests {
         );
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(600.0, 360.0));
-        let frames =
-            system.calculate_layout(layout, screen, 220.0, &constraints, &Default::default(), 0.0);
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            220.0,
+            &constraints,
+            &Default::default(),
+            Default::default(),
+        );
         let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
         let focused = frames.get(&w1).copied().expect("focused frame missing");
 
@@ -4494,8 +4513,14 @@ mod tests {
         );
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(420.0, 600.0));
-        let frames =
-            system.calculate_layout(layout, screen, 250.0, &constraints, &Default::default(), 0.0);
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            250.0,
+            &constraints,
+            &Default::default(),
+            Default::default(),
+        );
         let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
         let focused = frames.get(&w1).copied().expect("focused frame missing");
 
@@ -4543,7 +4568,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -4588,7 +4620,7 @@ mod tests {
                 40.0,
                 &Default::default(),
                 &Default::default(),
-                0.0,
+                Default::default(),
             )
             .into_iter()
             .collect();
@@ -4600,7 +4632,7 @@ mod tests {
                 40.0,
                 &Default::default(),
                 &Default::default(),
-                0.0,
+                Default::default(),
             )
             .into_iter()
             .collect();
@@ -4643,7 +4675,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 0.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -4698,7 +4737,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 0.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -4751,7 +4797,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 0.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -4768,8 +4821,36 @@ mod tests {
     }
 
     #[test]
-    fn native_tabs_reserve_top_without_changing_stack_direction() {
-        for kind in [LayoutKind::HorizontalStack, LayoutKind::VerticalStack] {
+    fn native_tabs_reserve_the_configured_edge_without_changing_stack_direction() {
+        use crate::common::config::{HorizontalPlacement, StackLineReserve, VerticalPlacement};
+        let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+        let cases = [
+            (
+                LayoutKind::HorizontalStack,
+                HorizontalPlacement::Top,
+                VerticalPlacement::Left,
+                rect(100.0, 229.0, 400.0, 271.0),
+            ),
+            (
+                LayoutKind::HorizontalStack,
+                HorizontalPlacement::Bottom,
+                VerticalPlacement::Left,
+                rect(100.0, 200.0, 400.0, 271.0),
+            ),
+            (
+                LayoutKind::VerticalStack,
+                HorizontalPlacement::Top,
+                VerticalPlacement::Left,
+                rect(129.0, 200.0, 371.0, 300.0),
+            ),
+            (
+                LayoutKind::VerticalStack,
+                HorizontalPlacement::Top,
+                VerticalPlacement::Right,
+                rect(100.0, 200.0, 371.0, 300.0),
+            ),
+        ];
+        for (kind, horiz, vert, expected) in cases {
             let mut system = TraditionalLayoutSystem::default();
             let layout = system.create_layout();
             let root = system.root(layout);
@@ -4779,21 +4860,37 @@ mod tests {
             system.add_window_under(layout, root, a);
             system.add_window_under(layout, root, b);
             system.select_window(layout, b);
-            let screen = CGRect::new(CGPoint::new(100.0, 200.0), CGSize::new(400.0, 300.0));
+            let screen = rect(100.0, 200.0, 400.0, 300.0);
+            let reserve = StackLineReserve {
+                thickness: 28.0,
+                spacing: 1.0,
+                horiz,
+                vert,
+            };
             let frames = system.calculate_layout(
                 layout,
                 screen,
                 0.0,
                 &HashMap::default(),
                 &Default::default(),
-                28.0,
+                reserve,
             );
             for (_, frame) in frames {
-                assert_eq!(
-                    frame,
-                    CGRect::new(CGPoint::new(100.0, 228.0), CGSize::new(400.0, 272.0))
-                );
+                assert_eq!(frame, expected, "{kind:?} {horiz:?} {vert:?}");
             }
+            // The bar sits on the reserved edge, flush with the stack's outer frame.
+            let bar = reserve.bar(screen, kind == LayoutKind::HorizontalStack);
+            let expected_bar = match (kind, horiz, vert) {
+                (LayoutKind::HorizontalStack, HorizontalPlacement::Top, _) => {
+                    rect(100.0, 200.0, 400.0, 28.0)
+                }
+                (LayoutKind::HorizontalStack, HorizontalPlacement::Bottom, _) => {
+                    rect(100.0, 472.0, 400.0, 28.0)
+                }
+                (_, _, VerticalPlacement::Left) => rect(100.0, 200.0, 28.0, 300.0),
+                (_, _, VerticalPlacement::Right) => rect(472.0, 200.0, 28.0, 300.0),
+            };
+            assert_eq!(bar, expected_bar);
             assert_eq!(system.tree.data.layout.kind(root), kind);
         }
     }
@@ -4819,7 +4916,10 @@ mod tests {
             CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(400.0, 300.0)),
             0.0,
             &Default::default(),
-            28.0,
+            crate::common::config::StackLineReserve {
+                thickness: 28.0,
+                ..Default::default()
+            },
         );
         let group = groups.iter().find(|g| g.node_id == root).unwrap();
         assert_eq!(group.total_count, 2);
@@ -4866,7 +4966,17 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 600.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 20.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                crate::common::config::StackLineReserve {
+                    thickness: 20.0,
+                    ..Default::default()
+                },
+            )
             .into_iter()
             .collect();
 
@@ -4911,7 +5021,17 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 600.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 20.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                crate::common::config::StackLineReserve {
+                    thickness: 20.0,
+                    ..Default::default()
+                },
+            )
             .into_iter()
             .collect();
 
@@ -4949,7 +5069,7 @@ mod tests {
                 40.0,
                 &Default::default(),
                 &Default::default(),
-                0.0,
+                Default::default(),
             )
             .into_iter()
             .collect();
@@ -4998,7 +5118,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -5056,13 +5183,27 @@ mod tests {
 
         system.select(constrained_node);
         let constrained_frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
         assert!(system.select_window(layout, unconstrained));
         let unconstrained_frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 40.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -5234,7 +5375,7 @@ mod tests {
             0.0,
             &HashMap::default(),
             &gaps,
-            0.0,
+            Default::default(),
         );
 
         let after = system
@@ -5359,7 +5500,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1500.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 0.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -5417,7 +5565,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1500.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 0.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -5471,7 +5626,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1500.0, 800.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 0.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
@@ -5513,7 +5675,14 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1600.0, 900.0));
         let frames: HashMap<WindowId, CGRect> = system
-            .calculate_layout(layout, screen, 0.0, &constraints, &Default::default(), 0.0)
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                Default::default(),
+            )
             .into_iter()
             .collect();
 
