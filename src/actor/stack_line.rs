@@ -7,9 +7,7 @@ use crate::actor::reactor::{Command, ReactorCommand};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, reactor};
 use crate::common::collections::HashMap;
-use crate::common::config::{
-    Config, HorizontalPlacement, StackLineHoverMode, VerticalPlacement,
-};
+use crate::common::config::{Config, HorizontalPlacement, StackLineHoverMode, VerticalPlacement};
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 #[derive(Debug, Clone, PartialEq)]
@@ -228,12 +226,18 @@ impl StackLine {
         let settings = &self.config.settings.ui.stack_line;
         let reserve = settings.reserve();
         group.bar.set_select_on_hover(settings.hover == StackLineHoverMode::Hover);
-        group.bar.set_edge(match (group.info.horizontal, settings.horiz_placement, settings.vert_placement) {
-            (true, HorizontalPlacement::Top, _) => cgs::TabBarEdge::Top,
-            (true, HorizontalPlacement::Bottom, _) => cgs::TabBarEdge::Bottom,
-            (false, _, VerticalPlacement::Left) => cgs::TabBarEdge::Left,
-            (false, _, VerticalPlacement::Right) => cgs::TabBarEdge::Right,
-        });
+        group.bar.set_edge(
+            match (
+                group.info.horizontal,
+                settings.horiz_placement,
+                settings.vert_placement,
+            ) {
+                (true, HorizontalPlacement::Top, _) => cgs::TabBarEdge::Top,
+                (true, HorizontalPlacement::Bottom, _) => cgs::TabBarEdge::Bottom,
+                (false, _, VerticalPlacement::Left) => cgs::TabBarEdge::Left,
+                (false, _, VerticalPlacement::Right) => cgs::TabBarEdge::Right,
+            },
+        );
         if let Some(frame) = self
             .coordinate_converter
             .convert_rect(reserve.bar(group.info.frame, group.info.horizontal))
