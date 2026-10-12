@@ -57,6 +57,33 @@ pub fn run(ui: Ui) {
             || {},
         );
         let root = settings.window.ns_window().contentView().unwrap();
+        assert_eq!(
+            settings
+                .window
+                .ns_window()
+                .contentRectForFrameRect(settings.window.ns_window().frame())
+                .size,
+            CGSize::new(880.0, 660.0)
+        );
+        late_runtime_populates_picker(&settings, &mut pending);
+        let search = find::<objc2_app_kit::NSSearchField>(&root).unwrap();
+        change_text(&search, "focus follows pointer");
+        assert_eq!(count::<NSOutlineView>(&root), 0, "search replaces the sidebar");
+        change_text(&search, "   ");
+        assert_eq!(
+            count::<NSOutlineView>(&root),
+            1,
+            "clearing search restores navigation"
+        );
+        change_text(&search, "this setting does not exist");
+        assert_eq!(count::<NSOutlineView>(&root), 0);
+        change_text(&search, "gaps");
+        assert_eq!(
+            count::<NSOutlineView>(&root),
+            0,
+            "search works after an empty result"
+        );
+        change_text(&search, "");
         assert_eq!(find::<NSOutlineView>(&root).unwrap().numberOfRows(), 9);
         let sidebar = find::<NSOutlineView>(&root).unwrap();
         sidebar.selectRowIndexes_byExtendingSelection(
@@ -503,7 +530,7 @@ pub fn run(ui: Ui) {
 fn repeated_close(ui: Ui) {
     let app = NSApplication::sharedApplication(ui.mtm());
     let policy = app.activationPolicy();
-    for _ in 0..20 {
+    for cycle in 0..20 {
         let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
         let closed = Rc::new(Cell::new(false));
         let on_close = closed.clone();
@@ -519,6 +546,13 @@ fn repeated_close(ui: Ui) {
                 move || on_close.set(true),
             );
             settings.show();
+            let presented_frame = settings.window.ns_window().frame();
+            settings.window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
+            assert_eq!(
+                settings.window.ns_window().frame(),
+                presented_frame,
+                "presentation completes layout before another layout pass"
+            );
             assert!(pending.try_recv().is_err(), "General does not need discovery");
             for id in 0..PAGE_COUNT {
                 settings.router.navigate(id);
@@ -558,7 +592,18 @@ fn repeated_close(ui: Ui) {
                 .flatten()
                 .map(|page| objc2::rc::Weak::new(page.view.ns_view()))
                 .collect();
-            settings.window.ns_window().close();
+            if cycle == 0 {
+                settings.model().close_sheet();
+                app.mainMenu()
+                    .unwrap()
+                    .itemAtIndex(0)
+                    .unwrap()
+                    .submenu()
+                    .unwrap()
+                    .performActionForItemAtIndex(0);
+            } else {
+                settings.window.ns_window().close();
+            }
             assert!(closed.get(), "native close notifies the deferred owner");
             assert!(model.upgrade().is_some(), "owner survives windowWillClose");
             assert_eq!(
@@ -604,5 +649,68 @@ fn source() -> ConfigSource {
         binding_modes: Default::default(),
         virtual_workspaces: Default::default(),
         modifier_combinations: Default::default(),
+    }
+}
+
+// Open the real Add Rule sheet before runtime discovery completes: late inventory must
+// redraw its native list without changing the draft or requiring another search keystroke.
+fn late_runtime_populates_picker(
+    settings: &Settings,
+    pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
+) {
+    fn add_button(view: &NSView) -> Option<Retained<objc2_app_kit::NSButton>> {
+        if let Some(button) = view.downcast_ref::<objc2_app_kit::NSButton>()
+            && button.title().to_string() == "Add"
+        {
+            return Some(button.retain());
+        }
+        view.subviews().iter().find_map(|child| add_button(&child))
+    }
+    settings.router.navigate(3);
+    let pages = settings.router.pages.borrow();
+    let add = add_button(pages[3].as_ref().unwrap().view.ns_view()).unwrap();
+    drop(pages);
+    assert!(unsafe { add.sendAction_to(add.action(), add.target().as_deref()) });
+    let window = settings.model().sheet.borrow().as_ref().unwrap().ns_window().retain();
+    let list = find::<NSTableView>(&window.contentView().unwrap()).unwrap();
+    assert_eq!(list.numberOfRows(), 0);
+    settings.refresh_applications(vec![rift_protocol::ApplicationData {
+        pid: 1,
+        bundle_id: Some("dev.test.Late".into()),
+        name: "Late".into(),
+        is_frontmost: false,
+        window_count: 1,
+    }]);
+    assert_eq!(list.numberOfRows(), 1, "late runtime populates an open picker");
+    list.selectRowIndexes_byExtendingSelection(
+        &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
+        false,
+    );
+    fn bundle_input(view: &NSView) -> Option<Retained<objc2_app_kit::NSTextField>> {
+        if let Some(field) = view.downcast_ref::<objc2_app_kit::NSTextField>()
+            && field
+                .placeholderString()
+                .is_some_and(|value| value.to_string() == "com.apple.Safari")
+        {
+            return Some(field.retain());
+        }
+        view.subviews().iter().find_map(|child| bundle_input(&child))
+    }
+    let input = bundle_input(&window.contentView().unwrap()).unwrap();
+    assert_eq!(input.stringValue().to_string(), "dev.test.Late");
+    settings.refresh_applications(vec![]);
+    assert_eq!(list.numberOfRows(), 0, "removed apps leave the picker");
+    assert_eq!(
+        input.stringValue().to_string(),
+        "dev.test.Late",
+        "inventory refresh preserves the chosen matcher"
+    );
+    settings.model().close_sheet();
+    settings.router.navigate(0);
+    while let Ok(request) = pending.try_recv() {
+        assert!(
+            matches!(request.action, Action::RefreshRuntime),
+            "discovery must not edit config"
+        );
     }
 }

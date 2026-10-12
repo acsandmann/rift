@@ -178,9 +178,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "cgs"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "107e18965c4d17d44546d80fb1397b8342bcd5885995c77272cfd0729412e287"
+checksum = "9141062d0897c7cb8f43a852d90647b302b211eb6e17b3fa780a66e1cbd0e50c"
 dependencies = [
  "block2",
  "objc2",

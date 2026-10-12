@@ -20,6 +20,7 @@ mod pages;
 pub mod process;
 mod schema;
 mod search;
+pub mod timing;
 mod updates;
 
 pub type Finish = Box<dyn FnOnce(Result<(), String>)>;
@@ -79,6 +80,8 @@ struct Env {
     applications: RefCell<Vec<ApplicationData>>,
     installed_applications: RefCell<Option<Vec<(String, String)>>>,
     inventory: RefCell<applications::Inventory>,
+    /// Weak native picker updates; expired views are pruned on the next inventory change.
+    application_views: RefCell<Vec<Box<dyn Fn() -> bool>>>,
     navigate: RefCell<Option<Navigate>>,
 }
 
@@ -99,6 +102,7 @@ impl Env {
             &self.applications.borrow(),
             self.installed_applications.borrow().as_deref().unwrap_or(&[]),
         );
+        self.application_views.borrow_mut().retain(|update| update());
     }
 
     fn set_installed_applications(&self, apps: Vec<(String, String)>) {
@@ -304,12 +308,16 @@ impl Router {
     fn show(&self, id: usize) {
         self.title.set_text(CATEGORIES[category(id)].0);
         if self.pages.borrow()[id].is_none() {
+            let page_timing = timing::start();
             let page = if id >= SCOPES {
                 pages::layout_scope(self.ui, &self.model, id - SCOPES)
             } else {
                 pages::build(self.ui, &self.model, id)
             };
             self.pages.borrow_mut()[id] = Some(page);
+            if id == 0 {
+                timing::finish(page_timing, "initial page construction");
+            }
         }
         let pages = self.pages.borrow();
         let page = pages[id].as_ref().unwrap();
@@ -371,6 +379,7 @@ impl Settings {
             applications: RefCell::new(applications),
             installed_applications: RefCell::new(None),
             inventory: RefCell::default(),
+            application_views: RefCell::default(),
             navigate: RefCell::new(None),
         });
         env.rebuild_applications();
@@ -396,6 +405,7 @@ impl Settings {
         };
         *env.navigate.borrow_mut() = Some(navigate.clone());
 
+        let sidebar_timing = timing::start();
         let entries = CATEGORIES
             .iter()
             .enumerate()
@@ -416,23 +426,31 @@ impl Settings {
         sidebar.set_selected(0);
         *router.sidebar.borrow_mut() = Rc::downgrade(&sidebar);
 
+        timing::finish(sidebar_timing, "sidebar construction");
+        let chrome_timing = timing::start();
         let activation = Rc::new(SettingsActivation {
             ui,
             menu: Menu::new(&ui),
             previous: RefCell::new(None),
         });
         let close_activation = activation.clone();
-        let window = SettingsWindow::new(&ui, "Rift Settings")
-            .page_title(&ui, router.title.clone())
-            .on_close(move || {
-                close_activation.restore();
-                on_close();
-            })
-            .content(NavigationSplitView::new(
-                &ui,
-                sidebar_pane(ui, &router, sidebar.clone()),
-                host,
-            ));
+        let window = SettingsWindow::with_size(&ui, "Rift Settings", CGSize::new(880.0, 660.0));
+        timing::finish(chrome_timing, "native window creation");
+        let attachment_timing = timing::start();
+        let window = window.page_title(&ui, router.title.clone()).on_close(move || {
+            close_activation.restore();
+            on_close();
+        });
+        timing::finish(attachment_timing, "toolbar attachment");
+        window.ns_window().center();
+        let content_timing = timing::start();
+        let window = window.content(NavigationSplitView::new(
+            &ui,
+            sidebar_pane(ui, &router, sidebar.clone()),
+            host,
+        ));
+        timing::finish(content_timing, "content attachment");
+        let navigation_timing = timing::start();
         window.initial_focus(&*sidebar);
         let app_menu = Rc::new(Menu::new(&ui));
         let close_window = objc2::rc::Weak::new(window.ns_window());
@@ -477,7 +495,7 @@ impl Settings {
         window.toolbar().update_navigation(false, false, CATEGORIES[0].0, false);
         *router.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
         *env.window.borrow_mut() = window.handle();
-        window.set_size_centered(CGSize::new(880.0, 660.0));
+        timing::finish(navigation_timing, "navigation/menu");
         router.show(0);
         Self { window, router, activation }
     }
@@ -511,8 +529,12 @@ impl Settings {
     }
 
     pub fn show(&self) {
+        let activation = timing::start();
         self.activation.activate();
+        timing::finish(activation, "activation policy/menu");
+        let present = timing::start();
         self.window.present();
+        timing::finish(present, "window presentation");
     }
 
     /// Updates the current page even while hidden or minimized; other pages sync when shown.
@@ -546,52 +568,11 @@ fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<Sidebar<usize>>) -> Vie
             router.host.reveal(search::section(&entry.location), entry.title);
         }
     });
-    let pick = open.clone();
-    let results = Rc::new(
-        Table::new(&ui)
-            .source_list()
-            .column("setting", "", 0.0)
-            .cells(move |row: &search::Row, _| {
-                let content = VStack::new(&ui).spacing(3.0).insets(Insets {
-                    top: 6.0,
-                    left: 12.0,
-                    bottom: 6.0,
-                    right: 12.0,
-                });
-                match row {
-                    search::Row::Heading(title) => {
-                        Box::new(content.push(SubsectionTitle::new(&ui, title)))
-                            as Box<dyn NativeView>
-                    }
-                    search::Row::Setting(entry) => Box::new(
-                        content
-                            .push(Label::new(&ui, entry.title))
-                            .push(Caption::new(&ui, &entry.description).max_lines(2)),
-                    ),
-                }
-            })
-            .group_rows(|row| matches!(row, search::Row::Heading(_)))
-            .selectable(|row| matches!(row, search::Row::Setting(_)))
-            .row_heights(|row| {
-                if matches!(row, search::Row::Heading(_)) {
-                    30.0
-                } else {
-                    54.0
-                }
-            })
-            .on_select_item(move |row| {
-                if let Some(search::Row::Setting(entry)) = row {
-                    pick(entry);
-                }
-            }),
-    );
-    let empty = Rc::new(
-        VStack::new(&ui)
-            .insets(uniform_insets(12.0))
-            .push(Caption::new(&ui, "No matching settings")),
-    );
+    let mut results = None;
+    let mut empty = None;
     let first = Rc::new(Cell::new(None::<&'static search::Entry>));
     let top = first.clone();
+    let open_results = open.clone();
     let weak_content = Rc::downgrade(&content);
     let search = SearchField::new(&ui)
         .placeholder("Search")
@@ -605,10 +586,59 @@ fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<Sidebar<usize>>) -> Vie
                 content.set_cached_page(if query.trim().is_empty() {
                     sidebar.clone()
                 } else {
-                    empty.clone()
+                    empty
+                        .get_or_insert_with(|| {
+                            Rc::new(
+                                VStack::new(&ui)
+                                    .insets(uniform_insets(12.0))
+                                    .push(Caption::new(&ui, "No matching settings")),
+                            )
+                        })
+                        .clone()
                 });
                 return;
             }
+            let results = results.get_or_insert_with(|| {
+                let pick = open_results.clone();
+                Rc::new(
+                    Table::new(&ui)
+                        .source_list()
+                        .column("setting", "", 0.0)
+                        .cells(move |row: &search::Row, _| {
+                            let content = VStack::new(&ui).spacing(3.0).insets(Insets {
+                                top: 6.0,
+                                left: 12.0,
+                                bottom: 6.0,
+                                right: 12.0,
+                            });
+                            match row {
+                                search::Row::Heading(title) => {
+                                    Box::new(content.push(SubsectionTitle::new(&ui, title)))
+                                        as Box<dyn NativeView>
+                                }
+                                search::Row::Setting(entry) => Box::new(
+                                    content
+                                        .push(Label::new(&ui, entry.title))
+                                        .push(Caption::new(&ui, &entry.description).max_lines(2)),
+                                ),
+                            }
+                        })
+                        .group_rows(|row| matches!(row, search::Row::Heading(_)))
+                        .selectable(|row| matches!(row, search::Row::Setting(_)))
+                        .row_heights(|row| {
+                            if matches!(row, search::Row::Heading(_)) {
+                                30.0
+                            } else {
+                                54.0
+                            }
+                        })
+                        .on_select_item(move |row| {
+                            if let Some(search::Row::Setting(entry)) = row {
+                                pick(entry);
+                            }
+                        }),
+                )
+            });
             results.set_rows(search::grouped(&hits));
             results.scroll_to(0);
             content.set_cached_page(results.clone());

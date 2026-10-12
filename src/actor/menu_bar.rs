@@ -185,6 +185,7 @@ impl Menu {
             }
             self.settings = None;
         }
+        let timing = crate::ui::settings::timing::start();
         let child = std::env::current_exe().and_then(|exe| {
             std::process::Command::new(exe)
                 .arg("--settings")
@@ -192,6 +193,7 @@ impl Menu {
                 .arg(&self.config_path)
                 .spawn()
         });
+        crate::ui::settings::timing::finish(timing, "parent process spawn");
         match child {
             Ok(child) => {
                 // Reap on exit so a closed Settings leaves no zombie behind.

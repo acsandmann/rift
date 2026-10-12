@@ -9,7 +9,7 @@ use std::ptr::NonNull;
 use std::sync::mpsc;
 
 use block2::RcBlock;
-use cgs::{Alert, Application, Ui};
+use cgs::{Alert, Ui};
 use dispatchr::time::Time;
 use objc2::MainThreadMarker;
 use objc2::rc::autoreleasepool;
@@ -48,6 +48,7 @@ enum Message {
     Runtime(Option<Runtime>),
     ConfigChanged(u64),
     RefreshSettings,
+    RefreshRuntime,
     Installed(Vec<(String, String)>),
     Updated(Result<String, String>),
     Closed,
@@ -56,6 +57,25 @@ enum Message {
 }
 
 pub fn run(config_path: PathBuf) -> ! {
+    let startup = super::timing::start();
+    let (messages, inbox) = unbounded_channel();
+    // The daemon launches Settings; once it exits, nothing can save the configuration.
+    let lost = messages.clone();
+    let daemon = std::os::unix::process::parent_id();
+    crate::sys::dispatch::on_proc_exit(daemon as i32, move || {
+        let _ = lost.send(Message::Lost("Rift quit.".into()));
+    });
+    if std::os::unix::process::parent_id() != daemon {
+        let _ = messages.send(Message::Lost("Rift quit.".into()));
+    }
+    let (jobs, queue) = mpsc::channel();
+    let worker = messages.clone();
+    std::thread::Builder::new()
+        .name("settings-ipc".into())
+        .spawn(move || serve(queue, worker))
+        .expect("spawn Settings IPC worker");
+    let _ = jobs.send(Job::Source);
+
     // Keep the same executable and signing identity, but distinguish the Settings child
     // in OS process listings. Foundation's processName alone does not rename it in the kernel.
     NSProcessInfo::processInfo().setProcessName(&NSString::from_str("rift-settings"));
@@ -74,72 +94,99 @@ pub fn run(config_path: PathBuf) -> ! {
         tracing::warn!(error = %std::io::Error::last_os_error(), "Could not name the Settings process");
     }
     let mtm = MainThreadMarker::new().expect("Settings runs on the main thread");
+    let appkit = super::timing::start();
     let app = NSApplication::sharedApplication(mtm);
+    super::timing::finish(appkit, "NSApplication::sharedApplication");
+    let policy = super::timing::start();
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    super::timing::finish(policy, "initial activation policy");
+    let launch = super::timing::start();
     app.finishLaunching();
-    Application::shared(&Ui::new(mtm)).install_close_window_command();
-    Executor::run_main(mtm, open(mtm, config_path));
+    super::timing::finish(launch, "finishLaunching");
+    Executor::run_main(mtm, open(mtm, config_path, startup, jobs, messages, inbox));
     std::process::exit(0)
 }
 
-async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
-    let (messages, mut inbox) = unbounded_channel();
-    // The daemon launches Settings; once it exits, nothing can save the configuration.
-    let lost = messages.clone();
-    let daemon = std::os::unix::process::parent_id();
-    crate::sys::dispatch::on_proc_exit(daemon as i32, move || {
-        let _ = lost.send(Message::Lost("Rift quit.".into()));
-    });
-    if std::os::unix::process::parent_id() != daemon {
-        fail("Rift quit.");
-        return std::future::pending().await;
-    }
-    let (jobs, queue) = mpsc::channel();
-    let worker = messages.clone();
-    std::thread::Builder::new()
-        .name("settings-ipc".into())
-        .spawn(move || serve(queue, worker))
-        .expect("spawn Settings IPC worker");
-    let _ = jobs.send(Job::Source);
-    let _ = jobs.send(Job::Runtime);
-    let (mut snapshot, mut runtime, mut announced) = (None, None, 0);
-    while snapshot.is_none() || runtime.is_none() {
+async fn open(
+    mtm: MainThreadMarker,
+    config_path: PathBuf,
+    startup: Option<super::timing::Start>,
+    jobs: mpsc::Sender<Job>,
+    messages: UnboundedSender<Message>,
+    mut inbox: tokio::sync::mpsc::UnboundedReceiver<Message>,
+) {
+    let (mut snapshot, mut announced) = (None, 0);
+    while snapshot.is_none() {
         match inbox.recv().await {
             Some(Message::Source(Ok(source))) => snapshot = Some(source),
             Some(Message::Source(Err(error)) | Message::Lost(error)) => {
                 fail(&error);
                 return std::future::pending().await;
             }
-            Some(Message::Runtime(result)) => runtime = Some(result.unwrap_or_default()),
             Some(Message::ConfigChanged(revision)) => announced = announced.max(revision),
             _ => {}
         }
     }
     let SourceSnapshot { revision, source } = *snapshot.unwrap();
-    let (displays, applications) = runtime.unwrap();
     let (requests, mut pending) = unbounded_channel();
     let closed = messages.clone();
+    let construction = super::timing::start();
     let settings = Settings::new(
         Ui::new(mtm),
         source.clone(),
         config_path,
-        displays,
-        applications,
+        Vec::new(),
+        Vec::new(),
         requests,
         move || {
             let _ = closed.send(Message::Closed);
         },
     );
-    settings.show();
-    for name in unsafe {
+    super::timing::finish(construction, "Settings::new");
+    if let Some(startup) = startup {
+        let updated = std::cell::Cell::new(false);
+        let update = RcBlock::new(move |note: NonNull<NSNotification>| {
+            // Activation can update an invisible window. Only count an update after ordering.
+            let visible = unsafe { note.as_ref() }
+                .object()
+                .and_then(|object| object.downcast::<objc2_app_kit::NSWindow>().ok())
+                .is_some_and(|window| window.isVisible());
+            if visible && !updated.replace(true) {
+                super::timing::finish(
+                    Some(startup),
+                    "first visible native window update (render proxy)",
+                );
+            }
+        });
+        let _ = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWindowDidUpdateNotification),
+                Some(settings.window.ns_window()),
+                None,
+                &update,
+            )
+        };
+    }
+    for (name, activation) in unsafe {
         [
-            NSApplicationDidBecomeActiveNotification,
-            NSApplicationDidChangeScreenParametersNotification,
+            (NSApplicationDidBecomeActiveNotification, true),
+            (NSApplicationDidChangeScreenParametersNotification, false),
         ]
     } {
         let messages = messages.clone();
+        let initial_activation =
+            std::cell::Cell::new(activation && !NSApplication::sharedApplication(mtm).isActive());
         let refresh = RcBlock::new(move |_: NonNull<NSNotification>| {
-            let _ = messages.send(Message::RefreshSettings);
+            // The first activation only presents the snapshot just obtained. Later activations
+            // recover missed broadcasts; screen changes only invalidate runtime data.
+            if initial_activation.replace(false) {
+                return;
+            }
+            let _ = messages.send(if activation {
+                Message::RefreshSettings
+            } else {
+                Message::RefreshRuntime
+            });
         });
         let _ = unsafe {
             NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
@@ -150,6 +197,8 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
             )
         };
     }
+    settings.show();
+    super::timing::finish(startup, "child entry to presented");
     let mut session = Session {
         settings: Some(settings),
         jobs,
@@ -166,6 +215,7 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
         update: None,
     };
     session.pump();
+    session.refresh_runtime();
     loop {
         tokio::select! {
             // Queue edits sent before the window closed ahead of the close itself.
@@ -281,6 +331,7 @@ impl Session {
                 self.pump();
                 self.refresh_runtime();
             }
+            Message::RefreshRuntime => self.refresh_runtime(),
             Message::Runtime(runtime) => {
                 if let (Some((displays, applications)), Some(settings)) = (runtime, &self.settings)
                 {
@@ -405,10 +456,12 @@ impl Session {
 fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
     let client = RiftMachClient;
     // Subscribe before the first snapshot so no change can fall between them.
+    let subscription_timing = super::timing::start();
     let subscription = match client.subscribe(EventKind::ConfigChanged) {
         Ok(subscription) => subscription,
         Err(error) => return drop(messages.send(Message::Lost(error.to_string()))),
     };
+    super::timing::finish(subscription_timing, "event subscription");
     let events = messages.clone();
     std::thread::Builder::new()
         .name("settings-events".into())
@@ -432,6 +485,12 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
         })
         .expect("spawn Settings event receiver");
     for job in jobs {
+        let timing = super::timing::start();
+        let stage = if matches!(job, Job::Runtime) {
+            "runtime IPC"
+        } else {
+            "configuration IPC"
+        };
         let message = match job {
             Job::Runtime => match runtime(&client) {
                 Ok(runtime) => Message::Runtime(Some(runtime)),
@@ -449,6 +508,7 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
                 })
             }
         };
+        super::timing::finish(timing, stage);
         let lost = matches!(message, Message::Lost(_));
         if messages.send(message).is_err() || lost {
             return;

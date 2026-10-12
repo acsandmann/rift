@@ -461,16 +461,8 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         }),
     );
     let weak_table = Rc::downgrade(&table);
-    let names = weak_table.clone();
     if model.env.installed_applications.borrow().is_none() {
-        let _ = model.env.requests.send(Request {
-            action: Action::RefreshRuntime,
-            finish: Box::new(move |_| {
-                if let Some(table) = names.upgrade() {
-                    table.reload();
-                }
-            }),
-        });
+        model.env.send(Action::RefreshRuntime, Box::new(|_| {}));
     }
     let edit_action = edit_rule.clone();
     let edit = IconButton::new(&ui, "pencil", "Edit Rule…").on_click(move || {
@@ -569,6 +561,16 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         *indices.borrow_mut() = matches.iter().map(|(index, _)| *index).collect();
         table.set_rows_if_changed(matches.into_iter().map(|(_, rule)| rule.clone()).collect());
     });
+    let names = Rc::downgrade(&table);
+    let inventory_refresh = Rc::downgrade(&refresh);
+    model.env.application_views.borrow_mut().push(Box::new(move || {
+        let (Some(table), Some(refresh)) = (names.upgrade(), inventory_refresh.upgrade()) else {
+            return false;
+        };
+        refresh();
+        table.reload();
+        true
+    }));
     let update = refresh.clone();
     f.sync.push(Box::new(move |_| update()));
     let update = refresh.clone();
@@ -656,6 +658,8 @@ fn application_picker(
     height: f64,
     mut choose: impl FnMut(Option<AppMatch>) + 'static,
 ) -> VStack {
+    let refreshing = Rc::new(Cell::new(false));
+    let selecting = refreshing.clone();
     let list = Rc::new(
         SettingsList::new(
             &ui,
@@ -666,7 +670,11 @@ fn application_picker(
         .fit_content(height)
         .symbol("app")
         .images(application_icons(|app: &Rc<Choice>| app.target.0.clone()))
-        .on_select_item(move |app| choose(app.map(|app| app.target.clone()))),
+        .on_select_item(move |app| {
+            if !selecting.get() {
+                choose(app.map(|app| app.target.clone()));
+            }
+        }),
     );
     list.set_rows(model.env.inventory.borrow().matching(""));
     let weak_env = Rc::downgrade(&model.env);
@@ -681,23 +689,28 @@ fn application_picker(
                 }
             }),
     );
+    let weak_env = Rc::downgrade(&model.env);
+    let weak_list = Rc::downgrade(&list);
+    let weak_search = Rc::downgrade(&search);
+    model.env.application_views.borrow_mut().push(Box::new(move || {
+        let (Some(env), Some(list), Some(search)) =
+            (weak_env.upgrade(), weak_list.upgrade(), weak_search.upgrade())
+        else {
+            return false;
+        };
+        let rows = env.inventory.borrow().matching(&search.get_value().trim().to_lowercase());
+        let selected = list
+            .selected_row()
+            .and_then(|selected| rows.iter().position(|app| app.target == selected.target));
+        // Native reload/selection notifications must not change the user's matcher.
+        refreshing.set(true);
+        list.set_rows_if_changed(rows);
+        list.set_selected(selected);
+        refreshing.set(false);
+        true
+    }));
     if model.env.installed_applications.borrow().is_none() {
-        let weak_env = Rc::downgrade(&model.env);
-        let weak_list = Rc::downgrade(&list);
-        let weak_search = Rc::downgrade(&search);
-        model.env.send(
-            Action::RefreshRuntime,
-            Box::new(move |_| {
-                if let (Some(env), Some(list), Some(search)) =
-                    (weak_env.upgrade(), weak_list.upgrade(), weak_search.upgrade())
-                {
-                    list.set_selected(None);
-                    list.set_rows(
-                        env.inventory.borrow().matching(&search.get_value().trim().to_lowercase()),
-                    );
-                }
-            }),
-        );
+        model.env.send(Action::RefreshRuntime, Box::new(|_| {}));
     }
     VStack::new(&ui).push(search).push(list)
 }
