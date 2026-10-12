@@ -2667,21 +2667,22 @@ impl Reactor {
         if outcome.arrange.passes > 0
             && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
         {
-            for _ in 0..outcome.arrange.passes.max(1) {
-                layout_changed |= self.update_layout_or_warn(
-                    outcome.arrange.is_resize,
-                    matches!(
-                        self.workspace_switch_manager.workspace_switch_state,
-                        WorkspaceSwitchState::Active
-                    ),
-                    outcome.arrange.space_scope,
-                );
-            }
-            if let Some(space) = outcome.arrange.secondary_space_scope {
+            // Reducers have finished mutating the model; arrange each affected space once.
+            layout_changed = self.update_layout_or_warn(
+                outcome.arrange.is_resize,
+                matches!(
+                    self.workspace_switch_manager.workspace_switch_state,
+                    WorkspaceSwitchState::Active
+                ),
+                outcome.arrange.space_scope,
+            );
+            if let Some(space) = outcome.arrange.secondary_space_scope
+                && outcome.arrange.space_scope.is_some_and(|primary| primary != space)
+            {
                 layout_changed |=
                     self.update_layout_or_warn(outcome.arrange.is_resize, false, Some(space));
             }
-            // Publish the menu state once after all arrange passes have completed.
+            // Publish the menu state once after all affected spaces have been arranged.
             self.maybe_send_menu_update();
         }
         if layout_changed && outcome.drop_haptic && !cfg!(test) {

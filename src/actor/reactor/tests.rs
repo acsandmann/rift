@@ -89,6 +89,98 @@ fn no_op_layout_command_does_not_schedule_arrange() {
 
     assert_eq!(outcome.arrange.passes, 0);
     assert_eq!(outcome.layout_responses.len(), 1);
+    let before = reactor.layout_update_count;
+    reactor.apply_event_outcome(outcome);
+    assert_eq!(reactor.layout_update_count, before);
+}
+
+#[test]
+fn combined_inventory_geometry_changes_arrange_and_notify_once() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    apps.requests();
+    let (tx, rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(tx);
+    reactor.config.settings.animate = true;
+    let (tx, mut broadcasts) = crate::actor::channel();
+    reactor.communication_manager.event_broadcaster = tx;
+    let windows: Vec<_> = (1..=3).map(|idx| WindowId::new(1, idx)).collect();
+    let observed = windows
+        .iter()
+        .map(|&wid| {
+            let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+            info.frame.origin.x += 40.0;
+            (wid, info)
+        })
+        .collect();
+    let before = reactor.layout_update_count;
+    reactor.discover_test_windows(1, observed, windows.clone());
+    assert_eq!(reactor.layout_update_count - before, 1);
+    let message = rx.commands.try_recv().expect("animation command");
+    assert!(matches!(message, super::animation::Message::Replace(_)));
+    assert!(rx.commands.try_recv().is_err(), "duplicate animation command");
+    super::animation::AnimationManager::new().handle_message(message);
+    let mut animated: Vec<_> = apps
+        .requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::BeginWindowAnimation(window) => Some(window),
+            _ => None,
+        })
+        .collect();
+    animated.sort();
+    assert_eq!(animated, windows);
+    assert_eq!(
+        std::iter::from_fn(|| broadcasts.try_recv().ok())
+            .filter(|(_, event)| matches!(event, BroadcastEvent::LayoutChanged { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn secondary_arrangement_only_updates_a_space_outside_primary_scope() {
+    for (scope, expected) in [
+        (None, 1),
+        (Some(SpaceId::new(1)), 1),
+        (Some(SpaceId::new(2)), 2),
+    ] {
+        let (mut reactor, _, _, source, _, _, _) = reactor_with_window_on_space1_two_displays();
+        let mut outcome = EventOutcome::layout_changed(false).with_arrange_space_scope(scope);
+        outcome.arrange.secondary_space_scope = Some(source);
+        let before = reactor.layout_update_count;
+        reactor.apply_event_outcome(outcome);
+        assert_eq!(reactor.layout_update_count - before, expected);
+    }
+}
+
+#[test]
+fn membership_removal_events_retile_once_and_ignore_repeated_notifications() {
+    for kind in 0..3 {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+        let removed = WindowId::new(1, 2);
+        let wsid = reactor.test_window_server_id(removed);
+        let event = || match kind {
+            0 => Event::WindowMinimized(removed),
+            1 => Event::WindowDestroyed(removed),
+            _ => Event::WindowClosed(wsid),
+        };
+        let before = reactor.layout_update_count;
+        reactor.handle_event(event());
+        assert_eq!(reactor.layout_update_count - before, 1, "{:?}", event());
+        reactor.handle_event(event());
+        assert_eq!(reactor.layout_update_count - before, 1);
+        apps.simulate_until_quiet(&mut reactor);
+        let layout = test_layout(&mut reactor, space, screen);
+        assert_eq!(layout.len(), 1);
+        assert_eq!(layout[0].0, WindowId::new(1, 1));
+        assert!(apps.windows[&layout[0].0].frame.same_as(layout[0].1));
+    }
 }
 
 #[test]
@@ -1696,6 +1788,9 @@ fn external_resize_requests_one_arrange_pass() {
     assert!(outcome.arrange.passes > 0);
     assert_eq!(outcome.arrange.passes, 1);
     assert!(outcome.arrange.is_resize);
+    let before = reactor.layout_update_count;
+    reactor.apply_event_outcome(outcome);
+    assert_eq!(reactor.layout_update_count - before, 1);
 }
 
 #[test]
@@ -1973,6 +2068,12 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
         point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
     });
+    assert!(reactor.is_in_drag());
+    let before = reactor.layout_update_count;
+    reactor.apply_event_outcome(EventOutcome::layout_changed(false));
+    assert_eq!(reactor.layout_update_count, before);
+    reactor.apply_event_outcome(EventOutcome::window_membership_changed(true, false));
+    assert_eq!(reactor.layout_update_count - before, 1);
     reactor.drag_manager.externally_controlled_window = Some(wid);
     let move_cancel = reactor.dispatch_workflow(Event::DragCancel).unwrap();
     assert!(move_cancel.arrange.passes > 0);
@@ -1990,8 +2091,11 @@ fn cancelling_tiled_modifier_move_reconciles_layout() {
     let mut config = reactor.config.clone();
     config.settings.drag_drop.enabled = false;
     let config_cancel = reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
-    assert!(config_cancel.arrange.passes > 0);
+    assert_eq!(config_cancel.arrange.passes, 1);
     assert!(!reactor.drag_manager.actor.is_active());
+    let before = reactor.layout_update_count;
+    reactor.apply_event_outcome(config_cancel);
+    assert_eq!(reactor.layout_update_count - before, 1);
 }
 
 #[test]
@@ -2935,7 +3039,9 @@ fn workspace_switch_batches_all_window_positions_with_eui_enabled() {
     apps.simulate_until_quiet(&mut reactor);
     let _ = apps.requests();
 
+    let before = reactor.layout_update_count;
     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    assert_eq!(reactor.layout_update_count - before, 1);
 
     let requests = apps.requests();
     assert!(
@@ -7552,6 +7658,16 @@ fn overview_cross_display_drop_arranges_only_source_and_destination_spaces() {
         target
     );
     assert_eq!(reactor.state.windows.workspace_for_window(source, window), None);
+    apps.requests();
+    let before = reactor.layout_update_count;
+    reactor.apply_event_outcome(outcome);
+    assert_eq!(reactor.layout_update_count - before, 2);
+    apps.simulate_until_quiet(&mut reactor);
+    for (wid, space) in [(window, destination), (WindowId::new(1, 2), source)] {
+        let screen = reactor.space_state.screen_by_space(space).unwrap().frame;
+        let expected = laid_out_frame(&mut reactor, space, screen, wid).unwrap();
+        assert!(apps.windows[&wid].frame.same_as(expected));
+    }
 }
 
 #[test]
