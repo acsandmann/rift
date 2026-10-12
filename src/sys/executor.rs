@@ -13,7 +13,7 @@ use objc2_core_foundation::CFRunLoop;
 
 #[cfg(feature = "custom-event-loop")]
 use super::cocoa::EventLoop;
-use super::run_loop::WakeupHandle;
+use super::run_loop::{WakeLatch, WakeupHandle};
 
 thread_local! {
     static HANDLE: Handle = Handle::new();
@@ -111,7 +111,7 @@ impl Handle {
                 }
             });
             let state = State {
-                wakeup: Arc::new(WakerImpl(wakeup)),
+                wakeup: Arc::new(WakerImpl(WakeLatch::default(), wakeup)),
                 main_task: None,
             };
             RefCell::new(state)
@@ -126,6 +126,8 @@ struct State {
 
 impl State {
     fn process_tasks(&mut self) {
+        // Reset before polling so wakes during or after this poll signal again.
+        self.wakeup.0.consume();
         let waker = self.wakeup.clone().into();
         let mut context = Context::from_waker(&waker);
 
@@ -141,10 +143,16 @@ impl State {
     }
 }
 
-struct WakerImpl(WakeupHandle);
+struct WakerImpl(WakeLatch, WakeupHandle);
 
 impl Wake for WakerImpl {
-    fn wake(self: Arc<Self>) { self.0.wake(); }
+    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if self.0.request() {
+            self.1.wake();
+        }
+    }
 }
 
 #[cfg(test)]
