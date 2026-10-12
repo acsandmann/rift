@@ -324,7 +324,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let process_actor = ProcessActor::new(wm_controller_sender.clone(), spaces_tx);
 
-    let stack_line_hit_rects = rift_wm::actor::stack_line::new_shared_hit_rects();
     let menu = Menu::new(
         config.clone(),
         menu_rx,
@@ -336,10 +335,10 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let stack_line = StackLine::new(
         config.clone(),
         stack_line_rx,
+        stack_line_tx.clone(),
         mtm,
         events_tx.clone(),
         CoordinateConverter::default(),
-        stack_line_hit_rects.clone(),
     );
 
     let mission_control = mc_channel.map(|(tx, rx)| {
@@ -377,9 +376,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             events_tx,
             input_rx,
             input_wm_sender,
-            stack_line_tx,
             input_mc_tx,
-            stack_line_hit_rects,
             native_motion_active,
         )
         .run()

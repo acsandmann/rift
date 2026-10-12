@@ -391,9 +391,7 @@ impl LayoutEngine {
                 self.layout_settings.stack.stack_offset,
                 &self.window_layout_constraints,
                 &gaps,
-                stack_line.thickness(),
-                stack_line.horiz_placement,
-                stack_line.vert_placement,
+                stack_line.reserve(),
             )
             .into_iter()
             .find_map(|(window, frame)| (window == source).then_some(frame))?;
@@ -454,9 +452,7 @@ impl LayoutEngine {
         workspace_id: VirtualWorkspaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let Some(layout) = self.workspaces.active_layout(space, workspace_id) else {
             return Vec::new();
@@ -467,9 +463,7 @@ impl LayoutEngine {
             self.layout_settings.stack.stack_offset,
             &self.window_layout_constraints,
             gaps,
-            stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
+            stack_line,
         )
     }
 
@@ -606,9 +600,7 @@ impl LayoutEngine {
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
         selection_path_only: bool,
     ) -> Vec<GroupContainerInfo> {
         let Some((ws_id, layout_id)) = self.workspaces.active_layout_for_space(space) else {
@@ -623,20 +615,10 @@ impl LayoutEngine {
                         screen,
                         stack_offset,
                         gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
+                        stack_line,
                     )
                 } else {
-                    s.collect_group_containers(
-                        layout_id,
-                        screen,
-                        stack_offset,
-                        gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
-                    )
+                    s.collect_group_containers(layout_id, screen, stack_offset, gaps, stack_line)
                 }
             }
             LayoutSystemKind::Floating(s) => {
@@ -649,20 +631,10 @@ impl LayoutEngine {
                         screen,
                         stack_offset,
                         gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
+                        stack_line,
                     )
                 } else {
-                    s.collect_group_containers(
-                        layout_id,
-                        screen,
-                        stack_offset,
-                        gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
-                    )
+                    s.collect_group_containers(layout_id, screen, stack_offset, gaps, stack_line)
                 }
             }
             LayoutSystemKind::MasterStack(s) => {
@@ -672,20 +644,10 @@ impl LayoutEngine {
                         screen,
                         stack_offset,
                         gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
+                        stack_line,
                     )
                 } else {
-                    s.collect_group_containers(
-                        layout_id,
-                        screen,
-                        stack_offset,
-                        gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
-                    )
+                    s.collect_group_containers(layout_id, screen, stack_offset, gaps, stack_line)
                 }
             }
             _ => Vec::new(),
@@ -2490,9 +2452,7 @@ impl LayoutEngine {
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let Some((workspace_id, layout)) = self.workspaces.active_layout_for_space(space) else {
             return Vec::new();
@@ -2503,15 +2463,7 @@ impl LayoutEngine {
             &self.window_layout_constraints,
             gaps,
         );
-        self.calculate_workspace_layout(
-            space,
-            workspace_id,
-            screen,
-            gaps,
-            stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
-        )
+        self.calculate_workspace_layout(space, workspace_id, screen, gaps, stack_line)
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
@@ -2520,9 +2472,7 @@ impl LayoutEngine {
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
         get_window_frame: F,
         all_screens: &[CGRect],
     ) -> Vec<(WindowId, CGRect)>
@@ -2593,9 +2543,7 @@ impl LayoutEngine {
                         self.layout_settings.stack.stack_offset,
                         &self.window_layout_constraints,
                         gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
+                        stack_line,
                     );
 
                 for (wid, rect) in tiled_positions {
@@ -2695,19 +2643,9 @@ impl LayoutEngine {
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<GroupContainerInfo> {
-        self.collect_group_containers_for_space(
-            space,
-            screen,
-            gaps,
-            stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
-            true,
-        )
+        self.collect_group_containers_for_space(space, screen, gaps, stack_line, true)
     }
 
     pub fn active_workspace_for_space_has_fullscreen(&mut self, space: SpaceId) -> bool {
@@ -2722,19 +2660,9 @@ impl LayoutEngine {
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<GroupContainerInfo> {
-        self.collect_group_containers_for_space(
-            space,
-            screen,
-            gaps,
-            stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
-            false,
-        )
+        self.collect_group_containers_for_space(space, screen, gaps, stack_line, false)
     }
 
     /// Scrolling strips expose their calculated coordinates before native offscreen parking.
@@ -2764,20 +2692,10 @@ impl LayoutEngine {
         workspace_id: crate::model::VirtualWorkspaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let mut positions: HashMap<_, _> = self
-            .calculate_workspace_layout(
-                space,
-                workspace_id,
-                screen,
-                gaps,
-                stack_line_thickness,
-                stack_line_horiz,
-                stack_line_vert,
-            )
+            .calculate_workspace_layout(space, workspace_id, screen, gaps, stack_line)
             .into_iter()
             .collect();
 
@@ -3505,14 +3423,7 @@ mod tests {
                 LayoutEvent::WindowAdded(space, WindowId::new(1, index)),
             );
         }
-        engine.calculate_layout(
-            space,
-            screen,
-            &Default::default(),
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        engine.calculate_layout(space, screen, &Default::default(), Default::default());
         let command = |engine: &mut LayoutEngine, store: &mut WindowStore, command| {
             engine.handle_command(store, Some(space), &[space], &HashMap::default(), command)
         };
@@ -3817,8 +3728,6 @@ mod tests {
                         target,
                         CGRect::new(CGPoint::new(0.0, 0.0), size),
                         &gaps,
-                        0.0,
-                        Default::default(),
                         Default::default(),
                     )
                     .into_iter()
@@ -4140,14 +4049,8 @@ mod tests {
         let new_frame = CGRect::new(old_frame.origin, CGSize::new(234.0, 500.0));
         engine.apply_app_rule_resize(resizes[0], old_frame, new_frame, screen, None);
 
-        let frames = engine.calculate_layout(
-            space,
-            screen,
-            &layout_settings.gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let frames =
+            engine.calculate_layout(space, screen, &layout_settings.gaps, Default::default());
         let frame = frames.iter().find(|(wid, _)| *wid == window).unwrap().1;
         assert_eq!(frame.size.width, 234.0);
 
@@ -4158,14 +4061,8 @@ mod tests {
             new_frame: user_frame,
             screens: vec![(space, screen, None)].into(),
         });
-        let frames = engine.calculate_layout(
-            space,
-            screen,
-            &layout_settings.gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let frames =
+            engine.calculate_layout(space, screen, &layout_settings.gaps, Default::default());
         let frame = frames.iter().find(|(wid, _)| *wid == window).unwrap().1;
         assert_eq!(frame.size.width, 400.0);
     }
@@ -4209,8 +4106,6 @@ mod tests {
             space_a,
             screen,
             &LayoutSettings::default().gaps,
-            0.0,
-            Default::default(),
             Default::default(),
         );
 
@@ -4227,8 +4122,6 @@ mod tests {
             space_a,
             screen,
             &LayoutSettings::default().gaps,
-            0.0,
-            Default::default(),
             Default::default(),
         );
         assert_eq!(
@@ -4340,9 +4233,7 @@ mod tests {
                     source_workspace,
                     source_screen,
                     &LayoutSettings::default().gaps,
-                    0.0,
-                    Default::default(),
-                    Default::default(),
+                    Default::default()
                 )
                 .into_iter()
                 .any(|(window_id, _)| window_id == wid),
@@ -4735,8 +4626,6 @@ mod tests {
             space,
             screen,
             &gaps,
-            0.0,
-            Default::default(),
             Default::default(),
             |_| None,
             &[screen],
@@ -4786,27 +4675,13 @@ mod tests {
         );
 
         let gaps = engine.layout_settings.gaps.clone();
-        let external_layout = engine.calculate_layout(
-            space,
-            external,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let external_layout = engine.calculate_layout(space, external, &gaps, Default::default());
 
         let _ = engine.handle_event(
             &mut window_store,
             LayoutEvent::SpaceExposed(space, internal.size),
         );
-        let internal_layout = engine.calculate_layout(
-            space,
-            internal,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let internal_layout = engine.calculate_layout(space, internal, &gaps, Default::default());
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, w2));
         let _ = engine.handle_command(
             &mut window_store,
@@ -4816,14 +4691,7 @@ mod tests {
             LayoutCommand::ResizeWindowBy { amount: 0.2 },
         );
         assert_ne!(
-            engine.calculate_layout(
-                space,
-                internal,
-                &gaps,
-                0.0,
-                Default::default(),
-                Default::default(),
-            ),
+            engine.calculate_layout(space, internal, &gaps, Default::default()),
             internal_layout,
             "test setup must modify the built-in-display layout"
         );
@@ -4833,14 +4701,7 @@ mod tests {
             LayoutEvent::SpaceExposed(space, external.size),
         );
         assert_eq!(
-            engine.calculate_layout(
-                space,
-                external,
-                &gaps,
-                0.0,
-                Default::default(),
-                Default::default(),
-            ),
+            engine.calculate_layout(space, external, &gaps, Default::default()),
             external_layout,
             "returning to a display size must restore its own layout configuration"
         );
@@ -4870,14 +4731,7 @@ mod tests {
         );
         let gaps = engine.layout_settings.gaps.clone();
 
-        let baseline = engine.calculate_layout(
-            space,
-            screen,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let baseline = engine.calculate_layout(space, screen, &gaps, Default::default());
 
         let _ = engine.handle_command(
             &mut window_store,
@@ -4887,14 +4741,7 @@ mod tests {
             LayoutCommand::MoveNode(Direction::Up),
         );
 
-        let modified = engine.calculate_layout(
-            space,
-            screen,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let modified = engine.calculate_layout(space, screen, &gaps, Default::default());
         assert_ne!(baseline, modified);
 
         let _ = engine.handle_event(
@@ -4903,14 +4750,7 @@ mod tests {
         );
 
         assert_eq!(
-            engine.calculate_layout(
-                space,
-                screen,
-                &gaps,
-                0.0,
-                Default::default(),
-                Default::default(),
-            ),
+            engine.calculate_layout(space, screen, &gaps, Default::default()),
             modified
         );
     }
@@ -4942,14 +4782,7 @@ mod tests {
         );
 
         let gaps = engine.layout_settings.gaps.clone();
-        let before = engine.calculate_layout(
-            space,
-            screen,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let before = engine.calculate_layout(space, screen, &gaps, Default::default());
 
         // A partial AX inventory observes w1 but says nothing about w2.
         let _ = engine.handle_event(
@@ -4958,14 +4791,7 @@ mod tests {
         );
 
         assert_eq!(
-            engine.calculate_layout(
-                space,
-                screen,
-                &gaps,
-                0.0,
-                Default::default(),
-                Default::default(),
-            ),
+            engine.calculate_layout(space, screen, &gaps, Default::default()),
             before,
             "partial discovery must not remove an assigned window or reset its split"
         );
@@ -5005,14 +4831,7 @@ mod tests {
         );
 
         let gaps = engine.layout_settings.gaps.clone();
-        let before = engine.calculate_layout(
-            space_a,
-            screen,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let before = engine.calculate_layout(space_a, screen, &gaps, Default::default());
 
         let _ = engine.handle_event(
             &mut window_store,
@@ -5022,14 +4841,7 @@ mod tests {
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(b1));
 
         assert_eq!(
-            engine.calculate_layout(
-                space_a,
-                screen,
-                &gaps,
-                0.0,
-                Default::default(),
-                Default::default(),
-            ),
+            engine.calculate_layout(space_a, screen, &gaps, Default::default()),
             before,
             "removing a window must not rebalance layouts in other workspaces"
         );
@@ -5064,7 +4876,7 @@ mod tests {
 
         let gaps = engine.layout_settings.gaps.clone();
         let before: HashMap<_, _> = engine
-            .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
+            .calculate_layout(space, screen, &gaps, Default::default())
             .into_iter()
             .collect();
         let ratio_before = before[&w1].size.width / before[&w2].size.width;
@@ -5078,7 +4890,7 @@ mod tests {
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(w3));
 
         let after: HashMap<_, _> = engine
-            .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
+            .calculate_layout(space, screen, &gaps, Default::default())
             .into_iter()
             .collect();
         let ratio_after = after[&w1].size.width / after[&w2].size.width;
@@ -5117,14 +4929,7 @@ mod tests {
             LayoutCommand::MoveNode(Direction::Up),
         );
 
-        let modified = engine.calculate_layout(
-            space,
-            screen,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let modified = engine.calculate_layout(space, screen, &gaps, Default::default());
 
         let _ = engine.handle_event(
             &mut window_store,
@@ -5132,14 +4937,7 @@ mod tests {
         );
 
         assert_eq!(
-            engine.calculate_layout(
-                space,
-                screen,
-                &gaps,
-                0.0,
-                Default::default(),
-                Default::default(),
-            ),
+            engine.calculate_layout(space, screen, &gaps, Default::default()),
             modified
         );
     }
@@ -5165,25 +4963,11 @@ mod tests {
             ),
         );
         let gaps = engine.layout_settings.gaps.clone();
-        let before = engine.calculate_layout(
-            space,
-            screen,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let before = engine.calculate_layout(space, screen, &gaps, Default::default());
 
         assert!(!engine.add_window_to_layout(&mut window_store, space, wid));
         assert_eq!(
-            engine.calculate_layout(
-                space,
-                screen,
-                &gaps,
-                0.0,
-                Default::default(),
-                Default::default(),
-            ),
+            engine.calculate_layout(space, screen, &gaps, Default::default()),
             before
         );
     }
@@ -5305,9 +5089,10 @@ mod tests {
             space,
             CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.)),
             &Default::default(),
-            2.,
-            Default::default(),
-            Default::default(),
+            crate::common::config::StackLineReserve {
+                thickness: 2.,
+                ..Default::default()
+            },
         );
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].window_ids[groups[0].selected_index], windows[1]);

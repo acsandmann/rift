@@ -160,9 +160,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)>;
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId>;

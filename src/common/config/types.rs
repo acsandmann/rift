@@ -816,82 +816,178 @@ impl Default for MenuBarSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StackLineSettings {
-    #[serde(default)]
-    /// Show the experimental stack indicator.
+    /// Show native Liquid Glass tabs beside stacked windows.
+    #[serde(default = "yes")]
     #[setting(label = "Enabled")]
     pub enabled: bool,
     #[serde(default)]
-    /// Choose whether hovering or clicking selects a window.
+    /// What hovering a tab does: just highlight it, or select it as a click would.
     #[setting(label = "Interaction", choices, enabled_by = "enabled")]
     pub hover: StackLineHoverMode,
-    #[serde(default = "default_stack_line_thickness")]
-    /// Thickness of the stack indicator, in points.
-    #[setting(label = "Thickness (points)", enabled_by = "enabled")]
-    pub thickness: f64,
     #[serde(default)]
-    /// Where to place a horizontal stack indicator.
+    /// Where the tabs sit for a horizontal stack.
     #[setting(label = "Horizontal placement", choices, enabled_by = "enabled")]
     pub horiz_placement: HorizontalPlacement,
     #[serde(default)]
-    /// Where to place a vertical stack indicator.
+    /// Where the tabs sit for a vertical stack; their titles run along the bar.
     #[setting(label = "Vertical placement", choices, enabled_by = "enabled")]
     pub vert_placement: VerticalPlacement,
-    #[serde(default = "default_stack_line_spacing")]
-    /// Space between stack segments, in points.
+    #[serde(default = "default_stack_line_thickness")]
+    /// Thickness of the tab bar, in points (at least 20).
+    #[setting(label = "Thickness (points)", enabled_by = "enabled")]
+    pub thickness: f64,
+    #[serde(default)]
+    /// Space between the tab bar and its windows, in points.
     #[setting(label = "Spacing (points)", enabled_by = "enabled")]
     pub spacing: f64,
-    /// Color of the selected stack segment, with normalized RGBA components.
-    #[serde(default = "default_stack_line_selected_color")]
-    #[setting(label = "Selected color", custom)]
-    pub selected_color: Color,
-    /// Color of unselected stack segments, with normalized RGBA components.
-    #[serde(default = "default_stack_line_unselected_color")]
-    #[setting(label = "Unselected color", custom)]
-    pub unselected_color: Color,
-    /// Color of segment borders and separators, with normalized RGBA components.
-    #[serde(default = "default_stack_line_border_color")]
-    #[setting(label = "Border color", custom)]
-    pub border_color: Color,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
-#[serde(deny_unknown_fields)]
-pub struct Color {
-    #[serde(default)]
-    pub r: f64,
-    #[serde(default)]
-    pub g: f64,
-    #[serde(default)]
-    pub b: f64,
-    #[serde(default = "default_color_alpha")]
-    pub a: f64,
+impl Default for StackLineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hover: StackLineHoverMode::default(),
+            horiz_placement: HorizontalPlacement::default(),
+            vert_placement: VerticalPlacement::default(),
+            thickness: default_stack_line_thickness(),
+            spacing: 0.0,
+        }
+    }
 }
 
-fn default_color_alpha() -> f64 { 1.0 }
+fn default_stack_line_thickness() -> f64 { cgs::TabBar::HEIGHT }
 
-impl Color {
-    pub const fn new(r: f64, g: f64, b: f64, a: f64) -> Self { Self { r, g, b, a } }
+impl StackLineSettings {
+    /// The native tab bar is unusable below this thickness.
+    pub const MIN_THICKNESS: f64 = 20.0;
+
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if !self.thickness.is_finite() || self.thickness < Self::MIN_THICKNESS {
+            issues.push(format!(
+                "ui.stack_line.thickness must be at least {}, got {}",
+                Self::MIN_THICKNESS,
+                self.thickness
+            ));
+        }
+        if !self.spacing.is_finite() || self.spacing < 0.0 {
+            issues.push(format!(
+                "ui.stack_line.spacing must be non-negative, got {}",
+                self.spacing
+            ));
+        }
+        issues
+    }
 }
 
-impl Default for Color {
-    fn default() -> Self { Self::new(0.0, 0.0, 0.0, 1.0) }
-}
-
-fn default_stack_line_selected_color() -> Color { Color::new(0.0, 0.5, 1.0, 1.0) }
-
-fn default_stack_line_unselected_color() -> Color { Color::new(0.8, 0.8, 0.8, 1.0) }
-
-fn default_stack_line_border_color() -> Color { Color::new(0.6, 0.6, 0.6, 1.0) }
-
+/// Values keep their pre-native meanings so existing configs behave as before.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum StackLineHoverMode {
+    /// Hovering a tab selects it, as a click would.
+    #[setting(label = "Select on hover")]
     Click,
+    /// Hovering only highlights a tab; click to select it.
     #[default]
+    #[setting(label = "Click to select")]
     Hover,
+}
+
+impl StackLineHoverMode {
+    pub fn selects_on_hover(self) -> bool { self == Self::Click }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum HorizontalPlacement {
+    #[default]
+    Top,
+    Bottom,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum VerticalPlacement {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Space a stack gives up to its tab bar, and on which edge.
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub struct StackLineReserve {
+    pub thickness: f64,
+    pub spacing: f64,
+    pub horiz: HorizontalPlacement,
+    pub vert: VerticalPlacement,
+}
+
+impl StackLineReserve {
+    /// Thickness plus spacing; nothing when the bar is absent.
+    pub fn total(&self) -> f64 {
+        if self.thickness > 0.0 {
+            self.thickness + self.spacing
+        } else {
+            0.0
+        }
+    }
+
+    /// The reservation along one axis of a node of `kind`. Horizontal stacks give up
+    /// height for a bar above or below; vertical stacks give up width for one beside.
+    pub fn on_axis(&self, kind: crate::layout_engine::LayoutKind, horizontal: bool) -> f64 {
+        use crate::layout_engine::LayoutKind::*;
+        match (kind, horizontal) {
+            (HorizontalStack, false) | (VerticalStack, true) => self.total(),
+            _ => 0.0,
+        }
+    }
+
+    /// Shrinks a stack's frame to leave room for its bar.
+    pub fn inset(
+        &self,
+        mut rect: objc2_core_foundation::CGRect,
+        horizontal_stack: bool,
+    ) -> objc2_core_foundation::CGRect {
+        let reserve = self.total();
+        if horizontal_stack {
+            let reserve = reserve.min(rect.size.height);
+            if self.horiz == HorizontalPlacement::Top {
+                rect.origin.y += reserve;
+            }
+            rect.size.height -= reserve;
+        } else {
+            let reserve = reserve.min(rect.size.width);
+            if self.vert == VerticalPlacement::Left {
+                rect.origin.x += reserve;
+            }
+            rect.size.width -= reserve;
+        }
+        rect
+    }
+
+    /// The bar's own frame along the reserved edge of a stack's frame, never beyond it.
+    pub fn bar(
+        &self,
+        rect: objc2_core_foundation::CGRect,
+        horizontal_stack: bool,
+    ) -> objc2_core_foundation::CGRect {
+        use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+        let (o, s) = (rect.origin, rect.size);
+        let t = self.thickness.min(if horizontal_stack { s.height } else { s.width }).max(0.0);
+        match (horizontal_stack, self.horiz, self.vert) {
+            (true, HorizontalPlacement::Top, _) => CGRect::new(o, CGSize::new(s.width, t)),
+            (true, HorizontalPlacement::Bottom, _) => {
+                CGRect::new(CGPoint::new(o.x, o.y + s.height - t), CGSize::new(s.width, t))
+            }
+            (false, _, VerticalPlacement::Left) => CGRect::new(o, CGSize::new(t, s.height)),
+            (false, _, VerticalPlacement::Right) => {
+                CGRect::new(CGPoint::new(o.x + s.width - t, o.y), CGSize::new(t, s.height))
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
@@ -936,24 +1032,19 @@ fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 
 fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum HorizontalPlacement {
-    #[default]
-    Top,
-    Bottom,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum VerticalPlacement {
-    #[default]
-    Left,
-    Right,
-}
-
 impl StackLineSettings {
-    pub fn thickness(&self) -> f64 { if self.enabled { self.thickness } else { 0.0 } }
+    pub fn reserve(&self) -> StackLineReserve {
+        StackLineReserve {
+            thickness: if self.enabled {
+                self.thickness.max(0.0)
+            } else {
+                0.0
+            },
+            spacing: self.spacing,
+            horiz: self.horiz_placement,
+            vert: self.vert_placement,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
@@ -1402,6 +1493,7 @@ impl Settings {
         }
 
         issues.extend(self.layout.validate());
+        issues.extend(self.ui.stack_line.validate());
 
         if !(0.10..=0.45).contains(&self.drag_drop.drop_zone_fraction) {
             issues.push(format!(
@@ -1674,9 +1766,6 @@ fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
 fn default_swipe_fingers() -> usize { 3 }
 fn default_distance_pct() -> f64 { 0.08 }
 fn default_overscroll_threshold() -> f64 { 0.55 }
-
-fn default_stack_line_spacing() -> f64 { 1.0 }
-fn default_stack_line_thickness() -> f64 { 20.0 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
 #[serde(rename_all = "snake_case")]

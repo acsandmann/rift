@@ -246,6 +246,89 @@ fn bound_scrolling_tiled_frames_to_screen(
 }
 
 impl LayoutManager {
+    fn publish_stack_tabs(
+        reactor: &Reactor,
+        space: SpaceId,
+        group_infos: &[crate::layout_engine::engine::GroupContainerInfo],
+        active_workspace_for_space_has_fullscreen: bool,
+        reorder: bool,
+    ) {
+        if reactor.config.settings.ui.stack_line.enabled
+            && let Some(tx) = &reactor.communication_manager.stack_line_tx
+        {
+            let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
+                .iter()
+                .map(|g| crate::actor::stack_line::GroupInfo {
+                    node_id: g.node_id,
+                    space_id: space,
+                    frame: g.frame,
+                    horizontal: g.container_kind != crate::layout_engine::LayoutKind::VerticalStack,
+                    selected_index: g.selected_index,
+                    tabs: g
+                        .window_ids
+                        .iter()
+                        .map(|&window_id| {
+                            let info = reactor.state.windows.window(window_id).map(|w| &w.info);
+                            crate::actor::stack_line::TabInfo {
+                                window_id,
+                                title: info.map(|i| i.title.clone()).unwrap_or_default(),
+                                bundle_id: info.and_then(|i| i.bundle_id.clone()),
+                                window_server_id: reactor
+                                    .state
+                                    .windows
+                                    .record(window_id)
+                                    .and_then(|record| record.window_server_id()),
+                            }
+                        })
+                        .collect(),
+                })
+                .collect();
+            let active_space_ids: Vec<crate::sys::screen::SpaceId> =
+                reactor.iter_active_spaces().collect();
+
+            if let Err(e) = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                active_space_ids,
+                space_id: space,
+                groups,
+                active_workspace_for_space_has_fullscreen,
+                reorder,
+            }) {
+                tracing::warn!("Failed to send groups update to stack_line: {}", e);
+            }
+        }
+    }
+
+    pub(super) fn refresh_stack_tabs(reactor: &mut Reactor, space: SpaceId) {
+        if !reactor.config.settings.ui.stack_line.enabled
+            || reactor.communication_manager.stack_line_tx.is_none()
+            || !reactor.is_space_active(space)
+        {
+            return;
+        }
+        let Some(screen) = reactor.space_state.screen_by_space(space) else {
+            return;
+        };
+        let frame = screen.frame;
+        let gaps = reactor
+            .config
+            .settings
+            .layout
+            .gaps
+            .effective_for_display(screen.display_uuid_owned().as_deref());
+        let groups = reactor.layout_manager.layout_engine.collect_group_containers(
+            space,
+            frame,
+            &gaps,
+            reactor.config.settings.ui.stack_line.reserve(),
+        );
+        let fullscreen = reactor.workspace_command_space() == Some(space)
+            && reactor
+                .layout_manager
+                .layout_engine
+                .active_workspace_for_space_has_fullscreen(space);
+        Self::publish_stack_tabs(reactor, space, &groups, fullscreen, true);
+    }
+
     pub fn update_layout(
         reactor: &mut Reactor,
         is_resize: bool,
@@ -296,9 +379,7 @@ impl LayoutManager {
                     space,
                     screen.frame.clone(),
                     &gaps,
-                    reactor.config.settings.ui.stack_line.thickness(),
-                    reactor.config.settings.ui.stack_line.horiz_placement,
-                    reactor.config.settings.ui.stack_line.vert_placement,
+                    reactor.config.settings.ui.stack_line.reserve(),
                     |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
@@ -357,39 +438,16 @@ impl LayoutManager {
                     space,
                     screen_frame,
                     &gaps,
-                    reactor.config.settings.ui.stack_line.thickness(),
-                    reactor.config.settings.ui.stack_line.horiz_placement,
-                    reactor.config.settings.ui.stack_line.vert_placement,
+                    reactor.config.settings.ui.stack_line.reserve(),
                 );
 
-                // Keep internal stack-line UI actor fed from the same group snapshot.
-                if reactor.config.settings.ui.stack_line.enabled
-                    && let Some(tx) = &reactor.communication_manager.stack_line_tx
-                {
-                    let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
-                        .iter()
-                        .map(|g| crate::actor::stack_line::GroupInfo {
-                            node_id: g.node_id,
-                            space_id: space,
-                            container_kind: g.container_kind,
-                            frame: g.frame,
-                            total_count: g.total_count,
-                            selected_index: g.selected_index,
-                            window_ids: g.window_ids.clone(),
-                        })
-                        .collect();
-                    let active_space_ids: Vec<crate::sys::screen::SpaceId> =
-                        reactor.iter_active_spaces().collect();
-
-                    if let Err(e) = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
-                        active_space_ids,
-                        space_id: space,
-                        groups,
-                        active_workspace_for_space_has_fullscreen,
-                    }) {
-                        tracing::warn!("Failed to send groups update to stack_line: {}", e);
-                    }
-                }
+                Self::publish_stack_tabs(
+                    reactor,
+                    space,
+                    &group_infos,
+                    active_workspace_for_space_has_fullscreen,
+                    false,
+                );
 
                 if let Some(workspace_id) =
                     reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
@@ -407,24 +465,35 @@ impl LayoutManager {
 
                     let stacks: Vec<StackInfo> = group_infos
                         .iter()
-                        .map(|g| StackInfo {
-                            container_kind: match g.container_kind {
-                                crate::layout_engine::LayoutKind::Horizontal => {
-                                    rift_protocol::LayoutKind::Horizontal
-                                }
-                                crate::layout_engine::LayoutKind::Vertical => {
-                                    rift_protocol::LayoutKind::Vertical
-                                }
-                                crate::layout_engine::LayoutKind::HorizontalStack => {
-                                    rift_protocol::LayoutKind::HorizontalStack
-                                }
-                                crate::layout_engine::LayoutKind::VerticalStack => {
-                                    rift_protocol::LayoutKind::VerticalStack
-                                }
-                            },
-                            total_count: g.total_count,
-                            selected_index: g.selected_index,
-                            windows: g.window_ids.iter().map(WindowId::to_debug_string).collect(),
+                        .map(|g| {
+                            // Clients have always received vertical stacks bottom to top.
+                            let mut windows: Vec<_> =
+                                g.window_ids.iter().map(WindowId::to_debug_string).collect();
+                            let mut selected_index = g.selected_index;
+                            if g.container_kind == crate::layout_engine::LayoutKind::VerticalStack {
+                                windows.reverse();
+                                selected_index =
+                                    windows.len().saturating_sub(1).saturating_sub(selected_index);
+                            }
+                            StackInfo {
+                                total_count: g.total_count,
+                                container_kind: match g.container_kind {
+                                    crate::layout_engine::LayoutKind::Horizontal => {
+                                        rift_protocol::LayoutKind::Horizontal
+                                    }
+                                    crate::layout_engine::LayoutKind::Vertical => {
+                                        rift_protocol::LayoutKind::Vertical
+                                    }
+                                    crate::layout_engine::LayoutKind::HorizontalStack => {
+                                        rift_protocol::LayoutKind::HorizontalStack
+                                    }
+                                    crate::layout_engine::LayoutKind::VerticalStack => {
+                                        rift_protocol::LayoutKind::VerticalStack
+                                    }
+                                },
+                                selected_index,
+                                windows,
+                            }
                         })
                         .collect();
 

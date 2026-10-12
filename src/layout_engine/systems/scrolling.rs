@@ -1637,9 +1637,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         _stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
-        _stack_line_thickness: f64,
-        _stack_line_horiz: crate::common::config::HorizontalPlacement,
-        _stack_line_vert: crate::common::config::VerticalPlacement,
+        _stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         self.calculate_frames(layout, screen, constraints, gaps, true)
     }

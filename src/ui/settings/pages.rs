@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use super::*;
-use crate::common::config::{Color, *};
+use crate::common::config::*;
 use crate::layout_engine::Orientation;
 
 /// Popup choices for every layout mode.
@@ -697,20 +697,6 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
 }
 
 fn interface(ui: Ui, model: &Rc<Model>) -> Page {
-    type ColorField = (
-        &'static str,
-        fn(&StackLineSettings) -> Color,
-        fn(&mut StackLineSettings) -> &mut Color,
-    );
-    const COLORS: [ColorField; 3] = [
-        ("Selected color", |s| s.selected_color, |s| &mut s.selected_color),
-        (
-            "Unselected color",
-            |s| s.unselected_color,
-            |s| &mut s.unselected_color,
-        ),
-        ("Border color", |s| s.border_color, |s| &mut s.border_color),
-    ];
     let mut f = FormBuilder::new(ui, model);
     let mut page = SettingsPage::new(&ui, "");
     let section = f.schema_section(
@@ -746,21 +732,12 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
         |s| &mut s.settings.ui.mission_control,
     );
     page = page.section(section);
-    let mut section = f.schema_rows(
-        Section::new(&ui, "Stack Line").description("Experimental window indicators."),
+    let section = f.schema_rows(
+        Section::new(&ui, "Stack Tabs").description("tabs beside stacked windows."),
         "",
         |s| &s.settings.ui.stack_line,
         |s| &mut s.settings.ui.stack_line,
     );
-    for (title, get, set) in COLORS {
-        let row = f.color(
-            title,
-            move |s| get(&s.settings.ui.stack_line),
-            move |s, v| *set(&mut s.settings.ui.stack_line) = v,
-        );
-        f.enabled(&row, |s| s.settings.ui.stack_line.enabled);
-        section = section.row(row);
-    }
     page = page.section(section);
     f.finish(page)
 }
@@ -820,35 +797,6 @@ pub(super) fn optional_number(value: &str) -> Result<Option<f64>, String> {
         .filter(|v| v.is_finite())
         .map(Some)
         .ok_or_else(|| "Enter a number, or leave blank to use Default".into())
-}
-
-impl FormBuilder {
-    fn color(
-        &mut self,
-        title: &str,
-        get: impl Fn(&ConfigSource) -> Color + 'static,
-        set: impl Fn(&mut ConfigSource, Color) + Send + Copy + 'static,
-    ) -> SettingsRow {
-        let message = Rc::new(ValidationMessage::new(&self.ui));
-        let error = Rc::downgrade(&message);
-        let model = self.model.clone();
-        let input = Rc::new(ColorWell::new(&self.ui).on_change(move |[r, g, b, a]| {
-            let color = Color::new(r, g, b, a);
-            Model::submit(
-                &model,
-                Box::new(move |s| {
-                    set(s, color);
-                    Ok(())
-                }),
-                error.clone(),
-            );
-        }));
-        self.sync(&input, move |input, s| {
-            let c = get(s);
-            input.set_value([c.r, c.g, c.b, c.a]);
-        });
-        self.row(title, input, message)
-    }
 }
 
 fn focus_suspend(f: &mut FormBuilder) -> Section {

@@ -1408,6 +1408,7 @@ impl Reactor {
                     self.space_state.command_space = Some(reported_space);
                 }
                 if self.layout_manager.layout_engine.focused_window() == Some(window) {
+                    LayoutManager::refresh_stack_tabs(self, reported_space);
                     if let Some(input_tx) = &self.communication_manager.input_tx {
                         _ = input_tx.send(crate::actor::input::Request::EnforceHidden);
                     }
@@ -1770,6 +1771,11 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowTitleChanged(wid, new_title) => {
+                if self.config.settings.ui.stack_line.enabled
+                    && let Some(tx) = &self.communication_manager.stack_line_tx
+                {
+                    tx.send(stack_line::Event::TitleChanged(wid, new_title.clone()));
+                }
                 let mut outcome = window_workflow::handle_window_title_changed(
                     &mut self.state,
                     window_workflow::WindowTitleChangedPayload { window: wid, title: new_title },
@@ -4074,6 +4080,9 @@ impl Reactor {
                 self.refresh_active_drag_scene();
             }
         }
+        if !geometry_changed && let Some(space) = event_space {
+            LayoutManager::refresh_stack_tabs(self, space);
+        }
         if matches!(
             event_clone,
             LayoutEvent::WindowRemoved(_)
@@ -4503,6 +4512,16 @@ impl Reactor {
         if self.is_in_drag() {
             self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
+        }
+
+        if !response.changed
+            && let Some(window) = response.focus_window
+        {
+            if let Some(space) =
+                workspace_switch_space.or_else(|| self.best_space_for_window_id(window))
+            {
+                LayoutManager::refresh_stack_tabs(self, space);
+            }
         }
 
         let mut pending_refocus_space =
