@@ -1460,28 +1460,23 @@ impl TraditionalLayoutSystem {
         children: &[NodeId],
         selected_index: usize,
     ) -> crate::layout_engine::engine::GroupContainerInfo {
-        let mut representatives: Vec<_> = children
+        // One representative per non-empty child, in child order: left to right for a
+        // horizontal stack, top to bottom for a vertical one.
+        let representatives: Vec<_> = children
             .iter()
             .enumerate()
             .filter_map(|(i, &child)| self.find_best_focus_target(child).map(|(_, wid)| (i, wid)))
             .collect();
-        let mut ui_selected_index =
+        let selected_index =
             representatives.iter().position(|(i, _)| *i == selected_index).unwrap_or(0);
-        if matches!(kind, crate::layout_engine::LayoutKind::VerticalStack) {
-            ui_selected_index =
-                representatives.len().saturating_sub(1).saturating_sub(ui_selected_index);
-        }
-        let mut window_ids = representatives.drain(..).map(|(_, wid)| wid).collect::<Vec<_>>();
-        if matches!(kind, crate::layout_engine::LayoutKind::VerticalStack) {
-            window_ids.reverse();
-        }
+        let window_ids: Vec<_> = representatives.into_iter().map(|(_, wid)| wid).collect();
 
         crate::layout_engine::engine::GroupContainerInfo {
             node_id: node,
             container_kind: kind,
             frame: rect,
             total_count: window_ids.len(),
-            selected_index: ui_selected_index,
+            selected_index,
             window_ids,
         }
     }
@@ -4900,7 +4895,7 @@ mod tests {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
         let root = system.root(layout);
-        system.tree.data.layout.set_kind(root, LayoutKind::HorizontalStack);
+        system.tree.data.layout.set_kind(root, LayoutKind::VerticalStack);
         let _empty = system.tree.mk_node().push_back(root);
         let nested = system.tree.mk_node().push_back(root);
         system.tree.data.layout.set_kind(nested, LayoutKind::Vertical);
@@ -4925,6 +4920,34 @@ mod tests {
         assert_eq!(group.total_count, 2);
         assert_eq!(group.window_ids[group.selected_index], b);
         assert_eq!(group.window_ids, [b, c]);
+    }
+
+    #[test]
+    fn stack_bars_stay_inside_small_stacks() {
+        use crate::common::config::HorizontalPlacement::*;
+        use crate::common::config::StackLineReserve;
+        use crate::common::config::VerticalPlacement::*;
+        let small = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(16.0, 12.0));
+        for (horiz, vert, horizontal) in [
+            (Top, Left, true),
+            (Bottom, Right, true),
+            (Top, Left, false),
+            (Bottom, Right, false),
+        ] {
+            let reserve = StackLineReserve {
+                thickness: 28.0,
+                spacing: 50.0,
+                horiz,
+                vert,
+            };
+            for f in [
+                reserve.bar(small, horizontal),
+                reserve.inset(small, horizontal),
+            ] {
+                assert!(f.origin.x >= small.origin.x && f.origin.y >= small.origin.y);
+                assert!(f.max().x <= small.max().x && f.max().y <= small.max().y, "{f:?}");
+            }
+        }
     }
 
     #[test]

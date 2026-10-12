@@ -296,9 +296,35 @@ fn migrate_legacy_window_snapping(document: &mut toml::Value) -> bool {
     settings.remove("window_snapping").is_some()
 }
 
+/// The stack line became native tabs: drop the old indicator colors and raise thin
+/// indicator thicknesses to the smallest usable tab bar.
+fn migrate_legacy_stack_line(document: &mut toml::Value) -> bool {
+    let Some(stack_line) = ["settings", "ui", "stack_line"]
+        .into_iter()
+        .try_fold(document, |table, key| table.get_mut(key))
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return false;
+    };
+    let mut migrated = false;
+    for key in ["selected_color", "unselected_color", "border_color"] {
+        migrated |= stack_line.remove(key).is_some();
+    }
+    let min = StackLineSettings::MIN_THICKNESS;
+    if let Some(thickness) = stack_line.get_mut("thickness") {
+        let value = thickness.as_float().or_else(|| thickness.as_integer().map(|v| v as f64));
+        if value.is_some_and(|value| value.is_finite() && value < min) {
+            *thickness = toml::Value::Float(min);
+            migrated = true;
+        }
+    }
+    migrated
+}
+
 pub(super) fn parse_config_file(buf: &str) -> Result<ConfigSource, toml::de::Error> {
     let mut document = toml::from_str::<toml::Value>(buf)?;
     migrate_legacy_resize_bindings(&mut document);
     migrate_legacy_window_snapping(&mut document);
+    migrate_legacy_stack_line(&mut document);
     document.try_into()
 }

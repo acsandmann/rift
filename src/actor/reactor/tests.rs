@@ -8069,3 +8069,120 @@ fn stack_tabs_follow_focus_without_arranging_windows() {
         );
     }
 }
+
+type Inbox<T> = actor::Receiver<T>;
+
+/// Three offset windows in a stack, with tab and broadcast events captured from the start.
+fn stacked_reactor(
+    horizontal: bool,
+) -> (Apps, Reactor, Inbox<stack_line::Event>, Inbox<BroadcastEvent>) {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.config.settings.layout.stack.stack_offset = 40.0;
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))]));
+    reactor.handle_events(apps.make_app(1, make_windows(3)));
+    apps.simulate_until_quiet(&mut reactor);
+    let (tabs_tx, tabs) = actor::channel();
+    let (events_tx, events) = actor::channel();
+    reactor.communication_manager.stack_line_tx = Some(tabs_tx);
+    reactor.communication_manager.event_broadcaster = events_tx;
+    reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
+    if horizontal {
+        reactor.handle_test_layout_command(LayoutCommand::ToggleOrientation);
+    }
+    apps.simulate_until_quiet(&mut reactor);
+    (apps, reactor, tabs, events)
+}
+
+fn last_groups(rx: &mut Inbox<stack_line::Event>) -> Option<Vec<stack_line::GroupInfo>> {
+    std::iter::from_fn(|| rx.try_recv().ok())
+        .filter_map(|(_, event)| match event {
+            stack_line::Event::GroupsUpdated { groups, .. } => Some(groups),
+            _ => None,
+        })
+        .last()
+}
+
+#[test]
+fn stack_tabs_publish_in_on_screen_order_and_follow_focus() {
+    for horizontal in [true, false] {
+        let (mut apps, mut reactor, mut tabs, mut events) = stacked_reactor(horizontal);
+        let along = |reactor: &Reactor, window: WindowId| {
+            let origin = reactor.state.windows.window(window).unwrap().frame_monotonic.origin;
+            if horizontal { origin.x } else { origin.y }
+        };
+        for idx in [3, 1, 2] {
+            let focused = WindowId::new(1, idx);
+            reactor.handle_event(Event::WindowServerFocusChanged(focused, SpaceId::new(1)));
+            let [group] = &last_groups(&mut tabs).unwrap()[..] else {
+                panic!()
+            };
+            assert_eq!(group.horizontal, horizontal);
+            let at: Vec<_> = group.tabs.iter().map(|t| along(&reactor, t.window_id)).collect();
+            assert!(at.len() == 3 && at.windows(2).all(|p| p[0] < p[1]), "{at:?}");
+            assert_eq!(group.tabs[group.selected_index].window_id, focused);
+        }
+        // A tab click focuses its window.
+        let clicked = WindowId::new(1, 3);
+        reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+            window_id: clicked.into(),
+            window_server_id: None,
+        })));
+        apps.simulate_until_quiet(&mut reactor);
+        let [group] = &last_groups(&mut tabs).unwrap()[..] else {
+            panic!()
+        };
+        assert_eq!(group.tabs[group.selected_index].window_id, clicked);
+        // Clients have always received vertical stacks bottom to top.
+        let stack = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|(_, event)| match event {
+                BroadcastEvent::StacksChanged { mut stacks, .. } => stacks.pop(),
+                _ => None,
+            })
+            .last()
+            .unwrap();
+        let mut expected: Vec<_> =
+            group.tabs.iter().map(|t| t.window_id.to_debug_string()).collect();
+        if !horizontal {
+            expected.reverse();
+        }
+        assert_eq!(stack.windows, expected);
+    }
+}
+
+#[test]
+fn toggling_stack_tabs_reserves_and_publishes_only_while_enabled() {
+    let (mut apps, mut reactor, mut tabs, _) = stacked_reactor(false);
+    let left = |reactor: &Reactor| {
+        reactor
+            .state
+            .windows
+            .window(WindowId::new(1, 1))
+            .unwrap()
+            .frame_monotonic
+            .origin
+            .x
+    };
+    let enabled_left = left(&reactor);
+    last_groups(&mut tabs);
+    for enabled in [false, true] {
+        let mut config = reactor.config.clone();
+        config.settings.ui.stack_line.enabled = enabled;
+        reactor.handle_event(Event::ConfigUpdated(config));
+        reactor.handle_event(Event::WindowServerFocusChanged(
+            WindowId::new(1, 2),
+            SpaceId::new(1),
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        // A vertical stack's bar sits on its left edge.
+        assert_eq!(enabled_left - left(&reactor), if enabled { 0.0 } else { 28.0 });
+        assert_eq!(last_groups(&mut tabs).map(|g| g.len()), enabled.then_some(1));
+    }
+    reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        last_groups(&mut tabs),
+        Some(Vec::new()),
+        "unstacked spaces drop their bars"
+    );
+}

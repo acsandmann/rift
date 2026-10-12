@@ -258,40 +258,29 @@ impl LayoutManager {
         {
             let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
                 .iter()
-                .map(|g| {
-                    let horizontal =
-                        g.container_kind != crate::layout_engine::LayoutKind::VerticalStack;
-                    // Group info lists a vertical stack bottom-up; its bar reads top-down.
-                    let mut window_ids = g.window_ids.clone();
-                    let mut selected_index = g.selected_index;
-                    if !horizontal {
-                        window_ids.reverse();
-                        selected_index =
-                            window_ids.len().saturating_sub(1).saturating_sub(selected_index);
-                    }
-                    crate::actor::stack_line::GroupInfo {
-                        node_id: g.node_id,
-                        space_id: space,
-                        frame: g.frame,
-                        horizontal,
-                        selected_index,
-                        tabs: window_ids
-                            .into_iter()
-                            .map(|window_id| {
-                                let info = reactor.state.windows.window(window_id).map(|w| &w.info);
-                                crate::actor::stack_line::TabInfo {
-                                    window_id,
-                                    title: info.map(|i| i.title.clone()).unwrap_or_default(),
-                                    bundle_id: info.and_then(|i| i.bundle_id.clone()),
-                                    window_server_id: reactor
-                                        .state
-                                        .windows
-                                        .record(window_id)
-                                        .and_then(|record| record.window_server_id()),
-                                }
-                            })
-                            .collect(),
-                    }
+                .map(|g| crate::actor::stack_line::GroupInfo {
+                    node_id: g.node_id,
+                    space_id: space,
+                    frame: g.frame,
+                    horizontal: g.container_kind != crate::layout_engine::LayoutKind::VerticalStack,
+                    selected_index: g.selected_index,
+                    tabs: g
+                        .window_ids
+                        .iter()
+                        .map(|&window_id| {
+                            let info = reactor.state.windows.window(window_id).map(|w| &w.info);
+                            crate::actor::stack_line::TabInfo {
+                                window_id,
+                                title: info.map(|i| i.title.clone()).unwrap_or_default(),
+                                bundle_id: info.and_then(|i| i.bundle_id.clone()),
+                                window_server_id: reactor
+                                    .state
+                                    .windows
+                                    .record(window_id)
+                                    .and_then(|record| record.window_server_id()),
+                            }
+                        })
+                        .collect(),
                 })
                 .collect();
             let active_space_ids: Vec<crate::sys::screen::SpaceId> =
@@ -476,24 +465,35 @@ impl LayoutManager {
 
                     let stacks: Vec<StackInfo> = group_infos
                         .iter()
-                        .map(|g| StackInfo {
-                            total_count: g.total_count,
-                            container_kind: match g.container_kind {
-                                crate::layout_engine::LayoutKind::Horizontal => {
-                                    rift_protocol::LayoutKind::Horizontal
-                                }
-                                crate::layout_engine::LayoutKind::Vertical => {
-                                    rift_protocol::LayoutKind::Vertical
-                                }
-                                crate::layout_engine::LayoutKind::HorizontalStack => {
-                                    rift_protocol::LayoutKind::HorizontalStack
-                                }
-                                crate::layout_engine::LayoutKind::VerticalStack => {
-                                    rift_protocol::LayoutKind::VerticalStack
-                                }
-                            },
-                            selected_index: g.selected_index,
-                            windows: g.window_ids.iter().map(WindowId::to_debug_string).collect(),
+                        .map(|g| {
+                            // Clients have always received vertical stacks bottom to top.
+                            let mut windows: Vec<_> =
+                                g.window_ids.iter().map(WindowId::to_debug_string).collect();
+                            let mut selected_index = g.selected_index;
+                            if g.container_kind == crate::layout_engine::LayoutKind::VerticalStack {
+                                windows.reverse();
+                                selected_index =
+                                    windows.len().saturating_sub(1).saturating_sub(selected_index);
+                            }
+                            StackInfo {
+                                total_count: g.total_count,
+                                container_kind: match g.container_kind {
+                                    crate::layout_engine::LayoutKind::Horizontal => {
+                                        rift_protocol::LayoutKind::Horizontal
+                                    }
+                                    crate::layout_engine::LayoutKind::Vertical => {
+                                        rift_protocol::LayoutKind::Vertical
+                                    }
+                                    crate::layout_engine::LayoutKind::HorizontalStack => {
+                                        rift_protocol::LayoutKind::HorizontalStack
+                                    }
+                                    crate::layout_engine::LayoutKind::VerticalStack => {
+                                        rift_protocol::LayoutKind::VerticalStack
+                                    }
+                                },
+                                selected_index,
+                                windows,
+                            }
                         })
                         .collect();
 

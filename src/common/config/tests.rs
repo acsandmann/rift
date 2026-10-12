@@ -614,19 +614,82 @@ fn keymap_rename_and_delete_update_both_command_encodings_and_self_references() 
 }
 
 #[test]
-fn stack_tabs_have_fixed_height_and_release_the_reservation_when_disabled() {
-    let mut tabs: StackLineSettings = toml::from_str("enabled = true").unwrap();
+fn stack_tabs_default_on_and_release_the_reservation_when_disabled() {
+    let mut tabs = Config::parse("[keys]\n[settings]").unwrap().settings.ui.stack_line;
+    assert!(tabs.enabled && tabs.validate().is_empty());
     assert_eq!(tabs.reserve().total(), 28.0);
-    tabs.spacing = 1.0;
-    assert_eq!(tabs.reserve().total(), 29.0);
     tabs.enabled = false;
     assert_eq!(tabs.reserve().total(), 0.0);
-    assert!(!StackLineSettings::default().enabled);
+}
+
+/// The stack line section of main's `rift.default.toml`, verbatim.
+const MAIN_DEFAULT_STACK_LINE: &str = r#"
+[keys]
+
+[settings.ui.stack_line]
+# experimental stack line indicator (defaults to off)
+enabled = false
+# action on hover: "click" or "hover" (defaults to "hover" which is just a visual indicator)
+hover = "hover"
+# in a horizontal stack where the line will be (top/bottom)
+horiz_placement = "top"
+# in a vertical stack where the line will be (left/right)
+vert_placement = "left"
+# how thick the indicator will be (in px)
+thickness = 20.0
+# spacing between the stack line and window edges (in px)
+spacing = 1.0
+# RGBA components range from 0.0 to 1.0. Each color can be customized
+# selected_color = { r = 0.0, g = 0.5, b = 1.0, a = 1.0 }
+# unselected_color = { r = 0.8, g = 0.8, b = 0.8, a = 1.0 }
+# border_color = { r = 0.6, g = 0.6, b = 0.6, a = 1.0 }
+"#;
+
+#[test]
+fn main_stack_line_configs_keep_their_meaning() {
+    let uncommented = MAIN_DEFAULT_STACK_LINE
+        .replace("# selected", "selected")
+        .replace("# unselected", "unselected")
+        .replace("# border", "border");
+    let thin = uncommented.replace("20.0", "4").replace("false", "true");
+    for (text, enabled) in [
+        (MAIN_DEFAULT_STACK_LINE.into(), false),
+        (uncommented, false),
+        (thin, true),
+    ] {
+        let config = Config::parse(&text).unwrap();
+        assert!(config.validate().is_empty(), "{:?}", config.validate());
+        let tabs = &config.settings.ui.stack_line;
+        assert_eq!(
+            tabs.enabled, enabled,
+            "an explicit setting beats the new default"
+        );
+        assert!(!tabs.hover.selects_on_hover(), "\"hover\" only highlights");
+        assert_eq!((tabs.horiz_placement, tabs.vert_placement), Default::default());
+        // Removed colors are dropped; indicator thicknesses rise to the 20 point minimum.
+        assert_eq!((tabs.thickness, tabs.spacing), (20.0, 1.0));
+        assert_eq!(tabs.reserve().total(), if enabled { 21.0 } else { 0.0 });
+        let mut document = ConfigDocument::parse(&text).unwrap();
+        document.update(|source| source.settings.ui.stack_line.spacing = 2.0).unwrap();
+        assert_eq!(
+            Config::parse(&document.to_string()).unwrap().settings.ui.stack_line.spacing,
+            2.0
+        );
+    }
+    assert!(Config::parse(&MAIN_DEFAULT_STACK_LINE.replace("hover =", "hover_color =")).is_err());
+    let click: StackLineSettings = toml::from_str(r#"hover = "click""#).unwrap();
+    assert!(click.hover.selects_on_hover());
 }
 
 #[test]
-fn stack_tabs_select_on_click_unless_hover_is_chosen() {
-    assert_eq!(StackLineSettings::default().hover, StackLineHoverMode::Click);
-    let tabs: StackLineSettings = toml::from_str(r#"hover = "hover""#).unwrap();
-    assert_eq!(tabs.hover, StackLineHoverMode::Hover);
+fn stack_tab_geometry_rejects_unusable_values() {
+    for text in [
+        "thickness = 19.5",
+        "thickness = nan",
+        "spacing = -1.0",
+        "spacing = inf",
+    ] {
+        let tabs: StackLineSettings = toml::from_str(text).unwrap();
+        assert_eq!(tabs.validate().len(), 1, "{text}");
+    }
 }

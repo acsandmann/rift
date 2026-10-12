@@ -820,23 +820,23 @@ impl Default for MenuBarSettings {
 #[serde(deny_unknown_fields)]
 pub struct StackLineSettings {
     /// Show native Liquid Glass tabs beside stacked windows.
-    #[serde(default)]
+    #[serde(default = "yes")]
     #[setting(label = "Enabled")]
     pub enabled: bool,
     #[serde(default)]
-    /// Select a tab by clicking it, or as soon as the pointer moves onto it.
-    #[setting(label = "Select tabs on", choices, enabled_by = "enabled")]
+    /// What hovering a tab does: just highlight it, or select it as a click would.
+    #[setting(label = "Interaction", choices, enabled_by = "enabled")]
     pub hover: StackLineHoverMode,
     #[serde(default)]
     /// Where the tabs sit for a horizontal stack.
     #[setting(label = "Horizontal placement", choices, enabled_by = "enabled")]
     pub horiz_placement: HorizontalPlacement,
     #[serde(default)]
-    /// Where the tabs sit for a vertical stack, as a compact column of app icons.
+    /// Where the tabs sit for a vertical stack; their titles run along the bar.
     #[setting(label = "Vertical placement", choices, enabled_by = "enabled")]
     pub vert_placement: VerticalPlacement,
     #[serde(default = "default_stack_line_thickness")]
-    /// Thickness of the tab bar, in points.
+    /// Thickness of the tab bar, in points (at least 20).
     #[setting(label = "Thickness (points)", enabled_by = "enabled")]
     pub thickness: f64,
     #[serde(default)]
@@ -848,7 +848,7 @@ pub struct StackLineSettings {
 impl Default for StackLineSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             hover: StackLineHoverMode::default(),
             horiz_placement: HorizontalPlacement::default(),
             vert_placement: VerticalPlacement::default(),
@@ -860,12 +860,44 @@ impl Default for StackLineSettings {
 
 fn default_stack_line_thickness() -> f64 { cgs::TabBar::HEIGHT }
 
+impl StackLineSettings {
+    /// The native tab bar is unusable below this thickness.
+    pub const MIN_THICKNESS: f64 = 20.0;
+
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if !self.thickness.is_finite() || self.thickness < Self::MIN_THICKNESS {
+            issues.push(format!(
+                "ui.stack_line.thickness must be at least {}, got {}",
+                Self::MIN_THICKNESS,
+                self.thickness
+            ));
+        }
+        if !self.spacing.is_finite() || self.spacing < 0.0 {
+            issues.push(format!(
+                "ui.stack_line.spacing must be non-negative, got {}",
+                self.spacing
+            ));
+        }
+        issues
+    }
+}
+
+/// Values keep their pre-native meanings so existing configs behave as before.
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum StackLineHoverMode {
-    #[default]
+    /// Hovering a tab selects it, as a click would.
+    #[setting(label = "Select on hover")]
     Click,
+    /// Hovering only highlights a tab; click to select it.
+    #[default]
+    #[setting(label = "Click to select")]
     Hover,
+}
+
+impl StackLineHoverMode {
+    pub fn selects_on_hover(self) -> bool { self == Self::Click }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
@@ -897,7 +929,7 @@ impl StackLineReserve {
     /// Thickness plus spacing; nothing when the bar is absent.
     pub fn total(&self) -> f64 {
         if self.thickness > 0.0 {
-            self.thickness + self.spacing.max(0.0)
+            self.thickness + self.spacing
         } else {
             0.0
         }
@@ -936,15 +968,15 @@ impl StackLineReserve {
         rect
     }
 
-    /// The bar's own frame along the reserved edge of a stack's frame.
+    /// The bar's own frame along the reserved edge of a stack's frame, never beyond it.
     pub fn bar(
         &self,
         rect: objc2_core_foundation::CGRect,
         horizontal_stack: bool,
     ) -> objc2_core_foundation::CGRect {
         use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-        let t = self.thickness;
         let (o, s) = (rect.origin, rect.size);
+        let t = self.thickness.min(if horizontal_stack { s.height } else { s.width }).max(0.0);
         match (horizontal_stack, self.horiz, self.vert) {
             (true, HorizontalPlacement::Top, _) => CGRect::new(o, CGSize::new(s.width, t)),
             (true, HorizontalPlacement::Bottom, _) => {
@@ -1461,6 +1493,7 @@ impl Settings {
         }
 
         issues.extend(self.layout.validate());
+        issues.extend(self.ui.stack_line.validate());
 
         if !(0.10..=0.45).contains(&self.drag_drop.drop_zone_fraction) {
             issues.push(format!(

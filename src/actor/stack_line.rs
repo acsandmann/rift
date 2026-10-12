@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use objc2::MainThreadMarker;
 use objc2_core_foundation::CGRect;
 use tracing::instrument;
@@ -7,7 +10,7 @@ use crate::actor::reactor::{Command, ReactorCommand};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, reactor};
 use crate::common::collections::HashMap;
-use crate::common::config::{Config, HorizontalPlacement, StackLineHoverMode, VerticalPlacement};
+use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 #[derive(Debug, Clone, PartialEq)]
@@ -28,14 +31,29 @@ pub struct TabInfo {
     pub bundle_id: Option<String>,
     pub window_server_id: Option<crate::sys::window_server::WindowServerId>,
 }
+
+impl GroupInfo {
+    /// The window the bar is ordered above: the selected window, or else another window
+    /// of the same stack. Never a window outside the stack.
+    fn anchor(&self) -> Option<crate::sys::window_server::WindowServerId> {
+        self.tabs
+            .get(self.selected_index)
+            .into_iter()
+            .chain(&self.tabs)
+            .find_map(|tab| tab.window_server_id)
+    }
+}
+
 struct NativeGroup {
     bar: cgs::TabBar,
     info: GroupInfo,
+    /// The windows the bar currently shows, so a click resolves against what was clicked.
+    shown: Rc<RefCell<Vec<WindowId>>>,
 }
 
 #[derive(Debug)]
 pub enum Event {
-    TabAction(NodeId, cgs::TabBarAction),
+    TabAction(NodeId, WindowId, cgs::TabBarAction),
     TitleChanged(WindowId, String),
     GroupsUpdated {
         active_space_ids: Vec<SpaceId>,
@@ -105,7 +123,7 @@ impl StackLine {
             return;
         }
         match event {
-            Event::TabAction(node, action) => self.handle_tab_action(node, action),
+            Event::TabAction(node, window, action) => self.handle_tab_action(node, window, action),
             Event::TitleChanged(wid, title) => {
                 let nodes: Vec<_> = self
                     .native_groups
@@ -179,17 +197,13 @@ impl StackLine {
                 if space_has_fullscreen {
                     group.bar.hide();
                 } else if self.coordinate_converter.screen_height().is_some() {
-                    if let Some(anchor) = group
-                        .info
-                        .tabs
-                        .get(group.info.selected_index)
-                        .and_then(|tab| tab.window_server_id)
+                    // Without a window of its own stack to order above, the bar is never
+                    // raised: a hidden bar waits for the next update carrying an identity,
+                    // and a visible one keeps its place below any newly activated app.
+                    if let Some(anchor) = group.info.anchor()
+                        && (reorder || changed || !group.bar.is_visible())
                     {
-                        if reorder || changed || !group.bar.is_visible() {
-                            group.bar.show_above(anchor.as_u32() as isize);
-                        }
-                    } else {
-                        group.bar.hide();
+                        group.bar.show_above(anchor.as_u32() as isize);
                     }
                 } else {
                     group.bar.hide();
@@ -225,7 +239,7 @@ impl StackLine {
     fn place(&self, group: &NativeGroup) {
         let settings = &self.config.settings.ui.stack_line;
         let reserve = settings.reserve();
-        group.bar.set_select_on_hover(settings.hover == StackLineHoverMode::Hover);
+        group.bar.set_select_on_hover(settings.hover.selects_on_hover());
         group.bar.set_edge(
             match (
                 group.info.horizontal,
@@ -248,14 +262,14 @@ impl StackLine {
         }
     }
 
-    fn handle_tab_action(&self, node: NodeId, action: cgs::TabBarAction) {
+    fn handle_tab_action(&self, node: NodeId, window: WindowId, action: cgs::TabBarAction) {
         let Some(group) = self.native_groups.get(&node) else {
             return;
         };
         if !group.bar.is_visible() {
             return;
         }
-        let Some(command) = tab_command(&group.info.tabs, action) else {
+        let Some(command) = tab_command(&group.info.tabs, window, action) else {
             return;
         };
         self.reactor_tx.send(reactor::Event::Command(Command::Reactor(command)));
@@ -274,6 +288,7 @@ impl StackLine {
             });
             cgs::TabBarItem { title: if tab.title.is_empty() { name.clone() } else { tab.title.clone() }, icon: icon.clone() }
         }).collect();
+        *group.shown.borrow_mut() = group.info.tabs.iter().map(|tab| tab.window_id).collect();
         group.bar.set_tabs(tabs, group.info.selected_index);
     }
 
@@ -287,9 +302,15 @@ impl StackLine {
         } else {
             let ui = cgs::Ui::new(self.mtm);
             let tx = self.tx.clone();
-            let bar = cgs::TabBar::new(&ui)
-                .on_action(move |action| tx.send(Event::TabAction(node, action)));
-            self.native_groups.insert(node, NativeGroup { bar, info });
+            let shown = Rc::new(RefCell::new(Vec::new()));
+            let clicked = shown.clone();
+            let bar = cgs::TabBar::new(&ui).on_action(move |action| {
+                let (cgs::TabBarAction::Select(i) | cgs::TabBarAction::Close(i)) = action;
+                if let Some(&window) = clicked.borrow().get(i) {
+                    tx.send(Event::TabAction(node, window, action));
+                }
+            });
+            self.native_groups.insert(node, NativeGroup { bar, info, shown });
         }
         self.refresh_native_tabs(node);
         self.place(&self.native_groups[&node]);
@@ -297,11 +318,13 @@ impl StackLine {
     }
 }
 
-fn tab_command(tabs: &[TabInfo], action: cgs::TabBarAction) -> Option<ReactorCommand> {
-    let index = match action {
-        cgs::TabBarAction::Select(i) | cgs::TabBarAction::Close(i) => i,
-    };
-    let tab = tabs.get(index)?;
+/// Targets the clicked window by identity, with its latest known WindowServer ID.
+fn tab_command(
+    tabs: &[TabInfo],
+    window: WindowId,
+    action: cgs::TabBarAction,
+) -> Option<ReactorCommand> {
+    let tab = tabs.iter().find(|tab| tab.window_id == window)?;
     let command = match action {
         cgs::TabBarAction::Select(_) => ReactorCommand::FocusWindow {
             window_id: tab.window_id.into(),
@@ -322,7 +345,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tab_actions_resolve_latest_ids_and_never_fall_back_to_frontmost_close() {
+    fn tab_actions_target_the_clicked_window_and_never_fall_back_to_frontmost_close() {
         use std::num::NonZeroU32;
 
         use crate::sys::window_server::WindowServerId;
@@ -349,15 +372,46 @@ mod tests {
             },
         ];
         assert!(matches!(
-            tab_command(&tabs, cgs::TabBarAction::Close(1)),
+            tab_command(&tabs, second, cgs::TabBarAction::Close(1)),
             Some(ReactorCommand::CloseWindow { window_server_id: Some(20) })
         ));
         tabs.remove(0);
         assert!(
-            matches!(tab_command(&tabs, cgs::TabBarAction::Select(0)), Some(ReactorCommand::FocusWindow { window_id, window_server_id: Some(20) }) if window_id == second.into())
+            matches!(tab_command(&tabs, second, cgs::TabBarAction::Select(0)), Some(ReactorCommand::FocusWindow { window_id, window_server_id: Some(20) }) if window_id == second.into())
         );
         tabs[0].window_server_id = None;
-        assert!(tab_command(&tabs, cgs::TabBarAction::Close(0)).is_none());
-        assert!(tab_command(&tabs, cgs::TabBarAction::Select(usize::MAX)).is_none());
+        assert!(tab_command(&tabs, second, cgs::TabBarAction::Close(0)).is_none());
+        assert!(tab_command(&tabs, first, cgs::TabBarAction::Select(0)).is_none());
+    }
+
+    #[test]
+    fn bars_anchor_only_to_windows_of_their_own_stack() {
+        use crate::sys::window_server::WindowServerId;
+        let group = |selected_index, ids: [Option<u32>; 3]| GroupInfo {
+            node_id: NodeId::default(),
+            space_id: SpaceId::new(1),
+            frame: CGRect::default(),
+            horizontal: true,
+            selected_index,
+            tabs: (1..)
+                .zip(ids)
+                .map(|(idx, id)| TabInfo {
+                    window_id: WindowId::new(1, idx),
+                    title: String::new(),
+                    bundle_id: None,
+                    window_server_id: id.map(WindowServerId::new),
+                })
+                .collect(),
+        };
+        // The selected window first, then any other window of the same stack, else none.
+        assert_eq!(
+            group(1, [Some(10), Some(20), Some(30)]).anchor(),
+            Some(WindowServerId::new(20))
+        );
+        assert_eq!(
+            group(1, [None, None, Some(30)]).anchor(),
+            Some(WindowServerId::new(30))
+        );
+        assert_eq!(group(0, [None; 3]).anchor(), None);
     }
 }

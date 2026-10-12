@@ -1771,7 +1771,9 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowTitleChanged(wid, new_title) => {
-                if let Some(tx) = &self.communication_manager.stack_line_tx {
+                if self.config.settings.ui.stack_line.enabled
+                    && let Some(tx) = &self.communication_manager.stack_line_tx
+                {
                     tx.send(stack_line::Event::TitleChanged(wid, new_title.clone()));
                 }
                 let mut outcome = window_workflow::handle_window_title_changed(
