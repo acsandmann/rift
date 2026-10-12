@@ -2893,7 +2893,8 @@ impl LayoutEngine {
                 }
             }
             LayoutCommand::CreateWorkspace => match self.workspaces.create_workspace(space, None) {
-                Ok(_workspace_id) => {
+                Ok(workspace_id) => {
+                    self.sync_new_workspace_layout(space, workspace_id);
                     self.sync_scrolling_widths_for_space(space);
                     self.broadcast_workspace_changed(space);
                     EventResponse {
@@ -3156,6 +3157,24 @@ impl LayoutEngine {
             raise_windows: moved,
             focus_window,
             boundary_hit: None,
+        }
+    }
+
+    /// A freshly created workspace has no active layout until the space is next
+    /// exposed, so a window moved straight into it is not tiled. Seed the new
+    /// workspace's layout from the space's current screen size, which we read
+    /// from the size of the already-active workspace layout on that space.
+    fn sync_new_workspace_layout(
+        &mut self,
+        space: SpaceId,
+        workspace_id: crate::model::VirtualWorkspaceId,
+    ) {
+        if let Some(size) = self
+            .workspaces
+            .active_workspace(space)
+            .and_then(|active_id| self.workspaces[active_id].layout_state.active_size())
+        {
+            self.workspaces[workspace_id].ensure_layout_for_size(size);
         }
     }
 
@@ -5499,6 +5518,54 @@ mod tests {
         assert_eq!(
             window_store.workspace_for_window(space, wid),
             Some(target_workspace)
+        );
+    }
+
+    #[test]
+    fn window_moved_to_a_fresh_workspace_is_tiled_immediately() {
+        let mut window_store = WindowStore::default();
+        let mut engine = test_engine();
+        let space = SpaceId::new(97);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 6100;
+        let wid = WindowId::new(pid, 1);
+
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                space,
+                pid,
+                vec![window_layout_info(wid, CGSize::new(500.0, 500.0))],
+                None,
+            ),
+        );
+        let _ = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::CreateWorkspace,
+        );
+        let (new_workspace, new_name) =
+            engine.workspaces_mut().list_workspaces(space).last().unwrap().clone();
+
+        let _ = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Name(new_name),
+                follow: false,
+                window_id: Some(wid.idx.get()),
+            },
+        );
+
+        assert_eq!(
+            window_store.workspace_for_window(space, wid),
+            Some(new_workspace)
+        );
+        assert!(
+            engine.active_workspace_contains_window(space, new_workspace, wid),
+            "a window moved into a freshly created workspace must be tiled right away"
         );
     }
 }
