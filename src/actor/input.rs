@@ -1,6 +1,4 @@
 //! Keyboard, mouse and native gesture arbitration on one HID input thread.
-//! Focus follows mouse only observes motion, so it uses a listen-only Session
-//! tap and keeps the move stream out of the active HID tap.
 
 use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
@@ -74,8 +72,6 @@ pub struct Input {
     gesture_filter: RefCell<gesture::Filter>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     tap_generation: Cell<u64>,
-    focus_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
-    focus_move_last_timestamp: Cell<Option<u64>>,
     disable_hotkey: RefCell<Option<Hotkey>>,
     binding_mode_specs: RefCell<BindingModeSpecs>,
     hotkeys: RefCell<Vec<HashMap<Hotkey, Vec<WmCommand>>>>,
@@ -90,7 +86,6 @@ impl Drop for Input {
     fn drop(&mut self) {
         // Unregister callbacks before their state is destroyed.
         self.gesture_control.stop(&self.events_tx);
-        self.focus_tap.get_mut().take();
         self.tap.get_mut().take();
     }
 }
@@ -154,7 +149,6 @@ struct CallbackCtx {
 #[derive(Clone, Copy, Debug)]
 enum Recovery {
     TapInvalidated(u64),
-    FocusTapInvalidated,
     NativeGestureHeld,
 }
 
@@ -173,7 +167,10 @@ impl Input {
             hotkeys_enabled || keyed_disable || self.mission_control_active.get(),
             hotkeys_enabled || disable_hotkey.is_some(),
             (state.event_processing_enabled
-                && (state.mouse_hides_on_focus || self.horizontal_mouse_warp.get().is_some()))
+                && (state.mouse_hides_on_focus
+                    || self.horizontal_mouse_warp.get().is_some()
+                    || (state.focus_follows_mouse_config_enabled
+                        && state.focus_follows_mouse_enabled)))
                 || self.mission_control_active.get(),
             state.event_processing_enabled && state.mouse_hides_on_focus,
             // Mouse-up delivery is part of the stable configured mask. Drag
@@ -271,66 +268,6 @@ impl Input {
         self.event_mask.set(next_mask);
     }
 
-    fn wants_focus_tap(&self) -> bool {
-        let state = self.state.borrow();
-        state.event_processing_enabled
-            && state.focus_follows_mouse_config_enabled
-            && state.focus_follows_mouse_enabled
-            && !self.mission_control_active.get()
-    }
-
-    fn rebuild_focus_tap_if_needed(
-        &self,
-        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
-    ) {
-        let wanted = self.wants_focus_tap();
-        if wanted == self.focus_tap.borrow().is_some() {
-            return;
-        }
-        self.focus_tap.borrow_mut().take();
-        if !wanted {
-            return;
-        }
-
-        let ctx_ptr = Box::into_raw(Box::new(CallbackCtx {
-            this: self as *const Input,
-            recovery_tx: recovery_tx.clone(),
-            tap_generation: 0,
-        })) as *mut std::ffi::c_void;
-        let tap = unsafe {
-            crate::sys::event_tap::EventTap::new(
-                CGTapLoc::SessionEventTap,
-                CGTapOpt::ListenOnly,
-                1u64 << CGEventType::MouseMoved.0,
-                Some(focus_callback),
-                ctx_ptr,
-                Some(drop_input_ctx),
-                None,
-                Some(focus_tap_invalidated),
-            )
-        };
-        let Some(tap) = tap else {
-            unsafe { drop_input_ctx(ctx_ptr) };
-            warn!("Failed to create focus-follows-mouse event tap");
-            return;
-        };
-        self.focus_move_last_timestamp.set(None);
-        *self.focus_tap.borrow_mut() = Some(tap);
-    }
-
-    fn rebuild_event_taps_if_needed(
-        &self,
-        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
-    ) {
-        self.rebuild_event_tap_mask_if_needed(recovery_tx);
-        self.rebuild_focus_tap_if_needed(recovery_tx);
-    }
-
-    fn event_tap_missing(&self) -> bool {
-        (self.tap.borrow().is_none() && self.desired_event_mask() != 0)
-            || (self.focus_tap.borrow().is_none() && self.wants_focus_tap())
-    }
-
     fn rebuild_invalidated_event_tap(
         &self,
         generation: u64,
@@ -390,8 +327,6 @@ impl Input {
             gesture_filter: RefCell::new(gesture::Filter::default()),
             tap: RefCell::new(None),
             tap_generation: Cell::new(0),
-            focus_tap: RefCell::new(None),
-            focus_move_last_timestamp: Cell::new(None),
             disable_hotkey: RefCell::new(disable_hotkey),
             binding_mode_specs: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(Vec::new()),
@@ -411,7 +346,7 @@ impl Input {
 
         let this = Box::new(self);
 
-        this.rebuild_event_taps_if_needed(&recovery_tx);
+        this.rebuild_event_tap_mask_if_needed(&recovery_tx);
         let _gesture_monitor = this.gesture_control.start(this.events_tx.clone());
 
         if this.state.borrow().mouse_hides_on_focus {
@@ -445,10 +380,9 @@ impl Input {
                 // select evaluates disabled futures too; defer timer creation
                 // so healthy taps allocate no timer and schedule no wakeup.
                 _ = async { Timer::sleep(Duration::from_secs(1)).with_tolerance(Duration::from_millis(100)).await },
-                    if this.event_tap_missing() => {
-                    let hid_missing = this.tap.borrow().is_none();
-                    this.rebuild_event_taps_if_needed(&recovery_tx);
-                    if hid_missing && this.tap.borrow().is_some() { this.reconcile_after_tap_reenabled(); }
+                    if this.tap.borrow().is_none() && this.desired_event_mask() != 0 => {
+                    this.rebuild_event_tap_mask_if_needed(&recovery_tx);
+                    if this.tap.borrow().is_some() { this.reconcile_after_tap_reenabled(); }
                 }
                 maybe_recovery = recovery_rx.recv() => {
                     let Some(recovery) = maybe_recovery else { break };
@@ -456,14 +390,6 @@ impl Input {
                         Recovery::NativeGestureHeld => {}
                         Recovery::TapInvalidated(generation) => {
                             this.rebuild_invalidated_event_tap(generation, &recovery_tx);
-                        }
-                        Recovery::FocusTapInvalidated => {
-                            // Replaced taps clear their callback, so only the live one can be dead.
-                            let dead = this.focus_tap.borrow().as_ref().is_some_and(|tap| !tap.is_valid());
-                            if dead {
-                                this.focus_tap.borrow_mut().take();
-                                this.rebuild_focus_tap_if_needed(&recovery_tx);
-                            }
                         }
                     }
                 }
@@ -698,7 +624,7 @@ impl Input {
         drop(state);
 
         if should_rebuild_mask {
-            self.rebuild_event_taps_if_needed(recovery_tx);
+            self.rebuild_event_tap_mask_if_needed(recovery_tx);
         }
     }
 
@@ -716,10 +642,7 @@ impl Input {
     }
 
     #[inline]
-    fn reset_mouse_move_sample_gate(&self) {
-        self.mouse_move_last_timestamp.set(None);
-        self.focus_move_last_timestamp.set(None);
-    }
+    fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
 
     fn reconcile_after_tap_reenabled(&self) {
         let mut state = self.state.borrow_mut();
@@ -913,10 +836,12 @@ impl Input {
         }
     }
 
-    /// Handle HID mouse moves without running the generic mouse/keyboard path.
+    /// Handle mouse moves without running the generic mouse/keyboard path.
     ///
-    /// The HID tap only receives moves for cursor hiding, horizontal warp and
-    /// the overview; focus follows mouse uses the Session tap instead.
+    /// Mouse moves are usually the most frequent events delivered to this tap.
+    /// In particular, do not read CGEvent flags for every hardware event: the
+    /// keyboard and flags-changed events already maintain modifier state, and
+    /// the sampled move path below is sufficient as a recovery check.
     fn on_mouse_moved(&self, event: &CGEvent, loc: CGPoint) -> bool {
         let mut state = self.state.borrow_mut();
         if !state.event_processing_enabled && !self.mission_control_active.get() {
@@ -932,61 +857,39 @@ impl Input {
             ));
             return true;
         }
-        self.reconcile_modifiers_from_move(event, &mut state);
-        true
-    }
 
-    /// Recover modifier state at the sampled rate instead of once per raw
-    /// mouse event. Normal modifier transitions arrive through FlagsChanged;
-    /// this is only the defensive reconciliation path for events lost while
-    /// macOS UI interrupts the HID tap. Do not read CGEvent flags for every
-    /// hardware event.
-    fn reconcile_modifiers_from_move(&self, event: &CGEvent, state: &mut State) {
+        // Recover modifier state at the sampled rate instead of once per raw
+        // mouse event. Normal modifier transitions arrive through
+        // FlagsChanged; this is only the defensive reconciliation path for
+        // events lost while macOS UI interrupts the tap.
         if self.disable_hotkey.borrow().is_some() || state.mouse_features_enabled {
             let flags = CGEvent::flags(Some(event));
             if flags != state.current_flags {
                 state.current_flags = flags;
                 state.reconcile_modifier_keys();
-                self.refresh_disable_hotkey_state(state);
+                self.refresh_disable_hotkey_state(&mut state);
             }
         }
-    }
 
-    /// Sampled Session-tap move. The tap only exists while focus follows mouse
-    /// is active. Publish positions only: WindowServer hit testing and focus
-    /// eligibility belong on the reactor, outside the tap callback.
-    fn on_focus_mouse_moved(&self, event: &CGEvent) {
-        let mut state = self.state.borrow_mut();
-        self.reconcile_modifiers_from_move(event, &mut state);
-        if state.disable_hotkey_active
-            || state.captured_button.is_some()
-            || state.current_flags.contains(mouse_modifier_flag(state.mouse_settings.modifier))
+        // Publish positions only. WindowServer hit testing and focus eligibility
+        // belong on the reactor, outside the synchronous input callback.
+        if state.focus_follows_mouse_config_enabled
+            && state.focus_follows_mouse_enabled
+            && !state.disable_hotkey_active
+            && state.captured_button.is_none()
+            && !state.current_flags.contains(mouse_modifier_flag(state.mouse_settings.modifier))
         {
-            return;
+            // Secondary pointer consumers above do not participate in focus
+            // suppression or window resolution.
+            drop(state);
+            self.on_mouse_focus(loc);
         }
-        drop(state);
-        _ = self
-            .mouse_focus_publisher
-            .publish(&self.events_tx, CGEvent::location(Some(event)));
-    }
 
-    /// Samples by arrival time in Mach ticks, so the gate does not depend on
-    /// the Session tap's event timestamp units.
-    #[inline]
-    fn admit_focus_mouse_move(&self) -> bool {
-        unsafe extern "C" {
-            fn mach_absolute_time() -> u64;
-        }
-        let timestamp = unsafe { mach_absolute_time() };
-        if self
-            .focus_move_last_timestamp
-            .get()
-            .is_some_and(|last| timestamp - last < self.mouse_move_min_interval_ticks.get())
-        {
-            return false;
-        }
-        self.focus_move_last_timestamp.set(Some(timestamp));
         true
+    }
+
+    fn on_mouse_focus(&self, loc: CGPoint) {
+        _ = self.mouse_focus_publisher.publish(&self.events_tx, loc);
     }
 
     fn maybe_horizontal_mouse_warp(&self, event: &CGEvent) -> Option<CGPoint> {
@@ -1228,34 +1131,6 @@ unsafe extern "C-unwind" fn input_callback(
     }
 }
 
-unsafe extern "C-unwind" fn focus_callback(
-    _proxy: CGEventTapProxy,
-    _event_type: CGEventType,
-    event_ref: core::ptr::NonNull<CGEvent>,
-    user_info: *mut std::ffi::c_void,
-) -> *mut CGEvent {
-    if user_info.is_null() {
-        return event_ref.as_ptr();
-    }
-    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
-    let this = unsafe { &*ctx.this };
-    let event = unsafe { event_ref.as_ref() };
-    if this.admit_focus_mouse_move()
-        && std::panic::catch_unwind(AssertUnwindSafe(|| this.on_focus_mouse_moved(event))).is_err()
-    {
-        error!("Panic while handling focus-follows-mouse movement");
-    }
-    event_ref.as_ptr()
-}
-
-unsafe extern "C-unwind" fn focus_tap_invalidated(user_info: *mut std::ffi::c_void) {
-    if user_info.is_null() {
-        return;
-    }
-    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
-    let _ = ctx.recovery_tx.send(Recovery::FocusTapInvalidated);
-}
-
 unsafe extern "C-unwind" fn event_tap_reenabled(user_info: *mut std::ffi::c_void) {
     if user_info.is_null() {
         return;
@@ -1387,7 +1262,7 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> u64 {
     } else {
         MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL
     };
-    // HID CGEvent timestamps and mach_absolute_time use Mach ticks.
+    // HID CGEvent timestamps use Mach ticks, unlike Session timestamps.
     // Convert the interval during configuration, not each hardware event.
     #[repr(C)]
     struct Timebase {
@@ -1921,18 +1796,10 @@ mod tests {
             (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
         assert_eq!(input.desired_event_mask(), stable_release_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
-        // Focus follows mouse moves are observed by the Session tap.
-        assert_eq!(input.desired_event_mask(), stable_release_mask);
-        assert!(input.wants_focus_tap());
-        input.state.borrow_mut().mouse_hides_on_focus = true;
         assert_eq!(
             input.desired_event_mask(),
-            stable_release_mask
-                | (1u64 << CGEventType::MouseMoved.0)
-                | (1u64 << CGEventType::LeftMouseDown.0)
-                | (1u64 << CGEventType::RightMouseDown.0)
+            stable_release_mask | (1u64 << CGEventType::MouseMoved.0)
         );
-        input.state.borrow_mut().mouse_hides_on_focus = false;
         input.state.borrow_mut().mouse_settings.action2 = MouseAction::Move;
         input.state.borrow_mut().mouse_features_enabled = true;
         let mouse_mask = input.desired_event_mask();

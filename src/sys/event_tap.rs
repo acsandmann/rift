@@ -173,8 +173,6 @@ impl EventTap {
 
         Some(event_tap)
     }
-
-    pub fn is_valid(&self) -> bool { self.port.is_valid() }
 }
 
 impl Drop for EventTap {
