@@ -3,11 +3,19 @@ pub use rift_wm::{actor, common, layout_engine, sys};
 #[path = "../src/ui/settings/mod.rs"]
 mod settings;
 fn main() {
-    // A single libtest-compatible case lets nextest list this harness without running AppKit.
-    if std::env::args().any(|arg| arg == "--list") {
-        if !std::env::args().any(|arg| arg == "--ignored") {
+    // Opens real AppKit UI, so it is ignored by default. Run it with `cargo test --test settings_native -- --ignored`
+    // (or `cargo nextest run --run-ignored all`).
+    // nextest discovers it via `--list`; report it only in the ignored listing so it is skipped by default.
+    let args: Vec<String> = std::env::args().collect();
+    let ignored = args.iter().any(|arg| arg == "--ignored" || arg == "--include-ignored");
+    if args.iter().any(|arg| arg == "--list") {
+        if args.iter().any(|arg| arg == "--ignored") {
             println!("settings_native: test");
         }
+        return;
+    }
+    if !ignored {
+        println!("settings_native: skipped (opens UI); pass --ignored to run");
         return;
     }
     let mtm = objc2::MainThreadMarker::new().unwrap();
