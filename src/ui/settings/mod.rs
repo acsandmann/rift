@@ -829,13 +829,7 @@ impl FormBuilder {
         let (slider, input, message) =
             self.numeric_controls(title, scale, integer, slider_range, get, set);
         if let Some(slider) = slider {
-            slider.width(120.0);
-            input.width(60.0);
-            self.row(
-                title,
-                HStack::new(&self.ui).spacing(8.0).push(slider).push(input),
-                message,
-            )
+            self.row(title, NumberSlider::new(&self.ui, slider, input), message)
         } else {
             self.row(title, input, message)
         }

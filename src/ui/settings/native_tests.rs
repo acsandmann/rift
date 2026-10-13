@@ -317,6 +317,94 @@ pub fn run(ui: Ui) {
                 "opening and cancelling an editor must not change config"
             );
         });
+        // Numeric sliders edit through the same draft and retain exact text values.
+        autoreleasepool(|_| {
+            let draft = settings.router.model.draft();
+            let mut form = FormBuilder::new(ui, &draft);
+            let count = form.field(
+                "master_count",
+                |s| &s.settings.layout.master_stack,
+                |s| &mut s.settings.layout.master_stack,
+            );
+            let page = Rc::new(form.finish(Section::new(&ui, "").row(count)));
+            *draft.draft.as_ref().unwrap().page.borrow_mut() = Some(page.clone());
+            page.synchronize(&draft);
+            let slider = find::<NSSlider>(page.view.ns_view()).unwrap();
+            slider.setDoubleValue(3.4);
+            assert!(unsafe { slider.sendAction_to(slider.action(), slider.target().as_deref()) });
+            assert_eq!(
+                draft.source.borrow().settings.layout.master_stack.master_count,
+                3
+            );
+            assert_eq!(
+                editable(page.view.ns_view()).unwrap().stringValue().to_string(),
+                "3"
+            );
+            // The convenient count range must not become a config limit.
+            change_text(&editable(page.view.ns_view()).unwrap(), "12");
+            assert_eq!(
+                draft.source.borrow().settings.layout.master_stack.master_count,
+                12
+            );
+            page.synchronize(&draft);
+            assert_eq!(
+                editable(page.view.ns_view()).unwrap().stringValue().to_string(),
+                "12"
+            );
+
+            let mut form = FormBuilder::new(ui, &draft);
+            let offset = form.field(
+                "stack_offset",
+                |s| &s.settings.layout.stack,
+                |s| &mut s.settings.layout.stack,
+            );
+            let page = Rc::new(form.finish(Section::new(&ui, "").row(offset)));
+            *draft.draft.as_ref().unwrap().page.borrow_mut() = Some(page.clone());
+            page.synchronize(&draft);
+            change_text(&editable(page.view.ns_view()).unwrap(), "123.456");
+            assert_eq!(draft.source.borrow().settings.layout.stack.stack_offset, 123.456);
+            page.synchronize(&draft);
+            assert_eq!(
+                editable(page.view.ns_view()).unwrap().stringValue().to_string(),
+                "123.456"
+            );
+            let mut form = FormBuilder::new(ui, &draft);
+            let minimum = form.field(
+                "min_column_width_ratio",
+                |s| &s.settings.layout.scrolling,
+                |s| &mut s.settings.layout.scrolling,
+            );
+            let page = Rc::new(form.finish(Section::new(&ui, "").row(minimum)));
+            *draft.draft.as_ref().unwrap().page.borrow_mut() = Some(page.clone());
+            let mut source = draft.source.borrow().clone();
+            source.settings.layout.scrolling.max_column_width_ratio = 0.373456;
+            draft.replace_source(source);
+            page.synchronize(&draft);
+            let slider = find::<NSSlider>(page.view.ns_view()).unwrap();
+            slider.setDoubleValue(100.0);
+            assert!(unsafe { slider.sendAction_to(slider.action(), slider.target().as_deref()) });
+            assert!(
+                (draft.source.borrow().settings.layout.scrolling.min_column_width_ratio - 0.373456)
+                    .abs()
+                    < 1e-9,
+                "percentage scaling and rounding must respect the exact upper bound"
+            );
+            let mut source = draft.source.borrow().clone();
+            source.settings.layout.scrolling.max_column_width_ratio = 0.8;
+            draft.replace_source(source);
+            page.synchronize(&draft);
+            slider.setDoubleValue(75.0);
+            assert!(unsafe { slider.sendAction_to(slider.action(), slider.target().as_deref()) });
+            assert_eq!(
+                draft.source.borrow().settings.layout.scrolling.min_column_width_ratio,
+                0.75,
+                "slider ranges must follow changes to the other width bound"
+            );
+            assert!(
+                pending.try_recv().is_err(),
+                "draft slider edits do not persist before Done"
+            );
+        });
         // Filtering must not change which command the selected visible row edits.
         autoreleasepool(|_| {
             use rift_protocol::LayoutCommand;
@@ -524,10 +612,10 @@ pub fn run(ui: Ui) {
             .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05))
     });
     assert!(host.load().is_none(), "closing must release the page host");
-    repeated_close(ui);
 }
 
-fn repeated_close(ui: Ui) {
+/// Explicit stress test: repeatedly presents and closes real Settings windows.
+pub fn run_lifecycle(ui: Ui) {
     let app = NSApplication::sharedApplication(ui.mtm());
     let policy = app.activationPolicy();
     for cycle in 0..20 {
