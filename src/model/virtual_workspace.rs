@@ -377,13 +377,34 @@ impl WorkspaceStore {
                 };
 
                 let mode = self.resolve_layout_mode_for_workspace(idx, &name);
-                let ws = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
-                let id = self.workspaces.insert(ws);
-                let ids = self.workspaces_by_space.get_mut(&space).unwrap();
-                ids.push(id);
-                ids.sort_unstable();
+                self.insert_workspace(space, name, mode);
             }
         }
+    }
+
+    /// Adds a workspace to an already-initialized space. If the space has been
+    /// shown, the new workspace gets a layout for the space's current size so
+    /// it can accept windows immediately instead of waiting for the next
+    /// `SpaceExposed`.
+    fn insert_workspace(
+        &mut self,
+        space: SpaceId,
+        name: String,
+        mode: LayoutMode,
+    ) -> VirtualWorkspaceId {
+        let size = self
+            .workspace_ids(space)
+            .iter()
+            .find_map(|&id| self.workspaces[id].layout_state.active_size());
+        let mut workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
+        if let Some(size) = size {
+            workspace.ensure_layout_for_size(size);
+        }
+        let id = self.workspaces.insert(workspace);
+        let ids = self.workspaces_by_space.entry(space).or_default();
+        ids.push(id);
+        ids.sort_unstable();
+        id
     }
 
     pub(crate) fn ensure_space_initialized(&mut self, space: SpaceId) {
@@ -589,13 +610,7 @@ impl WorkspaceStore {
             .unwrap_or(0);
         let mode = self.resolve_layout_mode_for_workspace(idx, &name);
 
-        let workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
-        let workspace_id = self.workspaces.insert(workspace);
-        let ids = self.workspaces_by_space.entry(space).or_default();
-        ids.push(workspace_id);
-        ids.sort_unstable();
-
-        Ok(workspace_id)
+        Ok(self.insert_workspace(space, name, mode))
     }
 
     pub fn last_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {

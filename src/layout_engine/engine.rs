@@ -5035,6 +5035,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn window_moved_to_created_workspace_is_tiled_immediately() {
+        let mut window_store = WindowStore::default();
+        let mut engine = LayoutEngine::new(
+            &VirtualWorkspaceSettings {
+                default_workspace_count: 1,
+                ..VirtualWorkspaceSettings::default()
+            },
+            &LayoutSettings::default(),
+            None,
+        );
+        let space = SpaceId::new(95);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 5154;
+        let wid = WindowId::new(pid, 1);
+
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                space,
+                pid,
+                vec![window_layout_info(wid, CGSize::new(500.0, 500.0))],
+                None,
+            ),
+        );
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, wid));
+
+        let _ = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::CreateWorkspace,
+        );
+        let workspace_two = engine.workspaces().workspace_ids(space)[1];
+        assert!(engine.workspaces().active_layout(space, workspace_two).is_some());
+
+        let response = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Index(1),
+                follow: true,
+                window_id: None,
+            },
+        );
+        engine.commit_workspace_focus(&mut window_store, space, response.focus_window);
+
+        assert_eq!(engine.workspaces().active_workspace(space), Some(workspace_two));
+        let gaps = engine.layout_settings.gaps.clone();
+        let layout = engine.calculate_layout(space, screen, &gaps, Default::default());
+        assert!(layout.iter().any(|(id, _)| *id == wid));
+    }
+
     fn floating_stack_fixture(
         count: u32,
     ) -> (
