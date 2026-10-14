@@ -622,7 +622,7 @@ struct State {
     windows: HashMap<WindowId, AppWindowState>,
     elem_to_wid: HashMap<AXUIElement, WindowId>,
     main_window: Option<WindowId>,
-    last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
+    last_activated: Option<ActivationContext>,
     pending_activation_quiet: Option<(Instant, Quiet)>,
     is_hidden: bool,
     is_frontmost: bool,
@@ -1085,6 +1085,9 @@ impl State {
                 .await
             {
                 debug!("Raise request failed: {e:?}");
+                if matches!(e, RaiseError::RaiseCancelled) {
+                    this.borrow_mut().demote_activation_context(sequence_id);
+                }
                 if matches!(
                     e,
                     RaiseError::AXError(AxError::NotFound)
@@ -1604,6 +1607,18 @@ enum RaiseError {
     AXError(AxError),
 }
 
+/// Attribution for a rift-initiated process activation, installed before the
+/// WindowServer make-key request is dispatched. The AX/Carbon activation edge
+/// that follows consumes this so the activation is labeled "by us" rather than
+/// arriving as a user activation.
+struct ActivationContext {
+    at: Instant,
+    quiet: Quiet,
+    quiet_window_change: Option<WindowId>,
+    notify: oneshot::Sender<()>,
+    sequence_id: u64,
+}
+
 impl From<AxError> for RaiseError {
     fn from(value: AxError) -> Self { Self::AXError(value) }
 }
@@ -1669,10 +1684,42 @@ impl State {
             }
             Err(err) => return Err(err.into()),
         };
-        let make_key_result =
-            window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
+        // Register the activation context before dispatching make-key: the
+        // WindowServer request can start process activation immediately, and
+        // if this sequence is cancelled before the activation wait runs the
+        // resulting edge must still be attributed to rift rather than arriving
+        // unlabeled as a user activation that retriggers workspace switching.
+        let (activation_quiet, activation_window) = if wids.len() == 1 {
+            // `quiet` only applies if the first window is also the last.
+            (quiet, (quiet == Quiet::Yes).then_some(first))
+        } else {
+            // Windows before the last are always quiet.
+            (Quiet::Yes, Some(first))
+        };
+        let mut activation_rx = None;
+        let make_key_result = window_server_id.map(|wsid| {
+            if !is_frontmost {
+                activation_rx = Some(this.mark_activation(
+                    activation_quiet,
+                    activation_window,
+                    sequence_id,
+                ));
+            }
+            window_server::make_key_window(this.pid, wsid)
+        });
         if let Some(Err(err)) = &make_key_result {
             warn!(?this.pid, ?err, "Failed to activate app");
+            // No activation will arrive; do not let the context we just
+            // registered mislabel a later user activation as ours.
+            activation_rx = None;
+            if this
+                .last_activated
+                .as_ref()
+                .is_some_and(|ctx| ctx.sequence_id == sequence_id)
+                && let Some(ctx) = this.last_activated.take()
+            {
+                let _ = ctx.notify.send(());
+            }
         }
 
         let waits_for_activation =
@@ -1692,13 +1739,8 @@ impl State {
                 window.elem.raise()
             })?;
 
-            if wids.len() == 1 {
-                // `quiet` only applies if the first window is also the last.
-                let quiet_window_change = (quiet == Quiet::Yes).then_some(first);
-                Self::wait_for_activation(this, quiet, quiet_window_change, &token).await?;
-            } else {
-                // Windows before the last are always quiet.
-                Self::wait_for_activation(this, Quiet::Yes, Some(first), &token).await?;
+            if let Some(rx) = activation_rx.take() {
+                Self::await_activation(this, rx, &token).await?;
             }
             this = this_ref.borrow_mut();
         } else {
@@ -1805,11 +1847,11 @@ impl State {
 
     fn take_activation_context(&mut self) -> (Quiet, Option<WindowId>) {
         match self.last_activated.take() {
-            Some((ts, quiet_activation, quiet_window_change, tx)) => {
-                _ = tx.send(());
-                if ts.elapsed() < Duration::from_millis(1000) {
+            Some(ctx) => {
+                _ = ctx.notify.send(());
+                if ctx.at.elapsed() < Duration::from_millis(1000) {
                     trace!("by us");
-                    (quiet_activation, quiet_window_change)
+                    (ctx.quiet, ctx.quiet_window_change)
                 } else {
                     trace!("by user");
                     (Quiet::No, None)
@@ -1870,20 +1912,43 @@ impl State {
         Ok(())
     }
 
-    async fn wait_for_activation(
-        mut this: std::cell::RefMut<'_, Self>,
+    fn mark_activation(
+        &mut self,
         quiet_activation: Quiet,
         quiet_window_change: Option<WindowId>,
+        sequence_id: u64,
+    ) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        if let Some(prev) = self.last_activated.replace(ActivationContext {
+            at: Instant::now(),
+            quiet: quiet_activation,
+            quiet_window_change,
+            notify: tx,
+            sequence_id,
+        }) {
+            let _ = prev.notify.send(());
+        }
+        rx
+    }
+
+    /// A cancelled sequence may have dispatched make-key just before the
+    /// cancel landed. If its activation context is still installed, downgrade
+    /// it to quiet so the late activation edge cannot surface as a user
+    /// activation and trigger an auto workspace switch back to the window.
+    fn demote_activation_context(&mut self, sequence_id: u64) {
+        if let Some(ctx) = &mut self.last_activated
+            && ctx.sequence_id == sequence_id
+        {
+            ctx.quiet = Quiet::Yes;
+        }
+    }
+
+    async fn await_activation(
+        this: std::cell::RefMut<'_, Self>,
+        rx: oneshot::Receiver<()>,
         token: &CancellationToken,
     ) -> Result<(), RaiseError> {
         let app = this.app.clone();
-        let (tx, rx) = oneshot::channel();
-        if let Some((_, _, _, prev_tx)) =
-            this.last_activated
-                .replace((Instant::now(), quiet_activation, quiet_window_change, tx))
-        {
-            let _ = prev_tx.send(());
-        }
         drop(this);
         trace!("Awaiting activation");
         tokio::pin!(rx);
@@ -2426,8 +2491,8 @@ fn collect_visible_window_server_info(
 
 impl Drop for State {
     fn drop(&mut self) {
-        if let Some((_, _, _, tx)) = self.last_activated.take() {
-            let _ = tx.send(());
+        if let Some(ctx) = self.last_activated.take() {
+            let _ = ctx.notify.send(());
         }
         self.enhanced_ui.restore_if_needed(&self.app);
     }
