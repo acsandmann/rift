@@ -15,6 +15,12 @@ use crate::sys::timer::Timer;
 #[derive(Debug)]
 pub enum Event {
     RaiseRequest(RaiseRequest),
+    /// A workspace switch started, carrying the reactor's switch generation.
+    /// Sequences enqueued before it target the superseded workspace and are
+    /// dropped so stale raises and activations cannot fight the new workspace.
+    WorkspaceSwitchStarted {
+        generation: u64,
+    },
     RaiseCompleted {
         window_id: WindowId,
         sequence_id: u64,
@@ -42,6 +48,9 @@ pub struct RaiseManager {
     /// Queued sequences waiting to be processed
     queued_sequences: VecDeque<RaiseRequest>,
     next_sequence_id: u64,
+    /// Latest workspace switch generation observed. Sequences created under an
+    /// older generation are stale and superseded by the switch.
+    latest_switch_generation: u64,
     input_tx: Option<input::Sender>,
 }
 
@@ -55,6 +64,8 @@ struct ActiveSequence {
     raise_token: CancellationToken,
     started_at: Instant,
     timed_out: bool,
+    /// Workspace switch generation this sequence was created under.
+    switch_generation: u64,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -120,6 +131,7 @@ impl RaiseManager {
             active_sequence: None,
             queued_sequences: VecDeque::new(),
             next_sequence_id: 1,
+            latest_switch_generation: 0,
             input_tx: None,
         }
     }
@@ -144,6 +156,22 @@ impl RaiseManager {
                     app_handles,
                     focus_quiet,
                 });
+            }
+            Event::WorkspaceSwitchStarted { generation } => {
+                if generation > self.latest_switch_generation {
+                    self.latest_switch_generation = generation;
+                    // Requests arrive on the same channel in order, so anything
+                    // queued or running predates the switch. Dropping it keeps a
+                    // stale raise/focus from activating an app in the previous
+                    // workspace and auto-switching back to it.
+                    self.queued_sequences.clear();
+                    if let Some(sequence) = &mut self.active_sequence
+                        && sequence.switch_generation < generation
+                    {
+                        sequence.raise_token.cancel();
+                        self.active_sequence = None;
+                    }
+                }
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 trace!("Raise completed for {:?} in sequence {}", window_id, sequence_id);
@@ -267,6 +295,7 @@ impl RaiseManager {
                 raise_token,
                 started_at: Instant::now(),
                 timed_out: false,
+                switch_generation: self.latest_switch_generation,
             });
         }
     }
@@ -852,6 +881,70 @@ mod tests {
             } else {
                 panic!("Expected Raise request for first batch");
             }
+        });
+    }
+
+    #[test]
+    fn test_workspace_switch_drops_stale_sequences() {
+        Executor::run(async {
+            let mut raise_manager = RaiseManager::new();
+            let (app_handles, _app_rx) = create_test_app_handles();
+
+            // A sequence running and one queued behind it, both predating the
+            // next workspace switch.
+            let first = create_layout_response(
+                vec![WindowId::new(1, 1)],
+                Some((WindowId::new(1, 2), None)),
+                app_handles.clone(),
+                Quiet::No,
+            );
+            let second = create_layout_response(
+                vec![WindowId::new(1, 3)],
+                Some((WindowId::new(1, 4), None)),
+                app_handles,
+                Quiet::No,
+            );
+            raise_manager.handle_message(first);
+            raise_manager.handle_message(second);
+            assert_eq!(raise_manager.queued_sequences.len(), 1);
+            let stale_token =
+                raise_manager.active_sequence.as_ref().unwrap().raise_token.clone();
+
+            raise_manager.handle_message(Event::WorkspaceSwitchStarted { generation: 1 });
+
+            assert!(raise_manager.active_sequence.is_none());
+            assert!(stale_token.is_cancelled());
+            assert!(raise_manager.queued_sequences.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_workspace_switch_keeps_current_generation_sequences() {
+        Executor::run(async {
+            let mut raise_manager = RaiseManager::new();
+            let (app_handles, mut app_rx) = create_test_app_handles();
+
+            raise_manager.handle_message(Event::WorkspaceSwitchStarted { generation: 1 });
+
+            // Requests sent after the marker belong to the new workspace.
+            let msg = create_layout_response(
+                vec![WindowId::new(1, 1)],
+                Some((WindowId::new(1, 2), None)),
+                app_handles,
+                Quiet::No,
+            );
+            raise_manager.handle_message(msg);
+            assert_eq!(
+                raise_manager.active_sequence.as_ref().unwrap().switch_generation,
+                1
+            );
+            let requests = collect_requests(&mut app_rx);
+            assert_eq!(requests.len(), 1);
+            assert_raise_request(&requests[0], WindowId::new(1, 1), 1, Quiet::Yes);
+
+            // Re-announcing the same generation changes nothing.
+            raise_manager.handle_message(Event::WorkspaceSwitchStarted { generation: 1 });
+            assert!(raise_manager.active_sequence.is_some());
         });
     }
 }

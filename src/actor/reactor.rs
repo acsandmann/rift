@@ -4510,6 +4510,16 @@ impl Reactor {
         response: layout::EventResponse,
         workspace_switch_space: Option<SpaceId>,
     ) {
+        if workspace_switch_space.is_some() {
+            // Every workspace switch bumps the generation and delivers the new
+            // value on this same channel before the switch's own raise request
+            // below, so queued and in-flight sequences from older switches are
+            // discarded instead of racing the transition.
+            let generation = self.workspace_switch_manager.workspace_switch_generation;
+            let _ = self.communication_manager.raise_manager_tx.try_send(
+                raise_manager::Event::WorkspaceSwitchStarted { generation },
+            );
+        }
         if self.is_in_drag() {
             self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
