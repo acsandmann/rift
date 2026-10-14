@@ -1,7 +1,8 @@
 use objc2::Message;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{
-    NSApplication, NSControl, NSOutlineView, NSPopUpButton, NSSlider, NSSwitch, NSTableView, NSView,
+    NSAccessibility, NSApplication, NSButton, NSControl, NSOutlineView, NSPopUpButton,
+    NSSegmentedControl, NSSlider, NSSwitch, NSTableView, NSView,
 };
 
 use super::*;
@@ -20,6 +21,21 @@ fn count<T: objc2::DowncastTarget + 'static>(view: &NSView) -> usize {
     }
     usize::from(view.downcast_ref::<T>().is_some())
         + view.subviews().iter().map(|child| count::<T>(&child)).sum::<usize>()
+}
+
+fn named<T: objc2::DowncastTarget + 'static>(view: &NSView, title: &str) -> Option<Retained<T>> {
+    if view.isHidden() {
+        return None;
+    }
+    if view.accessibilityLabel().is_some_and(|label| label.to_string() == title)
+        && let Some(value) = view.downcast_ref::<T>()
+    {
+        return Some(value.retain());
+    }
+    view.subviews().iter().find_map(|child| named(&child, title))
+}
+fn root_window(settings: &Settings) -> Retained<NSView> {
+    settings.window.ns_window().contentView().unwrap()
 }
 
 fn editable(view: &NSView) -> Option<Retained<objc2_app_kit::NSTextField>> {
@@ -65,6 +81,10 @@ pub fn run(ui: Ui) {
                 .size,
             CGSize::new(880.0, 660.0)
         );
+        assert!(
+            settings.router.layouts.get().is_none(),
+            "startup does not construct the Layouts workspace"
+        );
         late_runtime_populates_picker(&settings, &mut pending);
         let search = find::<objc2_app_kit::NSSearchField>(&root).unwrap();
         change_text(&search, "focus follows pointer");
@@ -91,24 +111,27 @@ pub fn run(ui: Ui) {
             false,
         );
         let toolbar = settings.window.toolbar().ns_toolbar();
-        let history = toolbar
-            .items()
-            .iter()
-            .find_map(|item| item.downcast::<objc2_app_kit::NSToolbarItemGroup>().ok())
-            .unwrap();
-        let back = history.subitems().objectAtIndex(0);
-        let forward = history.subitems().objectAtIndex(1);
-        assert!(back.isEnabled(), "enable Back after visiting a section");
-        assert!(!forward.isEnabled(), "disable Forward at the latest destination");
+        assert!(
+            toolbar.items().iter().all(|item| {
+                !matches!(
+                    item.itemIdentifier().to_string().as_str(),
+                    "cgs.back" | "cgs.history" | "cgs.page-menu"
+                )
+            }),
+            "preferences toolbar has no browser navigation"
+        );
         sidebar.selectRowIndexes_byExtendingSelection(
             &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
             false,
         );
         drop(sidebar);
 
-        settings.router.navigate(4);
-        settings.router.history.borrow_mut().select(4);
-        let keyboard = settings.router.pages.borrow()[4].as_ref().unwrap().view.clone();
+        settings.router.navigate(Category::Keyboard);
+        let keyboard = settings.router.pages.borrow()[Category::Keyboard.index()]
+            .as_ref()
+            .unwrap()
+            .view
+            .clone();
         settings.refresh_displays(vec![crate::sys::screen::ScreenInfo {
             id: crate::sys::screen::ScreenId::new(1),
             display_uuid: "test-display".into(),
@@ -174,104 +197,255 @@ pub fn run(ui: Ui) {
             "runtime refresh reaches the open editor"
         );
         settings.router.model.sheet_model.borrow_mut().take();
-        // The native menu switches layouts, history returns to the overview, and no secondary sidebar remains.
+        // Native visual choices select cached editors without changing persisted settings.
         autoreleasepool(|_| {
-            let navigate = settings.router.model.env.navigate.borrow().as_ref().unwrap().clone();
-            navigate(1);
-            assert_eq!(count::<NSOutlineView>(&root), 1, "one persistent sidebar");
-            let menu = toolbar
-                .items()
-                .iter()
-                .find_map(|item| item.view().and_then(|view| view.downcast::<NSPopUpButton>().ok()))
+            settings.router.navigate(Category::Layouts);
+            let before = settings.model().source.borrow().clone();
+            let root = settings.router.layouts().ns_view();
+            assert!(
+                named::<NSButton>(root, "Layouts help").is_some(),
+                "help sits with the page content, not in the toolbar"
+            );
+            settings.window.ns_window().setContentSize(CGSize::new(880.0, 660.0));
+            root.layoutSubtreeIfNeeded();
+            fn instances(view: &NSView) -> usize {
+                1 + view.subviews().iter().map(|view| instances(&view)).sum::<usize>()
+            }
+            let frame = settings.window.ns_window().frame();
+            let mut cached_instances = None;
+            for _ in 0..3 {
+                for (title, _) in pages::layouts() {
+                    let button = named::<NSButton>(root, &format!("Configure {title}")).unwrap();
+                    unsafe {
+                        button.performClick(None);
+                    }
+                    assert_eq!(button.state(), 1);
+                    assert_eq!(
+                        settings.window.ns_window().frame(),
+                        frame,
+                        "changing the inspected layout preserves the user’s window size"
+                    );
+                    assert!(*settings.model().source.borrow() == before);
+                    assert!(pending.try_recv().is_err());
+                }
+                let count = instances(root);
+                if let Some(expected) = cached_instances {
+                    assert_eq!(count, expected, "switching reuses native views");
+                }
+                cached_instances = Some(count);
+            }
+            let spacing = named::<NSButton>(root, "Spacing").unwrap();
+            let displays = named::<NSButton>(root, "Displays").unwrap();
+            assert!(
+                named::<NSControl>(root, "Screen edges").is_none(),
+                "spacing starts collapsed and lazy"
+            );
+            root.layoutSubtreeIfNeeded();
+            // Labels, the icon, and empty trailing space all hit the native disclosure button.
+            let header = unsafe { spacing.superview() }.unwrap();
+            for fraction in [0.05, 0.5, 0.95] {
+                let rect = header.frame();
+                let hit = header
+                    .hitTest(cgs::CGPoint::new(
+                        rect.origin.x + rect.size.width * fraction,
+                        rect.origin.y
+                            + spacing.frame().origin.y
+                            + spacing.frame().size.height * 0.5,
+                    ))
+                    .expect("the whole disclosure header is clickable");
+                let button = hit.downcast::<NSButton>().expect("native button hit target");
+                assert!(std::ptr::eq(&*button, &*spacing));
+                unsafe {
+                    button.performClick(None);
+                }
+                assert_eq!(spacing.state(), 1);
+                unsafe {
+                    button.performClick(None);
+                }
+                assert_eq!(spacing.state(), 0);
+            }
+            unsafe {
+                spacing.performClick(None);
+            }
+            assert_eq!(
+                settings.window.ns_window().frame(),
+                frame,
+                "expanding spacing preserves window size"
+            );
+            let gap = named::<NSControl>(root, "Screen edges").unwrap();
+            unsafe {
+                displays.performClick(None);
+            }
+            assert_eq!(spacing.state(), 0, "opening Displays collapses Spacing");
+            assert_eq!(displays.state(), 1);
+            assert_eq!(
+                settings.window.ns_window().frame(),
+                frame,
+                "expanding displays preserves window size"
+            );
+            assert!(
+                named::<NSControl>(root, "Screen edges").is_none(),
+                "the other editor is hidden"
+            );
+            assert_eq!(displays.state(), 1);
+            unsafe {
+                spacing.performClick(None);
+            }
+            assert!(
+                std::ptr::eq(&*gap, &*named::<NSControl>(root, "Screen edges").unwrap()),
+                "reopening reuses the editor"
+            );
+            assert_eq!(displays.state(), 0, "opening Spacing collapses Displays");
+            assert!(*settings.model().source.borrow() == before);
+            assert!(
+                pending.try_recv().is_err(),
+                "expansion never writes configuration"
+            );
+            for query in ["Master width", "Screen edges", "Display settings"] {
+                let entry =
+                    search::results(query).into_iter().find(|entry| entry.title == query).unwrap();
+                settings.router.open_search(entry);
+                assert!(
+                    named::<NSControl>(root, "Master width").is_some(),
+                    "shared settings remain separate from the visible layout inspector"
+                );
+                if query == "Master width" || query == "Screen edges" {
+                    let focused = settings.window.ns_window().firstResponder().unwrap();
+                    assert_eq!(
+                        focused
+                            .downcast_ref::<NSControl>()
+                            .and_then(|control| control.accessibilityLabel())
+                            .map(|label| label.to_string())
+                            .as_deref(),
+                        Some(query),
+                        "search focuses the revealed native control"
+                    );
+                }
+                assert_eq!(settings.router.current(), Category::Layouts);
+                assert_eq!(
+                    find::<NSOutlineView>(&root_window(&settings)).unwrap().selectedRow(),
+                    Category::Layouts.index() as isize
+                );
+            }
+            settings.router.layouts().select_target(layouts::Target::Layout(
+                crate::common::config::LayoutMode::Traditional,
+            ));
+            let position = named::<NSPopUpButton>(root, "New window position").unwrap();
+            assert_eq!(
+                position.titleOfSelectedItem().unwrap().to_string(),
+                "Shared · Next to selection",
+                "an inherited choice names its effective value"
+            );
+            let toggle = named::<NSSwitch>(root, "Keep windows equally sized").unwrap();
+            let mut reloaded = before.clone();
+            reloaded.settings.layout.traditional.equalize_nodes = false;
+            settings.synchronize(reloaded);
+            assert_eq!(toggle.state(), 0, "external reload updates visible controls");
+            settings.synchronize(before.clone());
+            // Switching must commit an actual AppKit field editor before hiding its client.
+            settings
+                .router
+                .layouts()
+                .select_target(layouts::Target::Layout(crate::common::config::LayoutMode::Bsp));
+            let ratio =
+                named::<objc2_app_kit::NSTextField>(root, "Single window aspect ratio").unwrap();
+            assert!(settings.window.ns_window().makeFirstResponder(Some(&ratio)));
+            ratio
+                .currentEditor()
                 .unwrap()
-                .menu()
-                .unwrap();
-            autoreleasepool(|_| {
-                menu.performActionForItemAtIndex(
-                    menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("Traditional")),
-                )
-            });
-            let old = objc2::rc::Weak::new(
-                settings.router.pages.borrow()[10].as_ref().unwrap().view.ns_view(),
-            );
+                .setString(&objc2_foundation::NSString::from_str("1.78"));
+            unsafe {
+                named::<NSButton>(root, "Configure Traditional").unwrap().performClick(None);
+            }
+            let request = pending.try_recv().expect("switch commits the field’s source edit");
+            let Action::Edit(edit) = request.action else {
+                panic!("field uses source edits");
+            };
+            let mut edited = before.clone();
+            edit(&mut edited).unwrap();
+            assert_eq!(edited.settings.layout.bsp.single_window_aspect_ratio, Some(1.78));
+            assert!(ratio.currentEditor().is_none());
+            unsafe {
+                named::<NSButton>(root, "Configure Scrolling").unwrap().performClick(None);
+            }
+            unsafe {
+                named::<NSButton>(root, "Set Scrolling as Default")
+                    .expect("a nondefault layout offers Set as Default beside its title")
+                    .performClick(None);
+            }
+            let request = pending.try_recv().unwrap();
+            let Action::Edit(edit) = request.action else {
+                panic!("default submits a source edit");
+            };
+            let mut external = before.clone();
+            edit(&mut external).unwrap();
             assert_eq!(
-                autoreleasepool(|_| count::<NSSwitch>(settings.router.host.ns_view())),
-                1
+                external.settings.layout.mode,
+                crate::common::config::LayoutMode::Scrolling
             );
-            autoreleasepool(|_| {
-                menu.performActionForItemAtIndex(
-                    menu.indexOfItemWithTitle(&objc2_foundation::NSString::from_str("BSP")),
-                )
-            });
-            autoreleasepool(|_| {
-                assert_eq!(count::<NSSwitch>(settings.router.host.ns_view()), 0);
-                assert!(old.load().is_some(), "switching layouts parks cached subpages");
-            });
-            // A display change rebuilds layout scopes, so parked copies must be released.
-            autoreleasepool(|_| {
-                settings.refresh_displays(vec![crate::sys::screen::ScreenInfo {
-                    id: crate::sys::screen::ScreenId::new(2),
-                    display_uuid: "replacement-display".into(),
-                    name: Some("Replacement display".into()),
-                    frame: Default::default(),
-                    backing_scale: 1.0,
-                    space: None,
-                }]);
-            });
-            autoreleasepool(|_| {
-                root.layoutSubtreeIfNeeded();
-                objc2_foundation::NSRunLoop::currentRunLoop()
-                    .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05));
-            });
-            assert!(old.load().is_none(), "release replaced subpages");
+            settings.synchronize(external.clone());
             assert_eq!(
-                settings.router.history.borrow().history[settings.router.history.borrow().cursor],
-                11
-            );
-            assert!(unsafe {
-                NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
-                    back.action().unwrap(),
-                    back.target().as_deref(),
-                    Some(&back),
-                )
-            });
-            assert_eq!(
-                count::<NSSwitch>(settings.router.host.ns_view()),
+                named::<NSButton>(root, "Configure Scrolling").unwrap().state(),
                 1,
-                "Back restores Traditional"
+                "making a layout default keeps editing it"
             );
-            assert!(unsafe {
-                NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
-                    back.action().unwrap(),
-                    back.target().as_deref(),
-                    Some(&back),
-                )
-            });
-            assert_eq!(
-                count::<NSOutlineView>(
-                    settings.router.pages.borrow()[1].as_ref().unwrap().view.ns_view()
-                ),
-                0
+            assert!(
+                named::<NSButton>(root, "Set Scrolling as Default").is_none(),
+                "the default layout offers no Set as Default action"
             );
-            assert!(forward.isEnabled());
-            assert!(unsafe {
-                NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
-                    forward.action().unwrap(),
-                    forward.target().as_deref(),
-                    Some(&forward),
-                )
-            });
-            assert_eq!(
-                count::<NSSwitch>(settings.router.host.ns_view()),
-                1,
-                "Forward restores Traditional"
+            external.settings.layout.mode = before.settings.layout.mode;
+            assert!(
+                external == before,
+                "default changes preserve individual layout settings"
             );
-            assert_eq!(
-                find::<NSOutlineView>(&root).unwrap().selectedRow(),
-                1,
-                "Layouts remains selected"
+            settings.synchronize(before.clone());
+            // Reset only the inspected algorithm, preserving defaults and display overrides.
+            let mut customized = before.clone();
+            customized.settings.layout.scrolling.column_width_ratio = 0.61;
+            customized.settings.layout.scrolling.per_display.insert(
+                "saved-display".into(),
+                crate::common::config::ScrollingWidthOverride {
+                    column_width_ratio: Some(0.7),
+                    ..Default::default()
+                },
             );
-            assert!(pending.try_recv().is_err(), "navigation must not change config");
+            settings.synchronize(customized.clone());
+            settings.router.layouts().select_target(layouts::Target::Layout(
+                crate::common::config::LayoutMode::Scrolling,
+            ));
+            assert!(
+                named::<NSButton>(root, "Restore Scrolling Defaults…").is_some(),
+                "restoring defaults lives in the page footer"
+            );
+            layouts::restore(
+                &Rc::downgrade(&settings.router.model),
+                crate::common::config::LayoutMode::Scrolling,
+                Weak::new(),
+            );
+            let request = pending.try_recv().unwrap();
+            let Action::Edit(edit) = request.action else {
+                panic!("reset uses the source mutation pipeline");
+            };
+            let mut expected = before.clone();
+            expected.settings.layout.scrolling = Default::default();
+            expected.settings.layout.scrolling.per_display =
+                customized.settings.layout.scrolling.per_display.clone();
+            edit(&mut customized).unwrap();
+            assert!(
+                customized == expected,
+                "reset preserves all other settings and display overrides"
+            );
+            settings.synchronize(before.clone());
+            // Width presets are one chip per percentage, plus an add button.
+            for title in ["33.33%", "50%", "66.67%"] {
+                assert!(
+                    named::<NSButton>(root, &format!("Width preset {title}")).is_some(),
+                    "each preset is its own control"
+                );
+                assert!(named::<NSButton>(root, &format!("Remove {title}")).is_some());
+            }
+            assert!(named::<NSButton>(root, "Add width preset").is_some());
+            settings.synchronize(before);
         });
         // A normal collection row's first click opens its editor without changing configuration.
         autoreleasepool(|_| {
@@ -330,6 +504,7 @@ pub fn run(ui: Ui) {
             *draft.draft.as_ref().unwrap().page.borrow_mut() = Some(page.clone());
             page.synchronize(&draft);
             let slider = find::<NSSlider>(page.view.ns_view()).unwrap();
+            assert!(slider.allowsTickMarkValuesOnly(), "counts use a stepped slider");
             slider.setDoubleValue(3.4);
             assert!(unsafe { slider.sendAction_to(slider.action(), slider.target().as_deref()) });
             assert_eq!(
@@ -449,7 +624,7 @@ pub fn run(ui: Ui) {
             settings.window.toolbar().set_page_controls(&ui, None);
             assert!(pending.try_recv().is_err());
         });
-        // A spacing slider must edit the visible display override, not an ineffective global value.
+        // The primary Spacing page edits global values and preserves individual display overrides.
         autoreleasepool(|_| {
             use crate::sys::screen::NSScreenExt;
             let screen = settings.window.ns_window().screen().unwrap();
@@ -477,13 +652,13 @@ pub fn run(ui: Ui) {
                 left: 12.0,
             });
             settings.router.model.replace_source(source);
-            let page = pages::layout_scope(ui, &settings.router.model, 7);
+            let page = pages::layout_spacing(ui, &settings.router.model);
             page.synchronize(&settings.router.model);
             let slider = find::<NSSlider>(page.view.ns_view()).unwrap();
             assert_eq!(
                 slider.doubleValue(),
-                12.0,
-                "show the display's effective spacing"
+                global.top,
+                "show global spacing even on a display with an override"
             );
             slider.setDoubleValue(24.0);
             assert!(unsafe { slider.sendAction_to(slider.action(), slider.target().as_deref()) });
@@ -494,8 +669,14 @@ pub fn run(ui: Ui) {
             let mut source = settings.router.model.source.borrow().clone();
             edit(&mut source).unwrap();
             assert_eq!(
-                source.settings.layout.gaps.outer, global,
-                "preserve global spacing"
+                [
+                    source.settings.layout.gaps.outer.top,
+                    source.settings.layout.gaps.outer.right,
+                    source.settings.layout.gaps.outer.bottom,
+                    source.settings.layout.gaps.outer.left
+                ],
+                [24.0; 4],
+                "edit global spacing"
             );
             let effective =
                 source.settings.layout.gaps.effective_for_display(Some("focused-display"));
@@ -506,8 +687,60 @@ pub fn run(ui: Ui) {
                     effective.outer.bottom,
                     effective.outer.left
                 ],
-                [24.0; 4]
+                [12.0; 4],
+                "preserve this display’s explicit override"
             );
+            settings.router.model.replace_source(source.clone());
+            page.synchronize(&settings.router.model);
+            let mode =
+                named::<NSSegmentedControl>(page.view.ns_view(), "Spacing controls").unwrap();
+            mode.setSelectedSegment(1);
+            assert!(unsafe { mode.sendAction_to(mode.action(), mode.target().as_deref()) });
+            assert_eq!(
+                count::<NSSlider>(page.view.ns_view()),
+                0,
+                "Custom uses numerical fields, not sliders"
+            );
+            for name in pages::EDGES.into_iter().chain(pages::AXES) {
+                assert!(
+                    named::<objc2_app_kit::NSTextField>(page.view.ns_view(), name)
+                        .unwrap()
+                        .isEditable()
+                );
+            }
+            let top = named::<objc2_app_kit::NSTextField>(page.view.ns_view(), "Top").unwrap();
+            settings.router.host.set_cached_page(page.view.clone());
+            assert!(settings.window.ns_window().makeFirstResponder(Some(&top)));
+            top.currentEditor()
+                .unwrap()
+                .setString(&objc2_foundation::NSString::from_str("7"));
+            assert!(settings.window.ns_window().makeFirstResponder(None));
+            let request = pending.try_recv().unwrap();
+            let Action::Edit(edit) = request.action else {
+                panic!("expected numerical spacing edit")
+            };
+            edit(&mut source).unwrap();
+            assert_eq!(source.settings.layout.gaps.outer.top, 7.0);
+            assert_eq!(source.settings.layout.gaps.outer.right, 24.0);
+            assert_eq!(
+                source
+                    .settings
+                    .layout
+                    .gaps
+                    .effective_for_display(Some("focused-display"))
+                    .outer
+                    .top,
+                12.0
+            );
+            source.settings.layout.gaps.outer.top = 14.0;
+            settings.router.model.replace_source(source);
+            page.synchronize(&settings.router.model);
+            assert_eq!(
+                top.stringValue().to_string(),
+                "14",
+                "external changes update custom fields"
+            );
+            assert!(pending.try_recv().is_err());
         });
         let model = Rc::downgrade(&settings.router.model);
         let host = objc2::rc::Weak::new(settings.router.host.ns_view());
@@ -614,7 +847,9 @@ pub fn run(ui: Ui) {
     assert!(host.load().is_none(), "closing must release the page host");
 }
 
-/// Explicit stress test: repeatedly presents and closes real Settings windows.
+/// Profiling only: repeatedly constructs and closes hidden Settings windows.
+/// Its entry point is commented out in tests/settings_native.rs. Keep it disabled
+/// for routine development; enable only for startup, memory, or teardown profiling.
 pub fn run_lifecycle(ui: Ui) {
     let app = NSApplication::sharedApplication(ui.mtm());
     let policy = app.activationPolicy();
@@ -633,30 +868,44 @@ pub fn run_lifecycle(ui: Ui) {
                 requests,
                 move || on_close.set(true),
             );
-            settings.show();
+            settings.activation.activate(); // Exercise lifecycle without presenting over the user’s work.
             let presented_frame = settings.window.ns_window().frame();
             settings.window.ns_window().contentView().unwrap().layoutSubtreeIfNeeded();
             assert_eq!(
                 settings.window.ns_window().frame(),
                 presented_frame,
-                "presentation completes layout before another layout pass"
+                "initial construction completes layout before another layout pass"
             );
             assert!(pending.try_recv().is_err(), "General does not need discovery");
-            for id in 0..PAGE_COUNT {
-                settings.router.navigate(id);
+            for &(category, _, _) in &CATEGORIES {
+                settings.router.navigate(category);
+            }
+            for &(_, mode) in pages::layouts() {
+                settings.router.layouts().select_target(layouts::Target::Layout(mode));
+            }
+            for target in [layouts::Target::Spacing, layouts::Target::Displays] {
+                settings.router.layouts().select_target(target);
             }
             let discovery = pending.try_recv().unwrap();
             assert!(matches!(discovery.action, Action::RefreshRuntime));
             completions.push(discovery);
-            settings.router.navigate(8);
-            let about = settings.router.pages.borrow()[8].as_ref().unwrap().view.clone();
+            settings.router.navigate(Category::About);
+            let about = settings.router.pages.borrow()[Category::About.index()]
+                .as_ref()
+                .unwrap()
+                .view
+                .clone();
             let check = find::<objc2_app_kit::NSButton>(about.ns_view()).unwrap();
             assert_eq!(check.title().to_string(), "Check for Updates…");
             assert!(unsafe { check.sendAction_to(check.action(), check.target().as_deref()) });
             completions.push(pending.try_recv().unwrap());
             // Leave discovery and update completions pending and a sheet open during teardown.
-            settings.router.navigate(2);
-            let page = settings.router.pages.borrow()[2].as_ref().unwrap().view.clone();
+            settings.router.navigate(Category::Workspaces);
+            let page = settings.router.pages.borrow()[Category::Workspaces.index()]
+                .as_ref()
+                .unwrap()
+                .view
+                .clone();
             let table = find::<NSTableView>(page.ns_view()).unwrap();
             table.selectRowIndexes_byExtendingSelection(
                 &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
@@ -754,9 +1003,9 @@ fn late_runtime_populates_picker(
         }
         view.subviews().iter().find_map(|child| add_button(&child))
     }
-    settings.router.navigate(3);
+    settings.router.navigate(Category::Rules);
     let pages = settings.router.pages.borrow();
-    let add = add_button(pages[3].as_ref().unwrap().view.ns_view()).unwrap();
+    let add = add_button(pages[Category::Rules.index()].as_ref().unwrap().view.ns_view()).unwrap();
     drop(pages);
     assert!(unsafe { add.sendAction_to(add.action(), add.target().as_deref()) });
     let window = settings.model().sheet.borrow().as_ref().unwrap().ns_window().retain();
@@ -794,11 +1043,120 @@ fn late_runtime_populates_picker(
         "inventory refresh preserves the chosen matcher"
     );
     settings.model().close_sheet();
-    settings.router.navigate(0);
+    settings.router.navigate(Category::General);
     while let Ok(request) = pending.try_recv() {
         assert!(
             matches!(request.action, Action::RefreshRuntime),
             "discovery must not edit config"
         );
     }
+}
+
+/// Hidden-window visual fixture: captures actual AppKit content without activation or presentation.
+pub fn render(ui: Ui, dark: bool, small: bool, scope: Option<usize>, path: &str) {
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+        NSBitmapImageFileType,
+    };
+    use objc2_foundation::{NSDictionary, NSString};
+    let (requests, _pending) = tokio::sync::mpsc::unbounded_channel();
+    let mut snapshot = source();
+    if scope == Some(7) {
+        snapshot.settings.layout.gaps.outer.top = 5.0;
+    }
+    let settings = Settings::new(
+        ui,
+        snapshot,
+        "/tmp/native-settings-preview.toml".into(),
+        vec![],
+        vec![],
+        requests,
+        || {},
+    );
+    settings.router.navigate(Category::Layouts);
+    if let Some(scope) = scope {
+        match scope {
+            7 => settings.router.layouts().select_target(layouts::Target::Spacing),
+            8 => settings.router.layouts().select_target(layouts::Target::Displays),
+            1..=6 => settings.router.layouts().select_target(layouts::Target::Layout(
+                crate::common::config::LayoutMode::from_config_choice(scope - 1).unwrap(),
+            )),
+            _ => {}
+        }
+    }
+    let window = settings.window.ns_window();
+    window.setAppearance(
+        NSAppearance::appearanceNamed(unsafe {
+            if dark {
+                NSAppearanceNameDarkAqua
+            } else {
+                NSAppearanceNameAqua
+            }
+        })
+        .as_deref(),
+    );
+    // Hidden AppKit windows can adjust their fitting size as controls are inserted.
+    // Capture the requested viewport after the selected editor has been mounted.
+    window.setContentSize(if small {
+        CGSize::new(700.0, 420.0)
+    } else {
+        CGSize::new(880.0, 660.0)
+    });
+    let content = window.contentView().unwrap();
+    fn invalidate_layout(view: &NSView) {
+        view.setNeedsUpdateConstraints(true);
+        view.setNeedsLayout(true);
+        for child in view.subviews() {
+            invalidate_layout(&child);
+        }
+    }
+    for _ in 0..3 {
+        invalidate_layout(&content);
+        content.updateConstraintsForSubtreeIfNeeded();
+        content.layoutSubtreeIfNeeded();
+    }
+    assert!(
+        content.bounds().size.width
+            <= window.contentRectForFrameRect(window.frame()).size.width + 1.0,
+        "the native content must fit the requested viewport width"
+    );
+    if small {
+        let sidebar = find::<NSOutlineView>(&content).unwrap();
+        assert!(
+            sidebar.rectOfRow(8).origin.y + sidebar.rectOfRow(8).size.height
+                <= sidebar.visibleRect().origin.y + sidebar.visibleRect().size.height + 1.0,
+            "all primary destinations fit in the smaller viewport"
+        );
+    }
+    let spacing_card = if scope == Some(7) {
+        let view = unsafe { named::<NSButton>(&content, "Spacing").unwrap().superview() }.unwrap();
+        view.scrollRectToVisible(view.bounds());
+        Some(view)
+    } else {
+        None
+    };
+    // Include native window chrome without ordering the window on screen.
+    let frame = unsafe { content.superview() }.unwrap_or(content);
+    frame.layoutSubtreeIfNeeded();
+    let capture = |view: &NSView, rect: CGRect, path: &str| {
+        let bitmap = view.bitmapImageRepForCachingDisplayInRect(rect).unwrap();
+        view.cacheDisplayInRect_toBitmapImageRep(rect, &bitmap);
+        let png = unsafe {
+            bitmap.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )
+        }
+        .unwrap();
+        assert!(png.writeToFile_atomically(&NSString::from_str(path), true));
+    };
+    capture(&frame, frame.bounds(), path);
+    if let Some(card) = spacing_card {
+        capture(
+            &frame,
+            card.convertRect_toView(card.bounds(), Some(&frame)),
+            &format!("{path}.spacing.png"),
+        );
+    }
+    assert!(!window.isVisible(), "rendering never presents a test window");
 }

@@ -77,6 +77,8 @@ impl FormBuilder {
                     let model = self.model.clone();
                     let slider = Slider::new(&self.ui).range(min, max).continuous(true);
                     let slider = if let Some(count) = notches {
+                        // Counts sit beside percentages; match their field width.
+                        input.width(70.0);
                         slider.notches(count)
                     } else {
                         slider
@@ -121,7 +123,6 @@ impl FormBuilder {
                     });
                     Box::new(NumberSlider::new(&self.ui, slider, input))
                 } else {
-                    input.width(100.0);
                     input.accessibility_label(field.title);
                     self.sync(&input, move |input, source| {
                         if let FieldValue::Number(value) = read(get(source)) {
@@ -174,7 +175,11 @@ impl FormBuilder {
         field: &'static ConfigField<T>,
         get: fn(&ConfigSource) -> &T,
     ) -> SettingsRow {
-        let row = row.help(field.help);
+        let row = if self.tooltips {
+            row.tooltip(field.help)
+        } else {
+            row.help(field.help)
+        };
         if let Some(enabled) = field.enabled {
             self.enabled(&row, move |source| enabled(get(source)));
         }

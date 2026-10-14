@@ -16,6 +16,7 @@ use crate::sys::screen::ScreenInfo;
 mod applications;
 mod commands;
 mod editors;
+mod layouts;
 mod pages;
 pub mod process;
 mod schema;
@@ -36,27 +37,35 @@ pub struct Request {
     pub finish: Finish,
 }
 
-/// Sidebar categories; a category's index is its page id.
-pub(super) const CATEGORIES: [(&str, &str); 9] = [
-    ("General", "gearshape"),
-    ("Layouts", "rectangle.split.2x2"),
-    ("Workspaces", "square.grid.2x2"),
-    ("Rules", "line.3.horizontal.decrease"),
-    ("Keyboard", "keyboard"),
-    ("Mouse & Trackpad", "computermouse"),
-    ("Interface", "macwindow"),
-    ("Advanced", "slider.horizontal.3"),
-    ("About", "info.circle"),
+/// One Settings hierarchy; enum order is the sidebar order and cache index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Category {
+    General,
+    Layouts,
+    Workspaces,
+    Rules,
+    Keyboard,
+    Mouse,
+    Interface,
+    Advanced,
+    About,
+}
+impl Category {
+    fn index(self) -> usize { self as usize }
+
+    fn title(self) -> &'static str { CATEGORIES[self.index()].1 }
+}
+pub(super) const CATEGORIES: [(Category, &str, &str); 9] = [
+    (Category::General, "General", "gearshape"),
+    (Category::Layouts, "Layouts", "rectangle.split.2x2"),
+    (Category::Workspaces, "Workspaces", "square.grid.2x2"),
+    (Category::Rules, "Rules", "line.3.horizontal.decrease"),
+    (Category::Keyboard, "Keyboard", "keyboard"),
+    (Category::Mouse, "Mouse & Trackpad", "computermouse"),
+    (Category::Interface, "Interface", "macwindow"),
+    (Category::Advanced, "Advanced", "slider.horizontal.3"),
+    (Category::About, "About", "info.circle"),
 ];
-const LAYOUTS: usize = 1;
-/// Layout scopes follow the categories in the page table.
-const SCOPES: usize = CATEGORIES.len();
-const PAGE_COUNT: usize = SCOPES + pages::LAYOUT_PAGES.len();
-
-fn scope_page(scope: usize) -> usize { SCOPES + scope }
-
-fn category(id: usize) -> usize { if id >= SCOPES { LAYOUTS } else { id } }
-
 /// Show an edit's outcome under the control that made it.
 fn report(message: &Weak<ValidationMessage>, result: &Result<(), String>) {
     if let Some(message) = message.upgrade() {
@@ -67,7 +76,6 @@ fn report(message: &Weak<ValidationMessage>, result: &Result<(), String>) {
     }
 }
 
-type Navigate = Rc<dyn Fn(usize)>;
 type DraftChanged = Box<dyn Fn(bool)>;
 type Preview = Rc<dyn Fn(&ConfigSource)>;
 
@@ -82,19 +90,11 @@ struct Env {
     inventory: RefCell<applications::Inventory>,
     /// Weak native picker updates; expired views are pruned on the next inventory change.
     application_views: RefCell<Vec<Box<dyn Fn() -> bool>>>,
-    navigate: RefCell<Option<Navigate>>,
 }
 
 impl Env {
     fn send(&self, action: Action, finish: Finish) {
         let _ = self.requests.send(Request { action, finish });
-    }
-
-    fn navigate(&self, id: usize) {
-        let navigate = self.navigate.borrow().clone();
-        if let Some(navigate) = navigate {
-            navigate(id);
-        }
     }
 
     fn rebuild_applications(&self) {
@@ -229,102 +229,71 @@ impl Page {
     }
 }
 
-struct NavigationState {
-    history: Vec<usize>,
-    cursor: usize,
-}
-impl NavigationState {
-    fn current(&self) -> usize { self.history[self.cursor] }
-
-    fn select(&mut self, page: usize) {
-        if self.current() != page {
-            self.history.truncate(self.cursor + 1);
-            self.history.push(page);
-            self.cursor += 1;
-        }
-    }
-
-    fn step(&mut self, forward: bool) -> Option<usize> {
-        let next = if forward {
-            self.cursor + 1
-        } else {
-            self.cursor.checked_sub(1)?
-        };
-        let page = *self.history.get(next)?;
-        self.cursor = next;
-        Some(page)
-    }
-}
-
-/// Page cache, history, and the window chrome that follows the current page.
+/// Lazy top-level pages and the chrome that follows the sidebar selection.
 struct Router {
     ui: Ui,
     model: Rc<Model>,
     host: Rc<PageHost>,
     /// Built lazily and kept while the window is open.
     pages: RefCell<Vec<Option<Page>>>,
-    history: RefCell<NavigationState>,
+    selected: Cell<Category>,
+    layouts: std::cell::OnceCell<Rc<layouts::Inspector>>,
     title: Rc<Label>,
     toolbar: RefCell<Weak<Toolbar>>,
-    sidebar: RefCell<Weak<Sidebar<usize>>>,
+    sidebar: RefCell<Weak<Sidebar<Category>>>,
     /// Set while the router itself moves the sidebar selection.
     routing: Cell<bool>,
 }
 
 impl Router {
-    fn current(&self) -> usize { self.history.borrow().current() }
+    fn current(&self) -> Category { self.selected.get() }
 
-    fn navigate(&self, id: usize) {
+    fn navigate(&self, id: Category) {
         self.model.close_sheet();
-        self.history.borrow_mut().select(id);
+        self.selected.set(id);
         self.routing.set(true);
         if let Some(sidebar) = self.sidebar.borrow().upgrade() {
-            sidebar.set_selected(category(id));
+            sidebar.set_selected(id.index());
         }
         self.routing.set(false);
         self.show(id);
-        if let Some(toolbar) = self.toolbar.borrow().upgrade() {
-            let history = self.history.borrow();
-            toolbar.update_navigation(
-                history.cursor > 0,
-                history.cursor + 1 < history.history.len(),
-                if id >= SCOPES {
-                    pages::LAYOUT_PAGES[id - SCOPES].0
-                } else {
-                    "All"
-                },
-                category(id) == LAYOUTS,
-            );
-        }
     }
 
-    fn step(&self, forward: bool) {
-        let id = self.history.borrow_mut().step(forward);
-        if let Some(id) = id {
-            self.navigate(id);
-        }
+    fn layouts(&self) -> &Rc<layouts::Inspector> {
+        self.layouts.get_or_init(|| layouts::Inspector::new(self.ui, &self.model))
     }
 
-    fn show(&self, id: usize) {
-        self.title.set_text(CATEGORIES[category(id)].0);
-        if self.pages.borrow()[id].is_none() {
+    fn open_search(&self, entry: &search::Entry) {
+        self.navigate(entry.page);
+        if entry.page == Category::Layouts {
+            if let Some(target) = entry.target() {
+                self.layouts().select_target(target);
+            }
+        }
+        self.host.reveal(search::section(&entry.location), entry.title);
+    }
+
+    fn show(&self, id: Category) {
+        self.title.set_text(id.title());
+        if self.pages.borrow()[id.index()].is_none() {
             let page_timing = timing::start();
-            let page = if id >= SCOPES {
-                pages::layout_scope(self.ui, &self.model, id - SCOPES)
+            let page = if id == Category::Layouts {
+                self.layouts().page()
             } else {
                 pages::build(self.ui, &self.model, id)
             };
-            self.pages.borrow_mut()[id] = Some(page);
-            if id == 0 {
+            self.pages.borrow_mut()[id.index()] = Some(page);
+            if id == Category::General {
                 timing::finish(page_timing, "initial page construction");
             }
         }
         let pages = self.pages.borrow();
-        let page = pages[id].as_ref().unwrap();
+        let page = pages[id.index()].as_ref().unwrap();
         page.synchronize(&self.model);
         self.host.set_cached_page(page.view.clone());
         if let Some(toolbar) = self.toolbar.borrow().upgrade() {
             toolbar.set_page_controls(&self.ui, page.header.as_deref());
+            toolbar.set_trailing_control(&self.ui, None);
         }
     }
 }
@@ -380,7 +349,6 @@ impl Settings {
             installed_applications: RefCell::new(None),
             inventory: RefCell::default(),
             application_views: RefCell::default(),
-            navigate: RefCell::new(None),
         });
         env.rebuild_applications();
         let host = Rc::new(PageHost::new(&ui));
@@ -388,29 +356,19 @@ impl Settings {
             ui,
             model: Model::new(env.clone(), source, None),
             host: host.clone(),
-            pages: RefCell::new((0..PAGE_COUNT).map(|_| None).collect()),
-            history: RefCell::new(NavigationState { history: vec![0], cursor: 0 }),
-            title: Rc::new(Label::new(&ui, CATEGORIES[0].0)),
+            pages: RefCell::new((0..CATEGORIES.len()).map(|_| None).collect()),
+            selected: Cell::new(Category::General),
+            layouts: std::cell::OnceCell::new(),
+            title: Rc::new(Label::new(&ui, Category::General.title())),
             toolbar: RefCell::new(Weak::new()),
             sidebar: RefCell::new(Weak::new()),
             routing: Cell::new(false),
         });
-        let navigate: Rc<dyn Fn(usize)> = {
-            let router = Rc::downgrade(&router);
-            Rc::new(move |id| {
-                if let Some(router) = router.upgrade() {
-                    router.navigate(id);
-                }
-            })
-        };
-        *env.navigate.borrow_mut() = Some(navigate.clone());
-
         let sidebar_timing = timing::start();
         let entries = CATEGORIES
             .iter()
-            .enumerate()
-            .map(|(id, (title, symbol))| SidebarItem {
-                id,
+            .map(|(id, title, symbol)| SidebarItem {
+                id: *id,
                 title: (*title).into(),
                 symbol: (*symbol).into(),
             })
@@ -464,39 +422,10 @@ impl Settings {
                 }),
         );
         activation.menu.add(MenuItem::new(&ui, "Rift").submenu(app_menu));
-        let menu = Rc::new(Menu::new(&ui));
-        let route = navigate.clone();
-        menu.add(MenuItem::new(&ui, "All").tag(LAYOUTS as isize).on_click(move || route(LAYOUTS)));
-        menu.add_separator();
-        for (title, range) in pages::LAYOUT_SECTIONS {
-            menu.add_section_header(title);
-            for scope in range {
-                let route = navigate.clone();
-                let id = scope_page(scope);
-                let item = MenuItem::new(&ui, pages::LAYOUT_PAGES[scope].0).tag(id as isize);
-                menu.add(item.on_click(move || route(id)));
-            }
-        }
-        let (back, forward) = (Rc::downgrade(&router), Rc::downgrade(&router));
-        window.toolbar().set_navigation(
-            &ui,
-            move || {
-                if let Some(router) = back.upgrade() {
-                    router.step(false);
-                }
-            },
-            move || {
-                if let Some(router) = forward.upgrade() {
-                    router.step(true);
-                }
-            },
-            menu,
-        );
-        window.toolbar().update_navigation(false, false, CATEGORIES[0].0, false);
         *router.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
         *env.window.borrow_mut() = window.handle();
         timing::finish(navigation_timing, "navigation/menu");
-        router.show(0);
+        router.show(Category::General);
         Self { window, router, activation }
     }
 
@@ -520,11 +449,8 @@ impl Settings {
             return;
         }
         *env.displays.borrow_mut() = displays;
-        // Layout scopes read the display list; parked copies unmount once replaced.
-        self.router.pages.borrow_mut()[SCOPES..].fill_with(|| None);
-        let id = self.router.current();
-        if id >= SCOPES {
-            self.router.show(id);
+        if let Some(layouts) = self.router.layouts.get() {
+            layouts.refresh_displays();
         }
     }
 
@@ -540,7 +466,7 @@ impl Settings {
     /// Updates the current page even while hidden or minimized; other pages sync when shown.
     pub fn synchronize(&self, source: ConfigSource) {
         self.model().replace_source(source);
-        if let Some(page) = &self.router.pages.borrow()[self.router.current()] {
+        if let Some(page) = &self.router.pages.borrow()[self.router.current().index()] {
             page.synchronize(self.model());
         }
     }
@@ -558,14 +484,13 @@ impl Drop for Settings {
 }
 
 /// The sidebar, replaced by search results while a query is entered.
-fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<Sidebar<usize>>) -> View {
+fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<Sidebar<Category>>) -> View {
     let content = Rc::new(PageHost::new(&ui));
     content.set_cached_page(sidebar.clone());
     let weak_router = Rc::downgrade(router);
     let open = Rc::new(move |entry: &'static search::Entry| {
         if let Some(router) = weak_router.upgrade() {
-            router.navigate(entry.page_id());
-            router.host.reveal(search::section(&entry.location), entry.title);
+            router.open_search(entry);
         }
     });
     let mut results = None;
@@ -672,6 +597,8 @@ pub(super) struct FormBuilder {
     draft: bool,
     sync: Vec<SyncControl>,
     gap_preview: Option<Preview>,
+    /// Explain settings with help tags rather than inline info buttons.
+    tooltips: bool,
 }
 impl FormBuilder {
     fn new(ui: Ui, model: &Rc<Model>) -> Self {
@@ -681,6 +608,7 @@ impl FormBuilder {
             draft: model.is_draft(),
             sync: Vec::new(),
             gap_preview: None,
+            tooltips: false,
         }
     }
 
@@ -900,7 +828,6 @@ impl FormBuilder {
             slider
         });
         input.accessibility_label(title);
-        input.min_width(60.0);
         let weak = Rc::downgrade(&input);
         let weak_slider = slider.as_ref().map(Rc::downgrade);
         self.sync.push(Box::new(move |s| {
@@ -923,23 +850,27 @@ impl FormBuilder {
     fn gap_cells(
         &mut self,
         title: &str,
+        with_slider: bool,
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> Vec<Box<dyn NativeView>> {
-        let (slider, input, message) =
-            self.numeric_controls(title, 1.0, true, Some(Rc::new(|_| (0.0, 100.0))), get, set);
-        let slider = slider.unwrap();
-        slider.width(120.0);
-        input.width(44.0);
+        let (slider, input, message) = self.numeric_controls(
+            title,
+            1.0,
+            true,
+            with_slider.then(|| Rc::new(|_: &ConfigSource| (0.0, 100.0)) as SliderRange),
+            get,
+            set,
+        );
         let value_field = input.unit_field(&self.ui, "pt");
-        value_field.width(82.0);
         // The bezel hosts the field's view; keep its Rust delegate alive with the cell.
         let value = VStack::new(&self.ui).spacing(2.0).push(value_field).push(message).keep(input);
-        vec![
-            Box::new(Label::new(&self.ui, title)),
-            Box::new(slider),
-            Box::new(value),
-        ]
+        let mut cells: Vec<Box<dyn NativeView>> = vec![Box::new(Label::new(&self.ui, title))];
+        if let Some(slider) = slider {
+            cells.push(Box::new(slider));
+        }
+        cells.push(Box::new(value));
+        cells
     }
 
     fn text(
@@ -958,7 +889,6 @@ impl FormBuilder {
         } else {
             field.on_commit(commit)
         });
-        input.width(220.0);
         self.sync(&input, move |input, s| input.set_value(&get(s)));
         self.row(title, input, message)
     }
@@ -983,6 +913,41 @@ impl FormBuilder {
         );
         self.sync(&input, move |input, s| {
             input.set_selected(items.iter().position(|v| *v == get(s)).unwrap_or(0));
+        });
+        self.row(title, input, message)
+    }
+
+    /// A choice that follows another value until overridden. The first item names
+    /// that source and its effective value, e.g. “Shared · Next to selection”.
+    fn following_popup<T: Clone + PartialEq + Send + 'static>(
+        &mut self,
+        title: &str,
+        source: &'static str,
+        values: Vec<(&'static str, T)>,
+        get: impl Fn(&ConfigSource) -> Option<T> + 'static,
+        followed: impl Fn(&ConfigSource) -> T + 'static,
+        set: impl Fn(&mut ConfigSource, Option<T>) + Send + Clone + 'static,
+    ) -> SettingsRow {
+        let message = Rc::new(ValidationMessage::new(&self.ui));
+        let values: Rc<[(&'static str, T)]> = values.into();
+        let choices = values.clone();
+        let get = Rc::new(get);
+        let current = get.clone();
+        let change = self.assign(move |s| current(s), set, Rc::downgrade(&message));
+        let input = Rc::new(Popup::new(&self.ui).on_change(move |index| {
+            change(index.checked_sub(1).map(|index| choices[index].1.clone()))
+        }));
+        self.sync(&input, move |input, s| {
+            let followed = followed(s);
+            let effective = values.iter().find(|(_, value)| *value == followed).map_or("", |v| v.0);
+            input.set_items(
+                std::iter::once(format!("{source} · {effective}"))
+                    .chain(values.iter().map(|(label, _)| (*label).to_owned())),
+            );
+            let current = get(s);
+            input.set_selected(current.map_or(0, |current| {
+                values.iter().position(|(_, value)| *value == current).map_or(0, |i| i + 1)
+            }));
         });
         self.row(title, input, message)
     }
@@ -1056,25 +1021,3 @@ impl FormBuilder {
 
 #[cfg(test)]
 pub mod native_tests;
-
-#[cfg(test)]
-mod navigation_tests {
-    use super::*;
-    #[test]
-    fn history_revisits_pages_and_discards_forward_branch_on_new_selection() {
-        let mut history = NavigationState { history: vec![0], cursor: 0 };
-        assert_eq!(history.step(false), None);
-        history.select(1);
-        history.select(4);
-        assert_eq!(history.step(false), Some(1));
-        history.select(1); // Replaying a sidebar selection adds no entry.
-        assert_eq!(history.step(true), Some(4));
-        assert_eq!(history.step(true), None);
-        assert_eq!(history.step(false), Some(1));
-        history.select(3);
-        assert_eq!(history.step(true), None);
-        assert_eq!(history.step(false), Some(1));
-        assert_eq!(history.step(false), Some(0));
-        assert_eq!(history.step(false), None);
-    }
-}

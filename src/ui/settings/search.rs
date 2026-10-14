@@ -1,13 +1,14 @@
 //! Searchable settings destinations, without constructing hidden page trees.
-use super::CATEGORIES;
-use super::pages::LAYOUT_PAGES;
+use super::Category::*;
+use super::{CATEGORIES, Category};
+use crate::common::config::LayoutMode;
 
 /// A destination with its search text precomputed once.
 pub(super) struct Entry {
     pub title: &'static str,
     pub location: String,
-    pub page: usize,
-    pub scope: Option<usize>,
+    pub page: Category,
+    pub layout: Option<LayoutMode>,
     pub description: String,
     name: String,
     context: String,
@@ -21,7 +22,14 @@ pub(super) enum Row {
 }
 
 impl Entry {
-    pub fn page_id(&self) -> usize { self.scope.map_or(self.page, super::scope_page) }
+    pub fn target(&self) -> Option<super::layouts::Target> {
+        use super::layouts::Target;
+        match section(&self.location) {
+            "Spacing" => Some(Target::Spacing),
+            "Displays" => Some(Target::Displays),
+            _ => self.layout.map(Target::Layout),
+        }
+    }
 
     fn score(&self, query: &str, terms: &[&str]) -> usize {
         let exact = if self.name == query {
@@ -51,7 +59,7 @@ impl Entry {
 
 pub(super) fn grouped(results: &[&'static Entry]) -> Vec<Row> {
     let mut rows = Vec::new();
-    for (page, (heading, _)) in CATEGORIES.iter().enumerate() {
+    for &(page, heading, _) in &CATEGORIES {
         let mut matches = results.iter().filter(|entry| entry.page == page).peekable();
         if matches.peek().is_some() {
             rows.push(Row::Heading(heading));
@@ -64,8 +72,8 @@ pub(super) fn grouped(results: &[&'static Entry]) -> Vec<Row> {
 struct Draft {
     title: &'static str,
     location: String,
-    page: usize,
-    scope: Option<usize>,
+    page: Category,
+    layout: Option<LayoutMode>,
     key: &'static str,
     help: &'static str,
     aliases: String,
@@ -82,7 +90,7 @@ impl Draft {
             title: self.title,
             location: self.location,
             page: self.page,
-            scope: self.scope,
+            layout: self.layout,
             description,
             name,
             context,
@@ -108,7 +116,7 @@ fn describe(entry: &Draft) -> String {
         "Workspaces" => "Add workspaces and customize their names and layouts.",
         _ => return entry.location.clone(),
     };
-    if entry.scope.is_some_and(|scope| (1..=6).contains(&scope)) {
+    if entry.layout.is_some() {
         let layout = entry.location.strip_prefix("Layouts › ").unwrap_or(&entry.location);
         format!("{layout} · {text}")
     } else {
@@ -117,151 +125,169 @@ fn describe(entry: &Draft) -> String {
 }
 
 /// Destinations without schema fields: pages, sections, and handcrafted editors.
-const MANUAL: &[(usize, Option<usize>, &str, &str, &str)] = &[
+const MANUAL: &[(Category, Option<LayoutMode>, &str, &str, &str)] = &[
     (
-        1,
-        Some(7),
-        "Layouts › Spacing",
+        Layouts,
+        None,
+        "Spacing",
         "Screen edges",
         "gaps gap margin padding outer edges spacing",
     ),
     (
-        1,
-        Some(7),
-        "Layouts › Spacing",
+        Layouts,
+        None,
+        "Spacing",
         "Set each edge separately",
         "gaps gap top bottom left right margin padding outer",
     ),
     (
-        1,
-        Some(7),
-        "Layouts › Spacing",
+        Layouts,
+        None,
+        "Spacing",
         "Horizontal",
         "gaps gap between windows inner horizontal spacing",
     ),
     (
-        1,
-        Some(7),
-        "Layouts › Spacing",
+        Layouts,
+        None,
+        "Spacing",
         "Vertical",
         "gaps gap between windows inner vertical spacing",
     ),
     (
-        1,
-        Some(8),
-        "Layouts › Displays",
+        Layouts,
+        None,
+        "Displays",
         "Display settings",
         "monitor screen connected per display override gaps spacing widths",
     ),
     (
-        2,
+        Workspaces,
         None,
         "Workspaces",
         "Virtual Workspaces",
         "desktops spaces enabled",
     ),
     (
-        3,
+        Rules,
         None,
         "Rules",
         "App rules",
         "application bundle identifier manage ignore floating window title match workspace assign desktop",
     ),
     (
-        4,
+        Keyboard,
         None,
         "Keyboard",
         "Keyboard shortcuts",
         "keys hotkeys keybindings bindings commands",
     ),
     (
-        4,
+        Keyboard,
         None,
         "Keyboard",
         "Shortcut set",
         "keymap keybinding mode default",
     ),
     (
-        4,
+        Keyboard,
         None,
         "Keyboard",
         "Reusable modifier combinations",
         "command option control shift modifiers",
     ),
     (
-        5,
+        Mouse,
         None,
         "Mouse & Trackpad",
         "Workspace swipes",
         "trackpad gestures fingers swipe sensitivity haptic",
     ),
     (
-        5,
+        Mouse,
         None,
         "Mouse & Trackpad",
         "Scrolling layout gestures",
         "trackpad gestures fingers swipe scrolling niri",
     ),
     (
-        5,
+        Mouse,
         None,
         "Mouse & Trackpad",
         "Drag & Drop",
         "mouse modifier move resize swap stack drop",
     ),
     (
-        5,
+        Mouse,
         None,
         "Mouse & Trackpad",
         "Pointer movement",
         "mouse cursor movement",
     ),
     (
-        6,
+        Interface,
         None,
         "Interface",
         "Overview",
         "window previews fade transitions",
     ),
     (
-        6,
+        Interface,
         None,
         "Interface",
         "Stack Line",
         "stackline indicator color position thickness interaction",
     ),
-    (7, None, "Advanced", "Startup commands", "launch run shell exec"),
     (
-        7,
+        Advanced,
+        None,
+        "Advanced",
+        "Startup commands",
+        "launch run shell exec",
+    ),
+    (
+        Advanced,
         None,
         "Advanced",
         "Autofocus blacklist",
         "focus exclude ignore app",
     ),
     (
-        7,
+        Advanced,
         None,
         "Advanced",
         "Reload config when edited externally",
         "configuration file automatic reload toml",
     ),
     (
-        7,
+        Advanced,
         None,
         "Advanced",
         "Configuration file",
         "open config path toml reload",
     ),
     (
-        8,
+        About,
         None,
         "About",
         "Check for Updates…",
         "version latest release update",
     ),
-    (8, None, "About", "Documentation", "docs help guide manual"),
-    (8, None, "About", "Release Notes", "changelog version changes"),
-    (8, None, "About", "Sponsor Rift", "donate support sponsorship"),
+    (About, None, "About", "Documentation", "docs help guide manual"),
+    (
+        About,
+        None,
+        "About",
+        "Release Notes",
+        "changelog version changes",
+    ),
+    (
+        About,
+        None,
+        "About",
+        "Sponsor Rift",
+        "donate support sponsorship",
+    ),
 ];
 
 // Schema registration supplies navigation context, not duplicate field lists.
@@ -273,8 +299,8 @@ fn catalog() -> &'static [Entry] {
         fn append<T: ConfigSchema>(
             out: &mut Vec<Draft>,
             group: &str,
-            page: usize,
-            scope: Option<usize>,
+            page: Category,
+            layout: Option<LayoutMode>,
             location: &str,
         ) {
             for field in T::fields().iter().filter(|field| field.group == group) {
@@ -282,72 +308,95 @@ fn catalog() -> &'static [Entry] {
                     title: field.title.split(" (").next().unwrap_or(field.title),
                     location: location.to_owned(),
                     page,
-                    scope,
+                    layout,
                     key: field.key,
                     help: field.help,
-                    aliases: field.aliases.to_owned(),
+                    aliases: format!("{} {}", field.aliases, field.title),
                 });
             }
         }
         let mut out = Vec::new();
-        append::<Settings>(&mut out, "general", 0, None, "General › Window behavior");
-        append::<Settings>(&mut out, "advanced", 7, None, "Advanced");
-        append::<Settings>(&mut out, "pointer", 5, None, "Mouse & Trackpad › Focus");
-        append::<VirtualWorkspaceSettings>(&mut out, "", 2, None, "Workspaces");
-        append::<GestureSettings>(&mut out, "main", 5, None, "Mouse & Trackpad › Workspace swipes");
+        append::<Settings>(&mut out, "general", General, None, "General › Window behavior");
+        append::<Settings>(&mut out, "advanced", Advanced, None, "Advanced");
+        append::<Settings>(&mut out, "pointer", Mouse, None, "Mouse & Trackpad › Focus");
+        append::<VirtualWorkspaceSettings>(&mut out, "", Workspaces, None, "Workspaces");
+        append::<GestureSettings>(
+            &mut out,
+            "main",
+            Mouse,
+            None,
+            "Mouse & Trackpad › Workspace swipes",
+        );
         append::<GestureSettings>(
             &mut out,
             "advanced",
-            5,
+            Mouse,
             None,
             "Mouse & Trackpad › Advanced swipe settings",
         );
         append::<ScrollingGestureSettings>(
             &mut out,
             "",
-            5,
+            Mouse,
             None,
             "Mouse & Trackpad › Scrolling layout gestures",
         );
-        append::<DragDropSettings>(&mut out, "", 5, None, "Mouse & Trackpad › Drag & Drop");
-        append::<MenuBarSettings>(&mut out, "", 6, None, "Interface › Menu Bar");
-        append::<MissionControlSettings>(&mut out, "", 6, None, "Interface › Overview");
-        append::<StackLineSettings>(&mut out, "", 6, None, "Interface › Stack Line");
-        append::<LayoutSettings>(&mut out, "", 1, Some(0), "Layouts › Default behavior");
-        for (scope, (title, _)) in LAYOUT_PAGES[..7].iter().enumerate() {
-            append::<BaseLayoutSettings>(
-                &mut out,
-                "",
-                1,
-                Some(scope),
-                &format!("Layouts › {title}"),
-            );
+        append::<DragDropSettings>(&mut out, "", Mouse, None, "Mouse & Trackpad › Drag & Drop");
+        append::<MenuBarSettings>(&mut out, "", Interface, None, "Interface › Menu Bar");
+        append::<MissionControlSettings>(&mut out, "", Interface, None, "Interface › Overview");
+        append::<StackLineSettings>(&mut out, "", Interface, None, "Interface › Stack Line");
+        append::<LayoutSettings>(&mut out, "", Layouts, None, "Layouts");
+        append::<BaseLayoutSettings>(&mut out, "", Layouts, None, "Layouts › Shared settings");
+        for (title, layout) in super::pages::layouts() {
+            if *layout != LayoutMode::Floating {
+                append::<BaseLayoutSettings>(
+                    &mut out,
+                    "",
+                    Layouts,
+                    Some(*layout),
+                    &format!("Layouts › {title}"),
+                );
+            }
         }
-        append::<TraditionalLayoutSettings>(&mut out, "", 1, Some(1), "Layouts › Traditional");
-        append::<BspLayoutSettings>(&mut out, "", 1, Some(2), "Layouts › BSP");
-        append::<StackSettings>(&mut out, "", 1, Some(3), "Layouts › Stack");
-        append::<MasterStackSettings>(&mut out, "", 1, Some(4), "Layouts › Master Stack");
-        append::<ScrollingLayoutSettings>(&mut out, "", 1, Some(5), "Layouts › Scrolling");
-        append::<OuterGaps>(&mut out, "", 1, Some(7), "Layouts › Spacing");
-        append::<InnerGaps>(&mut out, "", 1, Some(7), "Layouts › Spacing");
+        append::<TraditionalLayoutSettings>(
+            &mut out,
+            "",
+            Layouts,
+            Some(LayoutMode::Traditional),
+            "Layouts › Traditional",
+        );
+        append::<BspLayoutSettings>(&mut out, "", Layouts, Some(LayoutMode::Bsp), "Layouts › BSP");
+        append::<StackSettings>(&mut out, "", Layouts, Some(LayoutMode::Stack), "Layouts › Stack");
+        append::<MasterStackSettings>(
+            &mut out,
+            "",
+            Layouts,
+            Some(LayoutMode::MasterStack),
+            "Layouts › Master Stack",
+        );
+        append::<ScrollingLayoutSettings>(
+            &mut out,
+            "",
+            Layouts,
+            Some(LayoutMode::Scrolling),
+            "Layouts › Scrolling",
+        );
+        append::<OuterGaps>(&mut out, "", Layouts, None, "Spacing");
+        append::<InnerGaps>(&mut out, "", Layouts, None, "Spacing");
 
-        let pages = CATEGORIES
+        let pages = CATEGORIES.iter().map(|&(page, title, _)| (page, None, "Settings", title, ""));
+        let layouts = super::pages::layouts()
             .iter()
-            .enumerate()
-            .map(|(page, (title, _))| (page, None, "Settings", *title, ""));
-        let scopes = LAYOUT_PAGES
-            .iter()
-            .enumerate()
-            .map(|(scope, (title, _))| (1, Some(scope), "Layouts", *title, "layout"));
-        for (page, scope, location, title, aliases) in
-            pages.chain(scopes).chain(MANUAL.iter().copied())
+            .map(|&(title, layout)| (Layouts, Some(layout), "Layouts", title, "layout"));
+        for (page, layout, location, title, aliases) in
+            pages.chain(layouts).chain(MANUAL.iter().copied())
         {
             // A destination that names a documented field enriches it instead of repeating it.
             let fields: Vec<_> = out
                 .iter()
                 .enumerate()
                 .filter(|(_, field)| {
-                    field.title == title && field.page == page && field.scope == scope
+                    field.title == title && field.page == page && field.layout == layout
                 })
                 .map(|(index, _)| index)
                 .collect();
@@ -366,7 +415,7 @@ fn catalog() -> &'static [Entry] {
                     title,
                     location: location.to_owned(),
                     page,
-                    scope,
+                    layout,
                     key: "",
                     help: "",
                     aliases: aliases.to_owned(),
@@ -406,15 +455,22 @@ pub(super) fn section(location: &str) -> &str {
 mod tests {
     use super::*;
     #[test]
-    fn search_finds_settings_and_their_scopes() {
-        for (query, title, page, scope) in [
-            ("column width", "Default column width", 1, Some(5)),
-            (" FFM ", "Focus follows pointer", 5, None),
-            ("stack offset", "Window offset", 1, Some(3)),
+    fn search_finds_settings_and_their_layouts() {
+        for (query, title, page, layout) in [
+            (
+                "column width",
+                "Default column width",
+                Layouts,
+                Some(LayoutMode::Scrolling),
+            ),
+            (" FFM ", "Focus follows pointer", Mouse, None),
+            ("stack offset", "Window offset", Layouts, Some(LayoutMode::Stack)),
+            ("screen edges", "Screen edges", Layouts, None),
+            ("per display override", "Display settings", Layouts, None),
         ] {
             let found = results(query);
             let first = found.first().expect("find a setting, not just its section");
-            assert_eq!((first.title, first.page, first.scope), (title, page, scope));
+            assert_eq!((first.title, first.page, first.layout), (title, page, layout));
         }
         assert!(results("gaps").iter().any(|result| result.title == "Screen edges"));
         assert!(
@@ -429,7 +485,12 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for entry in catalog() {
             assert!(
-                seen.insert((entry.title, &entry.location, entry.page, entry.scope)),
+                seen.insert((
+                    entry.title,
+                    &entry.location,
+                    entry.page,
+                    entry.layout.map(|layout| layout.config_choice_index())
+                )),
                 "duplicate destination {} in {}",
                 entry.title,
                 entry.location

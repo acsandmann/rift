@@ -1,5 +1,3 @@
-use std::ops::Range;
-
 use super::*;
 use crate::common::config::*;
 use crate::layout_engine::Orientation;
@@ -35,18 +33,18 @@ fn arrangement() -> Vec<(&'static str, Orientation)> {
     ]
 }
 
-pub(super) fn build(ui: Ui, model: &Rc<Model>, id: usize) -> Page {
+pub(super) fn build(ui: Ui, model: &Rc<Model>, id: Category) -> Page {
     match id {
-        0 => general(ui, model),
-        1 => layout(ui, model),
-        2 => super::editors::workspaces(ui, model),
-        3 => super::editors::rules(ui, model),
-        4 => super::commands::keyboard(ui, model),
-        5 => input(ui, model),
-        6 => interface(ui, model),
-        8 => FormBuilder::new(ui, model)
+        Category::General => general(ui, model),
+        Category::Workspaces => super::editors::workspaces(ui, model),
+        Category::Rules => super::editors::rules(ui, model),
+        Category::Keyboard => super::commands::keyboard(ui, model),
+        Category::Mouse => input(ui, model),
+        Category::Interface => interface(ui, model),
+        Category::About => FormBuilder::new(ui, model)
             .finish(SettingsPage::new(&ui, "").section(about(ui, &model.env))),
-        _ => advanced(ui, model),
+        Category::Advanced => advanced(ui, model),
+        Category::Layouts => unreachable!("Layouts owns its inline inspector"),
     }
 }
 
@@ -94,7 +92,6 @@ fn about(ui: Ui, env: &Rc<Env>) -> VStack {
     let identity = HStack::new(&ui).spacing(16.0);
     if let Some(icon) = Application::shared(&ui).icon() {
         let icon = ImageView::new(&ui, &icon);
-        icon.width(64.0);
         icon.height(64.0);
         identity.add(icon);
     }
@@ -147,86 +144,42 @@ fn about(ui: Ui, env: &Rc<Env>) -> VStack {
         .push(Section::new(&ui, "Resources").content(resources))
 }
 
-pub(super) const LAYOUT_PAGES: [(&str, &str); 9] = [
-    ("Default behavior", "gearshape"),
-    ("Traditional", "rectangle.split.2x2"),
-    ("BSP", "rectangle.split.2x1"),
-    ("Stack", "square.3.layers.3d"),
-    ("Master Stack", "sidebar.left"),
-    ("Scrolling", "rectangle.split.3x1"),
-    ("Floating", "macwindow"),
-    ("Spacing", "arrow.up.left.and.arrow.down.right"),
-    ("Displays", "display"),
-];
-/// How the Layouts overview and toolbar menu group `LAYOUT_PAGES`.
-pub(super) const LAYOUT_SECTIONS: [(&str, Range<usize>); 3] =
-    [("Default", 0..1), ("Layouts", 1..7), ("Global", 7..9)];
+/// The shared new-window position each layout follows unless it overrides it.
+pub(super) fn window_position(f: &mut FormBuilder) -> SettingsRow {
+    f.inherited_popup(
+        "New window position",
+        insertion(),
+        |s| s.settings.layout.base.window_insertion_point,
+        |_| WindowInsertionPoint::default(),
+        |s, v| s.settings.layout.base.window_insertion_point = v,
+    )
+    .tooltip("Where layouts insert new windows, unless a layout chooses its own.")
+}
 
-fn layout(ui: Ui, model: &Rc<Model>) -> Page {
-    let f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "Layouts");
-    for (title, range) in LAYOUT_SECTIONS {
-        let env = Rc::downgrade(&model.env);
-        let start = range.start;
-        let list = SettingsList::new(
-            &ui,
-            |index: &usize| LAYOUT_PAGES[*index].0.into(),
-            |_| String::new(),
-        )
-        .full_length()
-        .navigation()
-        .trailing_summary()
-        .symbols(|index| LAYOUT_PAGES[*index].1.into())
-        .on_open(move |index| {
-            if let Some(env) = env.upgrade() {
-                env.navigate(scope_page(start + index));
-            }
-        });
-        list.set_rows(range.collect());
-        page = page.section(Section::new(&ui, title).content(list));
-    }
+pub(super) fn layout_displays(ui: Ui, model: &Rc<Model>) -> Page {
+    let mut f = FormBuilder::new(ui, model);
+    let page = super::editors::display_overrides(&mut f, model);
     f.finish(page)
 }
 
-pub(super) fn layout_scope(ui: Ui, model: &Rc<Model>, index: usize) -> Page {
-    match index {
-        0 => layout_defaults(ui, model),
-        1..=6 => layout_options(ui, model, LayoutMode::from_config_choice(index - 1).unwrap()),
-        7 => layout_spacing(ui, model),
-        _ => {
-            let mut f = FormBuilder::new(ui, model);
-            let page = super::editors::display_overrides(&mut f, SettingsPage::new(&ui, ""), model);
-            f.finish(page)
-        }
-    }
-}
-
-fn layout_defaults(ui: Ui, model: &Rc<Model>) -> Page {
-    let mut f = FormBuilder::new(ui, model);
-    let section = Section::form(&ui, "Default behavior")
-        .description("Used by workspaces that don’t have their own layout.")
-        .row(f.field("mode", |s| &s.settings.layout, |s| &mut s.settings.layout))
-        .row(f.inherited_popup(
-            "New window position",
-            insertion(),
-            |s| s.settings.layout.base.window_insertion_point,
-            |_| WindowInsertionPoint::default(),
-            |s, v| s.settings.layout.base.window_insertion_point = v,
-        ));
-    f.finish(SettingsPage::new(&ui, "").section(section))
-}
-
 pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) -> impl NativeView {
-    // Match the grid's 128 + 120 + 82 point columns and two 12 point gaps.
-    // A wider canvas was compressed by the editor while its window geometry
-    // still used the original width, making equal edge insets look unequal.
-    let preview = Rc::new(LayoutPreview::new(&ui, CGSize::new(354.0, 160.0)));
+    gap_preview_sized(ui, f, display, CGSize::new(354.0, 160.0))
+}
+
+fn gap_preview_sized(
+    ui: Ui,
+    f: &mut FormBuilder,
+    display: Option<String>,
+    size: CGSize,
+) -> impl NativeView {
+    let preview = Rc::new(LayoutPreview::new(&ui, size));
     let illustration = preview.clone();
     let update: Rc<dyn Fn(&ConfigSource)> = Rc::new(move |s| {
         let size = illustration.canvas_size();
         let gaps = s.settings.layout.gaps.effective_for_display(display.as_deref());
-        // A representative desktop, scaled to keep even large gaps legible.
-        let scaled = |v: f64| v.clamp(0.0, 200.0) * 0.25;
+        // A representative desktop. Compress gaps so small ones stay visible
+        // and large ones still leave room for windows.
+        let scaled = |v: f64| v.clamp(0.0, 200.0).sqrt() * size.width / 140.0;
         let left = scaled(gaps.outer.left);
         let top = scaled(gaps.outer.top);
         let width = (size.width - left - scaled(gaps.outer.right)).max(24.0);
@@ -315,69 +268,64 @@ pub(super) fn set_spacing_gap(
     }
 }
 
-fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
-    let screen = model.env.window.borrow().display_id().map(crate::sys::screen::ScreenId::new);
+pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
     let source = model.source.borrow();
-    let display = model
-        .env
-        .displays
-        .borrow()
-        .iter()
-        .find(|display| Some(display.id) == screen)
-        .filter(|display| {
-            source.settings.layout.gaps.per_display.contains_key(&display.display_uuid)
-                || source.settings.layout.scrolling.per_display.contains_key(&display.display_uuid)
-        })
-        .map(|display| {
-            (
-                display.display_uuid.clone(),
-                display
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("Display {}", display.id.as_u32())),
-            )
-        });
-    let uuid: Option<String> = display.as_ref().map(|(uuid, _)| uuid.clone());
-    let gaps = source.settings.layout.gaps.effective_for_display(uuid.as_deref());
+    let gaps = source.settings.layout.gaps.effective_for_display(None);
     let custom = gaps.outer.top != gaps.outer.bottom
         || gaps.outer.top != gaps.outer.left
         || gaps.outer.top != gaps.outer.right
         || gaps.inner.horizontal != gaps.inner.vertical;
     drop(source);
     let mut f = FormBuilder::new(ui, model);
-    let preview = gap_preview(ui, &mut f, uuid.as_deref().map(str::to_owned));
-    let form = |grid: Grid| grid.column_widths(&[128.0, 120.0, 82.0]).first_baseline();
+    let preview = gap_preview_sized(ui, &mut f, None, CGSize::new(160.0, 100.0));
     let mut row = |name: &str, outer: bool, axis: Option<usize>| {
-        let (read, write) = (uuid.clone(), uuid.clone());
         f.gap_cells(
             name,
-            move |source| spacing_gap(source, read.as_deref(), outer, axis),
-            move |source, value| set_spacing_gap(source, write.as_deref(), outer, axis, value),
+            true,
+            move |source| spacing_gap(source, None, outer, axis),
+            move |source, value| set_spacing_gap(source, None, outer, axis, value),
         )
     };
-    let simple = Rc::new(form(
-        Grid::new(&ui).spacing(8.0, 12.0).row(row("Screen edges", true, None)).row(row(
-            "Between windows",
-            false,
-            None,
-        )),
-    ));
-    let mut edges = Grid::new(&ui).spacing(8.0, 12.0);
-    for (axis, name) in EDGES.into_iter().enumerate() {
-        edges = edges.row(row(name, true, Some(axis)));
-    }
-    let mut between = Grid::new(&ui).spacing(8.0, 12.0);
-    for (axis, name) in AXES.into_iter().enumerate() {
-        between = between.row(row(name, false, Some(axis)));
-    }
-    let custom_form = Rc::new(
-        VStack::new(&ui)
-            .spacing(10.0)
-            .push(SubsectionTitle::new(&ui, "Screen edges"))
-            .push(form(edges))
-            .push(SubsectionTitle::new(&ui, "Between windows"))
-            .push(form(between)),
+    let simple = Rc::new(
+        HStack::new(&ui)
+            .push(
+                Grid::new(&ui)
+                    .spacing(8.0, 8.0)
+                    .row(row("Screen edges", true, None))
+                    .row(row("Between windows", false, None))
+                    .first_baseline()
+                    .column_widths(&[LABEL_COLUMN]),
+            )
+            .push(Spacer::new(&ui)),
     );
+    let mut numeric_row = |name: &str, outer: bool, axis: usize| {
+        f.gap_cells(
+            name,
+            false,
+            move |source| spacing_gap(source, None, outer, Some(axis)),
+            move |source, value| set_spacing_gap(source, None, outer, Some(axis), value),
+        )
+    };
+    let empty = || Box::new(View::new(&ui)) as Box<dyn NativeView>;
+    let mut custom_grid = Grid::new(&ui).spacing(8.0, 16.0).row(vec![
+        Box::new(SubsectionTitle::new(&ui, "Screen edges")),
+        empty(),
+        Box::new(SubsectionTitle::new(&ui, "Between windows")),
+        empty(),
+    ]);
+    for (index, name) in EDGES.into_iter().enumerate() {
+        let mut cells = numeric_row(name, true, index);
+        if let Some(axis) = AXES.get(index) {
+            cells.extend(numeric_row(axis, false, index));
+        } else {
+            cells.extend([empty(), empty()]);
+        }
+        custom_grid = custom_grid.row(cells);
+    }
+    let header = custom_grid.ns_grid_view().rowAtIndex(0);
+    header.mergeCellsInRange(objc2_foundation::NSRange::new(0, 2));
+    header.mergeCellsInRange(objc2_foundation::NSRange::new(2, 2));
+    let custom_form = Rc::new(custom_grid.first_baseline());
     simple.set_hidden(custom);
     custom_form.set_hidden(!custom);
     let (weak_simple, weak_custom) = (Rc::downgrade(&simple), Rc::downgrade(&custom_form));
@@ -387,28 +335,20 @@ fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
             custom.set_hidden(index == 0);
         }
     });
+    mode.accessibility_label("Spacing controls");
     mode.set_selected(usize::from(custom));
-    let editor = VStack::new(&ui)
-        .spacing(10.0)
-        .push(preview)
-        .push(HStack::new(&ui).push(mode).push(Spacer::new(&ui)))
-        .push(simple)
-        .push(custom_form);
-    let mut page = SettingsPage::new(&ui, "Spacing").content_spacing(10.0);
-    if let Some((_, name)) = display {
-        let mut scope = HStack::new(&ui).spacing(6.0);
-        if let Some(symbol) = ImageView::symbol(&ui, "display") {
-            symbol.width(14.0);
-            symbol.height(14.0);
-            scope = scope.push(symbol);
-        }
-        page = page
-            .section(scope.push(SecondaryLabel::new(&ui, &name)))
-            .subtitle("Editing this display’s spacing override.");
-    } else {
-        page = page.subtitle("Applied to every layout.");
-    }
-    f.finish(page.section(editor))
+    let editor = ResponsiveStack::new(&ui, 560.0)
+        .push(
+            VStack::new(&ui)
+                .spacing(12.0)
+                .push(HStack::new(&ui).push(mode).push(Spacer::new(&ui)))
+                .push(simple)
+                .push(custom_form),
+        )
+        .push(Spacer::new(&ui))
+        .push(preview);
+    lengthen_sliders(editor.ns_view());
+    f.finish(editor)
 }
 
 /// A ratio as a percentage, without float noise such as `56.99999999999999`.
@@ -419,35 +359,39 @@ pub(super) fn percentage_text(ratio: f64) -> String {
         .to_string()
 }
 
-fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
+pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let subsection = |title: &str| Section::form(&ui, "").content(SubsectionTitle::new(&ui, title));
-    let options = || {
-        subsection(match mode {
-            LayoutMode::Stack => "Arrangement",
-            LayoutMode::MasterStack => "Master area",
-            LayoutMode::Scrolling => "Column sizing",
-            _ => "Window arrangement",
-        })
+    f.tooltips = true;
+    let subsection = |title: &str| {
+        let title = SubsectionTitle::new(&ui, title);
+        title
+            .ns_text_field()
+            .setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize_weight(
+                objc2_app_kit::NSFont::smallSystemFontSize(),
+                unsafe { objc2_app_kit::NSFontWeightMedium },
+            )));
+        Section::form(&ui, "").content(title)
     };
+    let options = || match mode {
+        LayoutMode::MasterStack => subsection("Master area"),
+        LayoutMode::Scrolling => subsection("Column sizing"),
+        _ => Section::form(&ui, ""),
+    };
+    // A layout either follows the shared position or overrides it.
     macro_rules! insertion_point {
         ($layout:ident) => {
-            f.inherited_popup(
+            f.following_popup(
                 "New window position",
+                "Shared",
                 insertion(),
                 |s| s.settings.layout.$layout.base.window_insertion_point,
                 |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
                 |s, v| s.settings.layout.$layout.base.window_insertion_point = v,
             )
+            .tooltip("Where this layout inserts new windows. Shared follows New window position in Shared settings.")
         };
     }
-    let mut page = VStack::new(&ui)
-        .spacing(10.0)
-        .push(SectionTitle::new(&ui, layout_title(mode)))
-        .push(Caption::new(
-            &ui,
-            LayoutMode::CONFIG_CHOICES[mode.config_choice_index()].1,
-        ));
+    let mut page = VStack::new(&ui).spacing(12.0);
     let section = match mode {
         LayoutMode::Traditional => f
             .fields(
@@ -478,11 +422,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                         };
                     Ok(())
                 },
-            ))
-            .footer(WrappingLabel::new(
-                &ui,
-                "Automatic fills the available space when only one window is open. Enter a width-to-height ratio, such as 1.78 for 16:9, to keep that window at a fixed shape.",
-            )),
+            ).tooltip("Automatic fills the available space for a single window. Enter a width-to-height ratio, such as 1.78 for 16:9, to keep it at a fixed shape.")),
         LayoutMode::Stack => f
             .fields(
                 options(),
@@ -517,15 +457,17 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                 |s| &s.settings.layout.master_stack,
                 |s| &mut s.settings.layout.master_stack,
             )
-            .row(f.inherited_popup(
+            .row(f.following_popup(
                 "Master arrangement",
+                "Automatic",
                 arrangement(),
                 |s| s.settings.layout.master_stack.master_arrangement,
                 natural,
                 |s, v| s.settings.layout.master_stack.master_arrangement = v,
             ))
-            .row(f.inherited_popup(
+            .row(f.following_popup(
                 "Stack arrangement",
+                "Automatic",
                 arrangement(),
                 |s| s.settings.layout.master_stack.stack_arrangement,
                 natural,
@@ -535,7 +477,6 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
         }
         LayoutMode::Scrolling => {
             let sizing = options()
-                .description("Column widths are percentages of the screen width.")
                 .row(
                     f.percentage(
                         "Default column width",
@@ -551,40 +492,7 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                     )
                     .suffix("%"),
                 )
-                .row(f.text(
-                    "Width presets (%)",
-                    |s| {
-                        s.settings
-                            .layout
-                            .scrolling
-                            .preset_column_widths
-                            .iter()
-                            .map(|v| percentage_text(*v))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    },
-                    |s, v| {
-                        let old = &s.settings.layout.scrolling.preset_column_widths;
-                        let widths = v
-                            .split(',')
-                            .enumerate()
-                            .map(|(index, value)| {
-                                let value = value.trim().trim_end_matches('%').trim();
-                                // Keep the original precision for displayed values the user did not edit.
-                                if let Some(original) =
-                                    old.get(index).filter(|v| percentage_text(**v) == value)
-                                {
-                                    return Ok(*original);
-                                }
-                                value.parse::<f64>().map(|v| v / 100.0).map_err(|_| {
-                                    "Enter percentages separated by commas".to_string()
-                                })
-                            })
-                            .collect::<Result<_, _>>()?;
-                        s.settings.layout.scrolling.preset_column_widths = widths;
-                        Ok(())
-                    },
-                ));
+                .row(width_presets(&mut f));
             page = page.push(f.fields(
                 sizing,
                 &[
@@ -602,24 +510,107 @@ fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
                     |s| &s.settings.layout.scrolling,
                     |s| &mut s.settings.layout.scrolling,
                 )
-                .row(f.inherited_popup(
+                // Unset means animated, so only turning it off is written.
+                .row(f.switch(
                     "Animate navigation",
-                    bool_choices(),
-                    |s| s.settings.layout.scrolling.animate,
-                    |_| true,
-                    |s, v| s.settings.layout.scrolling.animate = v,
+                    |s| s.settings.layout.scrolling.animate.unwrap_or(true),
+                    |s, v| s.settings.layout.scrolling.animate = (!v).then_some(false),
                 ));
             page = page.push(navigation);
             subsection("Window placement").row(insertion_point!(scrolling))
         }
-        LayoutMode::Floating => {
-            return f.finish(SettingsPage::new(&ui, "").section(page.push(Caption::new(
-                &ui,
-                "Floating does not have any additional layout options.",
-            ))));
-        }
+        LayoutMode::Floating => return f.finish(page),
     };
-    f.finish(SettingsPage::new(&ui, "").section(page.push(section)))
+    let page = page.push(section);
+    align_form(page.ns_view());
+    f.finish(page)
+}
+
+/// Scrolling’s width presets as chips, in percent of the screen width.
+fn width_presets(f: &mut FormBuilder) -> SettingsRow {
+    let message = Rc::new(ValidationMessage::new(&f.ui));
+    let write = f.assign(
+        |s| s.settings.layout.scrolling.preset_column_widths.clone(),
+        |s, v| s.settings.layout.scrolling.preset_column_widths = v,
+        Rc::downgrade(&message),
+    );
+    let model = f.model.clone();
+    let chips = Rc::new(
+        ValueChips::new(&f.ui, "Width preset", "%", 5.0, 100.0)
+            .format(|percent| percentage_text(percent / 100.0))
+            .on_edit(move |edit| {
+                let Some(model) = model.upgrade() else { return };
+                // Untouched presets keep their full precision.
+                let mut widths =
+                    model.source.borrow().settings.layout.scrolling.preset_column_widths.clone();
+                match edit {
+                    ChipEdit::Add(percent) => widths.push(percent / 100.0),
+                    ChipEdit::Change(index, percent) if index < widths.len() => {
+                        widths[index] = percent / 100.0
+                    }
+                    ChipEdit::Remove(index) if index < widths.len() => {
+                        widths.remove(index);
+                    }
+                    ChipEdit::Move(from, to) if from < widths.len() && to < widths.len() => {
+                        let width = widths.remove(from);
+                        widths.insert(to, width);
+                    }
+                    _ => return,
+                }
+                write(widths);
+            }),
+    );
+    f.sync(&chips, |chips, s| {
+        let widths = &s.settings.layout.scrolling.preset_column_widths;
+        chips.set_values(&widths.iter().map(|width| width * 100.0).collect::<Vec<_>>());
+    });
+    f.row("Width presets", chips, message).tooltip(
+        "Column widths the preset column width command cycles through, as percentages of the screen width. Drag widths to reorder them; click to adjust, or hover to remove.",
+    )
+}
+
+/// One comfortable length for sliders on the Layouts page.
+pub(super) fn lengthen_sliders(view: &objc2_app_kit::NSView) {
+    if let Some(slider) = view.downcast_ref::<objc2_app_kit::NSSlider>() {
+        slider.widthAnchor().constraintEqualToConstant(140.0).setActive(true);
+    }
+    for child in view.subviews() {
+        lengthen_sliders(&child);
+    }
+}
+
+/// The narrowest label column on the Layouts page, so its forms share one control edge.
+pub(super) const LABEL_COLUMN: f64 = 180.0;
+
+/// Give every form grid in `view` the same label column, so controls in separate
+/// subsections and groups share one predictable leading edge, and give continuous
+/// sliders one comfortable length.
+pub(super) fn align_form(view: &objc2_app_kit::NSView) {
+    lengthen_sliders(view);
+    fn grids(view: &objc2_app_kit::NSView, out: &mut Vec<Retained<objc2_app_kit::NSGridView>>) {
+        if let Some(grid) = view.downcast_ref::<objc2_app_kit::NSGridView>()
+            && grid.numberOfColumns() >= 2
+        {
+            out.push(objc2::Message::retain(grid));
+        }
+        for child in view.subviews() {
+            grids(&child, out);
+        }
+    }
+    let mut found = Vec::new();
+    grids(view, &mut found);
+    let width = found
+        .iter()
+        .flat_map(|grid| {
+            (0..grid.numberOfRows()).filter_map(|row| {
+                let cell = grid.cellAtColumnIndex_rowIndex(0, row);
+                Some(cell.contentView()?.fittingSize().width)
+            })
+        })
+        .fold(LABEL_COLUMN, f64::max);
+    for grid in found {
+        grid.columnAtIndex(0).setWidth(width);
+    }
 }
 
 fn input(ui: Ui, model: &Rc<Model>) -> Page {

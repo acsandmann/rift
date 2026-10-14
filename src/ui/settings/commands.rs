@@ -490,7 +490,6 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         Rc::new(HeaderControls::selector("Shortcut set", popup, search).actions(management));
     let mut page = f.finish(
         SettingsPage::new(&ui, "")
-            .content_width(760.0)
             .section(
                 Section::new(&ui, "Keyboard shortcuts")
                     .content(table)
@@ -548,7 +547,6 @@ fn save_sheet(model: &Weak<Model>, edit: SourceEdit, message: &Rc<ValidationMess
     }
 }
 fn show_sheet(ui: Ui, model: &Rc<Model>, title: &str, content: impl NativeView) {
-    content.min_width(460.0);
     let sheet = Sheet::new(&ui, title, content);
     sheet.fit_content();
     if sheet.show(&model.env.window.borrow()) {
