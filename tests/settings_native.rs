@@ -30,6 +30,9 @@ fn main() {
             args.iter()
                 .position(|arg| arg == "--scope")
                 .map(|i| args[i + 1].parse().unwrap()),
+            args.iter()
+                .position(|arg| arg == "--page")
+                .map(|i| args[i + 1].parse().unwrap()),
             &args[index + 1],
         );
     } else if args.iter().any(|arg| arg == "--lifecycle") {

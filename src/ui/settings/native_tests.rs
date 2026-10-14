@@ -1110,7 +1110,14 @@ fn late_runtime_populates_picker(
 }
 
 /// Hidden-window visual fixture: captures actual AppKit content without activation or presentation.
-pub fn render(ui: Ui, dark: bool, small: bool, scope: Option<usize>, path: &str) {
+pub fn render(
+    ui: Ui,
+    dark: bool,
+    small: bool,
+    scope: Option<usize>,
+    page: Option<usize>,
+    path: &str,
+) {
     use objc2_app_kit::{
         NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
         NSBitmapImageFileType,
@@ -1121,6 +1128,27 @@ pub fn render(ui: Ui, dark: bool, small: bool, scope: Option<usize>, path: &str)
     if scope == Some(7) {
         snapshot.settings.layout.gaps.outer.top = 5.0;
     }
+    snapshot.settings.ui.menu_bar.layout_folder = "/Users/atticus/.config/rift/layouts".into();
+    snapshot.settings.run_on_start = vec!["sketchybar --reload".into()];
+    snapshot
+        .virtual_workspaces
+        .app_rules
+        .push(crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.example.Tool".into()),
+            floating: true,
+            ..Default::default()
+        });
+    snapshot
+        .virtual_workspaces
+        .app_rules
+        .push(crate::common::config::AppWorkspaceRule {
+            app_id: Some("org.mozilla.firefox".into()),
+            workspace: Some(crate::common::config::WorkspaceSelector::Name(
+                "Communication".into(),
+            )),
+            focus: true,
+            ..Default::default()
+        });
     let settings = Settings::new(
         ui,
         snapshot,
@@ -1130,7 +1158,9 @@ pub fn render(ui: Ui, dark: bool, small: bool, scope: Option<usize>, path: &str)
         requests,
         || {},
     );
-    settings.router.navigate(Category::Layouts);
+    settings
+        .router
+        .navigate(page.map_or(Category::Layouts, |page| CATEGORIES[page].0));
     if let Some(scope) = scope {
         match scope {
             7 => settings.router.layouts().select_target(layouts::Target::Spacing),

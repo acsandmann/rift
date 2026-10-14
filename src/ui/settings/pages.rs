@@ -92,6 +92,7 @@ fn about(ui: Ui, env: &Rc<Env>) -> VStack {
     let identity = HStack::new(&ui).spacing(16.0);
     if let Some(icon) = Application::shared(&ui).icon() {
         let icon = ImageView::new(&ui, &icon);
+        icon.width(64.0);
         icon.height(64.0);
         identity.add(icon);
     }
@@ -99,12 +100,13 @@ fn about(ui: Ui, env: &Rc<Env>) -> VStack {
         VStack::new(&ui)
             .spacing(4.0)
             .push(Label::new(&ui, "Rift").font(&Font::title()))
-            .push(Caption::new(&ui, "A window manager for macOS"))
-            .push(Caption::new(
+            .push(Caption::single_line(&ui, "A window manager for macOS"))
+            .push(Caption::single_line(
                 &ui,
                 &format!("Version {}", env!("CARGO_PKG_VERSION")),
             )),
     );
+    identity.add(Spacer::new(&ui));
     const RESOURCES: [(&str, &str, &str); 3] = [
         (
             "Documentation",
@@ -729,7 +731,7 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
     );
     let field = MenuBarSettings::field("layout_folder").unwrap();
     let row = f.row(field.title, path, message);
-    let row = f.schema_metadata(row, field, |s| &s.settings.ui.menu_bar);
+    let row = f.schema_metadata(row, field, |s| &s.settings.ui.menu_bar).wide();
     page = page.section(section.row(row));
     let section = f.schema_rows(
         Section::new(&ui, "Overview").description("Requires restarting Rift."),
