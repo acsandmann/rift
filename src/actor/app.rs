@@ -688,35 +688,47 @@ impl FrameWrites {
 }
 
 /// Issues each requested setter independently, since apps may reject one and
-/// honor the other. Returns the setters that failed.
+/// honor the other. Returns the setters that failed, or `CannotComplete` if the
+/// app did not answer. Every setter is still issued in that case: a timed-out
+/// setter remains queued and applies once the app recovers.
 fn write_frame(
     elem: &impl FrameTarget,
     current: CGRect,
     target: CGRect,
     writes: FrameWrites,
-) -> FrameWrites {
+) -> Result<FrameWrites, AxError> {
     // Moving before growing avoids clamping at a screen edge; shrinking first
     // avoids it in the opposite direction.
     let grows = target.size.width > current.size.width + 0.5
         || target.size.height > current.size.height + 0.5;
+    let mut unresponsive = false;
+    let mut failed_with = |result: Result<(), AxError>| {
+        unresponsive |= matches!(result, Err(AxError::Ax(AXError::CannotComplete)));
+        result.is_err()
+    };
     let mut failed = FrameWrites::default();
     if writes.position && grows {
-        failed.position = elem.set_position(target.origin).is_err();
+        failed.position = failed_with(elem.set_position(target.origin));
     }
     if writes.size {
-        failed.size = elem.set_size(target.size).is_err();
+        failed.size = failed_with(elem.set_size(target.size));
     }
     if writes.position && !grows {
-        failed.position = elem.set_position(target.origin).is_err();
+        failed.position = failed_with(elem.set_position(target.origin));
     }
-    failed
+    if unresponsive {
+        return Err(AxError::Ax(AXError::CannotComplete));
+    }
+    Ok(failed)
 }
 
 /// Writes `target` and returns the frame AX reports afterwards.
 ///
 /// `hint` is the last observed or intended frame. It only selects setters: AX
 /// notifications are asynchronous, so it may be stale, and the returned frame is
-/// always read back. `before_write` runs before any setter.
+/// always read back, unless the app did not answer a setter: the readback would
+/// queue behind it and wait out the same timeout. `before_write` runs before any
+/// setter.
 fn reconcile_frame(
     elem: &impl FrameTarget,
     hint: CGRect,
@@ -728,7 +740,7 @@ fn reconcile_frame(
     let mut failed = FrameWrites::default();
     if planned.any() {
         before_write();
-        failed = write_frame(elem, hint, target, planned);
+        failed = write_frame(elem, hint, target, planned)?;
     }
     let mut frame = elem.frame()?;
     // A dimension the hint skipped is wrong, so the hint was stale. Correct it as
@@ -742,7 +754,7 @@ fn reconcile_frame(
             size: missed.size,
         };
         before_write();
-        let fix_failed = write_frame(elem, frame, target, fix);
+        let fix_failed = write_frame(elem, frame, target, fix)?;
         failed.position |= fix_failed.position;
         failed.size |= fix_failed.size;
         frame = elem.frame()?;
@@ -769,7 +781,7 @@ fn write_interactive_frame(
 ) {
     if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
         let both = FrameWrites { position: true, size: true };
-        write_frame(elem, *hint, frame, both);
+        let _ = write_frame(elem, *hint, frame, both);
         *hint = frame;
     } else {
         let _ = elem.set_position(frame.origin);
@@ -2282,8 +2294,12 @@ impl State {
             // `kAXWindowsAttribute` is space-filtered and cannot be used to decide
             // whether a tracked window still exists globally. Only drop state when
             // the element itself has become invalid.
-            if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
-                to_remove.push(wid);
+            match window.elem.role() {
+                Err(AxError::Ax(AXError::InvalidUIElement)) => to_remove.push(wid),
+                // The app is not answering; every remaining check would wait out
+                // the same timeout. A later main-window change checks again.
+                Err(AxError::Ax(AXError::CannotComplete)) => break,
+                _ => {}
             }
         }
 
@@ -2516,7 +2532,6 @@ fn trace<T>(
     // to the app.
     trace!(time = ?(end - start), /*?elem,*/ "{desc:12}");
     if let Err(err) = &out {
-        let app = elem.parent().ok().flatten();
         match err {
             AxError::Ax(ax_err)
                 if matches!(
@@ -2527,11 +2542,119 @@ fn trace<T>(
                 debug!("{desc} failed with {err} - app may have quit or become unresponsive");
             }
             _ => {
-                debug!("{desc} failed with {err} for element {elem:#?} with parent {app:#?}");
+                // AXParent is another round trip to the app, so it is only
+                // requested when this event is actually logged.
+                debug!(
+                    "{desc} failed with {err} for element {elem:#?} with parent {:#?}",
+                    elem.parent().ok().flatten()
+                );
             }
         }
     }
     out
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    /// Records AX calls against a window that may clamp, reject, or not answer.
+    #[derive(Default)]
+    struct FakeWindow {
+        frame: Cell<CGRect>,
+        min_size: CGSize,
+        rejects_position: bool,
+        unresponsive: bool,
+        calls: RefCell<Vec<&'static str>>,
+    }
+
+    impl FrameTarget for FakeWindow {
+        fn frame(&self) -> Result<CGRect, AxError> {
+            self.calls.borrow_mut().push("frame");
+            if self.unresponsive {
+                return Err(AxError::Ax(AXError::CannotComplete));
+            }
+            Ok(self.frame.get())
+        }
+
+        fn set_position(&self, origin: CGPoint) -> Result<(), AxError> {
+            self.calls.borrow_mut().push("position");
+            if self.unresponsive {
+                return Err(AxError::Ax(AXError::CannotComplete));
+            }
+            if self.rejects_position {
+                return Err(AxError::Ax(AXError::Failure));
+            }
+            self.frame.set(CGRect::new(origin, self.frame.get().size));
+            Ok(())
+        }
+
+        fn set_size(&self, size: CGSize) -> Result<(), AxError> {
+            self.calls.borrow_mut().push("size");
+            if self.unresponsive {
+                return Err(AxError::Ax(AXError::CannotComplete));
+            }
+            let size = CGSize::new(
+                size.width.max(self.min_size.width),
+                size.height.max(self.min_size.height),
+            );
+            self.frame.set(CGRect::new(self.frame.get().origin, size));
+            Ok(())
+        }
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    fn reconcile(window: &FakeWindow, target: CGRect) -> Result<CGRect, AxError> {
+        reconcile_frame(window, window.frame.get(), target, FrameMode::Full, || {})
+    }
+
+    #[test]
+    fn write_is_read_back_once() {
+        let window = FakeWindow::default();
+        let target = rect(10.0, 20.0, 300.0, 200.0);
+        assert_eq!(reconcile(&window, target).unwrap(), target);
+        assert_eq!(*window.calls.borrow(), ["position", "size", "frame"]);
+    }
+
+    #[test]
+    fn minimum_size_is_reported_without_retrying() {
+        let window = FakeWindow {
+            min_size: CGSize::new(600.0, 500.0),
+            frame: Cell::new(rect(0.0, 0.0, 800.0, 600.0)),
+            ..Default::default()
+        };
+        let frame = reconcile(&window, rect(0.0, 0.0, 300.0, 200.0)).unwrap();
+        assert_eq!(frame, rect(0.0, 0.0, 600.0, 500.0));
+        assert_eq!(*window.calls.borrow(), ["size", "frame"]);
+    }
+
+    #[test]
+    fn rejected_position_is_reported_without_retrying() {
+        let window = FakeWindow {
+            rejects_position: true,
+            frame: Cell::new(rect(0.0, 0.0, 300.0, 200.0)),
+            ..Default::default()
+        };
+        let frame = reconcile(&window, rect(50.0, 50.0, 300.0, 200.0)).unwrap();
+        assert_eq!(frame, rect(0.0, 0.0, 300.0, 200.0));
+        assert_eq!(*window.calls.borrow(), ["position", "frame"]);
+    }
+
+    #[test]
+    fn unresponsive_app_gets_every_setter_but_no_readback() {
+        let window = FakeWindow {
+            unresponsive: true,
+            ..Default::default()
+        };
+        let result = reconcile(&window, rect(10.0, 20.0, 300.0, 200.0));
+        assert!(matches!(result, Err(AxError::Ax(AXError::CannotComplete))));
+        assert_eq!(*window.calls.borrow(), ["position", "size"]);
+    }
 }
 
 #[cfg(test)]
