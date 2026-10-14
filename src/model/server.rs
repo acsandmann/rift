@@ -41,13 +41,15 @@ pub struct RuntimeWindowData {
 #[derive(Debug, Clone)]
 pub struct RuntimeDisplayData {
     pub info: ScreenInfo,
-    /// True if this display's space is active per the activation policy.
+    /// True if macOS reports this display's current space as visible, even when Rift is disabled.
+    pub is_visible_space: bool,
+    /// True if this display's current space is enabled for Rift management.
     pub is_active_space: bool,
     /// True if this display corresponds to the context Rift uses when no space_id is provided
     pub is_active_context: bool,
-    /// Active space ids for this display (empty if none).
+    /// Visible space ids enabled for Rift management on this display (empty if none).
     pub active_space_ids: Vec<u64>,
-    /// Inactive space ids for this display (empty if none).
+    /// Space ids not currently managed: hidden spaces and visible spaces with Rift disabled.
     pub inactive_space_ids: Vec<u64>,
 }
 
@@ -112,6 +114,7 @@ impl From<RuntimeDisplayData> for protocol::DisplayData {
             frame: protocol_rect(value.info.frame),
             backing_scale: value.info.backing_scale,
             space: value.info.space.map(|space| space.get()),
+            is_visible_space: value.is_visible_space,
             is_active_space: value.is_active_space,
             is_active_context: value.is_active_context,
             active_space_ids: value.active_space_ids,
@@ -214,6 +217,7 @@ impl Serialize for RuntimeDisplayData {
             #[serde_as(as = "CGRectDef")]
             frame: &'a objc2_core_foundation::CGRect,
             space: Option<u64>,
+            is_visible_space: bool,
             is_active_space: bool,
             is_active_context: bool,
             active_space_ids: &'a [u64],
@@ -226,6 +230,7 @@ impl Serialize for RuntimeDisplayData {
             screen_id: self.info.id.as_u32(),
             frame: &self.info.frame,
             space: self.info.space.map(|s| s.get()),
+            is_visible_space: self.is_visible_space,
             is_active_space: self.is_active_space,
             is_active_context: self.is_active_context,
             active_space_ids: &self.active_space_ids,
@@ -248,6 +253,8 @@ impl<'de> Deserialize<'de> for RuntimeDisplayData {
             #[serde_as(as = "CGRectDef")]
             frame: objc2_core_foundation::CGRect,
             space: Option<u64>,
+            #[serde(default)]
+            is_visible_space: bool,
             is_active_space: bool,
             is_active_context: bool,
             active_space_ids: Vec<u64>,
@@ -266,6 +273,7 @@ impl<'de> Deserialize<'de> for RuntimeDisplayData {
 
         Ok(RuntimeDisplayData {
             info,
+            is_visible_space: helper.is_visible_space,
             is_active_space: helper.is_active_space,
             is_active_context: helper.is_active_context,
             active_space_ids: helper.active_space_ids,
@@ -336,6 +344,7 @@ mod tests {
         };
         let data = RuntimeDisplayData {
             info,
+            is_visible_space: true,
             is_active_space: true,
             is_active_context: false,
             active_space_ids: vec![42],
@@ -349,6 +358,7 @@ mod tests {
             "screen_id": 7,
             "frame": { "origin": { "x": 10.0, "y": 20.0 }, "size": { "width": 300.0, "height": 400.0 } },
             "space": 42,
+            "is_visible_space": true,
             "is_active_space": true,
             "is_active_context": false,
             "active_space_ids": [42],

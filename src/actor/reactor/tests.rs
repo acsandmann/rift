@@ -567,8 +567,13 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
     let mut reactor = test_reactor();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
+    let other_screen = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let other_space = SpaceId::new(2);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_event(space_state_event(vec![screen, other_screen], vec![
+        Some(space),
+        Some(other_space),
+    ]));
     assert!(reactor.is_space_active(space));
 
     reactor.handle_event(Event::Command(Command::Reactor(
@@ -576,12 +581,32 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
     )));
     assert!(!reactor.is_space_active(space));
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_event(space_state_event(vec![screen, other_screen], vec![
+        Some(space),
+        Some(other_space),
+    ]));
 
     assert!(
         !reactor.is_space_active(space),
         "forwarded raw active spaces must not re-enable a space disabled by ToggleSpaceActivated"
     );
+
+    let displays = reactor.query_displays();
+    let display = serde_json::to_value(rift_protocol::DisplayData::from(displays[0].clone()))
+        .expect("serialize display query");
+    assert_eq!(display["is_visible_space"], true);
+    assert_eq!(display["is_active_space"], false);
+    assert_eq!(display["is_active_context"], true);
+    assert_eq!(display["active_space_ids"], serde_json::json!([]));
+    assert_eq!(display["inactive_space_ids"], serde_json::json!([1]));
+    assert!(displays[1].is_visible_space);
+    assert!(displays[1].is_active_space);
+    assert!(!displays[1].is_active_context);
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::ToggleSpaceActivated,
+    )));
+    assert!(reactor.query_displays()[0].is_active_space);
 }
 
 #[test]

@@ -224,9 +224,18 @@ pub struct DisplayData {
     #[serde(default = "unit_scale")]
     pub backing_scale: f64,
     pub space: Option<u64>,
+    /// Whether macOS reports `space` as visible, independent of Rift management.
+    /// Older servers omit this field; it defaults to false (visibility unknown).
+    #[serde(default)]
+    pub is_visible_space: bool,
+    /// Whether the visible space is enabled for Rift management.
     pub is_active_space: bool,
+    /// The display targeted by commands without an explicit space id.
+    /// Can be true when management is disabled, so toggling can re-enable it.
     pub is_active_context: bool,
+    /// Visible space ids enabled for Rift management.
     pub active_space_ids: Vec<u64>,
+    /// Hidden space ids and visible space ids with Rift management disabled.
     pub inactive_space_ids: Vec<u64>,
 }
 

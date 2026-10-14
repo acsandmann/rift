@@ -611,6 +611,8 @@ impl Reactor {
                         space: space_for_screen,
                         ..screen.clone()
                     },
+                    is_visible_space: space_for_screen
+                        .is_some_and(|space| self.space_state.active_spaces.contains(&space)),
                     is_active_space: space_for_screen
                         .map(|s| active_space_set.contains(&s.get()))
                         .unwrap_or(false),
