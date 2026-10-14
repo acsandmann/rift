@@ -907,8 +907,7 @@ mod tests {
             raise_manager.handle_message(first);
             raise_manager.handle_message(second);
             assert_eq!(raise_manager.queued_sequences.len(), 1);
-            let stale_token =
-                raise_manager.active_sequence.as_ref().unwrap().raise_token.clone();
+            let stale_token = raise_manager.active_sequence.as_ref().unwrap().raise_token.clone();
 
             raise_manager.handle_message(Event::WorkspaceSwitchStarted { generation: 1 });
 

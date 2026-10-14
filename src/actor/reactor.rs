@@ -4534,9 +4534,10 @@ impl Reactor {
             // below, so queued and in-flight sequences from older switches are
             // discarded instead of racing the transition.
             let generation = self.workspace_switch_manager.workspace_switch_generation;
-            let _ = self.communication_manager.raise_manager_tx.try_send(
-                raise_manager::Event::WorkspaceSwitchStarted { generation },
-            );
+            let _ = self
+                .communication_manager
+                .raise_manager_tx
+                .try_send(raise_manager::Event::WorkspaceSwitchStarted { generation });
         }
         if self.is_in_drag() {
             self.workspace_switch_manager.mark_workspace_switch_inactive();

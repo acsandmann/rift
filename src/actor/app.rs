@@ -1699,11 +1699,8 @@ impl State {
         let mut activation_rx = None;
         let make_key_result = window_server_id.map(|wsid| {
             if !is_frontmost {
-                activation_rx = Some(this.mark_activation(
-                    activation_quiet,
-                    activation_window,
-                    sequence_id,
-                ));
+                activation_rx =
+                    Some(this.mark_activation(activation_quiet, activation_window, sequence_id));
             }
             window_server::make_key_window(this.pid, wsid)
         });
@@ -1712,10 +1709,7 @@ impl State {
             // No activation will arrive; do not let the context we just
             // registered mislabel a later user activation as ours.
             activation_rx = None;
-            if this
-                .last_activated
-                .as_ref()
-                .is_some_and(|ctx| ctx.sequence_id == sequence_id)
+            if this.last_activated.as_ref().is_some_and(|ctx| ctx.sequence_id == sequence_id)
                 && let Some(ctx) = this.last_activated.take()
             {
                 let _ = ctx.notify.send(());

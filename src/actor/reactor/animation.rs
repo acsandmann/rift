@@ -1235,9 +1235,11 @@ impl AnimationManager {
                 if let Some(window) = reactor.state.windows.window(wid)
                     && let Some(wsid) = window.info.sys_id
                 {
-                    reactor
-                        .transaction_manager
-                        .store_txid(wsid, batch.txid, window.frame_monotonic);
+                    reactor.transaction_manager.store_txid(
+                        wsid,
+                        batch.txid,
+                        window.frame_monotonic,
+                    );
                 }
             }
         }
