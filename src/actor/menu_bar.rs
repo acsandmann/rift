@@ -187,11 +187,14 @@ impl Menu {
         }
         let timing = crate::ui::settings::timing::start();
         let child = std::env::current_exe().and_then(|exe| {
-            std::process::Command::new(exe)
-                .arg("--settings")
-                .arg("--config")
-                .arg(&self.config_path)
-                .spawn()
+            let mut command = std::process::Command::new(exe);
+            if timing.is_some() {
+                command.env(
+                    "RIFT_SETTINGS_SPAWN_TIME_NS",
+                    crate::ui::settings::timing::spawn_time_ns().to_string(),
+                );
+            }
+            command.arg("--settings").arg("--config").arg(&self.config_path).spawn()
         });
         crate::ui::settings::timing::finish(timing, "parent process spawn");
         match child {

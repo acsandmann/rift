@@ -318,7 +318,9 @@ impl SettingsActivation {
             *self.previous.borrow_mut() = Some((app.activationPolicy(), app.mainMenu()));
         }
         app.setMainMenu(Some(self.menu.ns_menu()));
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+            app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+        }
     }
 
     fn restore(&self) {

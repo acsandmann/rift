@@ -20,7 +20,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSProcessInfo, NSString};
 use rift_client::{
-    ApplicationData, ClientError, DisplayData, EventKind, RiftEvent, RiftMachClient, RiftRequest,
+    ApplicationData, ClientError, DisplayData, RiftEvent, RiftMachClient, RiftRequest,
 };
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -74,7 +74,6 @@ pub fn run(config_path: PathBuf) -> ! {
         .name("settings-ipc".into())
         .spawn(move || serve(queue, worker))
         .expect("spawn Settings IPC worker");
-    let _ = jobs.send(Job::Source);
 
     // Keep the same executable and signing identity, but distinguish the Settings child
     // in OS process listings. Foundation's processName alone does not rename it in the kernel.
@@ -98,7 +97,9 @@ pub fn run(config_path: PathBuf) -> ! {
     let app = NSApplication::sharedApplication(mtm);
     super::timing::finish(appkit, "NSApplication::sharedApplication");
     let policy = super::timing::start();
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    // Settings uses a normal application menu and Dock presence while open.
+    // Avoid registering as Accessory only to switch at presentation.
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     super::timing::finish(policy, "initial activation policy");
     let launch = super::timing::start();
     app.finishLaunching();
@@ -115,6 +116,7 @@ async fn open(
     messages: UnboundedSender<Message>,
     mut inbox: tokio::sync::mpsc::UnboundedReceiver<Message>,
 ) {
+    let snapshot_wait = super::timing::start();
     let (mut snapshot, mut announced) = (None, 0);
     while snapshot.is_none() {
         match inbox.recv().await {
@@ -127,6 +129,7 @@ async fn open(
             _ => {}
         }
     }
+    super::timing::finish(snapshot_wait, "snapshot wait after AppKit");
     let SourceSnapshot { revision, source } = *snapshot.unwrap();
     let (requests, mut pending) = unbounded_channel();
     let closed = messages.clone();
@@ -139,6 +142,10 @@ async fn open(
         Vec::new(),
         requests,
         move || {
+            // Keep the previous close behavior while submitted edits drain:
+            // the window and Dock presence disappear before the process exits.
+            NSApplication::sharedApplication(mtm)
+                .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
             let _ = closed.send(Message::Closed);
         },
     );
@@ -152,6 +159,9 @@ async fn open(
                 .and_then(|object| object.downcast::<objc2_app_kit::NSWindow>().ok())
                 .is_some_and(|window| window.isVisible());
             if visible && !updated.replace(true) {
+                super::timing::finish_from_parent(
+                    "first visible native window update (render proxy)",
+                );
                 super::timing::finish(
                     Some(startup),
                     "first visible native window update (render proxy)",
@@ -455,13 +465,15 @@ impl Session {
 /// The IPC worker: one blocking client, used sequentially, plus one event receiver.
 fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
     let client = RiftMachClient;
-    // Subscribe before the first snapshot so no change can fall between them.
-    let subscription_timing = super::timing::start();
-    let subscription = match client.subscribe(EventKind::ConfigChanged) {
-        Ok(subscription) => subscription,
+    let initialization = super::timing::start();
+    let (snapshot, subscription) = match client.initialize_settings::<Box<SourceSnapshot>>() {
+        Ok(session) => session,
         Err(error) => return drop(messages.send(Message::Lost(error.to_string()))),
     };
-    super::timing::finish(subscription_timing, "event subscription");
+    super::timing::finish(initialization, "Settings session IPC (subscribe + snapshot)");
+    if messages.send(Message::Source(Ok(snapshot))).is_err() {
+        return;
+    }
     let events = messages.clone();
     std::thread::Builder::new()
         .name("settings-events".into())
