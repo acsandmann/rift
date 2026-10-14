@@ -240,7 +240,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         config_path.clone(),
     );
 
-    ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
+    ConfigWatcher::spawn(config_tx.clone(), config_path.clone());
 
     let server_state = match ipc::run_mach_server(reactor.clone(), config_tx.clone()) {
         Ok(state) => state,
