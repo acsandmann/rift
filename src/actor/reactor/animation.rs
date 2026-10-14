@@ -1161,6 +1161,8 @@ impl AnimationManager {
             })
         };
         let mut per_app: HashMap<pid_t, InstantLayoutBatch> = HashMap::default();
+        let mut newly_visible: HashSet<WindowId> = HashSet::default();
+        let mut show_wsids: HashSet<WindowServerId> = HashSet::default();
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
@@ -1198,9 +1200,15 @@ impl AnimationManager {
 
             let size_unchanged = current_frame.size.same_as(target_frame.size);
             window.frame_monotonic = target_frame;
+            let hidden = is_hidden_target(target_frame);
+            if !hidden {
+                newly_visible.insert(wid);
+                if let Some(wsid) = window.info.sys_id {
+                    show_wsids.insert(wsid);
+                }
+            }
             let batch = per_app.entry(wid.pid).or_default();
             batch.first_wsid = batch.first_wsid.or(window.info.sys_id);
-            let hidden = is_hidden_target(target_frame);
             let bucket = match (position_only && size_unchanged, hidden) {
                 (true, false) => &mut batch.show_positions,
                 (true, true) => &mut batch.hide_positions,
@@ -1235,66 +1243,67 @@ impl AnimationManager {
         }
 
         // Reveal new placements before parking windows offscreen. Frame writes
-        // run on per-app actor tasks, so dispatching every show request before
-        // any hide request keeps the incoming workspace's windows on top and
-        // avoids a beat where the screen is empty during workspace switches.
-        for hidden in [false, true] {
-            for (pid, batch) in &mut batches {
-                let Some(app_state) = reactor.app_manager.apps.get(pid) else {
-                    debug!(?pid, "Skipping layout update for app - app no longer exists");
-                    continue;
-                };
-                let requests = if hidden {
-                    [
-                        (!batch.hide_positions.is_empty()).then(|| {
-                            Request::SetWindowFrames(
-                                std::mem::take(&mut batch.hide_positions),
-                                batch.txid,
-                                FrameMode::Position,
-                                true,
-                            )
-                        }),
-                        (!batch.hide_frames.is_empty()).then(|| {
-                            Request::SetWindowFrames(
-                                std::mem::take(&mut batch.hide_frames),
-                                batch.txid,
-                                FrameMode::Full,
-                                true,
-                            )
-                        }),
-                    ]
-                } else {
-                    [
-                        (!batch.show_positions.is_empty()).then(|| {
-                            Request::SetWindowFrames(
-                                std::mem::take(&mut batch.show_positions),
-                                batch.txid,
-                                FrameMode::Position,
-                                true,
-                            )
-                        }),
-                        (!batch.show_frames.is_empty()).then(|| {
-                            Request::SetWindowFrames(
-                                std::mem::take(&mut batch.show_frames),
-                                batch.txid,
-                                FrameMode::Full,
-                                true,
-                            )
-                        }),
-                    ]
-                };
-                for request in requests.into_iter().flatten() {
-                    if let Err(e) = app_state.handle.send(request) {
-                        debug!(
-                            ?pid,
-                            ?e,
-                            "Failed to send instant layout request - app may have quit"
-                        );
-                        break;
-                    }
+        // run on per-app actor tasks, so parks are deferred until the reveal
+        // writes acknowledge rather than merely dispatched first.
+        let mut hide_requests: Vec<(pid_t, Request)> = Vec::new();
+        for (pid, batch) in &mut batches {
+            let Some(app_state) = reactor.app_manager.apps.get(pid) else {
+                debug!(?pid, "Skipping layout update for app - app no longer exists");
+                continue;
+            };
+            let requests = [
+                (!batch.show_positions.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.show_positions),
+                        batch.txid,
+                        FrameMode::Position,
+                        true,
+                    )
+                }),
+                (!batch.show_frames.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.show_frames),
+                        batch.txid,
+                        FrameMode::Full,
+                        true,
+                    )
+                }),
+            ];
+            for request in requests.into_iter().flatten() {
+                if let Err(e) = app_state.handle.send(request) {
+                    debug!(
+                        ?pid,
+                        ?e,
+                        "Failed to send instant layout request - app may have quit"
+                    );
+                    break;
                 }
             }
+            for request in [
+                (!batch.hide_positions.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.hide_positions),
+                        batch.txid,
+                        FrameMode::Position,
+                        true,
+                    )
+                }),
+                (!batch.hide_frames.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.hide_frames),
+                        batch.txid,
+                        FrameMode::Full,
+                        true,
+                    )
+                }),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                hide_requests.push((*pid, request));
+            }
         }
+        reactor.defer_park_writes(hide_requests, show_wsids, &newly_visible);
 
         any_frame_changed
     }

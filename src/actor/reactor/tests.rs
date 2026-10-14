@@ -3097,6 +3097,106 @@ fn workspace_switch_batches_all_window_positions_with_eui_enabled() {
 }
 
 #[test]
+fn workspace_switch_defers_parks_until_reveals_ack() {
+    let (mut apps, mut reactor) = test_context();
+    let (events_tx, _events_rx) = actor::channel();
+    reactor.communication_manager.events_tx = Some(events_tx);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let parked_wid = WindowId::new(1, 1);
+    let revealed_wid = WindowId::new(1, 2);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let _ = apps.requests();
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: Some(2),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+
+    let reveals = apps.requests();
+    assert!(
+        reveals.iter().any(|req| matches!(
+            req,
+            Request::SetWindowFrames(frames, ..)
+                if frames.iter().any(|(wid, _)| *wid == revealed_wid)
+        )),
+        "reveal writes for the incoming workspace should dispatch immediately: {reveals:?}"
+    );
+    assert!(
+        !reveals.iter().any(|req| matches!(
+            req,
+            Request::SetWindowFrames(frames, ..)
+                if frames.iter().any(|(wid, _)| *wid == parked_wid)
+        )),
+        "park writes for the outgoing workspace should be deferred: {reveals:?}"
+    );
+
+    for event in apps.simulate_events_for_requests(reveals) {
+        reactor.handle_event(event);
+    }
+    let parks = apps.requests();
+    assert!(
+        parks.iter().any(|req| matches!(
+            req,
+            Request::SetWindowFrames(frames, ..)
+                if frames.iter().any(|(wid, _)| *wid == parked_wid)
+        )),
+        "park writes should flush once every reveal acknowledges: {parks:?}"
+    );
+}
+
+#[test]
+fn workspace_switch_park_deferral_releases_on_stale_generation_timeout() {
+    let (mut apps, mut reactor) = test_context();
+    let (events_tx, _events_rx) = actor::channel();
+    reactor.communication_manager.events_tx = Some(events_tx);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let parked_wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let _ = apps.requests();
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: Some(2),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    let _ = apps.requests();
+
+    // A timeout event tagged with an older generation must not flush the
+    // current switch's pending parks.
+    let generation = reactor.layout_manager.deferred_park_generation;
+    reactor.flush_deferred_parks(generation.wrapping_sub(1));
+    assert!(
+        reactor.layout_manager.deferred_parks.is_some(),
+        "a stale generation should not flush pending parks"
+    );
+
+    // The matching timeout generation flushes without needing reveals to ack.
+    reactor.handle_event(Event::FlushDeferredParks(generation));
+    let parks = apps.requests();
+    assert!(
+        parks.iter().any(|req| matches!(
+            req,
+            Request::SetWindowFrames(frames, ..)
+                if frames.iter().any(|(wid, _)| *wid == parked_wid)
+        )),
+        "timeout flush should release the deferred parks: {parks:?}"
+    );
+}
+
+#[test]
 fn non_workspace_instant_layout_keeps_full_frame_batch() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

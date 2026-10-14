@@ -203,6 +203,10 @@ pub enum SpaceEventKind {
 pub enum Event {
     #[serde(skip)]
     CameraFinished,
+    /// Deadline flush for park-offscreen writes deferred behind reveal writes.
+    /// Carries the deferred generation so stale timers are ignored.
+    #[serde(skip)]
+    FlushDeferredParks(u64),
     #[serde(skip)]
     OverviewSelectWorkspace {
         display: String,
@@ -503,7 +507,11 @@ impl Reactor {
             one_space,
             binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
-            layout_manager: managers::LayoutManager { layout_engine },
+            layout_manager: managers::LayoutManager {
+                layout_engine,
+                deferred_parks: None,
+                deferred_park_generation: 0,
+            },
             state: RiftState::default(),
             space_state: ForwardedSpaceState::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
@@ -1271,6 +1279,7 @@ impl Reactor {
                 | Event::SessionDidBecomeActive
                 | Event::ActiveDisplayChanged { .. }
                 | Event::SpaceCreated(_)
+                | Event::FlushDeferredParks(_)
         ) {
             self.commit_presentations();
         }
@@ -1299,6 +1308,10 @@ impl Reactor {
             }
             Event::SessionDidBecomeActive => {
                 self.suppress_auto_workspace_switch_until_input = true;
+                return Ok(EventOutcome::default());
+            }
+            Event::FlushDeferredParks(generation) => {
+                self.flush_deferred_parks(generation);
                 return Ok(EventOutcome::default());
             }
             _ => {}
@@ -1665,6 +1678,11 @@ impl Reactor {
                 );
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
+                if requested.0
+                    && let Some(wsid) = self.state.windows.window(wid).and_then(|w| w.info.sys_id)
+                {
+                    self.note_reveal_write_acked(wsid);
+                }
                 let mission_control_active = self.is_mission_control_active();
                 let mut effective_mouse_state = mouse_state;
                 if matches!(
@@ -4789,6 +4807,88 @@ impl Reactor {
             return false;
         }
         window_server::make_key_window(info.pid, wsid).is_ok()
+    }
+
+    /// Hold park-offscreen writes until this pass' reveal writes acknowledge,
+    /// so a layout application cannot briefly empty the screen. Entries for
+    /// windows being revealed now are stale and dropped; everything else merges
+    /// into the pending set. A deadline event flushes the parks when a reveal
+    /// write never produces an acknowledgement.
+    fn defer_park_writes(
+        &mut self,
+        requests: Vec<(pid_t, crate::actor::app::Request)>,
+        show_wsids: HashSet<WindowServerId>,
+        newly_visible: &HashSet<WindowId>,
+    ) {
+        if requests.is_empty() {
+            return;
+        }
+        let mut pending = self.layout_manager.deferred_parks.take().unwrap_or_default();
+        for (_, request) in pending.requests.iter_mut() {
+            if let crate::actor::app::Request::SetWindowFrames(frames, ..) = request {
+                frames.retain(|(wid, _)| !newly_visible.contains(wid));
+            }
+        }
+        pending
+            .requests
+            .retain(|(_, request)| !matches!(request, crate::actor::app::Request::SetWindowFrames(frames, ..) if frames.is_empty()));
+        pending.requests.extend(requests);
+        pending.show_wsids.extend(show_wsids);
+        self.layout_manager.deferred_park_generation =
+            self.layout_manager.deferred_park_generation.wrapping_add(1);
+        pending.generation = self.layout_manager.deferred_park_generation;
+
+        if pending.show_wsids.is_empty() || self.communication_manager.events_tx.is_none() {
+            self.layout_manager.deferred_parks = Some(pending);
+            self.flush_deferred_parks_now();
+            return;
+        }
+        let generation = pending.generation;
+        self.layout_manager.deferred_parks = Some(pending);
+        let tx = self.communication_manager.events_tx.clone().unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            tx.send(Event::FlushDeferredParks(generation));
+        });
+    }
+
+    fn flush_deferred_parks(&mut self, generation: u64) {
+        if self
+            .layout_manager
+            .deferred_parks
+            .as_ref()
+            .is_none_or(|pending| pending.generation != generation)
+        {
+            return;
+        }
+        self.flush_deferred_parks_now();
+    }
+
+    fn flush_deferred_parks_now(&mut self) {
+        let Some(pending) = self.layout_manager.deferred_parks.take() else {
+            return;
+        };
+        for (pid, request) in pending.requests {
+            let Some(app_state) = self.app_manager.apps.get(&pid) else {
+                continue;
+            };
+            if let Err(e) = app_state.handle.send(request) {
+                debug!(
+                    ?pid,
+                    ?e,
+                    "Failed to send deferred park request - app may have quit"
+                );
+            }
+        }
+    }
+
+    fn note_reveal_write_acked(&mut self, wsid: WindowServerId) {
+        let Some(pending) = &mut self.layout_manager.deferred_parks else {
+            return;
+        };
+        if pending.show_wsids.remove(&wsid) && pending.show_wsids.is_empty() {
+            self.flush_deferred_parks_now();
+        }
     }
 
     fn focus_desktop_if_active_workspace_empty(&mut self, space: SpaceId) -> bool {
