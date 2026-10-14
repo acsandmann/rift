@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use cgs::MainThreadMarker;
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSMenu, NSRunningApplication};
 use objc2_core_foundation::CGRect;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -88,6 +88,12 @@ impl Menu {
         mtm: MainThreadMarker,
         config_path: std::path::PathBuf,
     ) -> Self {
+        // AppKit only dispatches the status menu's key equivalents (⌘, for Settings…)
+        // while it tracks if the application has a main menu, even an empty one.
+        let app = NSApplication::sharedApplication(mtm);
+        if app.mainMenu().is_none() {
+            app.setMainMenu(Some(&NSMenu::new(mtm)));
+        }
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let layout_folder = config.settings.ui.menu_bar.resolved_layout_folder();
         let mut icon = config
