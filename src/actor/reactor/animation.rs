@@ -193,7 +193,7 @@ pub struct CameraAnimation {
     scale: f64,
     store: WindowTxStore,
     interval: Duration,
-    bound: Option<CGRect>,
+    bound: Option<super::managers::ScrollingDisplayBounds>,
 }
 
 #[derive(Debug)]
@@ -224,7 +224,7 @@ enum Sample<'a> {
         presentation: &'a ViewportPresentation,
         offset: f64,
         scale: f64,
-        bound: Option<CGRect>,
+        bound: Option<super::managers::ScrollingDisplayBounds>,
         movement: f64,
     },
 }
@@ -274,9 +274,7 @@ impl PresentedWindow {
                     return None;
                 }
                 let frame = presentation.frame_at_offset(self.to, self.fixed, scale, offset);
-                let mut frame = bound.map_or(frame, |screen| {
-                    super::managers::bound_frame_to_screen(frame, screen)
-                });
+                let mut frame = bound.map_or(frame, |bounds| bounds.apply(frame));
                 frame.origin.x += self.move_from.x * movement;
                 frame.origin.y += self.move_from.y * movement;
                 (
@@ -414,9 +412,7 @@ impl CameraAnimation {
                     self.scale,
                     self.presentation.offset(),
                 );
-                let frame = self.bound.map_or(frame, |screen| {
-                    super::managers::bound_frame_to_screen(frame, screen)
-                });
+                let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
                 window.move_from = CGPoint::new(
                     window.frame.origin.x - frame.origin.x,
                     window.frame.origin.y - frame.origin.y,
@@ -438,9 +434,7 @@ impl CameraAnimation {
                 let txid = self.store.next_txid(wsid);
                 if self.gesture.is_none() && !self.presentation.gesturing() {
                     let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
-                    let frame = self.bound.map_or(frame, |screen| {
-                        super::managers::bound_frame_to_screen(frame, screen)
-                    });
+                    let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
                     self.store.insert(wsid, txid, frame);
                 }
                 txid
@@ -622,7 +616,10 @@ impl Reactor {
         let screen = self.space_state.screen_by_space(space)?;
         let display = screen.id.as_u32();
         let scale = screen.backing_scale;
-        let bound = (self.active_spaces.len() > 1).then_some(screen.frame);
+        let screen_frames: Vec<_> =
+            self.space_state.screens.iter().map(|screen| screen.frame).collect();
+        let bound =
+            super::managers::ScrollingDisplayBounds::for_screen(screen.frame, &screen_frames);
         let (workspace, layout) =
             self.layout_manager.layout_engine.workspaces().active_layout_for_space(space)?;
         let LayoutSystemKind::Scrolling(system) =

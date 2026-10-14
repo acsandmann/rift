@@ -553,13 +553,24 @@ mod tests {
 
     #[test]
     fn live_scroll_coalesces_app_writes_and_reconciles_once_at_lift() {
-        for (cancelled, final_x) in [(false, 40.0), (false, 60.0), (true, 40.0)] {
+        for (cancelled, final_x, external) in [
+            (false, 40.0, false),
+            (false, 60.0, false),
+            (true, 40.0, false),
+            (false, 40.0, true),
+        ] {
             let (mut apps, mut r) = test_context();
             let space = SpaceId::new(1);
-            r.handle_loop_event(space_state_event(
-                vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))],
-                vec![Some(space)],
-            ));
+            let mut screens = vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0))];
+            let mut spaces = vec![Some(space)];
+            if external {
+                screens.push(CGRect::new(
+                    CGPoint::new(800.0, -1440.0),
+                    CGSize::new(2560.0, 1440.0),
+                ));
+                spaces.push(Some(SpaceId::new(2)));
+            }
+            r.handle_loop_event(space_state_event(screens, spaces));
             r.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
                 workspace: None,
                 mode: LayoutMode::Scrolling,
@@ -585,6 +596,12 @@ mod tests {
                 motion.publish(sample(1, total_x, time));
                 r.gesture_tick();
             }
+
+            let moved = r.state.windows.window(WindowId::new(1, 1)).unwrap().frame_monotonic;
+            assert!(
+                moved.origin.x < initial.origin.x,
+                "a display above must not pin horizontal viewport motion: external={external}, initial={initial:?}, moved={moved:?}"
+            );
 
             let mut requests = apps.requests();
             let leases = requests
