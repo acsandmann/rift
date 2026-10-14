@@ -73,7 +73,10 @@ impl ConfigWatcher {
             actor.settle(&rx);
             // Watch parents rather than files: atomic saves replace the inode, and a
             // deleted file must remain discoverable. Retargeted symlinks need new parents.
-            actor.refresh_watches(&mut watcher)?;
+            // A failed refresh must not end hot reload; keep the existing watches.
+            if let Err(error) = actor.refresh_watches(&mut watcher) {
+                warn!("config-watcher: failed to refresh watches: {error}");
+            }
             actor.reload_if_changed();
             if actor.config_tx.is_closed() {
                 break;
