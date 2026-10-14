@@ -585,6 +585,46 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
 }
 
 #[test]
+fn gesture_routes_exclude_disabled_displays_and_clear_when_all_are_disabled() {
+    let mut reactor = test_reactor();
+    let left = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
+    reactor.update_event_tap_layout_mode();
+    let initial = input_rx.try_recv().unwrap().1;
+    assert!(matches!(initial, input::Request::LayoutModesChanged(modes) if modes.len() == 2));
+
+    for (space, expected) in [
+        (left_space, vec![right_space]),
+        (right_space, vec![]),
+        (left_space, vec![left_space]),
+    ] {
+        reactor.space_state.command_space = Some(space);
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::ToggleSpaceActivated,
+        )));
+        let modes = std::iter::from_fn(|| input_rx.try_recv().ok())
+            .filter_map(|(_, request)| match request {
+                input::Request::LayoutModesChanged(modes) => Some(modes),
+                _ => None,
+            })
+            .last()
+            .expect("activation changes must update gesture routing, including an empty set");
+        assert_eq!(
+            modes.into_iter().map(|(space, _)| space).collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn layout_commands_follow_active_display_space_across_active_displays() {
     let mut reactor = test_reactor();
     let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
