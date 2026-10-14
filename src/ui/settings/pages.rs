@@ -529,11 +529,20 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
 /// Scrolling’s width presets as chips, in percent of the screen width.
 fn width_presets(f: &mut FormBuilder) -> SettingsRow {
     let message = Rc::new(ValidationMessage::new(&f.ui));
-    let write = f.assign(
-        |s| s.settings.layout.scrolling.preset_column_widths.clone(),
-        |s, v| s.settings.layout.scrolling.preset_column_widths = v,
-        Rc::downgrade(&message),
-    );
+    // A chip collection contains distinct controls and structural operations;
+    // keep each submission as an ordered transaction rather than coalescing it.
+    let write_model = f.model.clone();
+    let error = Rc::downgrade(&message);
+    let write = move |widths| {
+        Model::submit(
+            &write_model,
+            Box::new(move |source| {
+                source.settings.layout.scrolling.preset_column_widths = widths;
+                Ok(())
+            }),
+            error.clone(),
+        );
+    };
     let model = f.model.clone();
     let chips = Rc::new(
         ValueChips::new(&f.ui, "Width preset", "%", 5.0, 100.0)
@@ -560,10 +569,14 @@ fn width_presets(f: &mut FormBuilder) -> SettingsRow {
                 write(widths);
             }),
     );
-    f.sync(&chips, |chips, s| {
-        let widths = &s.settings.layout.scrolling.preset_column_widths;
-        chips.set_values(&widths.iter().map(|width| width * 100.0).collect::<Vec<_>>());
-    });
+    f.sync_when(
+        &chips,
+        |s| s.settings.layout.scrolling.preset_column_widths.clone(),
+        |chips, s| {
+            let widths = &s.settings.layout.scrolling.preset_column_widths;
+            chips.set_values(&widths.iter().map(|width| width * 100.0).collect::<Vec<_>>());
+        },
+    );
     f.row("Width presets", chips, message).tooltip(
         "Column widths the preset column width command cycles through, as percentages of the screen width. Drag widths to reorder them; click to adjust, or hover to remove.",
     )
@@ -709,9 +722,11 @@ fn interface(ui: Ui, model: &Rc<Model>) -> Page {
             error.clone(),
         )
     }));
-    f.sync(&path, |path, s| {
-        path.set_value(&s.settings.ui.menu_bar.layout_folder)
-    });
+    f.sync_when(
+        &path,
+        |s| s.settings.ui.menu_bar.layout_folder.clone(),
+        |path, s| path.set_value(&s.settings.ui.menu_bar.layout_folder),
+    );
     let field = MenuBarSettings::field("layout_folder").unwrap();
     let row = f.row(field.title, path, message);
     let row = f.schema_metadata(row, field, |s| &s.settings.ui.menu_bar);
@@ -825,20 +840,46 @@ fn focus_suspend(f: &mut FormBuilder) -> Section {
             modifiers: to_rift_modifiers(flags),
         }));
     }));
-    f.sync(&recorder, |recorder, s| {
-        recorder.set_value(None);
-        if let Some(HotkeySpec::Hotkey(key)) = &s.settings.focus_follows_mouse_disable_hotkey {
-            recorder.set_title(&key.to_string());
-        }
-        recorder.set_enabled(s.settings.focus_follows_mouse);
-    });
-    f.sync(&modifier_recorder, |recorder, s| {
-        recorder.set_value(match &s.settings.focus_follows_mouse_disable_hotkey {
-            Some(HotkeySpec::ModifiersOnly { modifiers }) => from_rift_modifiers(*modifiers),
-            _ => Modifiers::empty(),
-        });
-        recorder.set_enabled(s.settings.focus_follows_mouse);
-    });
+    f.sync_when(
+        &recorder,
+        |s| {
+            (
+                match &s.settings.focus_follows_mouse_disable_hotkey {
+                    Some(HotkeySpec::Hotkey(key)) => Some(key.clone()),
+                    _ => None,
+                },
+                s.settings.focus_follows_mouse,
+            )
+        },
+        |recorder, s| {
+            recorder.set_value(None);
+            if let Some(HotkeySpec::Hotkey(key)) = &s.settings.focus_follows_mouse_disable_hotkey {
+                recorder.set_title(&key.to_string());
+            }
+            recorder.set_enabled(s.settings.focus_follows_mouse);
+        },
+    );
+    f.sync_when(
+        &modifier_recorder,
+        |s| {
+            (
+                match &s.settings.focus_follows_mouse_disable_hotkey {
+                    Some(HotkeySpec::ModifiersOnly { modifiers }) => {
+                        from_rift_modifiers(*modifiers)
+                    }
+                    _ => Modifiers::empty(),
+                },
+                s.settings.focus_follows_mouse,
+            )
+        },
+        |recorder, s| {
+            recorder.set_value(match &s.settings.focus_follows_mouse_disable_hotkey {
+                Some(HotkeySpec::ModifiersOnly { modifiers }) => from_rift_modifiers(*modifiers),
+                _ => Modifiers::empty(),
+            });
+            recorder.set_enabled(s.settings.focus_follows_mouse);
+        },
+    );
     let clear = Button::new(&ui, "Clear").on_click(move || submit(None));
     Section::new(&ui, "Suspend pointer focus while held")
         .description("Record either a shortcut or modifiers. Recording one replaces the other.")

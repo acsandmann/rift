@@ -2,6 +2,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 use cgs::*;
 use objc2::rc::Retained;
@@ -35,6 +36,8 @@ pub enum Action {
 pub struct Request {
     pub action: Action,
     pub finish: Finish,
+    /// Identity of an absolute control assignment; transactions have no identity.
+    pub control: Option<Rc<()>>,
 }
 
 /// One Settings hierarchy; enum order is the sidebar order and cache index.
@@ -94,7 +97,7 @@ struct Env {
 
 impl Env {
     fn send(&self, action: Action, finish: Finish) {
-        let _ = self.requests.send(Request { action, finish });
+        let _ = self.requests.send(Request { action, finish, control: None });
     }
 
     fn rebuild_applications(&self) {
@@ -122,14 +125,14 @@ impl Env {
 
 /// An editor sheet's uncommitted copy of the source.
 struct Draft {
-    base: ConfigSource,
+    base: Arc<ConfigSource>,
     page: RefCell<Option<Rc<Page>>>,
     changed: RefCell<Option<DraftChanged>>,
 }
 
 struct Model {
     env: Rc<Env>,
-    source: RefCell<ConfigSource>,
+    source: RefCell<Arc<ConfigSource>>,
     source_revision: Cell<u64>,
     syncing: Cell<bool>,
     /// The open sheet and the draft it edits; only the window model opens sheets.
@@ -147,10 +150,10 @@ pub(super) struct Page {
 }
 
 impl Model {
-    fn new(env: Rc<Env>, source: ConfigSource, draft: Option<Draft>) -> Rc<Self> {
+    fn new(env: Rc<Env>, source: impl Into<Arc<ConfigSource>>, draft: Option<Draft>) -> Rc<Self> {
         Rc::new(Self {
             env,
-            source: RefCell::new(source),
+            source: RefCell::new(source.into()),
             source_revision: Cell::new(0),
             syncing: Cell::new(false),
             sheet: RefCell::new(None),
@@ -193,7 +196,7 @@ impl Model {
             self.env.send(Action::Edit(edit), finish);
             return;
         };
-        let mut source = self.source.borrow().clone();
+        let mut source = self.source.borrow().as_ref().clone();
         let result = edit(&mut source);
         if result.is_ok() {
             self.replace_source(source);
@@ -207,8 +210,9 @@ impl Model {
         finish(result);
     }
 
-    fn replace_source(&self, source: ConfigSource) {
-        if *self.source.borrow() != source {
+    fn replace_source(&self, source: impl Into<Arc<ConfigSource>>) {
+        let source = source.into();
+        if !Arc::ptr_eq(&self.source.borrow(), &source) && *self.source.borrow() != source {
             *self.source.borrow_mut() = source;
             self.source_revision.set(self.source_revision.get() + 1);
         }
@@ -221,8 +225,9 @@ impl Page {
             return;
         }
         let syncing = model.syncing.replace(true);
+        let source = model.source.borrow();
         for sync in &self.sync {
-            sync(&model.source.borrow());
+            sync(&source);
         }
         model.syncing.set(syncing);
         self.synced_revision.set(Some(revision));
@@ -335,7 +340,7 @@ impl SettingsActivation {
 impl Settings {
     pub fn new(
         ui: Ui,
-        source: ConfigSource,
+        source: impl Into<Arc<ConfigSource>>,
         config_path: PathBuf,
         displays: Vec<ScreenInfo>,
         applications: Vec<ApplicationData>,
@@ -466,7 +471,7 @@ impl Settings {
     }
 
     /// Updates the current page even while hidden or minimized; other pages sync when shown.
-    pub fn synchronize(&self, source: ConfigSource) {
+    pub fn synchronize(&self, source: impl Into<Arc<ConfigSource>>) {
         self.model().replace_source(source);
         if let Some(page) = &self.router.pages.borrow()[self.router.current().index()] {
             page.synchronize(self.model());
@@ -653,7 +658,24 @@ impl FormBuilder {
         }));
     }
 
-    /// Submit `value` unless the source already holds it.
+    /// Cache each control's effective dependencies, rather than the whole source.
+    fn sync_when<C: NativeView, V: PartialEq + 'static>(
+        &mut self,
+        input: &Rc<C>,
+        value: impl Fn(&ConfigSource) -> V + 'static,
+        update: impl Fn(&C, &ConfigSource) + 'static,
+    ) {
+        let last = RefCell::new(None);
+        self.sync(input, move |input, source| {
+            let value = value(source);
+            if last.borrow().as_ref() != Some(&value) {
+                update(input, source);
+                *last.borrow_mut() = Some(value);
+            }
+        });
+    }
+
+    /// Submit an absolute assignment; only local drafts can skip it against their source.
     fn change<T: PartialEq + Send + 'static>(
         &self,
         get: impl Fn(&ConfigSource) -> T + 'static,
@@ -661,13 +683,28 @@ impl FormBuilder {
         error: Weak<ValidationMessage>,
     ) -> impl Fn(T) + Clone + 'static {
         let model = self.model.clone();
+        let control = Rc::new(());
         let get = Rc::new(get);
         move |value| {
-            if model.upgrade().is_some_and(|model| get(&model.source.borrow()) == value) {
+            let Some(model) = model.upgrade() else { return };
+            // Only drafts have no unacknowledged edits. Comparing with the daemon's
+            // old snapshot here could discard a quick return to the original value.
+            if model.is_draft() && get(&model.source.borrow()) == value {
                 return;
             }
             let set = set.clone();
-            Model::submit(&model, Box::new(move |source| set(source, value)), error.clone());
+            let edit: SourceEdit = Box::new(move |source| set(source, value));
+            let error = error.clone();
+            let finish: Finish = Box::new(move |result| report(&error, &result));
+            if model.is_draft() {
+                model.submit_edit(edit, finish);
+            } else if !model.syncing.get() {
+                let _ = model.env.requests.send(Request {
+                    action: Action::Edit(edit),
+                    finish,
+                    control: Some(control.clone()),
+                });
+            }
         }
     }
 
@@ -724,7 +761,14 @@ impl FormBuilder {
         let current = get.clone();
         let change = self.assign(move |s| current(s), set, Rc::downgrade(&message));
         let input = Rc::new(Switch::new(&self.ui).on_change(change));
-        self.sync(&input, move |input, s| input.set_value(get(s)));
+        self.sync_when(
+            &input,
+            {
+                let get = get.clone();
+                move |s| get(s)
+            },
+            move |input, s| input.set_value(get(s)),
+        );
         self.row(title, input, message)
     }
 
@@ -812,7 +856,8 @@ impl FormBuilder {
                 }
                 .clamp(min, max);
                 if let Some(preview) = &preview {
-                    let local = local_preview.get_or_insert_with(|| model.source.borrow().clone());
+                    let local =
+                        local_preview.get_or_insert_with(|| model.source.borrow().as_ref().clone());
                     edit_preview(local, value / scale);
                     preview(local);
                     if let Some(input) = preview_input.upgrade() {
@@ -832,7 +877,13 @@ impl FormBuilder {
         input.accessibility_label(title);
         let weak = Rc::downgrade(&input);
         let weak_slider = slider.as_ref().map(Rc::downgrade);
+        let last = RefCell::new(None);
         self.sync.push(Box::new(move |s| {
+            let effective = (get(s) * scale, slider_range.as_ref().map(|range| range(s)));
+            if last.borrow().as_ref() == Some(&effective) {
+                return;
+            }
+            *last.borrow_mut() = Some(effective);
             let Some(input) = weak.upgrade() else {
                 return;
             };
@@ -891,7 +942,14 @@ impl FormBuilder {
         } else {
             field.on_commit(commit)
         });
-        self.sync(&input, move |input, s| input.set_value(&get(s)));
+        self.sync_when(
+            &input,
+            {
+                let get = get.clone();
+                move |s| get(s)
+            },
+            move |input, s| input.set_value(&get(s)),
+        );
         self.row(title, input, message)
     }
 
@@ -913,9 +971,16 @@ impl FormBuilder {
                 .items(values.iter().map(|(label, _)| *label))
                 .on_change(move |index| change(choices[index].clone())),
         );
-        self.sync(&input, move |input, s| {
-            input.set_selected(items.iter().position(|v| *v == get(s)).unwrap_or(0));
-        });
+        self.sync_when(
+            &input,
+            {
+                let get = get.clone();
+                move |s| get(s)
+            },
+            move |input, s| {
+                input.set_selected(items.iter().position(|v| *v == get(s)).unwrap_or(0));
+            },
+        );
         self.row(title, input, message)
     }
 
@@ -939,18 +1004,28 @@ impl FormBuilder {
         let input = Rc::new(Popup::new(&self.ui).on_change(move |index| {
             change(index.checked_sub(1).map(|index| choices[index].1.clone()))
         }));
-        self.sync(&input, move |input, s| {
-            let followed = followed(s);
-            let effective = values.iter().find(|(_, value)| *value == followed).map_or("", |v| v.0);
-            input.set_items(
-                std::iter::once(format!("{source} · {effective}"))
-                    .chain(values.iter().map(|(label, _)| (*label).to_owned())),
-            );
-            let current = get(s);
-            input.set_selected(current.map_or(0, |current| {
-                values.iter().position(|(_, value)| *value == current).map_or(0, |i| i + 1)
-            }));
-        });
+        let followed = Rc::new(followed);
+        self.sync_when(
+            &input,
+            {
+                let get = get.clone();
+                let followed = followed.clone();
+                move |s| (get(s), followed(s))
+            },
+            move |input, s| {
+                let followed = followed(s);
+                let effective =
+                    values.iter().find(|(_, value)| *value == followed).map_or("", |v| v.0);
+                input.set_items(
+                    std::iter::once(format!("{source} · {effective}"))
+                        .chain(values.iter().map(|(label, _)| (*label).to_owned())),
+                );
+                let current = get(s);
+                input.set_selected(current.map_or(0, |current| {
+                    values.iter().position(|(_, value)| *value == current).map_or(0, |i| i + 1)
+                }));
+            },
+        );
         self.row(title, input, message)
     }
 
@@ -982,7 +1057,7 @@ impl FormBuilder {
             let value = {
                 let source = owner.source.borrow();
                 let value = (choice != inherited(&source)).then_some(choice);
-                if current(&source) == value {
+                if owner.is_draft() && current(&source) == value {
                     return;
                 }
                 value
@@ -997,15 +1072,26 @@ impl FormBuilder {
                 error.clone(),
             );
         }));
-        self.sync(&input, move |input, source| {
-            input.set_items(labels.iter().map(String::as_str));
-            let inherited = default(source);
-            for (index, item) in items.iter().enumerate() {
-                input.set_item_badge(index, (*item == inherited).then_some("Default"));
-            }
-            let effective = get(source).unwrap_or(inherited);
-            input.set_selected(items.iter().position(|item| *item == effective).unwrap_or(0));
-        });
+        self.sync_when(
+            &input,
+            {
+                let get = get.clone();
+                let default = default.clone();
+                move |s| {
+                    let inherited = default(s);
+                    (get(s).unwrap_or_else(|| inherited.clone()), inherited)
+                }
+            },
+            move |input, source| {
+                input.set_items(labels.iter().map(String::as_str));
+                let inherited = default(source);
+                for (index, item) in items.iter().enumerate() {
+                    input.set_item_badge(index, (*item == inherited).then_some("Default"));
+                }
+                let effective = get(source).unwrap_or(inherited);
+                input.set_selected(items.iter().position(|item| *item == effective).unwrap_or(0));
+            },
+        );
         self.row(title, input, message)
     }
 

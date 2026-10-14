@@ -75,7 +75,15 @@ impl ConfigDocument {
         &self,
         edit: impl FnOnce(&mut ConfigSource) -> anyhow::Result<()>,
     ) -> anyhow::Result<Edited> {
-        let mut source = self.source()?;
+        self.edited_from(self.source()?, edit)
+    }
+
+    /// Reuse a source just read from this document, avoiding another TOML parse.
+    pub(crate) fn edited_from(
+        &self,
+        mut source: ConfigSource,
+        edit: impl FnOnce(&mut ConfigSource) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Edited> {
         let before = toml::Value::try_from(&source)?;
         edit(&mut source)?;
         let after = toml::Value::try_from(&source)?;

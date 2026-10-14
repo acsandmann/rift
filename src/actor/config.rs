@@ -11,7 +11,7 @@ use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
-/// A typed transaction executed only against the actor’s authoritative source.
+/// A typed mutation of a source candidate; ConfigActor owns validation and persistence.
 pub type SourceEdit = Box<dyn FnOnce(&mut ConfigSource) -> Result<(), String> + Send>;
 
 #[derive(Serialize, Deserialize)]
@@ -162,20 +162,24 @@ impl ConfigActor {
         if current.source == source {
             return Ok(current);
         }
-        let source = self.edit_source(Box::new(move |current| {
+        let source = self.edit_source(current.source, move |current| {
             *current = source;
             Ok(())
-        }))?;
+        })?;
         Ok(SourceSnapshot {
             revision: self.source_revision,
             source,
         })
     }
 
-    fn edit_source(&mut self, edit: SourceEdit) -> Result<ConfigSource, String> {
+    fn edit_source(
+        &mut self,
+        source: ConfigSource,
+        edit: impl FnOnce(&mut ConfigSource) -> Result<(), String>,
+    ) -> Result<ConfigSource, String> {
         let edited = self
             .document
-            .edited(|source| edit(source).map_err(anyhow::Error::msg))
+            .edited_from(source, |source| edit(source).map_err(anyhow::Error::msg))
             .map_err(|e| e.to_string())?;
         // Persistence is part of the transaction: stale or failed saves never publish or commit.
         self.persist(&edited.document)?;
@@ -468,7 +472,7 @@ mod tests {
             path.clone(),
         );
         let source = actor
-            .edit_source(Box::new(|s| {
+            .edit_source(actor.document.source().unwrap(), |s| {
                 s.settings.animate = true;
                 s.virtual_workspaces.workspace_names[1] = "Development".into();
                 s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
@@ -495,7 +499,7 @@ mod tests {
                 );
                 s.keys.insert("Alt + H".into(), WmCommand::Wm(WmCmd::CloseWindow));
                 Ok(())
-            }))
+            })
             .unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -514,18 +518,18 @@ mod tests {
         let document_before = actor.document.to_string();
         assert!(
             actor
-                .edit_source(Box::new(|s| {
+                .edit_source(actor.document.source().unwrap(), |s| {
                     s.virtual_workspaces.app_rules[0].title_regex = Some("[".into());
                     Ok(())
-                }))
+                })
                 .is_err()
         );
         assert!(
             actor
-                .edit_source(Box::new(|s| {
+                .edit_source(actor.document.source().unwrap(), |s| {
                     s.keys.insert("Option + H".into(), WmCommand::Wm(WmCmd::NextWorkspace));
                     Ok(())
-                }))
+                })
                 .is_err()
         );
         assert_eq!(actor.document.to_string(), document_before);
@@ -534,10 +538,10 @@ mod tests {
         actor.config_path = directory.path().to_path_buf(); // atomic replacement of a directory must fail
         assert!(
             actor
-                .edit_source(Box::new(|s| {
+                .edit_source(actor.document.source().unwrap(), |s| {
                     s.settings.animate = false;
                     Ok(())
-                }))
+                })
                 .is_err()
         );
         assert!(actor.config.settings.animate);
@@ -545,12 +549,12 @@ mod tests {
         assert!(updates.try_recv().is_err());
         actor.config_path = path.clone();
         actor
-            .edit_source(Box::new(|s| {
+            .edit_source(actor.document.source().unwrap(), |s| {
                 s.virtual_workspaces.app_rules.remove(1);
                 s.keys.remove("Alt + H");
                 s.binding_modes.remove("resize");
                 Ok(())
-            }))
+            })
             .unwrap();
         let roundtrip = ConfigDocument::read(&path).unwrap().source().unwrap();
         assert_eq!(roundtrip.virtual_workspaces.app_rules.len(), 1);
@@ -564,7 +568,9 @@ mod tests {
             s.settings.animate = !s.settings.animate;
             Ok(())
         });
-        actor.edit_source(edit).map(|source| source.settings.animate)
+        actor
+            .edit_source(actor.document.source().unwrap(), edit)
+            .map(|source| source.settings.animate)
     }
 
     #[test]

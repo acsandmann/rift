@@ -38,6 +38,9 @@ fn main() {
         // to profile Settings startup, retained objects, or teardown.
         // objc2::rc::autoreleasepool(|_| settings::native_tests::run_lifecycle(ui));
         println!("Settings lifecycle stress run is disabled; enable only for profiling");
+    } else if args.iter().any(|arg| arg == "--verify") {
+        objc2::rc::autoreleasepool(|_| settings::native_tests::run(ui));
+        println!("Settings native controls and synchronization passed");
     } else {
         // For benchmarking: the native Settings checks open real AppKit windows, so they
         // are disabled by default. Uncomment to run them.

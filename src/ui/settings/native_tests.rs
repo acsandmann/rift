@@ -72,6 +72,33 @@ pub fn run(ui: Ui) {
             requests,
             || {},
         );
+        // An acknowledged source is stale while either of these edits is outstanding.
+        // A quick return to the original value must still reach the session queue.
+        let builder = FormBuilder::new(ui, settings.model());
+        let change = builder.assign(
+            |s| s.settings.animate,
+            |s, value| s.settings.animate = value,
+            Weak::new(),
+        );
+        let original = settings.model().source.borrow().settings.animate;
+        change(!original);
+        change(original);
+        let first = pending.try_recv().expect("first assignment");
+        let last = pending.try_recv().expect("return to original must not be discarded");
+        assert!(Rc::ptr_eq(
+            first.control.as_ref().unwrap(),
+            last.control.as_ref().unwrap()
+        ));
+        let mut edited = settings.model().source.borrow().as_ref().clone();
+        for request in [first, last] {
+            let Action::Edit(edit) = request.action else {
+                panic!("assignment")
+            };
+            edit(&mut edited).unwrap();
+            (request.finish)(Ok(()));
+        }
+        assert_eq!(edited.settings.animate, original);
+
         let root = settings.window.ns_window().contentView().unwrap();
         assert_eq!(
             settings
@@ -200,7 +227,7 @@ pub fn run(ui: Ui) {
         // Native visual choices select cached editors without changing persisted settings.
         autoreleasepool(|_| {
             settings.router.navigate(Category::Layouts);
-            let before = settings.model().source.borrow().clone();
+            let before = settings.model().source.borrow().as_ref().clone();
             let root = settings.router.layouts().ns_view();
             assert!(
                 named::<NSButton>(root, "Layouts help").is_some(),
@@ -225,7 +252,7 @@ pub fn run(ui: Ui) {
                         frame,
                         "changing the inspected layout preserves the user’s window size"
                     );
-                    assert!(*settings.model().source.borrow() == before);
+                    assert!(**settings.model().source.borrow() == before);
                     assert!(pending.try_recv().is_err());
                 }
                 let count = instances(root);
@@ -296,7 +323,7 @@ pub fn run(ui: Ui) {
                 "reopening reuses the editor"
             );
             assert_eq!(displays.state(), 0, "opening Spacing collapses Displays");
-            assert!(*settings.model().source.borrow() == before);
+            assert!(**settings.model().source.borrow() == before);
             assert!(
                 pending.try_recv().is_err(),
                 "expansion never writes configuration"
@@ -337,6 +364,36 @@ pub fn run(ui: Ui) {
                 "an inherited choice names its effective value"
             );
             let toggle = named::<NSSwitch>(root, "Keep windows equally sized").unwrap();
+            let original_state = toggle.state();
+            let pending_state = if original_state == 0 { 1 } else { 0 };
+            toggle.setState(pending_state);
+            assert!(unsafe { toggle.sendAction_to(toggle.action(), toggle.target().as_deref()) });
+            let request = pending.try_recv().expect("native assignment is queued");
+            let mut unrelated = before.clone();
+            unrelated.settings.animate = !unrelated.settings.animate;
+            settings.synchronize(unrelated.clone());
+            assert_eq!(
+                toggle.state(),
+                pending_state,
+                "unrelated revisions preserve immediate native feedback"
+            );
+            let Action::Edit(edit) = request.action else {
+                panic!("native assignment")
+            };
+            edit(&mut unrelated).unwrap();
+            (request.finish)(Ok(()));
+            settings.synchronize(unrelated);
+            assert_eq!(
+                toggle.state(),
+                pending_state,
+                "acknowledgment keeps the final native value"
+            );
+            settings.synchronize(before.clone());
+            assert_eq!(toggle.state(), original_state);
+            assert!(
+                pending.try_recv().is_err(),
+                "synchronization never submits edits"
+            );
             let mut reloaded = before.clone();
             reloaded.settings.layout.traditional.equalize_nodes = false;
             settings.synchronize(reloaded);
@@ -551,7 +608,7 @@ pub fn run(ui: Ui) {
             );
             let page = Rc::new(form.finish(Section::new(&ui, "").row(minimum)));
             *draft.draft.as_ref().unwrap().page.borrow_mut() = Some(page.clone());
-            let mut source = draft.source.borrow().clone();
+            let mut source = draft.source.borrow().as_ref().clone();
             source.settings.layout.scrolling.max_column_width_ratio = 0.373456;
             draft.replace_source(source);
             page.synchronize(&draft);
@@ -564,7 +621,7 @@ pub fn run(ui: Ui) {
                     < 1e-9,
                 "percentage scaling and rounding must respect the exact upper bound"
             );
-            let mut source = draft.source.borrow().clone();
+            let mut source = draft.source.borrow().as_ref().clone();
             source.settings.layout.scrolling.max_column_width_ratio = 0.8;
             draft.replace_source(source);
             page.synchronize(&draft);
@@ -586,7 +643,7 @@ pub fn run(ui: Ui) {
 
             use crate::actor::reactor::Command;
             use crate::actor::wm_controller::WmCommand;
-            let mut source = settings.router.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().as_ref().clone();
             source.keys.insert(
                 "Alt+a".into(),
                 WmCommand::ReactorCommand(Command::Layout(LayoutCommand::ToggleWindowFloating)),
@@ -636,7 +693,7 @@ pub fn run(ui: Ui) {
                 backing_scale: 1.0,
                 space: None,
             }]);
-            let mut source = settings.router.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().as_ref().clone();
             let global = source.settings.layout.gaps.outer.clone();
             source
                 .settings
@@ -666,7 +723,7 @@ pub fn run(ui: Ui) {
             let Action::Edit(edit) = request.action else {
                 panic!("expected spacing edit")
             };
-            let mut source = settings.router.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().as_ref().clone();
             edit(&mut source).unwrap();
             assert_eq!(
                 [
@@ -802,13 +859,13 @@ pub fn run(ui: Ui) {
             let Action::Edit(edit) = request.action else {
                 panic!("expected config edit")
             };
-            let mut source = settings.router.model.source.borrow().clone();
+            let mut source = settings.router.model.source.borrow().as_ref().clone();
             edit(&mut source).unwrap();
             assert_eq!(source.settings.layout.base.window_insertion_point, expected);
             settings.router.model.replace_source(source);
             page.synchronize(&settings.router.model);
         }
-        let mut source = settings.router.model.source.borrow().clone();
+        let mut source = settings.router.model.source.borrow().as_ref().clone();
         source.settings.layout.stack.base.window_insertion_point =
             Some(crate::common::config::WindowInsertionPoint::EndOfTree);
         settings.router.model.replace_source(source);

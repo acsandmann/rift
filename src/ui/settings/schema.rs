@@ -50,11 +50,15 @@ impl FormBuilder {
                 let input = Rc::new(
                     Switch::new(&self.ui).on_change(move |value| commit(FieldValue::Bool(value))),
                 );
-                self.sync(&input, move |input, source| {
-                    if let FieldValue::Bool(value) = read(get(source)) {
-                        input.set_value(value);
-                    }
-                });
+                self.sync_when(
+                    &input,
+                    move |source| read(get(source)),
+                    move |input, source| {
+                        if let FieldValue::Bool(value) = read(get(source)) {
+                            input.set_value(value);
+                        }
+                    },
+                );
                 Box::new(input)
             }
             FieldKind::Number { integer } => {
@@ -110,25 +114,33 @@ impl FormBuilder {
                     slider.accessibility_label(field.title);
                     input.accessibility_label(field.title);
                     let weak_slider = Rc::downgrade(&slider);
-                    self.sync(&input, move |input, source| {
-                        if let FieldValue::Number(value) = read(get(source)) {
-                            input.set_value(value * scale);
-                            if let Some(slider) = weak_slider.upgrade() {
-                                if let Some((min, max, _)) = slider_options(field.key, source) {
-                                    slider.set_range(min, max);
+                    self.sync_when(
+                        &input,
+                        move |source| (read(get(source)), slider_options(field.key, source)),
+                        move |input, source| {
+                            if let FieldValue::Number(value) = read(get(source)) {
+                                input.set_value(value * scale);
+                                if let Some(slider) = weak_slider.upgrade() {
+                                    if let Some((min, max, _)) = slider_options(field.key, source) {
+                                        slider.set_range(min, max);
+                                    }
+                                    slider.set_value(value * scale);
                                 }
-                                slider.set_value(value * scale);
                             }
-                        }
-                    });
+                        },
+                    );
                     Box::new(NumberSlider::new(&self.ui, slider, input))
                 } else {
                     input.accessibility_label(field.title);
-                    self.sync(&input, move |input, source| {
-                        if let FieldValue::Number(value) = read(get(source)) {
-                            input.set_value(value * scale);
-                        }
-                    });
+                    self.sync_when(
+                        &input,
+                        move |source| read(get(source)),
+                        move |input, source| {
+                            if let FieldValue::Number(value) = read(get(source)) {
+                                input.set_value(value * scale);
+                            }
+                        },
+                    );
                     Box::new(input)
                 }
             }
@@ -140,11 +152,15 @@ impl FormBuilder {
                 } else {
                     input.on_commit(change)
                 });
-                self.sync(&input, move |input, source| {
-                    if let FieldValue::Text(value) = read(get(source)) {
-                        input.set_value(&value);
-                    }
-                });
+                self.sync_when(
+                    &input,
+                    move |source| read(get(source)),
+                    move |input, source| {
+                        if let FieldValue::Text(value) = read(get(source)) {
+                            input.set_value(&value);
+                        }
+                    },
+                );
                 Box::new(input)
             }
             FieldKind::Choice(choices) => {
@@ -152,11 +168,15 @@ impl FormBuilder {
                     Popup::new(&self.ui).on_change(move |index| commit(FieldValue::Choice(index))),
                 );
                 input.set_items(choices.iter().map(|choice| choice.0));
-                self.sync(&input, move |input, source| {
-                    if let FieldValue::Choice(value) = read(get(source)) {
-                        input.set_selected(value);
-                    }
-                });
+                self.sync_when(
+                    &input,
+                    move |source| read(get(source)),
+                    move |input, source| {
+                        if let FieldValue::Choice(value) = read(get(source)) {
+                            input.set_selected(value);
+                        }
+                    },
+                );
                 Box::new(input)
             }
             FieldKind::Custom => return None,

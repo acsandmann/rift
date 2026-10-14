@@ -57,13 +57,13 @@ fn record_editor(
         let error = error.clone();
         model.submit_edit(
             Box::new(move |source| {
-                if *source != base {
+                if *source != *base {
                     return Err(
                         "Settings changed elsewhere. Cancel and reopen this editor to try again."
                             .into(),
                     );
                 }
-                *source = value;
+                *source = value.as_ref().clone();
                 Ok(())
             }),
             Box::new(move |result| {
@@ -140,7 +140,9 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
                 &workspace_name(&model.source.borrow(), index),
                 |draft| {
                     if index == draft.source.borrow().virtual_workspaces.default_workspace_count {
-                        draft.source.borrow_mut().virtual_workspaces.resize(index + 1);
+                        Arc::make_mut(&mut draft.source.borrow_mut())
+                            .virtual_workspaces
+                            .resize(index + 1);
                     }
                     workspace_detail(ui, draft, index)
                 },
@@ -812,6 +814,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         let message = input_error.clone();
         let next = edit_rule.clone();
         let _ = model.env.requests.send(Request {
+            control: None,
             action: Action::Edit(Box::new(move |source| {
                 source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
                     app_id: (!value.trim().is_empty()).then(|| value.trim().to_string()),

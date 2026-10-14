@@ -6,7 +6,8 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::sync::mpsc;
+use std::rc::Rc;
+use std::sync::{Arc, mpsc};
 
 use block2::RcBlock;
 use cgs::{Alert, Ui};
@@ -37,13 +38,15 @@ type Runtime = (Vec<ScreenInfo>, Vec<ApplicationData>);
 enum Job {
     Source,
     Reload,
-    Apply(u64, serde_json::Value),
+    Apply(u64, Arc<ConfigSource>, SourceEdit),
     Runtime,
 }
 
 /// Results delivered to the main thread.
 enum Message {
-    Source(Result<Box<SourceSnapshot>, String>),
+    Source(Result<Snapshot, String>),
+    /// Candidate preparation failed locally; the acknowledged source is still valid.
+    InvalidEdit(String),
     /// `None` when the daemon could not answer this time.
     Runtime(Option<Runtime>),
     ConfigChanged(u64),
@@ -54,6 +57,58 @@ enum Message {
     Closed,
     /// The daemon is gone.
     Lost(String),
+}
+
+/// Shared only within Settings; the wire format remains SourceSnapshot.
+struct Snapshot {
+    revision: u64,
+    source: Arc<ConfigSource>,
+}
+impl From<SourceSnapshot> for Snapshot {
+    fn from(snapshot: SourceSnapshot) -> Self {
+        Self {
+            revision: snapshot.revision,
+            source: Arc::new(snapshot.source),
+        }
+    }
+}
+
+struct PendingEdit {
+    control: Option<Rc<()>>,
+    edit: Option<SourceEdit>,
+    finishes: Vec<Finish>,
+}
+impl PendingEdit {
+    fn into_finish(self) -> Finish {
+        Box::new(move |result| {
+            for finish in self.finishes {
+                finish(result.clone());
+            }
+        })
+    }
+}
+
+/// Only adjacent absolute assignments from the same native control supersede each other.
+/// A different control, reload, or transaction is an ordering barrier.
+fn enqueue(
+    edits: &mut VecDeque<PendingEdit>,
+    control: Option<Rc<()>>,
+    edit: Option<SourceEdit>,
+    finish: Finish,
+) {
+    if let Some(control) = &control
+        && let Some(last) = edits.back_mut()
+        && last.control.as_ref().is_some_and(|last| Rc::ptr_eq(last, control))
+    {
+        last.edit = edit;
+        last.finishes.push(finish);
+        return;
+    }
+    edits.push_back(PendingEdit {
+        control,
+        edit,
+        finishes: vec![finish],
+    });
 }
 
 pub fn run(config_path: PathBuf) -> ! {
@@ -130,7 +185,7 @@ async fn open(
         }
     }
     super::timing::finish(snapshot_wait, "snapshot wait after AppKit");
-    let SourceSnapshot { revision, source } = *snapshot.unwrap();
+    let Snapshot { revision, source } = snapshot.unwrap();
     let (requests, mut pending) = unbounded_channel();
     let closed = messages.clone();
     let construction = super::timing::start();
@@ -268,12 +323,12 @@ struct Session {
     jobs: mpsc::Sender<Job>,
     messages: UnboundedSender<Message>,
     /// The daemon's last acknowledged source; queued edits apply to it in order.
-    source: ConfigSource,
+    source: Arc<ConfigSource>,
     revision: u64,
     /// The newest revision the daemon announced.
     announced: u64,
     /// Edits waiting for the one in flight; `None` reloads the file.
-    edits: VecDeque<(Option<SourceEdit>, Finish)>,
+    edits: VecDeque<PendingEdit>,
     /// The configuration request awaiting a reply; `Some(None)` is a snapshot refresh.
     in_flight: Option<Option<Finish>>,
     /// Re-read the source before the next edit.
@@ -289,10 +344,10 @@ struct Session {
 }
 
 impl Session {
-    fn request(&mut self, Request { action, finish }: Request) {
+    fn request(&mut self, Request { action, finish, control }: Request) {
         match action {
-            Action::Edit(edit) => self.edits.push_back((Some(edit), finish)),
-            Action::Reload => self.edits.push_back((None, finish)),
+            Action::Edit(edit) => enqueue(&mut self.edits, control, Some(edit), finish),
+            Action::Reload => enqueue(&mut self.edits, None, None, finish),
             Action::RefreshRuntime => return self.discover_applications(finish),
             Action::CheckUpdates(done) => {
                 self.update = Some(done);
@@ -313,7 +368,7 @@ impl Session {
                 match result {
                     Ok(snapshot) => {
                         self.stalled = None;
-                        self.adopt(*snapshot);
+                        self.adopt(snapshot);
                         if let Some(finish) = finish {
                             finish(Ok(()));
                         }
@@ -326,6 +381,12 @@ impl Session {
                         }
                         None => self.stall(error),
                     },
+                }
+                self.pump();
+            }
+            Message::InvalidEdit(error) => {
+                if let Some(finish) = self.in_flight.take().flatten() {
+                    finish(Err(error));
                 }
                 self.pump();
             }
@@ -372,37 +433,31 @@ impl Session {
 
     /// Starts the next configuration request unless one is in flight.
     fn pump(&mut self) {
-        while self.in_flight.is_none() {
-            if self.stalled.is_some_and(|announced| self.announced > announced) {
-                self.stalled = None;
-            }
-            let outdated = self.refresh || self.announced > self.revision;
-            if (outdated && self.stalled.is_none())
-                || (self.stalled.is_some() && !self.edits.is_empty())
-            {
-                self.refresh = false;
-                return self.send(Job::Source, None);
-            }
-            let Some((edit, finish)) = self.edits.pop_front() else {
-                return;
-            };
-            let Some(edit) = edit else {
-                return self.send(Job::Reload, Some(finish));
-            };
-            let mut source = self.source.clone();
-            if let Err(error) = edit(&mut source) {
-                finish(Err(error));
-            } else if source == self.source {
-                finish(Ok(()));
-            } else {
-                match serde_json::to_value(&source) {
-                    Ok(source) => {
-                        return self.send(Job::Apply(self.revision, source), Some(finish));
-                    }
-                    Err(error) => finish(Err(error.to_string())),
-                }
-            }
+        if self.in_flight.is_some() {
+            return;
         }
+        if self.stalled.is_some_and(|announced| self.announced > announced) {
+            self.stalled = None;
+        }
+        let outdated = self.refresh || self.announced > self.revision;
+        if (outdated && self.stalled.is_none())
+            || (self.stalled.is_some() && !self.edits.is_empty())
+        {
+            self.refresh = false;
+            return self.send(Job::Source, None);
+        }
+        let Some(mut pending) = self.edits.pop_front() else {
+            return;
+        };
+        let edit = pending.edit.take();
+        let finish = pending.into_finish();
+        let Some(edit) = edit else {
+            return self.send(Job::Reload, Some(finish));
+        };
+        self.send(
+            Job::Apply(self.revision, self.source.clone(), edit),
+            Some(finish),
+        );
     }
 
     /// A refresh failed: edits queued behind it would apply to an unknown source, so reject
@@ -410,8 +465,8 @@ impl Session {
     fn stall(&mut self, error: String) {
         tracing::warn!(%error, "Could not refresh Settings");
         let first = self.stalled.replace(self.announced).is_none();
-        for (_, finish) in std::mem::take(&mut self.edits) {
-            finish(Err(error.clone()));
+        for pending in std::mem::take(&mut self.edits) {
+            pending.into_finish()(Err(error.clone()));
         }
         if let (true, Some(settings)) = (first, &self.settings) {
             let ui = settings.router.ui;
@@ -426,13 +481,11 @@ impl Session {
         let _ = self.jobs.send(job);
     }
 
-    fn adopt(&mut self, snapshot: SourceSnapshot) {
+    fn adopt(&mut self, snapshot: Snapshot) {
         self.revision = snapshot.revision;
-        if self.source != snapshot.source {
-            self.source = snapshot.source;
-            if let Some(settings) = &self.settings {
-                settings.synchronize(self.source.clone());
-            }
+        self.source = snapshot.source;
+        if let Some(settings) = &self.settings {
+            settings.synchronize(self.source.clone());
         }
     }
 
@@ -466,12 +519,12 @@ impl Session {
 fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
     let client = RiftMachClient;
     let initialization = super::timing::start();
-    let (snapshot, subscription) = match client.initialize_settings::<Box<SourceSnapshot>>() {
+    let (snapshot, subscription) = match client.initialize_settings::<SourceSnapshot>() {
         Ok(session) => session,
         Err(error) => return drop(messages.send(Message::Lost(error.to_string()))),
     };
     super::timing::finish(initialization, "Settings session IPC (subscribe + snapshot)");
-    if messages.send(Message::Source(Ok(snapshot))).is_err() {
+    if messages.send(Message::Source(Ok(snapshot.into()))).is_err() {
         return;
     }
     let events = messages.clone();
@@ -513,11 +566,8 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
             },
             Job::Source => source(&client, RiftRequest::GetSettingsSource),
             Job::Reload => source(&client, RiftRequest::ReloadSettingsSource),
-            Job::Apply(expected_revision, source_json) => {
-                source(&client, RiftRequest::ApplySettingsSource {
-                    expected_revision,
-                    source: source_json,
-                })
+            Job::Apply(expected_revision, base, edit) => {
+                apply(&client, expected_revision, base, edit)
             }
         };
         super::timing::finish(timing, stage);
@@ -536,9 +586,33 @@ fn call<T: serde::de::DeserializeOwned>(
 }
 
 fn source(client: &RiftMachClient, request: RiftRequest) -> Message {
-    match call(client, &request) {
-        Ok(snapshot) => Message::Source(Ok(snapshot)),
+    match call::<SourceSnapshot>(client, &request) {
+        Ok(snapshot) => Message::Source(Ok(snapshot.into())),
         Err(error) => recoverable(error).map_or_else(Message::Lost, |e| Message::Source(Err(e))),
+    }
+}
+
+/// Clone, compare and serialize off the main thread. A no-op returns the same shared
+/// snapshot, so it needs neither serialization nor a Mach request.
+fn apply(
+    client: &RiftMachClient,
+    revision: u64,
+    base: Arc<ConfigSource>,
+    edit: SourceEdit,
+) -> Message {
+    let mut candidate = base.as_ref().clone();
+    if let Err(error) = edit(&mut candidate) {
+        return Message::InvalidEdit(error);
+    }
+    if candidate == *base {
+        return Message::Source(Ok(Snapshot { revision, source: base }));
+    }
+    match serde_json::to_value(&candidate) {
+        Ok(candidate) => source(client, RiftRequest::ApplySettingsSource {
+            expected_revision: revision,
+            source: candidate,
+        }),
+        Err(error) => Message::InvalidEdit(error.to_string()),
     }
 }
 
