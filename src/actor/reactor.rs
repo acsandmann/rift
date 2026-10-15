@@ -4624,7 +4624,9 @@ impl Reactor {
                     self.try_focus_or_warp_without_raise(Some(space), &mut focus_window)
                 }
             } else if let Some(space) = pending_refocus_space.take() {
-                if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, None) {
+                let selected = self.layout_manager.layout_engine.selected_window(space);
+                if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, selected)
+                {
                     focus_window = Some(wid);
                     false
                 } else if !self.is_in_drag() {

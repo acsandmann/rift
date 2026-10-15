@@ -2711,7 +2711,6 @@ impl LayoutEngine {
         positions.into_iter().collect()
     }
 
-    #[cfg(test)]
     pub(crate) fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
         let (ws_id, layout) = self.workspaces.active_layout_for_space(space)?;
         self.workspaces[ws_id].layout_system.selected_window(layout)
