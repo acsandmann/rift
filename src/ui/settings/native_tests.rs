@@ -1,8 +1,8 @@
 use objc2::Message;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSButton, NSControl, NSOutlineView, NSPopUpButton,
-    NSSegmentedControl, NSSlider, NSSwitch, NSTableView, NSView,
+    NSAccessibility, NSApplication, NSButton, NSControl, NSPopUpButton, NSSegmentedControl,
+    NSSlider, NSSwitch, NSTableView, NSView,
 };
 
 use super::*;
@@ -34,6 +34,29 @@ fn named<T: objc2::DowncastTarget + 'static>(view: &NSView, title: &str) -> Opti
     }
     view.subviews().iter().find_map(|child| named(&child, title))
 }
+fn navigation_row(table: &NSTableView, title: &str) -> usize {
+    (0..table.numberOfRows())
+        .find(|&row| {
+            table
+                .viewAtColumn_row_makeIfNecessary(0, row, true)
+                .and_then(|view| find::<objc2_app_kit::NSTextField>(&view))
+                .is_some_and(|field| field.stringValue().to_string() == title)
+        })
+        .unwrap_or_else(|| panic!("missing settings destination: {title}")) as usize
+}
+
+/// A layout tile, whose accessible name is its title, plus “, default” on the default.
+fn tile(view: &NSView, title: &str) -> Option<Retained<NSButton>> {
+    named::<NSButton>(view, title).or_else(|| named::<NSButton>(view, &format!("{title}, default")))
+}
+
+/// Choose `index` in a native popup as a click would.
+fn choose(popup: &NSPopUpButton, index: isize) {
+    popup.selectItemAtIndex(index);
+    let control: &NSControl = popup;
+    assert!(unsafe { control.sendAction_to(control.action(), control.target().as_deref()) });
+}
+
 fn root_window(settings: &Settings) -> Retained<NSView> {
     settings.window.ns_window().contentView().unwrap()
 }
@@ -115,40 +138,94 @@ pub fn run(ui: Ui) {
         late_runtime_populates_picker(&settings, &mut pending);
         let search = find::<objc2_app_kit::NSSearchField>(&root).unwrap();
         change_text(&search, "focus follows pointer");
-        assert_eq!(count::<NSOutlineView>(&root), 0, "search replaces the sidebar");
+        assert!(
+            named::<NSTableView>(&root, "Settings categories").is_none(),
+            "search replaces the sidebar"
+        );
         change_text(&search, "   ");
-        assert_eq!(
-            count::<NSOutlineView>(&root),
-            1,
+        assert!(
+            named::<NSTableView>(&root, "Settings categories").is_some(),
             "clearing search restores navigation"
         );
         change_text(&search, "this setting does not exist");
-        assert_eq!(count::<NSOutlineView>(&root), 0);
+        assert!(named::<NSTableView>(&root, "Settings categories").is_none());
         change_text(&search, "gaps");
-        assert_eq!(
-            count::<NSOutlineView>(&root),
-            0,
+        assert!(
+            named::<NSTableView>(&root, "Settings categories").is_none(),
             "search works after an empty result"
         );
         change_text(&search, "");
-        assert_eq!(find::<NSOutlineView>(&root).unwrap().numberOfRows(), 9);
-        let sidebar = find::<NSOutlineView>(&root).unwrap();
+        let sidebar = named::<NSTableView>(&root, "Settings categories").unwrap();
         sidebar.selectRowIndexes_byExtendingSelection(
-            &objc2_foundation::NSIndexSet::indexSetWithIndex(1),
+            &objc2_foundation::NSIndexSet::indexSetWithIndex(navigation_row(&sidebar, "Layouts")),
             false,
         );
         let toolbar = settings.window.toolbar().ns_toolbar();
+        let items = toolbar.items();
+        let arrows_index = items
+            .iter()
+            .position(|item| item.itemIdentifier().to_string() == "cgs.history")
+            .unwrap();
+        let title_index = items
+            .iter()
+            .position(|item| item.itemIdentifier().to_string() == "cgs.page-title")
+            .unwrap();
         assert!(
-            toolbar.items().iter().all(|item| {
-                !matches!(
-                    item.itemIdentifier().to_string().as_str(),
-                    "cgs.back" | "cgs.history" | "cgs.page-menu"
+            arrows_index < title_index,
+            "history arrows precede the page title"
+        );
+        let arrows = items
+            .objectAtIndex(arrows_index)
+            .downcast::<objc2_app_kit::NSToolbarItemGroup>()
+            .unwrap();
+        let back = arrows.subitems().objectAtIndex(0);
+        let forward = arrows.subitems().objectAtIndex(1);
+        let press = |item: &objc2_app_kit::NSToolbarItem| {
+            assert!(item.isEnabled());
+            assert!(unsafe {
+                NSApplication::sharedApplication(ui.mtm()).sendAction_to_from(
+                    item.action().unwrap(),
+                    item.target().as_deref(),
+                    Some(item),
                 )
-            }),
-            "preferences toolbar has no browser navigation"
+            });
+        };
+        assert!(back.isEnabled());
+        assert!(!forward.isEnabled());
+        press(&back);
+        assert_eq!(settings.router.current(), Category::General);
+        assert!(forward.isEnabled());
+        press(&forward);
+        assert_eq!(settings.router.current(), Category::Layouts);
+        // Re-selecting the current destination must not add a duplicate history entry.
+        settings.router.navigate(Category::Layouts);
+        press(&back);
+        assert_eq!(settings.router.current(), Category::General);
+        for _ in 0..16 {
+            if !back.isEnabled() {
+                break;
+            }
+            press(&back);
+        }
+        assert!(!back.isEnabled(), "back disables at the start of history");
+        assert_eq!(
+            settings.router.current(),
+            Category::General,
+            "history ends at the initial page"
         );
         sidebar.selectRowIndexes_byExtendingSelection(
-            &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
+            &objc2_foundation::NSIndexSet::indexSetWithIndex(navigation_row(&sidebar, "Keyboard")),
+            false,
+        );
+        assert_eq!(settings.router.current(), Category::Keyboard);
+        assert!(
+            !forward.isEnabled(),
+            "a new destination replaces the forward branch"
+        );
+        press(&back);
+        assert_eq!(settings.router.current(), Category::General);
+        sidebar.selectRowIndexes_byExtendingSelection(
+            &objc2_foundation::NSIndexSet::indexSetWithIndex(navigation_row(&sidebar, "General")),
             false,
         );
         drop(sidebar);
@@ -238,14 +315,34 @@ pub fn run(ui: Ui) {
             fn instances(view: &NSView) -> usize {
                 1 + view.subviews().iter().map(|view| instances(&view)).sum::<usize>()
             }
+            let window = settings.window.ns_window();
+            let content = window.contentView().unwrap();
+            // Switching layouts never resizes the window, even at its smallest useful size.
+            for size in [CGSize::new(700.0, 420.0), CGSize::new(760.0, 500.0)] {
+                window.setContentSize(size);
+                content.layoutSubtreeIfNeeded();
+                let frame = window.frame();
+                for (title, _) in pages::layouts().iter().chain(pages::layouts()) {
+                    unsafe { tile(root, title).unwrap().performClick(None) };
+                    content.layoutSubtreeIfNeeded();
+                    assert_eq!(
+                        window.frame(),
+                        frame,
+                        "{title} keeps the window size at {size:?}"
+                    );
+                }
+            }
+            window.setContentSize(CGSize::new(880.0, 660.0));
+            content.layoutSubtreeIfNeeded();
             let frame = settings.window.ns_window().frame();
             let mut cached_instances = None;
             for _ in 0..3 {
                 for (title, _) in pages::layouts() {
-                    let button = named::<NSButton>(root, &format!("Configure {title}")).unwrap();
+                    let button = tile(root, title).unwrap();
                     unsafe {
                         button.performClick(None);
                     }
+                    content.layoutSubtreeIfNeeded();
                     assert_eq!(button.state(), 1);
                     assert_eq!(
                         settings.window.ns_window().frame(),
@@ -262,7 +359,7 @@ pub fn run(ui: Ui) {
                 cached_instances = Some(count);
             }
             let spacing = named::<NSButton>(root, "Spacing").unwrap();
-            let displays = named::<NSButton>(root, "Displays").unwrap();
+            let displays = named::<NSButton>(root, "Display overrides").unwrap();
             assert!(
                 named::<NSControl>(root, "Screen edges").is_none(),
                 "spacing starts collapsed and lazy"
@@ -303,18 +400,25 @@ pub fn run(ui: Ui) {
             unsafe {
                 displays.performClick(None);
             }
-            assert_eq!(spacing.state(), 0, "opening Displays collapses Spacing");
+            assert_eq!(
+                spacing.state(),
+                1,
+                "disclosures open independently, without jumps"
+            );
             assert_eq!(displays.state(), 1);
             assert_eq!(
                 settings.window.ns_window().frame(),
                 frame,
                 "expanding displays preserves window size"
             );
+            unsafe {
+                spacing.performClick(None);
+                displays.performClick(None);
+            }
             assert!(
                 named::<NSControl>(root, "Screen edges").is_none(),
-                "the other editor is hidden"
+                "collapsed editors hide"
             );
-            assert_eq!(displays.state(), 1);
             unsafe {
                 spacing.performClick(None);
             }
@@ -322,13 +426,13 @@ pub fn run(ui: Ui) {
                 std::ptr::eq(&*gap, &*named::<NSControl>(root, "Screen edges").unwrap()),
                 "reopening reuses the editor"
             );
-            assert_eq!(displays.state(), 0, "opening Spacing collapses Displays");
+            assert_eq!(displays.state(), 0);
             assert!(**settings.model().source.borrow() == before);
             assert!(
                 pending.try_recv().is_err(),
                 "expansion never writes configuration"
             );
-            for query in ["Master width", "Screen edges", "Display settings"] {
+            for query in ["Master width", "Screen edges", "Display overrides"] {
                 let entry =
                     search::results(query).into_iter().find(|entry| entry.title == query).unwrap();
                 settings.router.open_search(entry);
@@ -349,9 +453,11 @@ pub fn run(ui: Ui) {
                     );
                 }
                 assert_eq!(settings.router.current(), Category::Layouts);
+                let sidebar =
+                    named::<NSTableView>(&root_window(&settings), "Settings categories").unwrap();
                 assert_eq!(
-                    find::<NSOutlineView>(&root_window(&settings)).unwrap().selectedRow(),
-                    Category::Layouts.index() as isize
+                    sidebar.selectedRow(),
+                    navigation_row(&sidebar, "Layouts") as isize
                 );
             }
             settings.router.layouts().select_target(layouts::Target::Layout(
@@ -360,8 +466,25 @@ pub fn run(ui: Ui) {
             let position = named::<NSPopUpButton>(root, "New window position").unwrap();
             assert_eq!(
                 position.titleOfSelectedItem().unwrap().to_string(),
-                "Shared · Next to selection",
-                "an inherited choice names its effective value"
+                "Use shared setting",
+                "following the shared setting is an explicit choice"
+            );
+            assert_eq!(
+                position
+                    .itemAtIndex(2)
+                    .unwrap()
+                    .badge()
+                    .unwrap()
+                    .stringValue()
+                    .unwrap()
+                    .to_string(),
+                "Shared",
+                "the menu marks the shared value"
+            );
+            assert!(
+                named::<NSButton>(root, "Traditional, default").is_some()
+                    && named::<NSButton>(root, "Traditional").is_none(),
+                "the default tile says so to assistive apps"
             );
             let toggle = named::<NSSwitch>(root, "Keep windows equally sized").unwrap();
             let original_state = toggle.state();
@@ -399,37 +522,54 @@ pub fn run(ui: Ui) {
             settings.synchronize(reloaded);
             assert_eq!(toggle.state(), 0, "external reload updates visible controls");
             settings.synchronize(before.clone());
-            // Switching must commit an actual AppKit field editor before hiding its client.
+            // BSP’s aspect ratio is Automatic or Custom, never a keyword typed into a field.
             settings
                 .router
                 .layouts()
                 .select_target(layouts::Target::Layout(crate::common::config::LayoutMode::Bsp));
-            let ratio =
-                named::<objc2_app_kit::NSTextField>(root, "Single window aspect ratio").unwrap();
+            let shape = named::<NSPopUpButton>(root, "Single window aspect ratio").unwrap();
+            assert!(named::<objc2_app_kit::NSTextField>(root, "Width-to-height ratio").is_none());
+            choose(&shape, 2);
+            let request = pending.try_recv().expect("choosing Custom seeds a ratio");
+            let Action::Edit(edit) = request.action else {
+                panic!("source edit")
+            };
+            let mut custom = before.clone();
+            edit(&mut custom).unwrap();
+            assert_eq!(
+                custom.settings.layout.bsp.single_window_aspect_ratio,
+                Some(16.0 / 9.0)
+            );
+            settings.synchronize(custom.clone());
+            // Switching must commit an actual AppKit field editor before hiding its client.
+            let ratio = named::<objc2_app_kit::NSTextField>(root, "Width-to-height ratio").unwrap();
             assert!(settings.window.ns_window().makeFirstResponder(Some(&ratio)));
             ratio
                 .currentEditor()
                 .unwrap()
-                .setString(&objc2_foundation::NSString::from_str("1.78"));
+                .setString(&objc2_foundation::NSString::from_str("1.5"));
             unsafe {
-                named::<NSButton>(root, "Configure Traditional").unwrap().performClick(None);
+                tile(root, "Traditional").unwrap().performClick(None);
             }
             let request = pending.try_recv().expect("switch commits the field’s source edit");
             let Action::Edit(edit) = request.action else {
                 panic!("field uses source edits");
             };
-            let mut edited = before.clone();
+            let mut edited = custom.clone();
             edit(&mut edited).unwrap();
-            assert_eq!(edited.settings.layout.bsp.single_window_aspect_ratio, Some(1.78));
+            assert_eq!(edited.settings.layout.bsp.single_window_aspect_ratio, Some(1.5));
             assert!(ratio.currentEditor().is_none());
+            settings.synchronize(before.clone());
             unsafe {
-                named::<NSButton>(root, "Configure Scrolling").unwrap().performClick(None);
+                tile(root, "Scrolling").unwrap().performClick(None);
             }
-            unsafe {
-                named::<NSButton>(root, "Set Scrolling as Default")
-                    .expect("a nondefault layout offers Set as Default beside its title")
-                    .performClick(None);
-            }
+            // The default is chosen in the toolbar, separately from the edited layout.
+            let control = settings.router.layouts().default_control();
+            let default = named::<NSPopUpButton>(control.ns_view(), "Default layout").unwrap();
+            choose(
+                &default,
+                crate::common::config::LayoutMode::Scrolling.config_choice_index() as isize,
+            );
             let request = pending.try_recv().unwrap();
             let Action::Edit(edit) = request.action else {
                 panic!("default submits a source edit");
@@ -441,21 +581,20 @@ pub fn run(ui: Ui) {
                 crate::common::config::LayoutMode::Scrolling
             );
             settings.synchronize(external.clone());
-            assert_eq!(
-                named::<NSButton>(root, "Configure Scrolling").unwrap().state(),
-                1,
-                "making a layout default keeps editing it"
-            );
-            assert!(
-                named::<NSButton>(root, "Set Scrolling as Default").is_none(),
-                "the default layout offers no Set as Default action"
-            );
+            let scrolling = named::<NSButton>(root, "Scrolling, default").unwrap();
+            assert_eq!(scrolling.state(), 1, "making a layout default keeps editing it");
+            assert_eq!(tile(root, "Traditional").unwrap().state(), 0);
             external.settings.layout.mode = before.settings.layout.mode;
             assert!(
                 external == before,
                 "default changes preserve individual layout settings"
             );
             settings.synchronize(before.clone());
+            assert_eq!(
+                default.titleOfSelectedItem().unwrap().to_string(),
+                "Traditional",
+                "external changes update the default popup"
+            );
             // Reset only the inspected algorithm, preserving defaults and display overrides.
             let mut customized = before.clone();
             customized.settings.layout.scrolling.column_width_ratio = 0.61;
@@ -467,12 +606,9 @@ pub fn run(ui: Ui) {
                 },
             );
             settings.synchronize(customized.clone());
-            settings.router.layouts().select_target(layouts::Target::Layout(
-                crate::common::config::LayoutMode::Scrolling,
-            ));
             assert!(
-                named::<NSButton>(root, "Restore Scrolling Defaults…").is_some(),
-                "restoring defaults lives in the page footer"
+                named::<NSPopUpButton>(root, "Scrolling actions").is_some(),
+                "restoring defaults lives in the edited layout’s actions menu"
             );
             layouts::restore(
                 &Rc::downgrade(&settings.router.model),
@@ -758,14 +894,17 @@ pub fn run(ui: Ui) {
                 0,
                 "Custom uses numerical fields, not sliders"
             );
-            for name in pages::EDGES.into_iter().chain(pages::AXES) {
+            let names = pages::EDGES.map(|edge| format!("Screen edges, {edge}"));
+            let axes = pages::AXES.map(|axis| format!("Between windows, {axis}"));
+            for name in names.iter().chain(&axes) {
                 assert!(
                     named::<objc2_app_kit::NSTextField>(page.view.ns_view(), name)
                         .unwrap()
                         .isEditable()
                 );
             }
-            let top = named::<objc2_app_kit::NSTextField>(page.view.ns_view(), "Top").unwrap();
+            let top = named::<objc2_app_kit::NSTextField>(page.view.ns_view(), "Screen edges, Top")
+                .unwrap();
             settings.router.host.set_cached_page(page.view.clone());
             assert!(settings.window.ns_window().makeFirstResponder(Some(&top)));
             top.currentEditor()
@@ -798,6 +937,128 @@ pub fn run(ui: Ui) {
                 "external changes update custom fields"
             );
             assert!(pending.try_recv().is_err());
+        });
+        // Display overrides edit inline: inherited values show as placeholders, spacing groups
+        // and each Scrolling width override independently, and displays can be added by UUID.
+        autoreleasepool(|_| {
+            use objc2_app_kit::NSTextField;
+            settings.refresh_displays(vec![crate::sys::screen::ScreenInfo {
+                id: crate::sys::screen::ScreenId::new(7),
+                display_uuid: "disp-a".into(),
+                name: Some("Display A".into()),
+                frame: Default::default(),
+                backing_scale: 1.0,
+                space: None,
+            }]);
+            let mut source = settings.router.model.source.borrow().as_ref().clone();
+            let layout = &mut source.settings.layout;
+            layout.gaps.outer = crate::common::config::OuterGaps {
+                top: 5.0,
+                right: 5.0,
+                bottom: 5.0,
+                left: 5.0,
+            };
+            layout.gaps.per_display.clear();
+            layout.scrolling.per_display.clear();
+            settings.router.model.replace_source(source.clone());
+            let page = editors::display_inspector(ui, &settings.router.model);
+            page.synchronize(&settings.router.model);
+            settings.router.host.set_cached_page(page.view.clone());
+            let view = page.view.ns_view();
+            let window = settings.window.ns_window();
+            let top = named::<NSTextField>(view, "Screen edges, Top").unwrap();
+            assert_eq!(
+                top.stringValue().to_string(),
+                "",
+                "inherited values leave the field empty"
+            );
+            assert_eq!(top.placeholderString().unwrap().to_string(), "5");
+            assert!(named::<NSButton>(view, "Use Shared for screen edges").is_none());
+            let type_into = |pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
+                             field: &NSTextField,
+                             text: &str| {
+                assert!(window.makeFirstResponder(Some(field)));
+                field
+                    .currentEditor()
+                    .unwrap()
+                    .setString(&objc2_foundation::NSString::from_str(text));
+                assert!(window.makeFirstResponder(None));
+                let request = pending.try_recv().expect("a committed value is one source edit");
+                let Action::Edit(edit) = request.action else {
+                    panic!("source edit")
+                };
+                let mut source = settings.router.model.source.borrow().as_ref().clone();
+                edit(&mut source).unwrap();
+                settings.router.model.replace_source(source);
+                page.synchronize(&settings.router.model);
+            };
+            let current = || settings.router.model.source.borrow().as_ref().clone();
+            type_into(&mut pending, &top, "9");
+            let custom = current().settings.layout.gaps.per_display["disp-a"].clone();
+            assert_eq!(custom.outer.as_ref().map(|o| (o.top, o.right)), Some((9.0, 5.0)));
+            assert!(custom.inner.is_none(), "between-window spacing still inherits");
+            assert_eq!(
+                named::<NSTextField>(view, "Screen edges, Right")
+                    .unwrap()
+                    .stringValue()
+                    .to_string(),
+                "5"
+            );
+            let width = named::<NSTextField>(view, "Default column width").unwrap();
+            type_into(&mut pending, &width, "50");
+            let widths = current().settings.layout.scrolling.per_display["disp-a"].clone();
+            assert_eq!(widths.column_width_ratio, Some(0.5));
+            assert_eq!(
+                widths.min_column_width_ratio, None,
+                "each width inherits on its own"
+            );
+            type_into(&mut pending, &width, "");
+            assert!(
+                !current().settings.layout.scrolling.per_display.contains_key("disp-a"),
+                "clearing the only override removes the display’s entry"
+            );
+            unsafe {
+                named::<NSButton>(view, "Use Shared for screen edges")
+                    .unwrap()
+                    .performClick(None);
+            }
+            let request = pending.try_recv().unwrap();
+            let Action::Edit(edit) = request.action else {
+                panic!("source edit")
+            };
+            let mut source = current();
+            edit(&mut source).unwrap();
+            assert!(
+                source.settings.layout.gaps.per_display.is_empty(),
+                "Use Shared inherits again"
+            );
+            settings.router.model.replace_source(source.clone());
+            page.synchronize(&settings.router.model);
+            // Add Display… prepares a display that isn’t connected, without writing anything.
+            let popup = named::<NSPopUpButton>(view, "Display").unwrap();
+            choose(&popup, popup.numberOfItems() - 1);
+            assert_eq!(popup.titleOfSelectedItem().unwrap().to_string(), "Display A");
+            named::<NSTextField>(view, "Display UUID")
+                .unwrap()
+                .setStringValue(&objc2_foundation::NSString::from_str("manual-display"));
+            unsafe {
+                named::<NSButton>(view, "Add").unwrap().performClick(None);
+            }
+            assert_eq!(
+                popup.titleOfSelectedItem().unwrap().to_string(),
+                "Display manual-d…"
+            );
+            assert!(
+                pending.try_recv().is_err(),
+                "adding a display writes nothing until edited"
+            );
+            type_into(
+                &mut pending,
+                &named::<NSTextField>(view, "Screen edges, Left").unwrap(),
+                "3",
+            );
+            assert!(current().settings.layout.gaps.per_display.contains_key("manual-display"));
+            settings.router.host.clear();
         });
         let model = Rc::downgrade(&settings.router.model);
         let host = objc2::rc::Weak::new(settings.router.host.ns_view());
@@ -1128,6 +1389,44 @@ pub fn render(
     if scope == Some(7) {
         snapshot.settings.layout.gaps.outer.top = 5.0;
     }
+    let mut displays = vec![];
+    if scope == Some(8) {
+        snapshot.settings.layout.gaps.outer.top = 5.0;
+        for (id, uuid, name) in [
+            (1, "studio", "Studio Display"),
+            (2, "builtin", "Built-in Retina Display"),
+        ] {
+            displays.push(ScreenInfo {
+                id: crate::sys::screen::ScreenId::new(id),
+                frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1512.0, 982.0)),
+                backing_scale: 2.0,
+                display_uuid: uuid.into(),
+                name: Some(name.into()),
+                space: None,
+            });
+        }
+        let gaps = &mut snapshot.settings.layout.gaps;
+        let mut inner = gaps.inner.clone();
+        inner.horizontal = 12.0;
+        inner.vertical = 12.0;
+        gaps.per_display.entry("studio".into()).or_default().inner = Some(inner);
+        let widths = snapshot
+            .settings
+            .layout
+            .scrolling
+            .per_display
+            .entry("studio".into())
+            .or_default();
+        widths.column_width_ratio = Some(0.5);
+        snapshot
+            .settings
+            .layout
+            .scrolling
+            .per_display
+            .entry("5A0C3D2E-OLD".into())
+            .or_default()
+            .max_column_width_ratio = Some(0.9);
+    }
     snapshot.settings.ui.menu_bar.layout_folder = "/Users/atticus/.config/rift/layouts".into();
     snapshot.settings.run_on_start = vec!["sketchybar --reload".into()];
     snapshot
@@ -1153,7 +1452,7 @@ pub fn render(
         ui,
         snapshot,
         "/tmp/native-settings-preview.toml".into(),
-        vec![],
+        displays,
         vec![],
         requests,
         || {},
@@ -1208,15 +1507,21 @@ pub fn render(
         "the native content must fit the requested viewport width"
     );
     if small {
-        let sidebar = find::<NSOutlineView>(&content).unwrap();
+        let sidebar = named::<NSTableView>(&content, "Settings categories").unwrap();
         assert!(
-            sidebar.rectOfRow(8).origin.y + sidebar.rectOfRow(8).size.height
+            sidebar.rectOfRow(sidebar.numberOfRows() - 1).origin.y
+                + sidebar.rectOfRow(sidebar.numberOfRows() - 1).size.height
                 <= sidebar.visibleRect().origin.y + sidebar.visibleRect().size.height + 1.0,
             "all primary destinations fit in the smaller viewport"
         );
     }
-    let spacing_card = if scope == Some(7) {
-        let view = unsafe { named::<NSButton>(&content, "Spacing").unwrap().superview() }.unwrap();
+    let card = match scope {
+        Some(7) => Some("Spacing"),
+        Some(8) => Some("Display overrides"),
+        _ => None,
+    };
+    let spacing_card = if let Some(card) = card {
+        let view = unsafe { named::<NSButton>(&content, card).unwrap().superview() }.unwrap();
         view.scrollRectToVisible(view.bounds());
         Some(view)
     } else {

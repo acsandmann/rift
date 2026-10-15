@@ -158,17 +158,12 @@ pub(super) fn window_position(f: &mut FormBuilder) -> SettingsRow {
     .tooltip("Where layouts insert new windows, unless a layout chooses its own.")
 }
 
-pub(super) fn layout_displays(ui: Ui, model: &Rc<Model>) -> Page {
-    let mut f = FormBuilder::new(ui, model);
-    let page = super::editors::display_overrides(&mut f, model);
-    f.finish(page)
-}
+/// A screen-shaped spacing preview, 16:10 like a Mac display.
+pub(super) const PREVIEW: CGSize = CGSize::new(192.0, 120.0);
 
-pub(super) fn gap_preview(ui: Ui, f: &mut FormBuilder, display: Option<String>) -> impl NativeView {
-    gap_preview_sized(ui, f, display, CGSize::new(354.0, 160.0))
-}
-
-fn gap_preview_sized(
+/// Spacing on a representative desktop, shared or as `display` sees it, following
+/// slider drags live.
+pub(super) fn gap_preview(
     ui: Ui,
     f: &mut FormBuilder,
     display: Option<String>,
@@ -179,8 +174,7 @@ fn gap_preview_sized(
     let update: Rc<dyn Fn(&ConfigSource)> = Rc::new(move |s| {
         let size = illustration.canvas_size();
         let gaps = s.settings.layout.gaps.effective_for_display(display.as_deref());
-        // A representative desktop. Compress gaps so small ones stay visible
-        // and large ones still leave room for windows.
+        // Compress gaps so small ones stay visible and large ones still leave room for windows.
         let scaled = |v: f64| v.clamp(0.0, 200.0).sqrt() * size.width / 140.0;
         let left = scaled(gaps.outer.left);
         let top = scaled(gaps.outer.top);
@@ -270,6 +264,9 @@ pub(super) fn set_spacing_gap(
     }
 }
 
+/// Shared spacing. Simple sets every edge, and both directions between windows, with
+/// one slider each; Custom sets each value. Switching only changes the controls, so
+/// custom values stay until a simple slider is moved.
 pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
     let source = model.source.borrow();
     let gaps = source.settings.layout.gaps.effective_for_display(None);
@@ -279,78 +276,101 @@ pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
         || gaps.inner.horizontal != gaps.inner.vertical;
     drop(source);
     let mut f = FormBuilder::new(ui, model);
-    let preview = gap_preview_sized(ui, &mut f, None, CGSize::new(160.0, 100.0));
-    let mut row = |name: &str, outer: bool, axis: Option<usize>| {
-        f.gap_cells(
-            name,
+    // Built first, so the sliders preview their drags in it.
+    let preview = gap_preview(ui, &mut f, None, PREVIEW);
+    let mut simple = Section::form(&ui, "");
+    let mut detailed = Section::form(&ui, "");
+    for (outer, title, names) in [
+        (true, "Screen edges", &EDGES[..]),
+        (false, "Between windows", &AXES[..]),
+    ] {
+        let (slider, input, message) = f.numeric_controls(
+            title,
+            1.0,
             true,
-            move |source| spacing_gap(source, None, outer, axis),
-            move |source, value| set_spacing_gap(source, None, outer, axis, value),
-        )
-    };
-    let simple = Rc::new(
-        HStack::new(&ui)
-            .push(
-                Grid::new(&ui)
-                    .spacing(8.0, 8.0)
-                    .row(row("Screen edges", true, None))
-                    .row(row("Between windows", false, None))
-                    .first_baseline()
-                    .column_widths(&[LABEL_COLUMN]),
-            )
-            .push(Spacer::new(&ui)),
-    );
-    let mut numeric_row = |name: &str, outer: bool, axis: usize| {
-        f.gap_cells(
-            name,
-            false,
-            move |source| spacing_gap(source, None, outer, Some(axis)),
-            move |source, value| set_spacing_gap(source, None, outer, Some(axis), value),
-        )
-    };
-    let empty = || Box::new(View::new(&ui)) as Box<dyn NativeView>;
-    let mut custom_grid = Grid::new(&ui).spacing(8.0, 16.0).row(vec![
-        Box::new(SubsectionTitle::new(&ui, "Screen edges")),
-        empty(),
-        Box::new(SubsectionTitle::new(&ui, "Between windows")),
-        empty(),
-    ]);
-    for (index, name) in EDGES.into_iter().enumerate() {
-        let mut cells = numeric_row(name, true, index);
-        if let Some(axis) = AXES.get(index) {
-            cells.extend(numeric_row(axis, false, index));
-        } else {
-            cells.extend([empty(), empty()]);
-        }
-        custom_grid = custom_grid.row(cells);
+            Some(Rc::new(|_: &ConfigSource| (0.0, 100.0))),
+            move |source| spacing_gap(source, None, outer, None),
+            move |source, value| set_spacing_gap(source, None, outer, None, value),
+        );
+        let value = input.unit_field(&ui, "pt");
+        value.width(Metrics::VALUE_FIELD_WIDTH);
+        // The bezel hosts the field’s view; keep its Rust owner with the row.
+        let control = HStack::new(&ui).spacing(8.0).push(slider.unwrap()).push(value).keep(input);
+        simple = simple.row(f.row(title, control, message));
+        let mut messages = Vec::new();
+        let fields = names
+            .iter()
+            .enumerate()
+            .map(|(axis, name)| {
+                let (_, input, message) = f.numeric_controls(
+                    &format!("{title}, {name}"),
+                    1.0,
+                    true,
+                    None,
+                    move |source| spacing_gap(source, None, outer, Some(axis)),
+                    move |source, value| set_spacing_gap(source, None, outer, Some(axis), value),
+                );
+                messages.push(message);
+                (*name, input)
+            })
+            .collect::<Vec<_>>();
+        let first = objc2::Message::retain(fields[0].1.ns_text_field());
+        let control = messages.into_iter().fold(
+            VStack::new(&ui)
+                .spacing(2.0)
+                .push(super::editors::field_group(&ui, "pt", fields)),
+            |stack, message| stack.push(message),
+        );
+        detailed = detailed.row(SettingsRow::new(&ui, title, control).label_baseline(&first));
     }
-    let header = custom_grid.ns_grid_view().rowAtIndex(0);
-    header.mergeCellsInRange(objc2_foundation::NSRange::new(0, 2));
-    header.mergeCellsInRange(objc2_foundation::NSRange::new(2, 2));
-    let custom_form = Rc::new(custom_grid.first_baseline());
+    let (simple, detailed) = (Rc::new(simple), Rc::new(detailed));
     simple.set_hidden(custom);
-    custom_form.set_hidden(!custom);
-    let (weak_simple, weak_custom) = (Rc::downgrade(&simple), Rc::downgrade(&custom_form));
+    detailed.set_hidden(!custom);
+    let (weak_simple, weak_detailed) = (Rc::downgrade(&simple), Rc::downgrade(&detailed));
     let mode = SegmentedControl::new(&ui, &["Simple", "Custom"]).on_change(move |index| {
-        if let (Some(simple), Some(custom)) = (weak_simple.upgrade(), weak_custom.upgrade()) {
+        if let (Some(simple), Some(detailed)) = (weak_simple.upgrade(), weak_detailed.upgrade()) {
             simple.set_hidden(index != 0);
-            custom.set_hidden(index == 0);
+            detailed.set_hidden(index == 0);
         }
     });
-    mode.accessibility_label("Spacing controls");
     mode.set_selected(usize::from(custom));
-    let editor = ResponsiveStack::new(&ui, 560.0)
-        .push(
-            VStack::new(&ui)
-                .spacing(12.0)
-                .push(HStack::new(&ui).push(mode).push(Spacer::new(&ui)))
-                .push(simple)
-                .push(custom_form),
-        )
-        .push(Spacer::new(&ui))
-        .push(preview);
-    lengthen_sliders(editor.ns_view());
-    f.finish(editor)
+    mode.accessibility_label("Spacing controls");
+    let page = VStack::new(&ui)
+        .spacing(12.0)
+        .push(stage(&ui, preview, Some(Box::new(mode))))
+        .push(simple)
+        .push(detailed);
+    align_form(page.ns_view());
+    f.finish(page)
+}
+
+/// A spacing preview centered above its editor, like a display arrangement, with an
+/// optional control beneath it.
+pub(super) fn stage(
+    ui: &Ui,
+    preview: impl NativeView,
+    below: Option<Box<dyn NativeView>>,
+) -> VStack {
+    let centered = |view: Box<dyn NativeView>| {
+        let (leading, trailing) = (Spacer::new(ui), Spacer::new(ui));
+        let equal = leading.ns_view().widthAnchor();
+        let other = trailing.ns_view().widthAnchor();
+        let row = HStack::new(ui).push(leading).push(view).push(trailing);
+        // Equal margins once both share the row.
+        equal.constraintEqualToAnchor(&other).setActive(true);
+        row
+    };
+    let stage = VStack::new(ui).spacing(10.0).insets(Insets {
+        top: 4.0,
+        left: 0.0,
+        bottom: 4.0,
+        right: 0.0,
+    });
+    let stage = stage.push(centered(Box::new(preview)));
+    match below {
+        Some(view) => stage.push(centered(view)),
+        None => stage,
+    }
 }
 
 /// A ratio as a percentage, without float noise such as `56.99999999999999`.
@@ -360,6 +380,14 @@ pub(super) fn percentage_text(ratio: f64) -> String {
         .trim_end_matches('.')
         .to_string()
 }
+
+type Following = (&'static str, &'static str, fn(&str) -> String);
+const SHARED_POSITION: Following = ("Use shared setting", "Shared", |value| {
+    format!("Shared setting: {value}")
+});
+const AUTOMATIC: Following = ("Automatic", "Automatic", |value| {
+    format!("{value}, to suit the master side")
+});
 
 pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Page {
     let mut f = FormBuilder::new(ui, model);
@@ -384,13 +412,13 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
         ($layout:ident) => {
             f.following_popup(
                 "New window position",
-                "Shared",
+                SHARED_POSITION,
                 insertion(),
                 |s| s.settings.layout.$layout.base.window_insertion_point,
                 |s| s.settings.layout.base.window_insertion_point.unwrap_or_default(),
                 |s, v| s.settings.layout.$layout.base.window_insertion_point = v,
             )
-            .tooltip("Where this layout inserts new windows. Shared follows New window position in Shared settings.")
+            .tooltip("Where this layout inserts new windows. Use shared setting follows New window position in Shared settings.")
         };
     }
     let mut page = VStack::new(&ui).spacing(12.0);
@@ -403,28 +431,7 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
                 |s| &mut s.settings.layout.traditional,
             )
             .row(insertion_point!(traditional)),
-        LayoutMode::Bsp => options()
-            .row(insertion_point!(bsp))
-            .row(f.text(
-                "Single window aspect ratio",
-                |s| {
-                    s.settings
-                        .layout
-                        .bsp
-                        .single_window_aspect_ratio
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "Automatic".into())
-                },
-                |s, v| {
-                    s.settings.layout.bsp.single_window_aspect_ratio =
-                        if v.trim().eq_ignore_ascii_case("automatic") {
-                            None
-                        } else {
-                            optional_number(&v)?
-                        };
-                    Ok(())
-                },
-            ).tooltip("Automatic fills the available space for a single window. Enter a width-to-height ratio, such as 1.78 for 16:9, to keep it at a fixed shape.")),
+        LayoutMode::Bsp => options().row(insertion_point!(bsp)).row(aspect_ratio(&mut f)),
         LayoutMode::Stack => f
             .fields(
                 options(),
@@ -461,7 +468,7 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
             )
             .row(f.following_popup(
                 "Master arrangement",
-                "Automatic",
+                AUTOMATIC,
                 arrangement(),
                 |s| s.settings.layout.master_stack.master_arrangement,
                 natural,
@@ -469,7 +476,7 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
             ))
             .row(f.following_popup(
                 "Stack arrangement",
-                "Automatic",
+                AUTOMATIC,
                 arrangement(),
                 |s| s.settings.layout.master_stack.stack_arrangement,
                 natural,
@@ -513,11 +520,15 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
                     |s| &mut s.settings.layout.scrolling,
                 )
                 // Unset means animated, so only turning it off is written.
-                .row(f.switch(
-                    "Animate navigation",
-                    |s| s.settings.layout.scrolling.animate.unwrap_or(true),
-                    |s, v| s.settings.layout.scrolling.animate = (!v).then_some(false),
-                ));
+                .row(
+                    f.switch(
+                        "Animate navigation",
+                        |s| s.settings.layout.scrolling.animate.unwrap_or(true),
+                        |s, v| s.settings.layout.scrolling.animate = (!v).then_some(false),
+                    )
+                    .description("Recommended")
+                    .tooltip("Recommended. Motion shows where columns move as the strip scrolls."),
+                );
             page = page.push(navigation);
             subsection("Window placement").row(insertion_point!(scrolling))
         }
@@ -526,6 +537,57 @@ pub(super) fn layout_options(ui: Ui, model: &Rc<Model>, mode: LayoutMode) -> Pag
     let page = page.push(section);
     align_form(page.ns_view());
     f.finish(page)
+}
+
+/// BSP’s single-window shape: Automatic fills the space; Custom keeps a width-to-height
+/// ratio, entered in its own field rather than mixed with a keyword.
+fn aspect_ratio(f: &mut FormBuilder) -> SettingsRow {
+    const SIXTEEN_NINE: f64 = 16.0 / 9.0;
+    let ui = f.ui;
+    let message = Rc::new(ValidationMessage::new(&ui));
+    let ratio = |s: &ConfigSource| s.settings.layout.bsp.single_window_aspect_ratio;
+    let set = |s: &mut ConfigSource, v| s.settings.layout.bsp.single_window_aspect_ratio = v;
+    let change = f.assign(ratio, set, Rc::downgrade(&message));
+    let field = Rc::new(NumberField::new(&ui).range(0.1, 10.0).on_change({
+        let change = change.clone();
+        move |value| change(Some(value))
+    }));
+    field.accessibility_label("Width-to-height ratio");
+    let model = f.model.clone();
+    let mode = Rc::new(Popup::new(&ui).sections([["Automatic"], ["Custom"]]).on_change(
+        move |index| {
+            let custom = model.upgrade().and_then(|model| ratio(&model.source.borrow()));
+            change(if index == 0 {
+                None
+            } else {
+                custom.or(Some(SIXTEEN_NINE))
+            });
+        },
+    ));
+    mode.accessibility_label("Single window aspect ratio");
+    mode.set_item_badge(0, Some("Default"));
+    let value = field.unit_field(&ui, ": 1");
+    value.width(Metrics::VALUE_FIELD_WIDTH);
+    let custom = Rc::new(
+        HStack::new(&ui)
+            .spacing(8.0)
+            .push(value)
+            .push(Caption::single_line(&ui, "1.78 is 16:9")),
+    );
+    let weak = Rc::downgrade(&custom);
+    f.sync_when(&mode, ratio, move |mode, s| {
+        mode.set_selected(usize::from(ratio(s).is_some()));
+        if let Some(custom) = weak.upgrade() {
+            custom.set_hidden(ratio(s).is_none());
+        }
+    });
+    f.sync_when(&field, ratio, move |field, s| {
+        field.set_value(ratio(s).unwrap_or(SIXTEEN_NINE))
+    });
+    let control = HStack::new(&ui).spacing(10.0).push(mode).push(custom).keep(field);
+    f.row("Single window aspect ratio", control, message).tooltip(
+        "Automatic fills the available space with a single window. Custom keeps it at a fixed width-to-height shape.",
+    )
 }
 
 /// Scrolling’s width presets as chips, in percent of the screen width.
@@ -548,6 +610,7 @@ fn width_presets(f: &mut FormBuilder) -> SettingsRow {
     let model = f.model.clone();
     let chips = Rc::new(
         ValueChips::new(&f.ui, "Width preset", "%", 5.0, 100.0)
+            .compact()
             .format(|percent| percentage_text(percent / 100.0))
             .on_edit(move |edit| {
                 let Some(model) = model.upgrade() else { return };
@@ -584,22 +647,36 @@ fn width_presets(f: &mut FormBuilder) -> SettingsRow {
     )
 }
 
-/// One comfortable length for sliders on the Layouts page.
+/// Sliders on the Layouts page start at a comfortable length and take any room the
+/// form has to spare, so their row spans the pane.
 pub(super) fn lengthen_sliders(view: &objc2_app_kit::NSView) {
     if let Some(slider) = view.downcast_ref::<objc2_app_kit::NSSlider>() {
-        slider.widthAnchor().constraintEqualToConstant(140.0).setActive(true);
+        slider
+            .widthAnchor()
+            .constraintGreaterThanOrEqualToConstant(140.0)
+            .setActive(true);
+        slider.setContentHuggingPriority_forOrientation(
+            1.0,
+            objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
+        );
     }
     for child in view.subviews() {
         lengthen_sliders(&child);
     }
 }
 
+/// Whether a form control should span its column: sliders do; popups, switches, chips
+/// and fields keep their natural width.
+fn stretches(view: &objc2_app_kit::NSView) -> bool {
+    view.downcast_ref::<objc2_app_kit::NSSlider>().is_some()
+        || view.subviews().iter().any(|child| stretches(&child))
+}
+
 /// The narrowest label column on the Layouts page, so its forms share one control edge.
 pub(super) const LABEL_COLUMN: f64 = 180.0;
 
-/// Give every form grid in `view` the same label column, so controls in separate
-/// subsections and groups share one predictable leading edge, and give continuous
-/// sliders one comfortable length.
+/// Give every form grid in `view` the same label column and trailing control edge, so
+/// rows in separate subsections and groups line up, with sliders spanning between.
 pub(super) fn align_form(view: &objc2_app_kit::NSView) {
     lengthen_sliders(view);
     fn grids(view: &objc2_app_kit::NSView, out: &mut Vec<Retained<objc2_app_kit::NSGridView>>) {
@@ -618,13 +695,30 @@ pub(super) fn align_form(view: &objc2_app_kit::NSView) {
         .iter()
         .flat_map(|grid| {
             (0..grid.numberOfRows()).filter_map(|row| {
-                let cell = grid.cellAtColumnIndex_rowIndex(0, row);
-                Some(cell.contentView()?.fittingSize().width)
+                // Measure the title alone; descriptions beneath it wrap to the column.
+                fn title(view: &objc2_app_kit::NSView) -> Option<Retained<objc2_app_kit::NSView>> {
+                    if view.downcast_ref::<objc2_app_kit::NSTextField>().is_some() {
+                        return Some(objc2::Message::retain(view));
+                    }
+                    view.subviews().iter().find_map(|child| title(&child))
+                }
+                let content = grid.cellAtColumnIndex_rowIndex(0, row).contentView()?;
+                Some(title(&content).unwrap_or(content).fittingSize().width)
             })
         })
         .fold(LABEL_COLUMN, f64::max);
     for grid in found {
         grid.columnAtIndex(0).setWidth(width);
+        for row in 0..grid.numberOfRows() {
+            let cell = grid.cellAtColumnIndex_rowIndex(1, row);
+            // Controls sit at the trailing edge, as in every other pane.
+            let fill = cell.contentView().is_some_and(|view| stretches(&view));
+            cell.setXPlacement(if fill {
+                objc2_app_kit::NSGridCellPlacement::Fill
+            } else {
+                objc2_app_kit::NSGridCellPlacement::Trailing
+            });
+        }
     }
 }
 

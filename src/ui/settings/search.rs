@@ -26,7 +26,7 @@ impl Entry {
         use super::layouts::Target;
         match section(&self.location) {
             "Spacing" => Some(Target::Spacing),
-            "Displays" => Some(Target::Displays),
+            "Display overrides" => Some(Target::Displays),
             _ => self.layout.map(Target::Layout),
         }
     }
@@ -112,7 +112,7 @@ fn describe(entry: &Draft) -> String {
         "App rules" => "Choose how Rift handles an application's windows.",
         "Workspace rules" => "Assign matching windows to a workspace.",
         "Keyboard shortcuts" => "View, add, and edit keyboard shortcuts.",
-        "Display settings" | "Displays" => "Customize spacing for a connected display.",
+        "Display overrides" => "Customize spacing and column widths for one display.",
         "Workspaces" => "Add workspaces and customize their names and layouts.",
         _ => return entry.location.clone(),
     };
@@ -157,9 +157,9 @@ const MANUAL: &[(Category, Option<LayoutMode>, &str, &str, &str)] = &[
     (
         Layouts,
         None,
-        "Displays",
-        "Display settings",
-        "monitor screen connected per display override gaps spacing widths",
+        "Display overrides",
+        "Display overrides",
+        "monitor screen connected per display override gaps spacing widths add display uuid",
     ),
     (
         Workspaces,
@@ -466,7 +466,7 @@ mod tests {
             (" FFM ", "Focus follows pointer", Mouse, None),
             ("stack offset", "Window offset", Layouts, Some(LayoutMode::Stack)),
             ("screen edges", "Screen edges", Layouts, None),
-            ("per display override", "Display settings", Layouts, None),
+            ("per display override", "Display overrides", Layouts, None),
         ] {
             let found = results(query);
             let first = found.first().expect("find a setting, not just its section");

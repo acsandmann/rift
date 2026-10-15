@@ -80,6 +80,10 @@ impl FormBuilder {
                     let app = Application::shared(&self.ui);
                     let model = self.model.clone();
                     let slider = Slider::new(&self.ui).range(min, max).continuous(true);
+                    let slider = match slider_step(field.key) {
+                        Some(step) => slider.step(step),
+                        None => slider,
+                    };
                     let slider = if let Some(count) = notches {
                         // Counts sit beside percentages; match their field width.
                         input.width(70.0);
@@ -168,6 +172,9 @@ impl FormBuilder {
                     Popup::new(&self.ui).on_change(move |index| commit(FieldValue::Choice(index))),
                 );
                 input.set_items(choices.iter().map(|choice| choice.0));
+                if let FieldValue::Choice(index) = read(get(defaults())) {
+                    input.set_item_badge(index, Some("Default"));
+                }
                 self.sync_when(
                     &input,
                     move |source| read(get(source)),
@@ -230,6 +237,20 @@ fn slider_options(key: &str, source: &ConfigSource) -> Option<(f64, f64, Option<
         "thickness" => (20.0, 64.0, None),
         "spacing" | "stack_offset" => (0.0, 100.0, None),
         "fade_duration_ms" => (0.0, 1000.0, None),
+        _ => return None,
+    })
+}
+
+/// Settings that read best in round steps; their fields still accept exact values.
+fn slider_step(key: &str) -> Option<f64> {
+    Some(match key {
+        "min_column_width_ratio" | "max_column_width_ratio" => 5.0,
+        "stack_offset" | "distance_pct" | "drop_zone_fraction" | "workspace_switch_threshold" => {
+            5.0
+        }
+        "thickness" => 4.0,
+        "fade_duration_ms" => 50.0,
+        "swipe_vertical_tolerance" | "vertical_tolerance" => 0.05,
         _ => return None,
     })
 }

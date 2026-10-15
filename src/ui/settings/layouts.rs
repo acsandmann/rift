@@ -2,6 +2,7 @@
 use std::cell::OnceCell;
 
 use objc2::Message;
+use objc2_app_kit::NSAccessibility;
 
 use super::*;
 use crate::common::config::{
@@ -15,42 +16,32 @@ pub(super) enum Target {
     Spacing,
     Displays,
 }
-impl Target {
-    fn index(self) -> usize {
-        match self {
-            Self::Layout(mode) => mode.config_choice_index(),
-            Self::Spacing => 6,
-            Self::Displays => 7,
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Layout(mode) => pages::layout_title(mode),
-            Self::Spacing => "Spacing",
-            Self::Displays => "Displays",
-        }
-    }
-}
 /// Canvas size of each layout tile’s illustration.
 const TILE: CGSize = CGSize::new(64.0, 40.0);
+/// Cache slots after the six layouts: Spacing, then Display overrides.
+const SHARED: usize = 6;
 
+/// One page answers, top to bottom: which layout is the default (the toolbar popup),
+/// which is being configured (the gallery’s selection), its own settings, the settings
+/// every layout shares, and what changes on a particular display.
 pub(super) struct Inspector {
     ui: Ui,
     model: Weak<Model>,
     root: Page,
-    choices: Vec<Rc<Button>>,
+    tiles: Vec<Rc<LayoutTile>>,
+    /// The default layout, shown in the toolbar beside the page title.
+    default_control: Rc<HStack>,
+    default_popup: Rc<Popup>,
     title: Label,
     summary: Caption,
-    /// Set as Default beside another layout’s title, or a quiet confirmation on the default.
-    set_default: Rc<Button>,
-    is_default: Rc<HStack>,
-    /// Restore Defaults in the page footer, for the edited layout.
-    restore_button: Rc<Button>,
-    /// Each tile’s context menu, with its Set as Default item.
-    tile_menus: Vec<(Rc<Menu>, WeakMenuItem)>,
+    actions: Rc<Popup>,
+    /// Use as Default in the selected layout’s actions and each tile’s context menu.
+    default_items: Vec<WeakMenuItem>,
+    restore_item: WeakMenuItem,
+    _tile_menus: Vec<Menu>,
     error: Rc<ValidationMessage>,
     host: Rc<PageHost>,
+    floating: Rc<HStack>,
     shared_hosts: [Rc<PageHost>; 2],
     disclosures: [Rc<Disclosure>; 2],
     selected: Cell<LayoutMode>,
@@ -62,103 +53,93 @@ impl Inspector {
     pub fn new(ui: Ui, model: &Rc<Model>) -> Rc<Self> {
         let selected = model.source.borrow().settings.layout.mode;
         let inspector = Rc::new_cyclic(|weak: &Weak<Self>| {
-            let mut choices = Vec::new();
+            let mut tiles = Vec::new();
+            let mut default_items = Vec::new();
             let mut tile_menus = Vec::new();
             for &(title, mode) in pages::layouts() {
                 let owner = weak.clone();
-                let preview = LayoutPreview::new(&ui, TILE);
-                let button = Rc::new(
-                    Button::new(&ui, title).layout_illustration(preview).on_click(move || {
-                        if let Some(inspector) = owner.upgrade() {
-                            inspector.select_target(Target::Layout(mode));
-                        }
-                    }),
-                );
-                // A little air between the illustration and its name, and room for the
-                // default marker below.
-                button.ns_button().setImage(Some(&objc2_app_kit::NSImage::initWithSize(
-                    <objc2_app_kit::NSImage as objc2::AnyThread>::alloc(),
-                    CGSize::new(TILE.width, TILE.height + 4.0),
-                )));
-                button.height(TILE.height + 46.0);
-                button.accessibility_label(&format!("Configure {title}"));
-                // Right-click a tile to make it the default or restore its options.
-                let owner = weak.clone();
-                let make_default =
-                    MenuItem::new(&ui, "Set as Default Layout").on_click(move || {
-                        if let Some(inspector) = owner.upgrade() {
-                            inspector.set_default(mode);
-                        }
-                    });
-                let default_item = make_default.weak();
-                let mut menu = Menu::new(&ui).item(make_default);
-                if mode != LayoutMode::Floating {
-                    let owner = weak.clone();
-                    menu = menu.separator().item(
-                        MenuItem::new(&ui, &format!("Restore {title} Defaults…")).on_click(
-                            move || {
-                                if let Some(inspector) = owner.upgrade() {
-                                    inspector.confirm_restore(mode);
-                                }
-                            },
-                        ),
-                    );
-                }
-                let menu = Rc::new(menu);
+                let tile = LayoutTile::new(&ui, title, TILE).on_click(move || {
+                    if let Some(inspector) = owner.upgrade() {
+                        inspector.select_target(Target::Layout(mode));
+                    }
+                });
+                tile.ns_button()
+                    .setAccessibilityHelp(Some(&objc2_foundation::NSString::from_str(&format!(
+                        "Shows {title}’s settings. Doesn’t change the default layout."
+                    ))));
+                // Right-click a tile to make it the default or restore its settings.
+                let (menu, item, _) = layout_menu(&ui, weak, Some(mode));
                 // SAFETY: the menu is kept alive with the tile in `tile_menus`.
-                unsafe { button.ns_button().setMenu(Some(menu.ns_menu())) };
-                tile_menus.push((menu, default_item));
-                choices.push(button);
+                unsafe { tile.ns_button().setMenu(Some(menu.ns_menu())) };
+                default_items.push(item);
+                tile_menus.push(menu);
+                tiles.push(Rc::new(tile));
             }
-            let picker = choices.iter().fold(
+            let gallery = tiles.iter().fold(
                 HStack::new(&ui)
                     .spacing(4.0)
                     .distribution(objc2_app_kit::NSStackViewDistribution::FillEqually),
-                |row, button| row.push(button.clone()),
+                |row, tile| row.push(tile.clone()),
             );
-            let title = Label::new(&ui, "").font(&Font::body_emphasized());
-            let summary = Caption::new(&ui, "").max_lines(2);
-            let owner = weak.clone();
-            let set_default = Rc::new(Button::new(&ui, "Set as Default").on_click(move || {
-                if let Some(inspector) = owner.upgrade() {
-                    inspector.set_default(inspector.selected.get());
-                }
+            let group = gallery.ns_view();
+            group.setAccessibilityElement(true);
+            group.setAccessibilityRole(Some(unsafe {
+                objc2_app_kit::NSAccessibilityRadioGroupRole
             }));
-            set_default.control_size(objc2_app_kit::NSControlSize::Small);
-            set_default.ns_button().setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
-            let is_default = Rc::new(
-                ImageView::symbol(&ui, "checkmark.circle.fill")
-                    .into_iter()
-                    .fold(HStack::new(&ui).spacing(4.0), |row, check| {
-                        check.ns_image_view().setContentTintColor(Some(
-                            &objc2_app_kit::NSColor::secondaryLabelColor(),
-                        ));
-                        row.push(check)
-                    })
-                    .push(Caption::new(&ui, "Default Layout")),
+            group.setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
+                "Layout to configure",
+            )));
+
+            let owner = weak.clone();
+            let default_popup = Rc::new(
+                Popup::new(&ui)
+                    .items(pages::layouts().iter().map(|(title, _)| *title))
+                    .on_change(move |index| {
+                        if let (Some(inspector), Some(mode)) =
+                            (owner.upgrade(), LayoutMode::from_config_choice(index))
+                        {
+                            inspector.set_default(mode);
+                        }
+                    }),
             );
-            // The default action shares the title’s line, at the editor’s trailing edge.
-            let title_row = HStack::new(&ui)
-                .push(title.ns_view().retain())
+            default_popup.accessibility_label("Default layout");
+            default_popup
+                .tooltip("The layout new workspaces use, unless a workspace chooses its own.");
+            let default_control = Rc::new(
+                HStack::new(&ui)
+                    .spacing(6.0)
+                    .push(SecondaryLabel::single_line(&ui, "Default layout"))
+                    .push(default_popup.clone()),
+            );
+            default_control.accessibility_label("Default layout");
+
+            let title = Label::new(&ui, "").font(&Font::title3());
+            let summary = Caption::new(&ui, "").max_lines(2);
+            let (menu, use_as_default, restore_item) = layout_menu(&ui, weak, None);
+            let actions = Rc::new(Popup::actions(&ui, "Layout actions", menu));
+            let heading = HStack::new(&ui)
+                .alignment(objc2_app_kit::NSLayoutAttribute::FirstBaseline)
+                .push(
+                    VStack::new(&ui)
+                        .spacing(2.0)
+                        .push(title.ns_view().retain())
+                        .push(summary.ns_view().retain()),
+                )
                 .push(Spacer::new(&ui))
-                .push(set_default.clone())
-                .push(is_default.clone());
-            title_row
-                .ns_view()
-                .heightAnchor()
-                .constraintGreaterThanOrEqualToConstant(set_default.ns_view().fittingSize().height)
-                .setActive(true);
-            let header =
-                VStack::new(&ui).spacing(0.0).push(title_row).push(summary.ns_view().retain());
+                .push(actions.clone());
             let host = Rc::new(PageHost::content_sized(&ui));
+            let floating = Rc::new(floating_note(&ui));
             let error = Rc::new(ValidationMessage::new(&ui));
             let editor = VStack::new(&ui)
-                .spacing(12.0)
-                .push(picker)
+                .spacing(14.0)
+                .push(gallery)
                 .push(Divider::new(&ui))
-                .push(header)
+                .push(heading)
                 .push(host.clone())
+                .push(floating.clone())
                 .push(error.clone());
+
+            let mut form = FormBuilder::new(ui, model);
             let shared_hosts = std::array::from_fn(|_| Rc::new(PageHost::content_sized(&ui)));
             let disclosures = std::array::from_fn(|index| {
                 let owner = weak.clone();
@@ -166,22 +147,18 @@ impl Inspector {
                 Rc::new(
                     Disclosure::new(
                         &ui,
-                        target.title(),
+                        ["Spacing", "Display overrides"][index],
                         View::new(&ui).content(shared_hosts[index].clone(), Insets {
-                            top: 0.0,
+                            top: 2.0,
                             left: 12.0,
-                            bottom: 12.0,
+                            bottom: 14.0,
                             right: 12.0,
                         }),
                     )
-                    .header_insets(Insets {
-                        top: 12.0,
-                        left: 12.0,
-                        bottom: 12.0,
-                        right: 12.0,
-                    })
+                    .header_insets(cgs::uniform_insets(12.0))
                     .compact()
                     .trailing_indicator(&ui)
+                    .summary(&ui)
                     .on_toggle(move |expanded| {
                         owner
                             .upgrade()
@@ -189,63 +166,61 @@ impl Inspector {
                     }),
                 )
             });
-            let mut form = FormBuilder::new(ui, model);
-            let owner = weak.clone();
-            let restore_button =
-                Rc::new(Button::new(&ui, "Restore Defaults…").on_click(move || {
-                    if let Some(inspector) = owner.upgrade() {
-                        inspector.confirm_restore(inspector.selected.get());
+            let weak_disclosures = disclosures.each_ref().map(Rc::downgrade);
+            let env = Rc::downgrade(&model.env);
+            form.sync.push(Box::new(move |source| {
+                let summaries = [
+                    spacing_summary(source),
+                    display_summary(source, env.upgrade().as_deref()),
+                ];
+                for (disclosure, summary) in weak_disclosures.iter().zip(summaries) {
+                    if let Some(disclosure) = disclosure.upgrade() {
+                        disclosure.set_summary(&summary);
                     }
-                }));
-            restore_button.ns_button().setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+                }
+            }));
             let position = Section::form(&ui, "").row(pages::window_position(&mut form));
             pages::align_form(position.ns_view());
-            let inset = |content: Box<dyn NativeView>, vertical: f64| {
-                View::new(&ui).content(content, Insets {
-                    top: vertical,
-                    left: 12.0,
-                    bottom: vertical,
-                    right: 12.0,
-                })
-            };
             let shared = VStack::new(&ui)
                 .spacing(0.0)
-                .push(inset(Box::new(position), 8.0))
-                .push(inset(Box::new(Divider::new(&ui)), 0.0))
+                .push(View::new(&ui).content(position, Insets {
+                    top: 10.0,
+                    left: 12.0,
+                    bottom: 10.0,
+                    right: 12.0,
+                }))
+                .push(inset_divider(&ui))
                 .push(disclosures[0].clone())
-                .push(inset(Box::new(Divider::new(&ui)), 0.0))
+                .push(inset_divider(&ui))
                 .push(disclosures[1].clone());
             let root = form.finish(
                 SettingsPage::new(&ui, "")
                     .section(GroupBox::with_insets(&ui, editor, cgs::uniform_insets(12.0)))
                     .section(
-                        Section::new(&ui, "Shared settings").content(GroupBox::with_insets(
-                            &ui,
-                            shared,
-                            cgs::uniform_insets(0.0),
-                        )),
+                        Section::new(&ui, "Shared settings")
+                            .description(
+                                "Every layout uses these, unless a layout or display sets its own.",
+                            )
+                            .content(GroupBox::with_insets(&ui, shared, cgs::uniform_insets(0.0))),
                     )
-                    // A preferences footer: restore the edited layout, and help.
-                    .section(
-                        HStack::new(&ui)
-                            .push(restore_button.clone())
-                            .push(Spacer::new(&ui))
-                            .push(layout_help(&ui)),
-                    ),
+                    .section(HStack::new(&ui).push(Spacer::new(&ui)).push(layout_help(&ui))),
             );
             Self {
                 ui,
                 model: Rc::downgrade(model),
                 root,
-                choices,
+                tiles,
+                default_control,
+                default_popup,
                 title,
                 summary,
-                set_default,
-                is_default,
-                restore_button,
-                tile_menus,
+                actions,
+                default_items: default_items.into_iter().chain([use_as_default]).collect(),
+                restore_item,
+                _tile_menus: tile_menus,
                 error,
                 host,
+                floating,
                 shared_hosts,
                 disclosures,
                 selected: Cell::new(selected),
@@ -256,6 +231,8 @@ impl Inspector {
         inspector.select_target(Target::Layout(selected));
         inspector
     }
+
+    pub fn default_control(&self) -> Rc<dyn NativeView> { self.default_control.clone() }
 
     /// Make `mode` the default for workspaces without their own layout.
     fn set_default(&self, mode: LayoutMode) {
@@ -286,7 +263,7 @@ impl Inspector {
             &self.ui,
             &format!("Restore {title} defaults?"),
             &format!(
-                "{title}’s options return to their original values. Your default layout, spacing, and display settings don’t change."
+                "{title}’s settings return to their original values. Your default layout, shared settings, and display overrides don’t change."
             ),
         )
         .button("Restore Defaults")
@@ -313,19 +290,27 @@ impl Inspector {
     }
 
     pub fn select_target(&self, target: Target) {
-        let Target::Layout(mode) = target else {
-            self.set_shared(target, true);
-            return;
+        let mode = match target {
+            Target::Layout(mode) => mode,
+            Target::Spacing | Target::Displays => {
+                let index = (target == Target::Displays) as usize;
+                if self.set_shared(target, true) {
+                    self.disclosures[index].set_expanded(true);
+                }
+                return;
+            }
         };
         let Some(model) = self.model.upgrade() else {
             return;
         };
+        if mode == self.selected.get() && !self.host.ns_view().subviews().is_empty() {
+            return self.update_selection(&model.source.borrow());
+        }
+        // Commit the field being edited, or keep showing it while its value is invalid.
         if !finish_editing(self.host.ns_view()) {
-            self.update_selection();
-            return;
+            return self.update_selection(&model.source.borrow());
         }
         self.selected.set(mode);
-        self.update_selection();
         let index = mode.config_choice_index();
         if self.pages.borrow()[index].is_none() {
             self.pages.borrow_mut()[index] = Some(pages::layout_options(self.ui, &model, mode));
@@ -336,78 +321,73 @@ impl Inspector {
         self.host.set_cached_page(page.view.clone());
         let floating = mode == LayoutMode::Floating;
         self.host.set_hidden(floating);
-        self.restore_button.set_hidden(floating);
-        self.update_previews(&model.source.borrow());
+        self.floating.set_hidden(!floating);
+        self.restore_item.set_enabled(!floating);
+        self.update_selection(&model.source.borrow());
     }
 
+    /// Mount a shared editor before its disclosure expands, or commit its field before
+    /// it collapses. Returns false to keep the disclosure as it is.
     fn set_shared(&self, target: Target, expanded: bool) -> bool {
-        let index = target.index();
-        let host = &self.shared_hosts[index - 6];
-        if !finish_editing(host.ns_view()) {
+        let index = (target == Target::Displays) as usize;
+        let host = &self.shared_hosts[index];
+        if !expanded {
+            return finish_editing(host.ns_view());
+        }
+        let Some(model) = self.model.upgrade() else {
             return false;
+        };
+        let slot = SHARED + index;
+        if self.pages.borrow()[slot].is_none() {
+            self.pages.borrow_mut()[slot] = Some(match target {
+                Target::Spacing => pages::layout_spacing(self.ui, &model),
+                _ => editors::display_inspector(self.ui, &model),
+            });
         }
-        if expanded {
-            let other = 1 - (index - 6);
-            if !finish_editing(self.shared_hosts[other].ns_view()) {
-                return false;
-            }
-            self.disclosures[other].set_expanded(false);
-            let Some(model) = self.model.upgrade() else {
-                return false;
-            };
-            if self.pages.borrow()[index].is_none() {
-                self.pages.borrow_mut()[index] = Some(match target {
-                    Target::Spacing => pages::layout_spacing(self.ui, &model),
-                    Target::Displays => pages::layout_displays(self.ui, &model),
-                    _ => unreachable!(),
-                });
-            }
-            let pages = self.pages.borrow();
-            let page = pages[index].as_ref().unwrap();
-            page.synchronize(&model);
-            host.set_cached_page(page.view.clone());
-            // The disclosure expands inside an animation. Lay a newly mounted editor out at
-            // its final width first, with animation off, so only the section’s height
-            // animates rather than every new control growing from an empty frame.
-            objc2_app_kit::NSAnimationContext::beginGrouping();
-            let context = objc2_app_kit::NSAnimationContext::currentContext();
-            context.setDuration(0.0);
-            context.setAllowsImplicitAnimation(false);
-            let view = host.ns_view();
-            let width = self.disclosures[index - 6].ns_view().frame().size.width - 24.0;
-            view.setFrameSize(CGSize::new(width, view.fittingSize().height));
-            view.layoutSubtreeIfNeeded();
-            objc2_app_kit::NSAnimationContext::endGrouping();
+        let pages = self.pages.borrow();
+        let page = pages[slot].as_ref().unwrap();
+        page.synchronize(&model);
+        if !host.ns_view().subviews().is_empty() {
+            return true;
         }
-        self.disclosures[index - 6].set_expanded(expanded);
+        host.set_cached_page(page.view.clone());
+        // The disclosure expands inside an animation. Lay a newly mounted editor out at
+        // its final width first, with animation off, so only the section’s height
+        // animates rather than every new control growing from an empty frame.
+        objc2_app_kit::NSAnimationContext::beginGrouping();
+        let context = objc2_app_kit::NSAnimationContext::currentContext();
+        context.setDuration(0.0);
+        context.setAllowsImplicitAnimation(false);
+        let view = host.ns_view();
+        let width = self.disclosures[index].ns_view().frame().size.width - 24.0;
+        view.setFrameSize(CGSize::new(width, view.fittingSize().height));
+        view.layoutSubtreeIfNeeded();
+        objc2_app_kit::NSAnimationContext::endGrouping();
         true
     }
 
-    fn update_selection(&self) {
-        for (index, button) in self.choices.iter().enumerate() {
-            let selected = index == self.selected.get().config_choice_index();
-            button.ns_button().setState(if selected { 1 } else { 0 });
-            button.layout_preview().unwrap().set_selected(selected);
-        }
-    }
-
-    /// Name the tiles and the editor header for the edited and default layouts.
-    fn update_header(&self, default: LayoutMode) {
+    /// Show the edited and default layouts on the tiles, header, menus and toolbar.
+    fn update_selection(&self, source: &ConfigSource) {
         let mode = self.selected.get();
+        let default = source.settings.layout.mode;
         if self.shown.replace(Some((mode, default))) == Some((mode, default)) {
             return;
         }
-        for (button, &(title, choice)) in self.choices.iter().zip(pages::layouts()) {
-            tile_title(button.ns_button(), title, choice == mode, choice == default);
+        for (tile, &(_, choice)) in self.tiles.iter().zip(pages::layouts()) {
+            tile.set_state(choice == mode, (choice == default).then_some("Default"));
         }
         let title = pages::layout_title(mode);
         self.title.set_text(title);
         self.summary.set_text(LayoutMode::CONFIG_CHOICES[mode.config_choice_index()].1);
-        self.set_default.set_hidden(mode == default);
-        self.set_default.accessibility_label(&format!("Set {title} as Default"));
-        self.is_default.set_hidden(mode != default);
-        self.restore_button.set_title(&format!("Restore {title} Defaults…"));
-        for ((_, item), &(_, choice)) in self.tile_menus.iter().zip(pages::layouts()) {
+        self.actions.accessibility_label(&format!("{title} actions"));
+        self.default_popup.set_selected(default.config_choice_index());
+        let edited = self.default_items.len() - 1;
+        for (index, item) in self.default_items.iter().enumerate() {
+            let choice = if index == edited {
+                mode
+            } else {
+                pages::layouts()[index].1
+            };
             item.set_checked(choice == default);
             item.set_enabled(choice != default);
         }
@@ -424,34 +404,144 @@ impl Inspector {
         }
         for (index, host) in self.shared_hosts.iter().enumerate() {
             if !host.ns_view().isHiddenOrHasHiddenAncestor()
-                && let Some(page) = &pages[index + 6]
+                && let Some(page) = &pages[SHARED + index]
             {
                 page.synchronize(&model);
             }
         }
-        self.update_previews(&model.source.borrow());
-    }
-
-    fn update_previews(&self, source: &ConfigSource) {
-        self.update_header(source.settings.layout.mode);
-        for (button, (_, mode)) in self.choices.iter().zip(pages::layouts().iter().copied()) {
-            let preview = button.layout_preview().unwrap();
+        let source = model.source.borrow();
+        self.update_selection(&source);
+        for (tile, &(_, mode)) in self.tiles.iter().zip(pages::layouts()) {
+            let preview = tile.preview();
             preview.set_windows(
-                &sample(source, mode, preview.canvas_size()),
+                &sample(&source, mode, preview.canvas_size()),
                 PreviewAnimation::Immediate,
             );
         }
     }
 
+    /// Connected displays changed: offer the new set without discarding open editors.
     pub fn refresh_displays(&self) {
-        self.pages.borrow_mut()[7] = None;
-        if !self.shared_hosts[1].ns_view().isHiddenOrHasHiddenAncestor() {
-            self.set_shared(Target::Displays, true);
+        let Some(model) = self.model.upgrade() else {
+            return;
+        };
+        self.root.synced_revision.set(None);
+        self.root.synchronize(&model);
+        if let Some(page) = &self.pages.borrow()[SHARED + 1] {
+            page.synced_revision.set(None);
+            page.synchronize(&model);
         }
     }
 }
 impl NativeView for Inspector {
     fn ns_view(&self) -> &objc2_app_kit::NSView { self.root.view.ns_view() }
+}
+
+/// A layout’s Use as Default and Restore Defaults… actions, for one layout or, with
+/// `None`, whichever layout is being edited.
+fn layout_menu(
+    ui: &Ui,
+    owner: &Weak<Inspector>,
+    mode: Option<LayoutMode>,
+) -> (Menu, WeakMenuItem, WeakMenuItem) {
+    let target = move |inspector: &Inspector| mode.unwrap_or(inspector.selected.get());
+    let weak = owner.clone();
+    let make_default = MenuItem::new(ui, "Use as Default Layout").on_click(move || {
+        if let Some(inspector) = weak.upgrade() {
+            inspector.set_default(target(&inspector));
+        }
+    });
+    let weak = owner.clone();
+    let restore = MenuItem::new(ui, "Restore Defaults…").on_click(move || {
+        if let Some(inspector) = weak.upgrade() {
+            inspector.confirm_restore(target(&inspector));
+        }
+    });
+    restore.set_enabled(mode != Some(LayoutMode::Floating));
+    let items = (make_default.weak(), restore.weak());
+    (
+        Menu::new(ui).item(make_default).separator().item(restore),
+        items.0,
+        items.1,
+    )
+}
+
+/// Floating has nothing to configure; say what it does instead of showing an empty form.
+fn floating_note(ui: &Ui) -> HStack {
+    let note = HStack::new(ui)
+        .spacing(12.0)
+        .alignment(objc2_app_kit::NSLayoutAttribute::CenterY);
+    if let Some(symbol) = ImageView::symbol(ui, "macwindow.on.rectangle") {
+        let image = symbol.ns_image_view();
+        image.setSymbolConfiguration(Some(
+            &objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                22.0,
+                unsafe { objc2_app_kit::NSFontWeightRegular },
+            ),
+        ));
+        image.setContentTintColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+        note.add(symbol);
+    }
+    note.add(
+        VStack::new(ui)
+            .spacing(2.0)
+            .push(Label::new(ui, "Windows stay where you put them"))
+            .push(Caption::new(
+                ui,
+                "Rift doesn’t arrange windows in floating workspaces, so this layout has no settings of its own.",
+            )),
+    );
+    note
+}
+
+/// A row divider aligned with the shared settings’ content.
+fn inset_divider(ui: &Ui) -> View {
+    View::new(ui).content(Divider::new(ui), Insets {
+        top: 0.0,
+        left: 12.0,
+        bottom: 0.0,
+        right: 12.0,
+    })
+}
+
+/// Collapsed Spacing: the screen-edge and between-window gaps, or their range.
+fn spacing_summary(source: &ConfigSource) -> String {
+    let gaps = source.settings.layout.gaps.effective_for_display(None);
+    let span = |values: &[f64]| {
+        let (min, max) =
+            values.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        if min == max {
+            format!("{min} pt")
+        } else {
+            format!("{min}–{max} pt")
+        }
+    };
+    let outer = &gaps.outer;
+    format!(
+        "Edges {} · Windows {}",
+        span(&[outer.top, outer.right, outer.bottom, outer.left]),
+        span(&[gaps.inner.horizontal, gaps.inner.vertical])
+    )
+}
+
+/// Collapsed Display overrides: how many displays have their own settings.
+fn display_summary(source: &ConfigSource, env: Option<&Env>) -> String {
+    let layout = &source.settings.layout;
+    let mut custom: Vec<&String> = layout
+        .gaps
+        .per_display
+        .keys()
+        .chain(layout.scrolling.per_display.keys())
+        .collect();
+    custom.sort();
+    custom.dedup();
+    match custom.as_slice() {
+        [] => "None".into(),
+        [uuid] => env
+            .and_then(|env| editors::display_name(&env.displays.borrow(), uuid))
+            .unwrap_or_else(|| "1 display".into()),
+        all => format!("{} displays", all.len()),
+    }
 }
 
 /// Four deterministic sample windows, in canvas points. No window-system queries,
@@ -620,62 +710,8 @@ pub(super) fn restore(model: &Weak<Model>, mode: LayoutMode, error: Weak<Validat
     );
 }
 
-/// A tile’s two-line title: the layout name, emphasized while edited, then a quiet
-/// marker on the default.
-/// Every tile reserves the second line so names stay aligned.
-fn tile_title(button: &objc2_app_kit::NSButton, title: &str, selected: bool, default: bool) {
-    use objc2::AnyThread;
-    use objc2::runtime::AnyObject;
-    use objc2_app_kit::{
-        NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSMutableParagraphStyle,
-        NSParagraphStyleAttributeName, NSTextAlignment,
-    };
-    use objc2_foundation::{NSAttributedString, NSDictionary, NSMutableAttributedString, NSString};
-    let paragraph = NSMutableParagraphStyle::new();
-    paragraph.setAlignment(NSTextAlignment::Center);
-    paragraph.setParagraphSpacing(1.0);
-    let line = |text: &str, font: &NSFont, color: &objc2_app_kit::NSColor| unsafe {
-        NSAttributedString::initWithString_attributes(
-            NSAttributedString::alloc(),
-            &NSString::from_str(text),
-            Some(&NSDictionary::from_slices(
-                &[
-                    NSFontAttributeName,
-                    NSForegroundColorAttributeName,
-                    NSParagraphStyleAttributeName,
-                ],
-                &[
-                    font as &AnyObject,
-                    color as &AnyObject,
-                    &*paragraph as &AnyObject,
-                ],
-            )),
-        )
-    };
-    let text = NSMutableAttributedString::new();
-    text.appendAttributedString(&line(
-        &format!("{title}\n"),
-        &*if selected {
-            NSFont::systemFontOfSize_weight(NSFont::smallSystemFontSize(), unsafe {
-                objc2_app_kit::NSFontWeightSemibold
-            })
-        } else {
-            Font::caption()
-        },
-        &objc2_app_kit::NSColor::labelColor(),
-    ));
-    text.appendAttributedString(&line(
-        if default { "Default" } else { " " },
-        &NSFont::systemFontOfSize_weight(NSFont::labelFontSize() - 1.0, unsafe {
-            objc2_app_kit::NSFontWeightMedium
-        }),
-        &objc2_app_kit::NSColor::secondaryLabelColor(),
-    ));
-    button.setAttributedTitle(&text);
-}
-
 /// Let AppKit commit or validate the active field before its inspector is hidden.
-fn finish_editing(view: &objc2_app_kit::NSView) -> bool {
+pub(super) fn finish_editing(view: &objc2_app_kit::NSView) -> bool {
     if view.isHidden() {
         return true;
     }
@@ -698,8 +734,8 @@ fn layout_help(ui: &Ui) -> HelpButton {
         let help = popover.get_or_init(|| {
             let content = VStack::new(&ui).spacing(10.0)
                 .push(SectionTitle::new(&ui, "Layouts"))
-                .push(WrappingLabel::new(&ui, "Workspaces without their own layout use the one marked Default. Choosing a layout only shows its options. Use Set as Default, or right-click a layout, to change the default."))
-                .push(WrappingLabel::new(&ui, "Shared settings apply to every layout. A layout’s own New window position overrides the shared one."))
+                .push(WrappingLabel::new(&ui, "Workspaces without their own layout use the Default layout, chosen in the toolbar. Clicking a layout shows its settings without changing the default."))
+                .push(WrappingLabel::new(&ui, "Shared settings apply to every layout. A layout can choose its own new-window position, and a display can override spacing and scrolling column widths."))
                 .push(Link::new(&ui, "Layout documentation", "https://acsandmann.github.io/rift-docs/layouts/"));
             content.width(320.0);
             HelpPopover::with_content(&ui, content)

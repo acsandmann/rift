@@ -22,6 +22,8 @@ mod pages;
 pub mod process;
 mod schema;
 mod search;
+mod sidebar;
+use sidebar::SettingsSidebar;
 pub mod timing;
 mod updates;
 
@@ -77,6 +79,16 @@ fn report(message: &Weak<ValidationMessage>, result: &Result<(), String>) {
             Err(error) => Validation::Error(error.clone()),
         });
     }
+}
+
+/// The shipped defaults, parsed once, so menus can mark each setting’s default choice.
+fn defaults() -> &'static ConfigSource {
+    static DEFAULTS: std::sync::OnceLock<ConfigSource> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        crate::common::config::ConfigDocument::default()
+            .source()
+            .expect("the shipped defaults parse")
+    })
 }
 
 type DraftChanged = Box<dyn Fn(bool)>;
@@ -242,10 +254,12 @@ struct Router {
     /// Built lazily and kept while the window is open.
     pages: RefCell<Vec<Option<Page>>>,
     selected: Cell<Category>,
+    history: RefCell<Vec<Category>>,
+    history_index: Cell<usize>,
     layouts: std::cell::OnceCell<Rc<layouts::Inspector>>,
     title: Rc<Label>,
     toolbar: RefCell<Weak<Toolbar>>,
-    sidebar: RefCell<Weak<Sidebar<Category>>>,
+    sidebar: RefCell<Weak<SettingsSidebar>>,
     /// Set while the router itself moves the sidebar selection.
     routing: Cell<bool>,
 }
@@ -254,11 +268,32 @@ impl Router {
     fn current(&self) -> Category { self.selected.get() }
 
     fn navigate(&self, id: Category) {
+        if id != self.current() {
+            let mut history = self.history.borrow_mut();
+            history.truncate(self.history_index.get() + 1);
+            history.push(id);
+            self.history_index.set(history.len() - 1);
+        }
+        self.visit(id);
+    }
+
+    fn step_history(&self, offset: isize) {
+        let Some(index) = self.history_index.get().checked_add_signed(offset) else {
+            return;
+        };
+        let Some(id) = self.history.borrow().get(index).copied() else {
+            return;
+        };
+        self.history_index.set(index);
+        self.visit(id);
+    }
+
+    fn visit(&self, id: Category) {
         self.model.close_sheet();
         self.selected.set(id);
         self.routing.set(true);
         if let Some(sidebar) = self.sidebar.borrow().upgrade() {
-            sidebar.set_selected(id.index());
+            sidebar.set_selected(id);
         }
         self.routing.set(false);
         self.show(id);
@@ -298,7 +333,14 @@ impl Router {
         self.host.set_cached_page(page.view.clone());
         if let Some(toolbar) = self.toolbar.borrow().upgrade() {
             toolbar.set_page_controls(&self.ui, page.header.as_deref());
-            toolbar.set_trailing_control(&self.ui, None);
+            let trailing = (id == Category::Layouts).then(|| self.layouts().default_control());
+            toolbar.set_trailing_control(&self.ui, trailing.as_deref());
+            toolbar.update_navigation(
+                self.history_index.get() > 0,
+                self.history_index.get() + 1 < self.history.borrow().len(),
+                id.title(),
+                false,
+            );
         }
     }
 }
@@ -365,6 +407,8 @@ impl Settings {
             host: host.clone(),
             pages: RefCell::new((0..CATEGORIES.len()).map(|_| None).collect()),
             selected: Cell::new(Category::General),
+            history: RefCell::new(vec![Category::General]),
+            history_index: Cell::new(0),
             layouts: std::cell::OnceCell::new(),
             title: Rc::new(Label::new(&ui, Category::General.title())),
             toolbar: RefCell::new(Weak::new()),
@@ -372,23 +416,15 @@ impl Settings {
             routing: Cell::new(false),
         });
         let sidebar_timing = timing::start();
-        let entries = CATEGORIES
-            .iter()
-            .map(|(id, title, symbol)| SidebarItem {
-                id: *id,
-                title: (*title).into(),
-                symbol: (*symbol).into(),
-            })
-            .collect();
         let weak_router = Rc::downgrade(&router);
-        let sidebar = Rc::new(Sidebar::new(&ui, entries).on_select(move |id| {
+        let sidebar = Rc::new(SettingsSidebar::new(&ui, move |id| {
             if let Some(router) = weak_router.upgrade()
                 && !router.routing.get()
             {
                 router.navigate(id);
             }
         }));
-        sidebar.set_selected(0);
+        sidebar.set_selected(Category::General);
         *router.sidebar.borrow_mut() = Rc::downgrade(&sidebar);
 
         timing::finish(sidebar_timing, "sidebar construction");
@@ -409,11 +445,14 @@ impl Settings {
         timing::finish(attachment_timing, "toolbar attachment");
         window.ns_window().center();
         let content_timing = timing::start();
-        let window = window.content(NavigationSplitView::new(
-            &ui,
-            sidebar_pane(ui, &router, sidebar.clone()),
-            host,
-        ));
+        let navigation =
+            NavigationSplitView::new(&ui, sidebar_pane(ui, &router, sidebar.clone()), host);
+        navigation
+            .ns_split_view_controller()
+            .splitViewItems()
+            .objectAtIndex(0)
+            .setHoldingPriority(250.0);
+        let window = window.content(navigation);
         timing::finish(content_timing, "content attachment");
         let navigation_timing = timing::start();
         window.initial_focus(&*sidebar);
@@ -430,6 +469,22 @@ impl Settings {
         );
         activation.menu.add(MenuItem::new(&ui, "Rift").submenu(app_menu));
         *router.toolbar.borrow_mut() = Rc::downgrade(window.toolbar());
+        let back = Rc::downgrade(&router);
+        let forward = Rc::downgrade(&router);
+        window.toolbar().set_navigation(
+            &ui,
+            move || {
+                if let Some(router) = back.upgrade() {
+                    router.step_history(-1);
+                }
+            },
+            move || {
+                if let Some(router) = forward.upgrade() {
+                    router.step_history(1);
+                }
+            },
+            Rc::new(Menu::new(&ui)),
+        );
         *env.window.borrow_mut() = window.handle();
         timing::finish(navigation_timing, "navigation/menu");
         router.show(Category::General);
@@ -491,7 +546,7 @@ impl Drop for Settings {
 }
 
 /// The sidebar, replaced by search results while a query is entered.
-fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<Sidebar<Category>>) -> View {
+fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<SettingsSidebar>) -> View {
     let content = Rc::new(PageHost::new(&ui));
     content.set_cached_page(sidebar.clone());
     let weak_router = Rc::downgrade(router);
@@ -580,8 +635,10 @@ fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<Sidebar<Category>>) -> 
                 open(entry);
             }
         });
+    search.control_size(objc2_app_kit::NSControlSize::Large);
+    search.height(28.0);
     let pane = VStack::new(&ui)
-        .spacing(8.0)
+        .spacing(4.0)
         .push(
             HStack::new(&ui)
                 .insets(Insets {
@@ -772,15 +829,6 @@ impl FormBuilder {
         self.row(title, input, message)
     }
 
-    fn gap(
-        &mut self,
-        title: &str,
-        get: impl Fn(&ConfigSource) -> f64 + 'static,
-        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
-    ) -> SettingsRow {
-        self.numeric(title, 1.0, false, Some(Rc::new(|_| (0.0, 100.0))), get, set)
-    }
-
     fn percentage(
         &mut self,
         title: &str,
@@ -788,25 +836,12 @@ impl FormBuilder {
         get: impl Fn(&ConfigSource) -> f64 + 'static,
         set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
     ) -> SettingsRow {
-        self.numeric(title, 100.0, false, Some(Rc::new(range)), get, set)
-    }
-
-    fn numeric(
-        &mut self,
-        title: &str,
-        scale: f64,
-        integer: bool,
-        slider_range: Option<SliderRange>,
-        get: impl Fn(&ConfigSource) -> f64 + 'static,
-        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
-    ) -> SettingsRow {
         let (slider, input, message) =
-            self.numeric_controls(title, scale, integer, slider_range, get, set);
-        if let Some(slider) = slider {
-            self.row(title, NumberSlider::new(&self.ui, slider, input), message)
-        } else {
-            self.row(title, input, message)
-        }
+            self.numeric_controls(title, 100.0, false, Some(Rc::new(range)), get, set);
+        // Percentages move in steps of five; the field still takes exact values.
+        let slider = slider.unwrap();
+        slider.set_step(5.0);
+        self.row(title, NumberSlider::new(&self.ui, slider, input), message)
     }
 
     // Bind native controls independently of their form layout.
@@ -843,7 +878,7 @@ impl FormBuilder {
             let preview_input = Rc::downgrade(&input);
             let mut local_preview = None::<ConfigSource>;
             let app = Application::shared(&self.ui);
-            let slider = Slider::new(&self.ui).range(min, max).continuous(preview.is_some());
+            let slider = Slider::new(&self.ui).range(min, max).continuous(true);
             let slider = Rc::new(slider.on_change(move |v| {
                 let Some(model) = model.upgrade() else {
                     return;
@@ -860,13 +895,13 @@ impl FormBuilder {
                         local_preview.get_or_insert_with(|| model.source.borrow().as_ref().clone());
                     edit_preview(local, value / scale);
                     preview(local);
-                    if let Some(input) = preview_input.upgrade() {
-                        input.set_value(value);
-                    }
-                    // Preview while dragging; commit once on release.
-                    if app.is_mouse_dragging() {
-                        return;
-                    }
+                }
+                // Show the value while dragging; commit once on release.
+                if let Some(input) = preview_input.upgrade() {
+                    input.set_value(value);
+                }
+                if app.is_mouse_dragging() {
+                    return;
                 }
                 local_preview = None;
                 commit(value);
@@ -898,32 +933,6 @@ impl FormBuilder {
             }
         }));
         (slider, input, message)
-    }
-
-    fn gap_cells(
-        &mut self,
-        title: &str,
-        with_slider: bool,
-        get: impl Fn(&ConfigSource) -> f64 + 'static,
-        set: impl Fn(&mut ConfigSource, f64) + Send + Clone + 'static,
-    ) -> Vec<Box<dyn NativeView>> {
-        let (slider, input, message) = self.numeric_controls(
-            title,
-            1.0,
-            true,
-            with_slider.then(|| Rc::new(|_: &ConfigSource| (0.0, 100.0)) as SliderRange),
-            get,
-            set,
-        );
-        let value_field = input.unit_field(&self.ui, "pt");
-        // The bezel hosts the field's view; keep its Rust delegate alive with the cell.
-        let value = VStack::new(&self.ui).spacing(2.0).push(value_field).push(message).keep(input);
-        let mut cells: Vec<Box<dyn NativeView>> = vec![Box::new(Label::new(&self.ui, title))];
-        if let Some(slider) = slider {
-            cells.push(Box::new(slider));
-        }
-        cells.push(Box::new(value));
-        cells
     }
 
     fn text(
@@ -971,6 +980,10 @@ impl FormBuilder {
                 .items(values.iter().map(|(label, _)| *label))
                 .on_change(move |index| change(choices[index].clone())),
         );
+        let default = get(defaults());
+        if let Some(index) = items.iter().position(|item| *item == default) {
+            input.set_item_badge(index, Some("Default"));
+        }
         self.sync_when(
             &input,
             {
@@ -984,12 +997,13 @@ impl FormBuilder {
         self.row(title, input, message)
     }
 
-    /// A choice that follows another value until overridden. The first item names
-    /// that source and its effective value, e.g. “Shared · Next to selection”.
+    /// A choice that follows another value until overridden. `source` comes first, such
+    /// as “Use shared setting”, above the explicit values; while it’s chosen, `describe`
+    /// names the value in effect beneath the popup, and the menu badges it with `badge`.
     fn following_popup<T: Clone + PartialEq + Send + 'static>(
         &mut self,
         title: &str,
-        source: &'static str,
+        (source, badge, describe): (&'static str, &'static str, fn(&str) -> String),
         values: Vec<(&'static str, T)>,
         get: impl Fn(&ConfigSource) -> Option<T> + 'static,
         followed: impl Fn(&ConfigSource) -> T + 'static,
@@ -1001,10 +1015,25 @@ impl FormBuilder {
         let get = Rc::new(get);
         let current = get.clone();
         let change = self.assign(move |s| current(s), set, Rc::downgrade(&message));
-        let input = Rc::new(Popup::new(&self.ui).on_change(move |index| {
-            change(index.checked_sub(1).map(|index| choices[index].1.clone()))
-        }));
+        let input = Rc::new(
+            Popup::new(&self.ui)
+                .sections([
+                    vec![source],
+                    values.iter().map(|(label, _)| *label).collect(),
+                ])
+                .on_change(move |index| {
+                    change(index.checked_sub(1).map(|index| choices[index].1.clone()))
+                }),
+        );
+        input.accessibility_label(title);
+        let effective = Rc::new(Caption::new(&self.ui, ""));
+        effective.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
+        let control = VStack::new(&self.ui)
+            .spacing(3.0)
+            .push(HStack::new(&self.ui).push(Spacer::new(&self.ui)).push(input.clone()))
+            .push(effective.clone());
         let followed = Rc::new(followed);
+        let caption = Rc::downgrade(&effective);
         self.sync_when(
             &input,
             {
@@ -1014,19 +1043,23 @@ impl FormBuilder {
             },
             move |input, s| {
                 let followed = followed(s);
-                let effective =
-                    values.iter().find(|(_, value)| *value == followed).map_or("", |v| v.0);
-                input.set_items(
-                    std::iter::once(format!("{source} · {effective}"))
-                        .chain(values.iter().map(|(label, _)| (*label).to_owned())),
-                );
+                let position = |value: &T| values.iter().position(|(_, v)| v == value);
+                for index in 0..values.len() {
+                    input.set_item_badge(
+                        index + 1,
+                        (position(&followed) == Some(index)).then_some(badge),
+                    );
+                }
                 let current = get(s);
-                input.set_selected(current.map_or(0, |current| {
-                    values.iter().position(|(_, value)| *value == current).map_or(0, |i| i + 1)
-                }));
+                input.set_selected(current.as_ref().and_then(position).map_or(0, |i| i + 1));
+                if let Some(caption) = caption.upgrade() {
+                    let label = position(&followed).map_or("", |i| values[i].0);
+                    caption.set_text(&describe(label));
+                    caption.set_hidden(current.is_some());
+                }
             },
         );
-        self.row(title, input, message)
+        self.row(title, control, message).label_baseline(input.ns_view())
     }
 
     fn inherited_popup<T: Clone + PartialEq + Send + 'static>(
