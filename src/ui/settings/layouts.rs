@@ -94,6 +94,7 @@ impl Inspector {
             let default_popup = Rc::new(
                 Popup::new(&ui)
                     .items(pages::layouts().iter().map(|(title, _)| *title))
+                    .toolbar_style()
                     .on_change(move |index| {
                         if let (Some(inspector), Some(mode)) =
                             (owner.upgrade(), LayoutMode::from_config_choice(index))

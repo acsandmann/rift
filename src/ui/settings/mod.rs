@@ -17,6 +17,8 @@ use crate::sys::screen::ScreenInfo;
 mod applications;
 mod commands;
 mod editors;
+mod interface;
+mod interface_preview;
 mod layouts;
 mod pages;
 pub mod process;
@@ -51,7 +53,9 @@ pub(super) enum Category {
     Rules,
     Keyboard,
     Mouse,
-    Interface,
+    MenuBar,
+    Overview,
+    StackTabs,
     Advanced,
     About,
 }
@@ -60,14 +64,16 @@ impl Category {
 
     fn title(self) -> &'static str { CATEGORIES[self.index()].1 }
 }
-pub(super) const CATEGORIES: [(Category, &str, &str); 9] = [
+pub(super) const CATEGORIES: [(Category, &str, &str); 11] = [
     (Category::General, "General", "gearshape"),
     (Category::Layouts, "Layouts", "rectangle.split.2x2"),
     (Category::Workspaces, "Workspaces", "square.grid.2x2"),
     (Category::Rules, "Rules", "line.3.horizontal.decrease"),
     (Category::Keyboard, "Keyboard", "keyboard"),
     (Category::Mouse, "Mouse & Trackpad", "computermouse"),
-    (Category::Interface, "Interface", "macwindow"),
+    (Category::MenuBar, "Menu Bar", "menubar.rectangle"),
+    (Category::Overview, "Overview", "rectangle.3.group"),
+    (Category::StackTabs, "Stack Tabs", "square.stack.3d.up"),
     (Category::Advanced, "Advanced", "slider.horizontal.3"),
     (Category::About, "About", "info.circle"),
 ];
@@ -660,7 +666,7 @@ pub(super) struct FormBuilder {
     model: Weak<Model>,
     draft: bool,
     sync: Vec<SyncControl>,
-    gap_preview: Option<Preview>,
+    live_preview: Option<Preview>,
     /// Explain settings with help tags rather than inline info buttons.
     tooltips: bool,
 }
@@ -671,7 +677,7 @@ impl FormBuilder {
             model: Rc::downgrade(model),
             draft: model.is_draft(),
             sync: Vec::new(),
-            gap_preview: None,
+            live_preview: None,
             tooltips: false,
         }
     }
@@ -741,6 +747,7 @@ impl FormBuilder {
     ) -> impl Fn(T) + Clone + 'static {
         let model = self.model.clone();
         let control = Rc::new(());
+        let preview = self.live_preview.as_ref().map(Rc::downgrade);
         let get = Rc::new(get);
         move |value| {
             let Some(model) = model.upgrade() else { return };
@@ -752,7 +759,17 @@ impl FormBuilder {
             let set = set.clone();
             let edit: SourceEdit = Box::new(move |source| set(source, value));
             let error = error.clone();
-            let finish: Finish = Box::new(move |result| report(&error, &result));
+            let preview = preview.clone();
+            let recovery_model = Rc::downgrade(&model);
+            let finish: Finish = Box::new(move |result| {
+                report(&error, &result);
+                if result.is_err()
+                    && let Some(preview) = preview.and_then(|preview| preview.upgrade())
+                    && let Some(model) = recovery_model.upgrade()
+                {
+                    preview(&model.source.borrow());
+                }
+            });
             if model.is_draft() {
                 model.submit_edit(edit, finish);
             } else if !model.syncing.get() {
@@ -874,7 +891,7 @@ impl FormBuilder {
             let model = self.model.clone();
             let (min, max) = range(&model.upgrade().unwrap().source.borrow());
             let range = range.clone();
-            let preview = self.gap_preview.clone();
+            let preview = self.live_preview.clone();
             let preview_input = Rc::downgrade(&input);
             let mut local_preview = None::<ConfigSource>;
             let app = Application::shared(&self.ui);

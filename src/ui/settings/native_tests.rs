@@ -1148,6 +1148,7 @@ pub fn run(ui: Ui) {
             pending.try_recv().is_err(),
             "synchronization must not write config"
         );
+        interface_controls(&settings, &mut pending);
         drop(page);
         drop(popup);
         drop(keyboard);
@@ -1163,6 +1164,229 @@ pub fn run(ui: Ui) {
             .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05))
     });
     assert!(host.load().is_none(), "closing must release the page host");
+}
+
+/// Exercises the native controls at the edit boundary: each destination must still
+/// submit its existing config key, and acknowledged changes drive dependent controls.
+fn interface_controls(
+    settings: &Settings,
+    pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
+) {
+    use crate::common::config::{ConfigDocument, HorizontalPlacement, MenuBarDisplayMode};
+    let original = settings.model().source.borrow().as_ref().clone();
+    let mut source = original.clone();
+    let root = root_window(settings);
+    let commit = |source: &mut ConfigSource,
+                  pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>| {
+        let request = pending.try_recv().expect("a native control submits its edit");
+        let Action::Edit(edit) = request.action else {
+            panic!("settings edit")
+        };
+        edit(source).unwrap();
+        (request.finish)(Ok(()));
+        settings.synchronize(source.clone());
+        assert!(
+            pending.try_recv().is_err(),
+            "acknowledgement never submits another edit"
+        );
+    };
+    let toggle = |title: &str, value: bool| {
+        let control = named::<NSSwitch>(&root, title).unwrap();
+        control.setState(if value { 1 } else { 0 });
+        assert!(unsafe { control.sendAction_to(control.action(), control.target().as_deref()) });
+    };
+    settings.router.navigate(Category::MenuBar);
+    toggle("Show menu bar indicator", true);
+    commit(&mut source, pending);
+    let mode = named::<NSPopUpButton>(&root, "Workspaces to show").unwrap();
+    assert!(mode.isEnabled());
+    choose(&mode, 1);
+    commit(&mut source, pending);
+    assert_eq!(source.settings.ui.menu_bar.mode, MenuBarDisplayMode::Active);
+    toggle("Show menu bar indicator", false);
+    commit(&mut source, pending);
+    assert!(!mode.isEnabled());
+
+    settings.router.navigate(Category::Overview);
+    toggle("Enabled", true);
+    commit(&mut source, pending);
+    toggle("Fade transitions", true);
+    commit(&mut source, pending);
+    let duration = named::<NSSlider>(&root, "Fade duration").unwrap();
+    assert!(duration.isEnabled());
+    toggle("Fade transitions", false);
+    commit(&mut source, pending);
+    assert!(!duration.isEnabled());
+
+    let windows = NSApplication::sharedApplication(settings.router.ui.mtm()).windows().len();
+    settings.router.navigate(Category::StackTabs);
+    assert_eq!(
+        NSApplication::sharedApplication(settings.router.ui.mtm()).windows().len(),
+        windows,
+        "the actual tab component embeds without allocating any preview windows"
+    );
+    toggle("Enabled", true);
+    commit(&mut source, pending);
+    let placement = named::<NSPopUpButton>(&root, "Horizontal placement").unwrap();
+    choose(&placement, 1);
+    commit(&mut source, pending);
+    assert_eq!(
+        source.settings.ui.stack_line.horiz_placement,
+        HorizontalPlacement::Bottom
+    );
+    let vertical = named::<NSPopUpButton>(&root, "Vertical placement").unwrap();
+    choose(&vertical, 1);
+    commit(&mut source, pending);
+    assert_eq!(
+        source.settings.ui.stack_line.vert_placement,
+        crate::common::config::VerticalPlacement::Right
+    );
+    for (title, value) in [("Thickness", 44.0), ("Spacing", 12.0)] {
+        let slider = named::<NSSlider>(&root, title).unwrap();
+        slider.setDoubleValue(value);
+        assert!(unsafe { slider.sendAction_to(slider.action(), slider.target().as_deref()) });
+        commit(&mut source, pending);
+    }
+    assert_eq!(source.settings.ui.stack_line.thickness, 44.0);
+    assert_eq!(source.settings.ui.stack_line.spacing, 12.0);
+    root.layoutSubtreeIfNeeded();
+    let tab = named::<NSButton>(&root, "Terminal").unwrap();
+    unsafe {
+        tab.performClick(None);
+    }
+    assert_eq!(
+        tab.state(),
+        1,
+        "selecting a preview tab updates its active state"
+    );
+    assert!(
+        pending.try_recv().is_err(),
+        "example tabs never edit real settings or select real windows"
+    );
+    // A failed save must discard the transient slider preview, even with no new
+    // source revision arriving from ConfigActor.
+    let bar = named::<NSView>(&root, "Horizontal stack example").unwrap();
+    let thickness = named::<NSSlider>(&root, "Thickness").unwrap();
+    thickness.setDoubleValue(48.0);
+    assert!(unsafe { thickness.sendAction_to(thickness.action(), thickness.target().as_deref()) });
+    root.layoutSubtreeIfNeeded();
+    assert_eq!(bar.frame().size.height, 48.0);
+    let rejected = pending.try_recv().unwrap();
+    (rejected.finish)(Err("The configuration could not be saved.".into()));
+    root.layoutSubtreeIfNeeded();
+    assert_eq!(bar.frame().size.height, source.settings.ui.stack_line.thickness);
+    let reset = named::<NSButton>(&root, "Reset preview").unwrap();
+    unsafe {
+        reset.performClick(None);
+    }
+    assert_eq!(tab.state(), 0, "reset restores the first example window");
+    toggle("Enabled", false);
+    commit(&mut source, pending);
+    assert!(!placement.isEnabled());
+    assert!(named::<NSButton>(&root, "Terminal").is_none());
+    // Use the real configuration document serializer/parser, not a preview state.
+    let mut document = ConfigDocument::default();
+    document
+        .update(|current| current.settings.ui = source.settings.ui.clone())
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rift.toml");
+    document.save(&path).unwrap();
+    let loaded = ConfigDocument::read(&path).unwrap().source().unwrap();
+    assert_eq!(loaded.settings.ui, source.settings.ui);
+    settings.synchronize(original);
+    settings.router.navigate(Category::General);
+}
+
+/// Exercise the real About controls without network access, including a completion
+/// delivered after teardown. This catches lost/strong callbacks and stuck checking UI.
+pub fn run_about(ui: Ui) {
+    use objc2_app_kit::NSTextField;
+    let (model, env, page, button, status, pending_update) = autoreleasepool(|_| {
+        let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
+        let settings = Settings::new(
+            ui,
+            source(),
+            "/tmp/native-about-test.toml".into(),
+            vec![],
+            vec![],
+            requests,
+            || {},
+        );
+        settings.router.navigate(Category::About);
+        assert!(
+            pending.try_recv().is_err(),
+            "opening About never checks the network"
+        );
+        let page = settings.router.pages.borrow()[Category::About.index()]
+            .as_ref()
+            .unwrap()
+            .view
+            .clone();
+        let button = named::<NSButton>(page.ns_view(), "Check for Updates…").unwrap();
+        let status = named::<NSTextField>(page.ns_view(), "Update status").unwrap();
+        assert_eq!(status.stringValue().to_string(), "Not checked yet");
+        for (result, expected) in [
+            (Ok(updates::Release::Current), "Rift is up to date."),
+            (
+                Ok(updates::Release::Available("0.7.0".into())),
+                "Version 0.7.0 is available.",
+            ),
+            (
+                Err("Couldn’t connect. Try again.".into()),
+                "Couldn’t connect. Try again.",
+            ),
+        ] {
+            assert!(unsafe { button.sendAction_to(button.action(), button.target().as_deref()) });
+            assert!(!button.isEnabled(), "one check at a time");
+            assert_eq!(status.stringValue().to_string(), "Checking for updates…");
+            let request = pending.try_recv().expect("a user-initiated update request");
+            let Action::CheckUpdates(done) = request.action else {
+                panic!("update action")
+            };
+            done(result);
+            (request.finish)(Ok(()));
+            assert!(button.isEnabled(), "success and failure both allow retry");
+            assert_eq!(status.stringValue().to_string(), expected);
+            assert!(
+                pending.try_recv().is_err(),
+                "completion never starts another check"
+            );
+        }
+        // A second request stays pending while its entire Settings hierarchy closes.
+        assert!(unsafe { button.sendAction_to(button.action(), button.target().as_deref()) });
+        let request = pending.try_recv().unwrap();
+        let weak = (
+            Rc::downgrade(settings.model()),
+            Rc::downgrade(&settings.model().env),
+            objc2::rc::Weak::new(page.ns_view()),
+            objc2::rc::Weak::new(&*button),
+            objc2::rc::Weak::new(&*status),
+        );
+        settings.window.ns_window().close();
+        drop(settings);
+        (weak.0, weak.1, weak.2, weak.3, weak.4, request)
+    });
+    assert!(model.upgrade().is_none());
+    assert!(
+        env.upgrade().is_none(),
+        "pending update work must not retain the environment"
+    );
+    autoreleasepool(|_| {
+        objc2_foundation::NSRunLoop::currentRunLoop()
+            .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05));
+    });
+    assert!(
+        page.load().is_none(),
+        "pending update work must not retain the page"
+    );
+    assert!(button.load().is_none());
+    assert!(status.load().is_none());
+    let Action::CheckUpdates(done) = pending_update.action else {
+        panic!("update action")
+    };
+    done(Err("A late result after Settings closed".into()));
+    (pending_update.finish)(Ok(()));
 }
 
 /// Profiling only: repeatedly constructs and closes hidden Settings windows.
@@ -1213,7 +1437,8 @@ pub fn run_lifecycle(ui: Ui) {
                 .unwrap()
                 .view
                 .clone();
-            let check = find::<objc2_app_kit::NSButton>(about.ns_view()).unwrap();
+            let check =
+                named::<objc2_app_kit::NSButton>(about.ns_view(), "Check for Updates…").unwrap();
             assert_eq!(check.title().to_string(), "Check for Updates…");
             assert!(unsafe { check.sendAction_to(check.action(), check.target().as_deref()) });
             completions.push(pending.try_recv().unwrap());
@@ -1279,7 +1504,7 @@ pub fn run_lifecycle(ui: Ui) {
         // Late asynchronous completions must remain safe after native and Rust teardown.
         for request in completions {
             if let Action::CheckUpdates(done) = request.action {
-                done(Ok("Up to date".into()));
+                done(Ok(updates::Release::Current));
             }
             (request.finish)(Ok(()));
         }
@@ -1377,6 +1602,7 @@ pub fn render(
     small: bool,
     scope: Option<usize>,
     page: Option<usize>,
+    viewport: Option<CGSize>,
     path: &str,
 ) {
     use objc2_app_kit::{
@@ -1386,6 +1612,35 @@ pub fn render(
     use objc2_foundation::{NSDictionary, NSString};
     let (requests, _pending) = tokio::sync::mpsc::unbounded_channel();
     let mut snapshot = source();
+    if page == Some(Category::MenuBar.index()) {
+        snapshot.settings.ui.menu_bar.enabled = true;
+        snapshot.settings.ui.menu_bar.show_empty = true;
+        if scope == Some(9) {
+            snapshot.settings.ui.menu_bar.display_style =
+                crate::common::config::WorkspaceDisplayStyle::Label;
+            snapshot.settings.ui.menu_bar.active_label =
+                crate::common::config::ActiveWorkspaceLabel::Name;
+        }
+    }
+    if page == Some(Category::StackTabs.index()) {
+        if scope == Some(10) {
+            snapshot.settings.ui.stack_line.enabled = false;
+        }
+        if scope == Some(11) {
+            let tabs = &mut snapshot.settings.ui.stack_line;
+            tabs.horiz_placement = crate::common::config::HorizontalPlacement::Bottom;
+            tabs.vert_placement = crate::common::config::VerticalPlacement::Right;
+            tabs.thickness = 40.0;
+            tabs.spacing = 12.0;
+        }
+    }
+    if page == Some(Category::MenuBar.index()) && scope == Some(12) {
+        snapshot.settings.ui.menu_bar.enabled = false;
+    }
+    if page == Some(Category::Overview.index()) && scope == Some(13) {
+        snapshot.settings.ui.mission_control.enabled = true;
+        snapshot.settings.ui.mission_control.fade_enabled = true;
+    }
     if scope == Some(7) {
         snapshot.settings.layout.gaps.outer.top = 5.0;
     }
@@ -1483,11 +1738,11 @@ pub fn render(
     );
     // Hidden AppKit windows can adjust their fitting size as controls are inserted.
     // Capture the requested viewport after the selected editor has been mounted.
-    window.setContentSize(if small {
+    window.setContentSize(viewport.unwrap_or(if small {
         CGSize::new(700.0, 420.0)
     } else {
         CGSize::new(880.0, 660.0)
-    });
+    }));
     let content = window.contentView().unwrap();
     fn invalidate_layout(view: &NSView) {
         view.setNeedsUpdateConstraints(true);
@@ -1508,12 +1763,17 @@ pub fn render(
     );
     if small {
         let sidebar = named::<NSTableView>(&content, "Settings categories").unwrap();
-        assert!(
-            sidebar.rectOfRow(sidebar.numberOfRows() - 1).origin.y
-                + sidebar.rectOfRow(sidebar.numberOfRows() - 1).size.height
-                <= sidebar.visibleRect().origin.y + sidebar.visibleRect().size.height + 1.0,
-            "all primary destinations fit in the smaller viewport"
-        );
+        let current = settings.router.current().title();
+        sidebar.scrollRowToVisible(navigation_row(&sidebar, current) as isize);
+    }
+    if page == Some(Category::About.index()) && matches!(scope, Some(14 | 15)) {
+        let emblem = named::<NSButton>(&content, "Rearrange windows").unwrap();
+        for _ in 0..scope.unwrap() - 13 {
+            assert!(unsafe { emblem.sendAction_to(emblem.action(), emblem.target().as_deref()) });
+        }
+        objc2_foundation::NSRunLoop::currentRunLoop()
+            .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.35));
+        content.layoutSubtreeIfNeeded();
     }
     let card = match scope {
         Some(7) => Some("Spacing"),

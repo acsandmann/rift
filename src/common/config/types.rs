@@ -1016,7 +1016,7 @@ pub struct MissionControlSettings {
     pub fade_enabled: bool,
     #[serde(default = "default_mission_control_fade_duration_ms")]
     /// Duration of the Overview fade animation, in milliseconds.
-    #[setting(label = "Fade duration (milliseconds)", enabled_by = "enabled")]
+    #[setting(label = "Fade duration", unit = "ms", enabled_by = "enabled")]
     pub fade_duration_ms: f64,
 }
 

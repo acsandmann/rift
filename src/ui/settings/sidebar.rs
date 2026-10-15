@@ -1,7 +1,9 @@
 //! Grouped settings navigation backed by AppKit's source-list selection.
 use cgs::*;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSAccessibility, NSColor, NSLayoutConstraint, NSTableCellView, NSView};
+use objc2_app_kit::{
+    NSAccessibility, NSColor, NSLayoutConstraint, NSTableCellView, NSTableView, NSView,
+};
 use objc2_foundation::NSArray;
 
 use super::{CATEGORIES, Category};
@@ -20,7 +22,10 @@ impl SettingsSidebar {
     pub(super) fn new(ui: &Ui, mut select: impl FnMut(Category) + 'static) -> Self {
         let mut rows = Vec::new();
         for (category, _, _) in CATEGORIES {
-            if matches!(category, Category::Keyboard | Category::Interface) {
+            if matches!(
+                category,
+                Category::Keyboard | Category::MenuBar | Category::Advanced | Category::About
+            ) {
                 rows.push(Row::Spacer);
             }
             rows.push(Row::Destination(category));
@@ -36,17 +41,22 @@ impl SettingsSidebar {
             .selectable(|row| matches!(row, Row::Destination(_)))
             .row_heights(|row| {
                 if matches!(row, Row::Spacer) {
-                    12.0
+                    8.0
                 } else {
+                    // Match System Settings: a 20-point icon with 6 points of padding above/below.
                     32.0
                 }
             })
-            .rows(rows)
-            .on_select_item(move |row| {
-                if let Some(Row::Destination(category)) = row {
-                    select(category);
-                }
-            });
+            .rows(rows);
+        let native = objc2::rc::Weak::new(table.ns_table_view());
+        let table = table.on_select_item(move |row| {
+            if let Some(table) = native.load() {
+                selection_colors(&table);
+            }
+            if let Some(Row::Destination(category)) = row {
+                select(category);
+            }
+        });
         table.ns_table_view().setIntercellSpacing(CGSize::new(0.0, 0.0));
         table.ns_table_view().setBackgroundColor(&NSColor::clearColor());
         table.min_width(210.0);
@@ -69,11 +79,31 @@ impl SettingsSidebar {
             |&index| matches!(self.table.row(index), Some(Row::Destination(id)) if id == category),
         );
         self.table.set_selected(index);
+        selection_colors(self.table.ns_table_view());
     }
 }
 
 impl NativeView for SettingsSidebar {
     fn ns_view(&self) -> &NSView { self.table.ns_view() }
+}
+
+// cgs wraps cells in a reusable NSTableCellView. Resolve selection on that
+// outer cell's text outlet, keeping the native source-list highlight and colors.
+fn selection_colors(table: &NSTableView) {
+    let selected = table.selectedRow();
+    for row in 0..table.numberOfRows() {
+        if let Some(view) = table.viewAtColumn_row_makeIfNecessary(0, row, row == selected)
+            && let Some(cell) = view.downcast_ref::<NSTableCellView>()
+            && let Some(field) = unsafe { cell.textField() }
+        {
+            let color = if row == selected {
+                NSColor::alternateSelectedControlTextColor()
+            } else {
+                NSColor::labelColor()
+            };
+            field.setTextColor(Some(&color));
+        }
+    }
 }
 
 struct DestinationCell(Retained<NSTableCellView>);
@@ -102,7 +132,7 @@ fn destination_cell(ui: &Ui, category: Category) -> DestinationCell {
         Category::Workspaces => (0.40, 0.41, 0.51),
         Category::Rules => (0.49, 0.43, 0.35),
         Category::Keyboard | Category::Mouse => (0.40, 0.41, 0.46),
-        Category::Interface => (0.34, 0.44, 0.46),
+        Category::MenuBar | Category::Overview | Category::StackTabs => (0.34, 0.44, 0.46),
     };
     let color = NSColor::colorWithSRGBRed_green_blue_alpha(red, green, blue, 1.0);
     if let Some(layer) = badge.ns_view().layer() {

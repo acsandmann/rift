@@ -225,17 +225,17 @@ const MANUAL: &[(Category, Option<LayoutMode>, &str, &str, &str)] = &[
         "mouse cursor movement",
     ),
     (
-        Interface,
+        Overview,
         None,
-        "Interface",
+        "Overview",
         "Overview",
         "window previews fade transitions",
     ),
     (
-        Interface,
+        StackTabs,
         None,
-        "Interface",
-        "Stack Line",
+        "Stack Tabs",
+        "Stack Tabs",
         "stackline indicator color position thickness interaction",
     ),
     (
@@ -274,6 +274,13 @@ const MANUAL: &[(Category, Option<LayoutMode>, &str, &str, &str)] = &[
         "version latest release update",
     ),
     (About, None, "About", "Documentation", "docs help guide manual"),
+    (
+        About,
+        None,
+        "About",
+        "Matrix Room",
+        "matrix community chat discussion support",
+    ),
     (
         About,
         None,
@@ -342,9 +349,9 @@ fn catalog() -> &'static [Entry] {
             "Mouse & Trackpad › Scrolling layout gestures",
         );
         append::<DragDropSettings>(&mut out, "", Mouse, None, "Mouse & Trackpad › Drag & Drop");
-        append::<MenuBarSettings>(&mut out, "", Interface, None, "Interface › Menu Bar");
-        append::<MissionControlSettings>(&mut out, "", Interface, None, "Interface › Overview");
-        append::<StackLineSettings>(&mut out, "", Interface, None, "Interface › Stack Line");
+        append::<MenuBarSettings>(&mut out, "", MenuBar, None, "Menu Bar");
+        append::<MissionControlSettings>(&mut out, "", Overview, None, "Overview");
+        append::<StackLineSettings>(&mut out, "", StackTabs, None, "Stack Tabs");
         append::<LayoutSettings>(&mut out, "", Layouts, None, "Layouts");
         append::<BaseLayoutSettings>(&mut out, "", Layouts, None, "Layouts › Shared settings");
         for (title, layout) in super::pages::layouts() {

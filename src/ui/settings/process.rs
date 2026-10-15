@@ -53,7 +53,7 @@ enum Message {
     RefreshSettings,
     RefreshRuntime,
     Installed(Vec<(String, String)>),
-    Updated(Result<String, String>),
+    Updated(updates::Result),
     Closed,
     /// The daemon is gone.
     Lost(String),

@@ -1,12 +1,18 @@
 //! A user-initiated release check. No timers or background checks.
-pub type Completion = Box<dyn FnOnce(Result<String, String>)>;
+pub enum Release {
+    Current,
+    Available(String),
+}
+
+pub type Result = std::result::Result<Release, String>;
+pub type Completion = Box<dyn FnOnce(Result)>;
 
 /// Checks off the main thread and passes the result to `done` on the checking thread.
-pub fn start(done: impl FnOnce(Result<String, String>) + Send + 'static) {
+pub fn start(done: impl FnOnce(Result) + Send + 'static) {
     std::thread::spawn(move || done(latest()));
 }
 
-fn latest() -> Result<String, String> {
+fn latest() -> Result {
     let response = std::process::Command::new("/usr/bin/curl")
         .args([
             "--fail",
@@ -36,8 +42,8 @@ fn latest() -> Result<String, String> {
     let latest = tag.trim_start_matches('v');
     let running = env!("CARGO_PKG_VERSION");
     if latest == running {
-        Ok("Rift is up to date.".into())
+        Ok(Release::Current)
     } else {
-        Ok(format!("Latest release: {latest}. You’re running {running}."))
+        Ok(Release::Available(latest.to_owned()))
     }
 }

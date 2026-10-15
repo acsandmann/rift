@@ -1,4 +1,4 @@
-pub use rift_wm::{actor, common, layout_engine, sys};
+pub use rift_wm::{actor, common, layout_engine, sys, ui};
 #[allow(dead_code, unused_imports)]
 #[path = "../src/ui/settings/mod.rs"]
 mod settings;
@@ -33,6 +33,10 @@ fn main() {
             args.iter()
                 .position(|arg| arg == "--page")
                 .map(|i| args[i + 1].parse().unwrap()),
+            args.iter().position(|arg| arg == "--size").map(|i| {
+                let (width, height) = args[i + 1].split_once('x').expect("--size WIDTHxHEIGHT");
+                cgs::CGSize::new(width.parse().unwrap(), height.parse().unwrap())
+            }),
             &args[index + 1],
         );
     } else if args.iter().any(|arg| arg == "--lifecycle") {
@@ -41,9 +45,13 @@ fn main() {
         // to profile Settings startup, retained objects, or teardown.
         // objc2::rc::autoreleasepool(|_| settings::native_tests::run_lifecycle(ui));
         println!("Settings lifecycle stress run is disabled; enable only for profiling");
+    } else if args.iter().any(|arg| arg == "--about") {
+        settings::native_tests::run_about(ui);
+        println!("About update states and pending-request teardown passed");
     } else if args.iter().any(|arg| arg == "--verify") {
         objc2::rc::autoreleasepool(|_| settings::native_tests::run(ui));
-        println!("Settings native controls and synchronization passed");
+        settings::native_tests::run_about(ui);
+        println!("Settings native controls, About updates, synchronization and teardown passed");
     } else {
         // For benchmarking: the native Settings checks open real AppKit windows, so they
         // are disabled by default. Uncomment to run them.

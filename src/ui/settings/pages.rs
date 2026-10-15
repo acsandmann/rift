@@ -1,3 +1,5 @@
+use objc2_app_kit::NSAccessibility;
+
 use super::*;
 use crate::common::config::*;
 use crate::layout_engine::Orientation;
@@ -40,9 +42,10 @@ pub(super) fn build(ui: Ui, model: &Rc<Model>, id: Category) -> Page {
         Category::Rules => super::editors::rules(ui, model),
         Category::Keyboard => super::commands::keyboard(ui, model),
         Category::Mouse => input(ui, model),
-        Category::Interface => interface(ui, model),
-        Category::About => FormBuilder::new(ui, model)
-            .finish(SettingsPage::new(&ui, "").section(about(ui, &model.env))),
+        Category::MenuBar => super::interface::menu_bar(ui, model),
+        Category::Overview => super::interface::overview(ui, model),
+        Category::StackTabs => super::interface::stack_tabs(ui, model),
+        Category::About => FormBuilder::new(ui, model).finish(about(ui, &model.env)),
         Category::Advanced => advanced(ui, model),
         Category::Layouts => unreachable!("Layouts owns its inline inspector"),
     }
@@ -59,55 +62,157 @@ fn general(ui: Ui, model: &Rc<Model>) -> Page {
     f.finish(SettingsPage::new(&ui, "").section(section))
 }
 
-fn about(ui: Ui, env: &Rc<Env>) -> VStack {
-    let status = Rc::new(Label::new(&ui, "").color(&cgs::Color::secondary_label()).wrapping());
-    status.set_hidden(true);
-    let weak_status = Rc::downgrade(&status);
-    let weak_env = Rc::downgrade(env);
-    let check = Button::new(&ui, "Check for Updates…");
+/// Stable window identities let the emblem demonstrate Rift without rebuilding views.
+fn about_layout(index: usize) -> [PreviewWindow; 3] {
+    let frames = match index {
+        1 => [
+            (0.0, 0.0, 76.0, 140.0),
+            (84.0, 0.0, 68.0, 140.0),
+            (160.0, 0.0, 76.0, 140.0),
+        ],
+        2 => [
+            (0.0, 0.0, 114.0, 66.0),
+            (122.0, 0.0, 114.0, 66.0),
+            (0.0, 74.0, 236.0, 66.0),
+        ],
+        _ => [
+            (0.0, 0.0, 138.0, 140.0),
+            (146.0, 0.0, 90.0, 66.0),
+            (146.0, 74.0, 90.0, 66.0),
+        ],
+    };
+    std::array::from_fn(|id| {
+        let (x, y, w, h) = frames[id];
+        PreviewWindow::new(id as u64, CGRect::new(CGPoint::new(x, y), CGSize::new(w, h)))
+    })
+}
+
+fn about_identity(ui: &Ui) -> VStack {
+    let preview = Rc::new(LayoutPreview::illustration(ui, CGSize::new(236.0, 140.0)));
+    preview.set_windows(&about_layout(0), PreviewAnimation::Immediate);
+    preview.ns_view().setAccessibilityElement(false);
+    let weak_preview = Rc::downgrade(&preview);
+    let mut layout = 0;
+    let emblem = Button::new(ui, "").borderless().on_click(move || {
+        if let Some(preview) = weak_preview.upgrade() {
+            layout = (layout + 1) % 3;
+            preview.set_windows(
+                &about_layout(layout),
+                PreviewAnimation::Animated(std::time::Duration::from_millis(280)),
+            );
+        }
+    });
+    emblem.width(268.0);
+    emblem.height(144.0);
+    emblem.accessibility_label("Rearrange windows");
+    emblem.accessibility_help("Show another Rift layout. Respects Reduce Motion.");
+    emblem.tooltip("A place for every window. Click to try another layout.");
+    emblem.ns_button().setFocusRingType(objc2_app_kit::NSFocusRingType::Exterior);
+    emblem.ns_view().addSubview(preview.ns_view());
+    preview
+        .ns_view()
+        .centerXAnchor()
+        .constraintEqualToAnchor(&emblem.ns_view().centerXAnchor())
+        .setActive(true);
+    preview
+        .ns_view()
+        .centerYAnchor()
+        .constraintEqualToAnchor(&emblem.ns_view().centerYAnchor())
+        .setActive(true);
+    let centered = |text: &str, font: &objc2_app_kit::NSFont, color: &objc2_app_kit::NSColor| {
+        let label = Label::new(ui, text).font(font).color(color).wrapping();
+        label.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Center);
+        label
+    };
+    VStack::new(ui)
+        .spacing(6.0)
+        .push(stage(ui, emblem, None))
+        .push(centered(
+            "Rift",
+            &objc2_app_kit::NSFont::systemFontOfSize_weight(28.0, unsafe {
+                objc2_app_kit::NSFontWeightSemibold
+            }),
+            &cgs::Color::label(),
+        ))
+        .push(centered(
+            &format!("Version {}", env!("CARGO_PKG_VERSION")),
+            &Font::caption(),
+            &cgs::Color::secondary_label(),
+        ))
+        .keep(preview)
+}
+
+fn about_updates(ui: &Ui, env: &Rc<Env>) -> Section {
+    let status = Rc::new(Label::new(ui, "Not checked yet").wrapping().color(&cgs::Color::label()));
+    status.accessibility_label("Update status");
+    let icon = Rc::new(ImageView::symbol(ui, "arrow.triangle.2.circlepath").unwrap());
+    icon.width(16.0);
+    icon.height(16.0);
+    icon.ns_image_view().setContentTintColor(Some(&cgs::Color::secondary_label()));
+    icon.ns_view().setAccessibilityElement(false);
+    let check = Button::new(ui, "Check for Updates…");
+    check.accessibility_label("Check for Updates…");
     let weak_button = WeakView::new(&check);
-    // Keep only weak view references in the pending request so closing Settings
-    // releases the page even while the bounded network request is finishing.
+    let weak_status = Rc::downgrade(&status);
+    let weak_icon = Rc::downgrade(&icon);
+    let weak_env = Rc::downgrade(env);
     let check = check.on_click(move || {
-        let Some(env) = weak_env.upgrade() else {
-            return;
-        };
+        let Some(env) = weak_env.upgrade() else { return };
         if let Some(status) = weak_status.upgrade() {
-            status.set_hidden(false);
             status.set_text("Checking for updates…");
+            status.ns_text_field().setTextColor(Some(&cgs::Color::label()));
+        }
+        if let Some(icon) = weak_icon.upgrade() {
+            icon.ns_image_view()
+                .setImage(Symbol::named("arrow.triangle.2.circlepath").as_deref());
+            icon.ns_image_view().setContentTintColor(Some(&cgs::Color::secondary_label()));
         }
         weak_button.set_enabled(false);
-        let status = weak_status.clone();
-        let button = weak_button.clone();
+        let (status, icon, button) = (weak_status.clone(), weak_icon.clone(), weak_button.clone());
+        // Pending network work must never retain a closed page or its environment.
         env.send(
             Action::CheckUpdates(Box::new(move |result| {
+                let (text, symbol, color) = match result {
+                    Ok(updates::Release::Current) => (
+                        "Rift is up to date.".to_owned(),
+                        "checkmark.circle",
+                        cgs::Color::secondary_label(),
+                    ),
+                    Ok(updates::Release::Available(version)) => (
+                        format!("Version {version} is available."),
+                        "arrow.down.circle",
+                        cgs::Color::control_accent(),
+                    ),
+                    Err(error) => (
+                        error,
+                        "exclamationmark.circle",
+                        objc2_app_kit::NSColor::systemOrangeColor(),
+                    ),
+                };
                 if let Some(status) = status.upgrade() {
-                    status.set_text(&result.unwrap_or_else(|e| e));
+                    status.set_text(&text);
+                }
+                if let Some(icon) = icon.upgrade() {
+                    icon.ns_image_view().setImage(Symbol::named(symbol).as_deref());
+                    icon.ns_image_view().setContentTintColor(Some(&color));
                 }
                 button.set_enabled(true);
             })),
             Box::new(|_| {}),
         );
     });
-    let identity = HStack::new(&ui).spacing(16.0);
-    if let Some(icon) = Application::shared(&ui).icon() {
-        let icon = ImageView::new(&ui, &icon);
-        icon.width(64.0);
-        icon.height(64.0);
-        identity.add(icon);
-    }
-    identity.add(
-        VStack::new(&ui)
-            .spacing(4.0)
-            .push(Label::new(&ui, "Rift").font(&Font::title()))
-            .push(Caption::single_line(&ui, "A window manager for macOS"))
-            .push(Caption::single_line(
-                &ui,
-                &format!("Version {}", env!("CARGO_PKG_VERSION")),
-            )),
-    );
-    identity.add(Spacer::new(&ui));
-    const RESOURCES: [(&str, &str, &str); 3] = [
+    let row = HStack::new(ui)
+        .spacing(10.0)
+        .push(icon)
+        .push(status)
+        .push(Spacer::new(ui))
+        .push(check);
+    row.min_height(24.0);
+    Section::new(ui, "Software Update").content(GroupBox::new(ui, row))
+}
+
+fn about_resources(ui: &Ui) -> Section {
+    const RESOURCES: [(&str, &str, &str); 4] = [
         (
             "Documentation",
             "book",
@@ -118,32 +223,92 @@ fn about(ui: Ui, env: &Rc<Env>) -> VStack {
             "clock.arrow.circlepath",
             "https://github.com/acsandmann/rift/releases",
         ),
+        (
+            "Matrix Room",
+            "bubble.left.and.bubble.right",
+            "https://matrix.to/#/#rift:matrix.org",
+        ),
         ("Sponsor Rift", "heart", "https://github.com/sponsors/acsandmann"),
     ];
-    let resources = SettingsList::new(
-        &ui,
-        |item: &(&str, &str, &str)| item.0.to_string(),
-        |_| String::new(),
-    )
-    .full_length()
-    .navigation()
-    .trailing_summary()
-    .symbols(|item| item.1.to_string())
-    .on_open(|index| {
-        if let Some(item) = RESOURCES.get(index) {
-            Application::open(item.2);
-        }
-    });
-    resources.set_rows(RESOURCES.to_vec());
-    VStack::new(&ui)
-        .spacing(16.0)
-        .push(identity)
-        .push(
-            Section::new(&ui, "")
-                .row(SettingsRow::new(&ui, "Software updates", check))
-                .footer(status),
+    let resource_group = |rows: Vec<(&'static str, &'static str, &'static str)>| {
+        let destinations = rows.clone();
+        let list = SettingsList::new(
+            ui,
+            |item: &(&str, &str, &str)| item.0.to_owned(),
+            |_| String::new(),
         )
-        .push(Section::new(&ui, "Resources").content(resources))
+        .external_links()
+        .full_length()
+        .symbols(|item| item.1.to_owned())
+        .on_open(move |index| {
+            if let Some((_, _, url)) = destinations.get(index) {
+                Application::open(url);
+            }
+        });
+        list.set_rows(rows);
+        list
+    };
+    Section::new(ui, "Resources").content(
+        VStack::new(ui)
+            .spacing(12.0)
+            .push(resource_group(RESOURCES[..3].to_vec()))
+            .push(resource_group(RESOURCES[3..].to_vec())),
+    )
+}
+
+fn about(ui: Ui, env: &Rc<Env>) -> SettingsPage {
+    let caption = |text: &str| {
+        Label::new(&ui, text)
+            .font(&Font::caption())
+            .color(&cgs::Color::secondary_label())
+    };
+    let heart = ImageView::symbol(&ui, "heart.fill").unwrap();
+    heart.width(11.0);
+    heart.height(11.0);
+    heart
+        .ns_image_view()
+        .setContentTintColor(Some(&objc2_app_kit::NSColor::systemRedColor()));
+    heart.accessibility_label("love");
+    let credit = HStack::new(&ui)
+        .spacing(4.0)
+        .push(caption("made with"))
+        .push(heart)
+        .push(caption("by acsandmann"));
+    let (leading, trailing) = (Spacer::new(&ui), Spacer::new(&ui));
+    let equal = leading
+        .ns_view()
+        .widthAnchor()
+        .constraintEqualToAnchor(&trailing.ns_view().widthAnchor());
+    let credit = HStack::new(&ui).push(leading).push(credit).push(trailing);
+    equal.setActive(true);
+    let footer = VStack::new(&ui).spacing(4.0).push(credit);
+    let (top, bottom) = (Spacer::new(&ui), Spacer::new(&ui));
+    top.height(8.0);
+    bottom.min_height(8.0);
+    let content = VStack::new(&ui)
+        .spacing(0.0)
+        .push(top)
+        .push(
+            VStack::new(&ui)
+                .spacing(20.0)
+                .push(about_identity(&ui))
+                .push(
+                    VStack::new(&ui)
+                        .spacing(18.0)
+                        .push(about_updates(&ui, env))
+                        .push(about_resources(&ui)),
+                )
+                .push(footer),
+        )
+        .push(bottom);
+    let page = SettingsPage::new(&ui, "").content_width(648.0).section(content);
+    let scroll = page.ns_scroll_view();
+    let document = scroll.documentView().unwrap();
+    document
+        .heightAnchor()
+        .constraintGreaterThanOrEqualToAnchor(&scroll.contentView().heightAnchor())
+        .setActive(true);
+    page
 }
 
 /// The shared new-window position each layout follows unless it overrides it.
@@ -197,7 +362,7 @@ pub(super) fn gap_preview(
             PreviewAnimation::default(),
         );
     });
-    f.gap_preview = Some(update.clone());
+    f.live_preview = Some(update.clone());
     f.sync.push(Box::new(move |source| update(source)));
     preview.accessibility_label("Preview of screen edges and spacing between windows");
     preview
@@ -793,54 +958,6 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
         "Advanced focus settings",
         focus_suspend(&mut f),
     ));
-    f.finish(page)
-}
-
-fn interface(ui: Ui, model: &Rc<Model>) -> Page {
-    let mut f = FormBuilder::new(ui, model);
-    let mut page = SettingsPage::new(&ui, "");
-    let section = f.schema_section(
-        "Menu Bar",
-        "",
-        |s| &s.settings.ui.menu_bar,
-        |s| &mut s.settings.ui.menu_bar,
-    );
-    let message = Rc::new(ValidationMessage::new(&ui));
-    let error = Rc::downgrade(&message);
-    let weak_model = f.model.clone();
-    let path = Rc::new(PathField::new(&ui).directories().on_change(move |path| {
-        Model::submit(
-            &weak_model,
-            Box::new(move |s| {
-                s.settings.ui.menu_bar.layout_folder = path;
-                Ok(())
-            }),
-            error.clone(),
-        )
-    }));
-    f.sync_when(
-        &path,
-        |s| s.settings.ui.menu_bar.layout_folder.clone(),
-        |path, s| path.set_value(&s.settings.ui.menu_bar.layout_folder),
-    );
-    let field = MenuBarSettings::field("layout_folder").unwrap();
-    let row = f.row(field.title, path, message);
-    let row = f.schema_metadata(row, field, |s| &s.settings.ui.menu_bar).wide();
-    page = page.section(section.row(row));
-    let section = f.schema_rows(
-        Section::new(&ui, "Overview").description("Requires restarting Rift."),
-        "",
-        |s| &s.settings.ui.mission_control,
-        |s| &mut s.settings.ui.mission_control,
-    );
-    page = page.section(section);
-    let section = f.schema_rows(
-        Section::new(&ui, "Stack Tabs").description("tabs beside stacked windows."),
-        "",
-        |s| &s.settings.ui.stack_line,
-        |s| &mut s.settings.ui.stack_line,
-    );
-    page = page.section(section);
     f.finish(page)
 }
 
