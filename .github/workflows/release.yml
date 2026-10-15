@@ -3,6 +3,13 @@ name: release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild
+        required: true
+        default: v0.7.0
+        type: string
 
 permissions:
   contents: write
@@ -13,158 +20,175 @@ concurrency:
 
 jobs:
   build-and-publish:
-    runs-on: macos-14
+    runs-on: macos-26
     env:
       CARGO_TERM_COLOR: always
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       ASSET_BASENAME: rift-universal-macos
       TAP_REPO: acsandmann/homebrew-tap
       TAP_FILE_PATH: Formula/rift.rb
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
       RELEASE_REPOSITORY: ${{ github.repository }}
+
     steps:
-      - name: Checkout source
+      - name: Checkout source at release tag
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
 
-      - name: Verify tag matches root package version
+      - name: Verify release tag and package version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" >/dev/null
           version=$(awk '/^\[package\]/{package=1; next} /^\[/{package=0}
             package && /^version[[:space:]]*=/{split($0, value, "\""); print value[2]; exit}' Cargo.toml)
           test -n "$version"
           if [[ "${RELEASE_TAG#v}" != "$version" ]]; then
-            echo "Release tag does not match Cargo.toml version ${version}" >&2
+            echo "Release tag ${RELEASE_TAG} does not match Cargo.toml version ${version}" >&2
             exit 1
           fi
 
-      - name: Install Rust + targets
+      - name: Install Rust and targets
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Show toolchain
+      - name: Verify build toolchain
         run: |
+          set -euo pipefail
           rustc -V
           cargo -V
           rustup target list --installed
           sw_vers
 
-      - name: Build release for both targets (both bins)
+      - name: Build release for both architectures
         run: |
           set -euxo pipefail
-          # Build arm64
           cargo build --release --locked --package rift-wm --bin rift --bin rift-cli --target aarch64-apple-darwin
-          # Build x86_64
           cargo build --release --locked --package rift-wm --bin rift --bin rift-cli --target x86_64-apple-darwin
 
-      - name: Create universal binaries with lipo
+      - name: Create universal binaries
         run: |
           set -euxo pipefail
           mkdir -p dist
-
-          # Combine rift
           lipo -create \
             target/aarch64-apple-darwin/release/rift \
             target/x86_64-apple-darwin/release/rift \
             -output dist/rift
-
-          # Combine rift-cli
           lipo -create \
             target/aarch64-apple-darwin/release/rift-cli \
             target/x86_64-apple-darwin/release/rift-cli \
             -output dist/rift-cli
-
-          # Optional: strip symbols to reduce size
           strip -x dist/rift dist/rift-cli
 
       - name: Package tarball
         id: pkg
         run: |
           set -euxo pipefail
-          TAG="${RELEASE_TAG}"
-          VERSION="${TAG#v}"            # strip leading 'v' if present
+          VERSION="${RELEASE_TAG#v}"
           ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
-
           test -s rift.default.toml
           cp rift.default.toml dist/rift.default.toml
-          tar -C dist -czf "${ASSET}" rift rift-cli rift.default.toml
-          sha256=$(shasum -a 256 "${ASSET}" | awk '{print $1}')
-
+          tar -C dist -czf "$ASSET" rift rift-cli rift.default.toml
+          sha256=$(shasum -a 256 "$ASSET" | awk '{print $1}')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
-      - name: Check packaged binary versions
+      - name: Verify packaged binary versions
         env:
           VERSION: ${{ steps.pkg.outputs.version }}
         run: |
+          set -euo pipefail
           test "$(dist/rift --version)" = "rift ${VERSION}"
           test "$(dist/rift-cli --version)" = "rift-cli ${VERSION}"
           test -s dist/rift.default.toml
 
-      - name: Upload asset to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.release.tag_name }}
-          files: ${{ steps.pkg.outputs.asset }}
-          fail_on_unmatched_files: true
+      - name: Replace release asset
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET: ${{ steps.pkg.outputs.asset }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" "$ASSET" --clobber --repo "$RELEASE_REPOSITORY"
 
-      - name: Checkout tap repo
+      - name: Checkout Homebrew tap
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TAP_REPO }}
           path: tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }} # PAT with repo:push to the tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
-      - name: Update formula URL, version & sha256
+      - name: Update formula URL, checksum and revision
         env:
           VERSION: ${{ steps.pkg.outputs.version }}
           SHA256: ${{ steps.pkg.outputs.sha256 }}
           ASSET: ${{ steps.pkg.outputs.asset }}
         run: |
           set -euo pipefail
-          FORMULA="tap/${TAP_FILE_PATH}"
+          export FORMULA="tap/${TAP_FILE_PATH}"
           export ASSET_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/${ASSET}"
-          # Only replace stable fields; preserve any development head block.
-          awk '
-            /^[[:space:]]*head[[:space:]]+do/ { head=1 }
-            !head && /^  url[[:space:]]+"/ {
-              print "  url \"" ENVIRON["ASSET_URL"] "\""
-              print "  version \"" ENVIRON["VERSION"] "\""
-              urls++; next
-            }
-            !head && /^  version[[:space:]]+"/ { next }
-            !head && /^  sha256[[:space:]]+"/ {
-              print "  sha256 \"" ENVIRON["SHA256"] "\""
-              hashes++; next
-            }
-            { print }
-            END { if (urls != 1 || hashes != 1) exit 1 }
-          ' "$FORMULA" > "${FORMULA}.tmp"
-          mv "${FORMULA}.tmp" "$FORMULA"
+          ruby <<'RUBY'
+          path = ENV.fetch("FORMULA")
+          contents = File.read(path)
+          stable, head_line, head_rest = contents.partition(/^  head\b.*$/)
+
+          read_field = lambda do |key|
+            matches = stable.scan(/^  #{Regexp.escape(key)} "([^"]*)"$/)
+            abort "Expected exactly one #{key} in #{path}" unless matches.length == 1
+            matches.first.first
+          end
+
+          old_url = read_field.call("url")
+          old_version = read_field.call("version")
+          old_sha = read_field.call("sha256")
+          old_revisions = stable.scan(/^  revision (\d+)$/)
+          abort "Multiple revisions in #{path}" if old_revisions.length > 1
+          old_revision = old_revisions.empty? ? 0 : old_revisions.first.first.to_i
+
+          version = ENV.fetch("VERSION")
+          sha = ENV.fetch("SHA256")
+          url = ENV.fetch("ASSET_URL")
+          revision = if old_version == version
+            old_revision + (old_url != url || old_sha != sha ? 1 : 0)
+          else
+            0
+          end
+
+          { "url" => url, "version" => version, "sha256" => sha }.each do |key, value|
+            stable.sub!(/^  #{Regexp.escape(key)} "[^"]*"$/) { "  #{key} \"#{value}\"" }
+          end
+          stable.sub!(/^  revision \d+\n/, "")
+          if revision > 0
+            stable.sub!(/^  sha256 "[^"]*"\n/) { |line| "#{line}  revision #{revision}\n" }
+          end
+
+          File.write(path, stable + head_line + head_rest)
+          puts "Homebrew formula: #{version}#{revision > 0 ? "_#{revision}" : ""}"
+          RUBY
           ruby -c "$FORMULA"
 
-      - name: Commit & push formula update
+      - name: Commit and push Homebrew formula update
         run: |
           set -euxo pipefail
           git -C tap config user.name "github-actions[bot]"
           git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
-          git -C tap add "${TAP_FILE_PATH}"
+          git -C tap add "$TAP_FILE_PATH"
           if git -C tap diff --cached --quiet; then
-            echo "Formula already up to date."
+            echo "Homebrew formula unchanged."
             exit 0
           fi
           git -C tap commit -m "chore(formula): rift ${{ steps.pkg.outputs.version }} (universal) - sha256 ${{ steps.pkg.outputs.sha256 }}"
           git -C tap push origin HEAD
 
       - name: Trigger documentation build
+        if: github.event_name == 'release'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           repository: acsandmann/rift-docs
           event-type: rift-release
-          client-payload: '{"rift_ref":"${{ github.event.release.tag_name }}"}'
+          client-payload: '{"rift_ref":"${{ env.RELEASE_TAG }}"}'
