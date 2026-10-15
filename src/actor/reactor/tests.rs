@@ -7620,6 +7620,8 @@ fn binding_mode_changes_update_query_state_before_broadcast() {
     let mut reactor = test_reactor();
     let (tx, mut rx) = crate::actor::channel();
     reactor.communication_manager.event_broadcaster = tx;
+    let (menu_tx, mut menu_rx) = crate::actor::channel();
+    reactor.menu_manager.menu_tx = Some(menu_tx);
     assert_eq!(reactor.binding_mode, "default");
     reactor.handle_loop_event(Event::BindingModeChanged { mode: "resize".into() });
     assert_eq!(reactor.binding_mode, "resize");
@@ -7627,8 +7629,18 @@ fn binding_mode_changes_update_query_state_before_broadcast() {
         previous_mode: "default".into(),
         mode: "resize".into(),
     });
+    assert!(matches!(
+        menu_rx.try_recv().unwrap().1,
+        menu_bar::Event::BindingModeChanged(mode) if mode == "resize"
+    ));
     reactor.handle_loop_event(Event::BindingModeChanged { mode: "resize".into() });
     assert!(rx.try_recv().is_err());
+    assert!(menu_rx.try_recv().is_err());
+    reactor.handle_loop_event(Event::BindingModeChanged { mode: "default".into() });
+    assert!(matches!(
+        menu_rx.try_recv().unwrap().1,
+        menu_bar::Event::BindingModeChanged(mode) if mode == "default"
+    ));
 }
 
 #[test]

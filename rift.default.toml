@@ -213,6 +213,8 @@ enabled = false
 # if enabled, it will show all workspaces including empty ones. disabled because this
 # tends to take up too much room in the menubar and then is auto hidden by macos
 show_empty = false
+# show the binding mode name beside workspaces when a non-default mode is active
+show_binding_mode = true
 # choose between drawing every workspace or only the active workspace on each display
 mode = "all"
 # when showing workspaces as labels ("index" or "name"), choose which label to render

@@ -213,6 +213,17 @@ fn resize_command_config_supports_legacy_and_oriented_forms() {
 }
 
 #[test]
+fn menu_bar_binding_mode_label_defaults_on_and_can_be_disabled() {
+    let settings: MenuBarSettings = toml::from_str("").unwrap();
+    assert!(settings.show_binding_mode);
+    assert!(MenuBarSettings::default().show_binding_mode);
+    let settings: MenuBarSettings = toml::from_str("show_binding_mode = false").unwrap();
+    assert!(!settings.show_binding_mode);
+    let roundtrip: MenuBarSettings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+    assert!(!roundtrip.show_binding_mode);
+}
+
+#[test]
 fn menu_bar_layout_folder_defaults_and_expands_home() {
     let settings: MenuBarSettings = toml::from_str("").unwrap();
 

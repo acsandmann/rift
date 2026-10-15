@@ -107,6 +107,7 @@ pub struct MenuIcon {
     mtm: MainThreadMarker,
     prev_width: f64,
     render_key: Option<MenuIconRenderKey>,
+    rendered_binding_mode: String,
 }
 
 struct WorkspaceMenuItem {
@@ -174,6 +175,7 @@ impl MenuIcon {
             mtm,
             prev_width: 0.0,
             render_key: None,
+            rendered_binding_mode: String::new(),
         };
         this.menu_handler.set_layout_folder(layout_folder.to_path_buf());
         this.refresh_layout_library();
@@ -295,7 +297,13 @@ impl MenuIcon {
         &mut self,
         displays: &[DisplayWorkspaces],
         settings: &MenuBarSettings,
+        binding_mode: &str,
     ) {
+        let binding_mode = if settings.show_binding_mode && binding_mode != "default" {
+            binding_mode
+        } else {
+            ""
+        };
         let render_inputs = render_inputs(displays, settings);
         let render_changed =
             self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
@@ -311,8 +319,16 @@ impl MenuIcon {
             return;
         }
 
-        if render_changed {
-            let layout = { build_layout(&render_inputs, self.view.text_attrs.as_ref()) };
+        if render_changed || self.rendered_binding_mode != binding_mode {
+            let mut layout = build_layout(&render_inputs, self.view.text_attrs.as_ref());
+            if let Some(line) = build_cached_text_line(binding_mode, self.view.text_attrs.as_ref())
+            {
+                let x = layout.size.width + SEPARATOR_SPACING;
+                layout.size.width = x + line.width;
+                layout.binding_mode = Some((x, line));
+            }
+            self.rendered_binding_mode.clear();
+            self.rendered_binding_mode.push_str(binding_mode);
             self.view.set_layout(layout);
             self.render_key = Some(MenuIconRenderKey::from_inputs(&render_inputs));
         }
@@ -353,6 +369,7 @@ struct MenuIconLayout {
     workspaces: Vec<WorkspaceRenderData>,
     separators: Vec<f64>,
     separator_line: Option<CachedTextLine>,
+    binding_mode: Option<(f64, CachedTextLine)>,
 }
 
 struct WorkspaceRenderData {
@@ -1668,6 +1685,7 @@ fn build_layout(
         workspaces,
         separators,
         separator_line,
+        binding_mode: None,
         size: CGSize::new(width, height),
     }
 }
@@ -1807,6 +1825,14 @@ fn draw_menu_icon(cg: &CGContext, bounds: CGRect, layout: &MenuIconLayout) {
         if is_label {
             CGContext::end_transparency_layer(Some(cg));
         }
+    }
+
+    if let Some((x, line)) = &layout.binding_mode {
+        foreground.setFill();
+        let baseline = centered_origin(y_offset, layout.size.height, line.ascent + line.descent)
+            + line.descent;
+        CGContext::set_text_position(Some(cg), *x, baseline);
+        unsafe { line.line.draw(cg) };
     }
 
     if let Some(line) = &layout.separator_line {

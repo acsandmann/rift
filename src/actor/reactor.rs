@@ -1020,6 +1020,9 @@ impl Reactor {
             Event::BindingModeChanged { mode } => {
                 if self.binding_mode != mode {
                     let previous_mode = std::mem::replace(&mut self.binding_mode, mode.clone());
+                    if let Some(tx) = &self.menu_manager.menu_tx {
+                        tx.send(menu_bar::Event::BindingModeChanged(mode.clone()));
+                    }
                     let _ = self
                         .communication_manager
                         .event_broadcaster

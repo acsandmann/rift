@@ -774,6 +774,10 @@ pub struct MenuBarSettings {
     /// Include workspaces without windows in the menu bar.
     #[setting(label = "Show empty workspaces", enabled_by = "enabled")]
     pub show_empty: bool,
+    #[serde(default = "yes")]
+    /// Show the active binding mode beside workspaces, except in default mode.
+    #[setting(label = "Show binding mode", enabled_by = "enabled")]
+    pub show_binding_mode: bool,
     #[serde(default)]
     /// Choose whether to show all workspaces or only the active one.
     #[setting(label = "Workspaces to show", choices, enabled_by = "enabled")]
@@ -808,6 +812,7 @@ impl Default for MenuBarSettings {
         Self {
             enabled: false,
             show_empty: false,
+            show_binding_mode: true,
             mode: MenuBarDisplayMode::default(),
             active_label: ActiveWorkspaceLabel::default(),
             display_style: WorkspaceDisplayStyle::default(),
