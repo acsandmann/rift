@@ -93,6 +93,7 @@ pub(crate) struct EventOutcome {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ArrangeRequest {
+    /// Zero or one: arrange the final model, regardless of how many reducers requested it.
     pub(crate) passes: u8,
     pub(crate) is_resize: bool,
     pub(crate) window_was_destroyed: bool,
@@ -159,7 +160,7 @@ impl EventOutcome {
                 self.arrange.space_scope = None;
                 self.arrange.secondary_space_scope = None;
             }
-            self.arrange.passes = self.arrange.passes.saturating_add(other.arrange.passes).max(1);
+            self.arrange.passes = 1;
             self.arrange.is_resize |= other.arrange.is_resize;
             self.arrange.window_was_destroyed |= other.arrange.window_was_destroyed;
         }
@@ -244,7 +245,7 @@ impl EventOutcome {
     }
 
     pub(crate) fn with_arrange_passes(mut self, passes: u8) -> Self {
-        self.arrange.passes = passes;
+        self.arrange.passes = u8::from(passes > 0);
         self
     }
 
@@ -403,11 +404,13 @@ mod tests {
             EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space)),
         );
         assert_eq!(outcome.arrange.space_scope, Some(first_space));
+        assert_eq!(outcome.arrange.passes, 1);
 
         outcome.absorb(
             EventOutcome::layout_changed(false).with_arrange_space_scope(Some(second_space)),
         );
         assert_eq!(outcome.arrange.space_scope, None);
+        assert_eq!(outcome.arrange.passes, 1);
     }
 
     #[test]
@@ -423,6 +426,19 @@ mod tests {
         assert_eq!(outcome.arrange.passes, 1);
         assert_eq!(outcome.arrange.space_scope, Some(space));
         assert!(!outcome.arrange.is_resize);
+    }
+
+    #[test]
+    fn absorbed_arrange_requests_preserve_resize_and_destruction_intent() {
+        let mut outcome = EventOutcome::no_change();
+        assert_eq!(outcome.arrange.passes, 0);
+        outcome.absorb(EventOutcome::no_change());
+        assert_eq!(outcome.arrange.passes, 0);
+        outcome.absorb(EventOutcome::layout_changed(true));
+        outcome.absorb(EventOutcome::window_membership_changed(true, false));
+        assert_eq!(outcome.arrange.passes, 1);
+        assert!(outcome.arrange.is_resize);
+        assert!(outcome.arrange.window_was_destroyed);
     }
 
     #[test]

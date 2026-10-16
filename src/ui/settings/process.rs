@@ -6,10 +6,11 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::ptr::NonNull;
-use std::sync::mpsc;
+use std::rc::Rc;
+use std::sync::{Arc, mpsc};
 
 use block2::RcBlock;
-use cgs::{Alert, Application, Ui};
+use cgs::{Alert, Ui};
 use dispatchr::time::Time;
 use objc2::MainThreadMarker;
 use objc2::rc::autoreleasepool;
@@ -20,7 +21,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSProcessInfo, NSString};
 use rift_client::{
-    ApplicationData, ClientError, DisplayData, EventKind, RiftEvent, RiftMachClient, RiftRequest,
+    ApplicationData, ClientError, DisplayData, RiftEvent, RiftMachClient, RiftRequest,
 };
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -37,25 +38,98 @@ type Runtime = (Vec<ScreenInfo>, Vec<ApplicationData>);
 enum Job {
     Source,
     Reload,
-    Apply(u64, serde_json::Value),
+    Apply(u64, Arc<ConfigSource>, SourceEdit),
     Runtime,
 }
 
 /// Results delivered to the main thread.
 enum Message {
-    Source(Result<Box<SourceSnapshot>, String>),
+    Source(Result<Snapshot, String>),
+    /// Candidate preparation failed locally; the acknowledged source is still valid.
+    InvalidEdit(String),
     /// `None` when the daemon could not answer this time.
     Runtime(Option<Runtime>),
     ConfigChanged(u64),
     RefreshSettings,
+    RefreshRuntime,
     Installed(Vec<(String, String)>),
-    Updated(Result<String, String>),
+    Updated(updates::Result),
     Closed,
     /// The daemon is gone.
     Lost(String),
 }
 
+/// Shared only within Settings; the wire format remains SourceSnapshot.
+struct Snapshot {
+    revision: u64,
+    source: Arc<ConfigSource>,
+}
+impl From<SourceSnapshot> for Snapshot {
+    fn from(snapshot: SourceSnapshot) -> Self {
+        Self {
+            revision: snapshot.revision,
+            source: Arc::new(snapshot.source),
+        }
+    }
+}
+
+struct PendingEdit {
+    control: Option<Rc<()>>,
+    edit: Option<SourceEdit>,
+    finishes: Vec<Finish>,
+}
+impl PendingEdit {
+    fn into_finish(self) -> Finish {
+        Box::new(move |result| {
+            for finish in self.finishes {
+                finish(result.clone());
+            }
+        })
+    }
+}
+
+/// Only adjacent absolute assignments from the same native control supersede each other.
+/// A different control, reload, or transaction is an ordering barrier.
+fn enqueue(
+    edits: &mut VecDeque<PendingEdit>,
+    control: Option<Rc<()>>,
+    edit: Option<SourceEdit>,
+    finish: Finish,
+) {
+    if let Some(control) = &control
+        && let Some(last) = edits.back_mut()
+        && last.control.as_ref().is_some_and(|last| Rc::ptr_eq(last, control))
+    {
+        last.edit = edit;
+        last.finishes.push(finish);
+        return;
+    }
+    edits.push_back(PendingEdit {
+        control,
+        edit,
+        finishes: vec![finish],
+    });
+}
+
 pub fn run(config_path: PathBuf) -> ! {
+    let startup = super::timing::start();
+    let (messages, inbox) = unbounded_channel();
+    // The daemon launches Settings; once it exits, nothing can save the configuration.
+    let lost = messages.clone();
+    let daemon = std::os::unix::process::parent_id();
+    crate::sys::dispatch::on_proc_exit(daemon as i32, move || {
+        let _ = lost.send(Message::Lost("Rift quit.".into()));
+    });
+    if std::os::unix::process::parent_id() != daemon {
+        let _ = messages.send(Message::Lost("Rift quit.".into()));
+    }
+    let (jobs, queue) = mpsc::channel();
+    let worker = messages.clone();
+    std::thread::Builder::new()
+        .name("settings-ipc".into())
+        .spawn(move || serve(queue, worker))
+        .expect("spawn Settings IPC worker");
+
     // Keep the same executable and signing identity, but distinguish the Settings child
     // in OS process listings. Foundation's processName alone does not rename it in the kernel.
     NSProcessInfo::processInfo().setProcessName(&NSString::from_str("rift-settings"));
@@ -74,72 +148,110 @@ pub fn run(config_path: PathBuf) -> ! {
         tracing::warn!(error = %std::io::Error::last_os_error(), "Could not name the Settings process");
     }
     let mtm = MainThreadMarker::new().expect("Settings runs on the main thread");
+    let appkit = super::timing::start();
     let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    super::timing::finish(appkit, "NSApplication::sharedApplication");
+    let policy = super::timing::start();
+    // Settings uses a normal application menu and Dock presence while open.
+    // Avoid registering as Accessory only to switch at presentation.
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    super::timing::finish(policy, "initial activation policy");
+    let launch = super::timing::start();
     app.finishLaunching();
-    Application::shared(&Ui::new(mtm)).install_close_window_command();
-    Executor::run_main(mtm, open(mtm, config_path));
+    super::timing::finish(launch, "finishLaunching");
+    Executor::run_main(mtm, open(mtm, config_path, startup, jobs, messages, inbox));
     std::process::exit(0)
 }
 
-async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
-    let (messages, mut inbox) = unbounded_channel();
-    // The daemon launches Settings; once it exits, nothing can save the configuration.
-    let lost = messages.clone();
-    let daemon = std::os::unix::process::parent_id();
-    crate::sys::dispatch::on_proc_exit(daemon as i32, move || {
-        let _ = lost.send(Message::Lost("Rift quit.".into()));
-    });
-    if std::os::unix::process::parent_id() != daemon {
-        fail("Rift quit.");
-        return std::future::pending().await;
-    }
-    let (jobs, queue) = mpsc::channel();
-    let worker = messages.clone();
-    std::thread::Builder::new()
-        .name("settings-ipc".into())
-        .spawn(move || serve(queue, worker))
-        .expect("spawn Settings IPC worker");
-    let _ = jobs.send(Job::Source);
-    let _ = jobs.send(Job::Runtime);
-    let (mut snapshot, mut runtime, mut announced) = (None, None, 0);
-    while snapshot.is_none() || runtime.is_none() {
+async fn open(
+    mtm: MainThreadMarker,
+    config_path: PathBuf,
+    startup: Option<super::timing::Start>,
+    jobs: mpsc::Sender<Job>,
+    messages: UnboundedSender<Message>,
+    mut inbox: tokio::sync::mpsc::UnboundedReceiver<Message>,
+) {
+    let snapshot_wait = super::timing::start();
+    let (mut snapshot, mut announced) = (None, 0);
+    while snapshot.is_none() {
         match inbox.recv().await {
             Some(Message::Source(Ok(source))) => snapshot = Some(source),
             Some(Message::Source(Err(error)) | Message::Lost(error)) => {
                 fail(&error);
                 return std::future::pending().await;
             }
-            Some(Message::Runtime(result)) => runtime = Some(result.unwrap_or_default()),
             Some(Message::ConfigChanged(revision)) => announced = announced.max(revision),
             _ => {}
         }
     }
-    let SourceSnapshot { revision, source } = *snapshot.unwrap();
-    let (displays, applications) = runtime.unwrap();
+    super::timing::finish(snapshot_wait, "snapshot wait after AppKit");
+    let Snapshot { revision, source } = snapshot.unwrap();
     let (requests, mut pending) = unbounded_channel();
     let closed = messages.clone();
+    let construction = super::timing::start();
     let settings = Settings::new(
         Ui::new(mtm),
         source.clone(),
         config_path,
-        displays,
-        applications,
+        Vec::new(),
+        Vec::new(),
         requests,
         move || {
+            // Keep the previous close behavior while submitted edits drain:
+            // the window and Dock presence disappear before the process exits.
+            NSApplication::sharedApplication(mtm)
+                .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
             let _ = closed.send(Message::Closed);
         },
     );
-    settings.show();
-    for name in unsafe {
+    super::timing::finish(construction, "Settings::new");
+    if let Some(startup) = startup {
+        let updated = std::cell::Cell::new(false);
+        let update = RcBlock::new(move |note: NonNull<NSNotification>| {
+            // Activation can update an invisible window. Only count an update after ordering.
+            let visible = unsafe { note.as_ref() }
+                .object()
+                .and_then(|object| object.downcast::<objc2_app_kit::NSWindow>().ok())
+                .is_some_and(|window| window.isVisible());
+            if visible && !updated.replace(true) {
+                super::timing::finish_from_parent(
+                    "first visible native window update (render proxy)",
+                );
+                super::timing::finish(
+                    Some(startup),
+                    "first visible native window update (render proxy)",
+                );
+            }
+        });
+        let _ = unsafe {
+            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+                Some(objc2_app_kit::NSWindowDidUpdateNotification),
+                Some(settings.window.ns_window()),
+                None,
+                &update,
+            )
+        };
+    }
+    for (name, activation) in unsafe {
         [
-            NSApplicationDidBecomeActiveNotification,
-            NSApplicationDidChangeScreenParametersNotification,
+            (NSApplicationDidBecomeActiveNotification, true),
+            (NSApplicationDidChangeScreenParametersNotification, false),
         ]
     } {
         let messages = messages.clone();
+        let initial_activation =
+            std::cell::Cell::new(activation && !NSApplication::sharedApplication(mtm).isActive());
         let refresh = RcBlock::new(move |_: NonNull<NSNotification>| {
-            let _ = messages.send(Message::RefreshSettings);
+            // The first activation only presents the snapshot just obtained. Later activations
+            // recover missed broadcasts; screen changes only invalidate runtime data.
+            if initial_activation.replace(false) {
+                return;
+            }
+            let _ = messages.send(if activation {
+                Message::RefreshSettings
+            } else {
+                Message::RefreshRuntime
+            });
         });
         let _ = unsafe {
             NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
@@ -150,6 +262,8 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
             )
         };
     }
+    settings.show();
+    super::timing::finish(startup, "child entry to presented");
     let mut session = Session {
         settings: Some(settings),
         jobs,
@@ -166,6 +280,7 @@ async fn open(mtm: MainThreadMarker, config_path: PathBuf) {
         update: None,
     };
     session.pump();
+    session.refresh_runtime();
     loop {
         tokio::select! {
             // Queue edits sent before the window closed ahead of the close itself.
@@ -208,12 +323,12 @@ struct Session {
     jobs: mpsc::Sender<Job>,
     messages: UnboundedSender<Message>,
     /// The daemon's last acknowledged source; queued edits apply to it in order.
-    source: ConfigSource,
+    source: Arc<ConfigSource>,
     revision: u64,
     /// The newest revision the daemon announced.
     announced: u64,
     /// Edits waiting for the one in flight; `None` reloads the file.
-    edits: VecDeque<(Option<SourceEdit>, Finish)>,
+    edits: VecDeque<PendingEdit>,
     /// The configuration request awaiting a reply; `Some(None)` is a snapshot refresh.
     in_flight: Option<Option<Finish>>,
     /// Re-read the source before the next edit.
@@ -229,10 +344,10 @@ struct Session {
 }
 
 impl Session {
-    fn request(&mut self, Request { action, finish }: Request) {
+    fn request(&mut self, Request { action, finish, control }: Request) {
         match action {
-            Action::Edit(edit) => self.edits.push_back((Some(edit), finish)),
-            Action::Reload => self.edits.push_back((None, finish)),
+            Action::Edit(edit) => enqueue(&mut self.edits, control, Some(edit), finish),
+            Action::Reload => enqueue(&mut self.edits, None, None, finish),
             Action::RefreshRuntime => return self.discover_applications(finish),
             Action::CheckUpdates(done) => {
                 self.update = Some(done);
@@ -253,7 +368,7 @@ impl Session {
                 match result {
                     Ok(snapshot) => {
                         self.stalled = None;
-                        self.adopt(*snapshot);
+                        self.adopt(snapshot);
                         if let Some(finish) = finish {
                             finish(Ok(()));
                         }
@@ -269,6 +384,12 @@ impl Session {
                 }
                 self.pump();
             }
+            Message::InvalidEdit(error) => {
+                if let Some(finish) = self.in_flight.take().flatten() {
+                    finish(Err(error));
+                }
+                self.pump();
+            }
             Message::ConfigChanged(revision) => {
                 self.announced = self.announced.max(revision);
                 self.pump();
@@ -281,6 +402,7 @@ impl Session {
                 self.pump();
                 self.refresh_runtime();
             }
+            Message::RefreshRuntime => self.refresh_runtime(),
             Message::Runtime(runtime) => {
                 if let (Some((displays, applications)), Some(settings)) = (runtime, &self.settings)
                 {
@@ -311,37 +433,31 @@ impl Session {
 
     /// Starts the next configuration request unless one is in flight.
     fn pump(&mut self) {
-        while self.in_flight.is_none() {
-            if self.stalled.is_some_and(|announced| self.announced > announced) {
-                self.stalled = None;
-            }
-            let outdated = self.refresh || self.announced > self.revision;
-            if (outdated && self.stalled.is_none())
-                || (self.stalled.is_some() && !self.edits.is_empty())
-            {
-                self.refresh = false;
-                return self.send(Job::Source, None);
-            }
-            let Some((edit, finish)) = self.edits.pop_front() else {
-                return;
-            };
-            let Some(edit) = edit else {
-                return self.send(Job::Reload, Some(finish));
-            };
-            let mut source = self.source.clone();
-            if let Err(error) = edit(&mut source) {
-                finish(Err(error));
-            } else if source == self.source {
-                finish(Ok(()));
-            } else {
-                match serde_json::to_value(&source) {
-                    Ok(source) => {
-                        return self.send(Job::Apply(self.revision, source), Some(finish));
-                    }
-                    Err(error) => finish(Err(error.to_string())),
-                }
-            }
+        if self.in_flight.is_some() {
+            return;
         }
+        if self.stalled.is_some_and(|announced| self.announced > announced) {
+            self.stalled = None;
+        }
+        let outdated = self.refresh || self.announced > self.revision;
+        if (outdated && self.stalled.is_none())
+            || (self.stalled.is_some() && !self.edits.is_empty())
+        {
+            self.refresh = false;
+            return self.send(Job::Source, None);
+        }
+        let Some(mut pending) = self.edits.pop_front() else {
+            return;
+        };
+        let edit = pending.edit.take();
+        let finish = pending.into_finish();
+        let Some(edit) = edit else {
+            return self.send(Job::Reload, Some(finish));
+        };
+        self.send(
+            Job::Apply(self.revision, self.source.clone(), edit),
+            Some(finish),
+        );
     }
 
     /// A refresh failed: edits queued behind it would apply to an unknown source, so reject
@@ -349,8 +465,8 @@ impl Session {
     fn stall(&mut self, error: String) {
         tracing::warn!(%error, "Could not refresh Settings");
         let first = self.stalled.replace(self.announced).is_none();
-        for (_, finish) in std::mem::take(&mut self.edits) {
-            finish(Err(error.clone()));
+        for pending in std::mem::take(&mut self.edits) {
+            pending.into_finish()(Err(error.clone()));
         }
         if let (true, Some(settings)) = (first, &self.settings) {
             let ui = settings.router.ui;
@@ -365,13 +481,11 @@ impl Session {
         let _ = self.jobs.send(job);
     }
 
-    fn adopt(&mut self, snapshot: SourceSnapshot) {
+    fn adopt(&mut self, snapshot: Snapshot) {
         self.revision = snapshot.revision;
-        if self.source != snapshot.source {
-            self.source = snapshot.source;
-            if let Some(settings) = &self.settings {
-                settings.synchronize(self.source.clone());
-            }
+        self.source = snapshot.source;
+        if let Some(settings) = &self.settings {
+            settings.synchronize(self.source.clone());
         }
     }
 
@@ -404,11 +518,15 @@ impl Session {
 /// The IPC worker: one blocking client, used sequentially, plus one event receiver.
 fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
     let client = RiftMachClient;
-    // Subscribe before the first snapshot so no change can fall between them.
-    let subscription = match client.subscribe(EventKind::ConfigChanged) {
-        Ok(subscription) => subscription,
+    let initialization = super::timing::start();
+    let (snapshot, subscription) = match client.initialize_settings::<SourceSnapshot>() {
+        Ok(session) => session,
         Err(error) => return drop(messages.send(Message::Lost(error.to_string()))),
     };
+    super::timing::finish(initialization, "Settings session IPC (subscribe + snapshot)");
+    if messages.send(Message::Source(Ok(snapshot.into()))).is_err() {
+        return;
+    }
     let events = messages.clone();
     std::thread::Builder::new()
         .name("settings-events".into())
@@ -432,6 +550,12 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
         })
         .expect("spawn Settings event receiver");
     for job in jobs {
+        let timing = super::timing::start();
+        let stage = if matches!(job, Job::Runtime) {
+            "runtime IPC"
+        } else {
+            "configuration IPC"
+        };
         let message = match job {
             Job::Runtime => match runtime(&client) {
                 Ok(runtime) => Message::Runtime(Some(runtime)),
@@ -442,13 +566,11 @@ fn serve(jobs: mpsc::Receiver<Job>, messages: UnboundedSender<Message>) {
             },
             Job::Source => source(&client, RiftRequest::GetSettingsSource),
             Job::Reload => source(&client, RiftRequest::ReloadSettingsSource),
-            Job::Apply(expected_revision, source_json) => {
-                source(&client, RiftRequest::ApplySettingsSource {
-                    expected_revision,
-                    source: source_json,
-                })
+            Job::Apply(expected_revision, base, edit) => {
+                apply(&client, expected_revision, base, edit)
             }
         };
+        super::timing::finish(timing, stage);
         let lost = matches!(message, Message::Lost(_));
         if messages.send(message).is_err() || lost {
             return;
@@ -464,9 +586,33 @@ fn call<T: serde::de::DeserializeOwned>(
 }
 
 fn source(client: &RiftMachClient, request: RiftRequest) -> Message {
-    match call(client, &request) {
-        Ok(snapshot) => Message::Source(Ok(snapshot)),
+    match call::<SourceSnapshot>(client, &request) {
+        Ok(snapshot) => Message::Source(Ok(snapshot.into())),
         Err(error) => recoverable(error).map_or_else(Message::Lost, |e| Message::Source(Err(e))),
+    }
+}
+
+/// Clone, compare and serialize off the main thread. A no-op returns the same shared
+/// snapshot, so it needs neither serialization nor a Mach request.
+fn apply(
+    client: &RiftMachClient,
+    revision: u64,
+    base: Arc<ConfigSource>,
+    edit: SourceEdit,
+) -> Message {
+    let mut candidate = base.as_ref().clone();
+    if let Err(error) = edit(&mut candidate) {
+        return Message::InvalidEdit(error);
+    }
+    if candidate == *base {
+        return Message::Source(Ok(Snapshot { revision, source: base }));
+    }
+    match serde_json::to_value(&candidate) {
+        Ok(candidate) => source(client, RiftRequest::ApplySettingsSource {
+            expected_revision: revision,
+            source: candidate,
+        }),
+        Err(error) => Message::InvalidEdit(error.to_string()),
     }
 }
 

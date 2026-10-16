@@ -1034,6 +1034,9 @@ impl Reactor {
             Event::BindingModeChanged { mode } => {
                 if self.binding_mode != mode {
                     let previous_mode = std::mem::replace(&mut self.binding_mode, mode.clone());
+                    if let Some(tx) = &self.menu_manager.menu_tx {
+                        tx.send(menu_bar::Event::BindingModeChanged(mode.clone()));
+                    }
                     let _ = self
                         .communication_manager
                         .event_broadcaster
@@ -2699,21 +2702,22 @@ impl Reactor {
         if outcome.arrange.passes > 0
             && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
         {
-            for _ in 0..outcome.arrange.passes.max(1) {
-                layout_changed |= self.update_layout_or_warn(
-                    outcome.arrange.is_resize,
-                    matches!(
-                        self.workspace_switch_manager.workspace_switch_state,
-                        WorkspaceSwitchState::Active
-                    ),
-                    outcome.arrange.space_scope,
-                );
-            }
-            if let Some(space) = outcome.arrange.secondary_space_scope {
+            // Reducers have finished mutating the model; arrange each affected space once.
+            layout_changed = self.update_layout_or_warn(
+                outcome.arrange.is_resize,
+                matches!(
+                    self.workspace_switch_manager.workspace_switch_state,
+                    WorkspaceSwitchState::Active
+                ),
+                outcome.arrange.space_scope,
+            );
+            if let Some(space) = outcome.arrange.secondary_space_scope
+                && outcome.arrange.space_scope.is_some_and(|primary| primary != space)
+            {
                 layout_changed |=
                     self.update_layout_or_warn(outcome.arrange.is_resize, false, Some(space));
             }
-            // Publish the menu state once after all arrange passes have completed.
+            // Publish the menu state once after all affected spaces have been arranged.
             self.maybe_send_menu_update();
         }
         if layout_changed && outcome.drop_haptic && !cfg!(test) {
@@ -4709,7 +4713,9 @@ impl Reactor {
                     self.try_focus_or_warp_without_raise(Some(space), &mut focus_window)
                 }
             } else if let Some(space) = pending_refocus_space.take() {
-                if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, None) {
+                let selected = self.layout_manager.layout_engine.selected_window(space);
+                if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, selected)
+                {
                     focus_window = Some(wid);
                     false
                 } else if !self.is_in_drag() {
@@ -5081,6 +5087,12 @@ impl Reactor {
                 continue;
             };
 
+            // Native visibility does not imply Rift management is enabled. Do
+            // not let input claim gestures that the reactor will reject.
+            if !self.is_space_active(space) {
+                continue;
+            }
+
             // Keep first occurrence only if multiple screens briefly report the same space.
             if modes.iter().any(|(existing, _)| *existing == space) {
                 continue;
@@ -5103,7 +5115,7 @@ impl Reactor {
             modes.push((space, mode));
         }
 
-        if modes.is_empty() || (!changed && modes.len() == last_modes.len()) {
+        if !changed && modes.len() == last_modes.len() {
             return;
         }
 

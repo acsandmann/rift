@@ -163,6 +163,19 @@ impl IpcRequestHandler {
                 self.dispatch_config_request(request, header);
                 return;
             }
+            RiftRequest::InitializeSettings => {
+                // Register first: every change after this point is either represented
+                // by the actor's snapshot or queued on the client's subscription port.
+                if !self.server_state.subscribe_client(
+                    client_port,
+                    rift_protocol::EventKind::ConfigChanged.to_string(),
+                ) {
+                    send_error_response(header, "Failed to monitor subscription port");
+                    return;
+                }
+                self.dispatch_config_request(RiftRequest::GetSettingsSource, header);
+                return;
+            }
             RiftRequest::Subscribe { event } => {
                 if self.server_state.subscribe_client(client_port, event.to_string()) {
                     encode_success(serde_json::json!({ "subscribed": event.to_string() }))

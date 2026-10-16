@@ -1,147 +1,172 @@
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::Duration;
 use std::{fs, thread};
 
-use notify::RecursiveMode;
-use notify_debouncer_mini::{
-    DebounceEventResult, DebouncedEvent, DebouncedEventKind, new_debouncer,
-};
-use tracing::{debug, info, trace, warn};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use tracing::{debug, info, warn};
 
 use crate::actor::config::{self as config_actor, Event as ConfigEvent};
 use crate::common::config::{self, ConfigCommand};
+
+const DEBOUNCE: Duration = Duration::from_millis(250);
 
 pub struct ConfigWatcher {
     file: PathBuf,
     real_file: Option<PathBuf>,
     real_file_id: Option<(u64, u64)>,
+    parents: HashSet<PathBuf>,
+    last_text: Option<String>,
     config_tx: config_actor::Sender,
-    enabled: bool,
 }
 
 impl ConfigWatcher {
-    pub fn spawn(config_tx: config_actor::Sender, config: config::Config, config_path: PathBuf) {
+    pub fn spawn(config_tx: config_actor::Sender, config_path: PathBuf) {
         thread::Builder::new()
             .name("config-watcher".to_string())
             .spawn(move || {
-                let file = config_path;
-                let real_file = fs::canonicalize(&file).ok();
-
-                let real_file_id = real_file
-                    .as_ref()
-                    .and_then(|p| fs::metadata(p).ok())
-                    .map(|m| (m.dev(), m.ino()));
-
-                let actor = ConfigWatcher {
-                    file,
-                    real_file,
-                    real_file_id,
-                    config_tx,
-                    enabled: config.settings.hot_reload,
-                };
-                crate::sys::executor::Executor::run(async move {
-                    if let Err(e) = actor.run().await {
-                        warn!("config-watcher: error: {e:?}");
-                    }
-                })
+                if let Err(e) = Self::run(config_tx, config_path) {
+                    warn!("config-watcher: error: {e:?}");
+                }
             })
             .expect("failed to spawn config-watcher thread");
     }
 
-    async fn run(mut self) -> notify::Result<()> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DebouncedEvent>();
-
-        let mut debouncer =
-            new_debouncer(Duration::from_millis(250), move |res: DebounceEventResult| {
-                if let Ok(events) = res {
-                    for e in events {
-                        if e.kind == DebouncedEventKind::Any {
-                            let _ = tx.send(e);
-                        }
-                    }
-                }
-            })?;
-
-        let watcher = debouncer.watcher();
-
-        let mut parents: HashSet<PathBuf> = HashSet::new();
-        if let Some(p) = self.file.parent() {
-            parents.insert(p.to_path_buf());
-        }
-        if let Some(real) = &self.real_file {
-            if let Some(p) = real.parent() {
-                parents.insert(p.to_path_buf());
+    fn watch(
+        config_tx: config_actor::Sender,
+        file: PathBuf,
+    ) -> notify::Result<(Self, RecommendedWatcher, Receiver<Event>)> {
+        // FSEvents reports absolute paths; preserve the final symlink itself.
+        let file = file
+            .parent()
+            .and_then(|p| fs::canonicalize(p).ok())
+            .zip(file.file_name())
+            .map(|(parent, name)| parent.join(name))
+            .unwrap_or(file);
+        let mut actor = Self {
+            file,
+            real_file: None,
+            real_file_id: None,
+            parents: HashSet::new(),
+            last_text: None,
+            config_tx,
+        };
+        let (tx, rx) = channel();
+        let mut watcher = notify::recommended_watcher(move |event| match event {
+            Ok(event) => {
+                let _ = tx.send(event);
             }
-        }
+            Err(error) => warn!("config-watcher: notification error: {error}"),
+        })?;
+        actor.refresh_watches(&mut watcher)?;
+        Ok((actor, watcher, rx))
+    }
 
-        for dir in parents.iter() {
-            watcher.watch(dir, RecursiveMode::NonRecursive)?;
-            info!("watching {:?}", dir);
-        }
-
-        while let Some(event) = rx.recv().await {
-            if !self.is_relevant(&event) {
+    fn run(config_tx: config_actor::Sender, file: PathBuf) -> notify::Result<()> {
+        let (mut actor, mut watcher, rx) = Self::watch(config_tx, file)?;
+        while let Ok(event) = rx.recv() {
+            if !actor.is_relevant(&event) {
                 continue;
             }
-
-            trace!("change detected (debounced): {:?} {:?}", event.kind, event.path);
-
-            let mut should_reload = self.enabled;
-
-            if !should_reload {
-                match crate::common::config::Config::read(&self.file) {
-                    Ok(new_cfg) => {
-                        if let Ok(current_cfg) = self.query_config() {
-                            if new_cfg.keys != current_cfg.keys {
-                                should_reload = true;
-                            }
-                        }
-                    }
-                    Err(e) => warn!("Failed to read config file for diff check: {:?}", e),
-                }
+            actor.settle(&rx);
+            // Watch parents rather than files: atomic saves replace the inode, and a
+            // deleted file must remain discoverable. Retargeted symlinks need new parents.
+            // A failed refresh must not end hot reload; keep the existing watches.
+            if let Err(error) = actor.refresh_watches(&mut watcher) {
+                warn!("config-watcher: failed to refresh watches: {error}");
             }
-
-            if should_reload {
-                if self.request_reload().is_ok()
-                    && let Ok(new_config) = self.query_config()
-                {
-                    self.enabled = new_config.settings.hot_reload;
-                    debug!("config reloaded successfully");
-                }
+            actor.reload_if_changed();
+            if actor.config_tx.is_closed() {
+                break;
             }
         }
-
         Ok(())
     }
 
-    fn is_relevant(&self, event: &DebouncedEvent) -> bool {
-        if event.path == self.file {
-            return true;
-        }
-
-        if let Some(real) = &self.real_file {
-            if event.path == *real {
-                return true;
-            }
-
-            if let Ok(ev_real) = fs::canonicalize(&event.path) {
-                if ev_real == *real {
-                    return true;
+    fn settle(&self, rx: &Receiver<Event>) {
+        let mut deadline = std::time::Instant::now() + DEBOUNCE;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(event) if self.is_relevant(&event) => {
+                    deadline = std::time::Instant::now() + DEBOUNCE;
                 }
-            }
-
-            if let Ok(meta) = fs::metadata(&event.path) {
-                if let Some((dev, ino)) = self.real_file_id {
-                    if meta.dev() == dev && meta.ino() == ino {
-                        return true;
-                    }
-                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
             }
         }
+    }
 
-        event.path.file_name().is_some_and(|n| Some(n) == self.file.file_name())
+    fn refresh_watches(&mut self, watcher: &mut dyn Watcher) -> notify::Result<()> {
+        // Keep the last target when it disappears so recreation is still observed.
+        let real_file = fs::canonicalize(&self.file).ok().or_else(|| self.real_file.clone());
+        let parents: HashSet<_> = self
+            .file
+            .parent()
+            .into_iter()
+            .chain(real_file.as_deref().and_then(|p| p.parent()))
+            .map(PathBuf::from)
+            .collect();
+        for dir in parents.difference(&self.parents) {
+            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+            info!("watching {:?}", dir);
+        }
+        for dir in self.parents.difference(&parents) {
+            watcher.unwatch(dir)?;
+        }
+        self.parents = parents;
+        self.real_file_id = real_file
+            .as_ref()
+            .and_then(|p| fs::metadata(p).ok())
+            .map(|m| (m.dev(), m.ino()));
+        self.real_file = real_file;
+        Ok(())
+    }
+
+    fn is_relevant(&self, event: &Event) -> bool {
+        event.paths.iter().any(|path| {
+            path == &self.file
+                || self.real_file.as_ref() == Some(path)
+                || self.parents.contains(path)
+                || self
+                    .real_file_id
+                    .is_some_and(|id| fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == id))
+        })
+    }
+
+    fn reload_if_changed(&mut self) {
+        let text = match fs::read_to_string(&self.file) {
+            Ok(text) => text,
+            Err(error) => {
+                // Recreation with the same bytes still deserves a fresh attempt.
+                self.last_text = None;
+                warn!("Failed to read config file: {error}");
+                return;
+            }
+        };
+        if self.last_text.as_ref() == Some(&text) {
+            return;
+        }
+        // Query the actor's authoritative setting, including changes made through Settings.
+        let Ok(current) = self.query_config() else { return };
+        let text = self.last_text.insert(text);
+        if !current.settings.hot_reload {
+            match config::Config::parse(text) {
+                Ok(new_cfg) if new_cfg.keys != current.keys => {}
+                Ok(_) => return,
+                Err(error) => {
+                    warn!("Failed to parse config file for diff check: {error}");
+                    return;
+                }
+            }
+        }
+        if let Err(error) = self.request_reload() {
+            self.last_text = None;
+            warn!("Failed to reload config: {error}");
+        } else {
+            debug!("config reloaded successfully");
+        }
     }
 
     fn request_reload(&self) -> Result<(), String> {

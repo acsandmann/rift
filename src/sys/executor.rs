@@ -13,7 +13,7 @@ use objc2_core_foundation::CFRunLoop;
 
 #[cfg(feature = "custom-event-loop")]
 use super::cocoa::EventLoop;
-use super::run_loop::WakeupHandle;
+use super::run_loop::{WakeLatch, WakeupHandle};
 
 thread_local! {
     static HANDLE: Handle = Handle::new();
@@ -33,14 +33,14 @@ impl Drop for Session {
 
 impl Executor {
     pub fn run(task: impl Future<Output = ()> + 'static) {
-        Self::run_with_loop_fn(task, CFRunLoop::run);
+        Self::run_with_loop_fn(task, CFRunLoop::run, false);
     }
 
     #[cfg(not(feature = "custom-event-loop"))]
     pub fn run_main(mtm: MainThreadMarker, task: impl Future<Output = ()> + 'static) {
         // Some macOS notifications require an AppKit pump, not just CFRunLoop.
         // https://github.com/koekeishiya/yabai/issues/2680
-        Self::run_with_loop_fn(task, || NSApp(mtm).run());
+        Self::run_with_loop_fn(task, || NSApp(mtm).run(), true);
     }
 
     #[cfg(feature = "custom-event-loop")]
@@ -59,7 +59,11 @@ impl Executor {
         }
     }
 
-    fn run_with_loop_fn(task: impl Future<Output = ()> + 'static, loop_fn: impl Fn()) {
+    fn run_with_loop_fn(
+        task: impl Future<Output = ()> + 'static,
+        loop_fn: impl Fn(),
+        immediate: bool,
+    ) {
         let task: Pin<Box<dyn Future<Output = ()> + 'static>> = Box::pin(task);
 
         HANDLE.with(move |handle| {
@@ -76,7 +80,13 @@ impl Executor {
             {
                 let mut state = handle.0.borrow_mut();
                 state.main_task.replace(task);
-                state.wakeup.wake_by_ref();
+                if immediate {
+                    // Like the custom event loop, construct UI before AppKit starts servicing
+                    // layout/display observers, avoiding intermediate layout passes.
+                    state.process_tasks();
+                } else {
+                    state.wakeup.wake_by_ref();
+                }
             }
 
             while handle.0.borrow().main_task.is_some() {
@@ -101,7 +111,7 @@ impl Handle {
                 }
             });
             let state = State {
-                wakeup: Arc::new(WakerImpl(wakeup)),
+                wakeup: Arc::new(WakerImpl(WakeLatch::default(), wakeup)),
                 main_task: None,
             };
             RefCell::new(state)
@@ -116,6 +126,8 @@ struct State {
 
 impl State {
     fn process_tasks(&mut self) {
+        // Reset before polling so wakes during or after this poll signal again.
+        self.wakeup.0.consume();
         let waker = self.wakeup.clone().into();
         let mut context = Context::from_waker(&waker);
 
@@ -131,10 +143,16 @@ impl State {
     }
 }
 
-struct WakerImpl(WakeupHandle);
+struct WakerImpl(WakeLatch, WakeupHandle);
 
 impl Wake for WakerImpl {
-    fn wake(self: Arc<Self>) { self.0.wake(); }
+    fn wake(self: Arc<Self>) { self.wake_by_ref(); }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        if self.0.request() {
+            self.1.wake();
+        }
+    }
 }
 
 #[cfg(test)]

@@ -105,10 +105,12 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 }
 
 fn main() {
+    let entry = rift_wm::ui::settings::timing::start();
     sigpipe::reset();
     let opt = Cli::parse();
 
     if opt.settings {
+        rift_wm::ui::settings::timing::finish(entry, "entry/argument parsing");
         log::init_logging();
         rift_wm::ui::settings::process::run(opt.config.unwrap_or_else(config_file));
     }
@@ -238,7 +240,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         config_path.clone(),
     );
 
-    ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
+    ConfigWatcher::spawn(config_tx.clone(), config_path.clone());
 
     let server_state = match ipc::run_mach_server(reactor.clone(), config_tx.clone()) {
         Ok(state) => state,

@@ -57,13 +57,13 @@ fn record_editor(
         let error = error.clone();
         model.submit_edit(
             Box::new(move |source| {
-                if *source != base {
+                if *source != *base {
                     return Err(
                         "Settings changed elsewhere. Cancel and reopen this editor to try again."
                             .into(),
                     );
                 }
-                *source = value;
+                *source = value.as_ref().clone();
                 Ok(())
             }),
             Box::new(move |result| {
@@ -102,7 +102,6 @@ fn record_editor(
         .push(body)
         .push(message)
         .push(cancel);
-    content.width(if scrolling { 540.0 } else { 420.0 });
     let sheet = Sheet::new(&ui, title, content);
     sheet.fit_content();
     model.sheet.borrow_mut().take();
@@ -141,7 +140,9 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
                 &workspace_name(&model.source.borrow(), index),
                 |draft| {
                     if index == draft.source.borrow().virtual_workspaces.default_workspace_count {
-                        draft.source.borrow_mut().virtual_workspaces.resize(index + 1);
+                        Arc::make_mut(&mut draft.source.borrow_mut())
+                            .virtual_workspaces
+                            .resize(index + 1);
                     }
                     workspace_detail(ui, draft, index)
                 },
@@ -249,7 +250,6 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     }));
     f.finish(
         SettingsPage::new(&ui, "")
-            .content_width(760.0)
             .section(section)
             .section(Section::new(&ui, "Workspaces").content(table).footer(message))
             .bottom_bar(HStack::new(&ui).push(actions).spacer(&ui)),
@@ -319,7 +319,22 @@ fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) 
         WorkspaceSelector::Name(n) => Some(n.as_str()) == name,
     }
 }
-fn workspace_layout(s: &ConfigSource, i: usize) -> Option<LayoutMode> {
+/// Give workspace `i` its own layout, or let it follow the default with `None`.
+pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<LayoutMode>) {
+    let name = s.virtual_workspaces.workspace_names.get(i).cloned();
+    s.virtual_workspaces
+        .workspace_rules
+        .retain(|r| !selector_matches(&r.workspace, i, name.as_deref()));
+    if let Some(layout) = mode {
+        s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Index(i),
+            layout,
+        });
+    }
+}
+
+/// The layout workspace `i` sets for itself, if any.
+pub(super) fn workspace_layout(s: &ConfigSource, i: usize) -> Option<LayoutMode> {
     s.virtual_workspaces
         .workspace_rules
         .iter()
@@ -468,16 +483,8 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         }),
     );
     let weak_table = Rc::downgrade(&table);
-    let names = weak_table.clone();
     if model.env.installed_applications.borrow().is_none() {
-        let _ = model.env.requests.send(Request {
-            action: Action::RefreshRuntime,
-            finish: Box::new(move |_| {
-                if let Some(table) = names.upgrade() {
-                    table.reload();
-                }
-            }),
-        });
+        model.env.send(Action::RefreshRuntime, Box::new(|_| {}));
     }
     let edit_action = edit_rule.clone();
     let edit = IconButton::new(&ui, "pencil", "Edit Rule…").on_click(move || {
@@ -576,6 +583,16 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
         *indices.borrow_mut() = matches.iter().map(|(index, _)| *index).collect();
         table.set_rows_if_changed(matches.into_iter().map(|(_, rule)| rule.clone()).collect());
     });
+    let names = Rc::downgrade(&table);
+    let inventory_refresh = Rc::downgrade(&refresh);
+    model.env.application_views.borrow_mut().push(Box::new(move || {
+        let (Some(table), Some(refresh)) = (names.upgrade(), inventory_refresh.upgrade()) else {
+            return false;
+        };
+        refresh();
+        table.reload();
+        true
+    }));
     let update = refresh.clone();
     f.sync.push(Box::new(move |_| update()));
     let update = refresh.clone();
@@ -620,7 +637,6 @@ pub(super) fn rules(ui: Ui, model: &Rc<Model>) -> Page {
     *tint.borrow_mut() = Rc::downgrade(&header);
     let mut page = f.finish(
         SettingsPage::new(&ui, "")
-            .content_width(760.0)
             .subtitle(
                 "Choose which windows Rift manages and where they open. Drag rules to change their order.",
             )
@@ -663,6 +679,8 @@ fn application_picker(
     height: f64,
     mut choose: impl FnMut(Option<AppMatch>) + 'static,
 ) -> VStack {
+    let refreshing = Rc::new(Cell::new(false));
+    let selecting = refreshing.clone();
     let list = Rc::new(
         SettingsList::new(
             &ui,
@@ -673,7 +691,11 @@ fn application_picker(
         .fit_content(height)
         .symbol("app")
         .images(application_icons(|app: &Rc<Choice>| app.target.0.clone()))
-        .on_select_item(move |app| choose(app.map(|app| app.target.clone()))),
+        .on_select_item(move |app| {
+            if !selecting.get() {
+                choose(app.map(|app| app.target.clone()));
+            }
+        }),
     );
     list.set_rows(model.env.inventory.borrow().matching(""));
     let weak_env = Rc::downgrade(&model.env);
@@ -688,23 +710,28 @@ fn application_picker(
                 }
             }),
     );
+    let weak_env = Rc::downgrade(&model.env);
+    let weak_list = Rc::downgrade(&list);
+    let weak_search = Rc::downgrade(&search);
+    model.env.application_views.borrow_mut().push(Box::new(move || {
+        let (Some(env), Some(list), Some(search)) =
+            (weak_env.upgrade(), weak_list.upgrade(), weak_search.upgrade())
+        else {
+            return false;
+        };
+        let rows = env.inventory.borrow().matching(&search.get_value().trim().to_lowercase());
+        let selected = list
+            .selected_row()
+            .and_then(|selected| rows.iter().position(|app| app.target == selected.target));
+        // Native reload/selection notifications must not change the user's matcher.
+        refreshing.set(true);
+        list.set_rows_if_changed(rows);
+        list.set_selected(selected);
+        refreshing.set(false);
+        true
+    }));
     if model.env.installed_applications.borrow().is_none() {
-        let weak_env = Rc::downgrade(&model.env);
-        let weak_list = Rc::downgrade(&list);
-        let weak_search = Rc::downgrade(&search);
-        model.env.send(
-            Action::RefreshRuntime,
-            Box::new(move |_| {
-                if let (Some(env), Some(list), Some(search)) =
-                    (weak_env.upgrade(), weak_list.upgrade(), weak_search.upgrade())
-                {
-                    list.set_selected(None);
-                    list.set_rows(
-                        env.inventory.borrow().matching(&search.get_value().trim().to_lowercase()),
-                    );
-                }
-            }),
-        );
+        model.env.send(Action::RefreshRuntime, Box::new(|_| {}));
     }
     VStack::new(&ui).push(search).push(list)
 }
@@ -734,6 +761,7 @@ fn app_picker(
         }
     })
     .insets(uniform_insets(12.0));
+    // A popover sizes to its content, and the search field and list have no width of their own.
     content.width(360.0);
     let popover = Rc::new(Popover::new(&ui, content));
     *dismissal.borrow_mut() = Rc::downgrade(&popover);
@@ -804,6 +832,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         let message = input_error.clone();
         let next = edit_rule.clone();
         let _ = model.env.requests.send(Request {
+            control: None,
             action: Action::Edit(Box::new(move |source| {
                 source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
                     app_id: (!value.trim().is_empty()).then(|| value.trim().to_string()),
@@ -871,6 +900,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         .push(Disclosure::new(&ui, "Enter a bundle identifier manually", input))
         .push(validation)
         .push(cancel);
+    // The sheet fits its content; give the application list room to read.
     content.min_width(380.0);
     let native = Sheet::new(&ui, "Add Rule", content);
     native.fit_content();
@@ -1176,221 +1206,509 @@ pub(super) fn strings(
         .footer(message)
 }
 
-pub(super) fn display_overrides(
-    f: &mut FormBuilder,
-    page: SettingsPage,
-    model: &Rc<Model>,
-) -> SettingsPage {
-    let ui = f.ui;
-    let mut displays: Vec<_> = model
-        .env
-        .displays
-        .borrow()
-        .iter()
-        .map(|d| {
-            (
-                d.display_uuid.clone(),
-                d.name.clone().unwrap_or_else(|| format!("Display {}", d.id.as_u32())),
-            )
-        })
-        .collect();
-    let source = model.source.borrow();
-    for uuid in source
-        .settings
-        .layout
-        .scrolling
-        .per_display
-        .keys()
-        .chain(source.settings.layout.gaps.per_display.keys())
-    {
-        if !displays.iter().any(|(id, _)| id == uuid) {
-            displays.push((uuid.clone(), "Disconnected display".into()));
-        }
-    }
-    let customized: Vec<_> = source
-        .settings
-        .layout
-        .scrolling
-        .per_display
-        .keys()
-        .chain(source.settings.layout.gaps.per_display.keys())
-        .cloned()
-        .collect();
-    drop(source);
-    if displays.is_empty() {
-        return page;
-    }
-    let weak = Rc::downgrade(model);
-    let entries = displays.clone();
-    let connected: Vec<_> =
-        model.env.displays.borrow().iter().map(|d| d.display_uuid.clone()).collect();
-    let list = SettingsList::new(
-        &ui,
-        |entry: &(String, String)| entry.1.clone(),
-        move |entry: &(String, String)| {
-            if connected.contains(&entry.0) {
-                if customized.contains(&entry.0) {
-                    "Connected · Custom settings".into()
-                } else {
-                    "Connected · Default".into()
-                }
-            } else {
-                format!("Not connected · Saved settings · {}", entry.0)
-            }
-        },
-    )
-    .symbol("display")
-    .full_length()
-    .on_open(move |index| {
-        if let Some(model) = weak.upgrade() {
-            let (uuid, name) = &entries[index];
-            record_editor(
-                ui,
-                &model,
-                name,
-                |draft| display_options(ui, draft, uuid.clone()),
-                true,
-            );
-        }
-    });
-    list.set_rows(displays);
-    page.section(
-        Section::new(&ui, "Display settings")
-            .description("Choose a display to customize its spacing.")
-            .content(list),
+/// A connected display’s name.
+pub(super) fn display_name(displays: &[ScreenInfo], uuid: &str) -> Option<String> {
+    let display = displays.iter().find(|display| display.display_uuid == uuid)?;
+    Some(
+        display
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("Display {}", display.id.as_u32())),
     )
 }
 
-fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
-    let mut f = FormBuilder::new(ui, model);
-    let mut rows = Section::new(&ui, "Scrolling layout widths").description(
-        "Widths inherit the scrolling layout’s values. Changing a value overrides it for this display.",
-    );
-    for (title, field) in [
-        ("Column width (%)", 0),
-        ("Minimum width (%)", 1),
-        ("Maximum width (%)", 2),
-    ] {
-        let id = uuid.clone();
-        let edit_id = uuid.clone();
-        rows = rows.row(f.text(
-            title,
-            move |s| {
-                super::pages::percentage_text(
-                    s.settings
-                        .layout
-                        .scrolling
-                        .per_display
-                        .get(&id)
-                        .and_then(|o| match field {
-                            0 => o.column_width_ratio,
-                            1 => o.min_column_width_ratio,
-                            _ => o.max_column_width_ratio,
-                        })
-                        .unwrap_or(match field {
-                            0 => s.settings.layout.scrolling.column_width_ratio,
-                            1 => s.settings.layout.scrolling.min_column_width_ratio,
-                            _ => s.settings.layout.scrolling.max_column_width_ratio,
-                        }),
-                )
-            },
-            move |s, v| {
-                let inherited = match field {
-                    0 => s.settings.layout.scrolling.column_width_ratio,
-                    1 => s.settings.layout.scrolling.min_column_width_ratio,
-                    _ => s.settings.layout.scrolling.max_column_width_ratio,
-                };
-                let value = optional_number(&v)?
-                    .map(|v| v / 100.0)
-                    .filter(|v| (*v - inherited).abs() > 1e-9);
-                let o = s.settings.layout.scrolling.per_display.entry(edit_id.clone()).or_default();
-                match field {
-                    0 => o.column_width_ratio = value,
-                    1 => o.min_column_width_ratio = value,
-                    _ => o.max_column_width_ratio = value,
-                };
-                if o.column_width_ratio.is_none()
-                    && o.min_column_width_ratio.is_none()
-                    && o.max_column_width_ratio.is_none()
-                {
-                    s.settings.layout.scrolling.per_display.remove(&edit_id);
-                }
-                Ok(())
-            },
-        ));
+/// Whether `uuid` has any saved spacing or Scrolling width overrides.
+fn has_overrides(source: &ConfigSource, uuid: &str) -> bool {
+    let layout = &source.settings.layout;
+    layout.gaps.per_display.contains_key(uuid) || layout.scrolling.per_display.contains_key(uuid)
+}
+
+/// Inline display overrides: a display popup, then that display’s spacing and Scrolling
+/// column widths. Connected displays come first; disconnected ones stay listed while
+/// they have saved overrides, and Add Display… accepts any display’s UUID, so settings
+/// can be prepared before it’s connected. Each display’s editor is built when chosen.
+pub(super) fn display_inspector(ui: Ui, model: &Rc<Model>) -> Page {
+    struct State {
+        ui: Ui,
+        model: Weak<Model>,
+        popup: Rc<Popup>,
+        host: Rc<PageHost>,
+        status: Caption,
+        adding: Rc<VStack>,
+        uuid: Rc<TextField>,
+        /// (uuid, connected) for each popup choice, before Add Display….
+        choices: RefCell<Vec<(String, bool)>>,
+        /// Displays added by UUID this session, listed until they have saved settings.
+        added: RefCell<Vec<String>>,
+        selected: RefCell<Option<String>>,
+        pages: RefCell<std::collections::HashMap<String, Page>>,
     }
-    rows = rows.content(super::pages::gap_preview(ui, &mut f, Some(uuid.clone())));
-    for outer in [true, false] {
-        let group = Rc::new(VStack::new(&ui));
-        for axis in 0..if outer { 4 } else { 2 } {
-            let id = uuid.clone();
-            let edit_id = uuid.clone();
-            let row = f
-                .gap(
-                    if outer {
-                        super::pages::EDGES[axis]
-                    } else {
-                        super::pages::AXES[axis]
-                    },
-                    move |s| super::pages::spacing_gap(s, Some(&id), outer, Some(axis)),
-                    move |s, v| {
-                        super::pages::set_spacing_gap(s, Some(&edit_id), outer, Some(axis), v);
-                    },
-                )
-                .suffix("pt");
-            // Preserve Rust callback ownership in the stack.
-            group.add(row);
+    impl State {
+        fn refresh(&self, source: &ConfigSource) {
+            let Some(model) = self.model.upgrade() else { return };
+            let displays = model.env.displays.borrow();
+            let layout = &source.settings.layout;
+            let mut choices: Vec<_> =
+                displays.iter().map(|d| (d.display_uuid.clone(), true)).collect();
+            let mut saved: Vec<_> = layout
+                .gaps
+                .per_display
+                .keys()
+                .chain(layout.scrolling.per_display.keys())
+                .chain(self.added.borrow().iter())
+                .filter(|uuid| !displays.iter().any(|d| d.display_uuid == **uuid))
+                .map(|uuid| (uuid.clone(), false))
+                .collect();
+            saved.sort();
+            saved.dedup();
+            let title = |(uuid, _): &(String, bool)| {
+                display_name(&displays, uuid).unwrap_or_else(|| {
+                    format!(
+                        "Display {}",
+                        uuid.get(..8).map_or(uuid.clone(), |id| format!("{id}…"))
+                    )
+                })
+            };
+            self.popup.set_sections([
+                choices.iter().map(title).collect::<Vec<_>>(),
+                saved.iter().map(title).collect(),
+                vec!["Add Display…".into()],
+            ]);
+            drop(displays);
+            choices.extend(saved);
+            for (index, (uuid, _)) in choices.iter().enumerate() {
+                self.popup
+                    .set_item_badge(index, has_overrides(source, uuid).then_some("Customized"));
+            }
+            let current = self
+                .selected
+                .borrow()
+                .clone()
+                .filter(|uuid| choices.iter().any(|c| c.0 == *uuid));
+            let current = current.or_else(|| choices.first().map(|c| c.0.clone()));
+            *self.choices.borrow_mut() = choices;
+            self.show(current);
         }
-        let id = uuid.clone();
-        let edit_id = uuid.clone();
-        let weak = f.model.clone();
-        let message = Rc::new(ValidationMessage::new(&ui));
-        let error = Rc::downgrade(&message);
-        let row = Rc::new(
-            OverrideRow::new(&ui, group, "Use Default").on_change(move |custom| {
-                let id = edit_id.clone();
-                Model::submit(
-                    &weak,
-                    Box::new(move |s| {
-                        let base = s.settings.layout.gaps.effective_for_display(None);
-                        let o = s.settings.layout.gaps.per_display.entry(id.clone()).or_default();
-                        if outer {
-                            o.outer = custom.then_some(base.outer);
-                        } else {
-                            o.inner = custom.then_some(base.inner);
-                        }
-                        if o.outer.is_none() && o.inner.is_none() {
-                            s.settings.layout.gaps.per_display.remove(&id);
-                        }
-                        Ok(())
-                    }),
-                    error.clone(),
+
+        fn show(&self, uuid: Option<String>) {
+            let Some(model) = self.model.upgrade() else { return };
+            if *self.selected.borrow() != uuid
+                && !super::layouts::finish_editing(self.host.ns_view())
+            {
+                return self.select_current();
+            }
+            self.host.set_hidden(uuid.is_none());
+            *self.selected.borrow_mut() = uuid.clone();
+            self.select_current();
+            let Some(uuid) = uuid else {
+                self.status.set_text(
+                    "No displays are connected. Add one by its UUID to prepare its settings.",
                 );
-            }),
-        );
-        let weak_row = Rc::downgrade(&row);
-        f.sync.push(Box::new(move |s| {
-            if let Some(row) = weak_row.upgrade() {
-                row.set_overridden(s.settings.layout.gaps.per_display.get(&id).is_some_and(|o| {
-                    if outer {
-                        o.outer.is_some()
-                    } else {
-                        o.inner.is_some()
-                    }
-                }));
+                return self.status.set_hidden(false);
+            };
+            let connected =
+                self.choices.borrow().iter().any(|(id, connected)| *id == uuid && *connected);
+            self.status
+                .set_text("Not connected. These settings apply when this display connects.");
+            self.status.set_hidden(connected);
+            let mut pages = self.pages.borrow_mut();
+            let page = pages
+                .entry(uuid.clone())
+                .or_insert_with(|| display_options(self.ui, &model, uuid));
+            page.synchronize(&model);
+            self.host.set_cached_page(page.view.clone());
+        }
+
+        /// Point the popup back at the shown display, such as after Add Display….
+        fn select_current(&self) {
+            let selected = self.selected.borrow();
+            if let Some(index) =
+                self.choices.borrow().iter().position(|c| Some(&c.0) == selected.as_ref())
+            {
+                self.popup.set_selected(index);
+            }
+        }
+
+        fn add(&self) {
+            let uuid = self.uuid.get_value().trim().to_owned();
+            let Some(model) = self.model.upgrade() else { return };
+            if uuid.is_empty() {
+                return;
+            }
+            if !self.added.borrow().contains(&uuid) {
+                self.added.borrow_mut().push(uuid.clone());
+            }
+            self.uuid.set_value("");
+            self.adding.set_hidden(true);
+            *self.selected.borrow_mut() = Some(uuid);
+            self.refresh(&model.source.borrow());
+        }
+    }
+    let state = Rc::new_cyclic(|weak: &Weak<State>| {
+        let owner = weak.clone();
+        let popup = Rc::new(Popup::new(&ui).on_change(move |index| {
+            let Some(state) = owner.upgrade() else { return };
+            let uuid = state.choices.borrow().get(index).map(|choice| choice.0.clone());
+            match uuid {
+                Some(uuid) => state.show(Some(uuid)),
+                // Add Display…: keep showing the current display while a UUID is entered.
+                None => {
+                    state.select_current();
+                    state.adding.set_hidden(false);
+                    state.uuid.focus();
+                }
             }
         }));
-        rows = rows
-            .content(SubsectionTitle::new(
-                &ui,
+        popup.accessibility_label("Display");
+        let uuid = Rc::new(TextField::new(&ui).placeholder("Display UUID"));
+        uuid.accessibility_label("Display UUID");
+        let owner = weak.clone();
+        let add = Button::new(&ui, "Add").push().key_equivalent("\r").on_click(move || {
+            if let Some(state) = owner.upgrade() {
+                state.add();
+            }
+        });
+        let owner = weak.clone();
+        let cancel =
+            Button::new(&ui, "Cancel").push().key_equivalent("\u{1b}").on_click(move || {
+                if let Some(state) = owner.upgrade() {
+                    state.adding.set_hidden(true);
+                }
+            });
+        let adding = Rc::new(
+            VStack::new(&ui)
+                .spacing(4.0)
+                .push(uuid.clone())
+                .push(HStack::new(&ui).push(Spacer::new(&ui)).push(cancel).push(add))
+                .push({
+                    let hint =
+                        Caption::new(&ui, "Find a display’s UUID with rift-cli query displays.");
+                    hint.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
+                    hint
+                }),
+        );
+        adding.set_hidden(true);
+        State {
+            ui,
+            model: Rc::downgrade(model),
+            popup,
+            host: Rc::new(PageHost::content_sized(&ui)),
+            status: {
+                let status = Caption::new(&ui, "");
+                status.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
+                status
+            },
+            adding,
+            uuid,
+            choices: RefCell::default(),
+            added: RefCell::default(),
+            selected: RefCell::default(),
+            pages: RefCell::default(),
+        }
+    });
+    let mut f = FormBuilder::new(ui, model);
+    let weak = Rc::downgrade(&state);
+    f.sync.push(Box::new(move |source| {
+        if let Some(state) = weak.upgrade() {
+            state.refresh(source);
+        }
+    }));
+    let control = VStack::new(&ui)
+        .spacing(6.0)
+        .push(HStack::new(&ui).push(Spacer::new(&ui)).push(state.popup.clone()))
+        .push(state.adding.clone())
+        .push(objc2::Message::retain(state.status.ns_view()));
+    let row = SettingsRow::new(&ui, "Display", control).label_baseline(state.popup.ns_view());
+    let page = VStack::new(&ui)
+        .spacing(10.0)
+        .push(Section::form(&ui, "").row(row))
+        .push(state.host.clone())
+        .keep(state);
+    super::pages::align_form(page.ns_view());
+    f.finish(page)
+}
+
+/// One display’s overrides. Empty fields show the inherited value in gray; entering a
+/// value overrides it, and clearing it, or Use Shared, inherits again. Spacing groups
+/// and each Scrolling width inherit independently, as the configuration stores them.
+fn display_options(ui: Ui, model: &Rc<Model>, uuid: String) -> Page {
+    use super::pages::{AXES, EDGES, set_spacing_gap, spacing_gap};
+    let mut f = FormBuilder::new(ui, model);
+    let mut section = Section::form(&ui, "");
+    for outer in [true, false] {
+        let names: &[&str] = if outer { &EDGES } else { &AXES };
+        let message = Rc::new(ValidationMessage::new(&ui));
+        let id = uuid.clone();
+        let overridden = move |s: &ConfigSource| {
+            s.settings.layout.gaps.per_display.get(&id).is_some_and(|o| {
                 if outer {
-                    "Space around windows"
+                    o.outer.is_some()
                 } else {
-                    "Space between windows"
+                    o.inner.is_some()
+                }
+            })
+        };
+        let fields = names
+            .iter()
+            .enumerate()
+            .map(|(axis, name)| {
+                let (get_id, set_id) = (uuid.clone(), uuid.clone());
+                let overridden = overridden.clone();
+                (
+                    *name,
+                    inherited_field(
+                        &mut f,
+                        &format!(
+                            "{}, {name}",
+                            if outer {
+                                "Screen edges"
+                            } else {
+                                "Between windows"
+                            }
+                        ),
+                        "pt",
+                        1.0,
+                        Rc::downgrade(&message),
+                        move |s| {
+                            (
+                                overridden(s)
+                                    .then(|| spacing_gap(s, Some(&get_id), outer, Some(axis))),
+                                spacing_gap(s, None, outer, Some(axis)),
+                            )
+                        },
+                        move |s, value| match value {
+                            Some(value) => {
+                                set_spacing_gap(s, Some(&set_id), outer, Some(axis), value)
+                            }
+                            None => clear_gaps(s, &set_id, outer),
+                        },
+                    ),
+                )
+            })
+            .collect();
+        let id = uuid.clone();
+        section = section.row(override_group(
+            &mut f,
+            (
+                if outer {
+                    "Screen edges"
+                } else {
+                    "Between windows"
                 },
-            ))
-            .content(row)
-            .content(message);
+                "Shared settings",
+                "Use Shared",
+            ),
+            "pt",
+            fields,
+            message,
+            overridden,
+            move |s| clear_gaps(s, &id, outer),
+        ));
     }
-    f.finish(rows)
+    const WIDTHS: [&str; 3] = ["Default", "Minimum", "Maximum"];
+    fn width_mut(o: &mut ScrollingWidthOverride, field: usize) -> &mut Option<f64> {
+        match field {
+            0 => &mut o.column_width_ratio,
+            1 => &mut o.min_column_width_ratio,
+            _ => &mut o.max_column_width_ratio,
+        }
+    }
+    fn inherited_width(s: &ScrollingLayoutSettings, field: usize) -> f64 {
+        [
+            s.column_width_ratio,
+            s.min_column_width_ratio,
+            s.max_column_width_ratio,
+        ][field]
+    }
+    let message = Rc::new(ValidationMessage::new(&ui));
+    let fields = (0..3)
+        .map(|field| {
+            let (get_id, set_id) = (uuid.clone(), uuid.clone());
+            (
+                WIDTHS[field],
+                inherited_field(
+                    &mut f,
+                    &format!("{} column width", WIDTHS[field]),
+                    "%",
+                    100.0,
+                    Rc::downgrade(&message),
+                    move |s| {
+                        let scrolling = &s.settings.layout.scrolling;
+                        let own = scrolling.per_display.get(&get_id).and_then(|o| {
+                            [
+                                o.column_width_ratio,
+                                o.min_column_width_ratio,
+                                o.max_column_width_ratio,
+                            ][field]
+                        });
+                        (own, inherited_width(scrolling, field))
+                    },
+                    move |s, value| {
+                        let scrolling = &mut s.settings.layout.scrolling;
+                        let inherited = inherited_width(scrolling, field);
+                        let o = scrolling.per_display.entry(set_id.clone()).or_default();
+                        *width_mut(o, field) = value.filter(|v| (*v - inherited).abs() > 1e-9);
+                        if (0..3).all(|field| width_mut(o, field).is_none()) {
+                            scrolling.per_display.remove(&set_id);
+                        }
+                    },
+                ),
+            )
+        })
+        .collect();
+    let id = uuid.clone();
+    let clear_id = uuid.clone();
+    section = section.row(override_group(
+        &mut f,
+        (
+            "Scrolling column widths",
+            "the Scrolling layout",
+            "Use Layout Widths",
+        ),
+        "%",
+        fields,
+        message,
+        move |s| s.settings.layout.scrolling.per_display.contains_key(&id),
+        move |s| {
+            s.settings.layout.scrolling.per_display.remove(&clear_id);
+        },
+    ));
+    let preview = super::pages::gap_preview(ui, &mut f, Some(uuid.clone()), super::pages::PREVIEW);
+    let page = VStack::new(&ui)
+        .spacing(10.0)
+        .push(super::pages::stage(&ui, preview, None))
+        .push(section)
+        .push(Caption::new(
+            &ui,
+            "Empty fields inherit. Enter a value to customize it for this display.",
+        ));
+    super::pages::align_form(page.ns_view());
+    f.finish(page)
+}
+
+fn clear_gaps(s: &mut ConfigSource, uuid: &str, outer: bool) {
+    let gaps = &mut s.settings.layout.gaps;
+    if let Some(o) = gaps.per_display.get_mut(uuid) {
+        if outer {
+            o.outer = None
+        } else {
+            o.inner = None
+        }
+        if o.outer.is_none() && o.inner.is_none() {
+            gaps.per_display.remove(uuid);
+        }
+    }
+}
+
+/// Labelled fields in one row, captioned beneath like an inspector, with a Use Shared
+/// button while the group is overridden.
+fn override_group(
+    f: &mut FormBuilder,
+    (title, source, revert): (&str, &str, &str),
+    unit: &str,
+    fields: Vec<(&str, Rc<NumberField>)>,
+    message: Rc<ValidationMessage>,
+    overridden: impl Fn(&ConfigSource) -> bool + Clone + 'static,
+    clear: impl Fn(&mut ConfigSource) + Send + Clone + 'static,
+) -> SettingsRow {
+    let ui = f.ui;
+    let model = f.model.clone();
+    let error = Rc::downgrade(&message);
+    let reset = Rc::new(
+        Button::new(&ui, "")
+            .symbol("arrow.uturn.backward.circle.fill")
+            .borderless()
+            .on_click(move || {
+                let clear = clear.clone();
+                let edit = move |s: &mut ConfigSource| {
+                    clear(s);
+                    Ok(())
+                };
+                Model::submit(&model, Box::new(edit), error.clone());
+            }),
+    );
+    reset
+        .ns_button()
+        .setContentTintColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+    reset.accessibility_label(&format!("{revert} for {}", title.to_lowercase()));
+    reset.tooltip(&format!("{revert}: follow {source} again on this display"));
+    // Under the label, whether this display follows the shared values or its own.
+    let status = Rc::new(Caption::single_line(&ui, ""));
+    let first = objc2::Message::retain(fields[0].1.ns_text_field());
+    let weak_reset = Rc::downgrade(&reset);
+    let source = source.to_owned();
+    let current = overridden.clone();
+    f.sync_when(
+        &status,
+        move |s| current(s),
+        move |status, s| {
+            let custom = overridden(s);
+            status.set_text(&if custom {
+                "Custom for this display".to_owned()
+            } else {
+                format!("From {source}")
+            });
+            if let Some(reset) = weak_reset.upgrade() {
+                reset.set_hidden(!custom);
+            }
+        },
+    );
+    let control = field_group(&ui, unit, fields).push(reset);
+    f.row(title, control, message).description_view(status).label_baseline(&first)
+}
+
+/// Compact fields in a row, each captioned beneath, as in an inspector.
+pub(super) fn field_group(ui: &Ui, unit: &str, fields: Vec<(&str, Rc<NumberField>)>) -> HStack {
+    fields.into_iter().fold(
+        HStack::new(ui)
+            .spacing(8.0)
+            .alignment(objc2_app_kit::NSLayoutAttribute::FirstBaseline),
+        |row, (name, field)| {
+            let value = field.unit_field(ui, unit);
+            value.width(56.0);
+            row.push(
+                VStack::new(ui)
+                    .spacing(3.0)
+                    .alignment(objc2_app_kit::NSLayoutAttribute::CenterX)
+                    .push(value)
+                    .push(Caption::single_line(ui, name))
+                    .keep(field),
+            )
+        },
+    )
+}
+
+/// A numeric field showing `get`’s inherited value (second) as a placeholder unless it’s
+/// overridden (first). Values are shown multiplied by `scale`.
+fn inherited_field(
+    f: &mut FormBuilder,
+    name: &str,
+    unit: &str,
+    scale: f64,
+    error: Weak<ValidationMessage>,
+    get: impl Fn(&ConfigSource) -> (Option<f64>, f64) + 'static,
+    set: impl Fn(&mut ConfigSource, Option<f64>) + Send + Clone + 'static,
+) -> Rc<NumberField> {
+    let get = Rc::new(get);
+    let current = get.clone();
+    let change = f.assign(move |s| current(s).0, set, error);
+    let input = Rc::new(
+        NumberField::new(&f.ui).on_change_optional(move |value| change(value.map(|v| v / scale))),
+    );
+    // Assistive apps read an empty field’s placeholder: the inherited value.
+    input.accessibility_label(name);
+    input.tooltip(&format!("In {unit}. Leave empty to inherit."));
+    let current = get.clone();
+    f.sync_when(
+        &input,
+        move |s| current(s),
+        move |input, s| match get(s) {
+            (Some(value), _) => input.set_value(value * scale),
+            // At most two decimals, without float noise.
+            (None, inherited) => {
+                input.set_inherited(&super::pages::percentage_text(inherited * scale / 100.0))
+            }
+        },
+    );
+    input
 }

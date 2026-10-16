@@ -2,6 +2,7 @@
 
 use std::ffi::c_void;
 use std::mem;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2_core_foundation::{
     CFIndex, CFRetained, CFRunLoop, CFRunLoopSource, CFRunLoopSourceContext, kCFRunLoopCommonModes,
@@ -99,5 +100,26 @@ impl WakeupHandle {
     pub fn wake(&self) {
         self.0.signal();
         self.1.wake_up();
+    }
+}
+
+/// Coalesces wake requests: only the first request after each [`consume`]
+/// needs to signal the target loop.
+///
+/// [`consume`]: WakeLatch::consume
+#[derive(Default)]
+pub(crate) struct WakeLatch(AtomicBool);
+
+impl WakeLatch {
+    /// Returns true if the caller must deliver a wake.
+    pub(crate) fn request(&self) -> bool { !self.0.swap(true, Ordering::AcqRel) }
+
+    /// Must be called after the wake is received and before polling.
+    pub(crate) fn consume(&self) {
+        // Work must be published before request(). An AcqRel swap reads all
+        // coalesced producers' release swaps before the upcoming poll.
+        // A producer ordered after this reset sees false and delivers a new wake.
+        // Thus its work is either visible to that poll or has another wake.
+        self.0.swap(false, Ordering::AcqRel);
     }
 }

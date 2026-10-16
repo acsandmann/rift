@@ -1,9 +1,8 @@
 use std::path::Path;
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use cgs::MainThreadMarker;
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSMenu, NSRunningApplication};
 use objc2_core_foundation::CGRect;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -11,6 +10,7 @@ use crate::actor::{config, reactor};
 use crate::common::config::{Config, ConfigCommand};
 use crate::layout_engine::LayoutCommand;
 use crate::sys::screen::SpaceId;
+use crate::sys::timer::Timer;
 use crate::ui::menu_bar::{MenuAction, MenuIcon};
 use crate::{actor, common};
 
@@ -54,14 +54,12 @@ impl Update {
 
 pub enum Event {
     OpenSettings,
+    BindingModeChanged(String),
     Update(Update),
     ConfigUpdated(Box<Config>),
 }
 
-enum DebounceCommand {
-    Arm,
-    Shutdown,
-}
+const LAYOUT_REFRESH_DELAY: Duration = Duration::from_millis(150);
 
 pub struct Menu {
     config: Config,
@@ -77,6 +75,7 @@ pub struct Menu {
     config_path: std::path::PathBuf,
     last_signature: Option<u64>,
     last_update: Option<Update>,
+    binding_mode: String,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -91,6 +90,12 @@ impl Menu {
         mtm: MainThreadMarker,
         config_path: std::path::PathBuf,
     ) -> Self {
+        // AppKit only dispatches the status menu's key equivalents (⌘, for Settings…)
+        // while it tracks if the application has a main menu, even an empty one.
+        let app = NSApplication::sharedApplication(mtm);
+        if app.mainMenu().is_none() {
+            app.setMainMenu(Some(&NSMenu::new(mtm)));
+        }
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let layout_folder = config.settings.ui.menu_bar.resolved_layout_folder();
         let mut icon = config
@@ -115,34 +120,39 @@ impl Menu {
             config_path,
             last_signature: None,
             last_update: None,
+            binding_mode: "default".into(),
         }
     }
 
     pub async fn run(mut self) {
+        // Updates are latest-wins: only the newest one is applied once updates go quiet.
         const DEBOUNCE: Duration = Duration::from_millis(150);
 
-        let mut pending: Option<Event> = None;
-        let (tick_tx, mut tick_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let debounce_tx = Self::spawn_debouncer(DEBOUNCE, tick_tx);
+        let mut pending: Option<Update> = None;
+        // Reusable main-run-loop timers; idle while disarmed, so they cost no thread or wakeup.
+        // The debounce stays exact: it already delays the visible workspace indicator.
+        let mut debounce = Timer::manual();
+        // Nothing waits on a layout-folder rescan, so it may coalesce with other wakeups.
+        let mut refresh_layouts = Timer::manual().with_tolerance(Duration::from_millis(50));
 
         loop {
             tokio::select! {
                 maybe_action = self.action_rx.recv() => {
                     if let Some(action) = maybe_action {
+                        if matches!(action, MenuAction::SaveLayout(_)) {
+                            // Give the reactor time to write the file before rereading the folder.
+                            refresh_layouts.set_next_fire(LAYOUT_REFRESH_DELAY);
+                        }
                         self.handle_action(action);
                     }
                 }
-                maybe_tick = tick_rx.recv() => {
-                    if maybe_tick.is_none() {
-                        if let Some(ev) = pending.take() {
-                            self.handle_event(ev);
-                        }
-                        break;
+                Some(()) = debounce.next(), if pending.is_some() => {
+                    if let Some(update) = pending.take() {
+                        self.handle_update(update);
                     }
-
-                    if let Some(ev) = pending.take() {
-                        self.handle_event(ev);
-                    }
+                }
+                Some(()) = refresh_layouts.next() => {
+                    self.handle_action(MenuAction::RefreshLayoutFiles);
                 }
 
                 maybe = self.rx.recv() => {
@@ -150,18 +160,27 @@ impl Menu {
                         Some((span, event)) => {
                             let _enter = span.enter();
                             match event {
-                                Event::Update(_) => {
-                                    pending = Some(event);
-                                    let _ = debounce_tx.send(DebounceCommand::Arm);
+                                Event::Update(update) => {
+                                    pending = Some(update);
+                                    debounce.set_next_fire(DEBOUNCE);
+                                }
+                                Event::BindingModeChanged(mode) => {
+                                    self.binding_mode = mode;
+                                    if let (Some(icon), Some(update)) = (&mut self.icon, &self.last_update) {
+                                        icon.update_status_icon(
+                                            &update.displays,
+                                            &self.config.settings.ui.menu_bar,
+                                            &self.binding_mode,
+                                        );
+                                    }
                                 }
                                 Event::ConfigUpdated(cfg) => self.handle_config_updated(*cfg),
                                 Event::OpenSettings => self.open_settings(),
                             }
                         }
                         None => {
-                            let _ = debounce_tx.send(DebounceCommand::Shutdown);
-                            if let Some(ev) = pending.take() {
-                                self.handle_event(ev);
+                            if let Some(update) = pending.take() {
+                                self.handle_update(update);
                             }
                             break;
                         }
@@ -185,13 +204,18 @@ impl Menu {
             }
             self.settings = None;
         }
+        let timing = crate::ui::settings::timing::start();
         let child = std::env::current_exe().and_then(|exe| {
-            std::process::Command::new(exe)
-                .arg("--settings")
-                .arg("--config")
-                .arg(&self.config_path)
-                .spawn()
+            let mut command = std::process::Command::new(exe);
+            if timing.is_some() {
+                command.env(
+                    "RIFT_SETTINGS_SPAWN_TIME_NS",
+                    crate::ui::settings::timing::spawn_time_ns().to_string(),
+                );
+            }
+            command.arg("--settings").arg("--config").arg(&self.config_path).spawn()
         });
+        crate::ui::settings::timing::finish(timing, "parent process spawn");
         match child {
             Ok(child) => {
                 // Reap on exit so a closed Settings leaves no zombie behind.
@@ -199,14 +223,6 @@ impl Menu {
                 self.settings = Some(child);
             }
             Err(error) => tracing::error!(%error, "Could not start Settings"),
-        }
-    }
-
-    fn handle_event(&mut self, event: Event) {
-        match event {
-            Event::OpenSettings => {}
-            Event::Update(update) => self.handle_update(update),
-            Event::ConfigUpdated(cfg) => self.handle_config_updated(*cfg),
         }
     }
 
@@ -226,7 +242,11 @@ impl Menu {
 
         icon.sync_workspace_topology(update.context_workspaces(), &self.config.keys);
         icon.update_menu_state(update.active_space_is_activated, update.context_workspaces());
-        icon.update_status_icon(&update.displays, &self.config.settings.ui.menu_bar);
+        icon.update_status_icon(
+            &update.displays,
+            &self.config.settings.ui.menu_bar,
+            &self.binding_mode,
+        );
     }
 
     fn handle_config_updated(&mut self, new_config: Config) {
@@ -287,11 +307,6 @@ impl Menu {
                 self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
                     reactor::ReactorCommand::SaveLayout { path },
                 )));
-                let action_tx = self.action_tx.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(150));
-                    let _ = action_tx.send(MenuAction::RefreshLayoutFiles);
-                });
             }
             MenuAction::SaveMasterFile => {
                 self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
@@ -350,37 +365,6 @@ impl Menu {
             response,
         };
         self.config_tx.send(msg);
-    }
-
-    fn spawn_debouncer(
-        period: Duration,
-        tick_tx: UnboundedSender<()>,
-    ) -> mpsc::Sender<DebounceCommand> {
-        let (cmd_tx, cmd_rx) = mpsc::channel::<DebounceCommand>();
-
-        std::thread::spawn(move || {
-            loop {
-                match cmd_rx.recv() {
-                    Ok(DebounceCommand::Arm) => loop {
-                        match cmd_rx.recv_timeout(period) {
-                            Ok(DebounceCommand::Arm) => continue,
-                            Ok(DebounceCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
-                                return;
-                            }
-                            Err(RecvTimeoutError::Timeout) => {
-                                if tick_tx.send(()).is_err() {
-                                    return;
-                                }
-                                break;
-                            }
-                        }
-                    },
-                    Ok(DebounceCommand::Shutdown) | Err(_) => return,
-                }
-            }
-        });
-
-        cmd_tx
     }
 }
 

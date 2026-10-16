@@ -13,9 +13,7 @@ use std::time::{Duration, Instant};
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::AXError;
-#[cfg(test)]
-use objc2_core_foundation::CGPoint;
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::oneshot;
@@ -642,40 +640,179 @@ struct AppWindowState {
     title: String,
     is_animating: bool,
     last_animation_frame: Option<CGRect>,
-    // Latest observed or intended geometry; only a hint for AX write ordering.
+    // Latest observed or intended geometry; only a hint for choosing AX setters.
     last_known_frame: CGRect,
     frame_source: FrameSource,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum FrameWriteOrder {
-    SizeThenPosition,
-    PositionThenSize,
+/// The AX geometry operations used to place a window.
+trait FrameTarget {
+    fn frame(&self) -> Result<CGRect, AxError>;
+    fn set_position(&self, origin: CGPoint) -> Result<(), AxError>;
+    fn set_size(&self, size: CGSize) -> Result<(), AxError>;
 }
 
-fn frame_write_order(current: Option<CGRect>, target: CGRect) -> FrameWriteOrder {
-    let Some(current) = current else {
-        return FrameWriteOrder::SizeThenPosition;
+impl FrameTarget for AXUIElement {
+    fn frame(&self) -> Result<CGRect, AxError> { AXUIElement::frame(self) }
+
+    fn set_position(&self, origin: CGPoint) -> Result<(), AxError> {
+        AXUIElement::set_position(self, origin)
+    }
+
+    fn set_size(&self, size: CGSize) -> Result<(), AxError> { AXUIElement::set_size(self, size) }
+}
+
+/// The AX setters needed to move a window from one frame to another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FrameWrites {
+    position: bool,
+    size: bool,
+}
+
+impl FrameWrites {
+    fn between(current: CGRect, target: CGRect, mode: FrameMode) -> Self {
+        Self {
+            position: !current.origin.same_as(target.origin),
+            size: mode == FrameMode::Full && !current.size.same_as(target.size),
+        }
+    }
+
+    fn without(self, done: Self) -> Self {
+        Self {
+            position: self.position && !done.position,
+            size: self.size && !done.size,
+        }
+    }
+
+    fn any(self) -> bool { self.position || self.size }
+}
+
+/// Issues each requested setter independently, since apps may reject one and
+/// honor the other. Returns the setters that failed, or `CannotComplete` if the
+/// app did not answer. Every setter is still issued in that case: a timed-out
+/// setter remains queued and applies once the app recovers.
+fn write_frame(
+    elem: &impl FrameTarget,
+    current: CGRect,
+    target: CGRect,
+    writes: FrameWrites,
+) -> Result<FrameWrites, AxError> {
+    // Moving before growing avoids clamping at a screen edge; shrinking first
+    // avoids it in the opposite direction.
+    let grows = target.size.width > current.size.width + 0.5
+        || target.size.height > current.size.height + 0.5;
+    let mut unresponsive = false;
+    let mut failed_with = |result: Result<(), AxError>| {
+        unresponsive |= matches!(result, Err(AxError::Ax(AXError::CannotComplete)));
+        result.is_err()
     };
-    if target.size.width > current.size.width + 0.5
-        || target.size.height > current.size.height + 0.5
-    {
-        FrameWriteOrder::PositionThenSize
+    let mut failed = FrameWrites::default();
+    if writes.position && grows {
+        failed.position = failed_with(elem.set_position(target.origin));
+    }
+    if writes.size {
+        failed.size = failed_with(elem.set_size(target.size));
+    }
+    if writes.position && !grows {
+        failed.position = failed_with(elem.set_position(target.origin));
+    }
+    if unresponsive {
+        return Err(AxError::Ax(AXError::CannotComplete));
+    }
+    Ok(failed)
+}
+
+/// Writes `target` and returns the frame AX reports afterwards.
+///
+/// `hint` is the last observed or intended frame. It only selects setters: AX
+/// notifications are asynchronous, so it may be stale, and the returned frame is
+/// always read back, unless the app did not answer a setter: the readback would
+/// queue behind it and wait out the same timeout. `before_write` runs before any
+/// setter.
+fn reconcile_frame(
+    elem: &impl FrameTarget,
+    hint: CGRect,
+    target: CGRect,
+    mode: FrameMode,
+    mut before_write: impl FnMut(),
+) -> Result<CGRect, AxError> {
+    let planned = FrameWrites::between(hint, target, mode);
+    let mut failed = FrameWrites::default();
+    if planned.any() {
+        before_write();
+        failed = write_frame(elem, hint, target, planned)?;
+    }
+    let mut frame = elem.frame()?;
+    // A dimension the hint skipped is wrong, so the hint was stale. Correct it as
+    // a full write from the observed frame would, rewriting position with any
+    // size correction because some apps move the origin while resizing. A size
+    // that was already attempted and a rejected position are not retried.
+    let missed = FrameWrites::between(frame, target, mode).without(planned);
+    if missed.any() {
+        let fix = FrameWrites {
+            position: !failed.position,
+            size: missed.size,
+        };
+        before_write();
+        let fix_failed = write_frame(elem, frame, target, fix)?;
+        failed.position |= fix_failed.position;
+        failed.size |= fix_failed.size;
+        frame = elem.frame()?;
+    }
+    if failed.any() {
+        debug!(
+            ?failed,
+            ?frame,
+            ?target,
+            "AX frame setter failed; reporting observed frame"
+        );
+    }
+    Ok(frame)
+}
+
+/// Writes a high-frequency frame, which is never read back. Every frame is
+/// written because `hint` may hold intended rather than observed geometry.
+fn write_interactive_frame(
+    elem: &impl FrameTarget,
+    hint: &mut CGRect,
+    frame: CGRect,
+    set_size: bool,
+    source: FrameSource,
+) {
+    if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
+        let both = FrameWrites { position: true, size: true };
+        let _ = write_frame(elem, *hint, frame, both);
+        *hint = frame;
     } else {
-        FrameWriteOrder::SizeThenPosition
+        let _ = elem.set_position(frame.origin);
+        hint.origin = frame.origin;
     }
 }
 
-fn write_frame(elem: &AXUIElement, current: Option<CGRect>, target: CGRect) {
-    match frame_write_order(current, target) {
-        FrameWriteOrder::SizeThenPosition => {
-            let _ = elem.set_size(target.size);
-            let _ = elem.set_position(target.origin);
+/// Batch-scoped Enhanced UI suppression, acquired before the batch's first write.
+#[derive(Debug, PartialEq, Eq)]
+enum BatchEui {
+    NotRequested,
+    Deferred,
+    Held,
+}
+
+impl BatchEui {
+    fn new(requested: bool) -> Self {
+        if requested {
+            Self::Deferred
+        } else {
+            Self::NotRequested
         }
-        FrameWriteOrder::PositionThenSize => {
-            let _ = elem.set_position(target.origin);
-            let _ = elem.set_size(target.size);
+    }
+
+    /// Returns true exactly once, when a deferred lease must be acquired.
+    fn take_deferred(&mut self) -> bool {
+        let deferred = *self == Self::Deferred;
+        if deferred {
+            *self = Self::Held;
         }
+        deferred
     }
 }
 
@@ -865,14 +1002,10 @@ impl State {
     fn handle_request_batch(this: &RefCell<Self>, batch: &mut Vec<(Span, Request)>) -> bool {
         // All requests in this actor target the same application. Coalesce EUI
         // suppression across the entire drained burst instead of toggling the
-        // app-level attribute once per window/request. Animation leases nest
-        // with this batch lease through the same refcount.
-        let disable_enhanced_ui = batch.iter().any(|(_, req)| req.disables_enhanced_ui());
-        if disable_enhanced_ui {
-            let mut state = this.borrow_mut();
-            let app = state.app.clone();
-            state.enhanced_ui.acquire(&app);
-        }
+        // app-level attribute once per window/request, and only once a write is
+        // needed. Animation leases nest with this batch lease through the same
+        // refcount.
+        let mut eui = BatchEui::new(batch.iter().any(|(_, req)| req.disables_enhanced_ui()));
 
         let mut pending_frames = HashMap::default();
         let mut should_terminate = false;
@@ -883,7 +1016,7 @@ impl State {
                 debug!(?state.bundle_id, ?state.pid, ?request, "Got request");
             }
             let request_kind: &'static str = (&request).into();
-            match state.handle_request(request, &mut pending_frames) {
+            match state.handle_request(request, &mut pending_frames, &mut eui) {
                 Ok(true) => {
                     should_terminate = true;
                     break;
@@ -901,8 +1034,9 @@ impl State {
             }
         }
 
-        if !should_terminate {
+        if !should_terminate && !pending_frames.is_empty() {
             let mut state = this.borrow_mut();
+            state.hold_batch_eui(&mut eui);
             for (wid, frame) in pending_frames {
                 if let Err(err) = state.apply_interactive_frame(wid, frame) {
                     warn!(?wid, ?err, "Failed to apply animation frame");
@@ -910,13 +1044,20 @@ impl State {
             }
         }
 
-        if disable_enhanced_ui {
+        if eui == BatchEui::Held {
             let mut state = this.borrow_mut();
             let app = state.app.clone();
             state.enhanced_ui.release(&app);
         }
 
         should_terminate
+    }
+
+    fn hold_batch_eui(&mut self, eui: &mut BatchEui) {
+        if eui.take_deferred() {
+            let app = self.app.clone();
+            self.enhanced_ui.acquire(&app);
+        }
     }
 
     fn apply_interactive_frame(
@@ -938,15 +1079,13 @@ impl State {
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
         window.last_animation_frame = Some(frame);
-        if set_size
-            || (source != FrameSource::Drag && !window.last_known_frame.size.same_as(frame.size))
-        {
-            write_frame(&window.elem, Some(window.last_known_frame), frame);
-            window.last_known_frame = frame;
-        } else {
-            let _ = window.elem.set_position(frame.origin);
-            window.last_known_frame.origin = frame.origin;
-        }
+        write_interactive_frame(
+            &window.elem,
+            &mut window.last_known_frame,
+            frame,
+            set_size,
+            source,
+        );
         Ok(())
     }
 
@@ -1080,6 +1219,7 @@ impl State {
         &mut self,
         request: Request,
         pending_frames: &mut HashMap<WindowId, PendingFrame>,
+        eui: &mut BatchEui,
     ) -> Result<bool, AxError> {
         match request {
             Request::Terminate => {
@@ -1133,11 +1273,11 @@ impl State {
             }
             Request::SetWindowFrames(frames, txid, mode, _) => {
                 for (wid, desired) in frames {
-                    let elem = match self.window_mut(wid) {
+                    let (elem, hint) = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
                             window.frame_source = FrameSource::Ordinary;
-                            window.elem.clone()
+                            (window.elem.clone(), window.last_known_frame)
                         }
                         Err(err) => match err {
                             AxError::Ax(code) => {
@@ -1150,23 +1290,17 @@ impl State {
                         },
                     };
 
-                    let window = self.window_mut(wid)?;
-                    if mode == FrameMode::Position {
-                        let _ = elem.set_position(desired.origin);
-                        window.last_known_frame.origin = desired.origin;
-                    } else {
-                        write_frame(&elem, Some(window.last_known_frame), desired);
-                        window.last_known_frame = desired;
-                    }
-
-                    let frame =
-                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                            Some(frame) => {
-                                self.window_mut(wid)?.last_known_frame = frame;
-                                frame
-                            }
-                            None => continue,
-                        };
+                    // The acknowledgment always carries geometry read back from AX.
+                    let result = trace("set_frame", &elem, || {
+                        reconcile_frame(&elem, hint, desired, mode, || self.hold_batch_eui(eui))
+                    });
+                    let frame = match self.handle_ax_result(wid, result)? {
+                        Some(frame) => {
+                            self.window_mut(wid)?.last_known_frame = frame;
+                            frame
+                        }
+                        None => continue,
+                    };
 
                     self.send_event(Event::WindowFrameChanged(
                         wid,
@@ -1254,16 +1388,13 @@ impl State {
                 if let Some(target) = last_animation_frame
                     && !frame.same_as(target)
                 {
-                    if frame.size.same_as(target.size) {
-                        let _ = elem.set_position(target.origin);
-                    } else {
-                        write_frame(&elem, Some(frame), target);
-                    }
-                    frame =
-                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                            Some(frame) => frame,
-                            None => return Ok(false),
-                        };
+                    let result = trace("set_frame", &elem, || {
+                        reconcile_frame(&elem, frame, target, FrameMode::Full, || {})
+                    });
+                    frame = match self.handle_ax_result(wid, result)? {
+                        Some(frame) => frame,
+                        None => return Ok(false),
+                    };
                 }
                 self.window_mut(wid)?.last_known_frame = frame;
                 self.send_event(Event::WindowFrameChanged(
@@ -2166,8 +2297,12 @@ impl State {
             // `kAXWindowsAttribute` is space-filtered and cannot be used to decide
             // whether a tracked window still exists globally. Only drop state when
             // the element itself has become invalid.
-            if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
-                to_remove.push(wid);
+            match window.elem.role() {
+                Err(AxError::Ax(AXError::InvalidUIElement)) => to_remove.push(wid),
+                // The app is not answering; every remaining check would wait out
+                // the same timeout. A later main-window change checks again.
+                Err(AxError::Ax(AXError::CannotComplete)) => break,
+                _ => {}
             }
         }
 
@@ -2400,7 +2535,6 @@ fn trace<T>(
     // to the app.
     trace!(time = ?(end - start), /*?elem,*/ "{desc:12}");
     if let Err(err) = &out {
-        let app = elem.parent().ok().flatten();
         match err {
             AxError::Ax(ax_err)
                 if matches!(
@@ -2411,11 +2545,119 @@ fn trace<T>(
                 debug!("{desc} failed with {err} - app may have quit or become unresponsive");
             }
             _ => {
-                debug!("{desc} failed with {err} for element {elem:#?} with parent {app:#?}");
+                // AXParent is another round trip to the app, so it is only
+                // requested when this event is actually logged.
+                debug!(
+                    "{desc} failed with {err} for element {elem:#?} with parent {:#?}",
+                    elem.parent().ok().flatten()
+                );
             }
         }
     }
     out
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use std::cell::{Cell, RefCell};
+
+    use super::*;
+
+    /// Records AX calls against a window that may clamp, reject, or not answer.
+    #[derive(Default)]
+    struct FakeWindow {
+        frame: Cell<CGRect>,
+        min_size: CGSize,
+        rejects_position: bool,
+        unresponsive: bool,
+        calls: RefCell<Vec<&'static str>>,
+    }
+
+    impl FrameTarget for FakeWindow {
+        fn frame(&self) -> Result<CGRect, AxError> {
+            self.calls.borrow_mut().push("frame");
+            if self.unresponsive {
+                return Err(AxError::Ax(AXError::CannotComplete));
+            }
+            Ok(self.frame.get())
+        }
+
+        fn set_position(&self, origin: CGPoint) -> Result<(), AxError> {
+            self.calls.borrow_mut().push("position");
+            if self.unresponsive {
+                return Err(AxError::Ax(AXError::CannotComplete));
+            }
+            if self.rejects_position {
+                return Err(AxError::Ax(AXError::Failure));
+            }
+            self.frame.set(CGRect::new(origin, self.frame.get().size));
+            Ok(())
+        }
+
+        fn set_size(&self, size: CGSize) -> Result<(), AxError> {
+            self.calls.borrow_mut().push("size");
+            if self.unresponsive {
+                return Err(AxError::Ax(AXError::CannotComplete));
+            }
+            let size = CGSize::new(
+                size.width.max(self.min_size.width),
+                size.height.max(self.min_size.height),
+            );
+            self.frame.set(CGRect::new(self.frame.get().origin, size));
+            Ok(())
+        }
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    fn reconcile(window: &FakeWindow, target: CGRect) -> Result<CGRect, AxError> {
+        reconcile_frame(window, window.frame.get(), target, FrameMode::Full, || {})
+    }
+
+    #[test]
+    fn write_is_read_back_once() {
+        let window = FakeWindow::default();
+        let target = rect(10.0, 20.0, 300.0, 200.0);
+        assert_eq!(reconcile(&window, target).unwrap(), target);
+        assert_eq!(*window.calls.borrow(), ["position", "size", "frame"]);
+    }
+
+    #[test]
+    fn minimum_size_is_reported_without_retrying() {
+        let window = FakeWindow {
+            min_size: CGSize::new(600.0, 500.0),
+            frame: Cell::new(rect(0.0, 0.0, 800.0, 600.0)),
+            ..Default::default()
+        };
+        let frame = reconcile(&window, rect(0.0, 0.0, 300.0, 200.0)).unwrap();
+        assert_eq!(frame, rect(0.0, 0.0, 600.0, 500.0));
+        assert_eq!(*window.calls.borrow(), ["size", "frame"]);
+    }
+
+    #[test]
+    fn rejected_position_is_reported_without_retrying() {
+        let window = FakeWindow {
+            rejects_position: true,
+            frame: Cell::new(rect(0.0, 0.0, 300.0, 200.0)),
+            ..Default::default()
+        };
+        let frame = reconcile(&window, rect(50.0, 50.0, 300.0, 200.0)).unwrap();
+        assert_eq!(frame, rect(0.0, 0.0, 300.0, 200.0));
+        assert_eq!(*window.calls.borrow(), ["position", "frame"]);
+    }
+
+    #[test]
+    fn unresponsive_app_gets_every_setter_but_no_readback() {
+        let window = FakeWindow {
+            unresponsive: true,
+            ..Default::default()
+        };
+        let result = reconcile(&window, rect(10.0, 20.0, 300.0, 200.0));
+        assert!(matches!(result, Err(AxError::Ax(AXError::CannotComplete))));
+        assert_eq!(*window.calls.borrow(), ["position", "size"]);
+    }
 }
 
 #[cfg(test)]
