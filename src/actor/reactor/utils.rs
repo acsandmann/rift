@@ -45,7 +45,7 @@ pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {
     }
 }
 
-fn compute_window_info_manageability(
+pub(super) fn compute_window_info_manageability(
     info: &WindowInfo,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
