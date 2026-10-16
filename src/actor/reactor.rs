@@ -1398,12 +1398,30 @@ impl Reactor {
                     if let Some(app) = self.app_manager.apps.get(&pid) {
                         let _ = app.handle.send(Request::ApplicationGloballyActivated(pid));
                     }
+                    // Recover apps whose creation/show notifications were missed,
+                    // without enumerating all AX windows on ordinary activation.
+                    let has_admitted_window =
+                        self.state.windows.window_ids_for_pid(pid).any(|wid| {
+                            self.state.windows.window(wid).is_some_and(WindowState::is_admitted)
+                        });
+                    if !has_admitted_window {
+                        self.request_window_inventory(pid);
+                    }
                 }
                 // The app thread will resolve the current AX main window and
                 // emit ApplicationActivated. Do not replay cached focus here.
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
+                let needs_inventory = self.state.windows.window(window).is_none_or(|state| {
+                    !state.is_admitted() && state.manage_override != Some(false)
+                });
+                if needs_inventory {
+                    // Native focus proves the window is present, even if a previous
+                    // AX snapshot marked it minimized or otherwise unmanageable.
+                    // Do this before the cached-layout-focus fast path as well.
+                    self.request_window_inventory(window.pid);
+                }
                 if self.state.windows.contains_window(window)
                     && self.is_space_active(reported_space)
                     && self.space_state.screen_by_space(reported_space).is_some()
@@ -1418,7 +1436,6 @@ impl Reactor {
                     return Ok(EventOutcome::default());
                 }
                 if !self.state.windows.contains_window(window) {
-                    self.request_window_inventory(window.pid);
                     return Ok(EventOutcome::default());
                 }
                 return Ok(if self.is_space_active(reported_space) {
