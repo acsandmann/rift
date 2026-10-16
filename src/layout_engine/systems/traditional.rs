@@ -1462,14 +1462,17 @@ impl TraditionalLayoutSystem {
     ) -> crate::layout_engine::engine::GroupContainerInfo {
         // One representative per non-empty child, in child order: left to right for a
         // horizontal stack, top to bottom for a vertical one.
-        let representatives: Vec<_> = children
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &child)| self.find_best_focus_target(child).map(|(_, wid)| (i, wid)))
-            .collect();
-        let selected_index =
-            representatives.iter().position(|(i, _)| *i == selected_index).unwrap_or(0);
-        let window_ids: Vec<_> = representatives.into_iter().map(|(_, wid)| wid).collect();
+        let mut window_ids = Vec::with_capacity(children.len());
+        let mut representative_selection = 0;
+        for (i, &child) in children.iter().enumerate() {
+            if let Some((_, wid)) = self.find_best_focus_target(child) {
+                if i == selected_index {
+                    representative_selection = window_ids.len();
+                }
+                window_ids.push(wid);
+            }
+        }
+        let selected_index = representative_selection;
 
         crate::layout_engine::engine::GroupContainerInfo {
             node_id: node,
@@ -1623,31 +1626,30 @@ impl TraditionalLayoutSystem {
                 continue;
             }
 
-            if !children.is_empty() {
-                for &child in children.iter().rev() {
-                    let child_rect =
-                        self.calculate_child_frame_in_container(node, child, rect, gaps);
-                    stack.push((child, child_rect));
-                }
-            }
+            // Calculate sibling frames once in forward order, preserving the exact
+            // accumulation used by selection-path geometry. Reverse only the work
+            // queue so the depth-first traversal still visits children in order.
+            let start = stack.len();
+            stack.extend(children.iter().copied().zip(self.child_frames_in_axis(
+                rect,
+                &children,
+                kind == Horizontal,
+                gaps,
+            )));
+            stack[start..].reverse();
         }
 
         out
     }
 
-    fn calculate_child_frame_in_axis(
-        &self,
+    fn child_frames_in_axis<'a>(
+        &'a self,
         parent_rect: CGRect,
-        siblings: &[NodeId],
-        child_index: usize,
+        siblings: &'a [NodeId],
         horizontal: bool,
         gaps: &crate::common::config::GapSettings,
-    ) -> CGRect {
+    ) -> impl Iterator<Item = CGRect> + 'a {
         use objc2_core_foundation::{CGPoint, CGSize};
-
-        if siblings.is_empty() || child_index >= siblings.len() {
-            return parent_rect;
-        }
 
         let total: f32 = siblings.iter().map(|&child| self.tree.data.layout.info[child].size).sum();
         let inner_gap = if horizontal {
@@ -1655,50 +1657,41 @@ impl TraditionalLayoutSystem {
         } else {
             gaps.inner.vertical
         };
-
         let axis_len = if horizontal {
             parent_rect.size.width
         } else {
             parent_rect.size.height
         };
-
-        let total_gap = (siblings.len().saturating_sub(1)) as f64 * inner_gap;
+        let total_gap = siblings.len().saturating_sub(1) as f64 * inner_gap;
         let usable_axis = if inner_gap == 0.0 {
             axis_len
         } else {
             (axis_len - total_gap).max(0.0)
         };
-
-        let mut offset = if horizontal {
+        let offset = if horizontal {
             parent_rect.origin.x
         } else {
             parent_rect.origin.y
         };
 
-        for i in 0..child_index {
-            let ratio = f64::from(self.tree.data.layout.info[siblings[i]].size) / f64::from(total);
+        siblings.iter().scan(offset, move |offset, &child| {
+            let ratio = f64::from(self.tree.data.layout.info[child].size) / f64::from(total);
             let seg_len = usable_axis * ratio;
-            offset += seg_len;
-            if i < siblings.len() - 1 {
-                offset += inner_gap;
-            }
-        }
-
-        let ratio =
-            f64::from(self.tree.data.layout.info[siblings[child_index]].size) / f64::from(total);
-        let seg_len = usable_axis * ratio;
-
-        if horizontal {
-            CGRect::new(
-                CGPoint::new(offset, parent_rect.origin.y),
-                CGSize::new(seg_len, parent_rect.size.height),
-            )
-        } else {
-            CGRect::new(
-                CGPoint::new(parent_rect.origin.x, offset),
-                CGSize::new(parent_rect.size.width, seg_len),
-            )
-        }
+            let frame = if horizontal {
+                CGRect::new(
+                    CGPoint::new(*offset, parent_rect.origin.y),
+                    CGSize::new(seg_len, parent_rect.size.height),
+                )
+            } else {
+                CGRect::new(
+                    CGPoint::new(parent_rect.origin.x, *offset),
+                    CGSize::new(parent_rect.size.width, seg_len),
+                )
+            };
+            *offset += seg_len;
+            *offset += inner_gap;
+            Some(frame)
+        })
     }
 
     fn calculate_child_frame_in_container(
@@ -1714,12 +1707,14 @@ impl TraditionalLayoutSystem {
         let child_index = siblings.iter().position(|&n| n == child_node).unwrap_or(0);
 
         match parent_kind {
-            crate::layout_engine::LayoutKind::Horizontal => {
-                self.calculate_child_frame_in_axis(parent_rect, &siblings, child_index, true, gaps)
-            }
-            crate::layout_engine::LayoutKind::Vertical => {
-                self.calculate_child_frame_in_axis(parent_rect, &siblings, child_index, false, gaps)
-            }
+            crate::layout_engine::LayoutKind::Horizontal => self
+                .child_frames_in_axis(parent_rect, &siblings, true, gaps)
+                .nth(child_index)
+                .unwrap_or(parent_rect),
+            crate::layout_engine::LayoutKind::Vertical => self
+                .child_frames_in_axis(parent_rect, &siblings, false, gaps)
+                .nth(child_index)
+                .unwrap_or(parent_rect),
             crate::layout_engine::LayoutKind::HorizontalStack
             | crate::layout_engine::LayoutKind::VerticalStack => parent_rect,
         }
@@ -4887,6 +4882,61 @@ mod tests {
             };
             assert_eq!(bar, expected_bar);
             assert_eq!(system.tree.data.layout.kind(root), kind);
+        }
+    }
+
+    #[test]
+    fn stack_bar_geometry_preserves_weighted_sibling_order_and_gaps() {
+        for horizontal in [true, false] {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            let root = system.root(layout);
+            system.tree.data.layout.set_kind(
+                root,
+                if horizontal {
+                    LayoutKind::Horizontal
+                } else {
+                    LayoutKind::Vertical
+                },
+            );
+            let mut nodes = Vec::new();
+            for i in 0..3 {
+                let node = system.tree.mk_node().push_back(root);
+                system.tree.data.layout.set_kind(node, LayoutKind::VerticalStack);
+                system.add_window_under(layout, node, w(200 + i * 2));
+                system.add_window_under(layout, node, w(201 + i * 2));
+                nodes.push(node);
+            }
+            for (i, &node) in nodes.iter().enumerate() {
+                system.tree.data.layout.info[node].size = (i + 1) as f32;
+            }
+            let mut gaps = crate::common::config::GapSettings::default();
+            gaps.inner.horizontal = 10.0;
+            gaps.inner.vertical = 10.0;
+            let screen = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(620.0, 620.0));
+            let groups =
+                system.collect_group_containers(layout, screen, 0.0, &gaps, Default::default());
+            assert_eq!(groups.len(), 3);
+            for (i, (group, (offset, length))) in
+                groups.iter().zip([(0.0, 100.0), (110.0, 200.0), (320.0, 300.0)]).enumerate()
+            {
+                let expected = if horizontal {
+                    CGRect::new(CGPoint::new(10.0 + offset, 20.0), CGSize::new(length, 620.0))
+                } else {
+                    CGRect::new(CGPoint::new(10.0, 20.0 + offset), CGSize::new(620.0, length))
+                };
+                assert_eq!(group.node_id, nodes[i]);
+                assert_eq!(group.frame, expected);
+                system.select_window(layout, w(200 + i as u32 * 2));
+                let path = system.collect_group_containers_in_selection_path(
+                    layout,
+                    screen,
+                    0.0,
+                    &gaps,
+                    Default::default(),
+                );
+                assert_eq!(path.last().unwrap().frame, expected);
+            }
         }
     }
 

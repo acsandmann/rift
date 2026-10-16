@@ -8470,3 +8470,41 @@ fn toggling_stack_tabs_reserves_and_publishes_only_while_enabled() {
         "unstacked spaces drop their bars"
     );
 }
+
+#[test]
+fn stack_tabs_keep_fullscreen_suppression_when_another_display_has_focus() {
+    let (mut apps, mut reactor, mut tabs, _) = stacked_reactor(false);
+    let first = SpaceId::new(1);
+    let second = SpaceId::new(2);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleFullscreen);
+    apps.simulate_until_quiet(&mut reactor);
+    let left = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0));
+    let right = CGRect::new(CGPoint::new(1000.0, 0.0), left.size);
+    reactor.handle_event(space_state_event_with(
+        vec![left, right],
+        vec![Some(first), Some(second)],
+        |state| {
+            state.command_space = Some(second);
+            state.menu_bar_space = Some(second);
+        },
+    ));
+    assert_eq!(reactor.workspace_command_space(), Some(second));
+    for focus_only in [true, false] {
+        while tabs.try_recv().is_ok() {}
+        if focus_only {
+            LayoutManager::refresh_stack_tabs(&mut reactor, first);
+        } else {
+            LayoutManager::update_layout(&mut reactor, false, false, None).unwrap();
+        }
+        let fullscreen =
+            std::iter::from_fn(|| tabs.try_recv().ok()).find_map(|(_, event)| match event {
+                stack_line::Event::GroupsUpdated {
+                    space_id,
+                    active_workspace_for_space_has_fullscreen,
+                    ..
+                } if space_id == first => Some(active_workspace_for_space_has_fullscreen),
+                _ => None,
+            });
+        assert_eq!(fullscreen, Some(true), "focus-only: {focus_only}");
+    }
+}
