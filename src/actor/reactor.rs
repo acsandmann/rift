@@ -618,6 +618,34 @@ impl Reactor {
         self.window_inventory_manager.pending.extend(abandoned);
     }
 
+    fn window_needs_inventory(&self, wid: WindowId) -> bool {
+        self.state.windows.window(wid).is_none_or(|window| {
+            // A rejected window is stale only if it now passes the normal
+            // eligibility checks. Minimized, rule-excluded, and heuristic-
+            // excluded windows must not trigger an AX scan just for focus.
+            !window.is_admitted()
+                && window.manage_override != Some(false)
+                && utils::compute_window_info_manageability(&window.info, |wsid| {
+                    self.state.windows.get_window_server_info(wsid)
+                })
+        })
+    }
+
+    fn app_needs_window_inventory(&self, pid: pid_t) -> bool {
+        let mut windows = self.state.windows.window_ids_for_pid(pid).peekable();
+        if windows.peek().is_none() {
+            return true;
+        }
+        let mut has_stale_window = false;
+        for wid in windows {
+            if self.state.windows.window(wid).is_some_and(WindowState::is_admitted) {
+                return false;
+            }
+            has_stale_window |= self.window_needs_inventory(wid);
+        }
+        has_stale_window
+    }
+
     fn request_window_inventory(&mut self, pid: pid_t) {
         if self.refreshes_blocked()
             || self.pending_space_change_manager.pending_space_change.is_some()
@@ -1398,13 +1426,9 @@ impl Reactor {
                     if let Some(app) = self.app_manager.apps.get(&pid) {
                         let _ = app.handle.send(Request::ApplicationGloballyActivated(pid));
                     }
-                    // Recover apps whose creation/show notifications were missed,
-                    // without enumerating all AX windows on ordinary activation.
-                    let has_admitted_window =
-                        self.state.windows.window_ids_for_pid(pid).any(|wid| {
-                            self.state.windows.window(wid).is_some_and(WindowState::is_admitted)
-                        });
-                    if !has_admitted_window {
+                    // Recover missing/stale inventory, but leave apps with only
+                    // intentionally excluded windows alone.
+                    if self.app_needs_window_inventory(pid) {
                         self.request_window_inventory(pid);
                     }
                 }
@@ -1413,13 +1437,9 @@ impl Reactor {
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
-                let needs_inventory = self.state.windows.window(window).is_none_or(|state| {
-                    !state.is_admitted() && state.manage_override != Some(false)
-                });
-                if needs_inventory {
-                    // Native focus proves the window is present, even if a previous
-                    // AX snapshot marked it minimized or otherwise unmanageable.
-                    // Do this before the cached-layout-focus fast path as well.
+                if self.window_needs_inventory(window) {
+                    // Recover stale admission before the cached-layout-focus
+                    // fast path as well, without rescanning excluded windows.
                     self.request_window_inventory(window.pid);
                 }
                 if self.state.windows.contains_window(window)
