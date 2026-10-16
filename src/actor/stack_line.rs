@@ -9,7 +9,7 @@ use crate::actor::app::WindowId;
 use crate::actor::reactor::{Command, ReactorCommand};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, reactor};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
@@ -54,6 +54,7 @@ struct NativeGroup {
     generation: u64,
     fullscreen: bool,
     ordered_anchor: Cell<Option<crate::sys::window_server::WindowServerId>>,
+    placed_frame: Cell<Option<CGRect>>,
 }
 
 #[derive(Debug)]
@@ -79,6 +80,8 @@ pub struct StackLine {
     native_groups: HashMap<GroupId, NativeGroup>,
     next_generation: u64,
     icons: HashMap<i32, (String, Option<cgs::Image>)>,
+    live_groups: HashSet<GroupId>,
+    live_pids: HashSet<i32>,
     tx: Sender,
     reactor_tx: reactor::Sender,
     coordinate_converter: CoordinateConverter,
@@ -103,6 +106,8 @@ impl StackLine {
             native_groups: HashMap::default(),
             next_generation: 0,
             icons: HashMap::default(),
+            live_groups: HashSet::default(),
+            live_pids: HashSet::default(),
             mtm,
             reactor_tx,
             coordinate_converter,
@@ -122,7 +127,7 @@ impl StackLine {
 
     fn is_enabled(&self) -> bool { self.config.settings.ui.stack_line.enabled }
 
-    #[instrument(name = "stack_line::handle_event", skip(self))]
+    #[instrument(name = "stack_line::handle_event", skip_all)]
     fn handle_event(&mut self, event: Event) {
         if !self.is_enabled()
             && !matches!(event, Event::ConfigUpdated(_) | Event::SpaceStateUpdated(..))
@@ -139,7 +144,10 @@ impl StackLine {
                     .iter_mut()
                     .filter_map(|(&node, group)| {
                         let tab = group.info.tabs.iter_mut().find(|t| t.window_id == wid)?;
-                        tab.title = title.clone();
+                        if tab.title == title {
+                            return None;
+                        }
+                        tab.title.clone_from(&title);
                         Some(node)
                     })
                     .collect();
@@ -168,11 +176,7 @@ impl StackLine {
                         space_state.active_spaces.contains(&group.info.space_id)
                             && !space_state.fullscreen_spaces.contains(&group.info.space_id)
                     });
-                    self.icons.retain(|pid, _| {
-                        self.native_groups
-                            .values()
-                            .any(|g| g.info.tabs.iter().any(|t| t.window_id.pid == *pid))
-                    });
+                    self.prune_icons();
                     self.handle_space_state_updated(
                         converter,
                         space_state.should_force_refresh_layout || space_state.display_set_changed,
@@ -193,15 +197,13 @@ impl StackLine {
         space_has_fullscreen: bool,
         reorder: bool,
     ) {
-        let active: crate::common::collections::HashSet<SpaceId> =
-            active_space_ids.iter().copied().collect();
-
+        self.live_groups.clear();
+        self.live_groups.extend(groups.iter().map(|info| (info.space_id, info.node_id)));
         self.native_groups.retain(|&id, _| {
-            active.contains(&id.0)
-                && (id.0 != space_id
-                    || groups.iter().any(|info| (info.space_id, info.node_id) == id))
+            active_space_ids.contains(&id.0) && (id.0 != space_id || self.live_groups.contains(&id))
         });
-        if !active.contains(&space_id) {
+        if !active_space_ids.contains(&space_id) {
+            self.prune_icons();
             return;
         }
         for info in groups {
@@ -214,16 +216,26 @@ impl StackLine {
             group.fullscreen = space_has_fullscreen;
             self.place(&self.native_groups[&id], reorder);
         }
-        self.icons.retain(|pid, _| {
+        self.prune_icons();
+    }
+
+    fn prune_icons(&mut self) {
+        // One pass over tabs, rather than searching every group for each cached PID.
+        self.live_pids.clear();
+        self.live_pids.extend(
             self.native_groups
                 .values()
-                .any(|g| g.info.tabs.iter().any(|t| t.window_id.pid == *pid))
-        });
+                .flat_map(|group| group.info.tabs.iter().map(|tab| tab.window_id.pid)),
+        );
+        self.icons.retain(|pid, _| self.live_pids.contains(pid));
     }
 
     fn handle_space_state_updated(&mut self, converter: CoordinateConverter, reorder: bool) {
         self.coordinate_converter = converter;
         for group in self.native_groups.values() {
+            // AppKit can relocate panels when displays change. Recheck the native
+            // frame even if the converted layout frame happens to be unchanged.
+            group.placed_frame.set(None);
             self.place(group, reorder);
         }
     }
@@ -233,6 +245,8 @@ impl StackLine {
         if !self.is_enabled() {
             self.native_groups.clear();
             self.icons.clear();
+            self.live_groups.clear();
+            self.live_pids.clear();
         }
         for group in self.native_groups.values() {
             self.place(group, false);
@@ -242,18 +256,17 @@ impl StackLine {
     fn place(&self, group: &NativeGroup, reorder: bool) {
         let settings = &self.config.settings.ui.stack_line;
         group.bar.set_select_on_hover(settings.hover.selects_on_hover());
-        group.bar.set_edge(
-            match (
-                group.info.horizontal,
-                settings.horiz_placement,
-                settings.vert_placement,
-            ) {
-                (true, HorizontalPlacement::Top, _) => cgs::TabBarEdge::Top,
-                (true, HorizontalPlacement::Bottom, _) => cgs::TabBarEdge::Bottom,
-                (false, _, VerticalPlacement::Left) => cgs::TabBarEdge::Left,
-                (false, _, VerticalPlacement::Right) => cgs::TabBarEdge::Right,
-            },
-        );
+        let edge = match (
+            group.info.horizontal,
+            settings.horiz_placement,
+            settings.vert_placement,
+        ) {
+            (true, HorizontalPlacement::Top, _) => cgs::TabBarEdge::Top,
+            (true, HorizontalPlacement::Bottom, _) => cgs::TabBarEdge::Bottom,
+            (false, _, VerticalPlacement::Left) => cgs::TabBarEdge::Left,
+            (false, _, VerticalPlacement::Right) => cgs::TabBarEdge::Right,
+        };
+        group.bar.set_edge(edge);
         let frame = self
             .coordinate_converter
             .convert_rect(settings.reserve().bar(group.info.frame, group.info.horizontal))
@@ -269,11 +282,16 @@ impl StackLine {
             });
         let anchor = group.info.anchor();
         if !self.is_enabled() || group.fullscreen || frame.is_none() || anchor.is_none() {
-            group.bar.hide();
+            if group.bar.is_visible() {
+                group.bar.hide();
+            }
             group.ordered_anchor.set(None);
             return;
         }
-        group.bar.set_frame(frame.unwrap());
+        let frame = frame.unwrap();
+        if group.placed_frame.replace(Some(frame)) != Some(frame) {
+            group.bar.set_frame(frame);
+        }
         if reorder || group.ordered_anchor.get() != anchor || !group.bar.is_visible() {
             group.bar.show_above(anchor.unwrap().as_u32() as isize);
             group.ordered_anchor.set(anchor);
@@ -314,7 +332,11 @@ impl StackLine {
             });
             cgs::TabBarItem { title: if tab.title.is_empty() { name.clone() } else { tab.title.clone() }, icon: icon.clone() }
         }).collect();
-        *group.shown.borrow_mut() = group.info.tabs.iter().map(|tab| tab.window_id).collect();
+        {
+            let mut shown = group.shown.borrow_mut();
+            shown.clear();
+            shown.extend(group.info.tabs.iter().map(|tab| tab.window_id));
+        }
         group.bar.set_tabs(tabs, group.info.selected_index);
     }
 
@@ -324,9 +346,15 @@ impl StackLine {
             return;
         }
         let mut tabs_changed = true;
+        let mut selection_changed = false;
         if let Some(group) = self.native_groups.get_mut(&node) {
-            tabs_changed =
-                group.info.tabs != info.tabs || group.info.selected_index != info.selected_index;
+            selection_changed = group.info.selected_index != info.selected_index;
+            tabs_changed = group.info.tabs.len() != info.tabs.len()
+                || group.info.tabs.iter().zip(&info.tabs).any(|(old, new)| {
+                    old.window_id != new.window_id
+                        || old.title != new.title
+                        || old.bundle_id != new.bundle_id
+                });
             group.info = info;
         } else {
             let generation = self.next_generation;
@@ -349,10 +377,14 @@ impl StackLine {
                 generation,
                 fullscreen: false,
                 ordered_anchor: Cell::new(None),
+                placed_frame: Cell::new(None),
             });
         }
         if tabs_changed {
             self.refresh_native_tabs(node);
+        } else if selection_changed {
+            let group = &self.native_groups[&node];
+            group.bar.set_selected_index(group.info.selected_index);
         }
     }
 }
