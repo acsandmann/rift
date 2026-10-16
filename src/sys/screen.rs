@@ -180,7 +180,7 @@ impl<S: System> ScreenCache<S> {
             }
         });
 
-        let main_id = CGMainDisplayID();
+        let main_id = self.system.main_display_id();
         if let Some(main_screen_idx) = cg_screens.iter().position(|s| s.cg_id.0 == main_id) {
             cg_screens.swap(0, main_screen_idx);
         } else {
@@ -191,11 +191,13 @@ impl<S: System> ScreenCache<S> {
             cg_screens.iter().map(|screen| self.system.display_uuid(screen)).collect();
         let uuid_strings: Vec<String> = uuids.iter().map(|uuid| uuid.to_string()).collect();
 
-        let union_max_y = cg_screens
+        // Cocoa's global origin is the bottom left of the primary display, not
+        // the bottom of the desktop union. Both APIs use logical points here.
+        let converter = cg_screens
             .iter()
-            .map(|screen| screen.bounds.max().y)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let converter = CoordinateConverter { screen_height: union_max_y };
+            .find(|s| s.cg_id.0 == main_id)
+            .map(|s| CoordinateConverter::from_height(s.bounds.max().y))
+            .unwrap_or_default();
 
         let screens: Vec<ScreenInfo> = cg_screens
             .iter()
@@ -430,6 +432,7 @@ impl CoordinateConverter {
 
 #[allow(private_interfaces)]
 pub trait System {
+    fn main_display_id(&self) -> u32 { CGMainDisplayID() }
     fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError>;
     fn display_uuid(&self, screen: &CGScreenInfo) -> CFRetained<CFString>;
     fn ns_screens(&self) -> Vec<NSScreenInfo>;
@@ -799,10 +802,13 @@ mod test {
     }
 
     struct Stub {
+        main_id: u32,
         cg_screens: Vec<CGScreenInfo>,
         ns_screens: Vec<NSScreenInfo>,
     }
     impl System for Stub {
+        fn main_display_id(&self) -> u32 { self.main_id }
+
         fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> { Ok(self.cg_screens.clone()) }
 
         fn display_uuid(&self, _screen: &CGScreenInfo) -> CFRetained<CFString> {
@@ -856,6 +862,7 @@ mod test {
     #[test]
     fn it_calculates_the_visible_frame() {
         let stub = Stub {
+            main_id: 3,
             cg_screens: vec![
                 CGScreenInfo {
                     cg_id: ScreenId(1),
@@ -912,6 +919,63 @@ mod test {
                 0.0,
             )
         );
+        // Changing the primary and rearranging a taller secondary must preserve
+        // the exact reserved rectangle, regardless of backing scale.
+        let rect = |x, y, w, h| CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+        for secondary in [
+            None,
+            Some(rect(-1080., 0., 1080., 1920.)),
+            Some(rect(1440., 0., 1080., 1920.)),
+            Some(rect(-1080., -500., 1080., 1920.)),
+            Some(rect(0., -1080., 1920., 1080.)),
+            Some(rect(0., 900., 1920., 1080.)),
+        ] {
+            for scale in [1., 2.] {
+                sc.system.main_id += 1;
+                let id = sc.system.main_id;
+                sc.system.cg_screens = vec![CGScreenInfo {
+                    cg_id: ScreenId(id),
+                    bounds: rect(0., 0., 1440., 900.),
+                }];
+                if let Some(bounds) = secondary {
+                    sc.system.cg_screens.push(CGScreenInfo { cg_id: ScreenId(1), bounds });
+                }
+                sc.system.ns_screens[0].cg_id = ScreenId(id);
+                for screen in &mut sc.system.ns_screens {
+                    screen.backing_scale = scale;
+                }
+                sc.mark_sleeping(true);
+                sc.mark_sleeping(false);
+                let (_, converter) = sc.refresh().unwrap();
+                for display in &sc.system.cg_screens {
+                    let (x, y) = (display.bounds.origin.x + 100., display.bounds.origin.y + 100.);
+                    let (w, h) = (
+                        display.bounds.size.width - 200.,
+                        display.bounds.size.height - 200.,
+                    );
+                    use crate::common::config::HorizontalPlacement::*;
+                    use crate::common::config::StackLineReserve;
+                    use crate::common::config::VerticalPlacement::*;
+                    for (horizontal, horiz, vert, expected) in [
+                        (true, Top, Left, rect(x, 860. - y, w, 40.)),
+                        (true, Bottom, Left, rect(x, 900. - y - h, w, 40.)),
+                        (false, Top, Left, rect(x, 900. - y - h, 40., h)),
+                        (false, Top, Right, rect(x + w - 40., 900. - y - h, 40., h)),
+                    ] {
+                        let reserve = StackLineReserve {
+                            thickness: 40.,
+                            spacing: 0.,
+                            horiz,
+                            vert,
+                        };
+                        assert_eq!(
+                            converter.convert_rect(reserve.bar(rect(x, y, w, h), horizontal)),
+                            Some(expected)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

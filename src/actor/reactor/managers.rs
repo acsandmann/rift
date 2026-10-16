@@ -357,11 +357,10 @@ impl LayoutManager {
             &gaps,
             reactor.config.settings.ui.stack_line.reserve(),
         );
-        let fullscreen = reactor.workspace_command_space() == Some(space)
-            && reactor
-                .layout_manager
-                .layout_engine
-                .active_workspace_for_space_has_fullscreen(space);
+        let fullscreen = reactor
+            .layout_manager
+            .layout_engine
+            .active_workspace_for_space_has_fullscreen(space);
         Self::publish_stack_tabs(reactor, space, &groups, fullscreen, true);
     }
 
@@ -461,11 +460,12 @@ impl LayoutManager {
                     .layout
                     .gaps
                     .effective_for_display(display_uuid.as_deref());
-                let active_workspace_for_space_has_fullscreen = active_space == Some(space)
-                    && reactor
-                        .layout_manager
-                        .layout_engine
-                        .active_workspace_for_space_has_fullscreen(space);
+                let stack_has_fullscreen = reactor
+                    .layout_manager
+                    .layout_engine
+                    .active_workspace_for_space_has_fullscreen(space);
+                let active_workspace_for_space_has_fullscreen =
+                    active_space == Some(space) && stack_has_fullscreen;
                 let group_infos = reactor.layout_manager.layout_engine.collect_group_containers(
                     space,
                     screen_frame,
@@ -473,13 +473,7 @@ impl LayoutManager {
                     reactor.config.settings.ui.stack_line.reserve(),
                 );
 
-                Self::publish_stack_tabs(
-                    reactor,
-                    space,
-                    &group_infos,
-                    active_workspace_for_space_has_fullscreen,
-                    false,
-                );
+                Self::publish_stack_tabs(reactor, space, &group_infos, stack_has_fullscreen, false);
 
                 if let Some(workspace_id) =
                     reactor.layout_manager.layout_engine.workspaces().active_workspace(space)
