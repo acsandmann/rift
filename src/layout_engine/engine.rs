@@ -23,6 +23,7 @@ use crate::model::{
 };
 use crate::sys::screen::SpaceId;
 
+mod departures;
 mod persistence;
 
 use persistence::PersistenceState;
@@ -184,6 +185,8 @@ pub struct LayoutEngine {
     startup_restore_pending: bool,
     /// Legacy strip commands report boundary excess; workspace arbitration lives here.
     scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
+    /// Windows that left their layout temporarily, to put back on return.
+    departures: departures::Departures,
 }
 
 pub(crate) struct WorkspaceLayoutQuerySnapshot {
@@ -657,6 +660,9 @@ impl LayoutEngine {
 
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
+        if self.layout_settings != *settings {
+            self.drop_departure_snapshots();
+        }
         self.layout_settings = settings.clone();
 
         for (_, ws) in self.workspaces.workspaces.iter_mut() {
@@ -1241,7 +1247,11 @@ impl LayoutEngine {
         wid: WindowId,
         preserve_floating: bool,
     ) -> bool {
-        let removal = self.remove_window_layout_membership(window_store, wid);
+        let previous_space = self.space_with_window(wid);
+        // The window may only be leaving for a while (minimized, hidden or in
+        // native fullscreen); record its position for when it returns.
+        self.note_departure(window_store, wid);
+        let removal = self.remove_window_layout_membership(window_store, wid).or(previous_space);
 
         if preserve_floating {
             self.floating.remove_active_for_window(wid);
@@ -1299,7 +1309,14 @@ impl LayoutEngine {
     ) -> bool {
         let active_space_before = self.space_with_window(wid);
 
-        let assigned_workspace = match window_store.workspace_for_window(space, wid) {
+        // Minimizing clears the assignment; a returning window goes back to the
+        // workspace it left.
+        let assigned = window_store.workspace_for_window(space, wid).or_else(|| {
+            self.departed_workspace(wid, space).filter(|&workspace| {
+                self.workspaces.assign_window_to_workspace(window_store, space, wid, workspace)
+            })
+        });
+        let assigned_workspace = match assigned {
             Some(workspace_id) => workspace_id,
             None => match self.workspaces.auto_assign_window(window_store, wid, space) {
                 Ok(workspace_id) => workspace_id,
@@ -1321,7 +1338,9 @@ impl LayoutEngine {
         if should_be_floating {
             self.floating.add_active(space, wid.pid, wid);
         } else if let Some(layout) = self.workspaces.active_layout(space, assigned_workspace) {
-            if !self.workspaces[assigned_workspace].layout_system.contains_window(layout, wid) {
+            if !self.workspaces[assigned_workspace].layout_system.contains_window(layout, wid)
+                && !self.restore_departed_window(assigned_workspace, layout, wid)
+            {
                 if matches!(
                     self.workspaces[assigned_workspace].layout_system,
                     LayoutSystemKind::Scrolling(_)
@@ -1338,6 +1357,9 @@ impl LayoutEngine {
                 "No active layout for workspace {:?} on space {:?}; window {:?} not added to tree",
                 assigned_workspace, space, wid
             );
+        }
+        if should_be_floating || self.workspace_contains_window(assigned_workspace, wid) {
+            self.forget_departure_on(wid, space);
         }
 
         self.space_with_window(wid) != active_space_before
@@ -1520,6 +1542,7 @@ impl LayoutEngine {
             persistence: PersistenceState::default(),
             startup_restore_pending: false,
             scroll_boundary: None,
+            departures: Default::default(),
         }
     }
 
@@ -1824,6 +1847,7 @@ impl LayoutEngine {
                 self.floating.remove_all_for_pid(pid);
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
                 self.forget_persisted_app(pid);
+                self.forget_departures_of_app(pid);
 
                 self.floating_positions.remove_app(pid);
                 return EventResponse {
@@ -1833,8 +1857,22 @@ impl LayoutEngine {
             }
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
-                if self.add_window_to_layout(window_store, space, wid) {
+                let shown = self.add_window_to_layout(window_store, space, wid);
+                if shown {
                     self.broadcast_windows_changed(window_store, space);
+                }
+                // The windows on screen make room for it, or, placed in a
+                // workspace that is not shown, it has to be moved off screen.
+                let active = self.workspaces.active_workspace(space);
+                if shown
+                    || window_store
+                        .workspace_for_window(space, wid)
+                        .is_some_and(|ws| Some(ws) != active)
+                {
+                    return EventResponse {
+                        changed: true,
+                        ..EventResponse::default()
+                    };
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
@@ -2990,10 +3028,18 @@ impl LayoutEngine {
         } else {
             self.app_rules.evaluate(context)
         };
+        // A window returning from minimized, hidden or fullscreen goes back to
+        // the workspace it left, like a persistence match below.
+        let returning = self.departed_workspace(window_id, space).is_some_and(|workspace| {
+            self.workspaces
+                .assign_window_to_workspace(window_store, space, window_id, workspace)
+        });
         // A persistence match is an explicit restoration of the user's previous
         // workspace. App rules still control admission and other effects, but
         // their default placement must not relocate the window during restore.
-        if restored && let Some(decision) = &mut decision {
+        if (restored || returning)
+            && let Some(decision) = &mut decision
+        {
             decision.workspace = None;
         }
         if reapply_workspace_rule {
