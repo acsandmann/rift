@@ -21,6 +21,7 @@ use crate::layout_engine::systems::{
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAction};
+use crate::model::{HiddenWindowPlacement, HideCorner};
 use crate::sys::geometry::Round;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,6 +253,7 @@ pub(crate) struct ViewportPresentation {
     width: f64,
     tiling: CGRect,
     screen: CGRect,
+    corner_parking: bool,
 }
 
 /// Rendered scalar state, read only at semantic boundaries. Motion samples stay
@@ -324,19 +326,63 @@ impl ViewportPresentation {
         }
     }
 
+    pub fn set_corner_parking(&mut self, enabled: bool) { self.corner_parking = enabled; }
+
+    pub fn corner_parking(&self) -> bool { self.corner_parking }
+
+    pub fn is_corner_parked(&self, frame: CGRect) -> bool {
+        self.corner_parking && is_corner_parked(frame, self.screen)
+    }
+
     pub fn target_frame(&self, frame: CGRect, fixed: bool, scale: f64) -> CGRect {
         self.frame_at_offset(frame, fixed, scale, self.target())
     }
 
+    pub fn logical_frame_at_offset(
+        &self,
+        frame: CGRect,
+        fixed: bool,
+        scale: f64,
+        offset: f64,
+    ) -> CGRect {
+        self.translated_frame(frame, fixed, scale, offset, false)
+    }
+
+    pub fn park_frame(&self, frame: CGRect, fixed: bool) -> CGRect {
+        if fixed {
+            return frame;
+        }
+        let frame = park_translated_frame(frame, self.tiling, self.screen);
+        if self.corner_parking {
+            park_offscreen_at_corner(frame, self.screen)
+        } else {
+            frame
+        }
+    }
+
     pub fn frame_at_offset(
+        &self,
+        frame: CGRect,
+        fixed: bool,
+        scale: f64,
+        offset: f64,
+    ) -> CGRect {
+        self.translated_frame(frame, fixed, scale, offset, true)
+    }
+
+    fn translated_frame(
         &self,
         mut frame: CGRect,
         fixed: bool,
         scale: f64,
         offset: f64,
+        park: bool,
     ) -> CGRect {
         if !fixed {
-            frame = translate_frame(frame, offset, self.tiling, self.screen, true);
+            frame = translate_frame(frame, offset, self.tiling, self.screen, false);
+            if park {
+                frame = self.park_frame(frame, fixed);
+            }
         }
         frame.origin.x = (frame.origin.x * scale).round() / scale;
         frame.origin.y = (frame.origin.y * scale).round() / scale;
@@ -353,13 +399,39 @@ fn translate_frame(
 ) -> CGRect {
     frame.origin.x += tiling.origin.x - offset;
     if park {
-        if frame.max().x <= tiling.origin.x {
-            frame.origin.x = screen.origin.x - frame.size.width;
-        } else if frame.origin.x >= tiling.max().x {
-            frame.origin.x = screen.max().x;
-        }
+        frame = park_translated_frame(frame, tiling, screen);
     }
     frame
+}
+
+fn park_translated_frame(mut frame: CGRect, tiling: CGRect, screen: CGRect) -> CGRect {
+    if frame.max().x <= tiling.origin.x {
+        frame.origin.x = screen.origin.x - frame.size.width;
+    } else if frame.origin.x >= tiling.max().x {
+        frame.origin.x = screen.max().x;
+    }
+    frame
+}
+
+/// Single-display parking; callers must retain horizontal parking with multiple displays.
+pub(crate) fn park_offscreen_at_corner(frame: CGRect, screen: CGRect) -> CGRect {
+    let corner = if frame.max().x <= screen.origin.x {
+        HideCorner::BottomLeft
+    } else if frame.origin.x >= screen.max().x {
+        HideCorner::BottomRight
+    } else {
+        return frame;
+    };
+    // Horizontal parking alone can leave a full-height strip after AX clamping.
+    HiddenWindowPlacement::calculate(screen, frame, corner, &[])
+}
+
+pub(crate) fn is_corner_parked(frame: CGRect, screen: CGRect) -> bool {
+    // Native corrections can leave more than the requested 1pt visible. A
+    // corrected corner still has most of its height below the screen.
+    HiddenWindowPlacement::is_hidden(screen, frame, &[])
+        || (frame.origin.y >= screen.max().y - frame.size.height.min(screen.size.height) / 2.0
+            && (frame.origin.x < screen.origin.x || frame.max().x > screen.max().x))
 }
 
 fn proportional_width(view: f64, gap: f64, ratio: f64) -> f64 {
@@ -1214,6 +1286,7 @@ impl ScrollingLayoutSystem {
             width: g.tiling.size.width,
             tiling: g.tiling,
             screen: g.screen,
+            corner_parking: false,
         };
         let frames = g
             .frames
@@ -2973,6 +3046,101 @@ pub(crate) mod tests {
         assert_eq!(release.offset, 0.0);
         assert_eq!(release.window, wid(3));
         assert_eq!(f.frame(3).origin.x, 500.0);
+    }
+
+    #[test]
+    fn corner_parking_preserves_visible_frames_and_restores_logical_rows() {
+        let mut f = Fixture::new(5);
+        f.gaps.outer.left = 8.0;
+        f.gaps.outer.right = 8.0;
+        f.gaps.inner.horizontal = 10.0;
+        f.drop(5, 4, WindowDropAction::Stack);
+        f.select(3);
+        f.prepare();
+        let (mut camera, frames) = f.system.presentation(f.layout).unwrap();
+        let offset = camera.offset();
+        let legacy: Vec<_> = frames
+            .iter()
+            .map(|&(_, world, fixed)| camera.frame_at_offset(world, fixed, 1.0, offset))
+            .collect();
+        camera.set_corner_parking(true);
+        for &(_, world, fixed) in &frames {
+            let logical = camera.logical_frame_at_offset(world, fixed, 1.0, offset);
+            let native = camera.frame_at_offset(world, fixed, 1.0, offset);
+            if logical.max().x <= camera.tiling.origin.x
+                || logical.origin.x >= camera.tiling.max().x
+            {
+                assert_eq!(native.origin.y, f.screen.max().y - 1.0);
+                assert_eq!(native.size, logical.size);
+                assert!(camera.is_corner_parked(native));
+            } else {
+                assert_eq!(native, logical);
+            }
+            // Re-entering uses the original row, never the corner's Y position.
+            let visible_offset = world.origin.x;
+            let restored = camera.frame_at_offset(world, fixed, 1.0, visible_offset);
+            assert_eq!(restored.origin.y, world.origin.y);
+            assert_eq!(camera.frame_at_offset(world, true, 1.0, offset), world);
+        }
+
+        camera.set_corner_parking(false);
+        let restored_legacy: Vec<_> = frames
+            .iter()
+            .map(|&(_, world, fixed)| camera.frame_at_offset(world, fixed, 1.0, offset))
+            .collect();
+        assert_eq!(restored_legacy, legacy);
+
+        let screen = f.screen;
+        for x in [-1000.0, screen.max().x] {
+            let frame = CGRect::new(CGPoint::new(x, 42.0), CGSize::new(994.0, 700.0));
+            let parked = park_offscreen_at_corner(frame, screen);
+            assert_eq!(parked.origin.y, screen.max().y - 1.0);
+            assert_eq!(parked.size, frame.size);
+        }
+    }
+
+    #[test]
+    fn corner_parking_keeps_partial_columns_and_fixed_windows_in_place() {
+        let mut f = Fixture::new(3);
+        f.screen.origin = CGPoint::new(200.0, 32.0);
+        f.gaps.outer.left = 8.0;
+        f.gaps.outer.right = 8.0;
+        f.prepare();
+        let (mut camera, _) = f.system.presentation(f.layout).unwrap();
+        camera.set_corner_parking(true);
+        let width = 400.0;
+        for x in [
+            camera.tiling.origin.x - width + 0.5,
+            camera.tiling.max().x - 0.5,
+        ] {
+            let frame = CGRect::new(CGPoint::new(x, 450.0), CGSize::new(width, 300.0));
+            assert_eq!(camera.park_frame(frame, false), frame);
+            assert!(!camera.is_corner_parked(frame));
+        }
+        for x in [camera.tiling.origin.x - width, camera.tiling.max().x] {
+            let frame = CGRect::new(CGPoint::new(x, 450.0), CGSize::new(width, 300.0));
+            assert_eq!(camera.park_frame(frame, true), frame);
+            let parked = camera.park_frame(frame, false);
+            assert_eq!(parked.origin.y, f.screen.max().y - 1.0);
+            assert_eq!(parked.size, frame.size);
+        }
+    }
+
+    #[test]
+    fn corner_parking_recognizes_native_corrections_without_hiding_visible_rows() {
+        let screen = CGRect::new(CGPoint::new(0.0, 32.0), CGSize::new(1512.0, 950.0));
+        for x in [-565.0, 1472.0] {
+            let corrected = CGRect::new(CGPoint::new(x, 950.0), CGSize::new(994.0, 932.0));
+            assert!(is_corner_parked(corrected, screen));
+        }
+        for (x, y, height) in [
+            (-954.0, 42.0, 932.0),
+            (1012.0, 700.0, 274.0),
+            (8.0, 42.0, 932.0),
+        ] {
+            let visible = CGRect::new(CGPoint::new(x, y), CGSize::new(994.0, height));
+            assert!(!is_corner_parked(visible, screen));
+        }
     }
 
     #[test]
