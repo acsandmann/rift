@@ -11,6 +11,7 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, reactor};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
+use crate::layout_engine::LayoutCommand;
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +61,8 @@ struct NativeGroup {
 #[derive(Debug)]
 pub enum Event {
     TabAction(GroupId, u64, WindowId, cgs::TabBarAction),
+    /// A tab was dragged onto `target`'s slot. The bar already shows the new order.
+    TabMoved(GroupId, u64, WindowId, WindowId),
     TitleChanged(WindowId, String),
     GroupsUpdated {
         active_space_ids: Vec<SpaceId>,
@@ -137,6 +140,9 @@ impl StackLine {
         match event {
             Event::TabAction(id, generation, window, action) => {
                 self.handle_tab_action(id, generation, window, action);
+            }
+            Event::TabMoved(id, generation, window, target) => {
+                self.handle_tab_moved(id, generation, window, target);
             }
             Event::TitleChanged(wid, title) => {
                 let nodes: Vec<_> = self
@@ -319,6 +325,39 @@ impl StackLine {
         self.reactor_tx.send(reactor::Event::Command(Command::Reactor(command)));
     }
 
+    fn handle_tab_moved(
+        &mut self,
+        id: GroupId,
+        generation: u64,
+        window: WindowId,
+        target: WindowId,
+    ) {
+        let Some(group) = self.native_groups.get_mut(&id) else {
+            return;
+        };
+        if generation != group.generation {
+            return;
+        }
+        let tabs = &mut group.info.tabs;
+        let (Some(from), Some(to)) = (
+            tabs.iter().position(|tab| tab.window_id == window),
+            tabs.iter().position(|tab| tab.window_id == target),
+        ) else {
+            return;
+        };
+        // Match what the bar shows until the layout confirms it, so the confirmation
+        // is a no-op rather than a second shuffle.
+        let tab = tabs.remove(from);
+        tabs.insert(to, tab);
+        group.info.selected_index = moved_index(group.info.selected_index, from, to);
+        self.reactor_tx.send(reactor::Event::Command(Command::Layout(
+            LayoutCommand::MoveStackTab {
+                window: window.into(),
+                target: target.into(),
+            },
+        )));
+    }
+
     fn refresh_native_tabs(&mut self, node: GroupId) {
         let Some(group) = self.native_groups.get(&node) else {
             return;
@@ -364,10 +403,21 @@ impl StackLine {
             let tx = self.tx.clone();
             let shown = Rc::new(RefCell::new(Vec::new()));
             let clicked = shown.clone();
-            let bar = cgs::TabBar::new(&ui).on_action(move |action| {
-                let (cgs::TabBarAction::Select(i) | cgs::TabBarAction::Close(i)) = action;
-                if let Some(&window) = clicked.borrow().get(i) {
-                    tx.send(Event::TabAction(node, generation, window, action));
+            let bar = cgs::TabBar::new(&ui).on_action(move |action| match action {
+                cgs::TabBarAction::Select(i) | cgs::TabBarAction::Close(i) => {
+                    if let Some(&window) = clicked.borrow().get(i) {
+                        tx.send(Event::TabAction(node, generation, window, action));
+                    }
+                }
+                cgs::TabBarAction::Move { from, to } => {
+                    let mut shown = clicked.borrow_mut();
+                    let Some(&target) = shown.get(to).filter(|_| from < shown.len()) else {
+                        return;
+                    };
+                    // Later clicks resolve against the order the bar now shows.
+                    let window = shown.remove(from);
+                    shown.insert(to, window);
+                    tx.send(Event::TabMoved(node, generation, window, target));
                 }
             });
             self.native_groups.insert(node, NativeGroup {
@@ -407,8 +457,22 @@ fn tab_command(
                 window_server_id: Some(id.as_u32()),
             }
         }
+        cgs::TabBarAction::Move { .. } => return None,
     };
     Some(command)
+}
+
+/// Where the tab at `index` ends up once the tab at `from` moves to `to`.
+fn moved_index(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < to && (from + 1..=to).contains(&index) {
+        index - 1
+    } else if to < from && (to..from).contains(&index) {
+        index + 1
+    } else {
+        index
+    }
 }
 
 #[cfg(test)]

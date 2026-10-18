@@ -8426,3 +8426,33 @@ fn stack_tabs_keep_fullscreen_suppression_when_another_display_has_focus() {
         assert_eq!(fullscreen, Some(true), "focus-only: {focus_only}");
     }
 }
+
+#[test]
+fn dragging_a_stack_tab_reorders_the_published_stack() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Stack] {
+        let (mut apps, mut reactor, mut tabs, _) = stacked_reactor(false);
+        if mode == LayoutMode::Stack {
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            apps.simulate_until_quiet(&mut reactor);
+        }
+        let order = |groups: Option<Vec<stack_line::GroupInfo>>| {
+            let groups = groups.unwrap();
+            let group = groups.iter().max_by_key(|g| g.tabs.len()).unwrap();
+            group.tabs.iter().map(|t| t.window_id).collect::<Vec<_>>()
+        };
+        LayoutManager::refresh_stack_tabs(&mut reactor, SpaceId::new(1));
+        let before = order(last_groups(&mut tabs));
+        assert_eq!(before.len(), 3, "{mode:?}");
+        reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveStackTab {
+            window: before[0].into(),
+            target: before[2].into(),
+        })));
+        apps.simulate_until_quiet(&mut reactor);
+        let mut expected = before.clone();
+        expected.rotate_left(1);
+        assert_eq!(order(last_groups(&mut tabs)), expected, "{mode:?}");
+    }
+}

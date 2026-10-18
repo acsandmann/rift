@@ -1944,6 +1944,23 @@ impl LayoutEngine {
                 debug!("No active workspace for space {:?}", space);
             }
         }
+        if let LayoutCommand::MoveStackTab { window, target } = command {
+            // The stack line belongs to whichever display it was dragged on, not the
+            // command space, so find the layout that holds the window.
+            let window = crate::actor::app::WindowId::new(window.pid, window.idx);
+            let target = crate::actor::app::WindowId::new(target.pid, target.idx);
+            let changed = visible_spaces.iter().any(|&space| {
+                self.workspaces.active_layout_for_space(space).is_some_and(|(ws_id, layout)| {
+                    let system = &mut self.workspaces[ws_id].layout_system;
+                    system.contains_window(layout, window)
+                        && system.move_stack_tab(layout, window, target)
+                })
+            });
+            return EventResponse {
+                changed,
+                ..EventResponse::default()
+            };
+        }
         let is_floating = if let Some(focus) = self.focused_window {
             self.floating.is_floating(focus)
         } else {
@@ -2127,6 +2144,7 @@ impl LayoutEngine {
                 unreachable!()
             }
             LayoutCommand::ToggleFocusFloating => unreachable!(),
+            LayoutCommand::MoveStackTab { .. } => unreachable!(),
 
             LayoutCommand::SwapWindows(a, b) => {
                 let a = crate::actor::app::WindowId::new(a.pid, a.idx);
@@ -3402,6 +3420,55 @@ mod tests {
         AppRulePosition, AppRuleSize, AppWorkspaceRule, LayoutMode, LayoutSettings,
         VirtualWorkspaceSettings, WorkspaceLayoutRule, WorkspaceSelector,
     };
+
+    #[test]
+    fn move_stack_tab_reorders_stack_line_tabs_in_stack_and_traditional_modes() {
+        for (mode, stack) in [(LayoutMode::Stack, false), (LayoutMode::Traditional, true)] {
+            let mut settings = LayoutSettings::default();
+            settings.mode = mode;
+            let mut engine =
+                LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+            let mut store = WindowStore::default();
+            let space = SpaceId::new(92);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 800.0));
+            let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, screen.size));
+            for index in 1..=3 {
+                let _ = engine.handle_event(
+                    &mut store,
+                    LayoutEvent::WindowAdded(space, WindowId::new(1, index)),
+                );
+            }
+            let command = |engine: &mut LayoutEngine, store: &mut WindowStore, command| {
+                engine.handle_command(store, Some(space), &[space], &HashMap::default(), command)
+            };
+            if stack {
+                let _ = command(&mut engine, &mut store, LayoutCommand::ToggleStack);
+            }
+            let tabs = |engine: &mut LayoutEngine| {
+                let groups = engine.collect_group_containers(
+                    space,
+                    screen,
+                    &Default::default(),
+                    Default::default(),
+                );
+                groups
+                    .into_iter()
+                    .max_by_key(|g| g.window_ids.len())
+                    .map(|g| g.window_ids)
+                    .unwrap_or_default()
+            };
+            let before = tabs(&mut engine);
+            assert!(before.len() >= 2, "{mode:?}: {before:?}");
+            let response = command(&mut engine, &mut store, LayoutCommand::MoveStackTab {
+                window: before[0].into(),
+                target: before[before.len() - 1].into(),
+            });
+            assert!(response.changed, "{mode:?}");
+            let mut expected = before.clone();
+            expected.rotate_left(1);
+            assert_eq!(tabs(&mut engine), expected, "{mode:?}");
+        }
+    }
 
     #[test]
     fn scroll_strip_accumulates_the_configured_boundary_threshold() {

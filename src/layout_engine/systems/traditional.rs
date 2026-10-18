@@ -1326,6 +1326,39 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.rebalance_node(root)
     }
 
+    fn move_stack_tab(&mut self, layout: LayoutId, window: WindowId, target: WindowId) -> bool {
+        let map = &self.tree.map;
+        let (Some(source), Some(target)) = (
+            self.tree.data.window.node_for(layout, window),
+            self.tree.data.window.node_for(layout, target),
+        ) else {
+            return false;
+        };
+        let target_path: Vec<_> = target.ancestors(map).collect();
+        // A tab is a child of the stack, which may hold a nested container rather than
+        // the window itself. The stack is the nearest container holding both.
+        let Some((moving, stack)) = source.ancestors_with_parent(map).find_map(|(node, parent)| {
+            parent.filter(|p| target_path.contains(p)).map(|p| (node, p))
+        }) else {
+            return false;
+        };
+        let Some(&anchor) = target_path.iter().find(|node| node.parent(map) == Some(stack)) else {
+            return false;
+        };
+        if anchor == moving || !self.tree.data.layout.kind(stack).is_stacked() {
+            return false;
+        }
+        let forward = stack.children(map).position(|c| c == moving)
+            < stack.children(map).position(|c| c == anchor);
+        let detached = moving.detach(&mut self.tree);
+        if forward {
+            detached.insert_after(anchor).finish();
+        } else {
+            detached.insert_before(anchor).finish();
+        }
+        true
+    }
+
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
         let node_a = match self.tree.data.window.node_for(layout, a) {
             Some(n) => n,
@@ -3292,6 +3325,41 @@ mod tests {
                 "{direction:?}"
             );
         }
+    }
+
+    #[test]
+    fn move_stack_tab_reorders_within_the_shared_stack_only() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::HorizontalStack);
+        for idx in 1..=4 {
+            system.add_window_after_selection(layout, w(idx));
+        }
+        system.select_window(layout, w(2));
+        let order = |system: &TraditionalLayoutSystem| {
+            root.children(&system.tree.map)
+                .filter_map(|child| system.tree.data.window.at(child))
+                .collect::<Vec<_>>()
+        };
+
+        // Forward: the passed tabs shift back toward the vacated slot.
+        assert!(system.move_stack_tab(layout, w(1), w(3)));
+        assert_eq!(order(&system), [w(2), w(3), w(1), w(4)]);
+        // Backward.
+        assert!(system.move_stack_tab(layout, w(4), w(2)));
+        assert_eq!(order(&system), [w(4), w(2), w(3), w(1)]);
+        assert_eq!(
+            system.selected_window(layout),
+            Some(w(2)),
+            "selection follows the window"
+        );
+        assert!(!system.move_stack_tab(layout, w(3), w(3)));
+
+        // Only stacks reorder this way; a split keeps its arrangement.
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        assert!(!system.move_stack_tab(layout, w(4), w(1)));
+        assert_eq!(order(&system), [w(4), w(2), w(3), w(1)]);
     }
 
     struct TestTraditionalLayoutSystem {

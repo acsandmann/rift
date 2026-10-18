@@ -226,6 +226,11 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
 
+    /// Reorder a stack: move `window`'s tab into `target`'s slot. Both must share a stack.
+    fn move_stack_tab(&mut self, _layout: LayoutId, _window: WindowId, _target: WindowId) -> bool {
+        false
+    }
+
     /// Route source-slot drags through the same operation as keyboard MoveNode.
     fn apply_window_drop(
         &mut self,
@@ -347,6 +352,9 @@ macro_rules! delegate_traditional_layout_system {
         }
         fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
             self.inner.swap_windows(layout, a, b)
+        }
+        fn move_stack_tab(&mut self, layout: LayoutId, window: WindowId, target: WindowId) -> bool {
+            self.inner.move_stack_tab(layout, window, target)
         }
         fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.toggle_fullscreen_of_selection(layout)

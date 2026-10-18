@@ -79,6 +79,12 @@ pub enum LayoutCommand {
     CreateWorkspace,
     SwitchToLastWorkspace,
     SwapWindows(WindowId, WindowId),
+    /// Move `window`'s tab to where `target`'s tab sits in their shared stack,
+    /// shifting the tabs between them toward the vacated slot.
+    MoveStackTab {
+        window: WindowId,
+        target: WindowId,
+    },
     AdjustMasterRatio(f64),
     AdjustMasterCount {
         delta: i32,
