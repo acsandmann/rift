@@ -2655,6 +2655,20 @@ impl LayoutEngine {
         self.workspaces[ws_id].layout_system.has_any_fullscreen_node(layout_id)
     }
 
+    pub fn workspace_has_fullscreen(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        windows: &[WindowId],
+    ) -> bool {
+        if windows.is_empty() {
+            return false;
+        }
+        self.workspaces.active_layout(space, workspace).is_some_and(|layout_id| {
+            self.workspaces[workspace].layout_system.has_any_fullscreen_node(layout_id)
+        }) || windows.iter().any(|wid| self.floating.fullscreen_kind(*wid).is_some())
+    }
+
     pub fn collect_group_containers(
         &mut self,
         space: SpaceId,

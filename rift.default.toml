@@ -222,6 +222,8 @@ active_label = "index"
 # when displaying workspaces, choose whether to draw the layout preview or a set of labels
 # options are "layout" or "label" (i3-style)
 display_style = "layout"
+# when display_style = "label", add brackets (e.g. "[2]") when a window is in fullscreen
+show_fullscreen_indicator = false
 # .ron files in this folder appear under Layout Files in the menu bar
 layout_folder = "~/.config/rift/layouts"
 

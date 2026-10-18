@@ -318,6 +318,8 @@ impl Reactor {
                             .is_some_and(|window| window.is_admitted())
                 });
                 let window_count = windows.len();
+                let has_fullscreen =
+                    self.layout_manager.layout_engine.workspace_has_fullscreen(space, id, &windows);
                 let mut frames = Vec::new();
                 if show_layout && (!active_only || is_active) && !windows.is_empty() {
                     // Preserve scrolling visual order without rich per-window snapshots
@@ -374,6 +376,7 @@ impl Reactor {
                     is_active,
                     window_count,
                     windows: frames,
+                    has_fullscreen,
                     layout_mode: self
                         .layout_manager
                         .layout_engine

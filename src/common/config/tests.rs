@@ -224,6 +224,17 @@ fn menu_bar_binding_mode_label_defaults_on_and_can_be_disabled() {
 }
 
 #[test]
+fn menu_bar_fullscreen_indicator_defaults_off_and_can_be_enabled() {
+    let settings: MenuBarSettings = toml::from_str("").unwrap();
+    assert!(!settings.show_fullscreen_indicator);
+    assert!(!MenuBarSettings::default().show_fullscreen_indicator);
+    let settings: MenuBarSettings = toml::from_str("show_fullscreen_indicator = true").unwrap();
+    assert!(settings.show_fullscreen_indicator);
+    let roundtrip: MenuBarSettings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+    assert!(roundtrip.show_fullscreen_indicator);
+}
+
+#[test]
 fn menu_bar_layout_folder_defaults_and_expands_home() {
     let settings: MenuBarSettings = toml::from_str("").unwrap();
 
