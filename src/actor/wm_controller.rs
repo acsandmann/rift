@@ -53,6 +53,9 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
+    /// An app terminated whose pid could not be read: each tracked app that is
+    /// no longer running is treated as terminated.
+    AppsMayHaveTerminated,
     AppExited(pid_t, AppThreadHandle),
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
@@ -234,6 +237,18 @@ impl AppLifecycle {
         Some((handle, rx))
     }
 
+    /// The active apps for which `running` is false.
+    fn ended(&self, running: impl Fn(pid_t) -> bool) -> Vec<pid_t> {
+        let mut pids: Vec<pid_t> = self
+            .0
+            .iter()
+            .filter(|(pid, (_, phase))| matches!(phase, AppPhase::Active) && !running(**pid))
+            .map(|(pid, _)| *pid)
+            .collect();
+        pids.sort_unstable();
+        pids
+    }
+
     fn terminate(&mut self, pid: pid_t) {
         if let Some((handle, phase)) = self.0.get_mut(&pid) {
             *phase = AppPhase::Stopping(None);
@@ -361,6 +376,17 @@ impl WmController {
             AppTerminated(pid) => {
                 sys::app::remove_application_observer(pid);
                 self.apps.terminate(pid);
+            }
+            AppsMayHaveTerminated => {
+                let ended = self.apps.ended(|pid| {
+                    NSRunningApplication::with_process_id(pid)
+                        .is_some_and(|app| !app.isTerminated())
+                });
+                for pid in ended {
+                    debug!(?pid, "App no longer running; terminating its actor");
+                    sys::app::remove_application_observer(pid);
+                    self.apps.terminate(pid);
+                }
             }
             AppExited(pid, handle) => {
                 if let Some(relaunch) = self.apps.exited(pid, &handle) {
@@ -645,6 +671,21 @@ mod app_lifecycle_tests {
         ] {
             assert_eq!(should_spawn_app(policy, source), expected);
         }
+    }
+
+    #[test]
+    fn only_active_apps_that_stopped_running_have_ended() {
+        let mut apps = AppLifecycle::default();
+        let info = || AppInfo {
+            bundle_id: None,
+            localized_name: None,
+        };
+        for pid in [1, 2, 3] {
+            let _ = apps.reserve(pid, info(), AppDiscoverySource::Process);
+        }
+        apps.terminate(3);
+        assert_eq!(apps.ended(|pid| pid == 1), vec![2], "3 is stopping already");
+        assert!(apps.ended(|_| true).is_empty());
     }
 
     #[test]
