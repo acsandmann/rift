@@ -4,69 +4,13 @@ use crate::actor::app::Request;
 use crate::actor::reactor::events::{EventOutcome, window};
 use crate::actor::reactor::managers::{DragManager, MissionControlManager};
 use crate::actor::reactor::{LayoutEvent, MissionControlState, SpaceEventKind};
-use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashSet;
 use crate::model::RiftState;
-use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
+use crate::model::space_activation::SpaceActivationPolicy;
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
-
-#[derive(Debug)]
-pub(crate) struct SpaceSnapshotAnalysis {
-    pub(crate) spaces: Vec<Option<SpaceId>>,
-    pub(crate) authoritative_spaces: Vec<Option<SpaceId>>,
-    pub(crate) command_space_only_update: bool,
-    pub(crate) invalidates_pending_targets: bool,
-}
-
-pub(crate) fn analyze_space_snapshot(
-    current: &ForwardedSpaceState,
-    current_effective_active_spaces: &HashSet<SpaceId>,
-    activation_policy: &SpaceActivationPolicy,
-    activation_config: SpaceActivationConfig,
-    incoming: &ForwardedSpaceState,
-) -> SpaceSnapshotAnalysis {
-    let active_window_membership_changed =
-        current.active_window_spaces != incoming.active_window_spaces;
-    let spaces = incoming.screens.iter().map(|screen| screen.space).collect();
-    let display_uuids: Vec<Option<String>> =
-        incoming.screens.iter().map(|screen| screen.display_uuid_owned()).collect();
-    let authoritative_spaces: Vec<Option<SpaceId>> = incoming
-        .screens
-        .iter()
-        .map(|screen| screen.space.filter(|space| incoming.active_spaces.contains(space)))
-        .collect();
-    let effective_active_spaces = activation_policy
-        .compute_active_spaces(activation_config, &authoritative_spaces, &display_uuids)
-        .into_iter()
-        .flatten()
-        .collect();
-    let command_space_only_update = !incoming.display_set_changed
-        && !incoming.should_force_refresh_layout
-        && incoming.space_remaps.is_empty()
-        && incoming.resized_spaces.is_empty()
-        && incoming.topology_window_delta.is_none()
-        && current.screens == incoming.screens
-        && current.fullscreen_spaces == incoming.fullscreen_spaces
-        && current_effective_active_spaces == &effective_active_spaces
-        && current.display_space_ids == incoming.display_space_ids
-        && current.last_user_space_by_display == incoming.last_user_space_by_display
-        && current.membership_complete == incoming.membership_complete
-        && !active_window_membership_changed;
-    let invalidates_pending_targets = incoming.display_set_changed
-        || incoming.should_force_refresh_layout
-        || !incoming.space_remaps.is_empty()
-        || !incoming.resized_spaces.is_empty()
-        || incoming.topology_window_delta.is_some();
-    SpaceSnapshotAnalysis {
-        spaces,
-        authoritative_spaces,
-        command_space_only_update,
-        invalidates_pending_targets,
-    }
-}
 
 // spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
 // since they are literally when a window enters or leaves a space and each display has its own space(s)

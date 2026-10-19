@@ -165,6 +165,8 @@ pub struct WindowFrameChangedPayload {
     pub pending_target_space: Option<SpaceId>,
     pub assigned_space: Option<SpaceId>,
     pub keep_assigned_for_scrolling: bool,
+    /// AppKit may still be reflowing windows after a display change.
+    pub display_reflow: bool,
     pub screens: Vec<(SpaceId, CGRect, Option<String>)>,
 }
 
@@ -264,6 +266,7 @@ pub fn handle_window_frame_changed(
         pending_target_space,
         assigned_space,
         keep_assigned_for_scrolling,
+        display_reflow,
         screens,
     } = payload;
     let mut outcome = EventOutcome::default();
@@ -375,6 +378,8 @@ pub fn handle_window_frame_changed(
             } else if let Some(server) = server_id {
                 state.windows.set_window_server_space(server, None);
             }
+        } else if display_reflow {
+            // Nobody resized it; the layout puts it back.
         } else if !old_frame.size.same_as(new_frame.size) && old_space_active {
             outcome.arrange.is_resize = true;
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {

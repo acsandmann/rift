@@ -19,8 +19,8 @@ use super::skylight::{
     CGDisplayGetDisplayIDFromUUID, CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces,
     CGSCopyManagedDisplays, CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace,
     CGSSpaceMask, CoreDockGetAutoHideEnabled, CoreDockGetOrientationAndPinning,
-    SLSCopyActiveMenuBarDisplayIdentifier, SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason,
-    SLSGetMenuBarAutohideEnabled, SLSGetSpaceManagementMode,
+    SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason, SLSGetMenuBarAutohideEnabled,
+    SLSGetSpaceManagementMode,
 };
 use crate::common::collections::HashMap;
 use crate::sys::geometry::CGRectDef;
@@ -591,11 +591,14 @@ pub fn get_active_space_number() -> Option<SpaceId> {
 }
 
 pub fn active_menu_bar_display_uuid() -> Option<String> {
+    #[cfg(test)]
+    return TEST_ACTIVE_DISPLAY.with(|display| display.borrow().clone());
+    #[cfg(not(test))]
     Some(
         unsafe {
-            CFRetained::<CFString>::from_raw(NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(
-                cgs::main_connection(),
-            ))?)
+            CFRetained::<CFString>::from_raw(NonNull::new(
+                super::skylight::SLSCopyActiveMenuBarDisplayIdentifier(cgs::main_connection()),
+            )?)
         }
         .to_string(),
     )
@@ -622,8 +625,10 @@ pub fn set_active_menu_bar_display_uuid(display_uuid: &str) -> bool {
             return false;
         }
         let active = unsafe {
-            NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(cgs::main_connection()))
-                .map(|ptr| CFRetained::<CFString>::from_raw(ptr))
+            NonNull::new(super::skylight::SLSCopyActiveMenuBarDisplayIdentifier(
+                cgs::main_connection(),
+            ))
+            .map(|ptr| CFRetained::<CFString>::from_raw(ptr))
         };
         let confirmed = active.as_deref().is_some_and(|active| active == &*uuid);
         if !confirmed {

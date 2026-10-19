@@ -1309,6 +1309,21 @@ impl WindowStore {
             if record.space == Some(old_space) {
                 record.space = Some(new_space);
             }
+            if let Some(pending) = record.pending_native_fullscreen.as_mut()
+                && pending.last_known_user_space == Some(old_space)
+            {
+                pending.last_known_user_space = Some(new_space);
+            }
+        }
+        for record in self.native_fullscreen_records_by_original_window.values_mut() {
+            if let Some(assignment) = record.workspace.as_mut()
+                && assignment.space == old_space
+            {
+                assignment.space = new_space;
+            }
+            if record.last_known_user_space == Some(old_space) {
+                record.last_known_user_space = Some(new_space);
+            }
         }
     }
 

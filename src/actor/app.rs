@@ -691,30 +691,38 @@ impl FrameWrites {
 /// honor the other. Returns the setters that failed, or `CannotComplete` if the
 /// app did not answer. Every setter is still issued in that case: a timed-out
 /// setter remains queued and applies once the app recovers.
+///
+/// A window moved at a size it is about to lose can be pushed back on screen, and
+/// one grown before it moves can be clamped at the edge it is leaving, so sizes
+/// shrink before the move and grow after it. When one dimension shrinks while the
+/// other grows, that takes a third setter, which `interim` allows.
 fn write_frame(
     elem: &impl FrameTarget,
     current: CGRect,
     target: CGRect,
     writes: FrameWrites,
+    interim: bool,
 ) -> Result<FrameWrites, AxError> {
-    // Moving before growing avoids clamping at a screen edge; shrinking first
-    // avoids it in the opposite direction.
-    let grows = target.size.width > current.size.width + 0.5
-        || target.size.height > current.size.height + 0.5;
+    let shrunk = CGSize::new(
+        current.size.width.min(target.size.width),
+        current.size.height.min(target.size.height),
+    );
+    let shrinks = writes.size && !shrunk.same_as(current.size);
+    let grows = writes.size && !shrunk.same_as(target.size);
     let mut unresponsive = false;
     let mut failed_with = |result: Result<(), AxError>| {
         unresponsive |= matches!(result, Err(AxError::Ax(AXError::CannotComplete)));
         result.is_err()
     };
     let mut failed = FrameWrites::default();
-    if writes.position && grows {
+    if shrinks && (interim || !grows) {
+        failed.size = failed_with(elem.set_size(if grows { shrunk } else { target.size }));
+    }
+    if writes.position {
         failed.position = failed_with(elem.set_position(target.origin));
     }
-    if writes.size {
-        failed.size = failed_with(elem.set_size(target.size));
-    }
-    if writes.position && !grows {
-        failed.position = failed_with(elem.set_position(target.origin));
+    if writes.size && (grows || !shrinks) {
+        failed.size |= failed_with(elem.set_size(target.size));
     }
     if unresponsive {
         return Err(AxError::Ax(AXError::CannotComplete));
@@ -740,7 +748,7 @@ fn reconcile_frame(
     let mut failed = FrameWrites::default();
     if planned.any() {
         before_write();
-        failed = write_frame(elem, hint, target, planned)?;
+        failed = write_frame(elem, hint, target, planned, true)?;
     }
     let mut frame = elem.frame()?;
     // A dimension the hint skipped is wrong, so the hint was stale. Correct it as
@@ -754,7 +762,7 @@ fn reconcile_frame(
             size: missed.size,
         };
         before_write();
-        let fix_failed = write_frame(elem, frame, target, fix)?;
+        let fix_failed = write_frame(elem, frame, target, fix, true)?;
         failed.position |= fix_failed.position;
         failed.size |= fix_failed.size;
         frame = elem.frame()?;
@@ -781,7 +789,7 @@ fn write_interactive_frame(
 ) {
     if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
         let both = FrameWrites { position: true, size: true };
-        let _ = write_frame(elem, *hint, frame, both);
+        let _ = write_frame(elem, *hint, frame, both, false);
         *hint = frame;
     } else {
         let _ = elem.set_position(frame.origin);
@@ -913,6 +921,16 @@ impl State {
             // handle as well or subsequent frame writes keep targeting the pre-wake
             // element and can never recover.
             self.rebind_window_element(wid, elem, &info);
+
+            // This frame was read after the last frame write this thread applied. Unless the
+            // reactor has sent a newer one, it is what that write produced, so the reactor
+            // must take it rather than keep trusting its acknowledgement.
+            if let (Some(store), Some(window)) = (&self.tx_store, self.windows.get(&wid))
+                && let Some(wsid) = window.window_server_id
+                && let Some(txid) = Self::some_txid(window.last_seen_txid)
+            {
+                store.clear_target_if_current(&wsid, txid);
+            }
 
             if !info.is_minimized {
                 known_visible.push(wid);
@@ -1663,8 +1681,14 @@ impl State {
         // transient system UI. Complete the request without touching focus.
         //
         // Only elide a single-window request. Multi-window batches still need
-        // their raises to establish the requested stacking order.
-        if is_frontmost && this.main_window == Some(first) && wids.len() == 1 {
+        // their raises to establish the requested stacking order. The cached main
+        // window misses changes AX does not announce, such as the app picking a
+        // new one after its main window closed, so it is confirmed first.
+        if is_frontmost
+            && wids.len() == 1
+            && this.main_window == Some(first)
+            && this.app.main_window().ok().and_then(|elem| this.id(&elem).ok()) == Some(first)
+        {
             trace!(?first, "Skipping raise for already focused window");
             this.send_event(Event::RaiseCompleted { window_id: first, sequence_id });
             return Ok(());
@@ -2565,6 +2589,8 @@ mod frame_tests {
     struct FakeWindow {
         frame: Cell<CGRect>,
         min_size: CGSize,
+        /// Like AppKit, keeps a moved window from hanging past this edge.
+        screen_bottom: Option<f64>,
         rejects_position: bool,
         unresponsive: bool,
         calls: RefCell<Vec<&'static str>>,
@@ -2587,7 +2613,10 @@ mod frame_tests {
             if self.rejects_position {
                 return Err(AxError::Ax(AXError::Failure));
             }
-            self.frame.set(CGRect::new(origin, self.frame.get().size));
+            let size = self.frame.get().size;
+            let y =
+                self.screen_bottom.map_or(origin.y, |bottom| origin.y.min(bottom - size.height));
+            self.frame.set(CGRect::new(CGPoint::new(origin.x, y), size));
             Ok(())
         }
 
@@ -2619,6 +2648,18 @@ mod frame_tests {
         let target = rect(10.0, 20.0, 300.0, 200.0);
         assert_eq!(reconcile(&window, target).unwrap(), target);
         assert_eq!(*window.calls.borrow(), ["position", "size", "frame"]);
+    }
+
+    #[test]
+    fn a_window_moved_down_while_it_shrinks_is_not_pushed_back_up() {
+        let window = FakeWindow {
+            screen_bottom: Some(815.0),
+            frame: Cell::new(rect(800.0, 31.0, 400.0, 784.0)),
+            ..Default::default()
+        };
+        let target = rect(0.0, 423.0, 800.0, 392.0);
+        assert_eq!(reconcile(&window, target).unwrap(), target);
+        assert_eq!(*window.calls.borrow(), ["size", "position", "size", "frame"]);
     }
 
     #[test]

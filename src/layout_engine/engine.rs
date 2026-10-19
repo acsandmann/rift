@@ -21,8 +21,10 @@ use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
     WindowStore,
 };
+use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::SpaceId;
 
+mod displaced;
 mod persistence;
 
 use persistence::PersistenceState;
@@ -851,6 +853,7 @@ impl LayoutEngine {
         preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
         self.workspaces.set_active_workspace(space, workspace_id);
+        self.release_fullscreen_slots(window_store, space, workspace_id);
         self.update_active_floating_windows(window_store, space);
         self.broadcast_workspace_changed(space);
         self.broadcast_windows_changed(window_store, space);
@@ -865,6 +868,21 @@ impl LayoutEngine {
             ),
             raise_windows: vec![],
             boundary_hit: None,
+        }
+    }
+
+    /// A shown workspace lays out its windows, so it gives up the slots kept for those still
+    /// fullscreen elsewhere; they are added back when they return.
+    fn release_fullscreen_slots(
+        &mut self,
+        window_store: &WindowStore,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) {
+        for wid in self.workspaces.workspace_windows(window_store, space, workspace_id) {
+            if window_store.native_fullscreen_record_for_window(wid).is_some() {
+                self.workspaces[workspace_id].layout_system.remove_window(wid);
+            }
         }
     }
 
@@ -1250,6 +1268,7 @@ impl LayoutEngine {
         }
 
         if !preserve_floating {
+            self.forget_displaced_window(wid, true);
             self.workspaces.remove_window(window_store, wid);
             self.floating_positions.remove_window(wid);
             self.forget_persisted_window(wid);
@@ -1387,7 +1406,11 @@ impl LayoutEngine {
     }
 
     pub(crate) fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
+        let away_from = self.away_home(wid).map(|(space, _)| space);
         for space in self.workspaces.layout_spaces() {
+            if away_from == Some(space) {
+                continue;
+            }
             if let Some(ws_id) = self.workspaces.active_workspace(space) {
                 if let Some(layout) = self.workspaces.active_layout(space, ws_id) {
                     if self.workspaces[ws_id].layout_system.contains_window(layout, wid) {
@@ -1446,7 +1469,7 @@ impl LayoutEngine {
         self.display_last_space.contains_key(display_uuid)
     }
 
-    fn display_uuid_for_space(&self, space: SpaceId) -> Option<String> {
+    pub(crate) fn display_uuid_for_space(&self, space: SpaceId) -> Option<String> {
         self.space_display_map.get(&space).and_then(|uuid| uuid.clone())
     }
 
@@ -1458,6 +1481,39 @@ impl LayoutEngine {
             Some(uuid) if uuid == display_uuid => Some(*space),
             _ => None,
         })
+    }
+
+    /// Applies `remaps` together, staging through unused ids so an exchange or cycle of ids
+    /// cannot overwrite another space's state.
+    pub fn remap_spaces(&mut self, window_store: &mut WindowStore, remaps: &[(SpaceId, SpaceId)]) {
+        let targets: HashSet<SpaceId> = remaps.iter().map(|(_, new)| *new).collect();
+        if !remaps.iter().any(|(old, _)| targets.contains(old)) {
+            for &(old, new) in remaps {
+                self.remap_space(window_store, old, new);
+            }
+            return;
+        }
+        let mut next_temporary = self
+            .workspaces
+            .layout_spaces()
+            .into_iter()
+            .chain(self.space_display_map.keys().copied())
+            .chain(remaps.iter().flat_map(|&(old, new)| [old, new]))
+            .map(|space| space.get())
+            .max()
+            .unwrap_or(0);
+        let staged: Vec<_> = remaps
+            .iter()
+            .map(|&(old, new)| {
+                next_temporary += 1;
+                let temporary = SpaceId::new(next_temporary);
+                self.remap_space(window_store, old, temporary);
+                (temporary, new)
+            })
+            .collect();
+        for (temporary, new) in staged {
+            self.remap_space(window_store, temporary, new);
+        }
     }
 
     /// Move all per-space layout state from `old_space` to `new_space`.
@@ -1474,6 +1530,7 @@ impl LayoutEngine {
         self.floating.remap_space(old_space, new_space);
         self.floating_positions.remap_space(old_space, new_space);
         self.workspaces.remap_space(window_store, old_space, new_space);
+        self.remap_displaced_space(old_space, new_space);
 
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
             self.space_display_map.insert(new_space, uuid);
@@ -1488,11 +1545,13 @@ impl LayoutEngine {
 
     pub fn prune_display_state(&mut self, active_display_uuids: &[String]) {
         let active: HashSet<&str> = active_display_uuids.iter().map(|s| s.as_str()).collect();
+        let initialized = self.workspaces.initialized_spaces();
 
-        self.display_last_space.retain(|uuid, _| active.contains(uuid.as_str()));
-
-        self.space_display_map.retain(|_, uuid_opt| {
-            uuid_opt.as_ref().map(|uuid| active.contains(uuid.as_str())).unwrap_or(false)
+        // A departed display keeps the spaces holding its layout so they can be found when it
+        // returns, possibly after a restart.
+        self.space_display_map.retain(|space, uuid_opt| {
+            initialized.binary_search(space).is_ok()
+                || uuid_opt.as_ref().is_some_and(|uuid| active.contains(uuid.as_str()))
         });
         for space in self.workspaces.initialized_spaces() {
             self.sync_scrolling_widths_for_space(space);
@@ -1708,10 +1767,13 @@ impl LayoutEngine {
                     self.floating.remove_floating(wid);
                 }
                 let should_float = self.floating.is_floating(wid);
+                let away_home = self.away_home(wid).map(|(_, workspace)| workspace);
                 let workspace_ids: Vec<_> = self.workspaces.workspaces.keys().collect();
                 let mut membership_changed = false;
                 for workspace_id in workspace_ids {
-                    if !should_float && workspace_id == target_workspace {
+                    if (!should_float && workspace_id == target_workspace)
+                        || Some(workspace_id) == away_home
+                    {
                         continue;
                     }
                     let contained = self.workspace_contains_window(workspace_id, wid);
@@ -1844,6 +1906,16 @@ impl LayoutEngine {
                 };
             }
             LayoutEvent::WindowRemovedPreserveFloating(wid) => {
+                // A window gone fullscreen from a hidden workspace keeps its slot there; nothing
+                // is laid out in that tree until it is shown, and by then it may be back.
+                if window_store.native_fullscreen_record_for_window(wid).is_some()
+                    && window_store.workspace_info_for_window(wid).is_some_and(|assigned| {
+                        self.workspaces.active_workspace(assigned.space)
+                            != Some(assigned.workspace_id)
+                    })
+                {
+                    return EventResponse::default();
+                }
                 return EventResponse {
                     changed: self.remove_window_internal(window_store, wid, true),
                     ..EventResponse::default()
@@ -2520,9 +2592,13 @@ impl LayoutEngine {
                                        candidate: Option<CGRect>,
                                        store_if_absent| {
             let existing = positions.get(&wid).copied();
-            let visible = candidate
-                .or(existing)
-                .filter(|rect| !HiddenWindowPlacement::is_hidden(screen, *rect, &other_screens));
+            let visible = candidate.or(existing).filter(|rect| {
+                // A displaced window may still have its temporary host's coordinates.
+                // Hidden placement detection alone accepts a rectangle overlapping only
+                // one axis; restoring it would move the window to the other display.
+                rect.intersection(&screen).area() > 0.0
+                    && !HiddenWindowPlacement::is_hidden(screen, *rect, &other_screens)
+            });
             let rect = visible.unwrap_or_else(|| center_rect(window_size(wid)));
             positions.insert(wid, rect);
             if store_if_absent {
@@ -3163,6 +3239,7 @@ impl LayoutEngine {
             self.workspaces.active_workspace(target_space) != Some(target_workspace_id);
         if workspace_changed {
             self.workspaces.set_active_workspace(target_space, target_workspace_id);
+            self.release_fullscreen_slots(window_store, target_space, target_workspace_id);
             self.broadcast_workspace_changed(target_space);
         }
         self.update_active_floating_windows(window_store, target_space);
@@ -3573,8 +3650,10 @@ mod tests {
         engine.set_layout_settings(&settings);
         assert_eq!(width(&engine, ids_a[0].0), 0.4);
         assert_eq!(width(&engine, ids_b[0].0), 0.6);
+        // A departed display's spaces keep their display, ready for its return.
         engine.prune_display_state(&[]);
-        assert_eq!(width(&engine, ids_a[0].0), 0.6);
+        assert_eq!(width(&engine, ids_a[0].0), 0.4);
+        assert_eq!(engine.last_space_for_display_uuid("display-a"), Some(a));
     }
 
     fn test_engine() -> LayoutEngine {

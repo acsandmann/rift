@@ -166,8 +166,15 @@ impl LayoutEngine {
         preferred: Option<(SpaceId, VirtualWorkspaceId)>,
     ) -> Option<(SpaceId, VirtualWorkspaceId)> {
         let locations = self.restored_locations_for_window(window);
-        preferred
-            .filter(|preferred| locations.contains(preferred))
+        // A window saved while away from its display is in its home tree as well as the one
+        // holding it, which wins until the display returns; one sent home is home.
+        let saved = self
+            .away_host(window)
+            .or_else(|| self.persistence.displaced.get(&window).map(|displaced| displaced.home()));
+        [saved, preferred]
+            .into_iter()
+            .flatten()
+            .find(|location| locations.contains(location))
             .or_else(|| locations.into_iter().next())
     }
 
@@ -176,12 +183,13 @@ impl LayoutEngine {
         window: WindowId,
         keep: (SpaceId, VirtualWorkspaceId),
     ) {
+        let home = self.away_home(window);
         let workspace_ids: Vec<_> = self.workspaces.workspaces.keys().collect();
         for workspace in workspace_ids {
             let Some(entry) = self.workspaces.workspaces.get_mut(workspace) else {
                 continue;
             };
-            if (entry.space, workspace) != keep {
+            if (entry.space, workspace) != keep && Some((entry.space, workspace)) != home {
                 entry.layout_system.remove_window_and_rebalance_parent(window);
             }
         }

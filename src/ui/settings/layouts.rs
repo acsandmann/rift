@@ -67,6 +67,11 @@ impl Inspector {
                     .setAccessibilityHelp(Some(&objc2_foundation::NSString::from_str(&format!(
                         "Shows {title}’s settings. Doesn’t change the default layout."
                     ))));
+                // In a narrow window tiles tighten before the window grows.
+                tile.ns_button().setContentCompressionResistancePriority_forOrientation(
+                    objc2_app_kit::NSLayoutPriorityDragThatCannotResizeWindow,
+                    objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,
+                );
                 // Right-click a tile to make it the default or restore its settings.
                 let (menu, item, _) = layout_menu(&ui, weak, Some(mode));
                 // SAFETY: the menu is kept alive with the tile in `tile_menus`.

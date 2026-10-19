@@ -13,6 +13,7 @@ mod managers;
 mod native_tabs;
 mod query;
 mod replay;
+mod topology;
 pub mod transaction_manager;
 mod utils;
 
@@ -83,17 +84,18 @@ use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
-use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
+use crate::model::{RiftState, WindowWorkspaceInfo};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
 pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
+use crate::sys::skylight::DisplayReconfigFlags;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, window_level, window_sub_level,
 };
@@ -197,6 +199,14 @@ pub enum SpaceEventKind {
     User,
     Fullscreen,
 }
+
+/// How long after a main display change the window server may still report windows hidden
+/// on one display as on another's desktop.
+const MAIN_DISPLAY_CHURN: Duration = Duration::from_secs(5);
+
+/// How long after a display change AppKit may still be reflowing windows on its own, for
+/// example snapping a tiled window back to the frame it was created with.
+const DISPLAY_REFLOW: Duration = Duration::from_secs(2);
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -354,6 +364,10 @@ pub enum Event {
     #[serde(skip)]
     TopologyInvalidated(u64),
 
+    /// Displays have been quiet for a while after a change.
+    #[serde(skip)]
+    DisplaysSettled,
+
     #[serde(skip)]
     MissionControlNativeEntered,
     #[serde(skip)]
@@ -427,6 +441,10 @@ pub struct Reactor {
     window_inventory_manager: managers::WindowInventoryManager,
     refocus_manager: managers::RefocusManager,
     suppress_auto_workspace_switch_until_input: bool,
+    /// When macOS last changed the main display.
+    main_display_changed_at: Option<Instant>,
+    /// When a display change was last applied.
+    topology_changed_at: Option<Instant>,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     startup_ready: Option<oneshot::Sender<()>>,
@@ -561,6 +579,8 @@ impl Reactor {
                 refocus_state: RefocusState::None,
             },
             suppress_auto_workspace_switch_until_input: false,
+            main_display_changed_at: None,
+            topology_changed_at: None,
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
@@ -580,28 +600,6 @@ impl Reactor {
             native_tab_successor: None,
         };
         reactor
-    }
-
-    fn set_active_spaces(&mut self, spaces: &[Option<SpaceId>]) {
-        self.active_spaces.clear();
-        for space in spaces.iter().flatten().copied() {
-            self.active_spaces.insert(space);
-        }
-    }
-
-    fn is_space_active(&self, space: SpaceId) -> bool { self.active_spaces.contains(&space) }
-
-    fn iter_active_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
-        self.active_spaces.iter().copied()
-    }
-
-    fn invalidate_native_topology(&mut self, revision: u64) {
-        if revision <= self.space_state.revision {
-            return;
-        }
-        self.space_state.revision = revision;
-        self.space_state.authoritative = false;
-        self.defer_window_inventory_refresh();
     }
 
     fn abandon_window_inventories_from_instability(&mut self) {
@@ -673,15 +671,6 @@ impl Reactor {
         accepted
     }
 
-    fn active_space_ids(&self) -> Vec<u64> {
-        self.active_spaces.iter().map(|space| space.get()).collect()
-    }
-
-    fn is_window_on_active_space(&self, wid: WindowId) -> bool {
-        self.best_space_for_window_id(wid)
-            .is_some_and(|space| self.is_space_active(space))
-    }
-
     fn activation_cfg(&self) -> SpaceActivationConfig {
         SpaceActivationConfig {
             default_disable: self.config.settings.default_disable,
@@ -689,249 +678,9 @@ impl Reactor {
         }
     }
 
-    fn display_uuids_for_current_screens(&self) -> Vec<Option<String>> {
-        self.space_state
-            .screens
-            .iter()
-            .map(|screen| screen.display_uuid_owned())
-            .collect()
-    }
-
-    #[cfg(test)]
-    fn raw_spaces_for_current_screens(&self) -> Vec<Option<SpaceId>> {
-        self.space_state.screens.iter().map(|s| s.space).collect()
-    }
-
-    fn display_uuid_for_space(&self, space: SpaceId) -> Option<String> {
-        self.space_state
-            .screen_by_space(space)
-            .and_then(|screen| screen.display_uuid_owned())
-    }
-
-    fn expose_space_if_known(&mut self, space: SpaceId) {
-        let Some(screen) = self.space_state.screen_by_space(space) else {
-            return;
-        };
-        self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
-        self.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
-    }
-
-    fn recompute_and_set_active_spaces(&mut self, spaces: &[Option<SpaceId>]) {
-        self.recompute_and_set_active_spaces_with_topology(spaces, &[]);
-    }
-
-    fn recompute_and_set_active_spaces_with_topology(
-        &mut self,
-        spaces: &[Option<SpaceId>],
-        invalidated_spaces: &[SpaceId],
-    ) {
-        let cfg = self.activation_cfg();
-        let display_uuids = self.display_uuids_for_current_screens();
-        let active_spaces =
-            self.space_activation_policy.compute_active_spaces(cfg, spaces, &display_uuids);
-        let previous_active = self.active_spaces.clone();
-        self.set_active_spaces(&active_spaces);
-        self.handle_active_space_change(previous_active, invalidated_spaces);
-    }
-
-    fn recompute_and_set_active_spaces_from_current_screens(&mut self) {
-        let raw_spaces = self.authoritative_spaces_for_current_screens();
-        self.recompute_and_set_active_spaces(&raw_spaces);
-    }
-
-    fn authoritative_spaces_for_current_screens(&self) -> Vec<Option<SpaceId>> {
-        self.space_state
-            .screens
-            .iter()
-            .map(|screen| {
-                screen.space.filter(|space| self.space_state.active_spaces.contains(space))
-            })
-            .collect()
-    }
-
-    fn handle_active_space_change(
-        &mut self,
-        previous_active: HashSet<SpaceId>,
-        invalidated_spaces: &[SpaceId],
-    ) {
-        if previous_active == self.active_spaces {
-            return;
-        }
-
-        let deactivated: Vec<SpaceId> =
-            previous_active.difference(&self.active_spaces).copied().collect();
-        let activated: Vec<SpaceId> =
-            self.active_spaces.difference(&previous_active).copied().collect();
-
-        // Do not remove windows when a space is merely deactivated (e.g. macOS Space
-        // switches). Removing them clears workspace assignments and causes windows
-        // without app rules to be re-assigned to the current workspace.
-
-        if !activated.is_empty() {
-            for space in &activated {
-                self.expose_space_if_known(*space);
-            }
-        }
-
-        if !activated.is_empty() || !deactivated.is_empty() {
-            let active_windows = self.authoritative_active_space_windows();
-            self.reconcile_authoritative_active_window_snapshot(
-                active_windows,
-                true,
-                invalidated_spaces,
-            );
-            self.request_window_inventories();
-        }
-
-        if !activated.is_empty() {
-            self.apply_app_rules_for_activated_spaces(&activated);
-        }
-    }
-
-    fn apply_app_rules_for_activated_spaces(&mut self, activated: &[SpaceId]) {
-        let activated_set: HashSet<SpaceId> = activated.iter().copied().collect();
-        let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
-
-        for (&wsid, &space) in &self.space_state.active_window_spaces {
-            if !activated_set.contains(&space) {
-                continue;
-            }
-            let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
-                continue;
-            };
-            let Some(state) = self.state.windows.window(wid) else {
-                continue;
-            };
-            if !state.can_reconcile_admission() {
-                continue;
-            }
-            windows_by_pid.entry(wid.pid).or_default().push(wid);
-        }
-
-        for (pid, window_ids) in windows_by_pid {
-            let Some(app_state) = self.app_manager.apps.get(&pid) else {
-                continue;
-            };
-
-            self.process_windows_for_app_rules(window_ids, app_state.info.clone(), false);
-        }
-    }
-
-    fn request_space_snapshot(&self) {
-        if let Some(tx) = &self.spaces_tx {
-            tx.send(crate::actor::spaces::Event::ReconcileWindowSpaces);
-        }
-    }
-
-    fn defer_native_space_move(&mut self, wsid: WindowServerId, space: SpaceId) -> bool {
-        let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
-            return false;
-        };
-        if self.is_known_fullscreen_window(wsid)
-            || self.assigned_space_for_window_id(wid).is_none_or(|assigned| assigned == space)
-        {
-            return false;
-        }
-        self.state
-            .windows
-            .observe_native_space(wsid, space, self.is_space_active(space));
-        self.request_space_snapshot();
-        true
-    }
-
-    fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
-        let mut membership: Vec<_> = self
-            .space_state
-            .active_window_spaces
-            .iter()
-            .filter(|(_, space)| self.is_space_active(**space))
-            .map(|(&wsid, &space)| (wsid, Some(space)))
-            .collect();
-        membership.sort_by_key(|(wsid, _)| *wsid);
-        membership
-    }
-
-    fn reconcile_authoritative_active_window_snapshot(
-        &mut self,
-        active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
-        preserve_missing_assignments: bool,
-        invalidated_spaces: &[SpaceId],
-    ) {
-        if active_windows.is_empty() && !self.space_state.membership_complete {
-            return;
-        }
-        let resolved: Vec<_> = active_windows
-            .iter()
-            .map(|&(wsid, space)| {
-                let space = self.resolve_native_space(wsid, space);
-                if let Some(space) = space {
-                    self.clear_pending_target_if_confirmed_space(wsid, space);
-                }
-                (wsid, space)
-            })
-            .collect();
-        let missing = self.state.windows.reconcile_native_snapshot(&resolved, &self.active_spaces);
-        for wsid in missing {
-            let inactive_target = self
-                .resolve_native_space(wsid, None)
-                .filter(|space| !self.is_space_active(*space))
-                .filter(|space| {
-                    #[cfg(test)]
-                    {
-                        let _ = space;
-                        true
-                    }
-                    #[cfg(not(test))]
-                    {
-                        window_server::space_is_user(space.get())
-                    }
-                });
-            if let Some((wid, target)) = self.state.windows.reconcile_native_absence(
-                wsid,
-                &self.active_spaces,
-                inactive_target,
-                preserve_missing_assignments,
-            ) {
-                if let Some(space) = target {
-                    let preserve_ordinal = self
-                        .assigned_space_for_window_id(wid)
-                        .is_some_and(|assigned| invalidated_spaces.contains(&assigned));
-                    self.reassign_window_to_authoritative_space(wid, space, preserve_ordinal);
-                } else {
-                    self.send_layout_event(LayoutEvent::WindowRemoved(wid));
-                }
-            }
-        }
-        self.reconcile_windows_in_authoritative_active_snapshot(
-            &active_windows,
-            invalidated_spaces,
-        );
-    }
-
     fn is_login_window_pid(&self, pid: pid_t) -> bool {
         self.app_manager.apps.get(&pid).and_then(|a| a.info.bundle_id.as_deref())
             == Some("com.apple.loginwindow")
-    }
-
-    fn clear_pending_hidden_window_targets(&self) {
-        for (wid, window) in self.state.windows.iter_windows() {
-            if self.hidden_assigned_space_for_window_id(wid).is_none() {
-                continue;
-            }
-            if let Some(wsid) = window.info.sys_id {
-                self.transaction_manager.clear_target_for_window(wsid);
-            }
-        }
-    }
-
-    fn clear_pending_target_if_confirmed_space(
-        &self,
-        wsid: WindowServerId,
-        confirmed_space: SpaceId,
-    ) {
-        if self.pending_target_space_for_window_server_id(wsid) == Some(confirmed_space) {
-            self.transaction_manager.clear_target_for_window(wsid);
-        }
     }
 
     fn is_in_drag(&self) -> bool { self.drag_manager.actor.is_active() }
@@ -1156,8 +905,6 @@ impl Reactor {
         )
     }
 
-    fn refreshes_blocked(&self) -> bool { !self.space_state.authoritative }
-
     fn defer_window_inventory_refresh(&mut self) {
         self.window_inventory_manager
             .pending
@@ -1237,6 +984,7 @@ impl Reactor {
             }
             Event::WindowClosed(wsid) => {
                 if let Some(wid) = self.state.windows.tracked_window_id(*wsid) {
+                    self.main_window_tracker.forget_window(wid);
                     self.cancel_window_presentations(vec![wid]);
                 }
             }
@@ -1303,6 +1051,16 @@ impl Reactor {
             Event::SessionDidBecomeActive => {
                 self.suppress_auto_workspace_switch_until_input = true;
                 return Ok(EventOutcome::default());
+            }
+            Event::DisplaysSettled => {
+                // A queued check can outlive sleep/lock invalidation or arrive while native
+                // Mission Control is rearranging desktops. Neither is a geometry sample.
+                if self.refreshes_blocked() || self.is_mission_control_active() || self.is_in_drag()
+                {
+                    return Ok(EventOutcome::default());
+                }
+                self.observe_shown_window_frames();
+                return Ok(EventOutcome::layout_changed(false));
             }
             _ => {}
         }
@@ -1759,6 +1517,9 @@ impl Reactor {
                         pending_target_space,
                         assigned_space,
                         keep_assigned_for_scrolling,
+                        display_reflow: self
+                            .topology_changed_at
+                            .is_some_and(|at| at.elapsed() < DISPLAY_REFLOW),
                         screens,
                     },
                 )?;
@@ -1846,13 +1607,9 @@ impl Reactor {
                 let session_id = self.drag_manager.actor.await_modifier(button, point, action);
                 let source = self.window_id_under_cursor().and_then(|window| {
                     let state = self.state.windows.window(window)?;
-                    state.is_admitted().then_some((
-                        window,
-                        state.frame_monotonic,
-                        state.info.sys_id,
-                    ))
+                    state.is_admitted().then_some((window, state.info.sys_id))
                 });
-                let Some((window, frame, server_id)) = source else {
+                let Some((window, server_id)) = source else {
                     let _ = self.drag_manager.actor.resolve_start(
                         session_id,
                         None,
@@ -1861,6 +1618,12 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 self.cancel_window_presentations(vec![window]);
+                // A slow app may still be applying the last drag's writes, and its stale
+                // echoes reach the cache first; the drag starts where the window is headed.
+                let frame = server_id
+                    .and_then(|wsid| self.transaction_manager.get_target_frame(wsid))
+                    .or_else(|| Some(self.state.windows.window(window)?.frame_monotonic))
+                    .unwrap_or_default();
                 let space = self.best_space_for_window(&frame, server_id);
                 let tiled = !self.layout_manager.layout_engine.is_window_floating(window);
                 let scene = if tiled && action == crate::common::config::MouseAction::Move {
@@ -2982,58 +2745,6 @@ impl Reactor {
         }
     }
 
-    fn is_fullscreen_space(&self, space: SpaceId) -> bool {
-        self.space_state.fullscreen_spaces.contains(&space)
-    }
-
-    fn finalize_space_change(
-        &mut self,
-        spaces: &[Option<SpaceId>],
-        active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
-        preserve_missing_assignments: bool,
-        invalidated_spaces: &[SpaceId],
-    ) {
-        self.refocus_manager.stale_cleanup_state = if spaces.iter().all(|space| space.is_none()) {
-            StaleCleanupState::Suppressed
-        } else {
-            StaleCleanupState::Enabled
-        };
-        self.expose_all_spaces();
-        if let Some(main_window) = self.main_window() {
-            if let Some(space) = self.main_window_space() {
-                self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
-            }
-        }
-        self.reconcile_authoritative_active_window_snapshot(
-            active_windows,
-            preserve_missing_assignments,
-            invalidated_spaces,
-        );
-        self.request_window_inventories();
-
-        if let Some(space) = self.workspace_command_space() {
-            self.focus_desktop_if_active_workspace_empty(space);
-        }
-
-        if let Some(space) = self
-            .workspace_command_space()
-            .or_else(|| spaces.iter().copied().flatten().find(|space| self.is_space_active(*space)))
-        {
-            if let Some((workspace_id, workspace_name)) =
-                self.layout_manager.layout_engine.ensure_active_workspace_info(space)
-            {
-                let display_uuid = self.display_uuid_for_space(space);
-                let broadcast_event = BroadcastEvent::WorkspaceChanged {
-                    workspace_id: protocol_workspace_id(workspace_id),
-                    workspace_name,
-                    space_id: space.get(),
-                    display_uuid,
-                };
-                _ = self.communication_manager.event_broadcaster.send(broadcast_event);
-            }
-        }
-    }
-
     fn broadcast_window_title_changed(
         &mut self,
         window_id: WindowId,
@@ -3169,215 +2880,6 @@ impl Reactor {
         };
 
         self.process_windows_for_app_rules(vec![window_id], app_info, true);
-    }
-
-    fn handle_authoritative_space_snapshot(
-        &mut self,
-        mut space_state: ForwardedSpaceState,
-    ) -> anyhow::Result<EventOutcome> {
-        if let Some(mut pending) = self.pending_space_change_manager.pending_space_change.take() {
-            // Keep accepted display continuity while the virtual model is deferred.
-            // Geometry and membership always come from the newest revision.
-            if pending.revision == space_state.revision {
-                pending.command_space = space_state.command_space;
-                pending.menu_bar_space = space_state.menu_bar_space;
-                space_state = pending;
-            } else {
-                pending.space_remaps.append(&mut space_state.space_remaps);
-                space_state.space_remaps = pending.space_remaps;
-                pending.resized_spaces.retain(|(space, _)| {
-                    !space_state.resized_spaces.iter().any(|(new_space, _)| space == new_space)
-                });
-                pending.resized_spaces.append(&mut space_state.resized_spaces);
-                space_state.resized_spaces = pending.resized_spaces;
-                space_state.should_force_refresh_layout |= pending.should_force_refresh_layout;
-                space_state.display_set_changed |= pending.display_set_changed;
-            }
-        }
-        if self.is_mission_control_active() {
-            self.pending_space_change_manager.pending_space_change = Some(space_state);
-            return Ok(EventOutcome::default());
-        }
-        let mut outcome = EventOutcome::window_membership_changed(false, true);
-        let analysis = topology_workflow::analyze_space_snapshot(
-            &self.space_state,
-            &self.active_spaces,
-            &self.space_activation_policy,
-            self.activation_cfg(),
-            &space_state,
-        );
-        // Compare all native Spaces, including inactive ones. A current-Space
-        // switch alone does not invalidate ownership.
-        let invalidated_spaces: Vec<_> = self
-            .space_state
-            .display_space_ids
-            .iter()
-            .filter(|_| {
-                space_state.display_set_changed
-                    || space_state.should_force_refresh_layout
-                    || space_state.topology_window_delta.is_some()
-            })
-            .flat_map(|(display, spaces)| {
-                spaces
-                    .iter()
-                    .filter(|space| {
-                        !space_state
-                            .display_space_ids
-                            .get(display)
-                            .is_some_and(|current| current.contains(space))
-                    })
-                    .copied()
-            })
-            .filter(|space| !space_state.space_remaps.iter().any(|(previous, _)| previous == space))
-            .collect();
-        if !space_state.membership_complete && !invalidated_spaces.is_empty() {
-            // Defer geometry and membership together so the old ownership survives
-            // an inconclusive query. Safe whole-Space remaps can still proceed.
-            self.pending_space_change_manager.pending_space_change = Some(space_state);
-            return Ok(EventOutcome::default());
-        }
-        let ForwardedSpaceState {
-            screens,
-            fullscreen_spaces,
-            active_spaces,
-            menu_bar_space,
-            command_space,
-            display_space_ids,
-            last_user_space_by_display,
-            space_remaps,
-            display_set_changed,
-            should_force_refresh_layout,
-            membership_complete,
-            resized_spaces,
-            topology_window_delta,
-            active_window_spaces,
-            ..
-        } = space_state;
-        self.space_state.active_window_spaces = active_window_spaces;
-        self.space_state.membership_complete = membership_complete;
-        let activation_config = self.activation_cfg();
-        let topology_workflow::SpaceSnapshotAnalysis {
-            spaces,
-            authoritative_spaces,
-            command_space_only_update,
-            invalidates_pending_targets,
-        } = analysis;
-
-        let current_display_spaces = screens
-            .iter()
-            .filter_map(|screen| screen.space.map(|space| (space, screen.display_uuid.clone())))
-            .collect::<Vec<_>>();
-        self.layout_manager.layout_engine.reconcile_startup_spaces(
-            &mut self.state.windows,
-            &current_display_spaces,
-            screens.len(),
-        );
-
-        self.space_state.fullscreen_spaces = fullscreen_spaces;
-        self.space_state.active_spaces = active_spaces;
-        if command_space_only_update {
-            self.space_state.menu_bar_space = menu_bar_space;
-            self.space_state.command_space = command_space;
-            outcome.arrange.passes = 0;
-            self.maybe_send_menu_update();
-            return Ok(outcome);
-        }
-        if display_set_changed {
-            if let Some(tx) = &self.animation_tx {
-                let _ = tx.send(animation::Message::Displays(
-                    screens.iter().map(|s| s.id.as_u32()).collect(),
-                ));
-            }
-            let active_displays: Vec<String> =
-                screens.iter().map(|screen| screen.display_uuid.clone()).collect();
-            self.layout_manager.layout_engine.prune_display_state(&active_displays);
-        }
-        self.space_state.menu_bar_space = menu_bar_space;
-        self.space_state.command_space = command_space;
-        self.space_state.display_space_ids = display_space_ids;
-        self.space_state.last_user_space_by_display = last_user_space_by_display;
-
-        if screens.is_empty() {
-            self.refocus_manager.stale_cleanup_state = StaleCleanupState::Suppressed;
-            if !self.space_state.screens.is_empty() {
-                self.space_state.screens.clear();
-                self.expose_all_spaces();
-            }
-            self.recompute_and_set_active_spaces(&[]);
-            self.update_complete_window_server_info(Vec::new());
-            self.try_apply_pending_space_change();
-            return Ok(outcome);
-        }
-
-        self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
-        self.space_state.screens = screens;
-        if invalidates_pending_targets {
-            self.clear_pending_hidden_window_targets();
-        }
-        for (previous_space, space) in space_remaps {
-            self.layout_manager.layout_engine.remap_space(
-                &mut self.state.windows,
-                previous_space,
-                space,
-            );
-        }
-        for screen in &self.space_state.screens {
-            let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
-            else {
-                continue;
-            };
-            self.layout_manager
-                .layout_engine
-                .update_space_display(space, Some(display_uuid.to_string()));
-        }
-        let current_screens = self.space_state.screens.clone();
-        self.space_activation_policy
-            .on_spaces_updated(activation_config, &current_screens);
-        self.recompute_and_set_active_spaces_with_topology(
-            &authoritative_spaces,
-            &invalidated_spaces,
-        );
-        self.restore_windows_after_fullscreen_exit(&spaces);
-
-        for (space, size) in resized_spaces {
-            if !self.is_space_active(space) {
-                continue;
-            }
-            self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
-            outcome = outcome.with_layout_event(LayoutEvent::SpaceExposed(space, size));
-        }
-        if let Some(delta) = topology_window_delta {
-            outcome.absorb(self.apply_topology_window_delta(delta));
-        }
-        let active_windows = self.authoritative_active_space_windows();
-        self.finalize_space_change(
-            &spaces,
-            active_windows,
-            !membership_complete,
-            &invalidated_spaces,
-        );
-        self.try_apply_pending_space_change();
-        if should_force_refresh_layout {
-            outcome = outcome.with_arrange_passes(1);
-        }
-        Ok(outcome)
-    }
-
-    fn try_apply_pending_space_change(&mut self) {
-        if self.is_mission_control_active() || self.refreshes_blocked() {
-            return;
-        }
-        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take()
-            && pending.revision == self.space_state.revision
-            && !self.refreshes_blocked()
-        {
-            // During native Mission Control we must preserve the full forwarded snapshot,
-            // not just the raw spaces vector, otherwise command-space and per-display space
-            // metadata can remain stale after exit.
-            if let Ok(outcome) = self.handle_authoritative_space_snapshot(pending) {
-                self.apply_event_outcome(outcome);
-            }
-        }
     }
 
     fn on_windows_discovered_with_app_info(
@@ -3545,46 +3047,6 @@ impl Reactor {
         self.apply_event_outcome(outcome);
     }
 
-    fn best_space_for_window(
-        &self,
-        frame: &CGRect,
-        window_server_id: Option<WindowServerId>,
-    ) -> Option<SpaceId> {
-        self.space_for_window_observation(frame, window_server_id, || {
-            window_server_id.and_then(|wsid| self.resolve_native_space(wsid, None))
-        })
-    }
-
-    fn space_for_window_observation(
-        &self,
-        frame: &CGRect,
-        wsid: Option<WindowServerId>,
-        native: impl FnOnce() -> Option<SpaceId>,
-    ) -> Option<SpaceId> {
-        if wsid.is_some_and(|wsid| self.is_known_fullscreen_window(wsid)) {
-            return None;
-        }
-        native()
-            .or_else(|| self.hidden_assigned_space_for_frame(wsid, frame))
-            .or_else(|| self.best_space_for_frame(frame))
-    }
-
-    fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
-        let center = frame.mid();
-        self.screen_for_point(center).and_then(|screen| screen.space).or_else(|| {
-            self.space_state
-                .screens
-                .iter()
-                .filter_map(|screen| {
-                    let space = screen.space?;
-                    let area = screen.frame.intersection(frame).area() as i64;
-                    if area > 0 { Some((area, space)) } else { None }
-                })
-                .max_by_key(|(area, _)| *area)
-                .map(|(_, space)| space)
-        })
-    }
-
     fn drag_scene(&self, source: WindowId, space: SpaceId) -> crate::actor::drag::DragScene {
         interaction_workflow::build_drag_scene(&self.state, &self.layout_manager, source, space)
     }
@@ -3669,278 +3131,6 @@ impl Reactor {
         self.drag_manager.externally_controlled_window = Some(wid);
     }
 
-    fn best_space_for_window_state(&self, window: &WindowState) -> Option<SpaceId> {
-        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
-    }
-
-    fn hidden_assigned_space_for_frame(
-        &self,
-        window_server_id: Option<WindowServerId>,
-        _frame: &CGRect,
-    ) -> Option<SpaceId> {
-        let wsid = window_server_id?;
-        let wid = self.state.windows.tracked_window_id(wsid)?;
-        let assigned_space = self.assigned_space_for_window_id(wid)?;
-        if !self.is_space_active(assigned_space)
-            || !self.window_in_non_active_workspace(assigned_space, wid)
-        {
-            return None;
-        }
-
-        Some(assigned_space)
-    }
-
-    fn hidden_assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        let window = self.state.windows.window(wid)?;
-        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic)
-    }
-
-    fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.state.windows.workspace_info_for_window(wid).map(|info| info.space)
-    }
-
-    fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
-        let wid = self.state.windows.tracked_window_id(wsid)?;
-        let target_frame = self.transaction_manager.get_target_frame(wsid)?;
-        let assigned_space = self.assigned_space_for_window_id(wid)?;
-        let target_space = self
-            .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
-            .or_else(|| self.best_space_for_frame(&target_frame))?;
-        (target_space == assigned_space).then_some(target_space)
-    }
-
-    fn apply_topology_window_delta(&mut self, delta: TopologyWindowDelta) -> EventOutcome {
-        let appeared: HashMap<WindowServerId, SpaceId> = delta.appeared.into_iter().collect();
-        let disappeared: HashMap<WindowServerId, SpaceId> = delta.disappeared.into_iter().collect();
-        let wsids: HashSet<WindowServerId> =
-            appeared.keys().chain(disappeared.keys()).copied().collect();
-        let mut outcome = EventOutcome::default();
-
-        for wsid in wsids {
-            let appeared_space = appeared.get(&wsid).copied();
-            let disappeared_space = disappeared.get(&wsid).copied();
-            let authoritative_space = self.resolve_native_space(wsid, appeared_space);
-            if let Some(target_space) = authoritative_space {
-                self.state.windows.observe_native_space(
-                    wsid,
-                    target_space,
-                    self.is_space_active(target_space),
-                );
-                if appeared_space == Some(target_space) {
-                    self.clear_pending_target_if_confirmed_space(wsid, target_space);
-                }
-                if let Some(window) = self.state.windows.tracked_window_id(wsid) {
-                    outcome =
-                        self.reconcile_native_presence(wsid, target_space, window, true, outcome);
-                }
-            } else if let Some(previous_space) = disappeared_space {
-                self.state.windows.observe_native_space(wsid, previous_space, false);
-                if let Some(window) = self.state.windows.tracked_window_id(wsid)
-                    && self.assigned_space_for_window_id(window) == Some(previous_space)
-                    && self.is_space_active(previous_space)
-                {
-                    outcome = outcome
-                        .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(window));
-                }
-            }
-        }
-        outcome
-    }
-
-    fn reconcile_native_presence(
-        &mut self,
-        wsid: WindowServerId,
-        space: SpaceId,
-        mut window: WindowId,
-        mut preserve_workspace_ordinal: bool,
-        mut outcome: EventOutcome,
-    ) -> EventOutcome {
-        if let Some(restored) = self.state.windows.restore_native_identity(Some(wsid), window)
-            && let Some(owner) = restored.window
-        {
-            if let Some(previous) = restored.removed_window {
-                outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(previous));
-            }
-            outcome = outcome.with_window_inventory_request(owner.pid);
-            window = owner;
-            preserve_workspace_ordinal = false;
-        }
-        self.reassign_window_to_authoritative_space(window, space, preserve_workspace_ordinal);
-        outcome
-    }
-
-    fn reassign_window_to_authoritative_space(
-        &mut self,
-        wid: WindowId,
-        space: SpaceId,
-        preserve_workspace_ordinal: bool,
-    ) {
-        if !self.state.windows.reconcile_admission(wid) {
-            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
-            return;
-        }
-        if self.assigned_space_for_window_id(wid) != Some(space) {
-            self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
-            let engine = &mut self.layout_manager.layout_engine;
-            engine.workspaces_mut().list_workspaces(space);
-            let assigned = if preserve_workspace_ordinal {
-                engine
-                    .workspaces_mut()
-                    .assign_window_to_workspace_preserving_ordinal(
-                        &mut self.state.windows,
-                        space,
-                        wid,
-                    )
-                    .is_some()
-            } else {
-                let Some((workspace, _)) = engine.ensure_active_workspace_info(space) else {
-                    return;
-                };
-                engine.workspaces_mut().assign_window_to_workspace(
-                    &mut self.state.windows,
-                    space,
-                    wid,
-                    workspace,
-                )
-            };
-            if !assigned {
-                return;
-            }
-        }
-        if self.is_space_active(space) && self.state.windows.is_visible_admitted(wid) {
-            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-        }
-    }
-
-    fn reconcile_windows_in_authoritative_active_snapshot(
-        &mut self,
-        active_windows: &[(WindowServerId, Option<SpaceId>)],
-        invalidated_spaces: &[SpaceId],
-    ) {
-        if self.refreshes_blocked() {
-            self.defer_window_inventory_refresh();
-            return;
-        }
-
-        let windows: Vec<_> = active_windows
-            .iter()
-            .filter_map(|&(wsid, observed_space)| {
-                let wid = self.state.windows.tracked_window_id(wsid)?;
-                let authoritative_space =
-                    self.state.windows.window_server_space(wsid).or(observed_space)?;
-                Some((wid, authoritative_space))
-            })
-            .collect();
-        for (wid, authoritative_space) in windows {
-            let preserve_ordinal = self
-                .assigned_space_for_window_id(wid)
-                .is_some_and(|space| invalidated_spaces.contains(&space));
-            self.reassign_window_to_authoritative_space(wid, authoritative_space, preserve_ordinal);
-        }
-    }
-
-    #[cfg(test)]
-    fn reconcile_windows_with_authoritative_spaces(&mut self) {
-        let active_windows: Vec<_> = self
-            .state
-            .windows
-            .iter_windows()
-            .filter_map(|(wid, state)| {
-                let wsid = state.info.sys_id?;
-                Some((wsid, self.authoritative_space_for_window_id(wid)))
-            })
-            .collect();
-        self.reconcile_windows_in_authoritative_active_snapshot(&active_windows, &[])
-    }
-
-    fn current_reported_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.state
-            .windows
-            .window(wid)
-            .and_then(|window| window.info.sys_id)
-            .and_then(|wsid| self.resolve_native_space(wsid, None))
-    }
-
-    fn authoritative_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.current_reported_space_for_window_id(wid)
-            .or_else(|| self.assigned_space_for_window_id(wid))
-    }
-
-    pub(crate) fn resolve_native_space(
-        &self,
-        wsid: WindowServerId,
-        observation: Option<SpaceId>,
-    ) -> Option<SpaceId> {
-        let pending = self.pending_target_space_for_window_server_id(wsid);
-        let live =
-            if observation.is_none() || pending.is_some_and(|target| observation != Some(target)) {
-                window_server::window_space(wsid)
-            } else {
-                None
-            };
-        let resolved = self.state.windows.resolve_native_space(wsid, observation, pending, live);
-        trace!(
-            ?wsid,
-            ?observation,
-            ?pending,
-            ?live,
-            ?resolved,
-            "Resolved native space"
-        );
-        resolved
-    }
-
-    fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.authoritative_space_for_window_id(wid).or_else(|| {
-            self.state
-                .windows
-                .window(wid)
-                .and_then(|window| self.best_space_for_window_state(window))
-        })
-    }
-
-    fn discovery_spaces_for_window(
-        &self,
-        wid: WindowId,
-        native: Option<SpaceId>,
-    ) -> (Option<SpaceId>, Option<SpaceId>) {
-        let authoritative = native.or_else(|| self.assigned_space_for_window_id(wid));
-        let discovery = self.assigned_space_for_window_id(wid).or(authoritative).or_else(|| {
-            let window = self.state.windows.window(wid)?;
-            self.best_space_for_frame(&window.frame_monotonic).filter(|space| {
-                self.is_space_active(*space)
-                    || !window.info.sys_id.is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
-            })
-        });
-        // A placeholder assignment supplies ownership but cannot admit an AX window.
-        (
-            authoritative,
-            discovery.filter(|_| self.state.windows.contains_window(wid)),
-        )
-    }
-
-    pub(crate) fn geometry_space_for_window(
-        &self,
-        frame: &CGRect,
-        window_server_id: Option<WindowServerId>,
-    ) -> Option<SpaceId> {
-        if let Some(wsid) = window_server_id
-            && self.is_known_fullscreen_window(wsid)
-        {
-            return None;
-        }
-
-        if let Some(space) = self.hidden_assigned_space_for_frame(window_server_id, frame) {
-            return Some(space);
-        }
-
-        self.best_space_for_frame(frame)
-    }
-
-    fn is_known_fullscreen_window(&self, wsid: WindowServerId) -> bool {
-        self.state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
-    }
-
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
         let window_center = self.state.windows.window(wid)?.frame_monotonic.mid();
         self.screen_for_point(window_center).map(|_| window_center)
@@ -3987,50 +3177,8 @@ impl Reactor {
         }
     }
 
-    fn expose_all_spaces(&mut self) {
-        let spaces: Vec<SpaceId> = self
-            .space_state
-            .screens
-            .iter()
-            .filter_map(|screen| screen.space)
-            .filter(|space| self.is_space_active(*space))
-            .collect();
-        for space in spaces {
-            self.expose_space_if_known(space);
-        }
-    }
-
     fn window_is_standard(&self, id: WindowId) -> bool {
         self.state.windows.window(id).is_some_and(WindowState::is_admitted)
-    }
-
-    pub(crate) fn visible_spaces_for_layout(
-        &self,
-        include_inactive: bool,
-    ) -> (Vec<SpaceId>, HashMap<SpaceId, CGRect>) {
-        let visible_spaces_input: Vec<(SpaceId, CGRect)> = self
-            .space_state
-            .screens
-            .iter()
-            .filter_map(|screen| {
-                let space = screen.space?;
-                if !include_inactive && !self.is_space_active(space) {
-                    return None;
-                }
-                Some((space, screen.frame))
-            })
-            .collect();
-
-        let mut visible_space_frames = HashMap::default();
-        for (space, frame) in &visible_spaces_input {
-            visible_space_frames.insert(*space, *frame);
-        }
-
-        let visible_spaces = order_visible_spaces_by_position(
-            visible_spaces_input.iter().map(|(space, frame)| (*space, frame.mid())),
-        );
-
-        (visible_spaces, visible_space_frames)
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
@@ -4649,7 +3797,7 @@ impl Reactor {
             && let Some(wsid) = state.info.sys_id
         {
             let is_visible = self.state.windows.is_window_visible(wsid);
-            let best_space = self.best_space_for_window_state(state);
+            let best_space = self.best_space_for_window(&state.frame_monotonic, state.info.sys_id);
             if !is_visible {
                 focus_window = None;
                 if let Some(space) = workspace_switch_space
@@ -5085,10 +4233,6 @@ impl Reactor {
         self.maybe_send_menu_update();
     }
 
-    fn has_user_space_context(&self) -> bool {
-        self.raw_command_space().is_some_and(|space| !self.is_fullscreen_space(space))
-    }
-
     fn request_close_window(&mut self, pid: pid_t, window_server_id: Option<WindowServerId>) {
         if let Some(app) = self.app_manager.apps.get(&pid) {
             if let Err(err) = app.handle.send(Request::CloseWindow(window_server_id)) {
@@ -5129,27 +4273,6 @@ impl Reactor {
                 .flatten()
         })?;
         (self.workspace_command_space() == Some(space)).then_some((space, window))
-    }
-
-    fn raw_command_space(&self) -> Option<SpaceId> { self.space_state.command_space }
-
-    fn active_display_space(&self) -> Option<SpaceId> {
-        self.raw_command_space()
-            .filter(|space| {
-                self.space_state.active_spaces.contains(space)
-                    && self.space_state.screens.iter().any(|screen| screen.space == Some(*space))
-            })
-            .or_else(|| {
-                self.space_state
-                    .screens
-                    .iter()
-                    .filter_map(|screen| screen.space)
-                    .find(|space| self.space_state.active_spaces.contains(space))
-            })
-    }
-
-    fn workspace_command_space(&self) -> Option<SpaceId> {
-        self.active_display_space().filter(|space| self.is_space_active(*space))
     }
 
     fn command_context_space(&self) -> Option<SpaceId> {

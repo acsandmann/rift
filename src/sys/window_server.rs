@@ -930,8 +930,16 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
     app_window_suitability(id).unwrap_or(false)
 }
 
+#[cfg(not(test))]
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
+#[cfg(not(test))]
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
+
+/// Tests encode fullscreen spaces as ids from 0x4_0000_0000; every other id is a user space.
+#[cfg(test)]
+pub fn space_is_user(sid: u64) -> bool { !space_is_fullscreen(sid) }
+#[cfg(test)]
+pub fn space_is_fullscreen(sid: u64) -> bool { sid >= 0x4_0000_0000 }
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
 pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> {

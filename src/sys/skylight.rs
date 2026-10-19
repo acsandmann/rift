@@ -297,7 +297,7 @@ bitflags! {
 }
 
 bitflags! {
-    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
     #[repr(transparent)]
     pub struct DisplayReconfigFlags: u32 {
         const BEGIN_CONFIGURATION        = 0x0000_0001;

@@ -182,6 +182,20 @@ impl SpaceActivationPolicy {
         }
     }
 
+    /// Carries activation across space ids macOS reassigned, applied together so an exchange
+    /// of ids moves each space's state to the other.
+    pub fn remap_spaces(&mut self, remaps: &[(SpaceId, SpaceId)]) {
+        if remaps.is_empty() {
+            return;
+        }
+        let remap = |space: SpaceId| {
+            remaps.iter().find(|(old, _)| *old == space).map_or(space, |(_, new)| *new)
+        };
+        self.disabled_spaces = self.disabled_spaces.drain().map(remap).collect();
+        self.enabled_spaces = self.enabled_spaces.drain().map(remap).collect();
+        self.starting_space = self.starting_space.map(remap);
+    }
+
     pub fn compute_active_spaces(
         &self,
         cfg: SpaceActivationConfig,

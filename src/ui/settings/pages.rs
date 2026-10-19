@@ -813,13 +813,13 @@ fn width_presets(f: &mut FormBuilder) -> SettingsRow {
 }
 
 /// Sliders on the Layouts page start at a comfortable length and take any room the
-/// form has to spare, so their row spans the pane.
+/// form has to spare, so their row spans the pane. The length gives way before the
+/// window size does: a narrow window shortens sliders rather than growing.
 pub(super) fn lengthen_sliders(view: &objc2_app_kit::NSView) {
     if let Some(slider) = view.downcast_ref::<objc2_app_kit::NSSlider>() {
-        slider
-            .widthAnchor()
-            .constraintGreaterThanOrEqualToConstant(140.0)
-            .setActive(true);
+        let length = slider.widthAnchor().constraintGreaterThanOrEqualToConstant(140.0);
+        length.setPriority(objc2_app_kit::NSLayoutPriorityDragThatCannotResizeWindow);
+        length.setActive(true);
         slider.setContentHuggingPriority_forOrientation(
             1.0,
             objc2_app_kit::NSLayoutConstraintOrientation::Horizontal,

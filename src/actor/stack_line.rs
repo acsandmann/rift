@@ -179,7 +179,7 @@ impl StackLine {
             Event::SpaceStateUpdated(converter, space_state) => {
                 if space_state.authoritative {
                     self.native_groups.retain(|_, group| {
-                        space_state.active_spaces.contains(&group.info.space_id)
+                        space_state.is_space_on_screen(group.info.space_id)
                             && !space_state.fullscreen_spaces.contains(&group.info.space_id)
                     });
                     self.prune_icons();

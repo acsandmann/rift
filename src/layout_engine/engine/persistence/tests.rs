@@ -1542,6 +1542,74 @@ fn startup_restore_remaps_saved_space_by_display_identity_once() {
 }
 
 #[test]
+fn startup_snapshot_preserves_floating_frames_when_space_ids_change() {
+    use objc2_core_foundation::{CGPoint, CGRect};
+
+    use crate::actor::reactor::{Event, Reactor, ScreenInfo};
+    use crate::actor::spaces::ForwardedSpaceState;
+    use crate::sys::screen::ScreenId;
+
+    for explicit_remap in [false, true] {
+        let (saved_space, current_space) = (SpaceId::new(630), SpaceId::new(631));
+        let display = "startup-display".to_string();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
+        let frame = CGRect::new(CGPoint::new(80.0, 90.0), CGSize::new(400.0, 300.0));
+        let window = WindowId::new(42, 7);
+        let mut engine = test_engine();
+        let mut store = WindowStore::default();
+        let _ =
+            engine.handle_event(&mut store, LayoutEvent::SpaceExposed(saved_space, screen.size));
+        engine.update_space_display(saved_space, Some(display.clone()));
+        let workspace = engine.workspaces.active_workspace(saved_space).unwrap();
+        engine.floating.add_floating(window);
+        engine.store_floating_position(saved_space, workspace, window, frame);
+        engine.persistence.windows.insert(window, WindowFingerprint {
+            window_server_id: Some(9001),
+            title: Some("Saved float".into()),
+            width: 400.0,
+            height: 300.0,
+            app_id: Some("com.example.editor".into()),
+        });
+        let mut loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+        // This is the state the startup loader hands to the reactor after its OS liveness
+        // checks. Exercise the complete forwarded-snapshot path, not just engine remapping.
+        loaded.startup_restore_pending = true;
+        let mut reactor = Reactor::new_for_test(loaded);
+        reactor.handle_events(vec![Event::SpaceStateChanged(ForwardedSpaceState {
+            revision: 1,
+            authoritative: true,
+            membership_complete: true,
+            screens: vec![ScreenInfo {
+                id: ScreenId::new(1),
+                frame: screen,
+                backing_scale: 1.0,
+                display_uuid: display.clone(),
+                name: None,
+                space: Some(current_space),
+            }],
+            display_space_ids: [(display, vec![current_space])].into_iter().collect(),
+            space_remaps: if explicit_remap {
+                vec![(saved_space, current_space)]
+            } else {
+                vec![]
+            },
+            display_set_changed: true,
+            ..Default::default()
+        })]);
+        let serialized: serde_json::Value =
+            serde_json::from_str(&reactor.serialize_state().unwrap()).unwrap();
+        let restored =
+            LayoutEngine::deserialize_from_str(serialized["layout_engine_ron"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            restored.get_floating_position(current_space, workspace, window),
+            Some(frame),
+            "startup lost its floating frame; explicit remap: {explicit_remap}"
+        );
+    }
+}
+
+#[test]
 fn startup_restore_handles_space_id_swaps_between_displays() {
     let space_a = SpaceId::new(620);
     let space_b = SpaceId::new(621);

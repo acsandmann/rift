@@ -8,6 +8,7 @@ use objc2_core_foundation::CGSize;
 pub use rift_protocol::{RestoreScope, RestoreSource};
 use serde::{Deserialize, Serialize};
 
+use super::displaced::Displaced;
 use super::{FloatingManager, LayoutEngine};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
@@ -144,6 +145,9 @@ pub(super) struct PersistenceState {
     /// intended source unambiguous when its SpaceIds do not exist in the current session.
     #[serde(default)]
     saved_active_space: Option<u64>,
+    /// Windows away from a departed display, so a restart keeps where they belong.
+    #[serde(default)]
+    pub(in crate::layout_engine::engine) displaced: HashMap<WindowId, Displaced>,
     #[serde(skip)]
     pending_windows: HashSet<WindowId>,
 }
@@ -175,16 +179,21 @@ impl PersistenceState {
     fn forget_window(&mut self, window: WindowId) {
         self.windows.remove(&window);
         self.pending_windows.remove(&window);
+        self.displaced.remove(&window);
     }
 
     fn forget_app(&mut self, pid: pid_t) {
         self.windows.retain(|window, _| window.pid != pid);
         self.pending_windows.retain(|window| window.pid != pid);
+        self.displaced.retain(|window, _| window.pid != pid);
     }
 
     fn rekey(&mut self, from: WindowId, to: WindowId) {
         if let Some(fingerprint) = self.windows.remove(&from) {
             self.windows.insert(to, fingerprint);
+        }
+        if let Some(displaced) = self.displaced.remove(&from) {
+            self.displaced.insert(to, displaced);
         }
         if self.pending_windows.remove(&from) {
             self.pending_windows.insert(to);
@@ -195,10 +204,7 @@ impl PersistenceState {
         self.pending_windows = windows.into_iter().collect();
     }
 
-    fn remove_candidate(&mut self, window: WindowId) {
-        self.pending_windows.remove(&window);
-        self.windows.remove(&window);
-    }
+    fn remove_candidate(&mut self, window: WindowId) { self.forget_window(window); }
 
     fn pending_len(&self) -> usize { self.pending_windows.len() }
 

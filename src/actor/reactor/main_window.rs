@@ -37,10 +37,8 @@ impl MainWindowTracker {
                 }
                 return None;
             }
-            &Event::WindowDestroyed(wid) => {
-                if self.window_server_focus == Some(wid) {
-                    self.window_server_focus = None;
-                }
+            &Event::WindowDestroyed(wid) | &Event::WindowInvalidated(wid, _) => {
+                self.forget_window(wid);
                 return None;
             }
             &Event::ApplicationActivated(pid, quiet) => {
@@ -115,6 +113,14 @@ impl MainWindowTracker {
         }
     }
 
+    /// Drops the WindowServer focus on a window that is gone. WindowServer reports no new
+    /// focus when the app's next window becomes key, so the app's main window takes over.
+    pub fn forget_window(&mut self, wid: WindowId) {
+        if self.window_server_focus == Some(wid) {
+            self.window_server_focus = None;
+        }
+    }
+
     pub fn is_globally_frontmost(&self, pid: pid_t) -> bool { self.global_frontmost == Some(pid) }
 
     pub fn app_main_window(&self, pid: pid_t) -> Option<WindowId> {
@@ -128,7 +134,7 @@ mod tests {
     use test_log::test;
 
     use super::super::testing::{Apps, make_windows, space_state_event};
-    use super::super::{Event, Quiet, Reactor, SpaceId, WindowId};
+    use super::super::{Event, Quiet, Reactor, SpaceId, WindowId, WindowInvalidationSource};
     use super::{AppState, MainWindowTracker};
     use crate::layout_engine::LayoutEngine;
 
@@ -170,6 +176,16 @@ mod tests {
         ));
 
         let _ = tracker.handle_event(&Event::WindowDestroyed(server_window));
+        assert_eq!(tracker.main_window(), Some(ax_window));
+
+        // A window closed through an invalidated AX element is gone too. WindowServer may
+        // report no new focus, so the app's main window has to take over.
+        let _ =
+            tracker.handle_event(&Event::WindowServerFocusChanged(server_window, SpaceId::new(1)));
+        let _ = tracker.handle_event(&Event::WindowInvalidated(
+            server_window,
+            WindowInvalidationSource::AxDestroyedNotification,
+        ));
         assert_eq!(tracker.main_window(), Some(ax_window));
     }
 

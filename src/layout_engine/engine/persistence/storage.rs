@@ -190,6 +190,11 @@ impl LayoutEngine {
             active_space.filter(|space| self.workspaces.layout_spaces().contains(space)),
         );
         for (window, state) in window_store.iter_windows() {
+            if self.away_home(window).is_some() {
+                // Both its home and its current trees hold an away window; the saved record
+                // tells startup which one is home.
+                continue;
+            }
             if self.floating.is_floating(window) {
                 // Floating and tiled are mutually exclusive persisted representations.
                 self.remove_window_from_all_tiling_trees(window);
@@ -260,13 +265,14 @@ impl LayoutEngine {
 
     /// Reconcile startup-only native SpaceId churn using the display identity saved in the master
     /// file. Normal space switches must never call this path: a new current space on a display is
-    /// ordinarily a distinct layout, not a renamed old space.
+    /// ordinarily a distinct layout, not a renamed old space. Returns the migrations applied so
+    /// a caller reconciling the same snapshot does not apply them again.
     pub fn reconcile_startup_spaces(
         &mut self,
         window_store: &mut WindowStore,
         current_spaces: &[(SpaceId, String)],
         expected_display_count: usize,
-    ) {
+    ) -> Vec<(SpaceId, SpaceId)> {
         // The first forwarded snapshot can be empty or contain displays whose native space has
         // not resolved yet. Consuming the one-shot restore in that state permanently strands the
         // saved topology under obsolete SpaceIds.
@@ -274,7 +280,7 @@ impl LayoutEngine {
             || expected_display_count == 0
             || current_spaces.len() != expected_display_count
         {
-            return;
+            return Vec::new();
         }
         let unique_spaces = current_spaces.iter().map(|(space, _)| *space).collect::<HashSet<_>>();
         let unique_displays = current_spaces
@@ -284,7 +290,7 @@ impl LayoutEngine {
         if unique_spaces.len() != current_spaces.len()
             || unique_displays.len() != current_spaces.len()
         {
-            return;
+            return Vec::new();
         }
         self.startup_restore_pending = false;
 
@@ -302,26 +308,8 @@ impl LayoutEngine {
             }
         }
 
-        // Stage through unused ids so a swap/cycle cannot overwrite another display's snapshot.
-        let mut next_temporary = saved_spaces
-            .iter()
-            .map(|space| space.get())
-            .chain(current_spaces.iter().map(|(space, _)| space.get()))
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        let staged = remaps
-            .into_iter()
-            .map(|(old, new)| {
-                let temporary = SpaceId::new(next_temporary);
-                next_temporary = next_temporary.saturating_add(1);
-                self.remap_space(window_store, old, temporary);
-                (temporary, new)
-            })
-            .collect::<Vec<_>>();
-        for (temporary, new) in staged {
-            self.remap_space(window_store, temporary, new);
-        }
+        self.remap_spaces(window_store, &remaps);
+        remaps
     }
 
     pub fn serialize_to_string(&self) -> String { PersistedLayout::serialize_engine(self) }

@@ -316,7 +316,6 @@ pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
 
 pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
     let command_space = screens.iter().find_map(|screen| screen.space);
-    let active_spaces = screens.iter().filter_map(|screen| screen.space).collect();
     ForwardedSpaceState {
         revision: next_test_topology_revision(),
         authoritative: true,
@@ -338,14 +337,12 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
             .collect(),
         screens: screens.clone(),
         fullscreen_spaces: Default::default(),
-        active_spaces,
         menu_bar_space: command_space,
         command_space,
         display_space_ids: screens
             .iter()
             .filter_map(|screen| Some((screen.display_uuid.clone(), vec![screen.space?])))
             .collect(),
-        last_user_space_by_display: Default::default(),
         space_remaps: Vec::new(),
         display_set_changed: false,
         should_force_refresh_layout: false,
@@ -358,7 +355,6 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
 pub fn fullscreen_startup_space_state(
     screen: CGRect,
     display_uuid: String,
-    user_space: SpaceId,
     fullscreen_space: SpaceId,
 ) -> Event {
     let mut state = forwarded_space_state(vec![ScreenInfo {
@@ -370,12 +366,8 @@ pub fn fullscreen_startup_space_state(
         name: None,
     }]);
     state.fullscreen_spaces.insert(fullscreen_space);
-    state.active_spaces.clear();
     state.menu_bar_space = None;
     state.command_space = None;
-    state
-        .last_user_space_by_display
-        .insert(state.screens[0].display_uuid.clone(), user_space);
     Event::SpaceStateChanged(state)
 }
 
