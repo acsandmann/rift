@@ -343,7 +343,6 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
             .iter()
             .filter_map(|screen| Some((screen.display_uuid.clone(), vec![screen.space?])))
             .collect(),
-        space_remaps: Vec::new(),
         display_set_changed: false,
         should_force_refresh_layout: false,
         // Set on every coherent snapshot the spaces actor forwards.

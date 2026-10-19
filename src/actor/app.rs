@@ -695,7 +695,8 @@ impl FrameWrites {
 /// A window moved at a size it is about to lose can be pushed back on screen, and
 /// one grown before it moves can be clamped at the edge it is leaving, so sizes
 /// shrink before the move and grow after it. When one dimension shrinks while the
-/// other grows, that takes a third setter, which `interim` allows.
+/// other grows during a move, that takes a third setter, which `interim` allows;
+/// without a move, one size setter does.
 fn write_frame(
     elem: &impl FrameTarget,
     current: CGRect,
@@ -715,7 +716,7 @@ fn write_frame(
         result.is_err()
     };
     let mut failed = FrameWrites::default();
-    if shrinks && (interim || !grows) {
+    if shrinks && (!grows || (interim && writes.position)) {
         failed.size = failed_with(elem.set_size(if grows { shrunk } else { target.size }));
     }
     if writes.position {
@@ -2660,6 +2661,17 @@ mod frame_tests {
         let target = rect(0.0, 423.0, 800.0, 392.0);
         assert_eq!(reconcile(&window, target).unwrap(), target);
         assert_eq!(*window.calls.borrow(), ["size", "position", "size", "frame"]);
+    }
+
+    #[test]
+    fn a_window_reshaped_in_place_takes_one_size_setter() {
+        let window = FakeWindow {
+            frame: Cell::new(rect(0.0, 0.0, 400.0, 784.0)),
+            ..Default::default()
+        };
+        let target = rect(0.0, 0.0, 800.0, 392.0);
+        assert_eq!(reconcile(&window, target).unwrap(), target);
+        assert_eq!(*window.calls.borrow(), ["size", "frame"]);
     }
 
     #[test]

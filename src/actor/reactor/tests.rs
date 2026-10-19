@@ -5113,7 +5113,6 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
         vec![Some(active_space)],
         |state| {
             state.topology_window_delta = Some(crate::actor::spaces::TopologyWindowDelta {
-                epoch: 11,
                 flags: crate::sys::skylight::DisplayReconfigFlags::MOVED,
                 appeared: Vec::new(),
                 disappeared: vec![(moved_wsid, active_space)],
@@ -5152,7 +5151,6 @@ fn topology_window_delta_is_not_ignored_by_command_space_only_short_circuit() {
         vec![Some(space1), Some(space2)],
         |state| {
             state.topology_window_delta = Some(crate::actor::spaces::TopologyWindowDelta {
-                epoch: 12,
                 flags: crate::sys::skylight::DisplayReconfigFlags::MOVED,
                 appeared: vec![(wsid, space2)],
                 disappeared: vec![(wsid, space1)],
@@ -7931,7 +7929,6 @@ fn mission_control_keeps_display_remaps_when_a_newer_membership_sample_arrives()
         reactor.handle_event(Event::MissionControlNativeEntered);
         let mut remapped =
             forwarded_space_state(make_screen_snapshots(vec![frame], vec![Some(target)]));
-        remapped.space_remaps.push((origin, target));
         remapped.should_force_refresh_layout = true;
         remapped.active_window_spaces.insert(wsid, target);
         reactor.handle_event(Event::SpaceStateChanged(remapped.clone()));
@@ -8239,7 +8236,6 @@ fn topology_snapshot_preserves_workspace_placement_with_incomplete_delta() {
         if scenario == 4 {
             snapshot.display_space_ids.insert("external".into(), vec![old, SpaceId::new(5)]);
         }
-        snapshot.space_remaps.clear();
         snapshot.active_window_spaces.clear();
         for wid in windows {
             crate::sys::window_server::set_window_spaces_override(
@@ -8284,7 +8280,6 @@ fn topology_snapshot_preserves_workspace_placement_with_incomplete_delta() {
         if scenario < 2 {
             let wsid = reactor.test_window_server_id(windows[0]);
             snapshot.topology_window_delta = Some(crate::actor::spaces::TopologyWindowDelta {
-                epoch: 1,
                 flags: crate::sys::skylight::DisplayReconfigFlags::ADD,
                 appeared: vec![(wsid, destination)],
                 disappeared: vec![(wsid, old)],
@@ -8587,7 +8582,6 @@ mod display_churn {
                 .collect();
             state.topology_window_delta =
                 flags.map(|flags| crate::actor::spaces::TopologyWindowDelta {
-                    epoch: 1,
                     flags,
                     appeared: native[1..].to_vec(),
                     disappeared: Vec::new(),
@@ -8685,6 +8679,29 @@ mod display_churn {
                     tree_shape(state.container_tree),
                 )
             })
+            .collect()
+    }
+
+    // Everything but where the trees are on screen.
+    fn structure(
+        reactor: &Reactor,
+        space: SpaceId,
+    ) -> Vec<(
+        bool,
+        String,
+        Vec<rift_protocol::WindowId>,
+        rift_protocol::ContainerTreeNode,
+    )> {
+        fn without_frames(
+            mut node: rift_protocol::ContainerTreeNode,
+        ) -> rift_protocol::ContainerTreeNode {
+            node.frame = Default::default();
+            node.children = node.children.into_iter().map(without_frames).collect();
+            node
+        }
+        display_layout(reactor, space)
+            .into_iter()
+            .map(|(shown, mode, windows, tree)| (shown, mode, windows, without_frames(tree)))
             .collect()
     }
 
@@ -8820,80 +8837,72 @@ mod display_churn {
 
     #[test_log::test]
     fn a_returning_desktop_reported_before_its_screen_keeps_its_tree() {
-        for explicit_remap in [true, false] {
-            for rediscover_before_screen in [false, true] {
-                let (mut apps, mut reactor) = populated_displays();
-                // Match the VM failure's non-default vertical split, also retaining unequal
-                // weights so a reconstruction with the same axis cannot pass.
-                let workspaces = reactor.test_workspace_ids(external());
-                assert!(reactor.set_test_active_workspace(external(), workspaces[0]));
-                reactor.handle_test_workspace_command(
-                    external(),
-                    &LayoutCommand::SetWorkspaceLayout {
-                        workspace: None,
-                        mode: LayoutMode::Bsp,
-                    },
-                );
-                reactor.send_layout_event(LayoutEvent::WindowFocused(external(), window(3)));
-                layout_command(&mut reactor, external(), LayoutCommand::ResizeWindowBy {
-                    amount: 0.2,
-                });
-                layout_command(&mut reactor, external(), LayoutCommand::ToggleOrientation);
-                assert!(reactor.set_test_active_workspace(external(), workspaces[1]));
-                let before = display_layout(&reactor, external());
-                assert_eq!(
-                    before[0].3.layout_kind,
-                    Some(rift_protocol::LayoutKind::Vertical)
-                );
-                assert_ne!(before[0].3.children[0].weight, Some(0.5));
-                let primary_before = display_layout(&reactor, primary());
-                unplug(&mut apps, &mut reactor);
+        for rediscover_before_screen in [false, true] {
+            let (mut apps, mut reactor) = populated_displays();
+            // Match the VM failure's non-default vertical split, also retaining unequal
+            // weights so a reconstruction with the same axis cannot pass.
+            let workspaces = reactor.test_workspace_ids(external());
+            assert!(reactor.set_test_active_workspace(external(), workspaces[0]));
+            reactor.handle_test_workspace_command(external(), &LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode: LayoutMode::Bsp,
+            });
+            reactor.send_layout_event(LayoutEvent::WindowFocused(external(), window(3)));
+            layout_command(&mut reactor, external(), LayoutCommand::ResizeWindowBy {
+                amount: 0.2,
+            });
+            layout_command(&mut reactor, external(), LayoutCommand::ToggleOrientation);
+            assert!(reactor.set_test_active_workspace(external(), workspaces[1]));
+            let before = display_layout(&reactor, external());
+            assert_eq!(
+                before[0].3.layout_kind,
+                Some(rift_protocol::LayoutKind::Vertical)
+            );
+            assert_ne!(before[0].3.children[0].weight, Some(0.5));
+            let primary_before = display_layout(&reactor, primary());
+            unplug(&mut apps, &mut reactor);
 
-                let returned = SpaceId::new(11);
-                // Native membership and desktop inventory arrive first, with only the primary
-                // screen in the same complete snapshot (VM revision 9). The callbacks request
-                // this snapshot; they do not establish screen geometry or a Space remap.
-                let mut early =
-                    snapshot(vec![LEFT], vec![Some(primary())], (primary(), returned), false);
-                if let Event::SpaceStateChanged(state) = &mut early {
-                    state.display_set_changed = false;
-                    state.should_force_refresh_layout = false;
-                    state.display_space_ids.insert("test-display-1".into(), vec![returned]);
-                }
-                for idx in 2..=4 {
-                    window_server_appeared(
-                        &mut reactor,
-                        server_id(idx),
-                        returned,
-                        SpaceEventKind::User,
-                    );
-                }
-                deliver(&mut reactor, early);
-                if rediscover_before_screen {
-                    rediscover(&mut apps, &mut reactor);
-                }
-
-                // The screen catches up, but one window's native membership still lags (VM
-                // revision 12). Exercise both the actor's remap and the reactor's inference.
-                let mut arrived = report(
-                    vec![LEFT, RIGHT],
-                    vec![Some(primary()), Some(returned)],
-                    [primary(), returned, primary(), returned],
-                    Some(crate::sys::skylight::DisplayReconfigFlags::MOVED),
-                );
-                if explicit_remap && let Event::SpaceStateChanged(state) = &mut arrived {
-                    state.space_remaps.push((external(), returned));
-                }
-                deliver(&mut reactor, arrived);
-                deliver(&mut reactor, both(returned, (primary(), returned), true));
-                clear_overrides();
-                assert_eq!(
-                    display_layout(&reactor, returned),
-                    before,
-                    "explicit remap: {explicit_remap}, rediscovery: {rediscover_before_screen}"
-                );
-                assert_eq!(display_layout(&reactor, primary()), primary_before);
+            let returned = SpaceId::new(11);
+            // Native membership and desktop inventory arrive first, with only the primary
+            // screen in the same complete snapshot (VM revision 9). The callbacks request
+            // this snapshot; they do not establish screen geometry or a Space remap.
+            let mut early =
+                snapshot(vec![LEFT], vec![Some(primary())], (primary(), returned), false);
+            if let Event::SpaceStateChanged(state) = &mut early {
+                state.display_set_changed = false;
+                state.should_force_refresh_layout = false;
+                state.display_space_ids.insert("test-display-1".into(), vec![returned]);
             }
+            for idx in 2..=4 {
+                window_server_appeared(
+                    &mut reactor,
+                    server_id(idx),
+                    returned,
+                    SpaceEventKind::User,
+                );
+            }
+            deliver(&mut reactor, early);
+            if rediscover_before_screen {
+                rediscover(&mut apps, &mut reactor);
+            }
+
+            // The screen catches up, but one window's native membership still lags (VM
+            // revision 12).
+            let arrived = report(
+                vec![LEFT, RIGHT],
+                vec![Some(primary()), Some(returned)],
+                [primary(), returned, primary(), returned],
+                Some(crate::sys::skylight::DisplayReconfigFlags::MOVED),
+            );
+            deliver(&mut reactor, arrived);
+            deliver(&mut reactor, both(returned, (primary(), returned), true));
+            clear_overrides();
+            assert_eq!(
+                display_layout(&reactor, returned),
+                before,
+                "rediscovery: {rediscover_before_screen}"
+            );
+            assert_eq!(display_layout(&reactor, primary()), primary_before);
         }
     }
 
@@ -9130,6 +9139,211 @@ mod display_churn {
     }
 
     #[test_log::test]
+    fn a_native_space_switch_asks_apps_for_windows_only_when_one_is_new() {
+        let (mut apps, mut reactor) = populated_displays();
+        apps.simulate_until_quiet(&mut reactor);
+        let hidden = SpaceId::new(12);
+        let switch = |space: SpaceId, windows: Vec<(WindowServerId, SpaceId)>| {
+            let mut event = report(
+                vec![LEFT, RIGHT],
+                vec![Some(primary()), Some(space)],
+                [primary(), external(), external(), external()],
+                None,
+            );
+            if let Event::SpaceStateChanged(state) = &mut event {
+                state
+                    .display_space_ids
+                    .insert("test-display-1".into(), vec![external(), hidden]);
+                state.active_window_spaces.extend(windows);
+            }
+            event
+        };
+        let inventories = |apps: &mut Apps| {
+            apps.requests()
+                .iter()
+                .filter(|request| matches!(request, Request::RefreshWindowInventory(_)))
+                .count()
+        };
+
+        // Every window on either desktop is known: switching needs no inventory.
+        deliver(&mut reactor, switch(hidden, vec![]));
+        assert_eq!(inventories(&mut apps), 0);
+        deliver(&mut reactor, switch(external(), vec![]));
+        assert_eq!(inventories(&mut apps), 0);
+
+        // A window of an app Rift does not manage, like the wallpaper, needs no discovery.
+        let unmanaged = WindowServerId::new(998);
+        deliver(&mut reactor, switch(hidden, vec![(unmanaged, hidden)]));
+        assert_eq!(inventories(&mut apps), 0);
+        deliver(&mut reactor, switch(external(), vec![]));
+
+        // A window created while its desktop was hidden is discovered when it is shown.
+        let created = WindowServerId::new(999);
+        reactor.track_test_window_server_info(created, PID, RIGHT);
+        deliver(
+            &mut reactor,
+            switch(hidden, vec![(created, hidden), (unmanaged, hidden)]),
+        );
+        assert_eq!(inventories(&mut apps), 1);
+        clear_overrides();
+    }
+
+    #[test_log::test]
+    fn a_display_leaving_during_a_drag_over_it_is_not_a_drop_target() {
+        let (mut apps, mut reactor) = populated_displays();
+        apps.simulate_until_quiet(&mut reactor);
+        let external_layout = display_layout(&reactor, external());
+        let wid = window(1);
+        let frame = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+        // Window 1 is dragged from the primary display over the external one.
+        reactor.ensure_active_drag(wid, &frame);
+        assert!(reactor.drag_manager.actor.update_current_space(Some(external())));
+
+        unplug(&mut apps, &mut reactor);
+        reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        assert_eq!(reactor.assigned_space_for_window_id(wid), Some(primary()));
+
+        // The departed display's layout is untouched when it returns.
+        let returned = SpaceId::new(11);
+        deliver(&mut reactor, both(returned, (primary(), primary()), false));
+        clear_overrides();
+        assert_eq!(display_layout(&reactor, returned), external_layout);
+    }
+
+    #[test_log::test]
+    fn rearranging_or_resizing_displays_keeps_workspaces_and_fits_windows() {
+        for resize in [false, true] {
+            let (mut apps, mut reactor) = populated_displays();
+            apps.simulate_until_quiet(&mut reactor);
+            let external_layout = structure(&reactor, external());
+            let primary_layout = structure(&reactor, primary());
+            let workspaces = [primary(), external()].map(|space| reactor.test_workspace_ids(space));
+
+            // The external display moves to the primary's left, possibly at a new resolution.
+            let moved = if resize {
+                CGRect::new(CGPoint::new(-1500., 0.), CGSize::new(1500., 900.))
+            } else {
+                CGRect::new(CGPoint::new(-1000., 0.), RIGHT.size)
+            };
+            let mut event = both(external(), (primary(), external()), false);
+            if let Event::SpaceStateChanged(state) = &mut event {
+                state.screens[1].frame = moved;
+                if resize {
+                    state.resized_spaces.push((external(), moved.size));
+                }
+            }
+            deliver(&mut reactor, event);
+            apps.simulate_until_quiet(&mut reactor);
+            clear_overrides();
+
+            assert_eq!(
+                [primary(), external()].map(|space| reactor.test_workspace_ids(space)),
+                workspaces
+            );
+            assert_eq!(structure(&reactor, external()), external_layout);
+            assert_eq!(structure(&reactor, primary()), primary_layout);
+            let shown = apps.windows[&window(4)].frame;
+            assert!(
+                moved.contains_rect(shown),
+                "resize: {resize}, {shown:?} outside {moved:?}"
+            );
+            if resize {
+                assert_eq!(shown.size.height, moved.size.height);
+            }
+        }
+    }
+
+    #[test_log::test]
+    fn an_identical_snapshot_does_no_work() {
+        let (mut apps, mut reactor) = populated_displays();
+        apps.simulate_until_quiet(&mut reactor);
+        let queries = crate::sys::window_server::window_space_query_count();
+        for _ in 0..3 {
+            let mut event = both(external(), (primary(), external()), false);
+            if let Event::SpaceStateChanged(state) = &mut event {
+                state.revision = reactor.space_state.revision;
+            }
+            let outcome = reactor.dispatch_workflow(event).unwrap();
+            assert_eq!(outcome.arrange.passes, 0);
+            assert!(!outcome.refresh_window_inventories);
+            assert!(apps.requests().is_empty());
+        }
+        assert_eq!(crate::sys::window_server::window_space_query_count(), queries);
+        clear_overrides();
+    }
+
+    #[test_log::test]
+    fn a_monitor_arriving_as_main_leaves_the_laptops_layout_with_its_windows() {
+        // macOS hands the arriving monitor the laptop's desktop: sometimes only its id, the
+        // windows left behind on a desktop minted for the laptop, sometimes windows and all.
+        for id_only in [true, false] {
+            let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+            deliver(
+                &mut reactor,
+                report(vec![LEFT], vec![Some(primary())], [primary(); 4], None),
+            );
+            apps.make_app_and_settle(&mut reactor, PID, make_windows(4));
+            let layout = structure(&reactor, primary());
+            let workspaces = reactor.test_workspace_ids(primary());
+
+            let minted = SpaceId::new(20);
+            let native = if id_only { minted } else { primary() };
+            let mut arrived = report(
+                vec![LEFT, RIGHT],
+                vec![Some(minted), Some(primary())],
+                [native; 4],
+                Some(
+                    crate::sys::skylight::DisplayReconfigFlags::ADD
+                        | crate::sys::skylight::DisplayReconfigFlags::SET_MAIN,
+                ),
+            );
+            if let Event::SpaceStateChanged(state) = &mut arrived {
+                state.display_space_ids = [
+                    ("test-display-0".to_string(), vec![minted]),
+                    ("test-display-1".to_string(), vec![primary()]),
+                ]
+                .into_iter()
+                .collect();
+            }
+            deliver(&mut reactor, arrived);
+            clear_overrides();
+
+            // The layout stays with the windows, on whichever desktop holds them.
+            assert_eq!(
+                reactor.test_workspace_ids(native),
+                workspaces,
+                "id only: {id_only}"
+            );
+            assert_eq!(structure(&reactor, native), layout, "id only: {id_only}");
+            for idx in 1..=4 {
+                assert_eq!(reactor.assigned_space_for_window_id(window(idx)), Some(native));
+            }
+        }
+    }
+
+    #[test_log::test]
+    fn settled_displays_with_every_window_in_place_need_no_arrange() {
+        let (mut apps, mut reactor) = populated_displays();
+        apps.simulate_until_quiet(&mut reactor);
+        // The test window server reports every window at this frame.
+        let reported = crate::sys::window_server::get_windows(&[server_id(4)])[0].frame;
+        for idx in 1..=4 {
+            reactor.state.windows.window_mut(window(idx)).unwrap().frame_monotonic = reported;
+        }
+        let outcome = reactor.dispatch_workflow(Event::DisplaysSettled).unwrap();
+        assert_eq!(outcome.arrange.passes, 0);
+
+        // A write that never landed is drift, and is written again.
+        let txid = reactor.transaction_manager.generate_next_txid(server_id(4));
+        let target = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(500., 1000.));
+        reactor.transaction_manager.store_txid(server_id(4), txid, target);
+        let outcome = reactor.dispatch_workflow(Event::DisplaysSettled).unwrap();
+        assert_ne!(outcome.arrange.passes, 0);
+        assert_eq!(reactor.transaction_manager.get_target_frame(server_id(4)), None);
+        clear_overrides();
+    }
+
+    #[test_log::test]
     fn settled_aftercare_preserves_pending_writes_during_topology_or_mission_control_quarantine() {
         for mission_control in [false, true] {
             let (mut apps, mut reactor) = populated_displays();
@@ -9183,6 +9397,279 @@ mod display_churn {
         assert!(!reactor.is_space_active(returned));
         assert!(reactor.is_space_active(primary()));
     }
+
+    /// Requests the topology path sends apps, for comparing implementations. Run with
+    /// `cargo test --lib topology_path_costs -- --ignored --nocapture`.
+    #[derive(Default, Debug)]
+    struct Costs {
+        frame_writes: usize,
+        inventories: usize,
+        other_requests: usize,
+        window_space_queries: usize,
+        micros: u128,
+    }
+
+    fn measure(apps: &mut Apps, reactor: &mut Reactor, step: impl FnOnce(&mut Reactor)) -> Costs {
+        let queries = crate::sys::window_server::window_space_query_count();
+        let start = std::time::Instant::now();
+        step(reactor);
+        let mut costs = Costs::default();
+        let mut requests = apps.requests();
+        while !requests.is_empty() {
+            for request in &requests {
+                match request {
+                    Request::SetWindowFrames(frames, ..) => costs.frame_writes += frames.len(),
+                    Request::RefreshWindowInventory(_) => costs.inventories += 1,
+                    _ => costs.other_requests += 1,
+                }
+            }
+            for event in apps.simulate_events_for_requests(requests) {
+                reactor.handle_event(event);
+            }
+            requests = apps.requests();
+        }
+        costs.micros = start.elapsed().as_micros();
+        costs.window_space_queries =
+            crate::sys::window_server::window_space_query_count() - queries;
+        costs
+    }
+
+    fn total(costs: impl IntoIterator<Item = Costs>) -> Costs {
+        costs.into_iter().fold(Costs::default(), |mut sum, c| {
+            sum.frame_writes += c.frame_writes;
+            sum.inventories += c.inventories;
+            sum.other_requests += c.other_requests;
+            sum.window_space_queries += c.window_space_queries;
+            sum.micros += c.micros;
+            sum
+        })
+    }
+
+    #[test_log::test]
+    #[ignore]
+    fn topology_path_costs() {
+        let (mut apps, mut reactor) = populated_displays();
+        apps.simulate_until_quiet(&mut reactor);
+        let hidden = SpaceId::new(12);
+        let with_inventory = |event: Event, external_spaces: Vec<SpaceId>| {
+            let mut event = event;
+            if let Event::SpaceStateChanged(state) = &mut event {
+                state.display_space_ids.insert("test-display-1".into(), external_spaces);
+            }
+            event
+        };
+
+        // The same snapshot again, as the space actor sends after an unchanged rescan.
+        let identical = total((0..20).map(|_| {
+            measure(&mut apps, &mut reactor, |reactor| {
+                let mut event =
+                    with_inventory(both(external(), (primary(), external()), false), vec![
+                        external(),
+                        hidden,
+                    ]);
+                if let Event::SpaceStateChanged(state) = &mut event {
+                    state.revision = reactor.space_state.revision;
+                }
+                reactor.handle_event(event);
+            })
+        }));
+
+        // Switching the external display between two native desktops and back.
+        let switches = total((0..10).flat_map(|_| {
+            [
+                measure(&mut apps, &mut reactor, |reactor| {
+                    deliver(
+                        reactor,
+                        with_inventory(
+                            report(
+                                vec![LEFT, RIGHT],
+                                vec![Some(primary()), Some(hidden)],
+                                [primary(), external(), external(), external()],
+                                None,
+                            ),
+                            vec![external(), hidden],
+                        ),
+                    )
+                }),
+                measure(&mut apps, &mut reactor, |reactor| {
+                    deliver(
+                        reactor,
+                        with_inventory(both(external(), (primary(), external()), false), vec![
+                            external(),
+                            hidden,
+                        ]),
+                    )
+                }),
+            ]
+        }));
+
+        // Displays settling with every window in place.
+        for idx in 1..=4 {
+            crate::sys::window_server::set_window_frame_override(
+                server_id(idx),
+                Some(apps.windows[&window(idx)].frame),
+            );
+        }
+        let settled = total((0..3).map(|_| {
+            measure(&mut apps, &mut reactor, |reactor| {
+                reactor.handle_event(Event::DisplaysSettled)
+            })
+        }));
+
+        // Unplugging and replugging the external display, which comes back under a new id.
+        let churn = total((0..5).flat_map(|cycle| {
+            let returned = SpaceId::new(100 + cycle);
+            [
+                measure(&mut apps, &mut reactor, |reactor| {
+                    deliver(
+                        reactor,
+                        snapshot(vec![LEFT], vec![Some(primary())], (primary(), primary()), true),
+                    )
+                }),
+                measure(&mut apps, &mut reactor, |reactor| {
+                    deliver(reactor, both(returned, (primary(), primary()), false))
+                }),
+                measure(&mut apps, &mut reactor, |reactor| {
+                    deliver(reactor, both(returned, (primary(), returned), true))
+                }),
+            ]
+        }));
+        clear_overrides();
+        for idx in 1..=4 {
+            crate::sys::window_server::set_window_frame_override(server_id(idx), None);
+        }
+        for (name, costs) in [
+            ("identical x20", identical),
+            ("space switch x20", switches),
+            ("settled x3", settled),
+            ("unplug/replug x5", churn),
+        ] {
+            println!("COSTS {name:18} {costs:?}");
+        }
+    }
+}
+
+/// A complete snapshot of one display showing `space`, whose inventory is `inventory`,
+/// with `windows` on the space.
+fn native_space_event(
+    space: SpaceId,
+    inventory: Vec<SpaceId>,
+    windows: &[WindowServerId],
+) -> Event {
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    space_state_event_with(vec![frame], vec![Some(space)], |state| {
+        state.membership_complete = true;
+        state.display_space_ids = [("test-display-0".to_string(), inventory)].into_iter().collect();
+        state.active_window_spaces = windows.iter().map(|&wsid| (wsid, space)).collect();
+    })
+}
+
+#[test]
+fn a_native_space_switch_does_not_rerun_app_rules_for_placed_windows() {
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".to_string()),
+            floating: true,
+            ..Default::default()
+        }],
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&workspace_cfg);
+    let (first, second) = (SpaceId::new(1), SpaceId::new(2));
+    let inventory = vec![first, second];
+    let (wid, wsid) = (WindowId::new(1, 1), WindowServerId::new(10_001));
+    let frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
+    reactor.handle_event(native_space_event(first, inventory.clone(), &[]));
+    reactor.add_test_app_with_info(1, "com.testapp1", "TestApp1");
+    reactor.track_test_window_server_info(wsid, 1, frame);
+    reactor.state.windows.set_window_server_space(wsid, Some(first));
+    reactor.discover_test_windows(
+        1,
+        vec![(
+            wid,
+            make_window_info(frame, Some(wsid), "Window", Some("com.testapp1")),
+        )],
+        vec![wid],
+    );
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+
+    // The user tiles the window the rule floated.
+    reactor.send_layout_event(LayoutEvent::WindowFocused(first, wid));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(wid));
+
+    // Switching to another native space and back does not float it again.
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![first.get()]));
+    reactor.handle_event(native_space_event(second, inventory.clone(), &[]));
+    reactor.handle_event(native_space_event(first, inventory, &[wsid]));
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(first));
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(wid));
+}
+
+#[test]
+fn switching_from_a_deleted_desktop_to_an_existing_one_is_not_a_remap() {
+    let mut reactor = test_reactor();
+    let (deleted, existing) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(native_space_event(deleted, vec![deleted, existing], &[]));
+    let workspaces = reactor.test_workspace_ids(deleted);
+
+    // macOS shows the next desktop when the current one is deleted. It existed before,
+    // so it is another desktop rather than the deleted one under a new id.
+    reactor.handle_event(native_space_event(existing, vec![existing], &[]));
+    assert_ne!(reactor.test_workspace_ids(existing), workspaces);
+
+    // A display whose desktop is recreated under an id it never listed is a remap.
+    let recreated = SpaceId::new(3);
+    let workspaces = reactor.test_workspace_ids(existing);
+    reactor.handle_event(native_space_event(recreated, vec![recreated], &[]));
+    assert_eq!(reactor.test_workspace_ids(recreated), workspaces);
+}
+
+#[test]
+fn a_display_showing_another_displays_desktop_is_not_a_remap() {
+    // Changing the main display moves each desktop, with its id, to the other display.
+    let mut reactor = test_reactor();
+    let (left, right) = (SpaceId::new(1), SpaceId::new(2));
+    let frames = vec![
+        CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+        CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
+    ];
+    reactor.handle_event(space_state_event(frames.clone(), vec![Some(left), Some(right)]));
+    let before = [left, right].map(|space| reactor.test_workspace_ids(space));
+    let swapped = space_state_event_with(frames, vec![Some(right), Some(left)], |state| {
+        state.should_force_refresh_layout = true;
+    });
+    let Event::SpaceStateChanged(snapshot) = &swapped else {
+        unreachable!()
+    };
+    assert!(reactor.space_remaps(snapshot).is_empty());
+    reactor.handle_event(swapped);
+    assert_eq!(
+        [left, right].map(|space| reactor.test_workspace_ids(space)),
+        before
+    );
+}
+
+#[test]
+fn a_deferred_snapshot_keeps_its_window_delta_when_a_newer_one_arrives() {
+    let (mut reactor, _wid, wsid, origin, _, frame) = reactor_with_window_on_space1();
+    reactor.handle_event(Event::MissionControlNativeEntered);
+    let mut deferred =
+        forwarded_space_state(make_screen_snapshots(vec![frame], vec![Some(origin)]));
+    deferred.topology_window_delta = Some(crate::actor::spaces::TopologyWindowDelta {
+        flags: crate::sys::skylight::DisplayReconfigFlags::SET_MAIN,
+        appeared: vec![(wsid, origin)],
+        disappeared: Vec::new(),
+    });
+    reactor.handle_event(Event::SpaceStateChanged(deferred));
+    let newer = forwarded_space_state(make_screen_snapshots(vec![frame], vec![Some(origin)]));
+    reactor.handle_event(Event::SpaceStateChanged(newer));
+    let pending = reactor.pending_space_change_manager.pending_space_change.as_ref().unwrap();
+    let delta = pending.topology_window_delta.as_ref().expect("deferred delta was dropped");
+    assert!(delta.flags.contains(crate::sys::skylight::DisplayReconfigFlags::SET_MAIN));
+    assert_eq!(delta.appeared, vec![(wsid, origin)]);
 }
 
 #[test]

@@ -1059,7 +1059,10 @@ impl Reactor {
                 {
                     return Ok(EventOutcome::default());
                 }
-                self.observe_shown_window_frames();
+                // Displays settle every time; most often every window is already in place.
+                if !self.observe_shown_window_frames() {
+                    return Ok(EventOutcome::default());
+                }
                 return Ok(EventOutcome::layout_changed(false));
             }
             _ => {}
@@ -2664,12 +2667,15 @@ impl Reactor {
         // AX discovery remains the source of truth for enumerating app windows.
         // Native-space membership/visibility is supplied separately by the spaces
         // actor; do not replace this with the global CG on-screen window list.
+        let pids: Vec<_> = self.app_manager.apps.keys().copied().collect();
+        self.request_window_inventories_for(pids);
+    }
+
+    fn request_window_inventories_for(&mut self, pids: Vec<pid_t>) {
         if self.refreshes_blocked() {
             self.defer_window_inventory_refresh();
             return;
         }
-
-        let pids: Vec<_> = self.app_manager.apps.keys().copied().collect();
         for pid in pids {
             if !self
                 .window_inventory_manager

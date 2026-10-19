@@ -10,7 +10,6 @@ impl LayoutEngine {
     /// Validation and menu previews continue to use `load` without emitting restore logs.
     pub fn load_for_startup_restore(path: PathBuf) -> anyhow::Result<Self> {
         let (mut engine, schema_version) = Self::load_with_schema_version(&path)?;
-        engine.startup_restore_pending = true;
         let unavailable_windows = engine.discard_unmatchable_startup_candidates(
             |window, id| {
                 crate::sys::window_server::get_window(
@@ -267,51 +266,6 @@ impl LayoutEngine {
     /// file. Normal space switches must never call this path: a new current space on a display is
     /// ordinarily a distinct layout, not a renamed old space. Returns the migrations applied so
     /// a caller reconciling the same snapshot does not apply them again.
-    pub fn reconcile_startup_spaces(
-        &mut self,
-        window_store: &mut WindowStore,
-        current_spaces: &[(SpaceId, String)],
-        expected_display_count: usize,
-    ) -> Vec<(SpaceId, SpaceId)> {
-        // The first forwarded snapshot can be empty or contain displays whose native space has
-        // not resolved yet. Consuming the one-shot restore in that state permanently strands the
-        // saved topology under obsolete SpaceIds.
-        if !self.startup_restore_pending
-            || expected_display_count == 0
-            || current_spaces.len() != expected_display_count
-        {
-            return Vec::new();
-        }
-        let unique_spaces = current_spaces.iter().map(|(space, _)| *space).collect::<HashSet<_>>();
-        let unique_displays = current_spaces
-            .iter()
-            .map(|(_, display)| display.as_str())
-            .collect::<HashSet<_>>();
-        if unique_spaces.len() != current_spaces.len()
-            || unique_displays.len() != current_spaces.len()
-        {
-            return Vec::new();
-        }
-        self.startup_restore_pending = false;
-
-        let saved_spaces = self.workspaces.layout_spaces();
-        let mut remaps = Vec::new();
-        for (current, display_uuid) in current_spaces {
-            let Some(saved) = self.display_last_space.get(display_uuid).copied() else {
-                continue;
-            };
-            if saved != *current
-                && saved_spaces.contains(&saved)
-                && !remaps.iter().any(|(old, _)| *old == saved)
-            {
-                remaps.push((saved, *current));
-            }
-        }
-
-        self.remap_spaces(window_store, &remaps);
-        remaps
-    }
-
     pub fn serialize_to_string(&self) -> String { PersistedLayout::serialize_engine(self) }
 
     pub fn finish_loading(

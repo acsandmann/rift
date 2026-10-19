@@ -45,6 +45,7 @@ thread_local! {
     static TEST_WINDOW_ORDER_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_FRAME_OVERRIDE: RefCell<HashMap<u32, CGRect>> = RefCell::new(HashMap::default());
 }
 
 pub const WINDOWSERVER_QUIET_US: u64 = 350_000;
@@ -435,14 +436,20 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
     spaces_cf.len() > 1
 }
 
+// Tests never ask the real window server: its answers depend on the host, and its lazy
+// initialization is not safe to race from parallel test threads.
+#[cfg(test)]
 pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
-    #[cfg(test)]
-    if let Some(override_spaces) =
-        TEST_WINDOW_SPACES_OVERRIDE.with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
-    {
-        return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
-    }
+    TEST_WINDOW_SPACES_OVERRIDE
+        .with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(crate::sys::screen::SpaceId::new)
+        .collect()
+}
 
+#[cfg(not(test))]
+pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
@@ -523,7 +530,9 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
             id,
             pid: 1234,
             layer: 0,
-            frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, 600.0)),
+            frame: TEST_WINDOW_FRAME_OVERRIDE
+                .with(|frames| frames.borrow().get(&id.as_u32()).copied())
+                .unwrap_or(CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, 600.0))),
             min_frame: CGSize::ZERO,
             max_frame: CGSize::ZERO,
         })
@@ -776,11 +785,24 @@ pub fn try_space_window_list_for_connection(
     }
 
     #[cfg(test)]
-    if let Some(override_ids) = TEST_SPACE_WINDOW_LIST_OVERRIDE.with(|ids| ids.borrow().clone()) {
-        let _ = (spaces, owner, include_minimized);
-        return Some(override_ids);
+    {
+        let _ = (owner, include_minimized);
+        Some(
+            TEST_SPACE_WINDOW_LIST_OVERRIDE
+                .with(|ids| ids.borrow().clone())
+                .unwrap_or_default(),
+        )
     }
+    #[cfg(not(test))]
+    query_space_window_list(spaces, owner, include_minimized)
+}
 
+#[cfg(not(test))]
+fn query_space_window_list(
+    spaces: &[u64],
+    owner: u32,
+    include_minimized: bool,
+) -> Option<Vec<u32>> {
     let cf_space_array = cf_array_from_u64s(spaces);
 
     let mut set_tags: u64 = 0;
@@ -997,6 +1019,15 @@ mod tests {
         assert!(WindowServerId::new(0).as_nonzero().is_none());
         assert_eq!(WindowServerId::new(42).as_nonzero().map(|id| id.get()), Some(42));
     }
+}
+
+/// Sets the frame `get_windows` reports for `id`.
+#[cfg(test)]
+pub fn set_window_frame_override(id: WindowServerId, frame: Option<CGRect>) {
+    TEST_WINDOW_FRAME_OVERRIDE.with(|frames| match frame {
+        Some(frame) => frames.borrow_mut().insert(id.as_u32(), frame),
+        None => frames.borrow_mut().remove(&id.as_u32()),
+    });
 }
 
 #[cfg(test)]

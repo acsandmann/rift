@@ -182,8 +182,6 @@ pub struct LayoutEngine {
     space_display_map: HashMap<SpaceId, Option<String>>,
     display_last_space: HashMap<String, SpaceId>,
     persistence: PersistenceState,
-    /// Set only while a master-file startup restore is waiting for the first display snapshot.
-    startup_restore_pending: bool,
     /// Legacy strip commands report boundary excess; workspace arbitration lives here.
     scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
 }
@@ -1483,39 +1481,6 @@ impl LayoutEngine {
         })
     }
 
-    /// Applies `remaps` together, staging through unused ids so an exchange or cycle of ids
-    /// cannot overwrite another space's state.
-    pub fn remap_spaces(&mut self, window_store: &mut WindowStore, remaps: &[(SpaceId, SpaceId)]) {
-        let targets: HashSet<SpaceId> = remaps.iter().map(|(_, new)| *new).collect();
-        if !remaps.iter().any(|(old, _)| targets.contains(old)) {
-            for &(old, new) in remaps {
-                self.remap_space(window_store, old, new);
-            }
-            return;
-        }
-        let mut next_temporary = self
-            .workspaces
-            .layout_spaces()
-            .into_iter()
-            .chain(self.space_display_map.keys().copied())
-            .chain(remaps.iter().flat_map(|&(old, new)| [old, new]))
-            .map(|space| space.get())
-            .max()
-            .unwrap_or(0);
-        let staged: Vec<_> = remaps
-            .iter()
-            .map(|&(old, new)| {
-                next_temporary += 1;
-                let temporary = SpaceId::new(next_temporary);
-                self.remap_space(window_store, old, temporary);
-                (temporary, new)
-            })
-            .collect();
-        for (temporary, new) in staged {
-            self.remap_space(window_store, temporary, new);
-        }
-    }
-
     /// Move all per-space layout state from `old_space` to `new_space`.
     pub fn remap_space(
         &mut self,
@@ -1577,7 +1542,6 @@ impl LayoutEngine {
             space_display_map: HashMap::default(),
             display_last_space: HashMap::default(),
             persistence: PersistenceState::default(),
-            startup_restore_pending: false,
             scroll_boundary: None,
         }
     }

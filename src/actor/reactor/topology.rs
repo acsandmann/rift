@@ -6,6 +6,19 @@
 //! reconciles each window's workspace with where the window server has it, and
 //! returns windows carried off a departed display once it is back. It also
 //! answers which space a window or frame is on.
+//!
+//! Invariants the reconciliation keeps:
+//!
+//! 1. A native space id can change without its virtual workspaces being lost:
+//!    they are renumbered with it ([`Reactor::space_remaps`]).
+//! 2. A temporary change of native membership, such as macOS carrying windows off
+//!    a departed display, does not change the windows' logical workspace: they keep
+//!    their place in their home tree while away.
+//! 3. A tracked window has at most one virtual workspace assignment (the window
+//!    store holds it).
+//! 4. A returning display gets its existing workspaces back rather than new ones.
+//! 5. A snapshot with incomplete membership never removes a window or workspace:
+//!    if it would invalidate spaces, it waits for a complete one.
 
 use super::*;
 
@@ -23,12 +36,11 @@ impl Reactor {
             self.pending_space_change_manager.pending_space_change = Some(snapshot);
             return Ok(EventOutcome::default());
         }
-        let unreported = self.unreported_space_remaps(&snapshot);
-        snapshot.space_remaps.extend(unreported);
-        let invalidated_spaces = self.invalidated_spaces(&snapshot);
+        let space_remaps = self.space_remaps(&snapshot);
+        let invalidated_spaces = self.invalidated_spaces(&snapshot, &space_remaps);
         if !snapshot.membership_complete && !invalidated_spaces.is_empty() {
             // Defer geometry and membership together so the old ownership survives
-            // an inconclusive query. Safe whole-Space remaps can still proceed.
+            // an inconclusive query. The spaces actor retries until one is complete.
             self.pending_space_change_manager.pending_space_change = Some(snapshot);
             return Ok(EventOutcome::default());
         }
@@ -41,7 +53,6 @@ impl Reactor {
             menu_bar_space,
             command_space,
             display_space_ids,
-            space_remaps,
             display_set_changed,
             should_force_refresh_layout,
             membership_complete,
@@ -53,16 +64,6 @@ impl Reactor {
         let mut outcome = EventOutcome::window_membership_changed(false, true);
         self.space_state.active_window_spaces = active_window_spaces;
         self.space_state.membership_complete = membership_complete;
-
-        let current_display_spaces = screens
-            .iter()
-            .filter_map(|screen| screen.space.map(|space| (space, screen.display_uuid.clone())))
-            .collect::<Vec<_>>();
-        let startup_remaps = self.layout_manager.layout_engine.reconcile_startup_spaces(
-            &mut self.state.windows,
-            &current_display_spaces,
-            screens.len(),
-        );
 
         self.space_state.fullscreen_spaces = fullscreen_spaces;
         self.space_state.menu_bar_space = menu_bar_space;
@@ -101,17 +102,11 @@ impl Reactor {
         if topology_changed {
             self.topology_changed_at = Some(Instant::now());
             self.clear_pending_hidden_window_targets();
+            self.retarget_drag_off_departed_display();
         }
-        // Startup reconciliation already migrated these layouts. Remapping a second time
-        // would delete the destination's saved floating frames even though the old tree is gone.
-        let layout_remaps: Vec<_> = space_remaps
-            .iter()
-            .copied()
-            .filter(|remap| !startup_remaps.contains(remap))
-            .collect();
-        self.layout_manager
-            .layout_engine
-            .remap_spaces(&mut self.state.windows, &layout_remaps);
+        for &(old, new) in &space_remaps {
+            self.layout_manager.layout_engine.remap_space(&mut self.state.windows, old, new);
+        }
         self.space_activation_policy.remap_spaces(&space_remaps);
         for screen in &self.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
@@ -142,7 +137,12 @@ impl Reactor {
             }
             outcome.absorb(self.apply_topology_window_delta(delta));
         }
-        self.finalize_space_change(&spaces, !membership_complete, &invalidated_spaces);
+        self.finalize_space_change(
+            &spaces,
+            !membership_complete,
+            &invalidated_spaces,
+            topology_changed,
+        );
         self.try_apply_pending_space_change();
         if should_force_refresh_layout {
             outcome = outcome.with_arrange_passes(1);
@@ -173,7 +173,11 @@ impl Reactor {
 
     /// Native spaces a topology change removed from their display, other than ones
     /// renumbered in place. Windows leaving them keep their workspace ordinal.
-    pub(super) fn invalidated_spaces(&self, snapshot: &ForwardedSpaceState) -> Vec<SpaceId> {
+    pub(super) fn invalidated_spaces(
+        &self,
+        snapshot: &ForwardedSpaceState,
+        space_remaps: &[(SpaceId, SpaceId)],
+    ) -> Vec<SpaceId> {
         if !(snapshot.display_set_changed
             || snapshot.should_force_refresh_layout
             || snapshot.topology_window_delta.is_some())
@@ -190,45 +194,91 @@ impl Reactor {
                     .copied()
                     .filter(move |space| !current.is_some_and(|current| current.contains(space)))
             })
-            .filter(|space| !snapshot.space_remaps.iter().any(|(previous, _)| previous == space))
+            .filter(|space| !space_remaps.iter().any(|(previous, _)| previous == space))
             .collect()
     }
 
-    /// Space id changes the space actor did not report, as it reports only changes it saw
-    /// happen, which excludes a restart or a churn it coalesced.
-    pub(super) fn unreported_space_remaps(
-        &self,
-        snapshot: &ForwardedSpaceState,
-    ) -> Vec<(SpaceId, SpaceId)> {
+    /// Native spaces macOS recreated or handed to another display, as `(old, new)` pairs:
+    /// the desktop a display was showing is now the new space it shows.
+    ///
+    /// That is so when the display lists a new space with no workspaces yet, and either
+    /// - the old id is gone from every display and the new one was not already listed
+    ///   alongside it, as when the display returns or after a reboot, or
+    /// - most of the windows Rift had on the old space are on the new one. macOS can
+    ///   give the old id to another display and keep its windows here on a desktop it
+    ///   mints, as when a monitor arrives as main.
+    ///
+    /// Anything else is a switch to another desktop, or macOS moving a desktop between
+    /// displays, windows and all (as a main display change does), and keeps every
+    /// space's identity. The display's last space is persisted, so this also covers a
+    /// display returning after a restart. A space given up by one remap can receive
+    /// the next display's.
+    pub(super) fn space_remaps(&self, snapshot: &ForwardedSpaceState) -> Vec<(SpaceId, SpaceId)> {
         let engine = &self.layout_manager.layout_engine;
         let inventory = &snapshot.display_space_ids;
-        snapshot
-            .screens
-            .iter()
-            .filter_map(|screen| {
-                let display = screen.display_uuid_opt()?;
+        let previous_inventory = &self.space_state.display_space_ids;
+        let listed = |inventory: &HashMap<String, Vec<SpaceId>>, space: SpaceId| {
+            inventory.values().any(|spaces| spaces.contains(&space))
+        };
+        let windows_followed = |previous: SpaceId, space: SpaceId| {
+            if !snapshot.membership_complete {
+                return false;
+            }
+            let (mut here, mut elsewhere) = (0, 0);
+            for (wid, window) in self.state.windows.iter_windows() {
+                if self.assigned_space_for_window_id(wid) != Some(previous) {
+                    continue;
+                }
+                match window.info.sys_id.and_then(|wsid| snapshot.active_window_spaces.get(&wsid)) {
+                    Some(&native) if native == space => here += 1,
+                    Some(_) => elsewhere += 1,
+                    None => {}
+                }
+            }
+            here > elsewhere
+        };
+        let mut remaps: Vec<(SpaceId, SpaceId)> = Vec::new();
+        // Each pass can free a space a later display's desktop is renumbered to.
+        loop {
+            let found = remaps.len();
+            for screen in &snapshot.screens {
+                let Some(display) = screen.display_uuid_opt() else {
+                    continue;
+                };
+                let Some(display_spaces) = inventory.get(display) else {
+                    continue;
+                };
                 // A display showing a fullscreen desktop still has its own desktop behind it.
                 let space = screen.space.or_else(|| {
-                    let mut desktops = inventory
-                        .get(display)?
+                    let mut desktops = display_spaces
                         .iter()
                         .filter(|space| !snapshot.fullscreen_spaces.contains(space));
                     let desktop = *desktops.next()?;
                     desktops.next().is_none().then_some(desktop)
-                })?;
-                let previous = engine.last_space_for_display_uuid(display)?;
-                // Recreated, as when the display returns: the old id is gone from every display
-                // (an inventory missing the current space proves nothing) and the new one has no
-                // layout yet. A display showing another display's desktop, as after a main display
-                // change, is not a renumbering: macOS moved that desktop, windows and all.
-                (previous != space
-                    && !snapshot.space_remaps.iter().any(|(old, _)| *old == previous)
-                    && inventory.get(display).is_some_and(|spaces| spaces.contains(&space))
-                    && !inventory.values().any(|spaces| spaces.contains(&previous))
-                    && engine.workspaces().workspace_ids(space).is_empty())
-                .then_some((previous, space))
-            })
-            .collect()
+                });
+                let (Some(space), Some(previous)) =
+                    (space, engine.last_space_for_display_uuid(display))
+                else {
+                    continue;
+                };
+                let free = engine.workspaces().workspace_ids(space).is_empty()
+                    || remaps.iter().any(|&(old, _)| old == space);
+                let renumbered = previous != space
+                    && display_spaces.contains(&space)
+                    && free
+                    && !remaps.iter().any(|&(old, new)| old == previous || new == space)
+                    && ((!listed(inventory, previous)
+                        && !(listed(previous_inventory, previous)
+                            && listed(previous_inventory, space)))
+                        || windows_followed(previous, space));
+                if renumbered {
+                    remaps.push((previous, space));
+                }
+            }
+            if remaps.len() == found {
+                return remaps;
+            }
+        }
     }
 
     pub(super) fn try_apply_pending_space_change(&mut self) {
@@ -265,6 +315,7 @@ impl Reactor {
         spaces: &[Option<SpaceId>],
         preserve_missing_assignments: bool,
         invalidated_spaces: &[SpaceId],
+        topology_changed: bool,
     ) {
         self.refocus_manager.stale_cleanup_state = if spaces.iter().all(Option::is_none) {
             StaleCleanupState::Suppressed
@@ -283,7 +334,11 @@ impl Reactor {
             preserve_missing_assignments,
             invalidated_spaces,
         );
-        self.request_window_inventories();
+        if topology_changed {
+            self.request_window_inventories();
+        } else {
+            self.discover_windows_on_active_spaces();
+        }
 
         if let Some(space) = self.workspace_command_space() {
             self.focus_desktop_if_active_workspace_empty(space);
@@ -306,6 +361,25 @@ impl Reactor {
         }
     }
 
+    /// A drag over a display that went away has no destination there: dropping into its
+    /// desktop would move the window out of sight, into a layout kept for the display's
+    /// return. The drag continues over whichever shown display has the window now.
+    fn retarget_drag_off_departed_display(&mut self) {
+        let Some(source) = self.drag_manager.actor.source() else {
+            return;
+        };
+        if source
+            .current_space
+            .is_none_or(|space| self.space_state.is_space_on_screen(space))
+        {
+            return;
+        }
+        let space = self.best_space_for_frame(&source.last_frame);
+        if self.drag_manager.actor.update_current_space(space) {
+            self.resolve_drag_preview();
+        }
+    }
+
     /// Sends windows carried off a display back to their workspaces on it now that it is here.
     pub(super) fn return_displaced_windows(&mut self) {
         let on_screen: Vec<_> =
@@ -324,8 +398,9 @@ impl Reactor {
     /// Takes the frames of windows on shown workspaces from the window server and forgets their
     /// pending writes. A write made during a display change can go unanswered, be adjusted, or be
     /// undone by the window server, and a target left pending makes every later arrange skip the
-    /// window as already on its way; the next arrange writes whatever is out of place.
-    pub(super) fn observe_shown_window_frames(&mut self) {
+    /// window as already on its way. Returns whether any window is not where Rift expects it, its
+    /// pending target or else its last known frame, so the next arrange has something to write.
+    pub(super) fn observe_shown_window_frames(&mut self) -> bool {
         let engine = &self.layout_manager.layout_engine;
         let shown: HashMap<WindowServerId, WindowId> = self
             .space_state
@@ -337,16 +412,24 @@ impl Reactor {
             .filter_map(|wid| Some((self.state.windows.window(wid)?.info.sys_id?, wid)))
             .collect();
         let wsids: Vec<_> = shown.keys().copied().collect();
+        let pending: HashMap<WindowServerId, CGRect> = wsids
+            .iter()
+            .filter_map(|&wsid| Some((wsid, self.transaction_manager.get_target_frame(wsid)?)))
+            .collect();
         for wsid in &wsids {
             self.transaction_manager.clear_target_for_window(*wsid);
         }
+        let mut drifted = false;
         for info in window_server::get_windows(&wsids) {
             if let Some(window) =
                 shown.get(&info.id).and_then(|wid| self.state.windows.window_mut(*wid))
             {
+                let expected = pending.get(&info.id).copied().unwrap_or(window.frame_monotonic);
+                drifted |= !expected.same_as(info.frame);
                 window.frame_monotonic = info.frame;
             }
         }
+        drifted
     }
 
     pub(super) fn expose_all_spaces(&mut self) {
@@ -438,18 +521,22 @@ impl Reactor {
             true,
             invalidated_spaces,
         );
-        self.request_window_inventories();
+        self.discover_windows_on_active_spaces();
         if !activated.is_empty() {
             self.apply_app_rules_for_activated_spaces(&activated);
         }
     }
 
+    /// Admits windows found on spaces that just became active. A window already assigned
+    /// there keeps its placement and needs no rules: a native space switch alone does not
+    /// rerun them.
     pub(super) fn apply_app_rules_for_activated_spaces(&mut self, activated: &[SpaceId]) {
         let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
         for (&wsid, space) in &self.space_state.active_window_spaces {
             if activated.contains(space)
                 && let Some(wid) = self.state.windows.tracked_window_id(wsid)
                 && self.state.windows.window(wid).is_some_and(|w| w.can_reconcile_admission())
+                && self.assigned_space_for_window_id(wid) != Some(*space)
             {
                 windows_by_pid.entry(wid.pid).or_default().push(wid);
             }
@@ -462,6 +549,34 @@ impl Reactor {
     }
 
     // Window membership
+
+    /// Asks for the windows of each app with a window on an active space that was never
+    /// discovered, as when it was created while its space was hidden. Activating a space
+    /// needs no other inventory. Every app is asked if membership is incomplete. Windows
+    /// of apps Rift does not manage, like the wallpaper the window server lists on every
+    /// desktop, need no discovery.
+    pub(super) fn discover_windows_on_active_spaces(&mut self) {
+        if !self.space_state.membership_complete {
+            self.request_window_inventories();
+            return;
+        }
+        let mut pids: Vec<pid_t> = self
+            .space_state
+            .active_window_spaces
+            .iter()
+            .filter(|&(&wsid, &space)| {
+                self.is_space_active(space) && self.state.windows.tracked_window_id(wsid).is_none()
+            })
+            .filter_map(|(&wsid, _)| {
+                let info = self.state.windows.get_window_server_info(wsid);
+                Some(info.or_else(|| window_server::get_window(wsid))?.pid)
+            })
+            .filter(|pid| self.app_manager.apps.contains_key(pid))
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        self.request_window_inventories_for(pids);
+    }
 
     pub(super) fn authoritative_active_space_windows(
         &self,
@@ -1033,10 +1148,10 @@ impl Reactor {
 }
 
 /// Folds a snapshot deferred (during Mission Control or an inconclusive membership
-/// query) into a newer one. Display continuity accepted while the virtual model was
-/// deferred is kept: the same revision keeps the deferred snapshot with the newest
-/// display focus, and a newer revision keeps its own geometry and membership while
-/// inheriting the deferred remaps, resizes, and change flags.
+/// query) into a newer one. The same revision keeps the deferred snapshot with the
+/// newest display focus; a newer revision keeps its own geometry and membership
+/// while inheriting the deferred resizes, change flags, and window delta. Space
+/// remaps need no carrying: they are inferred again from the applied state.
 fn merge_deferred_snapshot(
     mut pending: ForwardedSpaceState,
     mut snapshot: ForwardedSpaceState,
@@ -1046,8 +1161,6 @@ fn merge_deferred_snapshot(
         pending.menu_bar_space = snapshot.menu_bar_space;
         return pending;
     }
-    pending.space_remaps.append(&mut snapshot.space_remaps);
-    snapshot.space_remaps = pending.space_remaps;
     pending
         .resized_spaces
         .retain(|(space, _)| !snapshot.resized_spaces.iter().any(|(new, _)| space == new));
@@ -1055,5 +1168,24 @@ fn merge_deferred_snapshot(
     snapshot.resized_spaces = pending.resized_spaces;
     snapshot.should_force_refresh_layout |= pending.should_force_refresh_layout;
     snapshot.display_set_changed |= pending.display_set_changed;
+    snapshot.topology_window_delta =
+        match (pending.topology_window_delta, snapshot.topology_window_delta) {
+            (Some(mut older), Some(newer)) => {
+                // The newer delta has the last word on any window it mentions.
+                let mentioned: HashSet<WindowServerId> = newer
+                    .appeared
+                    .iter()
+                    .chain(&newer.disappeared)
+                    .map(|(wsid, _)| *wsid)
+                    .collect();
+                older.appeared.retain(|(wsid, _)| !mentioned.contains(wsid));
+                older.disappeared.retain(|(wsid, _)| !mentioned.contains(wsid));
+                older.appeared.extend(newer.appeared);
+                older.disappeared.extend(newer.disappeared);
+                older.flags |= newer.flags;
+                Some(older)
+            }
+            (older, newer) => newer.or(older),
+        };
     snapshot
 }

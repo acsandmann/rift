@@ -1506,111 +1506,159 @@ fn startup_restore_reapplies_configured_workspace_names() {
     assert_eq!(names, ["A", "S"]);
 }
 
-#[test]
-fn startup_restore_remaps_saved_space_by_display_identity_once() {
-    let saved_space = SpaceId::new(610);
-    let current_space = SpaceId::new(611);
-    let later_space = SpaceId::new(612);
+/// A forwarded snapshot of `displays`, each showing its space, with each display's
+/// full native inventory.
+fn startup_snapshot(
+    revision: u64,
+    displays: &[(&str, SpaceId, Vec<SpaceId>)],
+) -> crate::actor::reactor::Event {
+    use objc2_core_foundation::{CGPoint, CGRect};
+
+    use crate::actor::reactor::{Event, ScreenInfo};
+    use crate::actor::spaces::ForwardedSpaceState;
+    use crate::sys::screen::ScreenId;
+
     let size = CGSize::new(1200.0, 800.0);
-    let display = "display-a".to_string();
-    let mut snapshot = test_engine();
-    let mut snapshot_store = WindowStore::default();
-    let _ =
-        snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(saved_space, size));
-    snapshot.update_space_display(saved_space, Some(display.clone()));
-    let path = std::env::temp_dir().join(format!(
-        "rift-startup-space-remap-test-{}-{}.ron",
-        std::process::id(),
-        saved_space.get(),
-    ));
-    snapshot.save(path.clone()).unwrap();
+    Event::SpaceStateChanged(ForwardedSpaceState {
+        revision,
+        authoritative: true,
+        membership_complete: true,
+        screens: displays
+            .iter()
+            .enumerate()
+            .map(|(index, (display, space, _))| ScreenInfo {
+                id: ScreenId::new(index as u32 + 1),
+                frame: CGRect::new(CGPoint::new(size.width * index as f64, 0.0), size),
+                backing_scale: 1.0,
+                display_uuid: display.to_string(),
+                name: None,
+                space: Some(*space),
+            })
+            .collect(),
+        display_space_ids: displays
+            .iter()
+            .map(|(display, _, inventory)| (display.to_string(), inventory.clone()))
+            .collect(),
+        display_set_changed: true,
+        ..Default::default()
+    })
+}
 
-    let mut restored = LayoutEngine::load_for_startup_restore(path.clone()).unwrap();
-    let _ = std::fs::remove_file(path);
-    let mut window_store = WindowStore::default();
-    // An incomplete first topology snapshot must not consume the one-shot reconciliation.
-    restored.reconcile_startup_spaces(&mut window_store, &[], 1);
-    restored.reconcile_startup_spaces(&mut window_store, &[(current_space, display.clone())], 1);
+/// `engine` as it loads from disk at startup.
+fn reload(engine: &LayoutEngine) -> LayoutEngine {
+    let mut loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+    loaded.finish_loading(
+        &VirtualWorkspaceSettings::default(),
+        &LayoutSettings::default(),
+        None,
+    );
+    loaded
+}
 
-    assert!(!restored.workspaces.layout_spaces().contains(&saved_space));
-    assert!(restored.workspaces.layout_spaces().contains(&current_space));
+/// The reactor's layout engine, as it would be saved.
+fn reactor_engine(reactor: &mut crate::actor::reactor::Reactor) -> LayoutEngine {
+    let serialized: serde_json::Value =
+        serde_json::from_str(&reactor.serialize_state().unwrap()).unwrap();
+    LayoutEngine::deserialize_from_str(serialized["layout_engine_ron"].as_str().unwrap()).unwrap()
+}
 
-    // The repair is startup-only. A later ordinary native-space switch must not migrate state.
-    restored.reconcile_startup_spaces(&mut window_store, &[(later_space, display)], 1);
-    assert!(restored.workspaces.layout_spaces().contains(&current_space));
-    assert!(!restored.workspaces.layout_spaces().contains(&later_space));
+#[test]
+fn startup_remaps_a_saved_space_only_once_its_id_is_gone() {
+    use crate::actor::reactor::Reactor;
+
+    // After a reboot the saved id is gone; after a restart on another desktop it is not.
+    for saved_still_exists in [false, true] {
+        let saved_space = SpaceId::new(610);
+        let current_space = SpaceId::new(611);
+        let later_space = SpaceId::new(612);
+        let display = "display-a";
+        let mut snapshot = test_engine();
+        let mut snapshot_store = WindowStore::default();
+        let size = CGSize::new(1200.0, 800.0);
+        let _ = snapshot
+            .handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(saved_space, size));
+        snapshot.update_space_display(saved_space, Some(display.into()));
+        let saved = snapshot.workspaces().workspace_ids(saved_space);
+        let mut reactor = Reactor::new_for_test(reload(&snapshot));
+
+        let inventory = if saved_still_exists {
+            vec![saved_space, current_space]
+        } else {
+            vec![current_space]
+        };
+        reactor.handle_events(vec![startup_snapshot(1, &[(display, current_space, inventory)])]);
+        let engine = reactor_engine(&mut reactor);
+        assert_eq!(
+            engine.workspaces().workspace_ids(current_space) == saved,
+            !saved_still_exists,
+            "saved space still exists: {saved_still_exists}"
+        );
+        assert_eq!(
+            engine.workspaces().workspace_ids(saved_space) == saved,
+            saved_still_exists
+        );
+
+        // Switching to another existing desktop later never migrates state.
+        let before = engine.workspaces().workspace_ids(current_space);
+        reactor.handle_events(vec![startup_snapshot(2, &[(display, later_space, vec![
+            current_space,
+            later_space,
+        ])])]);
+        let engine = reactor_engine(&mut reactor);
+        assert_eq!(engine.workspaces().workspace_ids(current_space), before);
+        assert!(
+            !engine
+                .workspaces()
+                .workspace_ids(later_space)
+                .iter()
+                .any(|id| before.contains(id))
+        );
+    }
 }
 
 #[test]
 fn startup_snapshot_preserves_floating_frames_when_space_ids_change() {
     use objc2_core_foundation::{CGPoint, CGRect};
 
-    use crate::actor::reactor::{Event, Reactor, ScreenInfo};
-    use crate::actor::spaces::ForwardedSpaceState;
-    use crate::sys::screen::ScreenId;
+    use crate::actor::reactor::Reactor;
 
-    for explicit_remap in [false, true] {
-        let (saved_space, current_space) = (SpaceId::new(630), SpaceId::new(631));
-        let display = "startup-display".to_string();
-        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
-        let frame = CGRect::new(CGPoint::new(80.0, 90.0), CGSize::new(400.0, 300.0));
-        let window = WindowId::new(42, 7);
-        let mut engine = test_engine();
-        let mut store = WindowStore::default();
-        let _ =
-            engine.handle_event(&mut store, LayoutEvent::SpaceExposed(saved_space, screen.size));
-        engine.update_space_display(saved_space, Some(display.clone()));
-        let workspace = engine.workspaces.active_workspace(saved_space).unwrap();
-        engine.floating.add_floating(window);
-        engine.store_floating_position(saved_space, workspace, window, frame);
-        engine.persistence.windows.insert(window, WindowFingerprint {
-            window_server_id: Some(9001),
-            title: Some("Saved float".into()),
-            width: 400.0,
-            height: 300.0,
-            app_id: Some("com.example.editor".into()),
-        });
-        let mut loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
-        // This is the state the startup loader hands to the reactor after its OS liveness
-        // checks. Exercise the complete forwarded-snapshot path, not just engine remapping.
-        loaded.startup_restore_pending = true;
-        let mut reactor = Reactor::new_for_test(loaded);
-        reactor.handle_events(vec![Event::SpaceStateChanged(ForwardedSpaceState {
-            revision: 1,
-            authoritative: true,
-            membership_complete: true,
-            screens: vec![ScreenInfo {
-                id: ScreenId::new(1),
-                frame: screen,
-                backing_scale: 1.0,
-                display_uuid: display.clone(),
-                name: None,
-                space: Some(current_space),
-            }],
-            display_space_ids: [(display, vec![current_space])].into_iter().collect(),
-            space_remaps: if explicit_remap {
-                vec![(saved_space, current_space)]
-            } else {
-                vec![]
-            },
-            display_set_changed: true,
-            ..Default::default()
-        })]);
-        let serialized: serde_json::Value =
-            serde_json::from_str(&reactor.serialize_state().unwrap()).unwrap();
-        let restored =
-            LayoutEngine::deserialize_from_str(serialized["layout_engine_ron"].as_str().unwrap())
-                .unwrap();
-        assert_eq!(
-            restored.get_floating_position(current_space, workspace, window),
-            Some(frame),
-            "startup lost its floating frame; explicit remap: {explicit_remap}"
-        );
-    }
+    let (saved_space, current_space) = (SpaceId::new(630), SpaceId::new(631));
+    let display = "startup-display";
+    let screen = CGSize::new(1200.0, 800.0);
+    let frame = CGRect::new(CGPoint::new(80.0, 90.0), CGSize::new(400.0, 300.0));
+    let window = WindowId::new(42, 7);
+    let mut engine = test_engine();
+    let mut store = WindowStore::default();
+    let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(saved_space, screen));
+    engine.update_space_display(saved_space, Some(display.into()));
+    let workspace = engine.workspaces.active_workspace(saved_space).unwrap();
+    engine.floating.add_floating(window);
+    engine.store_floating_position(saved_space, workspace, window, frame);
+    engine.persistence.windows.insert(window, WindowFingerprint {
+        window_server_id: Some(9001),
+        title: Some("Saved float".into()),
+        width: 400.0,
+        height: 300.0,
+        app_id: Some("com.example.editor".into()),
+    });
+    // Exercise the complete forwarded-snapshot path, not just engine remapping.
+    let mut reactor = Reactor::new_for_test(reload(&engine));
+    reactor.handle_events(vec![startup_snapshot(1, &[(display, current_space, vec![
+        current_space,
+    ])])]);
+    assert_eq!(
+        reactor_engine(&mut reactor).get_floating_position(current_space, workspace, window),
+        Some(frame),
+        "startup lost its floating frame"
+    );
 }
 
 #[test]
-fn startup_restore_handles_space_id_swaps_between_displays() {
+fn startup_keeps_desktops_that_moved_between_displays() {
+    use crate::actor::reactor::Reactor;
+
+    // Changing the main display moves each desktop, windows and all, to the other display.
+    // The ids are unchanged, so each desktop keeps its own workspaces.
     let space_a = SpaceId::new(620);
     let space_b = SpaceId::new(621);
     let size = CGSize::new(1200.0, 800.0);
@@ -1619,37 +1667,18 @@ fn startup_restore_handles_space_id_swaps_between_displays() {
     for (space, display) in [(space_a, "display-a"), (space_b, "display-b")] {
         let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
         snapshot.update_space_display(space, Some(display.into()));
-        let workspace = snapshot.workspaces().active_workspace(space).unwrap();
-        assert!(
-            snapshot
-                .workspaces
-                .rename_workspace(space, workspace, format!("saved-{display}"),)
-        );
     }
-    let path = std::env::temp_dir().join(format!(
-        "rift-startup-space-swap-test-{}.ron",
-        std::process::id(),
-    ));
-    snapshot.save(path.clone()).unwrap();
+    let saved = [space_a, space_b].map(|space| snapshot.workspaces().workspace_ids(space));
+    let mut reactor = Reactor::new_for_test(reload(&snapshot));
+    reactor.handle_events(vec![startup_snapshot(1, &[
+        ("display-a", space_b, vec![space_b]),
+        ("display-b", space_a, vec![space_a]),
+    ])]);
 
-    let mut restored = LayoutEngine::load_for_startup_restore(path.clone()).unwrap();
-    let _ = std::fs::remove_file(path);
-    let mut window_store = WindowStore::default();
-    restored.reconcile_startup_spaces(
-        &mut window_store,
-        &[(space_b, "display-a".into()), (space_a, "display-b".into())],
-        2,
-    );
-
-    let active_a = restored.workspaces().active_workspace(space_b).unwrap();
-    let active_b = restored.workspaces().active_workspace(space_a).unwrap();
+    let engine = reactor_engine(&mut reactor);
     assert_eq!(
-        restored.workspaces.workspace_info(space_b, active_a).unwrap().name,
-        "saved-display-a",
-    );
-    assert_eq!(
-        restored.workspaces.workspace_info(space_a, active_b).unwrap().name,
-        "saved-display-b",
+        [space_a, space_b].map(|space| engine.workspaces().workspace_ids(space)),
+        saved
     );
 }
 

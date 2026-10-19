@@ -12,7 +12,12 @@
 //! - Only user spaces become the reactor's workspace/display context. Fullscreen
 //!   and system/login spaces are nulled out before they can rewrite mappings.
 //! - A stabilized churn is forwarded as one snapshot plus the window enter/leave
-//!   delta between the last authoritative membership and the new one.
+//!   delta between the last authoritative membership and the new one. The
+//!   pre-churn membership is kept until a complete sample can be diffed against
+//!   it, so a failed per-space query never makes windows look removed.
+//! - Space identity is reported, not interpreted: each snapshot carries every
+//!   display's full native inventory, from which the reactor tells a recreated
+//!   desktop from a switch to another one.
 //!
 //! The failure this prevents is treating an unstable lock/wake/login snapshot as
 //! user-space state: Rift would initialize default workspaces for the transient
@@ -35,7 +40,9 @@ use crate::sys::window_server::WindowServerId;
 
 const REFRESH_DELAY_NS: i64 = 100_000_000;
 const REFRESH_SPACE_SWITCH_DELAY_NS: i64 = 50_000_000;
+/// Quick retries before backing off, doubling the delay up to `REFRESH_MAX_BACKOFF`.
 const REFRESH_MAX_RETRIES: u8 = 10;
+const REFRESH_MAX_BACKOFF: u8 = 5;
 
 // Two identical topology samples plus a quiet WindowServer end display churn.
 const DISPLAY_STABILIZE_DELAY_NS: i64 = 100_000_000;
@@ -111,8 +118,6 @@ pub struct ForwardedSpaceState {
     pub command_space: Option<SpaceId>,
     /// Every native space of every display, current or not.
     pub display_space_ids: HashMap<String, Vec<SpaceId>>,
-    /// Spaces whose display now shows a new id for the same desktop.
-    pub space_remaps: Vec<(SpaceId, SpaceId)>,
     pub display_set_changed: bool,
     /// Display set, order, geometry, or native space inventory changed.
     pub should_force_refresh_layout: bool,
@@ -141,7 +146,6 @@ impl ForwardedSpaceState {
     pub fn topology_changed(&self) -> bool {
         self.display_set_changed
             || self.should_force_refresh_layout
-            || !self.space_remaps.is_empty()
             || !self.resized_spaces.is_empty()
             || self.topology_window_delta.is_some()
     }
@@ -149,7 +153,6 @@ impl ForwardedSpaceState {
 
 #[derive(Debug, Clone, Default)]
 pub struct TopologyWindowDelta {
-    pub epoch: u64,
     pub flags: DisplayReconfigFlags,
     pub appeared: Vec<(WindowServerId, SpaceId)>,
     pub disappeared: Vec<(WindowServerId, SpaceId)>,
@@ -168,19 +171,19 @@ pub struct AuthorityState {
     has_seen_display_set: bool,
     screen_cache: Option<ScreenCache>,
     last_converter: CoordinateConverter,
-    refresh_pending: bool,
+    /// The attempt of the scheduled refresh, if one is scheduled.
+    refresh_pending: Option<u8>,
     display_churn_epoch: u64,
-    display_churn_flags: DisplayReconfigFlags,
     /// The last sampled topology and how many consecutive times it was seen.
     display_topology_state: Option<(TopologyFingerprint, u8)>,
-    last_user_space_by_display: HashMap<String, SpaceId>,
     active_display_uuid: Option<String>,
     awaiting_space_switch_confirmation: bool,
     /// Set by wake/unlock until the first snapshot after it is forwarded.
     recovering_membership: bool,
     visible_window_spaces: HashMap<WindowServerId, SpaceId>,
-    pre_churn_visible_window_spaces: HashMap<WindowServerId, SpaceId>,
-    pending_topology_window_delta: Option<TopologyWindowDelta>,
+    /// The membership accepted before display churn began and the churn's flags,
+    /// kept until a complete membership sample is diffed against them.
+    churn_baseline: Option<(HashMap<WindowServerId, SpaceId>, DisplayReconfigFlags)>,
     revision: u64,
     last_forwarded: Option<ForwardedSpaceState>,
     timers_disabled: bool,
@@ -487,8 +490,7 @@ impl SpacesActor {
                     .is_some_and(|previous| *previous != screen.frame)
             });
         // The very first display set is not a change.
-        let refresh_layout =
-            topology_changed && (self.state.has_seen_display_set || !previous_screens.is_empty());
+        let refresh_layout = topology_changed && self.state.has_seen_display_set;
         self.state.has_seen_display_set |= !screens.is_empty();
 
         let previous_sizes: HashMap<_, _> =
@@ -503,18 +505,6 @@ impl SpacesActor {
             })
             .filter_map(|screen| Some((screen.space?, screen.frame.size)))
             .collect();
-
-        let mut unique_spaces = HashSet::default();
-        let has_duplicate_spaces = screens
-            .iter()
-            .filter_map(|screen| screen.space)
-            .any(|s| !unique_spaces.insert(s));
-        let space_remaps = if has_duplicate_spaces {
-            Vec::new()
-        } else {
-            let allow = refresh_layout && screens.iter().all(|screen| screen.space.is_some());
-            self.compute_space_remaps(&screens, allow)
-        };
 
         let active_display_uuid = crate::sys::screen::active_menu_bar_display_uuid();
         let active_space = crate::sys::screen::get_active_space_number();
@@ -541,19 +531,14 @@ impl SpacesActor {
             })
         });
 
-        let membership_complete = if self.state.pending_topology_window_delta.is_some() {
-            true
-        } else if self.state.display_churn_active {
-            self.synthesize_topology_window_delta(
-                self.state.display_churn_epoch,
-                self.state.display_churn_flags,
-                &screens,
-            )
-        } else {
-            let (membership, complete) = self.visible_window_spaces_for_screens(&screens);
-            self.state.visible_window_spaces = membership;
-            complete
-        };
+        let (membership, membership_complete) = self.visible_window_spaces_for_screens(&screens);
+        // An incomplete sample cannot show which windows left, so the baseline waits for
+        // a complete one, even after the churn itself has ended.
+        let topology_window_delta = membership_complete
+            .then(|| self.state.churn_baseline.take())
+            .flatten()
+            .map(|(baseline, flags)| topology_window_delta(&baseline, &membership, flags));
+        self.state.visible_window_spaces = membership;
         self.state.screens = screens.clone();
         self.state.recovering_membership = false;
         let mut forwarded = ForwardedSpaceState {
@@ -565,11 +550,10 @@ impl SpacesActor {
             menu_bar_space,
             command_space,
             display_space_ids,
-            space_remaps,
             display_set_changed,
             should_force_refresh_layout: refresh_layout || inventory_lost_space,
             resized_spaces,
-            topology_window_delta: self.state.pending_topology_window_delta.take(),
+            topology_window_delta,
             active_window_spaces: self.state.visible_window_spaces.clone(),
         };
         if self.state.last_forwarded.as_ref().is_none_or(|previous| {
@@ -590,49 +574,6 @@ impl SpacesActor {
         self.state.revision = self.state.revision.wrapping_add(1);
         self.state.display_topology_state = None;
         self.reactor_tx.send(reactor::Event::TopologyInvalidated(self.state.revision));
-    }
-
-    /// Records each display's current user space, returning `(old, new)` pairs for
-    /// displays whose space changed when `allow_space_remap` is set.
-    fn compute_space_remaps(
-        &mut self,
-        screens: &[ScreenInfo],
-        allow_space_remap: bool,
-    ) -> Vec<(SpaceId, SpaceId)> {
-        let history = &mut self.state.last_user_space_by_display;
-        let current_owners: HashMap<SpaceId, &str> = screens
-            .iter()
-            .filter_map(|screen| Some((screen.space?, screen.display_uuid_opt()?)))
-            .collect();
-        let historical_owners: HashMap<SpaceId, String> =
-            history.iter().map(|(display, &space)| (space, display.clone())).collect();
-        let mut seen_displays = HashSet::default();
-        let mut remaps = Vec::new();
-        for screen in screens {
-            let (Some(space), Some(display)) = (screen.space, screen.display_uuid_opt()) else {
-                continue;
-            };
-            if !seen_displays.insert(display) {
-                continue;
-            }
-            // During sleep/wake macOS can briefly report the remaining display with
-            // the space belonging to a display that has not reappeared yet. Treat
-            // that as cross-display contamination: accepting it poisons history and
-            // the eventual stable snapshot remaps the built-in display's layout onto
-            // the external display (resetting virtual workspaces in the process).
-            if historical_owners.get(&space).is_some_and(|owner| owner != display) {
-                continue;
-            }
-            if let Some(previous) = history.get(display).copied()
-                && previous != space
-                && allow_space_remap
-                && current_owners.get(&previous).is_none_or(|owner| *owner == display)
-            {
-                remaps.push((previous, space));
-            }
-            history.insert(display.to_string(), space);
-        }
-        remaps
     }
 
     /// Native membership of every window on the screens' spaces, and whether every
@@ -722,100 +663,59 @@ impl SpacesActor {
         }
     }
 
-    /// Diffs the membership seen before churn against the current one. Returns
-    /// false, leaving the pre-churn baseline, if the current query is incomplete.
-    fn synthesize_topology_window_delta(
-        &mut self,
-        epoch: u64,
-        flags: DisplayReconfigFlags,
-        screens: &[ScreenInfo],
-    ) -> bool {
-        let (current, complete) = self.visible_window_spaces_for_screens(screens);
-        if !complete {
-            self.state.visible_window_spaces = current;
-            return false;
-        }
-        let previous = std::mem::take(&mut self.state.pre_churn_visible_window_spaces);
-        let mut delta = TopologyWindowDelta {
-            epoch,
-            flags,
-            ..Default::default()
-        };
-        for (&wsid, &space) in &current {
-            match previous.get(&wsid).copied() {
-                None => delta.appeared.push((wsid, space)),
-                Some(previous_space) if previous_space != space => {
-                    delta.disappeared.push((wsid, previous_space));
-                    delta.appeared.push((wsid, space));
-                }
-                Some(_) => {}
-            }
-        }
-        for (&wsid, &space) in &previous {
-            if !current.contains_key(&wsid) {
-                delta.disappeared.push((wsid, space));
-            }
-        }
-        self.state.pending_topology_window_delta = Some(delta);
-        self.state.visible_window_spaces = current;
-        true
-    }
-
     fn process_screen_refresh(&mut self, attempt: u8) {
+        if !self.state.timers_disabled && self.state.refresh_pending != Some(attempt) {
+            return; // Superseded or cancelled.
+        }
+        self.state.refresh_pending = None;
         if self.topology_unstable() {
-            self.state.refresh_pending = false;
             return;
         }
-        let can_retry = attempt < REFRESH_MAX_RETRIES;
+        let next = attempt.saturating_add(1);
         let screens = self
             .collect_state()
             .filter(|(screens, _)| snapshot_is_ready_for_commit(screens));
         let Some((screens, converter)) = screens else {
-            if can_retry {
-                self.schedule_screen_refresh_after(REFRESH_DELAY_NS, attempt + 1);
-            } else {
-                // Keep retrying in batches without treating failure as authority.
-                self.state.refresh_pending = false;
-                if !self.topology_is_authoritative() {
-                    self.schedule_screen_refresh_after(REFRESH_DELAY_NS, 0);
-                }
-            }
+            self.schedule_screen_refresh_after(retry_delay(attempt), next);
             return;
         };
 
-        let invalidated = self.state.revision
-            > self.state.last_forwarded.as_ref().map_or(0, |snapshot| snapshot.revision);
-        if invalidated && !self.observe_stable_topology(&screens) {
-            if !can_retry {
-                self.state.refresh_pending = false;
-            }
-            let next = if can_retry { attempt + 1 } else { 0 };
-            self.schedule_screen_refresh_after(REFRESH_DELAY_NS, next);
+        if self.invalidated() && !self.observe_stable_topology(&screens) {
+            self.schedule_screen_refresh_after(retry_delay(attempt), next);
             return;
         }
 
         let spaces: Vec<_> = screens.iter().map(|screen| screen.space).collect();
         if self.state.awaiting_space_switch_confirmation
             && self.state.last_sent_spaces.as_ref() == Some(&spaces)
-            && can_retry
+            && attempt < REFRESH_MAX_RETRIES
         {
-            self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, attempt + 1);
+            self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, next);
             return;
         }
 
-        let membership_complete = self.forward_screen_parameters(screens, converter);
-        self.state.refresh_pending = false;
-        if !membership_complete && can_retry {
-            self.schedule_screen_refresh_after(REFRESH_DELAY_NS, attempt + 1);
+        // Incomplete membership is retried until a query succeeds; the reactor keeps
+        // the last accepted ownership meanwhile.
+        if !self.forward_screen_parameters(screens, converter) {
+            self.schedule_screen_refresh_after(retry_delay(attempt), next);
         }
+    }
+
+    /// Whether the last forwarded snapshot predates an invalidation, so a new one
+    /// needs a stable sample.
+    fn invalidated(&self) -> bool {
+        self.state.revision > self.state.last_forwarded.as_ref().map_or(0, |s| s.revision)
     }
 
     /// Samples and forwards the current topology now if nothing makes it unsafe.
     /// Returns false when the caller should fall back to a scheduled refresh.
     fn try_forward_authoritative_snapshot(&mut self, force: bool) -> bool {
-        if self.state.refresh_pending
+        // A refresh still in its quick retries is waiting out transient state; one
+        // backing off is not, and should not delay a fresh event.
+        if self.state.refresh_pending.is_some_and(|attempt| attempt <= REFRESH_MAX_RETRIES)
             || self.topology_unstable()
             || self.state.recovering_membership
+            || self.invalidated()
         {
             return false;
         }
@@ -844,38 +744,51 @@ impl SpacesActor {
         if !force && self.state.last_sent_spaces.as_ref() == Some(&spaces) {
             return false;
         }
+        // A complete sample is what a backing-off refresh was waiting for.
+        self.state.refresh_pending = None;
         if !self.forward_screen_parameters(screens, converter) {
-            self.schedule_screen_refresh_after(REFRESH_DELAY_NS, 0);
+            self.schedule_screen_refresh_after(REFRESH_DELAY_NS, 1);
         }
         true
     }
 
     /// Schedules a refresh. A new chain (`attempt == 0`) is not started while one is
-    /// pending or while churn stabilization owns resampling.
+    /// pending or while churn stabilization owns resampling. Only the timer of the
+    /// last scheduled attempt runs; an earlier one finds itself superseded.
     fn schedule_screen_refresh_after(&mut self, delay_ns: i64, attempt: u8) {
         if self.state.timers_disabled
-            || (attempt == 0 && (self.state.display_churn_active || self.state.refresh_pending))
+            || (attempt == 0
+                && (self.state.display_churn_active || self.state.refresh_pending.is_some()))
         {
             return;
         }
-        self.state.refresh_pending = true;
+        self.state.refresh_pending = Some(attempt);
         self.after(delay_ns, Event::ProcessScreenRefresh { attempt });
     }
 
     fn begin_display_churn(&mut self, flags: DisplayReconfigFlags) -> u64 {
-        if !self.state.display_churn_active {
-            // Live membership may already have changed before the display callback.
-            self.state.pre_churn_visible_window_spaces =
-                self.state.last_forwarded.as_ref().map_or_else(
+        match &mut self.state.churn_baseline {
+            // A churn not yet reconciled by a complete sample keeps its older baseline.
+            Some((_, pending_flags)) => *pending_flags |= flags,
+            None => {
+                // Live membership may already have changed before the display callback.
+                let baseline = self.state.last_forwarded.as_ref().map_or_else(
                     || self.state.visible_window_spaces.clone(),
                     |state| state.active_window_spaces.clone(),
                 );
+                self.state.churn_baseline = Some((baseline, flags));
+            }
+        }
+        // One physical change sends several callbacks. Each restarts stabilization, but
+        // the reactor only needs to hear that the topology is no longer authoritative once.
+        if !self.state.display_churn_active {
+            self.invalidate_topology();
+        } else {
+            self.state.display_topology_state = None;
         }
         self.state.display_churn_active = true;
-        self.state.display_churn_flags |= flags;
         self.state.display_churn_epoch = self.state.display_churn_epoch.wrapping_add(1);
         self.state.last_sent_spaces = None;
-        self.invalidate_topology();
         self.state.display_churn_epoch
     }
 
@@ -960,7 +873,6 @@ impl SpacesActor {
     fn finish_display_churn(&mut self, schedule_refresh: bool) {
         self.state.display_churn_active = false;
         self.state.display_churn_epoch = self.state.display_churn_epoch.wrapping_add(1);
-        self.state.display_churn_flags = DisplayReconfigFlags::empty();
         self.state.display_topology_state = None;
 
         if schedule_refresh {
@@ -973,6 +885,38 @@ impl SpacesActor {
             }
         }
     }
+}
+
+/// The delay before retry `attempt`: quick at first, then backing off so a
+/// WindowServer that stays busy is not sampled at full rate indefinitely.
+fn retry_delay(attempt: u8) -> i64 {
+    REFRESH_DELAY_NS << attempt.saturating_sub(REFRESH_MAX_RETRIES).min(REFRESH_MAX_BACKOFF)
+}
+
+/// Windows that left or entered a space between `before` and `after`. A window that
+/// changed spaces does both.
+fn topology_window_delta(
+    before: &HashMap<WindowServerId, SpaceId>,
+    after: &HashMap<WindowServerId, SpaceId>,
+    flags: DisplayReconfigFlags,
+) -> TopologyWindowDelta {
+    let mut delta = TopologyWindowDelta { flags, ..Default::default() };
+    for (&wsid, &space) in after {
+        match before.get(&wsid) {
+            Some(&previous) if previous == space => {}
+            Some(&previous) => {
+                delta.disappeared.push((wsid, previous));
+                delta.appeared.push((wsid, space));
+            }
+            None => delta.appeared.push((wsid, space)),
+        }
+    }
+    for (&wsid, &space) in before {
+        if !after.contains_key(&wsid) {
+            delta.disappeared.push((wsid, space));
+        }
+    }
+    delta
 }
 
 fn is_fullscreen_space(space: SpaceId) -> bool { window_server::space_is_fullscreen(space.get()) }
