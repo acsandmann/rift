@@ -1381,9 +1381,12 @@ fn user_space_window_server_events_preserve_hidden_window_state() {
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)]));
     reactor.insert_test_window(wid, wsid, Some(space1), frame, true);
 
+    // Keep this synthetic ID independent of the desktop's real WindowServer ID 21.
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space1.get()]));
     crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
     window_server_destroyed(&mut reactor, wsid, space1, SpaceEventKind::User);
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
 
     assert!(reactor.state.windows.contains_window(wid));
     assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space1));
@@ -3813,6 +3816,136 @@ fn duplicate_carbon_activation_is_forwarded_to_app_thread_once() {
         .filter(|request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid))
         .count();
     assert_eq!(activation_count, 1);
+}
+
+#[test]
+fn native_focus_refreshes_stale_window_admission() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(7, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, wid.pid, make_windows(1));
+    let fresh = reactor.state.windows.window(wid).unwrap().info.clone();
+    reactor.handle_event(Event::WindowMinimized(wid));
+    let stale = reactor.state.windows.window_mut(wid).unwrap();
+    stale.info.is_minimized = false;
+    stale.is_manageable = false;
+    let _ = apps.requests();
+    assert!(reactor.query_window_info(wid).is_none());
+
+    reactor.handle_event(Event::WindowServerFocusChanged(wid, space));
+    let token = apps
+        .requests()
+        .into_iter()
+        .find_map(|request| match request {
+            Request::RefreshWindowInventory(token) => Some(token),
+            _ => None,
+        })
+        .expect("native focus must refresh a known window with stale admission metadata");
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: wid.pid,
+        token,
+        successful: true,
+        new: vec![(wid, fresh)],
+        known_visible: vec![wid],
+    });
+
+    assert!(reactor.query_window_info(wid).is_some());
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+}
+
+#[test]
+fn carbon_activation_refreshes_inventory_once_when_no_windows_are_admitted() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, SpaceId::new(1), 7, make_windows(1));
+    reactor.state.windows.window_mut(WindowId::new(7, 1)).unwrap().is_manageable = false;
+    let _ = apps.requests();
+    reactor.handle_event(Event::ApplicationGloballyActivated(7));
+    reactor.handle_event(Event::ApplicationGloballyActivated(7));
+    assert_eq!(
+        apps.requests()
+            .into_iter()
+            .filter(|request| matches!(request, Request::RefreshWindowInventory(_)))
+            .count(),
+        1,
+        "activation must recover missed window creation/show notifications"
+    );
+}
+
+#[test]
+fn focus_and_activation_do_not_rescan_intentionally_excluded_windows() {
+    for case in [
+        "healthy",
+        "unmanaged",
+        "minimized",
+        "nonstandard",
+        "child",
+        "role",
+        "layer",
+    ] {
+        for native_focus in [false, true] {
+            let (mut apps, mut reactor) = test_context();
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+            let space = SpaceId::new(1);
+            let wid = WindowId::new(7, 1);
+            apps.make_app_and_settle_on_screen(
+                &mut reactor,
+                screen,
+                space,
+                wid.pid,
+                make_windows(1),
+            );
+            let window = reactor.state.windows.window_mut(wid).unwrap();
+            if case != "healthy" {
+                window.is_manageable = false;
+            }
+            match case {
+                "unmanaged" => window.manage_override = Some(false),
+                "minimized" => window.info.is_minimized = true,
+                "nonstandard" => window.info.is_standard = false,
+                "child" => window.info.is_root = false,
+                "role" => window.info.ax_role = Some("AXTextField".into()),
+                "layer" => {
+                    let wsid = WindowServerId(u32::MAX - 7);
+                    window.info.sys_id = Some(wsid);
+                    reactor.track_test_window_server_info(wsid, wid.pid, screen);
+                    let mut info = reactor.state.windows.get_window_server_info(wsid).unwrap();
+                    info.layer = 1;
+                    reactor.state.windows.track_window_server_info(info);
+                }
+                _ => {}
+            }
+            let _ = apps.requests();
+            reactor.handle_event(if native_focus {
+                Event::WindowServerFocusChanged(wid, space)
+            } else {
+                Event::ApplicationGloballyActivated(wid.pid)
+            });
+            assert!(
+                !apps
+                    .requests()
+                    .iter()
+                    .any(|request| matches!(request, Request::RefreshWindowInventory(_))),
+                "must not rescan {case} windows on native_focus={native_focus}"
+            );
+        }
+    }
+}
+
+#[test]
+fn carbon_activation_refreshes_inventory_when_windows_are_missing() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, SpaceId::new(1), 7, make_windows(1));
+    reactor.handle_event(Event::WindowDestroyed(WindowId::new(7, 1)));
+    let _ = apps.requests();
+    reactor.handle_event(Event::ApplicationGloballyActivated(7));
+    assert!(
+        apps.requests()
+            .iter()
+            .any(|request| matches!(request, Request::RefreshWindowInventory(_)))
+    );
 }
 
 #[test]
