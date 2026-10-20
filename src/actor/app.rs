@@ -308,6 +308,8 @@ pub(crate) enum FrameSource {
     Ordinary,
     Drag,
     Viewport,
+    /// A hidden-corner placement macOS may clamp, so it is never repaired.
+    Park,
 }
 
 #[derive(Default)]
@@ -1347,12 +1349,15 @@ impl State {
                     .window_mut(wid)
                 {
                     Ok(window) => {
-                        window.frame_source = FrameSource::Ordinary;
+                        // macOS keeps a parked title bar onscreen, so a park never
+                        // matches its target; rewriting it would only be clamped again.
+                        let parked = std::mem::take(&mut window.frame_source) == FrameSource::Park;
                         let ended_animation = std::mem::replace(&mut window.is_animating, false);
+                        let last_animation_frame = window.last_animation_frame.take();
                         (
                             window.elem.clone(),
                             window.last_seen_txid,
-                            window.last_animation_frame.take(),
+                            last_animation_frame.filter(|_| !parked),
                             ended_animation,
                         )
                     }

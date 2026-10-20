@@ -14,9 +14,10 @@ use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{DragDropSettings, LayoutMode};
+use crate::common::config::{DragDropSettings, LayoutMode, WorkspaceTransition};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
+use crate::sys::power;
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -160,6 +161,25 @@ pub struct WorkspaceSwitchManager {
     pub active_workspace_switch: Option<u64>,
     pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
     pub pending_workspace_mouse_warp: Option<WindowId>,
+    /// Direction of the switch awaiting its first arrange; consumed by `apply_layout`.
+    pub pending_transition: Option<(SpaceId, WorkspaceTransitionDirection)>,
+}
+
+/// Order of the incoming workspace relative to the outgoing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceTransitionDirection {
+    Forward,
+    Backward,
+}
+
+impl WorkspaceTransitionDirection {
+    pub fn between(from: Option<u64>, to: Option<u64>) -> Option<Self> {
+        match (from?, to?) {
+            (from, to) if to > from => Some(Self::Forward),
+            (from, to) if to < from => Some(Self::Backward),
+            _ => None,
+        }
+    }
 }
 
 impl WorkspaceSwitchManager {
@@ -168,6 +188,7 @@ impl WorkspaceSwitchManager {
         self.active_workspace_switch = Some(self.workspace_switch_generation);
         self.workspace_switch_state = WorkspaceSwitchState::Active;
         self.pending_workspace_switch_origin = Some(origin);
+        self.pending_transition = None;
     }
 
     pub fn manual_switch_in_progress(&self) -> bool {
@@ -438,6 +459,25 @@ impl LayoutManager {
         layout_result
     }
 
+    /// Claim the pending transition for `space` when the switch should animate.
+    fn take_workspace_transition(
+        reactor: &mut Reactor,
+        space: SpaceId,
+    ) -> Option<WorkspaceTransitionDirection> {
+        let switch = &mut reactor.workspace_switch_manager;
+        let (pending_space, direction) = switch.pending_transition?;
+        if pending_space != space {
+            return None;
+        }
+        switch.pending_transition = None;
+        let enabled = reactor.config.settings.workspace_transition == WorkspaceTransition::Slide
+            && reactor.config.settings.workspace_transition_duration > 0.0
+            && !reactor.is_in_drag()
+            && !power::is_low_power_mode_enabled();
+        trace!(?space, ?direction, enabled, "Workspace transition requested");
+        enabled.then_some(direction)
+    }
+
     fn apply_layout(
         reactor: &mut Reactor,
         layout_result: LayoutResult,
@@ -539,7 +579,11 @@ impl LayoutManager {
                 }
             }
 
-            if is_workspace_switch {
+            if let Some(direction) = Self::take_workspace_transition(reactor, space) {
+                any_frame_changed |= AnimationManager::workspace_transition_layout(
+                    reactor, space, &layout, skip_wid, direction,
+                );
+            } else if is_workspace_switch {
                 any_frame_changed |=
                     AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {

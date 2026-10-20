@@ -526,6 +526,7 @@ impl Reactor {
                 active_workspace_switch: None,
                 pending_workspace_switch_origin: None,
                 pending_workspace_mouse_warp: None,
+                pending_transition: None,
             },
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
@@ -2782,6 +2783,8 @@ impl Reactor {
             println!("{line}");
         }
         self.workspace_switch_manager.mark_workspace_switch_inactive();
+        // A transition is only meaningful for the arrange that immediately follows its switch.
+        self.workspace_switch_manager.pending_transition = None;
         if self.workspace_switch_manager.active_workspace_switch.is_some() && !layout_changed {
             self.workspace_switch_manager.active_workspace_switch = None;
             trace!("Workspace switch stabilized with no further frame changes");
@@ -4059,10 +4062,7 @@ impl Reactor {
         let workspace_switch_space = workspace_focus.map(|request| request.space);
         if let Some(request) = workspace_focus {
             self.store_current_floating_positions(request.space);
-            self.workspace_switch_manager
-                .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
-            response = self.layout_manager.layout_engine.switch_to_workspace_with_focus(
-                &self.state.windows,
+            response = self.auto_switch_workspace_with_focus(
                 request.space,
                 request.workspace_index,
                 request.window,
@@ -4491,11 +4491,7 @@ impl Reactor {
                 );
 
                 self.store_current_floating_positions(window_space);
-                self.workspace_switch_manager
-                    .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
-
-                let response = self.layout_manager.layout_engine.switch_to_workspace_with_focus(
-                    &self.state.windows,
+                let response = self.auto_switch_workspace_with_focus(
                     window_space,
                     workspace_index,
                     app_window_id,
@@ -4506,6 +4502,33 @@ impl Reactor {
         }
 
         EventOutcome::no_change()
+    }
+
+    fn auto_switch_workspace_with_focus(
+        &mut self,
+        space: SpaceId,
+        workspace_index: usize,
+        window: WindowId,
+    ) -> layout::EventResponse {
+        let active_index = |reactor: &Self| {
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+        };
+        let index_before_switch = active_index(self);
+        self.workspace_switch_manager
+            .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
+        let response = self.layout_manager.layout_engine.switch_to_workspace_with_focus(
+            &self.state.windows,
+            space,
+            workspace_index,
+            window,
+        );
+        self.workspace_switch_manager.pending_transition =
+            managers::WorkspaceTransitionDirection::between(
+                index_before_switch,
+                active_index(self),
+            )
+            .map(|direction| (space, direction));
+        response
     }
 
     fn handle_layout_response(

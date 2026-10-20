@@ -6,7 +6,7 @@ use crate::actor::raise_manager;
 use crate::actor::reactor::WorkspaceSwitchOrigin;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{
-    AppManager, DragManager, LayoutManager, WorkspaceSwitchManager,
+    AppManager, DragManager, LayoutManager, WorkspaceSwitchManager, WorkspaceTransitionDirection,
 };
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::HashMap;
@@ -102,6 +102,17 @@ pub fn handle_command_layout(
     if !is_workspace_switch {
         workspace_switch.mark_workspace_switch_inactive();
     }
+    let active_index = |layout: &LayoutManager| {
+        workspace_space
+            .and_then(|space| layout.layout_engine.workspaces().active_workspace_idx(space))
+    };
+    let index_before_switch = active_index(layout);
+    // Next/prev keep their natural direction across wrap-around.
+    let command_direction = match &cmd {
+        LayoutCommand::NextWorkspace(_) => Some(WorkspaceTransitionDirection::Forward),
+        LayoutCommand::PrevWorkspace(_) => Some(WorkspaceTransitionDirection::Backward),
+        _ => None,
+    };
 
     let response = match &cmd {
         LayoutCommand::NextWorkspace(_)
@@ -157,6 +168,13 @@ pub fn handle_command_layout(
     // Only begin the switch lifecycle once a real transition has been produced.
     if is_workspace_switch {
         workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
+        let index_after_switch = active_index(layout);
+        let direction = command_direction.or_else(|| {
+            WorkspaceTransitionDirection::between(index_before_switch, index_after_switch)
+        });
+        workspace_switch.pending_transition = workspace_space
+            .zip(direction)
+            .filter(|_| index_before_switch != index_after_switch);
     }
 
     let response_changed = response.changed;
