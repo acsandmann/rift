@@ -96,6 +96,7 @@ impl PersistedLayout {
             scroll_boundary: None,
             native_layouts: HashMap::default(),
             native_reconcile_batch: None,
+            evicted: HashMap::default(),
             floating: self.floating,
             floating_positions: self.floating_positions,
             app_rules: AppRuleEngine::default(),

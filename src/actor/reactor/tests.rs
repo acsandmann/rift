@@ -8293,6 +8293,150 @@ fn topology_revocation_protects_windows_before_queued_invalidation_is_delivered(
     assert!(reactor.state.windows.contains_window(wid));
 }
 
+/// Two displays on one Space each: D1 holds A and B in workspace 0 and E in workspace 1; D2
+/// holds C and D in workspace 0 and F in workspace 2. D2 is unplugged (macOS merges every window
+/// onto D1's Space) and plugged back in under a new Space id.
+fn unplug_and_replug_second_display(
+    between: impl FnOnce(&mut Reactor, &[WindowId; 6], SpaceId),
+) -> (Reactor, [WindowId; 6], SpaceId, SpaceId) {
+    let mut reactor = test_reactor_with_workspace_count(3);
+    let (a, b, returned) = (SpaceId::new(901), SpaceId::new(902), SpaceId::new(903));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), left.size);
+    reactor.handle_loop_event(space_state_event_with(
+        vec![left, right],
+        vec![Some(a), Some(b)],
+        |s| {
+            s.display_set_changed = true;
+            s.membership_complete = true;
+        },
+    ));
+    let display = reactor.space_state.screens[1].display_uuid.clone();
+    reactor.add_test_app(91);
+    let place = |reactor: &mut Reactor, idx, space, frame, workspace| {
+        let wid = WindowId::new(91, idx);
+        reactor.add_test_window(wid, WindowServerId::new(910_000 + idx), Some(space), frame);
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+        if workspace != 0 {
+            reactor.handle_test_workspace_command(space, &LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Index(workspace),
+                follow: false,
+                window_id: Some(wid.idx.get()),
+            });
+        }
+        wid
+    };
+    let windows = [
+        place(&mut reactor, 1, a, left, 0),
+        place(&mut reactor, 2, a, left, 0),
+        place(&mut reactor, 3, a, left, 1),
+        place(&mut reactor, 4, b, right, 0),
+        place(&mut reactor, 5, b, right, 0),
+        place(&mut reactor, 6, b, right, 2),
+    ];
+    let native = |reactor: &Reactor, space: Option<SpaceId>| {
+        for wid in &windows {
+            let wsid = reactor.test_window_server_id(*wid);
+            window_server::set_window_spaces_override(wsid, space.map(|s| vec![s.get()]));
+            window_server::set_window_ordered_in_override(wsid, space.map(|_| true));
+        }
+    };
+
+    native(&reactor, Some(a));
+    reactor.handle_loop_event(space_state_event_with(vec![left], vec![Some(a)], |s| {
+        s.display_set_changed = true;
+        s.membership_complete = true;
+        for wid in &windows {
+            s.active_window_spaces.insert(WindowServerId::new(910_000 + wid.idx.get()), a);
+        }
+    }));
+    native(&reactor, None);
+    between(&mut reactor, &windows, a);
+
+    let back = &windows[3..];
+    for wid in back {
+        let wsid = reactor.test_window_server_id(*wid);
+        window_server::set_window_spaces_override(wsid, Some(vec![returned.get()]));
+        window_server::set_window_ordered_in_override(wsid, Some(true));
+    }
+    let mut screens = make_screen_snapshots(vec![left, right], vec![Some(a), Some(returned)]);
+    screens[1].id = crate::sys::screen::ScreenId::new(99);
+    screens[1].display_uuid = display;
+    let mut snapshot = forwarded_space_state(screens);
+    snapshot.display_set_changed = true;
+    snapshot.membership_complete = true;
+    snapshot.space_remaps.push((b, returned));
+    for (index, wid) in windows.iter().enumerate() {
+        let space = if index >= 3 { returned } else { a };
+        snapshot
+            .active_window_spaces
+            .insert(WindowServerId::new(910_000 + wid.idx.get()), space);
+    }
+    reactor.handle_loop_event(Event::SpaceStateChanged(snapshot));
+    native(&reactor, None);
+    (reactor, windows, a, returned)
+}
+
+fn workspace_position(reactor: &mut Reactor, wid: WindowId) -> Option<(SpaceId, usize)> {
+    let space = reactor.assigned_space_for_window_id(wid)?;
+    let workspace = reactor.test_workspace_for_window(space, wid)?;
+    let position = reactor.test_workspace_ids(space).iter().position(|id| *id == workspace)?;
+    Some((space, position))
+}
+
+#[test]
+fn unplugged_display_windows_land_on_matching_workspaces_and_return_to_them() {
+    let mut on_unplug = Vec::new();
+    let (mut reactor, windows, survivor, returned) =
+        unplug_and_replug_second_display(|reactor, windows, _| {
+            on_unplug = windows.iter().map(|wid| workspace_position(reactor, *wid)).collect();
+        });
+    // The unplug kept each window's workspace position on the surviving display.
+    assert_eq!(on_unplug, vec![
+        Some((survivor, 0)),
+        Some((survivor, 0)),
+        Some((survivor, 1)),
+        Some((survivor, 0)),
+        Some((survivor, 0)),
+        Some((survivor, 2)),
+    ]);
+    // The return restored the replugged display's windows, including the hidden workspace.
+    let positions: Vec<_> =
+        windows.iter().map(|wid| workspace_position(&mut reactor, *wid)).collect();
+    assert_eq!(positions, vec![
+        Some((survivor, 0)),
+        Some((survivor, 0)),
+        Some((survivor, 1)),
+        Some((returned, 0)),
+        Some((returned, 0)),
+        Some((returned, 2)),
+    ]);
+}
+
+#[test]
+fn a_placement_made_while_the_display_was_away_beats_the_remembered_position() {
+    let (mut reactor, windows, survivor, returned) =
+        unplug_and_replug_second_display(|reactor, windows, survivor| {
+            // The user moves F, remembered at workspace 2, to workspace 1 while D2 is away.
+            reactor.handle_test_workspace_command(
+                survivor,
+                &LayoutCommand::MoveWindowToWorkspace {
+                    workspace: WorkspaceSelector::Index(1),
+                    follow: false,
+                    window_id: Some(windows[5].idx.get()),
+                },
+            );
+            assert_eq!(workspace_position(reactor, windows[5]), Some((survivor, 1)));
+        });
+    let (space, position) = workspace_position(&mut reactor, windows[5]).unwrap();
+    assert_eq!(space, returned);
+    assert_ne!(
+        position, 2,
+        "the user's placement must not be undone by the remembered one"
+    );
+    assert_eq!(workspace_position(&mut reactor, windows[2]), Some((survivor, 1)));
+}
+
 #[test]
 fn disconnect_does_not_erase_display_layout_memory() {
     let mut reactor = test_reactor_with_workspace_count(2);

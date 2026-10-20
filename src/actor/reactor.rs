@@ -3805,18 +3805,35 @@ impl Reactor {
             return;
         }
         if self.assigned_space_for_window_id(wid) != Some(space) {
+            let departed_from = self.state.windows.workspace_info_for_window(wid);
+            // A window a departure moved off this display goes back where it was.
+            let returning =
+                self.layout_manager.layout_engine.take_eviction(&self.state.windows, wid, space);
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             let engine = &mut self.layout_manager.layout_engine;
             engine.workspaces_mut().list_workspaces(space);
-            let assigned = if preserve_workspace_ordinal {
-                engine
+            let remembered = returning
+                .and_then(|ordinal| engine.workspaces().workspace_ids(space).get(ordinal).copied());
+            let assigned = if let Some(workspace) = remembered {
+                engine.workspaces_mut().assign_window_to_workspace(
+                    &mut self.state.windows,
+                    space,
+                    wid,
+                    workspace,
+                )
+            } else if preserve_workspace_ordinal {
+                let assigned = engine
                     .workspaces_mut()
                     .assign_window_to_workspace_preserving_ordinal(
                         &mut self.state.windows,
                         space,
                         wid,
                     )
-                    .is_some()
+                    .is_some();
+                if assigned && let Some(from) = departed_from {
+                    engine.note_eviction(&self.state.windows, wid, from);
+                }
+                assigned
             } else {
                 let Some((workspace, _)) = engine.ensure_active_workspace_info(space) else {
                     return;
