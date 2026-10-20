@@ -21,6 +21,7 @@
 //!    if it would invalidate spaces, it waits for a complete one.
 
 use super::*;
+use crate::sys::wm_bridge;
 
 impl Reactor {
     // Applying snapshots
@@ -36,6 +37,13 @@ impl Reactor {
             self.pending_space_change_manager.pending_space_change = Some(snapshot);
             return Ok(EventOutcome::default());
         }
+        self.pending_native_returns.retain(|wid, destination| {
+            self.state
+                .windows
+                .window(*wid)
+                .and_then(|window| window.info.sys_id)
+                .is_some_and(|wsid| snapshot.active_window_spaces.get(&wsid) != Some(destination))
+        });
         let space_remaps = self.space_remaps(&snapshot);
         let invalidated_spaces = self.invalidated_spaces(&snapshot, &space_remaps);
         if !snapshot.membership_complete && !invalidated_spaces.is_empty() {
@@ -43,6 +51,58 @@ impl Reactor {
             // an inconclusive query. The spaces actor retries until one is complete.
             self.pending_space_change_manager.pending_space_change = Some(snapshot);
             return Ok(EventOutcome::default());
+        }
+        if snapshot.membership_complete
+            && snapshot.display_set_changed
+            && !self.space_state.screens.is_empty()
+        {
+            let previous = &self.space_state.display_space_ids;
+            let candidates: Vec<_> = snapshot
+                .display_space_ids
+                .values()
+                .flatten()
+                .copied()
+                .filter(|space| !previous.values().any(|spaces| spaces.contains(space)))
+                .filter(|space| !snapshot.fullscreen_spaces.contains(space))
+                .filter(|space| !space_remaps.iter().any(|(_, new)| new == space))
+                .filter(|space| {
+                    self.layout_manager.layout_engine.workspaces().workspace_ids(*space).is_empty()
+                })
+                .collect();
+            if !candidates.is_empty()
+                && let Some(tx) = &self.spaces_tx
+            {
+                tx.send(crate::actor::spaces::Event::RetireUnusedDesktops {
+                    revision: snapshot.revision,
+                    spaces: candidates,
+                });
+            }
+        }
+        let display_reconfigured = snapshot.display_set_changed
+            || snapshot.should_force_refresh_layout
+            || !snapshot.resized_spaces.is_empty();
+        if display_reconfigured {
+            // A desktop that itself changed display is being recovered by identity
+            // reconciliation; its windows must not be pulled back to the reused id.
+            self.aftercare_windows = self
+                .state
+                .windows
+                .iter_windows()
+                .filter_map(|(wid, _)| {
+                    let space = self.assigned_space_for_window_id(wid)?;
+                    let display = self
+                        .space_state
+                        .display_space_ids
+                        .iter()
+                        .find(|(_, spaces)| spaces.contains(&space))?
+                        .0;
+                    snapshot
+                        .display_space_ids
+                        .get(display)
+                        .is_some_and(|spaces| spaces.contains(&space))
+                        .then_some(wid)
+                })
+                .collect();
         }
         let spaces: Vec<_> = snapshot.screens.iter().map(|screen| screen.space).collect();
         let topology_changed = snapshot.topology_changed();
@@ -99,12 +159,17 @@ impl Reactor {
 
         self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
         self.space_state.screens = screens;
-        if topology_changed {
+        if display_reconfigured {
             self.topology_changed_at = Some(Instant::now());
+            self.sent_back_after_display_change.clear();
+            self.pending_native_returns.clear();
             self.clear_pending_hidden_window_targets();
             self.retarget_drag_off_departed_display();
         }
         for &(old, new) in &space_remaps {
+            if let Some(record) = self.moved_desktops.remove(&old) {
+                self.moved_desktops.insert(new, record);
+            }
             self.layout_manager.layout_engine.remap_space(&mut self.state.windows, old, new);
         }
         self.space_activation_policy.remap_spaces(&space_remaps);
@@ -113,6 +178,14 @@ impl Reactor {
             else {
                 continue;
             };
+            if self
+                .layout_manager
+                .layout_engine
+                .display_uuid_for_space(space)
+                .is_some_and(|previous| previous != display_uuid)
+            {
+                self.moved_desktops.insert(space, (Instant::now(), None));
+            }
             self.layout_manager
                 .layout_engine
                 .update_space_display(space, Some(display_uuid.to_string()));
@@ -144,6 +217,7 @@ impl Reactor {
             topology_changed,
         );
         self.try_apply_pending_space_change();
+        self.rescue_offscreen_floats();
         if should_force_refresh_layout {
             outcome = outcome.with_arrange_passes(1);
         }
@@ -237,7 +311,7 @@ impl Reactor {
             }
             here > elsewhere
         };
-        let mut remaps: Vec<(SpaceId, SpaceId)> = Vec::new();
+        let mut remaps = self.vanished_desktop_remaps(snapshot);
         // Each pass can free a space a later display's desktop is renumbered to.
         loop {
             let found = remaps.len();
@@ -279,6 +353,119 @@ impl Reactor {
                 return remaps;
             }
         }
+    }
+
+    /// Desktops that are gone from every display, paired with the new desktops holding
+    /// their windows (see [`desktop_match`]). This covers every desktop of a returning
+    /// display, hidden ones included, which may come back under another display.
+    ///
+    /// A desktop is only matched once its own display is connected again. Until then
+    /// its windows were carried onto the displays that stayed, and that is not where
+    /// the desktop went. Only desktops with no workspaces yet can receive a match.
+    pub(super) fn vanished_desktop_remaps(
+        &self,
+        snapshot: &ForwardedSpaceState,
+    ) -> Vec<(SpaceId, SpaceId)> {
+        use super::desktop_match::{Desktop, match_desktops};
+
+        let engine = &self.layout_manager.layout_engine;
+        let inventory = &snapshot.display_space_ids;
+        let connected: HashSet<&str> =
+            snapshot.screens.iter().map(|screen| screen.display_uuid.as_str()).collect();
+        let mut vanished: Vec<(SpaceId, String)> = engine
+            .workspaces()
+            .layout_spaces()
+            .into_iter()
+            .filter(|space| !inventory.values().any(|spaces| spaces.contains(space)))
+            .filter_map(|space| Some((space, engine.display_uuid_for_space(space)?)))
+            .filter(|(_, display)| connected.contains(display.as_str()))
+            .collect();
+        vanished.sort_unstable();
+        let mut fresh: Vec<(SpaceId, &String, usize)> = inventory
+            .iter()
+            .flat_map(|(display, spaces)| {
+                spaces.iter().enumerate().map(move |(index, &space)| (space, display, index))
+            })
+            .filter(|&(space, ..)| {
+                !snapshot.fullscreen_spaces.contains(&space)
+                    && engine.workspaces().workspace_ids(space).is_empty()
+            })
+            .collect();
+        fresh.sort_unstable_by(|a, b| a.1.cmp(b.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
+        if vanished.is_empty() || fresh.is_empty() {
+            return Vec::new();
+        }
+
+        // Each window's home: the workspace it is assigned to, or that it was carried off.
+        let mut homes: HashMap<SpaceId, Vec<(WindowId, WindowServerId)>> = HashMap::default();
+        for (wid, window) in self.state.windows.iter_windows() {
+            let Some(wsid) = window.info.sys_id else { continue };
+            let home = engine
+                .away_home(wid)
+                .map(|(space, _)| space)
+                .or_else(|| self.assigned_space_for_window_id(wid));
+            if let Some(home) = home.filter(|home| vanished.iter().any(|(space, _)| space == home))
+            {
+                homes.entry(home).or_default().push((wid, wsid));
+            }
+        }
+        let mut now_holding: HashMap<SpaceId, Vec<WindowId>> = HashMap::default();
+        for &(wid, wsid) in homes.values().flatten() {
+            let native = snapshot
+                .active_window_spaces
+                .get(&wsid)
+                .copied()
+                .or_else(|| window_server::window_space(wsid));
+            if let Some(native) = native {
+                now_holding.entry(native).or_default().push(wid);
+            }
+        }
+
+        let was: Vec<Desktop> = vanished
+            .into_iter()
+            .filter_map(|(space, display)| {
+                let index = self
+                    .space_state
+                    .display_space_ids
+                    .get(&display)
+                    .and_then(|spaces| spaces.iter().position(|listed| *listed == space));
+                let windows: Vec<WindowId> =
+                    homes.get(&space).into_iter().flatten().map(|(wid, _)| *wid).collect();
+                // With neither windows nor a place among its display's desktops there is
+                // nothing to recognize it by.
+                (!windows.is_empty() || index.is_some()).then(|| Desktop {
+                    space,
+                    display: Some(display),
+                    index: index.unwrap_or(usize::MAX),
+                    windows,
+                })
+            })
+            .collect();
+        let now: Vec<Desktop> = fresh
+            .into_iter()
+            .map(|(space, display, index)| Desktop {
+                space,
+                display: Some(display.clone()),
+                index,
+                windows: now_holding.remove(&space).unwrap_or_default(),
+            })
+            .collect();
+        let matching = match_desktops(&was, &now);
+        // A desktop listed alongside the vanished one is another desktop, as when the
+        // vanished one was deleted and macOS shows its neighbour.
+        let listed_before = |space: SpaceId| {
+            self.space_state
+                .display_space_ids
+                .values()
+                .any(|spaces| spaces.contains(&space))
+        };
+        let mut remaps: Vec<_> = was
+            .iter()
+            .filter_map(|desktop| Some((desktop.space, matching.get(desktop.space)?)))
+            .filter(|&(old, new)| !(listed_before(old) && listed_before(new)))
+            .collect();
+        remaps.sort_unstable();
+        remaps
     }
 
     pub(super) fn try_apply_pending_space_change(&mut self) {
@@ -382,17 +569,155 @@ impl Reactor {
 
     /// Sends windows carried off a display back to their workspaces on it now that it is here.
     pub(super) fn return_displaced_windows(&mut self) {
-        let on_screen: Vec<_> =
-            self.space_state.screens.iter().filter_map(|screen| screen.space).collect();
-        let returned = self
-            .layout_manager
-            .layout_engine
-            .return_displaced_windows(&mut self.state.windows, &on_screen);
-        for (wid, space) in returned {
-            if self.is_space_active(space) && self.state.windows.is_visible_admitted(wid) {
+        let connected: Vec<_> = self
+            .space_state
+            .screens
+            .iter()
+            .flat_map(|screen| self.space_state.display_space_ids.get(&screen.display_uuid))
+            .flatten()
+            .copied()
+            .collect();
+        let candidates: Vec<_> = self
+            .state
+            .windows
+            .iter_windows()
+            .filter_map(|(wid, window)| {
+                let (space, _) = self.layout_manager.layout_engine.away_home(wid)?;
+                connected.contains(&space).then_some((wid, window.info.sys_id, space))
+            })
+            .collect();
+        let mut moved = false;
+        for (wid, wsid, space) in candidates {
+            let engine = &mut self.layout_manager.layout_engine;
+            let current =
+                self.state.windows.workspace_info_for_window(wid).map(|info| info.workspace_id);
+            if current != engine.away_host(wid).map(|(_, workspace)| workspace) {
+                // Let the engine discard the old home slot, respecting a placement made
+                // while the display was away, before issuing any native move.
+                engine.return_displaced_window(&mut self.state.windows, wid);
+                continue;
+            }
+            let issued = wsid.is_some_and(|wsid| wm_bridge::move_windows_to_space(&[wsid], space));
+            moved |= issued;
+            // A frame write can still return a window to a shown desktop on older systems.
+            if !issued && self.space_state.screen_by_space(space).is_none() {
+                continue;
+            }
+            if self
+                .layout_manager
+                .layout_engine
+                .return_displaced_window(&mut self.state.windows, wid)
+                && self.is_space_active(space)
+                && self.state.windows.is_visible_admitted(wid)
+            {
                 self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             }
         }
+        if moved {
+            self.request_space_snapshot();
+        }
+    }
+
+    /// Rescue shown floating or disabled-tiling windows after a display change.
+    /// Hidden floats keep their saved frame until their workspace is shown.
+    pub(super) fn rescue_offscreen_floats(&mut self) -> bool {
+        self.moved_desktops.retain(|_, (at, shown)| {
+            at.elapsed() < Duration::from_secs(30 * 60)
+                && shown.is_none_or(|since| since.elapsed() < Duration::from_secs(3))
+        });
+        let after_churn = self
+            .topology_changed_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(10));
+        if (!after_churn && self.moved_desktops.is_empty())
+            || self.is_in_drag()
+            || self.is_mission_control_active()
+            || self.refreshes_blocked()
+        {
+            return false;
+        }
+        for screen in &self.space_state.screens {
+            if let Some(space) = screen.space
+                && let Some((_, shown)) = self.moved_desktops.get_mut(&space)
+            {
+                shown.get_or_insert_with(Instant::now);
+            }
+        }
+        let moves: Vec<_> = self
+            .state
+            .windows
+            .iter_windows()
+            .filter_map(|(wid, window)| {
+                let assigned = self.state.windows.workspace_info_for_window(wid)?;
+                let engine = &self.layout_manager.layout_engine;
+                let disabled = !self.is_space_active(assigned.space);
+                let visible = if disabled {
+                    window.is_admitted()
+                        && window.info.sys_id.is_some_and(|wsid| {
+                            self.space_state.active_window_spaces.get(&wsid)
+                                == Some(&assigned.space)
+                        })
+                } else {
+                    self.state.windows.is_visible_admitted(wid)
+                };
+                if (!engine.is_window_floating(wid) && !disabled)
+                    || engine.workspaces().active_workspace(assigned.space)
+                        != Some(assigned.workspace_id)
+                    || !visible
+                {
+                    return None;
+                }
+                let screen = self.space_state.screen_by_space(assigned.space)?.frame;
+                let frame = window.frame_monotonic;
+                let area = frame.size.width * frame.size.height;
+                if area <= 1.0 {
+                    return None;
+                }
+                let overlap = frame.intersection(&screen);
+                let moved = self.moved_desktops.contains_key(&assigned.space);
+                let overhangs = frame.origin.x < screen.origin.x - 2.
+                    || frame.origin.y < screen.origin.y - 2.
+                    || frame.max().x > screen.max().x + 2.
+                    || frame.max().y > screen.max().y + 2.;
+                let mostly_gone =
+                    overlap.size.width.max(0.) * overlap.size.height.max(0.) / area < 0.25;
+                if !(if moved || (after_churn && disabled) {
+                    overhangs
+                } else {
+                    after_churn && mostly_gone
+                }) {
+                    return None;
+                }
+                let size = CGSize::new(
+                    frame.size.width.min(screen.size.width),
+                    frame.size.height.min(screen.size.height),
+                );
+                let target = CGRect::new(
+                    CGPoint::new(
+                        frame.origin.x.clamp(screen.origin.x, screen.max().x - size.width),
+                        frame.origin.y.clamp(screen.origin.y, screen.max().y - size.height),
+                    ),
+                    size,
+                );
+                Some((wid, window.info.sys_id?, assigned, target))
+            })
+            .collect();
+        let rescued = !moves.is_empty();
+        for (wid, wsid, assigned, target) in moves {
+            if self.layout_manager.layout_engine.is_window_floating(wid) {
+                self.layout_manager.layout_engine.store_floating_position(
+                    assigned.space,
+                    assigned.workspace_id,
+                    wid,
+                    target,
+                );
+            }
+            let txid = self.transaction_manager.generate_next_txid(wsid);
+            self.transaction_manager.store_txid(wsid, txid, target);
+            if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+                _ = app.handle.send(Request::set_window_frame(wid, target, txid, true));
+            }
+        }
+        rescued
     }
 
     /// Takes the frames of windows on shown workspaces from the window server and forgets their
@@ -405,7 +730,7 @@ impl Reactor {
         let shown: HashMap<WindowServerId, WindowId> = self
             .space_state
             .iter_known_spaces()
-            .filter(|space| self.is_space_active(*space))
+            .filter(|space| self.space_state.screen_by_space(*space).is_some())
             .flat_map(|space| {
                 engine.workspaces().windows_in_active_workspace(&self.state.windows, space)
             })
@@ -631,11 +956,20 @@ impl Reactor {
             let inactive_target = native.filter(|space| {
                 !self.is_space_active(*space) && window_server::space_is_user(space.get())
             });
+            // A hidden workspace is not projected on screen. A missing native window
+            // can be entering fullscreen before that desktop is identified; retain its
+            // slot until positive membership or the app inventory resolves its lifecycle.
+            let hidden_workspace = self.state.windows.tracked_window_id(wsid).is_some_and(|wid| {
+                self.state.windows.workspace_info_for_window(wid).is_some_and(|assigned| {
+                    self.layout_manager.layout_engine.workspaces().active_workspace(assigned.space)
+                        != Some(assigned.workspace_id)
+                })
+            });
             if let Some((wid, target)) = self.state.windows.reconcile_native_absence(
                 wsid,
                 &self.active_spaces,
                 inactive_target,
-                preserve_missing_assignments,
+                preserve_missing_assignments || hidden_workspace,
             ) {
                 if let Some(space) = target {
                     let preserve_ordinal = self
@@ -770,6 +1104,9 @@ impl Reactor {
         let assigned = self.state.windows.workspace_info_for_window(wid);
         if assigned.is_some_and(|assigned| assigned.space == space) {
             self.layout_manager.layout_engine.confirm_window_space(wid, space);
+            if self.pending_native_returns.get(&wid) == Some(&space) {
+                self.pending_native_returns.remove(&wid);
+            }
         } else if !self.follow_native_space(wid, assigned, space, preserve_workspace_ordinal) {
             return;
         }
@@ -799,28 +1136,26 @@ impl Reactor {
             // connected display remain valid destinations for an actual native-space move.
             return false;
         }
-        if away_home.is_some_and(|(home, _)| home == space) {
-            if self.space_state.screen_by_space(space).is_none() {
-                // The window server can still name the desktop of a display that is gone.
-                return false;
-            }
-            if self
+        // The first check above leaves only a home on a connected display, shown or not.
+        if away_home.is_some_and(|(home, _)| home == space)
+            && self
                 .layout_manager
                 .layout_engine
                 .return_displaced_window(&mut self.state.windows, wid)
-            {
-                self.layout_manager.layout_engine.confirm_window_space(wid, space);
-                return true;
-            }
+        {
+            self.layout_manager.layout_engine.confirm_window_space(wid, space);
+            return true;
+        }
+        if assigned.is_some_and(|assigned| {
+            self.layout_manager.layout_engine.is_returning_home(wid, assigned.space)
+        }) {
+            // Hidden desktops need the same acknowledgement guard as shown desktops.
+            return false;
         }
         if let Some(assigned) = assigned
             && self.space_state.screen_by_space(assigned.space).is_some()
         {
             let engine = &self.layout_manager.layout_engine;
-            if engine.is_returning_home(wid, assigned.space) {
-                // Sent home and on its way; the window server has yet to catch up.
-                return false;
-            }
             if self.main_display_changed_at.is_some_and(|at| at.elapsed() < MAIN_DISPLAY_CHURN)
                 && engine.workspaces().active_workspace(assigned.space)
                     != Some(assigned.workspace_id)
@@ -831,6 +1166,38 @@ impl Reactor {
                 // hidden again where it belongs.
                 return false;
             }
+        }
+        if self.pending_native_returns.contains_key(&wid)
+            && self.topology_changed_at.is_some_and(|at| at.elapsed() < AFTERCARE)
+        {
+            return false;
+        }
+        if let Some(assigned) = assigned
+            && away_home.is_none()
+            && self.aftercare_windows.contains(&wid)
+            && self.topology_changed_at.is_some_and(|at| at.elapsed() < AFTERCARE)
+            && self.space_is_listed_on_connected_display(assigned.space)
+            && !self.is_native_fullscreen_space(space)
+            && self.space_state.display_space_ids.iter().any(|(home_display, spaces)| {
+                spaces.contains(&assigned.space)
+                    && self.space_state.display_space_ids.iter().any(|(other_display, spaces)| {
+                        other_display != home_display && spaces.contains(&space)
+                    })
+            })
+            && !self.is_in_drag()
+            && !self.sent_back_after_display_change.contains(&wid)
+            && let Some(wsid) = self.state.windows.window(wid).and_then(|w| w.info.sys_id)
+            && wm_bridge::move_windows_to_space(&[wsid], assigned.space)
+        {
+            // The window server goes on moving windows for a few seconds after a display
+            // change, putting some where they were the last time these displays were
+            // attached. Nobody chose that, so the window is sent back to its desktop. A
+            // window moved again is left where it is.
+            self.sent_back_after_display_change.insert(wid);
+            self.pending_native_returns.insert(wid, assigned.space);
+            self.request_space_snapshot();
+            debug!(?wid, from = ?space, to = ?assigned.space, "Sent back a window a display change moved");
+            return false;
         }
         // A window carried off a departed display stays in its home tree, so the display's
         // layout is intact when it returns.

@@ -83,6 +83,11 @@ pub enum Event {
     },
     SpaceInventoryChanged,
     ReconcileWindowSpaces,
+    /// Newly minted desktops the reactor did not use to recover a workspace.
+    RetireUnusedDesktops {
+        revision: u64,
+        spaces: Vec<SpaceId>,
+    },
     SpaceCreated(SpaceId),
     SpaceDestroyed(SpaceId),
     WindowServerAppeared(WindowServerId, SpaceId),
@@ -187,6 +192,8 @@ pub struct AuthorityState {
     revision: u64,
     last_forwarded: Option<ForwardedSpaceState>,
     timers_disabled: bool,
+    /// Only desktops minted in a display-set change qualify, for a bounded time.
+    unused_desktops: HashMap<SpaceId, std::time::Instant>,
 }
 
 pub struct SpacesActor {
@@ -294,6 +301,17 @@ impl SpacesActor {
                     self.schedule_display_stabilization(epoch, 0);
                 }
             }
+            Event::RetireUnusedDesktops { revision, spaces } => {
+                if self.topology_is_authoritative() && revision == self.state.revision {
+                    for space in spaces {
+                        self.state
+                            .unused_desktops
+                            .entry(space)
+                            .or_insert_with(std::time::Instant::now);
+                    }
+                    self.retire_unused_desktops();
+                }
+            }
             Event::ReconcileWindowSpaces => {
                 // A native move may be the first evidence of display churn. Refresh
                 // physical screens too, rather than waiting for its late callback.
@@ -346,6 +364,7 @@ impl SpacesActor {
                 if expected_epoch == self.state.display_churn_epoch
                     && self.topology_is_authoritative()
                 {
+                    self.retire_unused_desktops();
                     self.reactor_tx.send(reactor::Event::DisplaysSettled);
                 }
             }
@@ -454,7 +473,55 @@ impl SpacesActor {
             forwarded,
             self.state.last_converter,
         ));
+        self.retire_unused_desktops();
         membership_complete
+    }
+
+    /// Keep desktop destruction beside topology observation. Unknown membership is never
+    /// evidence of emptiness; minimized and unmanaged app windows also protect a desktop.
+    fn retire_unused_desktops(&mut self) {
+        if self.state.unused_desktops.is_empty() || !self.topology_is_authoritative() {
+            return;
+        }
+        let Some(snapshot) = self.state.last_forwarded.as_ref() else {
+            return;
+        };
+        if !snapshot.membership_complete
+            || snapshot.screens.iter().any(|screen| screen.space.is_none())
+        {
+            return;
+        }
+        let mut listed = snapshot.display_space_ids.clone();
+        let shown: HashSet<_> = snapshot.screens.iter().filter_map(|screen| screen.space).collect();
+        let candidates = std::mem::take(&mut self.state.unused_desktops);
+        for (space, since) in candidates {
+            if since.elapsed() > std::time::Duration::from_secs(30) {
+                continue;
+            }
+            let Some(siblings) = listed.values_mut().find(|spaces| spaces.contains(&space)) else {
+                continue;
+            };
+            if siblings.len() < 2 || shown.contains(&space) {
+                self.state.unused_desktops.insert(space, since);
+                continue;
+            }
+            let empty =
+                window_server::try_space_window_list_for_connection(&[space.get()], 0, true)
+                    .is_some_and(|ids| {
+                        ids.into_iter().all(|id| {
+                            // Desktop wallpaper has a negative layer. Anything unknown, including
+                            // an unreadable window, keeps the desktop alive.
+                            window_server::get_window(WindowServerId::new(id))
+                                .is_some_and(|info| info.layer < 0)
+                        })
+                    });
+            if empty && crate::sys::wm_bridge::destroy_space(space) {
+                siblings.retain(|listed| *listed != space);
+                self.sender.send(Event::ReconcileWindowSpaces);
+            } else {
+                self.state.unused_desktops.insert(space, since);
+            }
+        }
     }
 
     fn build_forwarded_state(&mut self, mut screens: Vec<ScreenInfo>) -> ForwardedSpaceState {

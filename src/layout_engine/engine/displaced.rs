@@ -77,26 +77,6 @@ impl LayoutEngine {
         }
     }
 
-    /// Sends windows home to workspaces on `spaces`, which are on screen again. Returns each
-    /// window sent home with its space.
-    pub(crate) fn return_displaced_windows(
-        &mut self,
-        window_store: &mut WindowStore,
-        spaces: &[SpaceId],
-    ) -> Vec<(WindowId, SpaceId)> {
-        let arriving: Vec<_> = self
-            .persistence
-            .displaced
-            .iter()
-            .filter(|(_, entry)| entry.host.is_some() && spaces.contains(&entry.space))
-            .map(|(&wid, entry)| (wid, entry.space))
-            .collect();
-        arriving
-            .into_iter()
-            .filter(|&(wid, _)| self.return_displaced_window(window_store, wid))
-            .collect()
-    }
-
     /// Assigns an away window back to its home workspace, out of the one holding it meanwhile.
     /// Returns false, dropping the record, if it was placed elsewhere since: that choice stands.
     pub(crate) fn return_displaced_window(
@@ -152,7 +132,7 @@ impl LayoutEngine {
     }
 
     /// Where an away window is held until its display returns.
-    pub(super) fn away_host(&self, wid: WindowId) -> Option<(SpaceId, VirtualWorkspaceId)> {
+    pub(crate) fn away_host(&self, wid: WindowId) -> Option<(SpaceId, VirtualWorkspaceId)> {
         let host = self.persistence.displaced.get(&wid)?.host?;
         Some((self.workspaces.workspaces.get(host)?.space, host))
     }

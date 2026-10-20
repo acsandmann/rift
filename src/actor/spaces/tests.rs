@@ -1470,3 +1470,75 @@ fn a_backing_off_refresh_does_not_hold_back_a_space_switch() {
     assert_eq!(state.screens[0].space, Some(new_space));
     assert_eq!(actor.state.refresh_pending, None);
 }
+
+#[test]
+fn unused_desktop_cleanup_waits_for_authoritative_empty_hidden_surplus_space() {
+    use crate::sys::wm_bridge::test::{Operation, take};
+    let home = SpaceId::new(1);
+    let minted = SpaceId::new(2);
+    for case in [
+        "empty",
+        "shown",
+        "only",
+        "occupied",
+        "failed",
+        "incomplete",
+        "stale",
+    ] {
+        take();
+        let (mut actor, mut wm_rx, _) = build_actor();
+        sample(
+            &mut actor,
+            vec![make_screen(Some(home))],
+            CoordinateConverter::from_height(800.),
+        );
+        let (mut snapshot, _) = recv_snapshot(&mut wm_rx);
+        snapshot.display_space_ids.insert(
+            "display-1".into(),
+            if case == "only" {
+                vec![minted]
+            } else {
+                vec![home, minted]
+            },
+        );
+        if case == "shown" {
+            snapshot.screens[0].space = Some(minted);
+        }
+        snapshot.membership_complete = case != "incomplete";
+        let revision = snapshot.revision;
+        actor.state.last_forwarded = Some(snapshot);
+        window_server::set_space_window_list_for_space_override(
+            minted.get(),
+            Some(if case == "occupied" {
+                vec![123]
+            } else {
+                vec![]
+            }),
+        );
+        window_server::set_space_membership_query_failed(minted.get(), case == "failed");
+        actor.handle_event(Event::RetireUnusedDesktops {
+            revision: if case == "stale" {
+                revision.wrapping_sub(1)
+            } else {
+                revision
+            },
+            spaces: vec![minted],
+        });
+        let operations = take();
+        if case == "empty" {
+            assert_eq!(operations, vec![Operation::Destroy(minted)]);
+        } else {
+            assert!(operations.is_empty(), "destroyed protected desktop: {case}");
+        }
+        // An occupied desktop can become empty after its parked windows return home.
+        if case == "occupied" {
+            window_server::set_space_window_list_for_space_override(minted.get(), Some(vec![]));
+            actor.handle_event(Event::CheckDisplaysSettled {
+                expected_epoch: actor.state.display_churn_epoch,
+            });
+            assert_eq!(take(), vec![Operation::Destroy(minted)]);
+        }
+        window_server::set_space_membership_query_failed(minted.get(), false);
+        window_server::set_space_window_list_for_space_override(minted.get(), None);
+    }
+}

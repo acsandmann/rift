@@ -5,6 +5,7 @@
 //! changes by sending requests out to the other actors in the system.
 
 mod animation;
+mod desktop_match;
 mod events;
 mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
@@ -203,6 +204,10 @@ pub enum SpaceEventKind {
 /// How long after a main display change the window server may still report windows hidden
 /// on one display as on another's desktop.
 const MAIN_DISPLAY_CHURN: Duration = Duration::from_secs(5);
+
+/// How long after a display change the window server may still move windows between displays
+/// on its own.
+const AFTERCARE: Duration = Duration::from_secs(5);
 
 /// How long after a display change AppKit may still be reflowing windows on its own, for
 /// example snapping a tiled window back to the frame it was created with.
@@ -445,6 +450,14 @@ pub struct Reactor {
     main_display_changed_at: Option<Instant>,
     /// When a display change was last applied.
     topology_changed_at: Option<Instant>,
+    /// Windows the window server moved to another display after the last display change
+    /// that were sent back. Each is sent back once.
+    sent_back_after_display_change: HashSet<WindowId>,
+    aftercare_windows: HashSet<WindowId>,
+    /// Desktops moved between displays, with when they moved and were first shown.
+    moved_desktops: HashMap<SpaceId, (Instant, Option<Instant>)>,
+    /// Bridge moves awaiting a native membership acknowledgement.
+    pending_native_returns: HashMap<WindowId, SpaceId>,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     startup_ready: Option<oneshot::Sender<()>>,
@@ -581,6 +594,10 @@ impl Reactor {
             suppress_auto_workspace_switch_until_input: false,
             main_display_changed_at: None,
             topology_changed_at: None,
+            sent_back_after_display_change: HashSet::default(),
+            aftercare_windows: HashSet::default(),
+            moved_desktops: HashMap::default(),
+            pending_native_returns: HashMap::default(),
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
@@ -1060,7 +1077,9 @@ impl Reactor {
                     return Ok(EventOutcome::default());
                 }
                 // Displays settle every time; most often every window is already in place.
-                if !self.observe_shown_window_frames() {
+                let drifted = self.observe_shown_window_frames();
+                let rescued = self.rescue_offscreen_floats();
+                if !drifted && !rescued {
                     return Ok(EventOutcome::default());
                 }
                 return Ok(EventOutcome::layout_changed(false));
@@ -1330,6 +1349,21 @@ impl Reactor {
                         .is_some_and(|wid| self.retain_native_tab_slot_on_departure(wid))
                 {
                     return Ok(EventOutcome::default());
+                }
+                if matches!(kind, SpaceEventKind::User)
+                    && let Some(wid) = tracked_window
+                    && self.state.windows.workspace_info_for_window(wid).is_some_and(|assigned| {
+                        self.layout_manager
+                            .layout_engine
+                            .workspaces()
+                            .active_workspace(assigned.space)
+                            != Some(assigned.workspace_id)
+                    })
+                {
+                    // Ordered-out is also part of entering fullscreen. A hidden workspace
+                    // has no projection to remove; let AX verify whether it was closed.
+                    self.state.windows.observe_native_visibility(wsid, false);
+                    return Ok(EventOutcome::default().with_window_inventory_request(wid.pid));
                 }
                 let last_known_user_space = tracked_window
                     .and_then(|window| self.best_space_for_window_id(window))
@@ -2933,6 +2967,20 @@ impl Reactor {
             .windows
             .window_ids_for_pid(pid)
             .filter(|wid| {
+                // AX and ordering can both disappear during fullscreen entry. A
+                // hidden workspace keeps its slot while the native handle still exists.
+                if self.state.windows.workspace_info_for_window(*wid).is_some_and(|assigned| {
+                    self.layout_manager.layout_engine.workspaces().active_workspace(assigned.space)
+                        != Some(assigned.workspace_id)
+                }) && self
+                    .state
+                    .windows
+                    .record(*wid)
+                    .and_then(|record| record.window_server_id())
+                    .is_some_and(|wsid| window_server::window_level(wsid.as_u32()).is_some())
+                {
+                    return true;
+                }
                 let native = self
                     .state
                     .windows

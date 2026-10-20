@@ -32,6 +32,7 @@ pub mod space_switch;
 pub mod timer;
 pub mod window_notify;
 pub mod window_server;
+pub mod wm_bridge;
 
 #[inline(always)]
 pub fn cg_ok(err: CGError) -> Result<(), CGError> {
