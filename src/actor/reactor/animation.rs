@@ -15,6 +15,7 @@ use crate::layout_engine::systems::scrolling::{
     CameraSpring, PresentedViewport, ViewportPresentation,
 };
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
+use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
 use crate::sys::geometry::{Round, SameAs};
@@ -106,6 +107,18 @@ type Frame = (WindowId, CGRect, bool, TransactionId, FrameSource);
 /// one lock/wake per application, and terminal leases follow that publication.
 #[derive(Debug, Default)]
 struct FrameBatch(HashMap<pid_t, (AppThreadHandle, Vec<Frame>)>);
+
+/// Per-app buckets for one instant layout pass, split by whether the target
+/// frame reveals the window onscreen or parks it offscreen.
+#[derive(Default)]
+struct InstantLayoutBatch {
+    show_positions: Vec<(WindowId, CGRect)>,
+    show_frames: Vec<(WindowId, CGRect)>,
+    hide_positions: Vec<(WindowId, CGRect)>,
+    hide_frames: Vec<(WindowId, CGRect)>,
+    first_wsid: Option<WindowServerId>,
+    txid: TransactionId,
+}
 impl FrameBatch {
     fn extend(
         &mut self,
@@ -1125,13 +1138,28 @@ impl AnimationManager {
 
     fn instant_layout_inner(
         reactor: &mut Reactor,
-        _space: SpaceId,
+        space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
         position_only: bool,
     ) -> bool {
         reactor.cancel_window_presentations(layout.iter().map(|(wid, _)| *wid).collect());
-        let mut per_app: HashMap<pid_t, _> = HashMap::default();
+        let screen_frame = reactor.space_state.screen_by_space(space).map(|s| s.frame);
+        let other_screens: Vec<CGRect> = reactor
+            .space_state
+            .screens
+            .iter()
+            .filter(|screen| screen.space != Some(space))
+            .map(|screen| screen.frame)
+            .collect();
+        let is_hidden_target = |frame: CGRect| {
+            screen_frame.is_some_and(|screen| {
+                HiddenWindowPlacement::is_hidden(screen, frame, &other_screens)
+            })
+        };
+        let mut per_app: HashMap<pid_t, InstantLayoutBatch> = HashMap::default();
+        let mut newly_visible: HashSet<WindowId> = HashSet::default();
+        let mut show_wsids: HashSet<WindowServerId> = HashSet::default();
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
@@ -1169,43 +1197,79 @@ impl AnimationManager {
 
             let size_unchanged = current_frame.size.same_as(target_frame.size);
             window.frame_monotonic = target_frame;
-            let (frames, positions, first_wsid) =
-                per_app.entry(wid.pid).or_insert_with(|| (Vec::new(), Vec::new(), None));
-            *first_wsid = first_wsid.or(window.info.sys_id);
-            if position_only && size_unchanged {
-                positions.push((wid, target_frame));
-            } else {
-                frames.push((wid, target_frame));
+            let hidden = is_hidden_target(target_frame);
+            if !hidden {
+                newly_visible.insert(wid);
+                if let Some(wsid) = window.info.sys_id {
+                    show_wsids.insert(wsid);
+                }
+            }
+            let batch = per_app.entry(wid.pid).or_default();
+            batch.first_wsid = batch.first_wsid.or(window.info.sys_id);
+            let bucket = match (position_only && size_unchanged, hidden) {
+                (true, false) => &mut batch.show_positions,
+                (true, true) => &mut batch.hide_positions,
+                (false, false) => &mut batch.show_frames,
+                (false, true) => &mut batch.hide_frames,
+            };
+            bucket.push((wid, target_frame));
+        }
+
+        let mut batches: Vec<(pid_t, InstantLayoutBatch)> = per_app.into_iter().collect();
+        for (_, batch) in &mut batches {
+            batch.txid = batch
+                .first_wsid
+                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
+                .unwrap_or_default();
+            for wid in batch
+                .show_frames
+                .iter()
+                .chain(&batch.show_positions)
+                .chain(&batch.hide_frames)
+                .chain(&batch.hide_positions)
+                .map(|(wid, _)| *wid)
+            {
+                if let Some(window) = reactor.state.windows.window(wid)
+                    && let Some(wsid) = window.info.sys_id
+                {
+                    reactor.transaction_manager.store_txid(
+                        wsid,
+                        batch.txid,
+                        window.frame_monotonic,
+                    );
+                }
             }
         }
 
-        for (pid, (frames, positions, first_wsid)) in per_app {
-            let Some(app_state) = reactor.app_manager.apps.get(&pid) else {
+        // Reveal new placements before parking windows offscreen. Frame writes
+        // run on per-app actor tasks, so parks are deferred until the reveal
+        // writes acknowledge rather than merely dispatched first.
+        let mut hide_requests: Vec<(pid_t, Request)> = Vec::new();
+        for (pid, batch) in &mut batches {
+            let Some(app_state) = reactor.app_manager.apps.get(pid) else {
                 debug!(?pid, "Skipping layout update for app - app no longer exists");
                 continue;
             };
-
-            let handle = &app_state.handle;
-
-            let txid = first_wsid
-                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
-                .unwrap_or_default();
-            for wid in frames.iter().map(|(wid, _)| wid).chain(positions.iter().map(|(wid, _)| wid))
-            {
-                if let Some(window) = reactor.state.windows.window(*wid)
-                    && let Some(wsid) = window.info.sys_id
-                {
-                    reactor.transaction_manager.store_txid(wsid, txid, window.frame_monotonic);
-                }
-            }
             let requests = [
-                (!positions.is_empty())
-                    .then(|| Request::SetWindowFrames(positions, txid, FrameMode::Position, true)),
-                (!frames.is_empty())
-                    .then(|| Request::SetWindowFrames(frames, txid, FrameMode::Full, true)),
+                (!batch.show_positions.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.show_positions),
+                        batch.txid,
+                        FrameMode::Position,
+                        true,
+                    )
+                }),
+                (!batch.show_frames.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.show_frames),
+                        batch.txid,
+                        FrameMode::Full,
+                        true,
+                    )
+                }),
             ];
             for request in requests.into_iter().flatten() {
-                if let Err(e) = handle.send(request) {
+                if let Err(e) = app_state.handle.send(request) {
                     debug!(
                         ?pid,
                         ?e,
@@ -1214,7 +1278,31 @@ impl AnimationManager {
                     break;
                 }
             }
+            for request in [
+                (!batch.hide_positions.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.hide_positions),
+                        batch.txid,
+                        FrameMode::Position,
+                        true,
+                    )
+                }),
+                (!batch.hide_frames.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        std::mem::take(&mut batch.hide_frames),
+                        batch.txid,
+                        FrameMode::Full,
+                        true,
+                    )
+                }),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                hide_requests.push((*pid, request));
+            }
         }
+        reactor.defer_park_writes(hide_requests, show_wsids, &newly_visible);
 
         any_frame_changed
     }

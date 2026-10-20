@@ -8,7 +8,7 @@ use tracing::trace;
 use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
-use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
+use crate::actor::app::{AppThreadHandle, Request, WindowId, WindowInventoryToken, pid_t};
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
@@ -18,6 +18,7 @@ use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::screen::SpaceId;
+use crate::sys::window_server::WindowServerId;
 
 /// Manages application state and rules
 pub struct AppManager {
@@ -205,6 +206,19 @@ pub struct RecordingManager {
 /// Manages layout engine state
 pub struct LayoutManager {
     pub layout_engine: LayoutEngine,
+    /// Park-offscreen writes held until the current pass' reveal writes
+    /// acknowledge, so a layout application never empties the screen first.
+    pub deferred_parks: Option<DeferredParks>,
+    pub deferred_park_generation: u64,
+}
+
+/// Park requests withheld while reveal writes are in flight.
+#[derive(Debug, Default)]
+pub struct DeferredParks {
+    pub requests: Vec<(pid_t, Request)>,
+    /// Window server ids whose reveal writes have not yet acknowledged.
+    pub show_wsids: HashSet<WindowServerId>,
+    pub generation: u64,
 }
 
 pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
