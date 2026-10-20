@@ -328,7 +328,26 @@ fn inconclusive_samples_never_erase_accepted_topology_or_history_and_can_recover
             before.revision,
             "{case}"
         );
-        let recovered = rig.tick(1, Some(good.clone())).unwrap();
+        let revoked = rig.actor.topology_guard().invalidated_revision();
+        assert!(
+            revoked > before.revision,
+            "{case}: rejected native data revokes writes"
+        );
+        rig.notifications();
+        rig.event(Event::WindowServerAppeared(
+            WindowServerId::new(99),
+            SpaceId::new(2),
+        ));
+        rig.event(Event::WindowServerDestroyed(
+            WindowServerId::new(99),
+            SpaceId::new(1),
+        ));
+        assert!(
+            rig.notifications().is_empty(),
+            "{case}: stale window events are quarantined"
+        );
+        assert!(rig.tick(1, Some(good.clone())).is_none(), "{case}");
+        let recovered = rig.tick(2, Some(good.clone())).unwrap();
         assert_eq!(recovered.screens, before.screens, "{case}");
         assert_eq!(
             recovered.last_user_space_by_display, before.last_user_space_by_display,
@@ -391,14 +410,16 @@ fn retry_exhaustion_keeps_recovery_owed_and_stale_timers_cannot_release_it() {
     let mut rig = Rig::new();
     let good = sample(vec![screen(1, "laptop", 1)]);
     let before = rig.tick(0, Some(good.clone())).unwrap();
-    rig.event(Event::DisplayReconfigured {
-        display_id: 1,
-        flags: DisplayReconfigFlags::REMOVE,
-    });
+    // Membership can discover an unavailable native sample before the physical callback.
+    // No callback is needed to retain retry debt or revoke stale write authority.
     for attempt in 0..=REFRESH_MAX_RETRIES + 1 {
         assert!(rig.tick(attempt, None).is_none());
         assert!(rig.actor.topology_guard().invalidated_revision() > before.revision);
         assert!(rig.actor.state.refresh_pending);
+        assert_eq!(
+            rig.actor.topology_guard().invalidated_revision(),
+            before.revision + 1
+        );
     }
     assert!(rig.tick(0, Some(good.clone())).is_none());
     rig.event(Event::ProcessScreenRefresh {
@@ -494,7 +515,8 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
             }
             _ => {}
         }
-        // The inventory notification itself carries no geometry change or forced remap hint.
+        // Coalesce with a queued native query; the notification carries no remap hint.
+        rig.event(Event::ScreenRefreshRequested);
         rig.event(Event::SpaceInventoryChanged);
         let first = rig.tick(0, Some(next.clone()));
         let after = if case == "ordinary switch" {
@@ -656,7 +678,7 @@ fn failed_membership_and_first_empty_wake_sample_preserve_windows_until_complete
 }
 
 #[test]
-fn membership_refreshes_on_unchanged_topology_through_each_native_notification() {
+fn native_membership_notifications_coalesce_with_a_queued_unchanged_topology_sample() {
     for notification in [
         Event::SpaceInventoryChanged,
         Event::ReconcileWindowSpaces,
@@ -670,6 +692,7 @@ fn membership_refreshes_on_unchanged_topology_through_each_native_notification()
         rig.native_home(7, Some(2));
         rig.membership(1, &[]);
         rig.membership(2, &[7]);
+        rig.event(Event::ScreenRefreshRequested);
         rig.event(notification);
         let after = rig.tick(0, Some(base)).unwrap();
         assert_eq!(
@@ -709,13 +732,14 @@ fn resizing_during_a_native_space_switch_preserves_both_workspace_catalogs() {
 }
 
 #[test]
-fn active_space_notification_waits_for_a_real_switch_or_bounded_membership_refresh() {
+fn queued_active_space_notification_waits_for_a_real_switch_or_bounded_membership_refresh() {
     for changed_space in [true, false] {
         let mut rig = Rig::new();
         let mut base = sample(vec![screen(1, "laptop", 1)]);
         base.inventory.get_mut("laptop").unwrap().push(SpaceId::new(2));
         rig.membership(1, &[7]);
         let before = rig.tick(0, Some(base.clone())).unwrap();
+        rig.event(Event::ScreenRefreshRequested);
         rig.event(Event::ActiveSpaceChanged);
         rig.membership(1, &[]);
         rig.membership(2, &[7]);

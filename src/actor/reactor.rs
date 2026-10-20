@@ -296,10 +296,6 @@ pub enum Event {
         SpaceId,
         SpaceEventKind,
     ),
-    #[serde(skip)]
-    SpaceCreated(SpaceId),
-    #[serde(skip)]
-    SpaceDestroyed(SpaceId),
     WindowMinimized(WindowId),
     WindowDeminiaturized(WindowId),
     WindowFrameChanged(
@@ -565,6 +561,7 @@ impl Reactor {
             suppress_auto_workspace_switch_until_input: false,
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
+                inconclusive_samples: 0,
             },
             spaces_tx: None,
             topology_guard: Default::default(),
@@ -1158,8 +1155,6 @@ impl Reactor {
                 | Event::WindowMinimized(..)
                 | Event::WindowDeminiaturized(..)
                 | Event::WindowTitleChanged(..)
-                | Event::SpaceCreated(..)
-                | Event::SpaceDestroyed(..)
                 | Event::WindowClosed(..)
                 | Event::WindowServerHidden(..)
                 | Event::WindowServerUnhidden(..)
@@ -1179,6 +1174,36 @@ impl Reactor {
     fn refreshes_blocked(&self) -> bool {
         !self.space_state.authoritative
             || self.topology_guard.invalidated_revision() > self.space_state.revision
+    }
+
+    /// A sample older than the accepted model, a topology invalidation, or a held newer
+    /// sample can no longer be committed.
+    fn space_revision_superseded(&self, revision: u64) -> bool {
+        let held = self
+            .pending_space_change_manager
+            .pending_space_change
+            .as_ref()
+            .map_or(0, |pending| pending.revision);
+        revision
+            < self
+                .space_state
+                .revision
+                .max(self.topology_guard.invalidated_revision())
+                .max(held)
+    }
+
+    /// Remaps, resizes and refresh flags are deltas against the producer's own history, so a
+    /// sample dropped before commit would orphan the workspaces keyed by its old Space ids.
+    /// Geometry and membership are not carried: the next admitted sample owns them.
+    fn carry_superseded_space_deltas(&mut self, stale: ForwardedSpaceState) {
+        let slot = &mut self.pending_space_change_manager.pending_space_change;
+        *slot = Some(match slot.take() {
+            None => stale,
+            Some(held) if held.revision < stale.revision => {
+                topology_workflow::merge_space_deltas(held, stale)
+            }
+            Some(held) => topology_workflow::merge_space_deltas(stale, held),
+        });
     }
 
     fn defer_window_inventory_refresh(&mut self) {
@@ -1296,7 +1321,6 @@ impl Reactor {
                 | Event::ApplicationGloballyDeactivated(_)
                 | Event::SessionDidBecomeActive
                 | Event::ActiveDisplayChanged { .. }
-                | Event::SpaceCreated(_)
         ) {
             self.commit_presentations();
         }
@@ -1367,6 +1391,16 @@ impl Reactor {
                         window_server_info,
                     },
                 )?;
+                if self.spaces_tx.is_some()
+                    && let Some(app) = self.app_manager.apps.get_mut(&pid)
+                {
+                    app.handle.set_topology_authority(
+                        &self.topology_guard,
+                        self.space_state
+                            .revision
+                            .saturating_sub(u64::from(!self.space_state.authoritative)),
+                    );
+                }
                 if self.main_window_tracker.is_globally_frontmost(pid) {
                     outcome.app_requests.push((pid, Request::ApplicationGloballyActivated(pid)));
                 }
@@ -1463,6 +1497,14 @@ impl Reactor {
             Event::RegisterSenders { wm, spaces, topology_guard } => {
                 self.spaces_tx = Some(spaces);
                 self.topology_guard = topology_guard;
+                for app in self.app_manager.apps.values_mut() {
+                    app.handle.set_topology_authority(
+                        &self.topology_guard,
+                        self.space_state
+                            .revision
+                            .saturating_sub(u64::from(!self.space_state.authoritative)),
+                    );
+                }
                 return Ok(system_workflow::handle_register_wm_sender(
                     &mut self.communication_manager,
                     wm,
@@ -1664,18 +1706,6 @@ impl Reactor {
                     observations,
                 );
             }
-            Event::SpaceCreated(space) => {
-                return topology_workflow::handle_space_lifecycle(
-                    &mut self.space_activation_policy,
-                    topology_workflow::SpaceLifecyclePayload { space, created: true },
-                );
-            }
-            Event::SpaceDestroyed(space) => {
-                return topology_workflow::handle_space_lifecycle(
-                    &mut self.space_activation_policy,
-                    topology_workflow::SpaceLifecyclePayload { space, created: false },
-                );
-            }
             Event::WindowMinimized(wid) => {
                 return window_workflow::handle_window_minimized(&mut self.state, wid);
             }
@@ -1820,10 +1850,14 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::SpaceStateChanged(space_state) => {
-                if !space_state.authoritative
-                    || space_state.revision < self.space_state.revision
-                    || space_state.revision < self.topology_guard.invalidated_revision()
-                {
+                if !space_state.authoritative {
+                    return Ok(EventOutcome::default());
+                }
+                if self.space_revision_superseded(space_state.revision) {
+                    // Once settled, an older sample is a duplicate whose deltas were consumed.
+                    if self.refreshes_blocked() {
+                        self.carry_superseded_space_deltas(space_state);
+                    }
                     return Ok(EventOutcome::default());
                 }
                 let recovering = self.refreshes_blocked();
@@ -1835,8 +1869,6 @@ impl Reactor {
                         .pending
                         .extend(self.window_inventory_manager.in_flight.keys().copied());
                 }
-                self.space_state.revision = space_state.revision;
-                self.space_state.authoritative = space_state.authoritative;
                 let mut outcome = self.handle_authoritative_space_snapshot(space_state)?;
                 if recovering {
                     self.flush_deferred_window_inventory_refresh();
@@ -3214,26 +3246,13 @@ impl Reactor {
         &mut self,
         mut space_state: ForwardedSpaceState,
     ) -> anyhow::Result<EventOutcome> {
-        if let Some(mut pending) = self.pending_space_change_manager.pending_space_change.take() {
+        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
             // Keep accepted display continuity while the virtual model is deferred.
             // Geometry and membership always come from the newest revision.
-            if pending.revision == space_state.revision {
-                pending.command_space = space_state.command_space;
-                pending.menu_bar_space = space_state.menu_bar_space;
-                space_state = pending;
-            } else {
-                pending.space_remaps.append(&mut space_state.space_remaps);
-                space_state.space_remaps = pending.space_remaps;
-                pending.resized_spaces.retain(|(space, _)| {
-                    !space_state.resized_spaces.iter().any(|(new_space, _)| space == new_space)
-                });
-                pending.resized_spaces.append(&mut space_state.resized_spaces);
-                space_state.resized_spaces = pending.resized_spaces;
-                space_state.should_force_refresh_layout |= pending.should_force_refresh_layout;
-                space_state.display_set_changed |= pending.display_set_changed;
-            }
+            space_state = topology_workflow::merge_space_deltas(pending, space_state);
         }
         if self.is_mission_control_active() {
+            self.space_state.authoritative = false;
             self.pending_space_change_manager.pending_space_change = Some(space_state);
             return Ok(EventOutcome::default());
         }
@@ -3267,9 +3286,30 @@ impl Reactor {
             .collect();
         if !space_state.membership_complete && !invalidated_spaces.is_empty() {
             // Defer geometry and membership together so the old ownership survives
-            // an inconclusive query. Safe whole-Space remaps can still proceed.
-            self.pending_space_change_manager.pending_space_change = Some(space_state);
-            return Ok(EventOutcome::default());
+            // an inconclusive query. Safe whole-Space remaps can still proceed. The
+            // spaces actor resamples within a bounded budget; once that is spent,
+            // commit what is known (missing windows keep their assignments) and let
+            // the inventory refresh below ask each window where it is.
+            let manager = &mut self.pending_space_change_manager;
+            manager.inconclusive_samples = manager.inconclusive_samples.saturating_add(1);
+            if manager.inconclusive_samples < crate::actor::spaces::REFRESH_MAX_RETRIES {
+                self.space_state.authoritative = false;
+                manager.pending_space_change = Some(space_state);
+                return Ok(EventOutcome::default());
+            }
+            tracing::warn!(
+                revision = space_state.revision,
+                ?invalidated_spaces,
+                "Space membership still inconclusive after bounded resampling; committing known ownership"
+            );
+        }
+        self.pending_space_change_manager.inconclusive_samples = 0;
+        self.space_state.revision = space_state.revision;
+        self.space_state.authoritative = true;
+        if self.spaces_tx.is_some() {
+            for app in self.app_manager.apps.values_mut() {
+                app.handle.set_topology_authority(&self.topology_guard, space_state.revision);
+            }
         }
         let ForwardedSpaceState {
             screens,
@@ -3346,6 +3386,7 @@ impl Reactor {
             self.clear_pending_hidden_window_targets();
         }
         for (previous_space, space) in space_remaps {
+            self.space_activation_policy.on_space_remapped(previous_space, space);
             self.layout_manager.layout_engine.remap_space(
                 &mut self.state.windows,
                 previous_space,
@@ -3390,17 +3431,13 @@ impl Reactor {
     }
 
     fn try_apply_pending_space_change(&mut self) {
-        if self.is_mission_control_active() || self.refreshes_blocked() {
+        if self.is_mission_control_active() {
             return;
         }
-        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take()
-            && pending.revision == self.space_state.revision
-            && !self.refreshes_blocked()
-        {
-            // During native Mission Control we must preserve the full forwarded snapshot,
-            // not just the raw spaces vector, otherwise command-space and per-display space
-            // metadata can remain stale after exit.
-            if let Ok(outcome) = self.handle_authoritative_space_snapshot(pending) {
+        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
+            // Re-enter the same admission/commit path: valid pending snapshots can
+            // release a hold, while superseded ones stay pending for their deltas.
+            if let Ok(outcome) = self.dispatch_workflow(Event::SpaceStateChanged(pending)) {
                 self.apply_event_outcome(outcome);
             }
         }
@@ -3768,9 +3805,6 @@ impl Reactor {
             return;
         }
         if self.assigned_space_for_window_id(wid) != Some(space) {
-            self.layout_manager
-                .layout_engine
-                .remember_native_departure(&self.state.windows, wid);
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             let engine = &mut self.layout_manager.layout_engine;
             engine.workspaces_mut().list_workspaces(space);
@@ -3800,9 +3834,6 @@ impl Reactor {
         }
         if self.is_space_active(space) && self.state.windows.is_visible_admitted(wid) {
             self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-            self.layout_manager
-                .layout_engine
-                .restore_native_return(&self.state.windows, wid);
         }
     }
 
@@ -3825,12 +3856,16 @@ impl Reactor {
                 Some((wid, authoritative_space))
             })
             .collect();
+        self.layout_manager
+            .layout_engine
+            .begin_native_reconcile(&self.state.windows, &windows);
         for (wid, authoritative_space) in windows {
             let preserve_ordinal = self
                 .assigned_space_for_window_id(wid)
                 .is_some_and(|space| invalidated_spaces.contains(&space));
             self.reassign_window_to_authoritative_space(wid, authoritative_space, preserve_ordinal);
         }
+        self.layout_manager.layout_engine.finish_native_reconcile(&self.state.windows);
     }
 
     #[cfg(test)]

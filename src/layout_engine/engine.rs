@@ -187,6 +187,7 @@ pub struct LayoutEngine {
     // One original arrangement per workspace, shared by all native departures.
     native_layouts:
         HashMap<VirtualWorkspaceId, (LayoutSystemKind, super::workspaces::WorkspaceLayoutState)>,
+    native_reconcile_batch: Option<HashSet<VirtualWorkspaceId>>,
 }
 
 pub(crate) struct WorkspaceLayoutQuerySnapshot {
@@ -205,7 +206,6 @@ impl LayoutEngine {
         &mut self,
         request: crate::layout_engine::WindowDropRequest,
     ) -> bool {
-        self.native_layouts.clear();
         if self.active_layout_mode_at(request.space) == LayoutMode::Floating {
             return false;
         }
@@ -213,6 +213,7 @@ impl LayoutEngine {
         else {
             return false;
         };
+        self.native_layouts.remove(&workspace);
         self.workspaces[workspace].layout_state.last_saved = Some(layout);
         self.workspaces[workspace].layout_system.apply_window_drop(
             layout,
@@ -229,7 +230,6 @@ impl LayoutEngine {
         windows: &mut WindowStore,
         drop: &crate::layout_engine::WorkspaceDropRequest,
     ) -> bool {
-        self.native_layouts.clear();
         let Some(source_assignment) = windows.workspace_info_for_window(drop.window) else {
             return false;
         };
@@ -926,7 +926,7 @@ impl LayoutEngine {
         layout: LayoutId,
         resize_amount: f64,
     ) {
-        self.native_layouts.clear();
+        self.native_layouts.remove(&ws_id);
         self.workspaces[ws_id].layout_system.resize_selection_by(
             layout,
             resize_amount,
@@ -1263,55 +1263,96 @@ impl LayoutEngine {
         }
     }
 
-    pub(crate) fn restore_native_return(&mut self, windows: &WindowStore, wid: WindowId) {
-        let Some(assignment) = windows.workspace_info_for_window(wid) else {
-            return;
-        };
-        let workspace = assignment.workspace_id;
+    pub(crate) fn begin_native_reconcile(
+        &mut self,
+        windows: &WindowStore,
+        moves: &[(WindowId, SpaceId)],
+    ) {
+        // Capture every source before the first arrival can modify another source tree.
+        for &(window, target) in moves {
+            if windows
+                .workspace_info_for_window(window)
+                .is_some_and(|source| source.space != target)
+            {
+                self.remember_native_departure(windows, window);
+            }
+        }
+        self.native_reconcile_batch = Some(HashSet::default());
+    }
+
+    pub(crate) fn finish_native_reconcile(&mut self, windows: &WindowStore) {
+        let workspaces = self.native_reconcile_batch.take().unwrap_or_default();
+        for workspace in workspaces {
+            self.restore_native_layout(windows, workspace, None);
+        }
+    }
+
+    fn restore_native_layout(
+        &mut self,
+        windows: &WindowStore,
+        workspace: VirtualWorkspaceId,
+        returning: Option<WindowId>,
+    ) {
         let Some((saved, state)) = self.native_layouts.get(&workspace) else {
             return;
         };
+        if returning.is_some_and(|window| {
+            !state.all_layouts().any(|layout| saved.contains_window(layout, window))
+        }) {
+            return;
+        }
+        if let Some(workspaces) = self.native_reconcile_batch.as_mut() {
+            workspaces.insert(workspace);
+            return;
+        }
         let original: HashSet<_> = state
             .all_layouts()
             .flat_map(|layout| saved.all_windows_in_layout(layout))
             .collect();
-        if !original.contains(&wid) {
-            return;
-        }
         let current = &self.workspaces[workspace];
         let Some(size) = current.layout_state.active_size() else {
             return;
         };
-        let desired: Vec<_> = current
+        let mut desired = HashSet::default();
+        let ordered: Vec<_> = current
             .layout_state
             .all_layouts()
             .flat_map(|layout| current.layout_system.all_windows_in_layout(layout))
             .filter(|window| {
-                windows.workspace_info_for_window(*window) == Some(assignment)
+                windows.workspace_for_window(current.space, *window) == Some(workspace)
                     && windows.is_visible_admitted(*window)
                     && !self.floating.is_floating(*window)
+                    && desired.insert(*window)
             })
             .collect();
+        if original.is_disjoint(&desired) {
+            return;
+        }
         let Some(mut system) = saved.preview_clone() else {
             return;
         };
         let mut state = state.clone();
-        // Prune only the working copy: later arrivals must see the same original tree.
-        for window in original.iter().filter(|window| !desired.contains(window)) {
+        // Prune only a working copy: partial returns must share one original arrangement.
+        for window in original.difference(&desired) {
             system.remove_window(*window);
         }
         for layout in state.all_layouts() {
-            for &window in &desired {
+            for &window in &ordered {
                 if !system.contains_window(layout, window) {
                     system.add_window_after_selection(layout, window);
                 }
             }
         }
         state.ensure_active(size, &mut system);
+        if let Some(focused) = self.focused_window.filter(|window| desired.contains(window))
+            && let Some(layout) = state.active()
+        {
+            system.select_window(layout, focused);
+        }
         let current = &mut self.workspaces[workspace];
         current.layout_system = system;
         current.layout_state = state;
-        if original.iter().all(|window| desired.contains(window)) {
+        if original.is_subset(&desired) {
             self.native_layouts.remove(&workspace);
         }
     }
@@ -1322,6 +1363,9 @@ impl LayoutEngine {
         wid: WindowId,
         preserve_floating: bool,
     ) -> bool {
+        if preserve_floating {
+            self.remember_native_departure(window_store, wid);
+        }
         let removal = self.remove_window_layout_membership(window_store, wid);
 
         if preserve_floating {
@@ -1379,6 +1423,7 @@ impl LayoutEngine {
         wid: WindowId,
     ) -> bool {
         let active_space_before = self.space_with_window(wid);
+        let mut inserted = false;
 
         let assigned_workspace = match window_store.workspace_for_window(space, wid) {
             Some(workspace_id) => workspace_id,
@@ -1413,6 +1458,7 @@ impl LayoutEngine {
                 self.workspaces[assigned_workspace]
                     .layout_system
                     .add_window_after_selection(layout, wid);
+                inserted = true;
             }
         } else {
             warn!(
@@ -1421,6 +1467,9 @@ impl LayoutEngine {
             );
         }
 
+        if inserted {
+            self.restore_native_layout(window_store, assigned_workspace, Some(wid));
+        }
         self.space_with_window(wid) != active_space_before
     }
 
@@ -1540,7 +1589,14 @@ impl LayoutEngine {
 
         self.floating.remap_space(old_space, new_space);
         self.floating_positions.remap_space(old_space, new_space);
-        self.workspaces.remap_space(window_store, old_space, new_space);
+        // Saved native arrangements are keyed by workspace; one for a deleted workspace
+        // would no longer resolve.
+        for deleted in self.workspaces.remap_space(window_store, old_space, new_space) {
+            self.native_layouts.remove(&deleted);
+            if let Some(batch) = self.native_reconcile_batch.as_mut() {
+                batch.remove(&deleted);
+            }
+        }
 
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
             self.space_display_map.insert(new_space, uuid);
@@ -1575,6 +1631,7 @@ impl LayoutEngine {
             startup_restore_pending: false,
             scroll_boundary: None,
             native_layouts: HashMap::default(),
+            native_reconcile_batch: None,
         }
     }
 
@@ -1987,7 +2044,21 @@ impl LayoutEngine {
         visible_space_frames: &HashMap<SpaceId, CGRect>,
         command: LayoutCommand,
     ) -> EventResponse {
-        self.native_layouts.clear();
+        if !matches!(
+            command,
+            LayoutCommand::NextWindow
+                | LayoutCommand::PrevWindow
+                | LayoutCommand::MoveFocus(_)
+                | LayoutCommand::ToggleFocusFloating
+                | LayoutCommand::Ascend
+                | LayoutCommand::Descend
+                | LayoutCommand::ScrollStrip { .. }
+                | LayoutCommand::MoveStackTab { .. }
+        ) && let Some(workspace) =
+            space.and_then(|space| self.workspaces.active_workspace(space))
+        {
+            self.native_layouts.remove(&workspace);
+        }
         if !matches!(command, LayoutCommand::ScrollStrip { .. }) {
             self.scroll_boundary = None;
         }
@@ -2011,6 +2082,7 @@ impl LayoutEngine {
             // command space, so find the layout that holds the window.
             let window = crate::actor::app::WindowId::new(window.pid, window.idx);
             let target = crate::actor::app::WindowId::new(target.pid, target.idx);
+            self.forget_native_layout_for_window(window_store, window);
             let changed = visible_spaces.iter().any(|&space| {
                 self.workspaces.active_layout_for_space(space).is_some_and(|(ws_id, layout)| {
                     let system = &mut self.workspaces[ws_id].layout_system;
@@ -2802,7 +2874,6 @@ impl LayoutEngine {
         space: SpaceId,
         command: &LayoutCommand,
     ) -> EventResponse {
-        self.native_layouts.clear();
         match command {
             LayoutCommand::NextWorkspace(skip_empty) | LayoutCommand::PrevWorkspace(skip_empty) => {
                 let Some(current) = self.workspaces.active_workspace(space) else {
@@ -2867,6 +2938,8 @@ impl LayoutEngine {
                 if current_workspace_id == target_workspace_id {
                     return EventResponse::default();
                 }
+                self.native_layouts.remove(&current_workspace_id);
+                self.native_layouts.remove(&target_workspace_id);
 
                 if matches!(
                     self.workspaces[current_workspace_id].layout_system,
@@ -3642,6 +3715,35 @@ mod tests {
         engine.set_layout_settings(&settings);
         assert_eq!(width(&engine, ids_a[0].0), 0.4);
         assert_eq!(width(&engine, ids_b[0].0), 0.6);
+    }
+
+    #[test]
+    fn remapping_over_a_workspace_with_a_saved_native_arrangement_forgets_it() {
+        let mut engine = test_engine();
+        let mut store = WindowStore::default();
+        let (old, new) = (SpaceId::new(1), SpaceId::new(2));
+        let size = CGSize::new(1000.0, 800.0);
+        let window = WindowId::new(7, 1);
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(old, size));
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(new, size));
+        // The window server placed this window on the incoming id before the remap.
+        let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(new, window));
+        let doomed = store.workspace_info_for_window(window).unwrap().workspace_id;
+        engine.remember_native_departure(&store, window);
+        assert!(engine.native_layouts.contains_key(&doomed));
+
+        engine.remap_space(&mut store, old, new);
+
+        assert!(
+            !engine.native_layouts.contains_key(&doomed),
+            "the deleted workspace's saved arrangement can no longer resolve"
+        );
+        let rehomed = store.workspace_info_for_window(window).unwrap();
+        assert_eq!(rehomed.space, new);
+        assert_ne!(rehomed.workspace_id, doomed);
+        // A later reconcile over the same window must not index the deleted workspace.
+        engine.begin_native_reconcile(&store, &[(window, new)]);
+        engine.finish_native_reconcile(&store);
     }
 
     fn test_engine() -> LayoutEngine {

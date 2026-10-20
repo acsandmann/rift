@@ -40,7 +40,7 @@ use crate::sys::window_server::WindowServerId;
 const REFRESH_DEFAULT_DELAY_NS: i64 = 100_000_000;
 const REFRESH_SPACE_SWITCH_DELAY_NS: i64 = 50_000_000;
 const REFRESH_RETRY_DELAY_NS: i64 = 100_000_000;
-const REFRESH_MAX_RETRIES: u8 = 10;
+pub(crate) const REFRESH_MAX_RETRIES: u8 = 10;
 const REFRESH_RECOVERY_DELAY_NS: i64 = 1_000_000_000;
 
 // Recovery needs two matching physical/Space samples and a quiet WindowServer.
@@ -146,11 +146,9 @@ pub struct AuthorityState {
     pub session_inactive: bool,
     pub display_churn_active: bool,
     pub screens: Vec<ScreenInfo>,
-    pub has_seen_display_set: bool,
     pub last_sent_spaces: Option<Vec<Option<SpaceId>>>,
     pub quarantine_stats: QuarantineStats,
     screen_cache: Option<ScreenCache>,
-    last_converter: CoordinateConverter,
     refresh_pending: bool,
     display_churn_flags: DisplayReconfigFlags,
     display_topology_state: Option<DisplayTopologyState>,
@@ -174,11 +172,9 @@ impl Default for AuthorityState {
             session_inactive: false,
             display_churn_active: false,
             screens: Vec::new(),
-            has_seen_display_set: false,
             last_sent_spaces: None,
             quarantine_stats: QuarantineStats::default(),
             screen_cache: None,
-            last_converter: CoordinateConverter::default(),
             refresh_pending: false,
             display_churn_flags: DisplayReconfigFlags::empty(),
             display_topology_state: None,
@@ -330,16 +326,7 @@ impl SpacesActor {
             Event::SpaceInventoryChanged => {
                 self.handle_space_inventory_changed();
             }
-            Event::SpaceCreated(space) => {
-                if !self.should_buffer_topology_updates() && self.classify_space(space).is_some() {
-                    self.reactor_tx.send(reactor::Event::SpaceCreated(space));
-                }
-                self.handle_space_inventory_changed();
-            }
-            Event::SpaceDestroyed(space) => {
-                if !self.should_buffer_topology_updates() && self.classify_space(space).is_some() {
-                    self.reactor_tx.send(reactor::Event::SpaceDestroyed(space));
-                }
+            Event::SpaceCreated(_) | Event::SpaceDestroyed(_) => {
                 self.handle_space_inventory_changed();
             }
             Event::WindowServerAppeared(wsid, sid) => {
@@ -492,40 +479,6 @@ impl SpacesActor {
         })
     }
 
-    fn forward_screen_parameters(
-        &mut self,
-        screens: Vec<ScreenInfo>,
-        converter: CoordinateConverter,
-        inventory: HashMap<String, Vec<SpaceId>>,
-    ) -> Option<bool> {
-        // Rejection must leave all accepted topology and identity history untouched.
-        if !Self::screen_snapshot_is_ready_for_authoritative_commit(&screens, false) {
-            tracing::debug!(
-                revision = self.state.revision,
-                "Rejected incoherent display snapshot; resampling"
-            );
-            return None;
-        }
-        if !Self::inventory_matches_screens(&screens, &inventory) {
-            tracing::debug!(
-                revision = self.state.revision,
-                "Display and Space inventories disagree; resampling"
-            );
-            return None;
-        }
-        self.state.last_converter = converter;
-        let forwarded = self.build_forwarded_state(screens, inventory);
-        self.state.last_sent_spaces =
-            Some(forwarded.screens.iter().map(|screen| screen.space).collect());
-        self.state.awaiting_space_switch_confirmation = false;
-        let membership_complete = forwarded.membership_complete;
-        self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
-            forwarded,
-            self.state.last_converter,
-        ));
-        Some(membership_complete)
-    }
-
     fn inventory_matches_screens(
         screens: &[ScreenInfo],
         inventory: &HashMap<String, Vec<SpaceId>>,
@@ -575,8 +528,7 @@ impl SpacesActor {
         });
         let topology_changed =
             display_set_changed || display_order_changed || display_geometry_changed;
-        let should_force_refresh_layout =
-            topology_changed && (self.state.has_seen_display_set || !previous_displays.is_empty());
+        let should_force_refresh_layout = topology_changed && !previous_screens.is_empty();
 
         let previous_sizes: HashMap<_, _> =
             previous_screens.iter().map(|screen| (screen.id, screen.frame.size)).collect();
@@ -635,9 +587,6 @@ impl SpacesActor {
                     })
                 })
             });
-        if !screens.is_empty() {
-            self.state.has_seen_display_set = true;
-        }
         let (membership, membership_complete) = self.visible_window_spaces_for_screens(&screens);
         self.state.visible_window_spaces = membership;
         self.state.screens = screens.clone();
@@ -948,37 +897,30 @@ impl SpacesActor {
     fn screen_snapshot_is_valid_for_commit(screens: &[ScreenInfo]) -> bool {
         let mut seen_user_spaces: HashSet<SpaceId> = HashSet::default();
         let mut seen_displays = HashSet::default();
-        screens.iter().all(|screen| {
-            let frame = screen.frame;
-            screen.display_uuid_opt().is_some_and(|uuid| seen_displays.insert(uuid))
-                && [
-                    frame.origin.x,
-                    frame.origin.y,
-                    frame.size.width,
-                    frame.size.height,
-                    screen.backing_scale,
-                ]
-                .iter()
-                .all(|value| value.is_finite())
-                && frame.size.width > 0.0
-                && frame.size.height > 0.0
-                && screen.backing_scale > 0.0
-                && match screen.space {
-                    Some(space) if !Self::is_fullscreen_space(space) => {
-                        seen_user_spaces.insert(space)
-                    }
-                    _ => true,
-                }
-        })
-    }
-
-    fn screen_snapshot_is_ready_for_authoritative_commit(
-        screens: &[ScreenInfo],
-        require_complete_spaces: bool,
-    ) -> bool {
         !screens.is_empty()
-            && (!require_complete_spaces || screens.iter().all(|screen| screen.space.is_some()))
-            && Self::screen_snapshot_is_valid_for_commit(screens)
+            && screens.iter().all(|screen| {
+                let frame = screen.frame;
+                screen.space.is_some()
+                    && screen.display_uuid_opt().is_some_and(|uuid| seen_displays.insert(uuid))
+                    && [
+                        frame.origin.x,
+                        frame.origin.y,
+                        frame.size.width,
+                        frame.size.height,
+                        screen.backing_scale,
+                    ]
+                    .iter()
+                    .all(|value| value.is_finite())
+                    && frame.size.width > 0.0
+                    && frame.size.height > 0.0
+                    && screen.backing_scale > 0.0
+                    && match screen.space {
+                        Some(space) if !Self::is_fullscreen_space(space) => {
+                            seen_user_spaces.insert(space)
+                        }
+                        _ => true,
+                    }
+            })
     }
 
     fn process_screen_refresh(&mut self, attempt: u8, snapshot: Option<NativeSnapshot>) {
@@ -1021,14 +963,14 @@ impl SpacesActor {
             quiet,
         }) = snapshot
         else {
-            self.state.display_topology_state = None;
+            self.reject_native_snapshot();
             return false;
         };
-        if !Self::screen_snapshot_is_ready_for_authoritative_commit(&screens, true)
+        if !Self::screen_snapshot_is_valid_for_commit(&screens)
             || !Self::inventory_matches_screens(&screens, &inventory)
             || self.fullscreen_snapshot_crosses_display_ownership(&screens)
         {
-            self.state.display_topology_state = None;
+            self.reject_native_snapshot();
             return false;
         }
         // Detect churn even when native membership gets here before the display callback.
@@ -1067,12 +1009,12 @@ impl SpacesActor {
         {
             return false;
         }
-        let Some(membership_complete) =
-            self.forward_screen_parameters(screens, converter, inventory)
-        else {
-            self.state.display_topology_state = None;
-            return false;
-        };
+        let forwarded = self.build_forwarded_state(screens, inventory);
+        self.state.last_sent_spaces =
+            Some(forwarded.screens.iter().map(|screen| screen.space).collect());
+        self.state.awaiting_space_switch_confirmation = false;
+        let membership_complete = forwarded.membership_complete;
+        self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(forwarded, converter));
         if self.state.display_churn_active {
             tracing::info!(revision = self.state.revision,
                 elapsed_ms = self.state.churn_started.take().map(|at| at.elapsed().as_millis()),
@@ -1093,6 +1035,17 @@ impl SpacesActor {
             self.schedule_screen_refresh_after(delay, next);
         }
         true
+    }
+
+    fn reject_native_snapshot(&mut self) {
+        // Native queries can fail before the physical-display callback arrives.
+        // Retain the accepted model, but revoke writes until a complete sample settles.
+        // Repeated failures share one revision and the existing bounded retry batches.
+        if !self.state.display_churn_active {
+            self.begin_display_churn(DisplayReconfigFlags::empty());
+        } else {
+            self.state.display_topology_state = None;
+        }
     }
 
     fn schedule_screen_refresh(&mut self) {

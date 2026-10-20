@@ -66,6 +66,24 @@ pub(crate) fn analyze_space_snapshot(
     }
 }
 
+/// Prepends an older sample's deltas to a newer one; geometry and membership stay the newer's.
+pub(crate) fn merge_space_deltas(
+    mut older: ForwardedSpaceState,
+    mut newer: ForwardedSpaceState,
+) -> ForwardedSpaceState {
+    older.space_remaps.retain(|remap| !newer.space_remaps.contains(remap));
+    older.space_remaps.append(&mut newer.space_remaps);
+    newer.space_remaps = older.space_remaps;
+    older
+        .resized_spaces
+        .retain(|(space, _)| !newer.resized_spaces.iter().any(|(next, _)| space == next));
+    older.resized_spaces.append(&mut newer.resized_spaces);
+    newer.resized_spaces = older.resized_spaces;
+    newer.should_force_refresh_layout |= older.should_force_refresh_layout;
+    newer.display_set_changed |= older.display_set_changed;
+    newer
+}
+
 // spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
 // since they are literally when a window enters or leaves a space and each display has its own space(s)
 // this is functionally a connection dropping to the window server
@@ -342,22 +360,4 @@ pub fn handle_mission_control_native_exited(
     } else {
         outcome
     })
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SpaceLifecyclePayload {
-    pub space: SpaceId,
-    pub created: bool,
-}
-
-pub fn handle_space_lifecycle(
-    policy: &mut SpaceActivationPolicy,
-    payload: SpaceLifecyclePayload,
-) -> anyhow::Result<EventOutcome> {
-    if payload.created {
-        policy.on_space_created(payload.space);
-    } else {
-        policy.on_space_destroyed(payload.space);
-    }
-    Ok(EventOutcome::layout_changed(false).with_active_space_recompute())
 }

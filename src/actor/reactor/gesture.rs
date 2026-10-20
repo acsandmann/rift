@@ -606,10 +606,10 @@ mod tests {
             let mut requests = apps.requests();
             let leases = requests
                 .iter()
-                .filter(|r| matches!(r, Request::BeginWindowAnimation(_)))
+                .filter(|r| matches!(r, Request::BeginWindowAnimation(_, _)))
                 .count();
             assert_eq!(leases, 4, "each camera window acquires its lease once");
-            requests.retain(|r| !matches!(r, Request::BeginWindowAnimation(_)));
+            requests.retain(|r| !matches!(r, Request::BeginWindowAnimation(_, _)));
             assert_eq!(
                 requests.len(),
                 1,
@@ -619,7 +619,7 @@ mod tests {
                 panic!("live scrolling must use the interactive transport");
             };
             let mut written = crate::common::collections::HashSet::default();
-            queue.drain_with(|wid, frame, set_size, _, source, _| {
+            queue.drain_with(|wid, frame, set_size, _, source, _, _| {
                 assert_eq!(source, crate::actor::app::FrameSource::Viewport);
                 assert!(!set_size, "scrolling must only move windows");
                 assert!(frame.same_as(r.state.windows.window(wid).unwrap().frame_monotonic));
@@ -647,7 +647,7 @@ mod tests {
             let reconciled: Vec<_> = requests
                 .iter()
                 .filter_map(|request| match request {
-                    Request::EndWindowAnimation(wid) => Some(*wid),
+                    Request::EndWindowAnimation(wid, _) => Some(*wid),
                     _ => None,
                 })
                 .collect();
@@ -884,11 +884,12 @@ mod tests {
             while let Ok((_, request)) = rx.try_recv() {
                 match request {
                     Request::InteractiveFramesPending(queue) => {
-                        queue.drain_with(|wid, _, _, _, _, _| {
+                        queue.drain_with(|wid, _, _, _, _, _, _| {
                             written.insert(wid);
                         });
                     }
-                    Request::EndWindowAnimation(wid) | Request::CancelWindowAnimation(wid, _) => {
+                    Request::EndWindowAnimation(wid, _)
+                    | Request::CancelWindowAnimation(wid, _) => {
                         assert!(
                             !hidden.contains(&wid),
                             "terminal viewport frames must precede workspace hiding"
@@ -899,6 +900,7 @@ mod tests {
                         positions,
                         _,
                         crate::actor::app::FrameMode::Position,
+                        _,
                         _,
                     ) => {
                         for (wid, position) in positions {
@@ -980,7 +982,7 @@ mod tests {
                 // Drain the preceding gesture wake before checking for stale release writes.
                 while let Ok((_, request)) = app_rx.try_recv() {
                     if let Request::InteractiveFramesPending(queue) = request {
-                        queue.drain_with(|_, _, _, _, _, _| {});
+                        queue.drain_with(|_, _, _, _, _, _, _| {});
                     }
                 }
                 r.gesture_tick();
@@ -1000,7 +1002,7 @@ mod tests {
                 let mut moved = 0;
                 while let Ok((_, request)) = app_rx.try_recv() {
                     if let Request::InteractiveFramesPending(queue) = request {
-                        queue.drain_with(|wid, frame, set_size, _, source, _| {
+                        queue.drain_with(|wid, frame, set_size, _, source, _, _| {
                             assert_eq!(source, FrameSource::Viewport);
                             assert!(!set_size);
                             assert!(
