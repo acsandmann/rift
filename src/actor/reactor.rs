@@ -78,7 +78,7 @@ use crate::actor::app::{
 };
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
-use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
@@ -388,6 +388,7 @@ pub enum Event {
     RegisterSenders {
         wm: crate::actor::wm_controller::Sender,
         spaces: crate::actor::spaces::Sender,
+        topology_guard: crate::actor::spaces::TopologyGuard,
     },
 
     #[serde(skip)]
@@ -413,6 +414,7 @@ pub struct Reactor {
     space_state: ForwardedSpaceState,
     space_activation_policy: SpaceActivationPolicy,
     spaces_tx: Option<crate::actor::spaces::Sender>,
+    topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
     pending_mouse_focus: Option<(WindowId, Instant)>,
     mouse_inventory_hit: Option<WindowServerId>,
@@ -565,6 +567,7 @@ impl Reactor {
                 pending_space_change: None,
             },
             spaces_tx: None,
+            topology_guard: Default::default(),
             active_spaces: HashSet::default(),
             startup_ready: None,
             animation_tx: None,
@@ -745,21 +748,26 @@ impl Reactor {
     }
 
     fn recompute_and_set_active_spaces(&mut self, spaces: &[Option<SpaceId>]) {
-        self.recompute_and_set_active_spaces_with_topology(spaces, &[]);
+        let previous = self.set_active_spaces_from_snapshot(spaces);
+        if previous != self.active_spaces {
+            self.handle_active_space_change(&previous);
+            self.reconcile_authoritative_active_window_snapshot(
+                self.authoritative_active_space_windows(),
+                true,
+                &[],
+            );
+            self.request_window_inventories();
+        }
     }
 
-    fn recompute_and_set_active_spaces_with_topology(
-        &mut self,
-        spaces: &[Option<SpaceId>],
-        invalidated_spaces: &[SpaceId],
-    ) {
+    fn set_active_spaces_from_snapshot(&mut self, spaces: &[Option<SpaceId>]) -> HashSet<SpaceId> {
         let cfg = self.activation_cfg();
         let display_uuids = self.display_uuids_for_current_screens();
         let active_spaces =
             self.space_activation_policy.compute_active_spaces(cfg, spaces, &display_uuids);
-        let previous_active = self.active_spaces.clone();
+        let previous = self.active_spaces.clone();
         self.set_active_spaces(&active_spaces);
-        self.handle_active_space_change(previous_active, invalidated_spaces);
+        previous
     }
 
     fn recompute_and_set_active_spaces_from_current_screens(&mut self) {
@@ -777,43 +785,12 @@ impl Reactor {
             .collect()
     }
 
-    fn handle_active_space_change(
-        &mut self,
-        previous_active: HashSet<SpaceId>,
-        invalidated_spaces: &[SpaceId],
-    ) {
-        if previous_active == self.active_spaces {
-            return;
+    fn handle_active_space_change(&mut self, previous: &HashSet<SpaceId>) {
+        let activated: Vec<_> = self.active_spaces.difference(previous).copied().collect();
+        for space in &activated {
+            self.expose_space_if_known(*space);
         }
-
-        let deactivated: Vec<SpaceId> =
-            previous_active.difference(&self.active_spaces).copied().collect();
-        let activated: Vec<SpaceId> =
-            self.active_spaces.difference(&previous_active).copied().collect();
-
-        // Do not remove windows when a space is merely deactivated (e.g. macOS Space
-        // switches). Removing them clears workspace assignments and causes windows
-        // without app rules to be re-assigned to the current workspace.
-
-        if !activated.is_empty() {
-            for space in &activated {
-                self.expose_space_if_known(*space);
-            }
-        }
-
-        if !activated.is_empty() || !deactivated.is_empty() {
-            let active_windows = self.authoritative_active_space_windows();
-            self.reconcile_authoritative_active_window_snapshot(
-                active_windows,
-                true,
-                invalidated_spaces,
-            );
-            self.request_window_inventories();
-        }
-
-        if !activated.is_empty() {
-            self.apply_app_rules_for_activated_spaces(&activated);
-        }
+        self.apply_app_rules_for_activated_spaces(&activated);
     }
 
     fn apply_app_rules_for_activated_spaces(&mut self, activated: &[SpaceId]) {
@@ -1040,6 +1017,13 @@ impl Reactor {
     }
 
     fn handle_loop_event(&mut self, event: Event) {
+        Self::note_windowserver_activity(&event);
+        // Check before fast paths (mouse, gestures, queries that commit a
+        // presentation) and before queued invalidation reaches this thread.
+        if self.should_quarantine_unstable_topology(&event) {
+            trace!(?event, "quarantined while native topology is unstable");
+            return;
+        }
         let event = match event {
             Event::Gesture(event) => {
                 self.gesture_event(event);
@@ -1097,11 +1081,6 @@ impl Reactor {
             }
             event => event,
         };
-        if self.should_quarantine_unstable_topology(&event) {
-            trace!(?event, "quarantined while native topology is unstable");
-            return;
-        }
-        Self::note_windowserver_activity(&event);
         #[cfg(any(test, debug_assertions))]
         let high_frequency = matches!(&event, Event::DragMotion(..));
         self.handle_event(event);
@@ -1181,10 +1160,26 @@ impl Reactor {
                 | Event::WindowTitleChanged(..)
                 | Event::SpaceCreated(..)
                 | Event::SpaceDestroyed(..)
+                | Event::WindowClosed(..)
+                | Event::WindowServerHidden(..)
+                | Event::WindowServerUnhidden(..)
+                | Event::WindowServerFocusChanged(..)
+                | Event::MouseMoved(..)
+                | Event::DragMotion(..)
+                | Event::ModifierMouseDown { .. }
+                | Event::Gesture(..)
+                | Event::Command(Command::Layout(..))
+                | Event::Command(Command::Reactor(
+                    ReactorCommand::MoveWindowToDisplay { .. }
+                        | ReactorCommand::MoveWorkspaceToDisplay { .. }
+                ))
         )
     }
 
-    fn refreshes_blocked(&self) -> bool { !self.space_state.authoritative }
+    fn refreshes_blocked(&self) -> bool {
+        !self.space_state.authoritative
+            || self.topology_guard.invalidated_revision() > self.space_state.revision
+    }
 
     fn defer_window_inventory_refresh(&mut self) {
         self.window_inventory_manager
@@ -1465,8 +1460,9 @@ impl Reactor {
                     EventOutcome::default()
                 });
             }
-            Event::RegisterSenders { wm, spaces } => {
+            Event::RegisterSenders { wm, spaces, topology_guard } => {
                 self.spaces_tx = Some(spaces);
+                self.topology_guard = topology_guard;
                 return Ok(system_workflow::handle_register_wm_sender(
                     &mut self.communication_manager,
                     wm,
@@ -1824,10 +1820,13 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::SpaceStateChanged(space_state) => {
-                if !space_state.authoritative || space_state.revision < self.space_state.revision {
+                if !space_state.authoritative
+                    || space_state.revision < self.space_state.revision
+                    || space_state.revision < self.topology_guard.invalidated_revision()
+                {
                     return Ok(EventOutcome::default());
                 }
-                let recovering = !self.space_state.authoritative;
+                let recovering = self.refreshes_blocked();
                 let changed = space_state.revision != self.space_state.revision;
                 if recovering {
                     self.abandon_window_inventories_from_instability();
@@ -2655,6 +2654,9 @@ impl Reactor {
             .into_iter()
             .chain(outcome.interactive_window_frame_write)
         {
+            if self.refreshes_blocked() {
+                break;
+            }
             if write.coalesced && !self.drag_manager.actor.is_active() {
                 continue;
             }
@@ -3249,11 +3251,7 @@ impl Reactor {
             .space_state
             .display_space_ids
             .iter()
-            .filter(|_| {
-                space_state.display_set_changed
-                    || space_state.should_force_refresh_layout
-                    || space_state.topology_window_delta.is_some()
-            })
+            .filter(|_| space_state.display_set_changed || space_state.should_force_refresh_layout)
             .flat_map(|(display, spaces)| {
                 spaces
                     .iter()
@@ -3286,7 +3284,6 @@ impl Reactor {
             should_force_refresh_layout,
             membership_complete,
             resized_spaces,
-            topology_window_delta,
             active_window_spaces,
             ..
         } = space_state;
@@ -3325,9 +3322,6 @@ impl Reactor {
                     screens.iter().map(|s| s.id.as_u32()).collect(),
                 ));
             }
-            let active_displays: Vec<String> =
-                screens.iter().map(|screen| screen.display_uuid.clone()).collect();
-            self.layout_manager.layout_engine.prune_display_state(&active_displays);
         }
         self.space_state.menu_bar_space = menu_bar_space;
         self.space_state.command_space = command_space;
@@ -3370,10 +3364,7 @@ impl Reactor {
         let current_screens = self.space_state.screens.clone();
         self.space_activation_policy
             .on_spaces_updated(activation_config, &current_screens);
-        self.recompute_and_set_active_spaces_with_topology(
-            &authoritative_spaces,
-            &invalidated_spaces,
-        );
+        let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
         self.restore_windows_after_fullscreen_exit(&spaces);
 
         for (space, size) in resized_spaces {
@@ -3383,9 +3374,6 @@ impl Reactor {
             self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
             outcome = outcome.with_layout_event(LayoutEvent::SpaceExposed(space, size));
         }
-        if let Some(delta) = topology_window_delta {
-            outcome.absorb(self.apply_topology_window_delta(delta));
-        }
         let active_windows = self.authoritative_active_space_windows();
         self.finalize_space_change(
             &spaces,
@@ -3393,6 +3381,7 @@ impl Reactor {
             !membership_complete,
             &invalidated_spaces,
         );
+        self.handle_active_space_change(&previously_active);
         self.try_apply_pending_space_change();
         if should_force_refresh_layout {
             outcome = outcome.with_arrange_passes(1);
@@ -3746,44 +3735,6 @@ impl Reactor {
         (target_space == assigned_space).then_some(target_space)
     }
 
-    fn apply_topology_window_delta(&mut self, delta: TopologyWindowDelta) -> EventOutcome {
-        let appeared: HashMap<WindowServerId, SpaceId> = delta.appeared.into_iter().collect();
-        let disappeared: HashMap<WindowServerId, SpaceId> = delta.disappeared.into_iter().collect();
-        let wsids: HashSet<WindowServerId> =
-            appeared.keys().chain(disappeared.keys()).copied().collect();
-        let mut outcome = EventOutcome::default();
-
-        for wsid in wsids {
-            let appeared_space = appeared.get(&wsid).copied();
-            let disappeared_space = disappeared.get(&wsid).copied();
-            let authoritative_space = self.resolve_native_space(wsid, appeared_space);
-            if let Some(target_space) = authoritative_space {
-                self.state.windows.observe_native_space(
-                    wsid,
-                    target_space,
-                    self.is_space_active(target_space),
-                );
-                if appeared_space == Some(target_space) {
-                    self.clear_pending_target_if_confirmed_space(wsid, target_space);
-                }
-                if let Some(window) = self.state.windows.tracked_window_id(wsid) {
-                    outcome =
-                        self.reconcile_native_presence(wsid, target_space, window, true, outcome);
-                }
-            } else if let Some(previous_space) = disappeared_space {
-                self.state.windows.observe_native_space(wsid, previous_space, false);
-                if let Some(window) = self.state.windows.tracked_window_id(wsid)
-                    && self.assigned_space_for_window_id(window) == Some(previous_space)
-                    && self.is_space_active(previous_space)
-                {
-                    outcome = outcome
-                        .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(window));
-                }
-            }
-        }
-        outcome
-    }
-
     fn reconcile_native_presence(
         &mut self,
         wsid: WindowServerId,
@@ -3817,6 +3768,9 @@ impl Reactor {
             return;
         }
         if self.assigned_space_for_window_id(wid) != Some(space) {
+            self.layout_manager
+                .layout_engine
+                .remember_native_departure(&self.state.windows, wid);
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             let engine = &mut self.layout_manager.layout_engine;
             engine.workspaces_mut().list_workspaces(space);
@@ -3846,6 +3800,9 @@ impl Reactor {
         }
         if self.is_space_active(space) && self.state.windows.is_visible_admitted(wid) {
             self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+            self.layout_manager
+                .layout_engine
+                .restore_native_return(&self.state.windows, wid);
         }
     }
 

@@ -114,16 +114,16 @@ impl<S: System> ScreenCache<S> {
     }
 
     pub fn refresh(&mut self) -> Option<(Vec<ScreenInfo>, CoordinateConverter)> {
-        self.refresh_snapshot(false).map(|s| (s.screens, s.converter))
+        self.refresh_snapshot().map(|s| (s.screens, s.converter))
     }
 
-    fn refresh_snapshot(&mut self, force: bool) -> Option<ScreenState> {
+    fn refresh_snapshot(&mut self) -> Option<ScreenState> {
         if self.sleeping {
             return self.state.clone();
         }
 
         let dirty = self.pending_generation != self.processed_generation;
-        let should_rebuild = force || self.state.is_none() || dirty;
+        let should_rebuild = self.state.is_none() || dirty;
 
         if !should_rebuild {
             // Even when displays are unchanged, the active space per display can change.
@@ -161,14 +161,9 @@ impl<S: System> ScreenCache<S> {
         debug!("cg_screens={cg_screens:?}");
 
         if cg_screens.is_empty() {
-            self.uuids.clear();
-            let state = ScreenState {
-                screens: Vec::new(),
-                converter: CoordinateConverter::default(),
-            };
-            self.state = Some(state.clone());
-            self.processed_generation = self.pending_generation;
-            return Some(state);
+            // No connected display is a transient sample, not a new coordinate
+            // system. Keep the last good cache and leave the generation dirty.
+            return None;
         }
 
         cg_screens.sort_by(|a, b| {
@@ -185,11 +180,18 @@ impl<S: System> ScreenCache<S> {
             cg_screens.swap(0, main_screen_idx);
         } else {
             warn!("Could not find main screen. cg_screens={cg_screens:?}");
+            return None;
         }
 
         let uuids: Vec<CFRetained<CFString>> =
             cg_screens.iter().map(|screen| self.system.display_uuid(screen)).collect();
         let uuid_strings: Vec<String> = uuids.iter().map(|uuid| uuid.to_string()).collect();
+
+        let mut identities = std::collections::HashSet::new();
+        if uuid_strings.iter().any(|uuid| uuid.is_empty() || !identities.insert(uuid)) {
+            warn!("Display identities unavailable; retaining previous screen cache");
+            return None;
+        }
 
         // Cocoa's global origin is the bottom left of the primary display, not
         // the bottom of the desktop union. Both APIs use logical points here.
@@ -205,13 +207,7 @@ impl<S: System> ScreenCache<S> {
             .map(|(idx, &CGScreenInfo { cg_id, bounds })| {
                 let notch_height = self.system.notch_height(cg_id.as_u32());
                 let frame = constrain_display_bounds(cg_id.as_u32(), bounds, notch_height);
-                let display_uuid =
-                    uuid_strings.get(idx).cloned().filter(|uuid| !uuid.is_empty()).unwrap_or_else(
-                        || {
-                            warn!("Missing cached UUID for {:?}; using fallback", cg_id);
-                            format!("cgdisplay-{}", cg_id.as_u32())
-                        },
-                    );
+                let display_uuid = uuid_strings[idx].clone();
                 ScreenInfo {
                     id: cg_id,
                     frame,
@@ -811,8 +807,8 @@ mod test {
 
         fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> { Ok(self.cg_screens.clone()) }
 
-        fn display_uuid(&self, _screen: &CGScreenInfo) -> CFRetained<CFString> {
-            CFString::from_str("stub")
+        fn display_uuid(&self, screen: &CGScreenInfo) -> CFRetained<CFString> {
+            CFString::from_str(&format!("stub-{}", screen.cg_id.0))
         }
 
         fn ns_screens(&self) -> Vec<NSScreenInfo> { self.ns_screens.clone() }
@@ -821,42 +817,31 @@ mod test {
     }
 
     struct SequenceSystem {
-        cg_screens: RefCell<VecDeque<Vec<CGScreenInfo>>>,
-        ns_screens: RefCell<VecDeque<Vec<NSScreenInfo>>>,
+        cg_screens: RefCell<VecDeque<Result<Vec<CGScreenInfo>, CGError>>>,
         uuids: RefCell<VecDeque<CFRetained<CFString>>>,
     }
 
     impl SequenceSystem {
-        fn new(
-            cg_screens: Vec<Vec<CGScreenInfo>>,
-            ns_screens: Vec<Vec<NSScreenInfo>>,
-            uuids: Vec<CFRetained<CFString>>,
-        ) -> Self {
+        fn new(samples: Vec<Result<Vec<CGScreenInfo>, CGError>>, uuids: Vec<&str>) -> Self {
             Self {
-                cg_screens: RefCell::new(VecDeque::from(cg_screens)),
-                ns_screens: RefCell::new(VecDeque::from(ns_screens)),
-                uuids: RefCell::new(VecDeque::from(uuids)),
+                cg_screens: RefCell::new(samples.into()),
+                uuids: RefCell::new(uuids.into_iter().map(CFString::from_str).collect()),
             }
         }
     }
 
     impl System for SequenceSystem {
+        fn main_display_id(&self) -> u32 { 1 }
+
         fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> {
-            Ok(self.cg_screens.borrow_mut().pop_front().unwrap_or_default())
+            self.cg_screens.borrow_mut().pop_front().expect("unexpected display sample")
         }
 
         fn display_uuid(&self, _screen: &CGScreenInfo) -> CFRetained<CFString> {
-            self.uuids
-                .borrow_mut()
-                .pop_front()
-                .unwrap_or_else(|| CFString::from_str("missing-uuid"))
+            self.uuids.borrow_mut().pop_front().expect("unexpected UUID read")
         }
 
-        fn ns_screens(&self) -> Vec<NSScreenInfo> {
-            self.ns_screens.borrow_mut().pop_front().unwrap_or_default()
-        }
-
-        fn notch_height(&self, _did: u32) -> f64 { 0.0 }
+        fn ns_screens(&self) -> Vec<NSScreenInfo> { Vec::new() }
     }
 
     #[test]
@@ -979,58 +964,89 @@ mod test {
     }
 
     #[test]
-    fn clears_cached_screen_identifiers_when_display_list_is_empty() {
-        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1440.0, 900.0));
-        let visible_frame = CGRect::new(CGPoint::new(0.0, 22.0), CGSize::new(1440.0, 878.0));
+    fn invalid_display_samples_preserve_cache_and_retry_without_another_notification() {
+        let bounds = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+        let screen = |id| CGScreenInfo { cg_id: ScreenId(id), bounds };
+        for (case, sample, invalid_uuids) in [
+            ("empty list", Ok(vec![]), vec![]),
+            ("missing main", Ok(vec![screen(2)]), vec![]),
+            ("empty UUID", Ok(vec![screen(1)]), vec![""]),
+            ("duplicate UUID", Ok(vec![screen(1), screen(2)]), vec![
+                "same", "same",
+            ]),
+            ("CG failure", Err(CGError::Failure), vec![]),
+        ] {
+            let mut uuids = vec!["original"];
+            uuids.extend(invalid_uuids);
+            uuids.extend(["returned-main", "new-display"]);
+            let system = SequenceSystem::new(
+                vec![Ok(vec![screen(1)]), sample, Ok(vec![screen(1), screen(2)])],
+                uuids,
+            );
+            let mut cache = ScreenCache::new_with(system);
+            let (original, converter) = cache.refresh().unwrap();
+            cache.mark_dirty();
+            assert!(cache.refresh().is_none(), "{case}");
+            assert_eq!(cache.state.as_ref().unwrap().screens, original, "{case}");
+            assert_eq!(
+                cache.uuids.iter().map(|uuid| uuid.to_string()).collect::<Vec<_>>(),
+                vec!["original"],
+                "{case}"
+            );
+            assert_eq!(
+                cache.state.as_ref().unwrap().converter.screen_height(),
+                converter.screen_height(),
+                "{case}"
+            );
 
-        let system = SequenceSystem::new(
-            vec![vec![CGScreenInfo { cg_id: ScreenId(1), bounds }], vec![]],
-            vec![
-                vec![NSScreenInfo {
-                    cg_id: ScreenId(1),
-                    frame: bounds,
-                    visible_frame,
-                    backing_scale: 1.0,
-                    name: None,
-                }],
-                vec![],
-            ],
-            vec![CFString::from_str("uuid-1")],
-        );
+            // The rejected sample must leave its rebuild pending: no mark_dirty here.
+            let (recovered, _) = cache.refresh().unwrap();
+            assert_eq!(
+                recovered.iter().map(|s| s.display_uuid.as_str()).collect::<Vec<_>>(),
+                vec!["returned-main", "new-display"],
+                "{case}"
+            );
+            assert_eq!(cache.processed_generation, cache.pending_generation, "{case}");
+        }
+    }
 
+    #[test]
+    fn sleeping_keeps_the_last_snapshot_and_waking_rebuilds_without_a_display_notification() {
+        let screen = |height| CGScreenInfo {
+            cg_id: ScreenId(1),
+            bounds: CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., height)),
+        };
+        let system =
+            SequenceSystem::new(vec![Ok(vec![screen(900.)]), Ok(vec![screen(1080.)])], vec![
+                "before-sleep",
+                "after-wake",
+            ]);
         let mut cache = ScreenCache::new_with(system);
-
-        let (screens, _) = cache.refresh().unwrap();
-        assert_eq!(screens.len(), 1);
-        assert_eq!(cache.uuids.len(), 1);
-
-        cache.mark_dirty();
-        let (screens, converter) = cache.refresh().unwrap();
-        assert!(screens.is_empty());
-        assert!(cache.uuids.is_empty());
-        assert!(converter.convert_point(CGPoint::new(0.0, 0.0)).is_none());
+        let (before, _) = cache.refresh().unwrap();
+        cache.mark_sleeping(true);
+        assert_eq!(cache.refresh().unwrap().0, before);
+        assert_eq!(cache.refresh().unwrap().0, before);
+        assert_eq!(cache.system.cg_screens.borrow().len(), 1);
+        cache.mark_sleeping(false);
+        let (after, converter) = cache.refresh().unwrap();
+        assert_eq!(after[0].display_uuid, "after-wake");
+        assert_eq!(converter.screen_height(), Some(1080.));
+        assert!(cache.system.cg_screens.borrow().is_empty());
     }
 
     #[test]
-    fn orders_spaces_by_horizontal_position() {
+    fn orders_shuffled_spaces_by_horizontal_then_vertical_position() {
         let spaces = vec![
-            (SpaceId::new(1), CGPoint::new(-500.0, 0.0)),
-            (SpaceId::new(2), CGPoint::new(0.0, 0.0)),
-            (SpaceId::new(3), CGPoint::new(500.0, 100.0)),
+            (SpaceId::new(4), CGPoint::new(500., -300.)),
+            (SpaceId::new(3), CGPoint::new(0., 150.)),
+            (SpaceId::new(1), CGPoint::new(-500., 200.)),
+            (SpaceId::new(2), CGPoint::new(0., -200.)),
         ];
-
-        let ordered = order_visible_spaces_by_position(spaces);
-        assert_eq!(ordered, vec![SpaceId::new(1), SpaceId::new(2), SpaceId::new(3)]);
-    }
-
-    #[test]
-    fn orders_spaces_by_vertical_position_when_aligned() {
-        let spaces = vec![
-            (SpaceId::new(10), CGPoint::new(0.0, -200.0)),
-            (SpaceId::new(11), CGPoint::new(0.0, 150.0)),
-        ];
-
-        let ordered = order_visible_spaces_by_position(spaces);
-        assert_eq!(ordered, vec![SpaceId::new(10), SpaceId::new(11)]);
+        assert_eq!(order_visible_spaces_by_position(spaces), vec![
+            SpaceId::new(1),
+            SpaceId::new(2),
+            SpaceId::new(3),
+            SpaceId::new(4)
+        ]);
     }
 }

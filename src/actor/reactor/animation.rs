@@ -508,6 +508,9 @@ impl Reactor {
     }
 
     pub(super) fn commit_presentations(&mut self) {
+        if self.refreshes_blocked() {
+            return;
+        }
         let control = self.animation_tx.as_ref().map(|tx| tx.control.clone());
         let control = control.as_ref().map(|c| c.lock());
         let mut completed = Vec::new();

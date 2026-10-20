@@ -351,7 +351,6 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
         should_force_refresh_layout: false,
         // Set on every coherent snapshot the spaces actor forwards.
         resized_spaces: Vec::new(),
-        topology_window_delta: None,
     }
 }
 

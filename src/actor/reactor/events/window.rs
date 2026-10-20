@@ -334,6 +334,9 @@ pub fn handle_window_frame_changed(
             drag.externally_controlled_window = Some(wid);
         }
         if native_resize && active_resize_space.is_some() {
+            // Unsolicited system geometry is also reported as WindowResized.
+            // Only this native drag is an explicit edit to the saved arrangement.
+            layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
                 wid,
                 old_frame,

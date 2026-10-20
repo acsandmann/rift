@@ -47,7 +47,6 @@ pub(crate) fn analyze_space_snapshot(
         && !incoming.should_force_refresh_layout
         && incoming.space_remaps.is_empty()
         && incoming.resized_spaces.is_empty()
-        && incoming.topology_window_delta.is_none()
         && current.screens == incoming.screens
         && current.fullscreen_spaces == incoming.fullscreen_spaces
         && current_effective_active_spaces == &effective_active_spaces
@@ -58,8 +57,7 @@ pub(crate) fn analyze_space_snapshot(
     let invalidates_pending_targets = incoming.display_set_changed
         || incoming.should_force_refresh_layout
         || !incoming.space_remaps.is_empty()
-        || !incoming.resized_spaces.is_empty()
-        || incoming.topology_window_delta.is_some();
+        || !incoming.resized_spaces.is_empty();
     SpaceSnapshotAnalysis {
         spaces,
         authoritative_spaces,
