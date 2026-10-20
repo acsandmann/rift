@@ -58,6 +58,18 @@ impl HiddenWindowPlacement {
         }
     }
 
+    /// Whether at most a sliver of `window` shows on `screen` along either axis.
+    ///
+    /// macOS can pull a parked window back up by its title bar, so an observed
+    /// park only reliably matches its hidden placement along one axis.
+    pub fn is_parked(screen: CGRect, window: CGRect) -> bool {
+        let visible_width =
+            (window.max().x.min(screen.max().x) - window.origin.x.max(screen.origin.x)).max(0.0);
+        let visible_height =
+            (window.max().y.min(screen.max().y) - window.origin.y.max(screen.origin.y)).max(0.0);
+        visible_width <= Self::VISIBLE_THRESHOLD_PX || visible_height <= Self::VISIBLE_THRESHOLD_PX
+    }
+
     pub fn is_hidden(screen: CGRect, window: CGRect, other_screens: &[CGRect]) -> bool {
         [HideCorner::BottomLeft, HideCorner::BottomRight]
             .into_iter()
@@ -83,6 +95,20 @@ mod tests {
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+    }
+
+    #[test]
+    fn park_pulled_up_by_macos_still_counts_as_parked() {
+        let screen = rect(0.0, 0.0, 1470.0, 956.0);
+        // Requested at y=955; macOS keeps the title bar onscreen.
+        assert!(HiddenWindowPlacement::is_parked(
+            screen,
+            rect(1469.0, 924.0, 725.0, 902.0)
+        ));
+        assert!(!HiddenWindowPlacement::is_parked(
+            screen,
+            rect(10.0, 44.0, 725.0, 902.0)
+        ));
     }
 
     #[test]

@@ -10,11 +10,14 @@ use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, WindowId, pid_t};
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
+use crate::actor::reactor::managers::WorkspaceTransitionDirection;
 use crate::common::collections::{HashMap, HashSet};
+use crate::common::config::WorkspaceTransitionAxis;
 use crate::layout_engine::systems::scrolling::{
     CameraSpring, PresentedViewport, ViewportPresentation,
 };
 use crate::layout_engine::{LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId};
+use crate::model::HiddenWindowPlacement;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::display_link::DisplayLink;
 use crate::sys::geometry::{Round, SameAs};
@@ -139,9 +142,7 @@ struct DisplayPresenter {
 struct ActiveAnimation {
     animation: Animation,
     started: Instant,
-    progress: f64,
     next_sample: Instant,
-    ended: bool,
 }
 
 #[derive(Debug)]
@@ -207,18 +208,48 @@ struct PresentedWindow {
     to: CGRect,
     frame: CGRect,
     move_from: CGPoint,
+    // Workspace transitions slide offscreen along `from -> to`, then settle
+    // here on the final frame; the jump is invisible because `to` is offscreen.
+    park: Option<CGRect>,
+    timing: Timing,
     txid: TransactionId,
     fixed: bool,
     leased: bool,
     announced: bool,
 }
 
+/// Each transition window keeps its own clock, so retargeting one window
+/// neither restarts nor stretches the others. Viewport motion ignores it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Timing {
+    // Seconds after the active transition started; negative once carried over.
+    delay: f64,
+    duration: Duration,
+    progress: f64,
+    // Interrupted windows are already moving, so they skip the ease-in.
+    ease_out: bool,
+}
+
+impl Timing {
+    fn progress_at(&self, elapsed: f64) -> f64 {
+        let t = if self.duration.is_zero() {
+            1.0
+        } else {
+            ((elapsed - self.delay) / self.duration.as_secs_f64()).clamp(0.0, 1.0)
+        };
+        t.max(self.progress)
+    }
+
+    fn finishes_at(&self) -> f64 { self.delay + self.duration.as_secs_f64() }
+
+    fn is_complete(&self) -> bool { self.progress >= 1.0 }
+}
+
 #[derive(Clone, Copy)]
 enum Sample<'a> {
     Transition {
-        progress: f64,
-        eased: f64,
-        set_size: bool,
+        // Seconds since the active transition started.
+        elapsed: f64,
     },
     Viewport {
         presentation: &'a ViewportPresentation,
@@ -254,14 +285,31 @@ impl PresentedWindow {
 
     fn sample(&mut self, sample: Sample<'_>) -> Option<Frame> {
         let (frame, set_size, source, force) = match sample {
-            Sample::Transition { progress, eased, set_size } => {
+            Sample::Transition { elapsed } => {
+                let previous = self.timing.progress;
+                if previous >= 1.0 {
+                    return None;
+                }
+                let progress = self.timing.progress_at(elapsed);
+                self.timing.progress = progress;
+                let set_size =
+                    (previous < 0.5 && progress >= 0.5) || (previous < 1.0 && progress >= 1.0);
+                let eased = if self.timing.ease_out {
+                    ease_out(progress)
+                } else {
+                    ease(progress)
+                };
                 let mut frame = interpolate_frame(self.from, self.to, eased);
                 frame.size = if progress >= 0.5 {
                     self.to.size
                 } else {
                     self.from.size
                 };
-                (frame, set_size, FrameSource::Ordinary, set_size)
+                let (frame, source) = match self.park {
+                    Some(park) if progress >= 1.0 => (park, FrameSource::Park),
+                    _ => (frame, FrameSource::Ordinary),
+                };
+                (frame, set_size, source, set_size)
             }
             Sample::Viewport {
                 presentation,
@@ -664,6 +712,8 @@ impl Reactor {
                     leased: false,
                     frame,
                     move_from: CGPoint::ZERO,
+                    park: None,
+                    timing: Timing::default(),
                     txid: TransactionId::default(),
                 })
             })
@@ -1123,6 +1173,107 @@ impl AnimationManager {
         Self::instant_layout_inner(reactor, space, layout, skip_wid, true)
     }
 
+    /// Slide the outgoing workspace off one edge and the incoming one in from the
+    /// opposite edge. Windows that neither appear nor disappear are positioned
+    /// instantly, exactly as `workspace_switch_layout` would.
+    pub fn workspace_transition_layout(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        skip_wid: Option<WindowId>,
+        direction: WorkspaceTransitionDirection,
+    ) -> bool {
+        reactor.retire_presentations();
+        let Some(screen) = reactor.space_state.screen_by_space(space) else {
+            return Self::workspace_switch_layout(reactor, space, layout, skip_wid);
+        };
+        let screen_frame = screen.frame;
+        let display = screen.id.as_u32();
+        let is_hidden = |frame| HiddenWindowPlacement::is_parked(screen_frame, frame);
+        let settings = &reactor.config.settings;
+        let offset = transition_offset(screen_frame, settings.workspace_transition_axis, direction);
+        let mut anim =
+            Animation::new(settings.animation_fps, settings.workspace_transition_duration);
+        anim.display = display;
+
+        let mut instant = Vec::new();
+        let mut any_frame_changed = false;
+        for &(wid, target_frame) in layout {
+            let target_frame = target_frame.round();
+            let Some(window) = reactor.state.windows.window(wid) else {
+                continue;
+            };
+            let current_frame = window.frame_monotonic;
+            let window_server_id = window.info.sys_id;
+            let incoming = !is_hidden(target_frame) && is_hidden(current_frame);
+            let outgoing = is_hidden(target_frame) && !is_hidden(current_frame);
+            trace!(
+                ?wid,
+                ?current_frame,
+                ?target_frame,
+                incoming,
+                outgoing,
+                "Workspace transition classification"
+            );
+            if skip_wid == Some(wid) || !(incoming || outgoing) {
+                instant.push((wid, target_frame));
+                continue;
+            }
+            let pending = window_server_id
+                .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
+            if pending.is_some_and(|frame| frame.same_as(target_frame)) {
+                continue;
+            }
+            let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
+                debug!(?wid, "Skipping transition for window - app no longer exists");
+                continue;
+            };
+            let txid = window_server_id
+                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
+                .unwrap_or_default();
+            if let Some(wsid) = window_server_id {
+                reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
+            }
+            if incoming {
+                trace!(?wid, ?target_frame, "Sliding in workspace window");
+                let start = offset_frame(target_frame, offset, 1.0);
+                anim.add_window(&app_state.handle, wid, start, target_frame, txid);
+            } else {
+                trace!(?wid, ?current_frame, "Sliding out workspace window");
+                let slide_to =
+                    keep_revealed(offset_frame(current_frame, offset, -1.0), screen_frame);
+                anim.add_window_parked(
+                    &app_state.handle,
+                    wid,
+                    current_frame,
+                    slide_to,
+                    target_frame,
+                    txid,
+                );
+            }
+            any_frame_changed = true;
+            if let Some(window) = reactor.state.windows.window_mut(wid) {
+                window.frame_monotonic = target_frame;
+            }
+        }
+
+        any_frame_changed |= Self::instant_layout_inner(reactor, space, &instant, skip_wid, true);
+        if anim.is_empty() {
+            return any_frame_changed;
+        }
+        match &reactor.animation_tx {
+            Some(tx) => {
+                if let Err(err) = tx.send(Message::Replace(anim))
+                    && let Message::Replace(animation) = err.0
+                {
+                    animation.skip_to_end();
+                }
+            }
+            None => anim.skip_to_end(),
+        }
+        any_frame_changed
+    }
+
     fn instant_layout_inner(
         reactor: &mut Reactor,
         _space: SpaceId,
@@ -1130,7 +1281,22 @@ impl AnimationManager {
         skip_wid: Option<WindowId>,
         position_only: bool,
     ) -> bool {
-        reactor.cancel_window_presentations(layout.iter().map(|(wid, _)| *wid).collect());
+        // A window already presenting toward this exact target (such as an in-flight
+        // workspace transition) keeps its motion; anything else is interrupted.
+        let interrupted = layout
+            .iter()
+            .filter(|(wid, target)| {
+                let pending = reactor
+                    .state
+                    .windows
+                    .window(*wid)
+                    .and_then(|window| window.info.sys_id)
+                    .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
+                !pending.is_some_and(|pending| pending.same_as(target.round()))
+            })
+            .map(|(wid, _)| *wid)
+            .collect();
+        reactor.cancel_window_presentations(interrupted);
         let mut per_app: HashMap<pid_t, _> = HashMap::default();
         let mut any_frame_changed = false;
 
@@ -1288,7 +1454,7 @@ impl Motion {
                     return None;
                 }
                 if now + Duration::from_micros(1) < a.next_sample
-                    && now.saturating_duration_since(a.started) < a.animation.duration
+                    && a.elapsed(now) < a.animation.finishes_at()
                 {
                     return Some(a.next_sample - now);
                 }
@@ -1303,10 +1469,8 @@ impl Motion {
 
     fn finish_frame(&mut self) {
         match self {
-            Self::Transition(a) if a.is_complete() && !a.ended => {
-                a.animation.end();
-                a.ended = true;
-            }
+            // Terminal leases follow the final frame's publication.
+            Self::Transition(a) => a.animation.end_finished(),
             Self::Viewport(c) if !c.active => c.end(),
             _ => {}
         }
@@ -1337,55 +1501,77 @@ impl ActiveAnimation {
         Some(Self {
             animation,
             started,
-            progress: 0.0,
             next_sample,
-            ended: false,
         })
     }
 
+    /// Merges `next` into the running transition without restarting anyone
+    /// else's clock. A retargeted window continues from its presented frame
+    /// for a share of the duration matching the distance it has left; a
+    /// window `next` does not handle finishes its own motion.
     fn replace_with(self, mut next: Animation) -> Self {
+        let started = Instant::now();
+        let shift = started.saturating_duration_since(self.started).as_secs_f64();
+        let floor = next.interval * 2;
         for window in &mut next.windows {
-            if let Some(old) = self.animation.windows.iter().find(|old| old.wid == window.wid) {
-                window.from = old.frame;
-                window.leased = old.leased;
-            } else {
-                window.begin();
+            // A window that already landed (and ended) starts afresh from the
+            // caller's `from`; its last frame may be a parking spot.
+            match self
+                .animation
+                .windows
+                .iter()
+                .find(|old| old.wid == window.wid && !old.timing.is_complete())
+            {
+                Some(old) => {
+                    let full = frame_distance(window.from, window.to);
+                    let ratio = if full > 0.0 {
+                        (frame_distance(old.frame, window.to) / full).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    window.timing.duration = window
+                        .timing
+                        .duration
+                        .mul_f64(ratio)
+                        .max(floor)
+                        .min(window.timing.duration);
+                    window.timing.ease_out = true;
+                    window.from = old.frame;
+                    window.leased = old.leased;
+                    window.begin();
+                }
+                None => window.begin(),
             }
         }
         for mut old in self.animation.windows {
             if !next.handled_windows.contains(&old.wid) {
-                old.from = old.frame;
-                next.windows.push(old);
+                if !old.timing.is_complete() {
+                    old.timing.delay -= shift;
+                    next.windows.push(old);
+                }
             } else if !next.windows.iter().any(|w| w.wid == old.wid) {
                 old.cancel(None);
             }
         }
         next.windows.sort_unstable_by_key(|w| w.wid.pid);
-        let started = Instant::now();
         let next_sample = started + next.interval;
         Self {
             animation: next,
             started,
-            progress: 0.0,
             next_sample,
-            ended: false,
         }
     }
 
-    fn send_frame(&mut self, now: Instant, frames: &mut FrameBatch) {
-        let t = if self.animation.duration.is_zero() {
-            1.0
-        } else {
-            (now.saturating_duration_since(self.started).as_secs_f64()
-                / self.animation.duration.as_secs_f64())
-            .clamp(0.0, 1.0)
-        };
-        let t = t.max(self.progress);
-        self.animation.stage_frame(t, self.progress, frames);
-        self.progress = t;
+    fn elapsed(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.started).as_secs_f64()
     }
 
-    fn is_complete(&self) -> bool { self.progress >= 1.0 }
+    fn send_frame(&mut self, now: Instant, frames: &mut FrameBatch) {
+        let elapsed = self.elapsed(now);
+        self.animation.stage_frame(elapsed, frames);
+    }
+
+    fn is_complete(&self) -> bool { self.animation.windows.iter().all(|w| w.timing.is_complete()) }
 }
 
 impl Animation {
@@ -1418,10 +1604,31 @@ impl Animation {
             announced: false,
             frame: start,
             move_from: CGPoint::ZERO,
+            park: None,
+            timing: Timing {
+                duration: self.duration,
+                ..Timing::default()
+            },
             txid,
             leased: false,
         });
         self.mark_handled(wid);
+    }
+
+    /// Slide `start -> slide_to`, then settle at `park` on the final frame.
+    fn add_window_parked(
+        &mut self,
+        handle: &AppThreadHandle,
+        wid: WindowId,
+        start: CGRect,
+        slide_to: CGRect,
+        park: CGRect,
+        txid: TransactionId,
+    ) {
+        self.add_window(handle, wid, start, slide_to, txid);
+        if let Some(window) = self.windows.last_mut() {
+            window.park = Some(park);
+        }
     }
 
     fn mark_handled(&mut self, wid: WindowId) {
@@ -1434,7 +1641,7 @@ impl Animation {
         for window in &self.windows {
             _ = window.handle.send(Request::set_window_frame(
                 window.wid,
-                window.to,
+                window.park.unwrap_or(window.to),
                 window.txid,
                 true,
             ));
@@ -1451,32 +1658,28 @@ impl Animation {
 
     fn finish_all(&mut self) {
         let mut frames = FrameBatch::default();
-        self.stage_frame(1.0, 0.0, &mut frames);
+        self.stage_frame(f64::INFINITY, &mut frames);
         frames.flush();
-        self.end();
+        self.end_finished();
     }
 
-    fn stage_frame(&mut self, t: f64, previous: f64, frames: &mut FrameBatch) {
-        stage_windows(
-            &mut self.windows,
-            Sample::Transition {
-                progress: t,
-                eased: ease(t),
-                set_size: (previous < 0.5 && t >= 0.5) || t == 1.0,
-            },
-            frames,
-        );
+    fn stage_frame(&mut self, elapsed: f64, frames: &mut FrameBatch) {
+        stage_windows(&mut self.windows, Sample::Transition { elapsed }, frames);
     }
 
-    fn end(&mut self) {
+    /// When the slowest window lands, relative to the transition's start.
+    fn finishes_at(&self) -> f64 {
+        self.windows.iter().map(|w| w.timing.finishes_at()).fold(0.0, f64::max)
+    }
+
+    fn end_finished(&mut self) {
         for window in &mut self.windows {
-            window.end();
+            if window.timing.is_complete() {
+                window.end();
+            }
         }
     }
 }
-
-#[cfg(test)]
-fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect { interpolate_frame(a, b, ease(t)) }
 
 fn interpolate_frame(a: CGRect, b: CGRect, s: f64) -> CGRect {
     CGRect {
@@ -1499,7 +1702,62 @@ fn ease(t: f64) -> f64 {
     }
 }
 
+fn ease_out(t: f64) -> f64 { 1.0 - (1.0 - t).powi(3) }
+
 fn blend(a: f64, b: f64, s: f64) -> f64 { (1.0 - s) * a + s * b }
+
+/// The largest per-component change between two frames.
+fn frame_distance(a: CGRect, b: CGRect) -> f64 {
+    [
+        a.origin.x - b.origin.x,
+        a.origin.y - b.origin.y,
+        a.size.width - b.size.width,
+        a.size.height - b.size.height,
+    ]
+    .into_iter()
+    .fold(0.0, |max, d| max.max(d.abs()))
+}
+
+/// One screen-length page shift; incoming windows enter from `+offset`.
+fn transition_offset(
+    screen: CGRect,
+    axis: WorkspaceTransitionAxis,
+    direction: WorkspaceTransitionDirection,
+) -> CGPoint {
+    let sign = match direction {
+        WorkspaceTransitionDirection::Forward => 1.0,
+        WorkspaceTransitionDirection::Backward => -1.0,
+    };
+    match axis {
+        WorkspaceTransitionAxis::Horizontal => CGPoint::new(sign * screen.size.width, 0.0),
+        WorkspaceTransitionAxis::Vertical => CGPoint::new(0.0, sign * screen.size.height),
+    }
+}
+
+fn offset_frame(frame: CGRect, offset: CGPoint, scale: f64) -> CGRect {
+    CGRect::new(
+        CGPoint::new(
+            frame.origin.x + offset.x * scale,
+            frame.origin.y + offset.y * scale,
+        ),
+        frame.size,
+    )
+}
+
+// macOS pulls fully offscreen windows back, so outgoing slides stop one pixel short.
+fn keep_revealed(frame: CGRect, screen: CGRect) -> CGRect {
+    const REVEAL_PX: f64 = 1.0;
+    let mut frame = frame;
+    frame.origin.x = frame.origin.x.clamp(
+        screen.origin.x - frame.size.width + REVEAL_PX,
+        screen.max().x - REVEAL_PX,
+    );
+    frame.origin.y = frame.origin.y.clamp(
+        screen.origin.y - frame.size.height + REVEAL_PX,
+        screen.max().y - REVEAL_PX,
+    );
+    frame
+}
 
 #[cfg(test)]
 mod tests {
@@ -1548,6 +1806,7 @@ mod tests {
             frame: CGRect,
             set_size: bool,
             txid: TransactionId,
+            source: FrameSource,
         },
         Request(Request),
     }
@@ -1555,8 +1814,14 @@ mod tests {
         let mut requests = Vec::new();
         while let Ok((_, request)) = rx.try_recv() {
             if let Request::InteractiveFramesPending(queue) = request {
-                queue.drain_with(|wid, frame, set_size, txid, _, _| {
-                    requests.push(Observed::Frame { wid, frame, set_size, txid })
+                queue.drain_with(|wid, frame, set_size, txid, source, _| {
+                    requests.push(Observed::Frame {
+                        wid,
+                        frame,
+                        set_size,
+                        txid,
+                        source,
+                    })
                 });
             } else {
                 requests.push(Observed::Request(request));
@@ -1585,6 +1850,7 @@ mod tests {
                 frame: req_frame,
                 set_size,
                 txid,
+                ..
             } => {
                 assert_eq!(*req_wid, wid);
                 assert_eq!(*req_frame, frame);
@@ -1602,6 +1868,7 @@ mod tests {
                 frame,
                 set_size,
                 txid,
+                ..
             } => {
                 assert_eq!(*req_wid, wid);
                 assert_eq!(frame.origin, pos);
@@ -1610,6 +1877,93 @@ mod tests {
             }
             _ => panic!("expected coalesced frame, got {request:?}"),
         }
+    }
+
+    #[test]
+    fn parked_window_slides_offscreen_then_settles_at_park_frame() {
+        let start = Instant::now();
+        let (tx, mut rx) = crate::actor::channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let wid = WindowId::new(1, 1);
+        let park = rect(999.0, 999.0, 400.0, 300.0);
+        let mut a = Animation::new(100.0, 0.3);
+        a.add_window_parked(
+            &handle,
+            wid,
+            rect(100.0, 50.0, 400.0, 300.0),
+            rect(-399.0, 50.0, 400.0, 300.0),
+            park,
+            TransactionId::default(),
+        );
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(a));
+        active_mut(&mut manager).unwrap().started = start;
+        collect_requests(&mut rx);
+
+        let frame_at = |manager: &mut AnimationManager, rx: &mut _, ms| {
+            manager.tick_at(start + Duration::from_millis(ms));
+            collect_requests(rx)
+                .into_iter()
+                .find_map(|r| match r {
+                    Observed::Frame { frame, source, .. } => Some((frame, source)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (mid, source) = frame_at(&mut manager, &mut rx, 150);
+        assert_eq!(mid.origin, CGPoint::new(-149.5, 50.0));
+        assert_eq!(source, FrameSource::Ordinary);
+        // Only the settled park is exempt from the app actor's end-of-motion repair.
+        let (last, source) = frame_at(&mut manager, &mut rx, 300);
+        assert_eq!(last, park);
+        assert_eq!(source, FrameSource::Park);
+    }
+
+    #[test]
+    fn skip_to_end_writes_park_frame() {
+        let (tx, mut rx) = crate::actor::channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let wid = WindowId::new(1, 1);
+        let park = rect(999.0, 999.0, 400.0, 300.0);
+        let mut a = empty_animation();
+        a.add_window_parked(
+            &handle,
+            wid,
+            rect(100.0, 50.0, 400.0, 300.0),
+            rect(-399.0, 50.0, 400.0, 300.0),
+            park,
+            TransactionId::default(),
+        );
+        a.skip_to_end();
+        let requests = collect_requests(&mut rx);
+        assert_set_window_frame(&requests[0], wid, park);
+    }
+
+    #[test]
+    fn transition_offset_follows_axis_and_direction() {
+        let screen = rect(0.0, 0.0, 1000.0, 800.0);
+        use WorkspaceTransitionDirection::{Backward, Forward};
+        assert_eq!(
+            transition_offset(screen, WorkspaceTransitionAxis::Horizontal, Forward),
+            CGPoint::new(1000.0, 0.0)
+        );
+        assert_eq!(
+            transition_offset(screen, WorkspaceTransitionAxis::Vertical, Backward),
+            CGPoint::new(0.0, -800.0)
+        );
+    }
+
+    #[test]
+    fn keep_revealed_leaves_one_pixel_onscreen() {
+        let screen = rect(0.0, 0.0, 1000.0, 800.0);
+        assert_eq!(
+            keep_revealed(rect(-1100.0, 50.0, 400.0, 300.0), screen),
+            rect(-399.0, 50.0, 400.0, 300.0)
+        );
+        assert_eq!(
+            keep_revealed(rect(100.0, 1200.0, 400.0, 300.0), screen),
+            rect(100.0, 799.0, 400.0, 300.0)
+        );
     }
 
     #[test]
@@ -1684,14 +2038,14 @@ mod tests {
         }
         let (handle, mut rx) = AppThreadHandle::channel();
         let wid = WindowId::new(1, 1);
-        let mut a = animation(
+        let mut a = Animation::new(50.0, 1.0);
+        a.add_window(
             &handle,
             wid,
             rect(0.0, 0.0, 10.0, 10.0),
             rect(1000.0, 0.0, 10.0, 10.0),
+            TransactionId::default(),
         );
-        a.interval = Duration::from_millis(20);
-        a.duration = Duration::from_secs(1);
         let mut manager = AnimationManager::new();
         manager.handle_message(Message::Replace(a));
         let active = active_mut(&mut manager).unwrap();
@@ -1776,6 +2130,8 @@ mod tests {
                             leased: false,
                             frame,
                             move_from: CGPoint::ZERO,
+                            park: None,
+                            timing: Timing::default(),
                             txid: TransactionId::default(),
                         }
                     })
@@ -2000,6 +2356,8 @@ mod tests {
                 leased: false,
                 frame: rect(0.0, 0.0, 10.0, 10.0),
                 move_from: CGPoint::ZERO,
+                park: None,
+                timing: Timing::default(),
                 txid: TransactionId::default(),
             }],
             gesture: None,
@@ -2107,6 +2465,8 @@ mod tests {
                 leased: false,
                 frame: dragged,
                 move_from: CGPoint::ZERO,
+                park: None,
+                timing: Timing::default(),
                 txid: TransactionId::default(),
             });
             c.active = true;
@@ -2405,8 +2765,131 @@ mod tests {
         assert_eq!(resumed_start, continuing_frame);
 
         manager.tick_at(transition_state(&manager).unwrap().started + Duration::from_millis(10));
-        let expected_next = get_frame(resumed_start, rect(80.0, 90.0, 10.0, 10.0), 1.0 / 30.0);
+        // Interrupted mid-motion, the window keeps moving rather than easing in.
+        let expected_next =
+            interpolate_frame(resumed_start, rect(80.0, 90.0, 10.0, 10.0), ease_out(1.0 / 30.0));
         assert_animation_pos(&collect_requests(&mut rx)[0], wid, expected_next.origin);
+    }
+
+    fn frames_for(requests: &[Observed], wid: WindowId) -> Vec<CGRect> {
+        requests
+            .iter()
+            .filter_map(|r| match r {
+                Observed::Frame { wid: id, frame, .. } if *id == wid => Some(*frame),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retarget_duration_scales_with_remaining_distance() {
+        let (tx, mut rx) = crate::actor::channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let wid = WindowId::new(1, 1);
+        let home = rect(0.0, 0.0, 10.0, 10.0);
+        let away = rect(1000.0, 0.0, 10.0, 10.0);
+        let mut out = Animation::new(100.0, 1.0);
+        out.add_window(&handle, wid, home, away, TransactionId::default());
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(out));
+        let start = transition_state(&manager).unwrap().started;
+        // ease(0.3) = 0.1: the window is 100px out when it reverses.
+        manager.tick_at(start + Duration::from_millis(300));
+        let presented = transition_state(&manager).unwrap().animation.windows[0].frame;
+        assert!((presented.origin.x - 100.0).abs() < 1e-9);
+
+        let mut back = Animation::new(100.0, 1.0);
+        back.add_window(&handle, wid, away, home, TransactionId::default());
+        manager.handle_message(Message::Replace(back));
+        collect_requests(&mut rx);
+        let active = transition_state(&manager).unwrap();
+        let (restart, timing) = (active.started, active.animation.windows[0].timing);
+        assert!((timing.duration.as_secs_f64() - 0.1).abs() < 1e-9);
+        assert!(timing.ease_out);
+        assert_eq!(active.animation.windows[0].from, presented);
+
+        manager.tick_at(restart + timing.duration);
+        let requests = collect_requests(&mut rx);
+        assert_animation_frame(&requests[0], wid, home);
+        assert!(matches!(
+            requests[1],
+            Observed::Request(Request::EndWindowAnimation(id)) if id == wid
+        ));
+        assert!(!manager.has_work());
+    }
+
+    #[test]
+    fn carried_window_finishes_on_its_own_clock() {
+        let (tx, mut rx) = crate::actor::channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let (a, b) = (WindowId::new(1, 1), WindowId::new(2, 1));
+        let origin = rect(0.0, 0.0, 10.0, 10.0);
+        let b_target = rect(1000.0, 0.0, 10.0, 10.0);
+        let mut first = Animation::new(100.0, 1.0);
+        first.add_window(&handle, a, origin, b_target, TransactionId::default());
+        first.add_window(&handle, b, origin, b_target, TransactionId::default());
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(first));
+        // Replace reads the real clock, so date the start back to meet the tick.
+        let start = Instant::now() - Duration::from_millis(500);
+        let active = active_mut(&mut manager).unwrap();
+        active.started = start;
+        active.next_sample = start;
+        manager.tick_at(start + Duration::from_millis(500));
+        collect_requests(&mut rx);
+
+        let a_target = rect(2000.0, 0.0, 10.0, 10.0);
+        let mut retarget = Animation::new(100.0, 1.0);
+        retarget.add_window(&handle, a, b_target, a_target, TransactionId::default());
+        manager.handle_message(Message::Replace(retarget));
+        let active = transition_state(&manager).unwrap();
+        let restart = active.started;
+        let carried = active.animation.windows.iter().find(|w| w.wid == b).unwrap();
+        assert_eq!(carried.from, origin, "a carried window keeps its own path");
+        assert_eq!(carried.timing.progress, 0.5);
+        assert!(carried.timing.delay <= -0.5);
+
+        // B lands on its original schedule and releases its lease while A moves.
+        manager.tick_at(restart + Duration::from_millis(500));
+        let requests = collect_requests(&mut rx);
+        assert_eq!(frames_for(&requests, b), vec![b_target]);
+        assert!(
+            requests.iter().any(
+                |r| matches!(r, Observed::Request(Request::EndWindowAnimation(id)) if *id == b)
+            )
+        );
+        assert!(
+            !requests.iter().any(
+                |r| matches!(r, Observed::Request(Request::EndWindowAnimation(id)) if *id == a)
+            )
+        );
+
+        // A finished window is not resent while the others keep moving.
+        manager.tick_at(restart + Duration::from_millis(600));
+        let requests = collect_requests(&mut rx);
+        assert!(frames_for(&requests, b).is_empty());
+        assert_eq!(frames_for(&requests, a).len(), 1);
+
+        // Retargeting a window that already landed starts afresh from the
+        // caller's frame (its last frame may be a parking spot) with a new lease.
+        let offscreen = rect(-1000.0, 0.0, 10.0, 10.0);
+        let mut again = Animation::new(100.0, 1.0);
+        again.add_window(&handle, b, offscreen, origin, TransactionId::default());
+        manager.handle_message(Message::Replace(again));
+        let requests = collect_requests(&mut rx);
+        assert!(requests.iter().any(
+            |r| matches!(r, Observed::Request(Request::BeginWindowAnimation(id)) if *id == b)
+        ));
+        let b_window = transition_state(&manager)
+            .unwrap()
+            .animation
+            .windows
+            .iter()
+            .find(|w| w.wid == b)
+            .unwrap();
+        assert_eq!(b_window.from, offscreen);
+        assert_eq!(b_window.timing.duration, Duration::from_secs(1));
+        assert!(!b_window.timing.ease_out, "a window at rest eases in");
     }
 
     fn animation_contains(manager: &AnimationManager, wid: WindowId) -> bool {

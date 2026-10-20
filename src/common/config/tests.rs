@@ -704,3 +704,52 @@ fn stack_tab_geometry_rejects_unusable_values() {
         assert_eq!(tabs.validate().len(), 1, "{text}");
     }
 }
+
+#[test]
+fn workspace_transition_settings_parse_and_default_off() {
+    let defaults = Config::default().settings;
+    assert_eq!(defaults.workspace_transition, WorkspaceTransition::None);
+    assert_eq!(
+        defaults.workspace_transition_axis,
+        WorkspaceTransitionAxis::Horizontal
+    );
+    assert_eq!(defaults.workspace_transition_duration, 0.25);
+
+    let cfg = Config::parse(
+        r#"
+                [settings]
+                workspace_transition = "slide"
+                workspace_transition_duration = 0.4
+                workspace_transition_axis = "vertical"
+                [keys]
+            "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.settings.workspace_transition, WorkspaceTransition::Slide);
+    assert_eq!(
+        cfg.settings.workspace_transition_axis,
+        WorkspaceTransitionAxis::Vertical
+    );
+    assert_eq!(cfg.settings.workspace_transition_duration, 0.4);
+}
+
+#[test]
+fn invalid_workspace_transition_settings_are_rejected() {
+    let mut cfg = Config::default();
+    cfg.settings.workspace_transition_duration = -0.1;
+    assert!(
+        cfg.validate()
+            .iter()
+            .any(|issue| issue.contains("workspace_transition_duration"))
+    );
+    assert!(
+        Config::parse(
+            r#"
+                [settings]
+                workspace_transition = "fade"
+                [keys]
+            "#,
+        )
+        .is_err()
+    );
+}

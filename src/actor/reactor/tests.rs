@@ -8456,3 +8456,216 @@ fn dragging_a_stack_tab_reorders_the_published_stack() {
         assert_eq!(order(last_groups(&mut tabs)), expected, "{mode:?}");
     }
 }
+
+struct SlideFixture {
+    apps: Apps,
+    reactor: Reactor,
+    rx: super::animation::AnimationReceiver,
+    space: SpaceId,
+}
+
+/// Window 1 sits on workspace 0 (active), window 2 on workspace 1.
+fn slide_fixture(workspace_count: usize) -> SlideFixture {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(workspace_count);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: Some(2),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+    let (tx, rx) = super::animation::AnimationSender::channel();
+    reactor.animation_tx = Some(tx);
+    reactor.config.settings.workspace_transition =
+        crate::common::config::WorkspaceTransition::Slide;
+    SlideFixture { apps, reactor, rx, space }
+}
+
+impl SlideFixture {
+    fn frame(&self, wid: WindowId) -> CGRect {
+        self.reactor.state.windows.window(wid).unwrap().frame_monotonic
+    }
+
+    /// Switch without a transition so the next switch starts from a settled state.
+    fn switch_instantly(&mut self, workspace: usize) {
+        let setting = self.reactor.config.settings.workspace_transition;
+        self.reactor.config.settings.workspace_transition =
+            crate::common::config::WorkspaceTransition::None;
+        self.reactor
+            .handle_test_layout_command(LayoutCommand::SwitchToWorkspace(workspace));
+        self.apps.simulate_until_quiet(&mut self.reactor);
+        let _ = self.apps.requests();
+        while self.rx.commands.try_recv().is_ok() {}
+        self.reactor.config.settings.workspace_transition = setting;
+    }
+
+    /// Start the queued transition and sample it at `elapsed`.
+    fn sample(
+        &mut self,
+        manager: &mut super::animation::AnimationManager,
+        elapsed: std::time::Duration,
+    ) -> HashMap<WindowId, CGRect> {
+        while let Ok(message) = self.rx.commands.try_recv() {
+            manager.handle_message(message);
+        }
+        manager.tick_at(std::time::Instant::now() + elapsed);
+        let mut frames = HashMap::default();
+        for request in self.apps.requests() {
+            if let Request::InteractiveFramesPending(queue) = request {
+                queue.drain_with(|wid, frame, _, _, _, _| {
+                    frames.insert(wid, frame);
+                });
+            }
+        }
+        frames
+    }
+}
+
+#[test]
+fn slide_transition_moves_workspaces_horizontally_and_parks_outgoing_windows() {
+    let mut f = slide_fixture(3);
+    let (stay, enter) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    let outgoing_before = f.frame(stay);
+
+    f.reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    let message = f.rx.commands.try_recv().expect("switch should queue a transition");
+    assert!(matches!(message, super::animation::Message::Replace(_)));
+    let mut manager = super::animation::AnimationManager::new();
+    manager.handle_message(message);
+    let incoming_target = f.frame(enter);
+    let parked = f.frame(stay);
+
+    let mid = f.sample(&mut manager, std::time::Duration::from_millis(125));
+    let (incoming, outgoing) = (mid[&enter], mid[&stay]);
+    assert!(
+        incoming.origin.x > incoming_target.origin.x
+            && incoming.origin.x < incoming_target.origin.x + 1000.,
+        "incoming window should enter from the right: {incoming:?}"
+    );
+    assert_eq!(incoming.origin.y, incoming_target.origin.y);
+    assert!(
+        outgoing.origin.x < outgoing_before.origin.x
+            && outgoing.origin.x > outgoing_before.origin.x - 1000.,
+        "outgoing window should leave to the left: {outgoing:?}"
+    );
+    assert_eq!(outgoing.origin.y, outgoing_before.origin.y);
+
+    let last = f.sample(&mut manager, std::time::Duration::from_secs(1));
+    assert!(last[&enter].same_as(incoming_target));
+    assert!(
+        last[&stay].same_as(parked),
+        "outgoing window must settle at the layout's hidden frame: {:?}",
+        last[&stay]
+    );
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    assert!(crate::model::HiddenWindowPlacement::is_hidden(
+        screen,
+        parked,
+        &[]
+    ));
+}
+
+#[test]
+fn backward_vertical_slide_enters_from_above() {
+    let mut f = slide_fixture(3);
+    let (enter, leave) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    f.switch_instantly(1);
+    f.reactor.config.settings.workspace_transition_axis =
+        crate::common::config::WorkspaceTransitionAxis::Vertical;
+    let outgoing_before = f.frame(leave);
+
+    f.reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    let incoming_target = f.frame(enter);
+    let mut manager = super::animation::AnimationManager::new();
+    let mid = f.sample(&mut manager, std::time::Duration::from_millis(125));
+
+    assert!(mid[&enter].origin.y < incoming_target.origin.y);
+    assert_eq!(mid[&enter].origin.x, incoming_target.origin.x);
+    assert!(mid[&leave].origin.y > outgoing_before.origin.y);
+    assert_eq!(mid[&leave].origin.x, outgoing_before.origin.x);
+}
+
+#[test]
+fn next_workspace_wrap_keeps_forward_direction() {
+    let mut f = slide_fixture(2);
+    let enter = WindowId::new(1, 1);
+    f.switch_instantly(1);
+
+    f.reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
+    let incoming_target = f.frame(enter);
+    let mut manager = super::animation::AnimationManager::new();
+    let mid = f.sample(&mut manager, std::time::Duration::from_millis(125));
+
+    assert!(
+        mid[&enter].origin.x > incoming_target.origin.x,
+        "wrapping to the first workspace should still enter from the right: {:?}",
+        mid[&enter]
+    );
+}
+
+#[test]
+fn rearrange_during_slide_does_not_cancel_it() {
+    let mut f = slide_fixture(3);
+    f.reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    assert!(matches!(
+        f.rx.commands.try_recv(),
+        Ok(super::animation::Message::Replace(_))
+    ));
+
+    f.reactor.update_layout_or_warn(false, false, Some(f.space));
+
+    let stops: Vec<_> =
+        f.rx.commands
+            .try_iter()
+            .filter(|message| matches!(message, super::animation::Message::Stop(_)))
+            .collect();
+    assert!(
+        stops.is_empty(),
+        "an unchanged arrange cancelled the slide: {stops:?}"
+    );
+}
+
+#[test]
+fn disabled_transition_switches_instantly() {
+    let mut f = slide_fixture(3);
+    f.reactor.config.settings.workspace_transition =
+        crate::common::config::WorkspaceTransition::None;
+
+    f.reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+
+    assert!(
+        f.rx.commands
+            .try_iter()
+            .all(|message| !matches!(message, super::animation::Message::Replace(_))),
+        "a disabled transition must not animate"
+    );
+    let requests = f.apps.requests();
+    assert!(requests.iter().any(|request| matches!(
+        request,
+        Request::SetWindowFrames(_, _, crate::actor::app::FrameMode::Position, true)
+    )));
+    assert!(f.reactor.workspace_switch_manager.pending_transition.is_none());
+}
+
+#[test]
+fn slide_from_empty_workspace_still_slides_incoming_windows() {
+    let mut f = slide_fixture(3);
+    let enter = WindowId::new(1, 2);
+    f.switch_instantly(2);
+    // macOS pulls parked windows back up by their title bar.
+    f.reactor.state.windows.window_mut(enter).unwrap().frame_monotonic.origin.y -= 31.;
+
+    f.reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    let incoming_target = f.frame(enter);
+    let mut manager = super::animation::AnimationManager::new();
+    let mid = f.sample(&mut manager, std::time::Duration::from_millis(125));
+
+    let frame = mid.get(&enter).copied();
+    assert!(
+        frame.is_some_and(|frame| frame.origin.x < incoming_target.origin.x),
+        "incoming window from an empty workspace should slide in: {frame:?} target {incoming_target:?}"
+    );
+}

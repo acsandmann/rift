@@ -468,6 +468,23 @@ pub struct Settings {
     // )]
     #[setting(ignore)]
     pub animation_easing: AnimationEasing,
+    #[serde(default)]
+    /// Animation played when switching virtual workspaces.
+    #[setting(
+        label = "Workspace transition",
+        group = "general",
+        choices,
+        aliases = "workspace switch slide animation"
+    )]
+    pub workspace_transition: WorkspaceTransition,
+    #[serde(default = "default_workspace_transition_duration")]
+    /// Duration of a workspace transition, in seconds.
+    #[setting(ignore)]
+    pub workspace_transition_duration: f64,
+    #[serde(default)]
+    /// Axis along which workspaces slide.
+    #[setting(ignore)]
+    pub workspace_transition_axis: WorkspaceTransitionAxis,
     #[serde(default = "yes")]
     /// Start Rift with automatic tiling turned off.
     #[setting(
@@ -671,6 +688,32 @@ pub enum MouseAction {
     #[default]
     #[setting(label = "Move window")]
     Move,
+}
+
+/// Animation played when switching virtual workspaces.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTransition {
+    /// Switch instantly.
+    #[default]
+    #[setting(label = "None")]
+    None,
+    /// Slide the outgoing workspace out and the incoming one in.
+    #[setting(label = "Slide")]
+    Slide,
+}
+
+/// Axis along which workspaces slide during a transition.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTransitionAxis {
+    /// Next workspace enters from the right.
+    #[default]
+    #[setting(label = "Horizontal")]
+    Horizontal,
+    /// Next workspace enters from below.
+    #[setting(label = "Vertical")]
+    Vertical,
 }
 
 /// Action used when a tiled window is released in another tile's center zone.
@@ -1490,6 +1533,13 @@ impl Settings {
             ));
         }
 
+        if self.workspace_transition_duration < 0.0 {
+            issues.push(format!(
+                "workspace_transition_duration must be non-negative, got {}",
+                self.workspace_transition_duration
+            ));
+        }
+
         if self.animation_fps <= 0.0 {
             issues.push(format!(
                 "animation_fps must be positive, got {}",
@@ -1751,6 +1801,8 @@ fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement 
 fn default_animation_duration() -> f64 { 0.3 }
 
 fn default_animation_fps() -> f64 { 100.0 }
+
+fn default_workspace_transition_duration() -> f64 { 0.25 }
 
 fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
 

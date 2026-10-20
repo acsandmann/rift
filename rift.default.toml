@@ -11,6 +11,15 @@ animate = false
 animation_duration = 0.3
 animation_fps = 100.0
 
+# Workspace transitions (independent of `animate`)
+# - workspace_transition: "none" or "slide"
+# - workspace_transition_duration: seconds per transition (>= 0.0)
+# - workspace_transition_axis: "horizontal" (next enters from the right)
+#   or "vertical" (next enters from below)
+workspace_transition = "none"
+workspace_transition_duration = 0.25
+workspace_transition_axis = "horizontal"
+
 # Space activation behavior
 # - If true, spaces start inactive (rift does not manage windows there)
 #   and you must toggle activation via a keybind (toggle_space_activated).
