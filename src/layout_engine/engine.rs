@@ -19,7 +19,7 @@ use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspac
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
-    WindowStore, WindowWorkspaceInfo,
+    WindowStore,
 };
 use crate::sys::screen::SpaceId;
 
