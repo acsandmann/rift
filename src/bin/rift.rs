@@ -291,6 +291,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     events_tx.send(reactor::Event::RegisterSenders {
         wm: wm_controller_sender.clone(),
         spaces: spaces_tx.clone(),
+        topology_guard: spaces_actor.topology_guard(),
     });
     let wn_actor = window_notify_actor::WindowNotify::new(
         events_tx.clone(),

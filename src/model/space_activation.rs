@@ -1,5 +1,5 @@
-use crate::common::collections::{HashMap, HashSet};
-use crate::sys::screen::{ScreenId, ScreenInfo, SpaceId};
+use crate::common::collections::HashSet;
+use crate::sys::screen::{ScreenInfo, SpaceId};
 
 /// this is how we decide which macos spaces (and/or displays) are considered active.
 ///
@@ -16,12 +16,7 @@ pub struct SpaceActivationPolicy {
     disabled_displays: HashSet<String>,
     enabled_displays: HashSet<String>,
 
-    known_user_spaces: HashSet<SpaceId>,
-
     starting_space: Option<SpaceId>,
-
-    last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
-    last_known_display_by_screen: HashMap<ScreenId, String>,
 
     pub login_window_active: bool,
 }
@@ -39,98 +34,19 @@ pub struct ToggleSpaceContext {
 }
 
 impl SpaceActivationPolicy {
-    pub fn new() -> Self {
-        Self {
-            disabled_spaces: HashSet::default(),
-            enabled_spaces: HashSet::default(),
-            disabled_displays: HashSet::default(),
-            enabled_displays: HashSet::default(),
-            known_user_spaces: HashSet::default(),
-            starting_space: None,
-            last_known_space_by_screen: HashMap::default(),
-            last_known_display_by_screen: HashMap::default(),
-            login_window_active: false,
-        }
-    }
+    pub fn new() -> Self { Self::default() }
 
     pub fn set_login_window_active(&mut self, active: bool) { self.login_window_active = active; }
 
-    #[allow(dead_code)]
-    pub fn on_space_created(&mut self, space: SpaceId) { self.known_user_spaces.insert(space); }
-
-    #[allow(dead_code)]
-    pub fn on_space_destroyed(&mut self, space: SpaceId) { self.known_user_spaces.remove(&space); }
-
     /// Note: this emits no events; Reactor should call this and then recompute active spaces.
     pub fn on_spaces_updated(&mut self, cfg: SpaceActivationConfig, screens: &[ScreenInfo]) {
-        // rebuild to prune old activation states
-        let active_spaces: HashSet<SpaceId> = screens.iter().filter_map(|s| s.space).collect();
-        let active_screen_ids: HashSet<ScreenId> = screens.iter().map(|s| s.id).collect();
-
-        self.last_known_space_by_screen.retain(|sid, _| active_screen_ids.contains(sid));
-        self.last_known_display_by_screen
-            .retain(|sid, _| active_screen_ids.contains(sid));
-
-        // transfer activation state since space ids can churn sometimes (why does this happen apple)
-        for screen in screens.iter() {
-            let Some(new_space) = screen.space else { continue };
-
-            // Capture "previous" space per screen from the last known snapshot (not current inputs).
-            // Using current `screens[..].space` here would make `previous_space == new_space` and
-            // prevent activation transfer from ever triggering.
-            let previous_space = self.last_known_space_by_screen.get(&screen.id).copied();
-
-            if let Some(previous_space) = previous_space
-                && previous_space != new_space
-            {
-                // Only transfer activation when the previous space id is no longer known
-                // (e.g. space id churn on reconnect), not for normal space switches.
-                if !self.known_user_spaces.contains(&previous_space) {
-                    self.transfer_space_activation(cfg, previous_space, new_space);
-                }
-            }
-
-            self.known_user_spaces.insert(new_space);
-            self.last_known_space_by_screen.insert(screen.id, new_space);
-        }
-
-        // transfer activation across display UUID churns (e.g. wake/reconnect)
-        for screen in screens.iter() {
-            let Some(new_display) = screen.display_uuid_opt() else {
-                continue;
-            };
-            if let Some(previous_display) =
-                self.last_known_display_by_screen.get(&screen.id).cloned()
-            {
-                if previous_display != new_display {
-                    self.transfer_display_activation(cfg, &previous_display, new_display);
-                }
-            }
-            self.last_known_display_by_screen.insert(screen.id, new_display.to_string());
-        }
-
-        let mut active_displays: HashSet<String> = HashSet::default();
-        for screen in screens {
-            if let Some(display_uuid) = screen.display_uuid_opt() {
-                active_displays.insert(display_uuid.to_string());
-                if let Some(prev) = self.last_known_display_by_screen.get(&screen.id) {
-                    active_displays.insert(prev.clone());
-                }
-            } else if let Some(prev) = self.last_known_display_by_screen.get(&screen.id) {
-                active_displays.insert(prev.clone());
-            }
-        }
-
-        self.disabled_displays.retain(|uuid| active_displays.contains(uuid));
-        self.enabled_displays.retain(|uuid| active_displays.contains(uuid));
-
-        // apply display level activation status
+        // Display preferences belong to durable UUIDs, never a reusable live ScreenId.
+        // Native Space identity is transferred only by an authoritative remap.
         for screen in screens {
             let Some(space) = screen.space else { continue };
-            let display_uuid = screen
-                .display_uuid_opt()
-                .or_else(|| self.last_known_display_by_screen.get(&screen.id).map(|v| v.as_str()));
-            let Some(display_uuid) = display_uuid else { continue };
+            let Some(display_uuid) = screen.display_uuid_opt() else {
+                continue;
+            };
 
             if cfg.default_disable {
                 if self.enabled_displays.contains(display_uuid) {
@@ -144,7 +60,7 @@ impl SpaceActivationPolicy {
         }
 
         if let Some(starting) = self.starting_space {
-            if !active_spaces.contains(&starting) {
+            if !screens.iter().any(|screen| screen.space == Some(starting)) {
                 self.starting_space = None;
             }
         }
@@ -221,37 +137,15 @@ impl SpaceActivationPolicy {
         out
     }
 
-    fn transfer_space_activation(
-        &mut self,
-        cfg: SpaceActivationConfig,
-        old_space: SpaceId,
-        new_space: SpaceId,
-    ) {
-        if cfg.default_disable {
-            if self.enabled_spaces.remove(&old_space) {
-                self.enabled_spaces.insert(new_space);
-            }
-        } else if self.disabled_spaces.remove(&old_space) {
+    pub fn on_space_remapped(&mut self, old_space: SpaceId, new_space: SpaceId) {
+        if self.enabled_spaces.remove(&old_space) {
+            self.enabled_spaces.insert(new_space);
+        }
+        if self.disabled_spaces.remove(&old_space) {
             self.disabled_spaces.insert(new_space);
         }
-
         if self.starting_space == Some(old_space) {
             self.starting_space = Some(new_space);
-        }
-    }
-
-    fn transfer_display_activation(
-        &mut self,
-        cfg: SpaceActivationConfig,
-        old_display: &str,
-        new_display: &str,
-    ) {
-        if cfg.default_disable {
-            if self.enabled_displays.remove(old_display) {
-                self.enabled_displays.insert(new_display.to_string());
-            }
-        } else if self.disabled_displays.remove(old_display) {
-            self.disabled_displays.insert(new_display.to_string());
         }
     }
 }
@@ -261,6 +155,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
+    use crate::sys::screen::ScreenId;
 
     fn input(screen_id: u32, space: Option<u64>, display_uuid: Option<&str>) -> ScreenInfo {
         ScreenInfo {
@@ -295,62 +190,56 @@ mod tests {
     }
 
     #[test]
-    fn preserves_display_state_when_uuid_missing() {
-        let mut policy = SpaceActivationPolicy::new();
-        let cfg = SpaceActivationConfig {
-            default_disable: true,
-            one_space: false,
-        };
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        policy.toggle_space_activated(cfg, ToggleSpaceContext {
-            space: SpaceId::new(1),
-            display_uuid: Some("display-a".to_string()),
-        });
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), None)]);
-
-        assert!(policy.enabled_displays.contains("display-a"));
-        assert!(policy.enabled_spaces.contains(&SpaceId::new(1)));
+    fn missing_uuid_preserves_activation_for_both_default_policies() {
+        for default_disable in [false, true] {
+            let mut policy = SpaceActivationPolicy::new();
+            let cfg = SpaceActivationConfig {
+                default_disable,
+                one_space: false,
+            };
+            let space = SpaceId::new(1);
+            policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
+            policy.toggle_space_activated(cfg, ToggleSpaceContext {
+                space,
+                display_uuid: Some("display-a".into()),
+            });
+            for uuid in [None, Some("display-a")] {
+                policy.on_spaces_updated(cfg, &[input(1, Some(1), uuid)]);
+                assert_eq!(
+                    policy.compute_active_spaces(cfg, &[Some(space)], &[uuid.map(str::to_owned)]),
+                    vec![default_disable.then_some(space)],
+                    "default_disable={default_disable}, uuid={uuid:?}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn preserves_disabled_space_state_when_uuid_missing_default_enable() {
-        let mut policy = SpaceActivationPolicy::new();
-        let cfg = SpaceActivationConfig {
-            default_disable: false,
-            one_space: false,
-        };
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        policy.toggle_space_activated(cfg, ToggleSpaceContext {
-            space: SpaceId::new(1),
-            display_uuid: Some("display-a".to_string()),
-        });
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), None)]);
-
-        assert!(policy.disabled_spaces.contains(&SpaceId::new(1)));
-    }
-
-    #[test]
-    fn transfers_enabled_display_on_uuid_change_default_disable() {
-        let mut policy = SpaceActivationPolicy::new();
-        let cfg = SpaceActivationConfig {
-            default_disable: true,
-            one_space: false,
-        };
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        policy.toggle_space_activated(cfg, ToggleSpaceContext {
-            space: SpaceId::new(1),
-            display_uuid: Some("display-a".to_string()),
-        });
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-b"))]);
-
-        assert!(!policy.enabled_displays.contains("display-a"));
-        assert!(policy.enabled_displays.contains("display-b"));
+    fn reused_screen_id_does_not_transfer_display_or_space_preferences() {
+        for default_disable in [false, true] {
+            let mut policy = SpaceActivationPolicy::new();
+            let cfg = SpaceActivationConfig {
+                default_disable,
+                one_space: false,
+            };
+            let old = SpaceId::new(1);
+            let new = SpaceId::new(2);
+            policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
+            policy.toggle_space_activated(cfg, ToggleSpaceContext {
+                space: old,
+                display_uuid: Some("display-a".into()),
+            });
+            policy.on_spaces_updated(cfg, &[input(1, Some(2), Some("display-b"))]);
+            assert_eq!(
+                policy.compute_active_spaces(cfg, &[Some(new)], &[Some("display-b".into())]),
+                vec![(!default_disable).then_some(new)]
+            );
+            policy.on_spaces_updated(cfg, &[input(9, Some(1), Some("display-a"))]);
+            assert_eq!(
+                policy.compute_active_spaces(cfg, &[Some(old)], &[Some("display-a".into())]),
+                vec![default_disable.then_some(old)]
+            );
+        }
     }
 
     #[test]
@@ -399,43 +288,33 @@ mod tests {
     }
 
     #[test]
-    fn enabled_display_allows_space_when_default_disabled() {
+    fn enabled_display_applies_to_its_current_and_other_native_spaces_only() {
         let mut policy = SpaceActivationPolicy::new();
         let cfg = SpaceActivationConfig {
             default_disable: true,
             one_space: false,
         };
-
         policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
         policy.toggle_space_activated(cfg, ToggleSpaceContext {
             space: SpaceId::new(1),
-            display_uuid: Some("display-a".to_string()),
+            display_uuid: Some("display-a".into()),
         });
-
-        let active = policy
-            .compute_active_spaces(cfg, &[Some(SpaceId::new(1))], &[Some("display-a".to_string())]);
-
-        assert_eq!(active, vec![Some(SpaceId::new(1))]);
-    }
-
-    #[test]
-    fn enabled_display_applies_to_other_spaces_on_same_display() {
-        let mut policy = SpaceActivationPolicy::new();
-        let cfg = SpaceActivationConfig {
-            default_disable: true,
-            one_space: false,
-        };
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        policy.toggle_space_activated(cfg, ToggleSpaceContext {
-            space: SpaceId::new(1),
-            display_uuid: Some("display-a".to_string()),
-        });
-
-        let active = policy
-            .compute_active_spaces(cfg, &[Some(SpaceId::new(2))], &[Some("display-a".to_string())]);
-
-        assert_eq!(active, vec![Some(SpaceId::new(2))]);
+        assert_eq!(
+            policy.compute_active_spaces(
+                cfg,
+                &[
+                    Some(SpaceId::new(1)),
+                    Some(SpaceId::new(2)),
+                    Some(SpaceId::new(3))
+                ],
+                &[
+                    Some("display-a".into()),
+                    Some("display-a".into()),
+                    Some("display-b".into())
+                ]
+            ),
+            vec![Some(SpaceId::new(1)), Some(SpaceId::new(2)), None]
+        );
     }
 
     #[test]
@@ -480,45 +359,30 @@ mod tests {
     }
 
     #[test]
-    fn transfer_space_activation_on_space_id_churn_default_disable() {
-        let mut policy = SpaceActivationPolicy::new();
-        let cfg = SpaceActivationConfig {
-            default_disable: true,
-            one_space: false,
-        };
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        policy.toggle_space_activated(cfg, ToggleSpaceContext {
-            space: SpaceId::new(1),
-            display_uuid: Some("display-a".to_string()),
-        });
-
-        policy.on_space_destroyed(SpaceId::new(1));
-        policy.on_spaces_updated(cfg, &[input(1, Some(2), Some("display-a"))]);
-
-        assert!(!policy.enabled_spaces.contains(&SpaceId::new(1)));
-        assert!(policy.enabled_spaces.contains(&SpaceId::new(2)));
-    }
-
-    #[test]
-    fn transfer_space_activation_on_space_id_churn_default_enable() {
-        let mut policy = SpaceActivationPolicy::new();
-        let cfg = SpaceActivationConfig {
-            default_disable: false,
-            one_space: false,
-        };
-
-        policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
-        policy.toggle_space_activated(cfg, ToggleSpaceContext {
-            space: SpaceId::new(1),
-            display_uuid: Some("display-a".to_string()),
-        });
-
-        policy.on_space_destroyed(SpaceId::new(1));
-        policy.on_spaces_updated(cfg, &[input(1, Some(2), Some("display-a"))]);
-
-        assert!(!policy.disabled_spaces.contains(&SpaceId::new(1)));
-        assert!(policy.disabled_spaces.contains(&SpaceId::new(2)));
+    fn native_space_replacement_transfers_activation_for_both_default_policies() {
+        for default_disable in [false, true] {
+            let mut policy = SpaceActivationPolicy::new();
+            let cfg = SpaceActivationConfig {
+                default_disable,
+                one_space: false,
+            };
+            let old = SpaceId::new(1);
+            let new = SpaceId::new(2);
+            policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
+            // No display preference may mask whether the native-space state transfers.
+            policy
+                .toggle_space_activated(cfg, ToggleSpaceContext { space: old, display_uuid: None });
+            policy.on_space_remapped(old, new);
+            policy.on_spaces_updated(cfg, &[input(1, Some(2), Some("display-a"))]);
+            assert_eq!(
+                policy.compute_active_spaces(cfg, &[Some(old), Some(new)], &[None, None]),
+                vec![
+                    (!default_disable).then_some(old),
+                    default_disable.then_some(new)
+                ],
+                "default_disable={default_disable}"
+            );
+        }
     }
 
     #[test]
@@ -537,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_display_state_when_screen_removed() {
+    fn display_activation_survives_disconnect_and_reconnect_with_new_native_ids() {
         let mut policy = SpaceActivationPolicy::new();
         let cfg = SpaceActivationConfig {
             default_disable: true,
@@ -559,8 +423,27 @@ mod tests {
 
         policy.on_spaces_updated(cfg, &[input(1, Some(1), Some("display-a"))]);
 
-        assert!(policy.enabled_displays.contains("display-a"));
-        assert!(!policy.enabled_displays.contains("display-b"));
+        policy.on_spaces_updated(cfg, &[
+            input(1, Some(1), Some("display-a")),
+            input(4, Some(40), Some("display-b")),
+            input(2, Some(50), Some("projector")),
+        ]);
+        assert_eq!(
+            policy.compute_active_spaces(
+                cfg,
+                &[
+                    Some(SpaceId::new(1)),
+                    Some(SpaceId::new(40)),
+                    Some(SpaceId::new(50))
+                ],
+                &[
+                    Some("display-a".into()),
+                    Some("display-b".into()),
+                    Some("projector".into())
+                ]
+            ),
+            vec![Some(SpaceId::new(1)), Some(SpaceId::new(40)), None]
+        );
     }
 
     #[test]

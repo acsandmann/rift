@@ -519,6 +519,7 @@ impl LayoutEngine {
         self.refresh_window_fingerprints(window_store);
         let live_windows = self.persistence.live_fingerprints();
         let plan = RestorePlan::build(snapshot, self, window_store, request)?;
+        self.native_layouts.clear();
         let report = plan.apply(self, window_store, live_windows);
         tracing::info!(
             path = %path.display(),

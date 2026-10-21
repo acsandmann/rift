@@ -5,7 +5,7 @@ use super::{LayoutId, LayoutSystem};
 use crate::common::collections::HashMap;
 
 /// Display-size configurations belong to their workspace; layout systems own the arrangements.
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub(crate) struct WorkspaceLayoutState {
     pub(crate) configurations: HashMap<Size, LayoutId>,
     active_size: Size,

@@ -113,8 +113,11 @@ impl FrameBatch {
         pid: pid_t,
         frames: impl Iterator<Item = Frame>,
     ) {
+        if !handle.can_write_frames() {
+            return;
+        }
         let (actor, pending) = self.0.entry(pid).or_insert_with(|| (handle.clone(), Vec::new()));
-        if !actor.same_actor(handle) {
+        if !actor.same_actor(handle) || !actor.can_write_frames() {
             *actor = handle.clone();
         }
         pending.extend(frames);
@@ -232,13 +235,13 @@ enum Sample<'a> {
 impl PresentedWindow {
     fn begin(&mut self) {
         if !std::mem::replace(&mut self.leased, true) {
-            let _ = self.handle.send(Request::BeginWindowAnimation(self.wid));
+            let _ = self.handle.send(Request::BeginWindowAnimation(self.wid, Default::default()));
         }
     }
 
     fn end(&mut self) {
         if std::mem::replace(&mut self.leased, false) {
-            let _ = self.handle.send(Request::EndWindowAnimation(self.wid));
+            let _ = self.handle.send(Request::EndWindowAnimation(self.wid, Default::default()));
         }
     }
 
@@ -508,6 +511,9 @@ impl Reactor {
     }
 
     pub(super) fn commit_presentations(&mut self) {
+        if self.refreshes_blocked() {
+            return;
+        }
         let control = self.animation_tx.as_ref().map(|tx| tx.control.clone());
         let control = control.as_ref().map(|c| c.lock());
         let mut completed = Vec::new();
@@ -1199,10 +1205,24 @@ impl AnimationManager {
                 }
             }
             let requests = [
-                (!positions.is_empty())
-                    .then(|| Request::SetWindowFrames(positions, txid, FrameMode::Position, true)),
-                (!frames.is_empty())
-                    .then(|| Request::SetWindowFrames(frames, txid, FrameMode::Full, true)),
+                (!positions.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        positions,
+                        txid,
+                        FrameMode::Position,
+                        true,
+                        Default::default(),
+                    )
+                }),
+                (!frames.is_empty()).then(|| {
+                    Request::SetWindowFrames(
+                        frames,
+                        txid,
+                        FrameMode::Full,
+                        true,
+                        Default::default(),
+                    )
+                }),
             ];
             for request in requests.into_iter().flatten() {
                 if let Err(e) = handle.send(request) {
@@ -1541,6 +1561,40 @@ mod tests {
         })
     }
 
+    #[test]
+    fn retained_frame_batch_accepts_a_fresh_producer_for_the_same_app_actor() {
+        let (events, _) = crate::actor::channel();
+        let (wm, _) = crate::actor::channel();
+        let (spaces, sender) = crate::actor::spaces::SpacesActor::new_for_tests(events, wm);
+        let guard = spaces.topology_guard();
+        let (mut handle, mut requests) = AppThreadHandle::channel();
+        handle.set_topology_authority(&guard, 0);
+        let old = handle.clone();
+        let wid = WindowId::new(1, 1);
+        let frame = rect(1., 2., 300., 400.);
+        let mut batch = FrameBatch::default();
+        let sample =
+            || std::iter::once((wid, frame, true, Default::default(), FrameSource::Viewport));
+        batch.extend(&old, wid.pid, sample());
+        batch.flush();
+        collect_requests(&mut requests);
+        sender.send(crate::actor::spaces::Event::SystemWillSleep);
+        let mut running = std::pin::pin!(spaces.run());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(running.as_mut(), &mut context).is_pending());
+        handle.set_topology_authority(&guard, guard.invalidated_revision());
+        assert!(old.same_actor(&handle));
+        batch.extend(&handle, wid.pid, sample());
+        // A late old motion must not replace or contaminate the new batch.
+        batch.extend(&old, wid.pid, sample());
+        batch.flush();
+        let frames = collect_requests(&mut requests);
+        assert!(
+            matches!(frames.as_slice(), [Observed::Frame { wid: id, frame: actual, .. }]
+            if *id == wid && *actual == frame)
+        );
+    }
+
     #[derive(Debug)]
     enum Observed {
         Frame {
@@ -1555,7 +1609,7 @@ mod tests {
         let mut requests = Vec::new();
         while let Ok((_, request)) = rx.try_recv() {
             if let Request::InteractiveFramesPending(queue) = request {
-                queue.drain_with(|wid, frame, set_size, txid, _, _| {
+                queue.drain_with(|wid, frame, set_size, txid, _, _, _| {
                     requests.push(Observed::Frame { wid, frame, set_size, txid })
                 });
             } else {
@@ -1567,7 +1621,7 @@ mod tests {
 
     fn assert_set_window_frame(request: &Observed, wid: WindowId, frame: CGRect) {
         match request {
-            Observed::Request(Request::SetWindowFrames(frames, txid, FrameMode::Full, eui)) => {
+            Observed::Request(Request::SetWindowFrames(frames, txid, FrameMode::Full, eui, _)) => {
                 let (req_wid, req_frame) = frames[0];
                 assert_eq!(req_wid, wid);
                 assert_eq!(req_frame, frame);
@@ -2025,15 +2079,17 @@ mod tests {
         };
         manager.handle_message(Message::Camera(Box::new(camera)));
         assert!(transition_state(&manager).is_none());
-        let Request::CancelWindowAnimation(_, through) = rx.try_recv().unwrap().1 else {
+        let Request::CancelWindowAnimation(_, through, _) = rx.try_recv().unwrap().1 else {
             panic!("cancel");
         };
-        assert!(matches!(rx.try_recv().unwrap().1, Request::BeginWindowAnimation(id) if id == wid));
+        assert!(
+            matches!(rx.try_recv().unwrap().1, Request::BeginWindowAnimation(id, _) if id == wid)
+        );
         // A native camera frame reuses the old outstanding generic wake.
         camera_mut(&mut manager).unwrap().windows[0].to.origin.x += 0.5;
         camera_mut(&mut manager).unwrap().sample(now);
         assert!(rx.try_recv().is_err());
-        old_wake.drain_with(|id, frame, _, _, source, sequence| {
+        old_wake.drain_with(|id, frame, _, _, source, sequence, _| {
             assert_eq!(id, wid);
             assert_eq!(source, FrameSource::Viewport);
             assert!(sequence > through);
@@ -2070,7 +2126,7 @@ mod tests {
             panic!("wake");
         };
         manager.handle_message(Message::Stop(vec![wid]));
-        let Request::CancelWindowAnimation(_, through) = rx.try_recv().unwrap().1 else {
+        let Request::CancelWindowAnimation(_, through, _) = rx.try_recv().unwrap().1 else {
             panic!("cancel");
         };
         let dragged = rect(12.0, 34.0, 10.0, 10.0);
@@ -2084,7 +2140,7 @@ mod tests {
         camera_mut(&mut manager).unwrap().sample(now + Duration::from_secs(1));
         assert!(!manager.has_work());
         assert!(rx.try_recv().is_err());
-        old_wake.drain_with(|_, frame, _, _, source, sequence| {
+        old_wake.drain_with(|_, frame, _, _, source, sequence, _| {
             assert_eq!(frame, dragged);
             assert_eq!(source, FrameSource::Drag);
             assert!(sequence > through);
@@ -2121,7 +2177,7 @@ mod tests {
         };
         assert_eq!(frame.origin.x.fract().abs(), 0.5);
         assert!(
-            matches!(requests[1], Observed::Request(Request::EndWindowAnimation(id)) if id == wid)
+            matches!(requests[1], Observed::Request(Request::EndWindowAnimation(id, _)) if id == wid)
         );
 
         // A completed camera must wake semantic reconciliation and leave the
@@ -2186,9 +2242,9 @@ mod tests {
         ));
         let terminal = collect_requests(&mut rx);
         assert!(matches!(terminal.as_slice(), [
-            Observed::Request(Request::BeginWindowAnimation(_)),
+            Observed::Request(Request::BeginWindowAnimation(_, _)),
             Observed::Frame { frame, .. },
-            Observed::Request(Request::EndWindowAnimation(_))
+            Observed::Request(Request::EndWindowAnimation(_, _))
         ] if *frame == expected_final));
     }
 
@@ -2355,13 +2411,13 @@ mod tests {
         runner.join().unwrap();
         let requests = collect_requests(&mut rx);
         assert!(requests.iter().any(
-            |r| matches!(r, Observed::Request(Request::CancelWindowAnimation(id, _)) if *id == wid)
+            |r| matches!(r, Observed::Request(Request::CancelWindowAnimation(id, _, _)) if *id == wid)
         ));
         assert!(
             requests.iter().all(|r| matches!(
                 r,
                 Observed::Request(
-                    Request::BeginWindowAnimation(_) | Request::CancelWindowAnimation(..)
+                    Request::BeginWindowAnimation(_, _) | Request::CancelWindowAnimation(..)
                 )
             )),
             "cancelled frames and the target cannot be replayed: {requests:?}"
@@ -2390,7 +2446,7 @@ mod tests {
         manager.handle_message(Message::Replace(first));
         assert!(matches!(
             collect_requests(&mut rx).as_slice(),
-            [Observed::Request(Request::BeginWindowAnimation(req_wid))] if *req_wid == wid
+            [Observed::Request(Request::BeginWindowAnimation(req_wid, _))] if *req_wid == wid
         ));
 
         manager.tick_at(transition_state(&manager).unwrap().started + Duration::from_millis(10));
@@ -2459,7 +2515,7 @@ mod tests {
         let requests = collect_requests(&mut rx);
         assert_eq!(requests.len(), 1);
         assert!(
-            matches!(requests[0], Observed::Request(Request::BeginWindowAnimation(req_wid)) if req_wid == wid3)
+            matches!(requests[0], Observed::Request(Request::BeginWindowAnimation(req_wid, _)) if req_wid == wid3)
         );
         assert!(animation_contains(&manager, wid2));
 
@@ -2537,11 +2593,11 @@ mod tests {
         let requests = collect_requests(&mut rx);
         assert_eq!(requests.len(), 4);
         assert!(
-            matches!(requests[0], Observed::Request(Request::BeginWindowAnimation(req_wid)) if req_wid == wid)
+            matches!(requests[0], Observed::Request(Request::BeginWindowAnimation(req_wid, _)) if req_wid == wid)
         );
         assert_animation_frame(&requests[1], wid, rect(50.0, 60.0, 10.0, 10.0));
         assert!(
-            matches!(requests[2], Observed::Request(Request::EndWindowAnimation(req_wid)) if req_wid == wid)
+            matches!(requests[2], Observed::Request(Request::EndWindowAnimation(req_wid, _)) if req_wid == wid)
         );
         assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
     }

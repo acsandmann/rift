@@ -47,7 +47,6 @@ pub(crate) fn analyze_space_snapshot(
         && !incoming.should_force_refresh_layout
         && incoming.space_remaps.is_empty()
         && incoming.resized_spaces.is_empty()
-        && incoming.topology_window_delta.is_none()
         && current.screens == incoming.screens
         && current.fullscreen_spaces == incoming.fullscreen_spaces
         && current_effective_active_spaces == &effective_active_spaces
@@ -58,14 +57,31 @@ pub(crate) fn analyze_space_snapshot(
     let invalidates_pending_targets = incoming.display_set_changed
         || incoming.should_force_refresh_layout
         || !incoming.space_remaps.is_empty()
-        || !incoming.resized_spaces.is_empty()
-        || incoming.topology_window_delta.is_some();
+        || !incoming.resized_spaces.is_empty();
     SpaceSnapshotAnalysis {
         spaces,
         authoritative_spaces,
         command_space_only_update,
         invalidates_pending_targets,
     }
+}
+
+/// Prepends an older sample's deltas to a newer one; geometry and membership stay the newer's.
+pub(crate) fn merge_space_deltas(
+    mut older: ForwardedSpaceState,
+    mut newer: ForwardedSpaceState,
+) -> ForwardedSpaceState {
+    older.space_remaps.retain(|remap| !newer.space_remaps.contains(remap));
+    older.space_remaps.append(&mut newer.space_remaps);
+    newer.space_remaps = older.space_remaps;
+    older
+        .resized_spaces
+        .retain(|(space, _)| !newer.resized_spaces.iter().any(|(next, _)| space == next));
+    older.resized_spaces.append(&mut newer.resized_spaces);
+    newer.resized_spaces = older.resized_spaces;
+    newer.should_force_refresh_layout |= older.should_force_refresh_layout;
+    newer.display_set_changed |= older.display_set_changed;
+    newer
 }
 
 // spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
@@ -344,22 +360,4 @@ pub fn handle_mission_control_native_exited(
     } else {
         outcome
     })
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SpaceLifecyclePayload {
-    pub space: SpaceId,
-    pub created: bool,
-}
-
-pub fn handle_space_lifecycle(
-    policy: &mut SpaceActivationPolicy,
-    payload: SpaceLifecyclePayload,
-) -> anyhow::Result<EventOutcome> {
-    if payload.created {
-        policy.on_space_created(payload.space);
-    } else {
-        policy.on_space_destroyed(payload.space);
-    }
-    Ok(EventOutcome::layout_changed(false).with_active_space_recompute())
 }

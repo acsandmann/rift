@@ -308,6 +308,8 @@ pub fn handle_window_frame_changed(
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = !old_frame.size.same_as(new_frame.size);
         if !drag.actor.update_native(wid, new_frame, new_space) {
+            // The start of a user drag is intent, even when no workspace changes.
+            layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
             let session_id = drag.actor.await_native(wid);
             let scene = if tiled && !native_resize {
                 new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {

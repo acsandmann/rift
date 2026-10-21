@@ -1285,13 +1285,15 @@ impl WindowStore {
             .collect();
         for old_assignment in moved_assignments {
             if let Some(windows) = self.workspace_windows.remove(&old_assignment) {
-                self.workspace_windows.insert(
-                    WindowWorkspaceInfo {
+                // Extended, not inserted: the window server can already have put windows on
+                // the new space before rift learned it replaced the old one.
+                self.workspace_windows
+                    .entry(WindowWorkspaceInfo {
                         space: new_space,
                         workspace_id: old_assignment.workspace_id,
-                    },
-                    windows,
-                );
+                    })
+                    .or_default()
+                    .extend(windows);
             }
         }
 
@@ -1779,5 +1781,24 @@ mod tests {
         assert_eq!(store.tracked_window_id(wsid), None);
         assert!(store.window_ids_for_pid(wid.pid).next().is_none());
         store.debug_assert_invariants();
+    }
+
+    #[test]
+    fn remap_space_merges_into_windows_already_on_the_new_space() {
+        let mut store = WindowStore::default();
+        let (old, new) = (SpaceId::new(1), SpaceId::new(2));
+        let mut workspaces = WorkspaceStore::new();
+        let workspace_id = workspaces.create_workspace(old, Some("Shared".to_string())).unwrap();
+        let (moved, present) = (WindowId::new(5, 1), WindowId::new(5, 2));
+        store.assign_window_to_workspace(moved, WindowWorkspaceInfo { space: old, workspace_id });
+        // The window server placed this one on the incoming id before rift heard of it.
+        store.assign_window_to_workspace(present, WindowWorkspaceInfo { space: new, workspace_id });
+
+        store.remap_space(old, new);
+
+        assert_eq!(store.workspace_for_window(new, moved), Some(workspace_id));
+        assert_eq!(store.workspace_for_window(new, present), Some(workspace_id));
+        assert_eq!(store.workspace_window_count(new, workspace_id), 2);
+        assert_eq!(store.workspace_window_count(old, workspace_id), 0);
     }
 }

@@ -351,7 +351,6 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
         should_force_refresh_layout: false,
         // Set on every coherent snapshot the spaces actor forwards.
         resized_spaces: Vec::new(),
-        topology_window_delta: None,
     }
 }
 
@@ -574,6 +573,9 @@ impl Apps {
         let mut events = vec![];
         let mut got_visible_windows = false;
         for request in requests {
+            let Some((request, _)) = request.authorized() else {
+                continue;
+            };
             debug!(?request);
             match request {
                 Request::Terminate => break,
@@ -600,7 +602,7 @@ impl Apps {
                 Request::ApplicationGloballyActivated(pid) => {
                     events.push(Event::ApplicationActivated(pid, Quiet::No));
                 }
-                Request::SetWindowFrames(frames, txid, mode, _) => {
+                Request::SetWindowFrames(frames, txid, mode, _, _) => {
                     for (wid, frame) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
@@ -622,7 +624,7 @@ impl Apps {
                     }
                 }
                 Request::InteractiveFramesPending(frames) => {
-                    frames.drain_with(|wid, frame, set_size, txid, _, _| {
+                    frames.drain_with(|wid, frame, set_size, txid, _, _, _| {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;
@@ -642,13 +644,13 @@ impl Apps {
                         }
                     });
                 }
-                Request::BeginWindowAnimation(wid) => {
+                Request::BeginWindowAnimation(wid, _) => {
                     self.windows.entry(wid).or_default().animating = true;
                 }
-                Request::CancelWindowAnimation(wid, _) => {
+                Request::CancelWindowAnimation(wid, _, _) => {
                     self.windows.entry(wid).or_default().animating = false;
                 }
-                Request::EndWindowAnimation(wid) => {
+                Request::EndWindowAnimation(wid, _) => {
                     let window = self.windows.entry(wid).or_default();
                     window.animating = false;
                     events.push(Event::WindowFrameChanged(

@@ -94,6 +94,9 @@ impl PersistedLayout {
     pub(super) fn into_engine(self) -> LayoutEngine {
         LayoutEngine {
             scroll_boundary: None,
+            native_layouts: HashMap::default(),
+            native_reconcile_batch: None,
+            evicted: HashMap::default(),
             floating: self.floating,
             floating_positions: self.floating_positions,
             app_rules: AppRuleEngine::default(),

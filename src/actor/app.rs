@@ -300,6 +300,26 @@ fn decode_notification_data(
 pub struct AppThreadHandle {
     requests_tx: actor::Sender<Request>,
     interactive_frames: InteractiveFrameQueue,
+    frame_authority: FrameAuthority,
+}
+
+/// The topology accepted when this producer was created. Clones held by an old
+/// presenter retain their revision even after the reactor accepts a new one.
+#[derive(Clone, Debug, Default)]
+#[doc(hidden)]
+pub struct FrameAuthority(Option<(crate::actor::spaces::TopologyGuard, u64)>);
+
+impl FrameAuthority {
+    fn is_older_than(&self, other: &Self) -> bool {
+        self.0.as_ref().map(|(_, revision)| *revision)
+            < other.0.as_ref().map(|(_, revision)| *revision)
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|(guard, revision)| guard.invalidated_revision() <= *revision)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -314,7 +334,7 @@ pub(crate) enum FrameSource {
 struct InteractiveFrames {
     wake_pending: bool,
     sequence: u64,
-    latest: HashMap<WindowId, (CGRect, bool, TransactionId, FrameSource, u64)>,
+    latest: HashMap<WindowId, (CGRect, bool, TransactionId, FrameSource, u64, FrameAuthority)>,
 }
 
 #[derive(Clone, Default)]
@@ -334,12 +354,14 @@ impl Debug for InteractiveFrameQueue {
 impl InteractiveFrameQueue {
     pub(crate) fn drain_with(
         &self,
-        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource, u64),
+        mut consume: impl FnMut(WindowId, CGRect, bool, TransactionId, FrameSource, u64, FrameAuthority),
     ) {
         let mut frames = self.0.lock().unwrap();
         frames.wake_pending = false;
-        for (wid, (frame, set_size, txid, source, sequence)) in frames.latest.drain() {
-            consume(wid, frame, set_size, txid, source, sequence);
+        for (wid, (frame, set_size, txid, source, sequence, authority)) in frames.latest.drain() {
+            if authority.is_current() {
+                consume(wid, frame, set_size, txid, source, sequence, authority);
+            }
         }
     }
 }
@@ -376,7 +398,7 @@ mod interactive_frame_tests {
         };
         assert!(rx.try_recv().is_err());
         let mut received = Vec::new();
-        queue.drain_with(|wid, frame, set_size, _, _, _| received.push((wid, frame, set_size)));
+        queue.drain_with(|wid, frame, set_size, _, _, _, _| received.push((wid, frame, set_size)));
         assert_eq!(received, vec![(window, latest, true)]);
         assert_eq!(queue.0.lock().unwrap().latest.capacity(), capacity);
 
@@ -399,7 +421,7 @@ mod interactive_frame_tests {
             FrameSource::Viewport,
         );
         assert!(rx.try_recv().is_err(), "reuse the outstanding wake");
-        old_wake.drain_with(|wid, frame, _, _, source, sequence| {
+        old_wake.drain_with(|wid, frame, _, _, source, sequence, _| {
             assert_eq!(wid, window);
             assert_eq!(frame, latest);
             assert_eq!(source, FrameSource::Viewport);
@@ -438,6 +460,7 @@ impl AppThreadHandle {
         AppThreadHandle {
             requests_tx,
             interactive_frames: Default::default(),
+            frame_authority: Default::default(),
         }
     }
 
@@ -447,29 +470,55 @@ impl AppThreadHandle {
             Self {
                 requests_tx,
                 interactive_frames: Default::default(),
+                frame_authority: Default::default(),
             },
             rx,
         )
     }
 
+    pub(crate) fn can_write_frames(&self) -> bool { self.frame_authority.is_current() }
+
     pub(crate) fn same_actor(&self, other: &Self) -> bool {
         self.requests_tx.same_channel(&other.requests_tx)
     }
 
+    pub(crate) fn set_topology_authority(
+        &mut self,
+        guard: &crate::actor::spaces::TopologyGuard,
+        revision: u64,
+    ) {
+        self.frame_authority = FrameAuthority(Some((guard.clone(), revision)));
+    }
+
     pub fn send(&self, req: Request) -> anyhow::Result<()> {
+        let mut req = req;
+        match &mut req {
+            Request::SetWindowFrames(_, _, _, _, authority)
+            | Request::BeginWindowAnimation(_, authority)
+            | Request::EndWindowAnimation(_, authority) => {
+                *authority = self.frame_authority.clone()
+            }
+            _ => (),
+        }
         self.requests_tx.send(req);
         Ok(())
     }
 
     pub(crate) fn cancel_interactive_frame(&self, wid: WindowId) -> u64 {
         let mut frames = self.interactive_frames.0.lock().unwrap();
-        frames.latest.remove(&wid);
+        if self.frame_authority.is_current() {
+            frames.latest.remove(&wid);
+        }
         frames.sequence
     }
 
     pub(crate) fn cancel_window_animation(&self, wid: WindowId) {
         let through = self.cancel_interactive_frame(wid);
-        let _ = self.send(Request::CancelWindowAnimation(wid, through));
+        let _ = self.send(Request::CancelWindowAnimation(
+            wid,
+            through,
+            self.frame_authority.clone(),
+        ));
     }
 
     /// Publish a high-frequency interactive frame without growing the actor queue.
@@ -491,16 +540,29 @@ impl AppThreadHandle {
         frames: impl IntoIterator<Item = (WindowId, CGRect, bool, TransactionId, FrameSource)>,
     ) {
         let mut pending = self.interactive_frames.0.lock().unwrap();
+        if !self.frame_authority.is_current() {
+            return;
+        }
         let mut changed = false;
         for (wid, frame, set_size, txid, source) in frames {
             let set_size = set_size
                 || pending
                     .latest
                     .get(&wid)
-                    .is_some_and(|(_, size, _, old, _)| *size && *old == source);
+                    .is_some_and(|(_, size, _, old, _, _)| *size && *old == source);
             pending.sequence = pending.sequence.wrapping_add(1);
             let sequence = pending.sequence;
-            pending.latest.insert(wid, (frame, set_size, txid, source, sequence));
+            pending.latest.insert(
+                wid,
+                (
+                    frame,
+                    set_size,
+                    txid,
+                    source,
+                    sequence,
+                    self.frame_authority.clone(),
+                ),
+            );
             changed = true;
         }
         if !changed {
@@ -540,13 +602,19 @@ pub enum Request {
     WindowMaybeDestroyed(WindowId),
     CloseWindow(Option<WindowServerId>),
 
-    SetWindowFrames(Vec<(WindowId, CGRect)>, TransactionId, FrameMode, bool),
+    SetWindowFrames(
+        Vec<(WindowId, CGRect)>,
+        TransactionId,
+        FrameMode,
+        bool,
+        FrameAuthority,
+    ),
     #[doc(hidden)]
     InteractiveFramesPending(InteractiveFrameQueue),
 
-    BeginWindowAnimation(WindowId),
-    EndWindowAnimation(WindowId),
-    CancelWindowAnimation(WindowId, u64),
+    BeginWindowAnimation(WindowId, FrameAuthority),
+    EndWindowAnimation(WindowId, FrameAuthority),
+    CancelWindowAnimation(WindowId, u64, FrameAuthority),
 
     /// Raise the windows within a single space, in the given order. All windows must be
     /// in the same space, or they will not be raised correctly.
@@ -564,14 +632,36 @@ pub enum FrameMode {
 }
 
 impl Request {
+    pub(crate) fn authorized(self) -> Option<(Self, FrameAuthority)> {
+        let authority = match &self {
+            Self::SetWindowFrames(_, _, _, _, authority)
+            | Self::BeginWindowAnimation(_, authority)
+            | Self::EndWindowAnimation(_, authority)
+            | Self::CancelWindowAnimation(_, _, authority) => authority.clone(),
+            _ => FrameAuthority::default(),
+        };
+        (authority.is_current()
+            || matches!(
+                self,
+                Self::EndWindowAnimation(..) | Self::CancelWindowAnimation(..)
+            ))
+        .then_some((self, authority))
+    }
+
     pub fn set_window_frame(wid: WindowId, frame: CGRect, txid: TransactionId, eui: bool) -> Self {
-        Self::SetWindowFrames(vec![(wid, frame)], txid, FrameMode::Full, eui)
+        Self::SetWindowFrames(
+            vec![(wid, frame)],
+            txid,
+            FrameMode::Full,
+            eui,
+            Default::default(),
+        )
     }
 
     #[inline]
     fn disables_enhanced_ui(&self) -> bool {
         match self {
-            Self::SetWindowFrames(_, _, _, enabled) => *enabled,
+            Self::SetWindowFrames(_, _, _, enabled, _) => *enabled,
             _ => false,
         }
     }
@@ -639,7 +729,8 @@ struct AppWindowState {
     window_server_id: Option<WindowServerId>,
     title: String,
     is_animating: bool,
-    last_animation_frame: Option<CGRect>,
+    animation_authority: FrameAuthority,
+    last_animation_frame: Option<(CGRect, FrameAuthority)>,
     // Latest observed or intended geometry; only a hint for choosing AX setters.
     last_known_frame: CGRect,
     frame_source: FrameSource,
@@ -660,6 +751,34 @@ impl FrameTarget for AXUIElement {
     }
 
     fn set_size(&self, size: CGSize) -> Result<(), AxError> { AXUIElement::set_size(self, size) }
+}
+
+/// Fence each setter, including hint-correction and animation-end repairs.
+/// Revocation cannot recall an AX call already in flight, but prevents the next
+/// setter from starting with coordinates from that topology.
+struct AuthorizedFrameTarget<'a, T> {
+    target: &'a T,
+    authority: &'a FrameAuthority,
+}
+
+impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
+    fn frame(&self) -> Result<CGRect, AxError> { self.target.frame() }
+
+    fn set_position(&self, origin: CGPoint) -> Result<(), AxError> {
+        if self.authority.is_current() {
+            self.target.set_position(origin)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn set_size(&self, size: CGSize) -> Result<(), AxError> {
+        if self.authority.is_current() {
+            self.target.set_size(size)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// The AX setters needed to move a window from one frame to another.
@@ -823,6 +942,7 @@ struct PendingFrame {
     txid: TransactionId,
     source: FrameSource,
     sequence: u64,
+    authority: FrameAuthority,
 }
 
 /// Some AX bridges (notably Qt's) surface menu elements through window discovery.
@@ -1065,7 +1185,11 @@ impl State {
         wid: WindowId,
         pending: PendingFrame,
     ) -> Result<(), AxError> {
+        if !pending.authority.is_current() {
+            return Ok(());
+        }
         let PendingFrame {
+            authority,
             span,
             frame,
             set_size,
@@ -1078,9 +1202,12 @@ impl State {
         window.last_seen_txid = txid;
         window.frame_source = source;
         // Release reapplies this frame, including position-only viewport writes.
-        window.last_animation_frame = Some(frame);
+        window.last_animation_frame = Some((frame, authority.clone()));
         write_interactive_frame(
-            &window.elem,
+            &AuthorizedFrameTarget {
+                target: &window.elem,
+                authority: &authority,
+            },
             &mut window.last_known_frame,
             frame,
             set_size,
@@ -1218,6 +1345,9 @@ impl State {
         pending_frames: &mut HashMap<WindowId, PendingFrame>,
         eui: &mut BatchEui,
     ) -> Result<bool, AxError> {
+        let Some((request, authority)) = request.authorized() else {
+            return Ok(false);
+        };
         match request {
             Request::Terminate => {
                 return Ok(true);
@@ -1257,7 +1387,7 @@ impl State {
                 }
             }
             Request::InteractiveFramesPending(frames) => {
-                frames.drain_with(|wid, frame, set_size, txid, source, sequence| {
+                frames.drain_with(|wid, frame, set_size, txid, source, sequence, authority| {
                     pending_frames.insert(wid, PendingFrame {
                         span: Span::current(),
                         frame,
@@ -1265,11 +1395,15 @@ impl State {
                         txid,
                         source,
                         sequence,
+                        authority,
                     });
                 });
             }
-            Request::SetWindowFrames(frames, txid, mode, _) => {
+            Request::SetWindowFrames(frames, txid, mode, _, _) => {
                 for (wid, desired) in frames {
+                    if !authority.is_current() {
+                        break;
+                    }
                     let (elem, hint) = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
@@ -1289,7 +1423,16 @@ impl State {
 
                     // The acknowledgment always carries geometry read back from AX.
                     let result = trace("set_frame", &elem, || {
-                        reconcile_frame(&elem, hint, desired, mode, || self.hold_batch_eui(eui))
+                        reconcile_frame(
+                            &AuthorizedFrameTarget {
+                                target: &elem,
+                                authority: &authority,
+                            },
+                            hint,
+                            desired,
+                            mode,
+                            || self.hold_batch_eui(eui),
+                        )
                     });
                     let frame = match self.handle_ax_result(wid, result)? {
                         Some(frame) => {
@@ -1308,9 +1451,10 @@ impl State {
                     ));
                 }
             }
-            Request::BeginWindowAnimation(wid) => {
+            Request::BeginWindowAnimation(wid, _) => {
                 let (elem, started_animation) = {
                     let window = self.window_mut(wid)?;
+                    window.animation_authority = authority;
                     let started_animation = !std::mem::replace(&mut window.is_animating, true);
                     if started_animation {
                         window.last_animation_frame = None;
@@ -1323,21 +1467,39 @@ impl State {
                     self.stop_notifications_for_animation(&elem);
                 }
             }
-            request @ (Request::EndWindowAnimation(_) | Request::CancelWindowAnimation(..)) => {
+            request @ (Request::EndWindowAnimation(_, _) | Request::CancelWindowAnimation(..)) => {
                 let (wid, through) = match request {
-                    Request::EndWindowAnimation(wid) => (wid, None),
-                    Request::CancelWindowAnimation(wid, through) => (wid, Some(through)),
+                    Request::EndWindowAnimation(wid, _) => (wid, None),
+                    Request::CancelWindowAnimation(wid, through, _) => (wid, Some(through)),
                     _ => unreachable!(),
                 };
+                // An old presenter may retire after a replacement has begun.
+                // It can clean up its own lease, never the replacement's lease.
+                if self
+                    .window_mut(wid)
+                    .is_ok_and(|window| authority.is_older_than(&window.animation_authority))
+                {
+                    return Ok(false);
+                }
                 if let Some(through) = through {
-                    if pending_frames.get(&wid).is_some_and(|frame| frame.sequence <= through) {
+                    if pending_frames.get(&wid).is_some_and(|frame| {
+                        frame.sequence <= through && !authority.is_older_than(&frame.authority)
+                    }) {
                         pending_frames.remove(&wid);
                     }
-                    if let Ok(window) = self.window_mut(wid) {
+                    if let Ok(window) = self.window_mut(wid)
+                        && window
+                            .last_animation_frame
+                            .as_ref()
+                            .is_some_and(|(_, owner)| !authority.is_older_than(owner))
+                    {
                         window.last_animation_frame = None;
                     }
                 }
                 if through.is_none()
+                    && pending_frames
+                        .get(&wid)
+                        .is_some_and(|frame| !authority.is_older_than(&frame.authority))
                     && let Some(frame) = pending_frames.remove(&wid)
                     && let Err(err) = self.apply_interactive_frame(wid, frame)
                 {
@@ -1352,7 +1514,15 @@ impl State {
                         (
                             window.elem.clone(),
                             window.last_seen_txid,
-                            window.last_animation_frame.take(),
+                            if window
+                                .last_animation_frame
+                                .as_ref()
+                                .is_some_and(|(_, owner)| authority.is_older_than(owner))
+                            {
+                                None
+                            } else {
+                                window.last_animation_frame.take()
+                            },
                             ended_animation,
                         )
                     }
@@ -1382,11 +1552,21 @@ impl State {
                 // Intermediate AX writes can be clamped while a growing column
                 // still overlaps the screen edge. The intended-frame cache is
                 // only a hint: repair against observed geometry once motion ends.
-                if let Some(target) = last_animation_frame
+                if let Some((target, authority)) = last_animation_frame
+                    && authority.is_current()
                     && !frame.same_as(target)
                 {
                     let result = trace("set_frame", &elem, || {
-                        reconcile_frame(&elem, frame, target, FrameMode::Full, || {})
+                        reconcile_frame(
+                            &AuthorizedFrameTarget {
+                                target: &elem,
+                                authority: &authority,
+                            },
+                            frame,
+                            target,
+                            FrameMode::Full,
+                            || {},
+                        )
                     });
                     frame = match self.handle_ax_result(wid, result)? {
                         Some(frame) => frame,
@@ -2049,6 +2229,7 @@ impl State {
             window_server_id: Some(window_server_id),
             title: info.title.clone(),
             is_animating: false,
+            animation_authority: Default::default(),
             last_animation_frame: None,
             last_known_frame: info.frame,
             frame_source: FrameSource::Ordinary,
@@ -2611,6 +2792,92 @@ mod frame_tests {
 
     fn reconcile(window: &FakeWindow, target: CGRect) -> Result<CGRect, AxError> {
         reconcile_frame(window, window.frame.get(), target, FrameMode::Full, || {})
+    }
+
+    #[test]
+    fn topology_revocation_fences_queued_and_drained_frames_until_a_fresh_producer() {
+        let (events, mut invalidations) = actor::channel();
+        let (wm, _) = actor::channel();
+        let (spaces, sender) = crate::actor::spaces::SpacesActor::new_for_tests(events, wm);
+        let guard = spaces.topology_guard();
+        let (mut handle, mut requests) = AppThreadHandle::channel();
+        handle.set_topology_authority(&guard, 0);
+        let old_presenter = handle.clone();
+        let wid = WindowId::new(1, 1);
+        let target = rect(10., 20., 300., 200.);
+        handle
+            .send(Request::set_window_frame(wid, target, Default::default(), false))
+            .unwrap();
+        handle.send_interactive_frame(wid, target, true, Default::default(), FrameSource::Viewport);
+        let queued = requests.try_recv().unwrap().1;
+        let Request::InteractiveFramesPending(queue) = requests.try_recv().unwrap().1 else {
+            panic!("frame wake");
+        };
+        let mut drained = None;
+        queue.drain_with(|_, _, _, _, _, _, authority| drained = Some(authority));
+        // Invalidation is published before its reactor message is consumed.
+        sender.send(crate::actor::spaces::Event::SystemWillSleep);
+        let mut running = std::pin::pin!(spaces.run());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(running.as_mut(), &mut context).is_pending());
+        assert!(invalidations.try_recv().is_ok());
+        assert!(queued.authorized().is_none(), "queued ordinary batch is stale");
+
+        let window = FakeWindow::default();
+        let authority = drained.unwrap();
+        let fenced = AuthorizedFrameTarget {
+            target: &window,
+            authority: &authority,
+        };
+        write_interactive_frame(
+            &fenced,
+            &mut CGRect::default(),
+            target,
+            true,
+            FrameSource::Viewport,
+        );
+        reconcile_frame(&fenced, CGRect::default(), target, FrameMode::Full, || {}).unwrap();
+        assert!(
+            window.calls.borrow().iter().all(|call| *call == "frame"),
+            "drained frames and terminal repair must not write after revocation"
+        );
+        assert_eq!(window.frame.get(), CGRect::default());
+
+        handle.set_topology_authority(&guard, guard.invalidated_revision());
+        for (producer, expected) in [(&old_presenter, false), (&handle, true)] {
+            producer
+                .send(Request::set_window_frame(wid, target, Default::default(), false))
+                .unwrap();
+            assert_eq!(requests.try_recv().unwrap().1.authorized().is_some(), expected);
+            producer.send_interactive_frame(
+                wid,
+                target,
+                true,
+                Default::default(),
+                FrameSource::Drag,
+            );
+            if !expected {
+                assert!(
+                    requests.try_recv().is_err(),
+                    "stale producer must not replace newer pending frames"
+                );
+                continue;
+            }
+            let Request::InteractiveFramesPending(queue) = requests.try_recv().unwrap().1 else {
+                panic!("frame wake");
+            };
+            // An obsolete producer cannot clear its replacement's pending frame.
+            old_presenter.cancel_window_animation(wid);
+            let cancel = requests.try_recv().unwrap().1;
+            let (_, authority) = cancel.authorized().unwrap();
+            assert!(
+                !authority.is_current(),
+                "cleanup must retain the old producer's authority"
+            );
+            let mut delivered = false;
+            queue.drain_with(|_, _, _, _, _, _, _| delivered = true);
+            assert_eq!(delivered, expected, "old presenters cannot mint fresh authority");
+        }
     }
 
     #[test]

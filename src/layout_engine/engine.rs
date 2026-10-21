@@ -19,7 +19,7 @@ use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspac
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStore};
 use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
-    WindowStore,
+    WindowStore, WindowWorkspaceInfo,
 };
 use crate::sys::screen::SpaceId;
 
@@ -184,6 +184,23 @@ pub struct LayoutEngine {
     startup_restore_pending: bool,
     /// Legacy strip commands report boundary excess; workspace arbitration lives here.
     scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
+    // One original arrangement per workspace, shared by all native departures.
+    native_layouts:
+        HashMap<VirtualWorkspaceId, (LayoutSystemKind, super::workspaces::WorkspaceLayoutState)>,
+    native_reconcile_batch: Option<HashSet<VirtualWorkspaceId>>,
+    // Windows a display departure moved to another display, by where they came from.
+    evicted: HashMap<WindowId, EvictedWindow>,
+}
+
+/// Where a display departure moved a window from, so the display's return can put it back
+/// at the same workspace position instead of the active one.
+#[derive(Debug)]
+struct EvictedWindow {
+    display: String,
+    ordinal: usize,
+    /// The assignment the departure gave the window. If the window has since been placed
+    /// anywhere else, the user (or another change) decided and the record no longer applies.
+    landed: WindowWorkspaceInfo,
 }
 
 pub(crate) struct WorkspaceLayoutQuerySnapshot {
@@ -209,6 +226,8 @@ impl LayoutEngine {
         else {
             return false;
         };
+        self.forget_native_layout_for_window_id(request.source);
+        self.native_layouts.remove(&workspace);
         self.workspaces[workspace].layout_state.last_saved = Some(layout);
         self.workspaces[workspace].layout_system.apply_window_drop(
             layout,
@@ -498,6 +517,7 @@ impl LayoutEngine {
             ordered.extend(hidden_windows);
             (workspace.layout_mode, selected, ordered)
         };
+        self.forget_native_layout_for_workspace(workspace_id);
 
         if current_mode == LayoutMode::Floating || mode == LayoutMode::Floating {
             for &wid in &window_order {
@@ -657,6 +677,7 @@ impl LayoutEngine {
 
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
+        self.native_layouts.clear();
         self.layout_settings = settings.clone();
 
         for (_, ws) in self.workspaces.workspaces.iter_mut() {
@@ -919,6 +940,7 @@ impl LayoutEngine {
         layout: LayoutId,
         resize_amount: f64,
     ) {
+        self.forget_native_layout_for_workspace(ws_id);
         self.workspaces[ws_id].layout_system.resize_selection_by(
             layout,
             resize_amount,
@@ -1235,12 +1257,222 @@ impl LayoutEngine {
         best.map(|(_, _, space)| space)
     }
 
+    // Explicit placement edits revoke recovery even when logical membership is unchanged.
+    // Native reconciliation deliberately does not use this boundary.
+    fn forget_native_layout_for_window_id(&mut self, wid: WindowId) {
+        self.evicted.remove(&wid);
+        for (system, _) in self.native_layouts.values_mut() {
+            system.remove_window(wid);
+        }
+        self.prune_native_layouts();
+    }
+
+    fn forget_native_layout_for_workspace(&mut self, workspace: VirtualWorkspaceId) {
+        self.native_layouts.remove(&workspace);
+        let edited: Vec<_> = self
+            .evicted
+            .iter()
+            .filter_map(|(&window, record)| {
+                (record.landed.workspace_id == workspace).then_some(window)
+            })
+            .collect();
+        for window in edited {
+            self.forget_native_layout_for_window_id(window);
+        }
+    }
+
+    fn prune_native_layouts(&mut self) {
+        self.native_layouts.retain(|_, (system, state)| {
+            state
+                .all_layouts()
+                .any(|layout| !system.all_windows_in_layout(layout).is_empty())
+        });
+    }
+
+    pub(crate) fn forget_native_layout_for_window(&mut self, windows: &WindowStore, wid: WindowId) {
+        self.forget_native_layout_for_window_id(wid);
+        if let Some(assignment) = windows.workspace_info_for_window(wid) {
+            self.native_layouts.remove(&assignment.workspace_id);
+        }
+    }
+
+    pub(crate) fn remember_native_departure(&mut self, windows: &WindowStore, wid: WindowId) {
+        let Some(assignment) = windows.workspace_info_for_window(wid) else {
+            return;
+        };
+        let workspace = assignment.workspace_id;
+        if self.floating.is_floating(wid) || self.native_layouts.contains_key(&workspace) {
+            return;
+        }
+        let current = &self.workspaces[workspace];
+        if let Some(system) = current.layout_system.preview_clone() {
+            self.native_layouts.insert(workspace, (system, current.layout_state.clone()));
+        }
+    }
+
+    pub(crate) fn begin_native_reconcile(
+        &mut self,
+        windows: &WindowStore,
+        moves: &[(WindowId, SpaceId)],
+    ) {
+        // Capture every source before the first arrival can modify another source tree.
+        for &(window, target) in moves {
+            if windows
+                .workspace_info_for_window(window)
+                .is_some_and(|source| source.space != target)
+            {
+                self.remember_native_departure(windows, window);
+            }
+        }
+        self.native_reconcile_batch = Some(HashSet::default());
+    }
+
+    pub(crate) fn finish_native_reconcile(&mut self, windows: &WindowStore) {
+        let workspaces = self.native_reconcile_batch.take().unwrap_or_default();
+        for workspace in workspaces {
+            self.restore_native_layout(windows, workspace, None);
+        }
+        // Forget windows that were closed, rekeyed or placed somewhere else since.
+        let stale: Vec<_> = self
+            .evicted
+            .iter()
+            .filter_map(|(&wid, record)| {
+                (windows.workspace_info_for_window(wid) != Some(record.landed)).then_some(wid)
+            })
+            .collect();
+        for wid in stale {
+            self.forget_native_layout_for_window_id(wid);
+        }
+        self.prune_native_layouts();
+    }
+
+    /// Records the display and workspace position `wid` was moved from because its display
+    /// departed. Call after the window has been reassigned; `from` is its previous assignment.
+    pub(crate) fn note_eviction(
+        &mut self,
+        windows: &WindowStore,
+        wid: WindowId,
+        from: WindowWorkspaceInfo,
+    ) {
+        let (Some(landed), Some(display)) = (
+            windows.workspace_info_for_window(wid),
+            self.display_uuid_for_space(from.space),
+        ) else {
+            return;
+        };
+        if self.display_uuid_for_space(landed.space).as_deref() == Some(display.as_str()) {
+            return;
+        }
+        let Some(ordinal) = self
+            .workspaces
+            .workspace_ids(from.space)
+            .iter()
+            .position(|id| *id == from.workspace_id)
+        else {
+            return;
+        };
+        self.evicted.insert(wid, EvictedWindow { display, ordinal, landed });
+    }
+
+    /// The workspace position `wid` was evicted from, if the display now showing `space` is the
+    /// one it was evicted from and nothing has placed the window elsewhere since. Consumes the
+    /// record when it applies.
+    pub(crate) fn take_eviction(
+        &mut self,
+        windows: &WindowStore,
+        wid: WindowId,
+        space: SpaceId,
+    ) -> Option<usize> {
+        let record = self.evicted.get(&wid)?;
+        if windows.workspace_info_for_window(wid) != Some(record.landed) {
+            self.evicted.remove(&wid);
+            return None;
+        }
+        if self.display_uuid_for_space(space).as_deref() != Some(record.display.as_str()) {
+            return None;
+        }
+        self.evicted.remove(&wid).map(|record| record.ordinal)
+    }
+
+    fn restore_native_layout(
+        &mut self,
+        windows: &WindowStore,
+        workspace: VirtualWorkspaceId,
+        returning: Option<WindowId>,
+    ) {
+        let Some((saved, state)) = self.native_layouts.get(&workspace) else {
+            return;
+        };
+        if returning.is_some_and(|window| {
+            !state.all_layouts().any(|layout| saved.contains_window(layout, window))
+        }) {
+            return;
+        }
+        if let Some(workspaces) = self.native_reconcile_batch.as_mut() {
+            workspaces.insert(workspace);
+            return;
+        }
+        let original: HashSet<_> = state
+            .all_layouts()
+            .flat_map(|layout| saved.all_windows_in_layout(layout))
+            .collect();
+        let current = &self.workspaces[workspace];
+        let Some(size) = current.layout_state.active_size() else {
+            return;
+        };
+        let mut desired = HashSet::default();
+        let ordered: Vec<_> = current
+            .layout_state
+            .all_layouts()
+            .flat_map(|layout| current.layout_system.all_windows_in_layout(layout))
+            .filter(|window| {
+                windows.workspace_for_window(current.space, *window) == Some(workspace)
+                    && windows.is_visible_admitted(*window)
+                    && !self.floating.is_floating(*window)
+                    && desired.insert(*window)
+            })
+            .collect();
+        if original.is_disjoint(&desired) {
+            return;
+        }
+        let Some(mut system) = saved.preview_clone() else {
+            return;
+        };
+        let mut state = state.clone();
+        // Prune only a working copy: partial returns must share one original arrangement.
+        for window in original.difference(&desired) {
+            system.remove_window(*window);
+        }
+        for layout in state.all_layouts() {
+            for &window in &ordered {
+                if !system.contains_window(layout, window) {
+                    system.add_window_after_selection(layout, window);
+                }
+            }
+        }
+        state.ensure_active(size, &mut system);
+        if let Some(focused) = self.focused_window.filter(|window| desired.contains(window))
+            && let Some(layout) = state.active()
+        {
+            system.select_window(layout, focused);
+        }
+        let current = &mut self.workspaces[workspace];
+        current.layout_system = system;
+        current.layout_state = state;
+        if original.is_subset(&desired) {
+            self.native_layouts.remove(&workspace);
+        }
+    }
+
     fn remove_window_internal(
         &mut self,
         window_store: &mut WindowStore,
         wid: WindowId,
         preserve_floating: bool,
     ) -> bool {
+        if preserve_floating {
+            self.remember_native_departure(window_store, wid);
+        }
         let removal = self.remove_window_layout_membership(window_store, wid);
 
         if preserve_floating {
@@ -1253,6 +1485,7 @@ impl LayoutEngine {
             self.workspaces.remove_window(window_store, wid);
             self.floating_positions.remove_window(wid);
             self.forget_persisted_window(wid);
+            self.evicted.remove(&wid);
         }
 
         if self.focused_window == Some(wid) {
@@ -1298,6 +1531,7 @@ impl LayoutEngine {
         wid: WindowId,
     ) -> bool {
         let active_space_before = self.space_with_window(wid);
+        let mut inserted = false;
 
         let assigned_workspace = match window_store.workspace_for_window(space, wid) {
             Some(workspace_id) => workspace_id,
@@ -1332,6 +1566,7 @@ impl LayoutEngine {
                 self.workspaces[assigned_workspace]
                     .layout_system
                     .add_window_after_selection(layout, wid);
+                inserted = true;
             }
         } else {
             warn!(
@@ -1340,6 +1575,9 @@ impl LayoutEngine {
             );
         }
 
+        if inserted {
+            self.restore_native_layout(window_store, assigned_workspace, Some(wid));
+        }
         self.space_with_window(wid) != active_space_before
     }
 
@@ -1442,22 +1680,8 @@ impl LayoutEngine {
         self.display_last_space.get(display_uuid).copied()
     }
 
-    pub fn display_seen_before(&self, display_uuid: &str) -> bool {
-        self.display_last_space.contains_key(display_uuid)
-    }
-
     fn display_uuid_for_space(&self, space: SpaceId) -> Option<String> {
         self.space_display_map.get(&space).and_then(|uuid| uuid.clone())
-    }
-
-    /// Returns the last known space associated with the given display UUID.
-    /// Useful when the OS recreates spaces (e.g. after sleep/resume) and we
-    /// want to migrate layout state to the new space id.
-    pub fn space_for_display_uuid(&self, display_uuid: &str) -> Option<SpaceId> {
-        self.space_display_map.iter().find_map(|(space, uuid_opt)| match uuid_opt {
-            Some(uuid) if uuid == display_uuid => Some(*space),
-            _ => None,
-        })
     }
 
     /// Move all per-space layout state from `old_space` to `new_space`.
@@ -1473,7 +1697,22 @@ impl LayoutEngine {
 
         self.floating.remap_space(old_space, new_space);
         self.floating_positions.remap_space(old_space, new_space);
-        self.workspaces.remap_space(window_store, old_space, new_space);
+        // Saved native arrangements are keyed by workspace; one for a deleted workspace
+        // would no longer resolve.
+        for deleted in self.workspaces.remap_space(window_store, old_space, new_space) {
+            self.native_layouts.remove(&deleted);
+            if let Some(batch) = self.native_reconcile_batch.as_mut() {
+                batch.remove(&deleted);
+            }
+        }
+
+        // A native identity replacement preserves the landing's logical placement.
+        // Keep the recovery receipt in the same namespace as WindowStore.
+        for record in self.evicted.values_mut() {
+            if record.landed.space == old_space {
+                record.landed.space = new_space;
+            }
+        }
 
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
             self.space_display_map.insert(new_space, uuid);
@@ -1483,19 +1722,6 @@ impl LayoutEngine {
             if *space == old_space {
                 *space = new_space;
             }
-        }
-    }
-
-    pub fn prune_display_state(&mut self, active_display_uuids: &[String]) {
-        let active: HashSet<&str> = active_display_uuids.iter().map(|s| s.as_str()).collect();
-
-        self.display_last_space.retain(|uuid, _| active.contains(uuid.as_str()));
-
-        self.space_display_map.retain(|_, uuid_opt| {
-            uuid_opt.as_ref().map(|uuid| active.contains(uuid.as_str())).unwrap_or(false)
-        });
-        for space in self.workspaces.initialized_spaces() {
-            self.sync_scrolling_widths_for_space(space);
         }
     }
 
@@ -1520,6 +1746,9 @@ impl LayoutEngine {
             persistence: PersistenceState::default(),
             startup_restore_pending: false,
             scroll_boundary: None,
+            native_layouts: HashMap::default(),
+            native_reconcile_batch: None,
+            evicted: HashMap::default(),
         }
     }
 
@@ -1806,6 +2035,9 @@ impl LayoutEngine {
                 };
             }
             LayoutEvent::AppClosed(pid) => {
+                for (system, _) in self.native_layouts.values_mut() {
+                    system.remove_windows_for_app(pid);
+                }
                 let changed = self.workspaces.layout_spaces().into_iter().any(|space| {
                     self.workspaces.active_layout_for_space(space).is_some_and(
                         |(workspace, layout)| {
@@ -1821,6 +2053,8 @@ impl LayoutEngine {
                 for (_, ws) in self.workspaces.workspaces.iter_mut() {
                     ws.layout_system.remove_windows_for_app(pid);
                 }
+                self.evicted.retain(|wid, _| wid.pid != pid);
+                self.prune_native_layouts();
                 self.floating.remove_all_for_pid(pid);
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
                 self.forget_persisted_app(pid);
@@ -1838,6 +2072,7 @@ impl LayoutEngine {
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
+                self.forget_native_layout_for_window_id(wid);
                 return EventResponse {
                     changed: self.remove_window_internal(window_store, wid, false),
                     ..EventResponse::default()
@@ -1926,6 +2161,29 @@ impl LayoutEngine {
         visible_space_frames: &HashMap<SpaceId, CGRect>,
         command: LayoutCommand,
     ) -> EventResponse {
+        if !matches!(
+            command,
+            LayoutCommand::NextWindow
+                | LayoutCommand::PrevWindow
+                | LayoutCommand::MoveFocus(_)
+                | LayoutCommand::ToggleFocusFloating
+                | LayoutCommand::Ascend
+                | LayoutCommand::Descend
+                | LayoutCommand::ScrollStrip { .. }
+                | LayoutCommand::MoveStackTab { .. }
+                | LayoutCommand::NextWorkspace(_)
+                | LayoutCommand::PrevWorkspace(_)
+                | LayoutCommand::SwitchToWorkspace(_)
+                | LayoutCommand::SwitchToLastWorkspace
+                | LayoutCommand::CreateWorkspace
+                | LayoutCommand::SetWorkspaceLayout { .. }
+                | LayoutCommand::SnapStrip
+                | LayoutCommand::CenterSelection
+        ) && let Some(workspace) =
+            space.and_then(|space| self.workspaces.active_workspace(space))
+        {
+            self.forget_native_layout_for_workspace(workspace);
+        }
         if !matches!(command, LayoutCommand::ScrollStrip { .. }) {
             self.scroll_boundary = None;
         }
@@ -1949,6 +2207,7 @@ impl LayoutEngine {
             // command space, so find the layout that holds the window.
             let window = crate::actor::app::WindowId::new(window.pid, window.idx);
             let target = crate::actor::app::WindowId::new(target.pid, target.idx);
+            self.forget_native_layout_for_window(window_store, window);
             let changed = visible_spaces.iter().any(|&space| {
                 self.workspaces.active_layout_for_space(space).is_some_and(|(ws_id, layout)| {
                     let system = &mut self.workspaces[ws_id].layout_system;
@@ -2149,6 +2408,8 @@ impl LayoutEngine {
             LayoutCommand::SwapWindows(a, b) => {
                 let a = crate::actor::app::WindowId::new(a.pid, a.idx);
                 let b = crate::actor::app::WindowId::new(b.pid, b.idx);
+                self.forget_native_layout_for_window_id(a);
+                self.forget_native_layout_for_window_id(b);
                 let _ = self.workspaces[workspace_id].layout_system.swap_windows(layout, a, b);
 
                 EventResponse::default()
@@ -2804,6 +3065,9 @@ impl LayoutEngine {
                 if current_workspace_id == target_workspace_id {
                     return EventResponse::default();
                 }
+                self.forget_native_layout_for_window_id(focused_window);
+                self.native_layouts.remove(&current_workspace_id);
+                self.native_layouts.remove(&target_workspace_id);
 
                 if matches!(
                     self.workspaces[current_workspace_id].layout_system,
@@ -3014,6 +3278,11 @@ impl LayoutEngine {
         if restored && let Some(decision) = &mut decision {
             decision.workspace = None;
         }
+        if reapply_workspace_rule
+            && decision.as_ref().is_some_and(|decision| decision.workspace.is_some())
+        {
+            self.forget_native_layout_for_window(window_store, window_id);
+        }
         if reapply_workspace_rule {
             self.workspaces
                 .apply_app_rule_decision(window_store, window_id, space, decision)
@@ -3190,6 +3459,9 @@ impl LayoutEngine {
         window_id: WindowId,
         preserve_classification: bool,
     ) -> bool {
+        self.forget_native_layout_for_window_id(window_id);
+        self.native_layouts.remove(&source.1);
+        self.native_layouts.remove(&destination.1);
         let (source_space, source_workspace_id) = source;
         let (target_space, target_workspace_id) = destination;
         let effective_floating = self.is_window_floating(window_id);
@@ -3329,6 +3601,12 @@ impl LayoutEngine {
             return;
         }
 
+        self.evicted.remove(&from);
+        self.evicted.remove(&to);
+        for (system, _) in self.native_layouts.values_mut() {
+            system.remove_window(to);
+            system.replace_window(from, to);
+        }
         // A live `to` identity can already be provisionally present when a saved `from` identity
         // is matched. Remove that projection before replacement; LayoutSystem::replace_window is
         // not required to deduplicate and otherwise the same window can survive in two workspaces.
@@ -3459,6 +3737,27 @@ mod tests {
             };
             let before = tabs(&mut engine);
             assert!(before.len() >= 2, "{mode:?}: {before:?}");
+            // A native eviction can land in this workspace without encoding a new
+            // user choice. Reordering the actual tab must retire that recovery.
+            let origin = SpaceId::new(93);
+            engine.update_space_display(origin, Some("external".into()));
+            engine.update_space_display(space, Some("builtin".into()));
+            let origin_workspace = engine.workspaces.list_workspaces(origin)[2].0;
+            let landing = store.workspace_info_for_window(before[0]).unwrap();
+            assert!(engine.workspaces.assign_window_to_workspace(
+                &mut store,
+                origin,
+                before[0],
+                origin_workspace
+            ));
+            let from = store.workspace_info_for_window(before[0]).unwrap();
+            assert!(engine.workspaces.assign_window_to_workspace(
+                &mut store,
+                space,
+                before[0],
+                landing.workspace_id
+            ));
+            engine.note_eviction(&store, before[0], from);
             let response = command(&mut engine, &mut store, LayoutCommand::MoveStackTab {
                 window: before[0].into(),
                 target: before[before.len() - 1].into(),
@@ -3467,6 +3766,12 @@ mod tests {
             let mut expected = before.clone();
             expected.rotate_left(1);
             assert_eq!(tabs(&mut engine), expected, "{mode:?}");
+            assert_eq!(store.workspace_info_for_window(before[0]), Some(landing));
+            assert_eq!(
+                engine.take_eviction(&store, before[0], origin),
+                None,
+                "same-workspace user placement beats the old eviction"
+            );
         }
     }
 
@@ -3573,8 +3878,124 @@ mod tests {
         engine.set_layout_settings(&settings);
         assert_eq!(width(&engine, ids_a[0].0), 0.4);
         assert_eq!(width(&engine, ids_b[0].0), 0.6);
-        engine.prune_display_state(&[]);
-        assert_eq!(width(&engine, ids_a[0].0), 0.6);
+    }
+
+    #[test]
+    fn remapping_over_a_workspace_with_a_saved_native_arrangement_forgets_it() {
+        let mut engine = test_engine();
+        let mut store = WindowStore::default();
+        let (old, new) = (SpaceId::new(1), SpaceId::new(2));
+        let size = CGSize::new(1000.0, 800.0);
+        let window = WindowId::new(7, 1);
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(old, size));
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(new, size));
+        // The window server placed this window on the incoming id before the remap.
+        let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(new, window));
+        let doomed = store.workspace_info_for_window(window).unwrap().workspace_id;
+        engine.remember_native_departure(&store, window);
+        assert!(engine.native_layouts.contains_key(&doomed));
+
+        engine.remap_space(&mut store, old, new);
+
+        assert!(
+            !engine.native_layouts.contains_key(&doomed),
+            "the deleted workspace's saved arrangement can no longer resolve"
+        );
+        let rehomed = store.workspace_info_for_window(window).unwrap();
+        assert_eq!(rehomed.space, new);
+        assert_ne!(rehomed.workspace_id, doomed);
+        // A later reconcile over the same window must not index the deleted workspace.
+        engine.begin_native_reconcile(&store, &[(window, new)]);
+        engine.finish_native_reconcile(&store);
+    }
+
+    #[test]
+    fn an_evicted_window_is_remembered_until_its_display_returns_or_it_is_placed_elsewhere() {
+        let mut engine = test_engine();
+        let mut store = WindowStore::default();
+        let (gone, home) = (SpaceId::new(1), SpaceId::new(2));
+        let (other_display, original_display) = (SpaceId::new(3), SpaceId::new(4));
+        engine.update_space_display(gone, Some("D2".to_string()));
+        engine.update_space_display(home, Some("D1".to_string()));
+        engine.update_space_display(other_display, Some("D3".to_string()));
+        engine.update_space_display(original_display, Some("D2".to_string()));
+        let departed: Vec<_> = engine
+            .workspaces_mut()
+            .list_workspaces(gone)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        engine.workspaces_mut().list_workspaces(home);
+
+        let evict = |engine: &mut LayoutEngine, store: &mut WindowStore, window: WindowId| {
+            assert!(engine.workspaces_mut().assign_window_to_workspace(
+                store,
+                gone,
+                window,
+                departed[2]
+            ));
+            let from = store.workspace_info_for_window(window).unwrap();
+            assert!(
+                engine
+                    .workspaces_mut()
+                    .assign_window_to_workspace_preserving_ordinal(store, home, window)
+                    .is_some()
+            );
+            engine.note_eviction(store, window, from);
+        };
+
+        // Waits for its own display, and is consumed exactly once.
+        let window = WindowId::new(1, 1);
+        evict(&mut engine, &mut store, window);
+        assert_eq!(engine.take_eviction(&store, window, other_display), None);
+        assert_eq!(engine.take_eviction(&store, window, original_display), Some(2));
+        assert_eq!(engine.take_eviction(&store, window, original_display), None);
+
+        // A window placed somewhere else since no longer follows the record.
+        let moved = WindowId::new(1, 2);
+        evict(&mut engine, &mut store, moved);
+        let elsewhere = engine.workspaces().workspace_ids(home)[0];
+        assert!(
+            engine
+                .workspaces_mut()
+                .assign_window_to_workspace(&mut store, home, moved, elsewhere)
+        );
+        assert_eq!(engine.take_eviction(&store, moved, original_display), None);
+
+        // A closed window leaves nothing behind.
+        let closed = WindowId::new(1, 3);
+        evict(&mut engine, &mut store, closed);
+        let _ = engine.handle_event(&mut store, LayoutEvent::WindowRemoved(closed));
+        assert!(
+            engine.evicted.is_empty(),
+            "closing a window drops its record at once"
+        );
+        assert_eq!(engine.take_eviction(&store, closed, original_display), None);
+
+        // Moving between workspaces of one display is not an eviction.
+        let same_display = WindowId::new(1, 4);
+        let home_workspaces = engine.workspaces().workspace_ids(home).to_vec();
+        assert!(engine.workspaces_mut().assign_window_to_workspace(
+            &mut store,
+            home,
+            same_display,
+            home_workspaces[1]
+        ));
+        let from = store.workspace_info_for_window(same_display).unwrap();
+        assert!(engine.workspaces_mut().assign_window_to_workspace(
+            &mut store,
+            home,
+            same_display,
+            home_workspaces[0]
+        ));
+        engine.note_eviction(&store, same_display, from);
+        assert!(engine.evicted.is_empty());
+
+        // A native rename of the temporary landing is not a newer placement choice.
+        let renamed = WindowId::new(1, 6);
+        evict(&mut engine, &mut store, renamed);
+        engine.remap_space(&mut store, home, SpaceId::new(5));
+        assert_eq!(engine.take_eviction(&store, renamed, original_display), Some(2));
     }
 
     fn test_engine() -> LayoutEngine {

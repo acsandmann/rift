@@ -523,14 +523,16 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    /// Moves `old_space`'s workspaces onto `new_space` and returns the workspaces that were
+    /// auto-created there and deleted to make room, so callers can drop state keyed by them.
     pub fn remap_space(
         &mut self,
         window_store: &mut WindowStore,
         old_space: SpaceId,
         new_space: SpaceId,
-    ) {
+    ) -> Vec<VirtualWorkspaceId> {
         if old_space == new_space || !self.workspaces_by_space.contains_key(&old_space) {
-            return;
+            return Vec::new();
         }
 
         // Remove any auto-created state for the target space; the migrated state
@@ -548,20 +550,6 @@ impl WorkspaceStore {
         }
         self.active_workspace_per_space.remove(&new_space);
 
-        if !deleted_target_workspace_ids.is_empty() {
-            let stale_windows: Vec<_> = window_store
-                .iter_workspace_assignments()
-                .filter_map(|(window_id, assignment)| {
-                    deleted_target_workspace_ids
-                        .contains(&assignment.workspace_id)
-                        .then_some(window_id)
-                })
-                .collect();
-            for window_id in stale_windows {
-                let _ = window_store.remove_window_assignment(window_id);
-            }
-        }
-
         let ids = self.workspaces_by_space.remove(&old_space).unwrap_or_default();
         for ws_id in &ids {
             if let Some(ws) = self.workspaces.get_mut(*ws_id) {
@@ -577,6 +565,38 @@ impl WorkspaceStore {
         }
 
         window_store.remap_space(old_space, new_space);
+
+        // The window server puts windows on a desktop before rift is told it replaced
+        // another, so some are already assigned to the workspaces just deleted. Dropping
+        // those assignments leaves the window on no workspace, which also loses which
+        // workspace of the desktop it was on. Each moves to the migrated workspace in the
+        // same position instead.
+        if !deleted_target_workspace_ids.is_empty() {
+            let stranded: Vec<_> = window_store
+                .iter_workspace_assignments()
+                .filter_map(|(window_id, assignment)| {
+                    deleted_target_workspace_ids
+                        .iter()
+                        .position(|deleted| *deleted == assignment.workspace_id)
+                        .map(|ordinal| (window_id, ordinal))
+                })
+                .collect();
+            for (window_id, ordinal) in stranded {
+                match ids.get(ordinal).or_else(|| ids.last()) {
+                    Some(&workspace_id) => {
+                        window_store.assign_window_to_workspace(window_id, WindowWorkspaceInfo {
+                            space: new_space,
+                            workspace_id,
+                        });
+                    }
+                    None => {
+                        let _ = window_store.remove_window_assignment(window_id);
+                    }
+                }
+            }
+        }
+
+        deleted_target_workspace_ids
     }
 
     pub fn create_workspace(
@@ -1354,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    fn remap_space_drops_assignments_to_deleted_target_workspaces() {
+    fn remap_space_migrates_workspaces_and_rehomes_deleted_target_windows() {
         let mut window_store = WindowStore::default();
         let mut manager = WorkspaceStore::new();
         let old_space = SpaceId::new(1);
@@ -1401,13 +1421,54 @@ mod tests {
             window_store.workspace_for_window(new_space, migrated_window),
             Some(migrated_ws)
         );
+        let mut on_migrated = manager.workspace_windows(&window_store, new_space, migrated_ws);
+        on_migrated.sort();
+        assert_eq!(on_migrated, vec![migrated_window, transient_window]);
+        // The window the window server had already placed keeps a workspace.
         assert_eq!(
-            manager.workspace_windows(&window_store, new_space, migrated_ws),
-            vec![migrated_window]
+            window_store.workspace_for_window(new_space, transient_window),
+            Some(migrated_ws)
         );
-        assert_eq!(window_store.workspace_info_for_window(transient_window), None);
         assert!(manager.workspace_windows(&window_store, new_space, transient_ws).is_empty());
         assert!(manager.workspace_info(new_space, transient_ws).is_none());
+    }
+
+    #[test]
+    fn remap_space_rehomes_windows_of_deleted_target_workspaces_by_ordinal() {
+        let mut window_store = WindowStore::default();
+        let mut manager = WorkspaceStore::new();
+        let old_space = SpaceId::new(1);
+        let new_space = SpaceId::new(2);
+        let migrated: Vec<_> =
+            manager.list_workspaces(old_space).into_iter().map(|(id, _)| id).collect();
+        // One more than the migrated space has, so its last position has no counterpart.
+        manager.create_workspace(new_space, Some("Extra".to_string())).unwrap();
+        let transient: Vec<_> =
+            manager.list_workspaces(new_space).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(transient.len(), migrated.len() + 1);
+        let positions = [0, 1, transient.len() - 1];
+        let windows: Vec<_> = (1..=3).map(|idx| WindowId::new(20, idx)).collect();
+        for (window, &position) in windows.iter().zip(&positions) {
+            assert!(manager.assign_window_to_workspace(
+                &mut window_store,
+                new_space,
+                *window,
+                transient[position]
+            ));
+        }
+
+        let deleted = manager.remap_space(&mut window_store, old_space, new_space);
+
+        assert_eq!(deleted, transient, "callers are told every workspace that went");
+        let landed: Vec<_> = windows
+            .iter()
+            .map(|w| window_store.workspace_for_window(new_space, *w))
+            .collect();
+        assert_eq!(landed, vec![
+            Some(migrated[0]),
+            Some(migrated[1]),
+            Some(*migrated.last().unwrap())
+        ]);
     }
 
     #[test]
