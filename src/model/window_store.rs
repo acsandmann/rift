@@ -29,6 +29,8 @@ pub struct PendingWindowOperation {
     pub generation: u64,
     pub requested_frame: Option<objc2_core_foundation::CGRect>,
     pub requested_space: Option<SpaceId>,
+    pub(crate) last_revision: Option<u64>,
+    pub(crate) attempts: u8,
 }
 
 /// The complete reactor-owned state for one AX window identity.
@@ -154,7 +156,7 @@ pub struct WindowStore {
     windows: HashMap<WindowId, WindowRecord>,
     app_windows: HashMap<i32, HashSet<WindowId>>,
     window_servers: HashMap<WindowServerId, WindowServerRecord>,
-    workspace_windows: HashMap<WindowWorkspaceInfo, HashSet<WindowId>>,
+    workspace_windows: HashMap<VirtualWorkspaceId, HashSet<WindowId>>,
     native_fullscreen_records_by_original_window: HashMap<WindowId, NativeFullscreenRecord>,
     native_fullscreen_original_window_by_current_window: HashMap<WindowId, WindowId>,
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
@@ -469,13 +471,15 @@ impl WindowStore {
             }
         }
         self.workspace_windows
-            .iter()
-            .filter(|(assignment, _)| active_spaces.contains(&assignment.space))
-            .flat_map(|(_, windows)| windows.iter())
+            .values()
+            .flat_map(|windows| windows.iter())
             .filter_map(|wid| {
                 let record = self.record(*wid)?;
                 let wsid = record.window_server_id?;
-                (record.placement != WindowPlacement::NativeFullscreen
+                (record
+                    .workspace
+                    .is_some_and(|assignment| active_spaces.contains(&assignment.space))
+                    && record.placement != WindowPlacement::NativeFullscreen
                     && !observed_ids.contains(&wsid))
                 .then_some(wsid)
             })
@@ -566,14 +570,15 @@ impl WindowStore {
         window_id: WindowId,
         assignment: WindowWorkspaceInfo,
     ) {
-        let should_prune = if let Some(windows) = self.workspace_windows.get_mut(&assignment) {
-            windows.remove(&window_id);
-            windows.is_empty()
-        } else {
-            false
-        };
+        let should_prune =
+            if let Some(windows) = self.workspace_windows.get_mut(&assignment.workspace_id) {
+                windows.remove(&window_id);
+                windows.is_empty()
+            } else {
+                false
+            };
         if should_prune {
-            self.workspace_windows.remove(&assignment);
+            self.workspace_windows.remove(&assignment.workspace_id);
         }
     }
 
@@ -582,7 +587,10 @@ impl WindowStore {
         window_id: WindowId,
         assignment: WindowWorkspaceInfo,
     ) {
-        self.workspace_windows.entry(assignment).or_default().insert(window_id);
+        self.workspace_windows
+            .entry(assignment.workspace_id)
+            .or_default()
+            .insert(window_id);
     }
 
     pub(crate) fn window(&self, window_id: WindowId) -> Option<&WindowState> {
@@ -1037,6 +1045,9 @@ impl WindowStore {
         assignment: WindowWorkspaceInfo,
     ) -> Option<WindowWorkspaceInfo> {
         let old = self.windows.get(&window_id).and_then(|record| record.workspace);
+        if old == Some(assignment) {
+            return old;
+        }
         if let Some(old_assignment) = old {
             self.remove_window_from_workspace_index(window_id, old_assignment);
         }
@@ -1052,6 +1063,28 @@ impl WindowStore {
             self.upsert_native_fullscreen_record(record);
         }
         old
+    }
+
+    /// Update presentation context without touching the ID-keyed membership index.
+    /// Observed WindowServer placement is intentionally unchanged.
+    pub(crate) fn set_workspace_space(&mut self, workspace: VirtualWorkspaceId, space: SpaceId) {
+        if let Some(members) = self.workspace_windows.get(&workspace) {
+            for window in members {
+                if let Some(assignment) =
+                    self.windows.get_mut(window).and_then(|record| record.workspace.as_mut())
+                {
+                    assignment.space = space;
+                }
+            }
+        }
+        for record in self.native_fullscreen_records_by_original_window.values_mut() {
+            if let Some(assignment) = record.workspace.as_mut()
+                && assignment.workspace_id == workspace
+            {
+                assignment.space = space;
+                record.last_known_user_space = Some(space);
+            }
+        }
     }
 
     pub fn workspace_info_for_window(&self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
@@ -1074,15 +1107,10 @@ impl WindowStore {
             .unwrap_or_default()
     }
 
-    pub fn workspace_windows(
-        &self,
-        space: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-    ) -> Vec<WindowId> {
-        let assignment = WindowWorkspaceInfo { space, workspace_id };
+    pub fn workspace_windows(&self, workspace_id: VirtualWorkspaceId) -> Vec<WindowId> {
         let mut windows: Vec<_> = self
             .workspace_windows
-            .get(&assignment)
+            .get(&workspace_id)
             .into_iter()
             .flat_map(|windows| windows.iter().copied())
             .collect();
@@ -1090,17 +1118,8 @@ impl WindowStore {
         windows
     }
 
-    pub fn workspace_window_count(
-        &self,
-        space: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-    ) -> usize {
-        let assignment = WindowWorkspaceInfo { space, workspace_id };
-        self.workspace_windows.get(&assignment).map_or(0, HashSet::len)
-    }
-
-    pub fn has_workspace_assignments_in_space(&self, space: SpaceId) -> bool {
-        self.workspace_windows.keys().any(|assignment| assignment.space == space)
+    pub fn workspace_window_count(&self, workspace_id: VirtualWorkspaceId) -> usize {
+        self.workspace_windows.get(&workspace_id).map_or(0, HashSet::len)
     }
 
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
@@ -1277,27 +1296,12 @@ impl WindowStore {
             return;
         }
 
-        let moved_assignments: Vec<_> = self
-            .workspace_windows
-            .keys()
-            .copied()
-            .filter(|assignment| assignment.space == old_space)
-            .collect();
-        for old_assignment in moved_assignments {
-            if let Some(windows) = self.workspace_windows.remove(&old_assignment) {
-                // Extended, not inserted: the window server can already have put windows on
-                // the new space before rift learned it replaced the old one.
-                self.workspace_windows
-                    .entry(WindowWorkspaceInfo {
-                        space: new_space,
-                        workspace_id: old_assignment.workspace_id,
-                    })
-                    .or_default()
-                    .extend(windows);
-            }
-        }
-
         for record in self.windows.values_mut() {
+            if let Some(operation) = record.pending_operation.as_mut()
+                && operation.requested_space == Some(old_space)
+            {
+                operation.requested_space = Some(new_space);
+            }
             if let Some(assignment) = record.workspace.as_mut()
                 && assignment.space == old_space
             {
@@ -1344,10 +1348,31 @@ impl WindowStore {
             generation: record.operation_generation,
             requested_frame,
             requested_space,
+            last_revision: None,
+            attempts: 0,
         };
         record.pending_operation = Some(operation);
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         operation
+    }
+
+    /// Retry only on accepted, complete topology revisions, with a fixed budget.
+    /// Exhaustion keeps the logical intent; a frame acknowledgement never confirms Space membership.
+    pub(crate) fn advance_transfer(
+        &mut self,
+        window: WindowId,
+        revision: u64,
+    ) -> Option<PendingWindowOperation> {
+        let operation = self.windows.get_mut(&window)?.pending_operation.as_mut()?;
+        if operation.requested_space.is_none() || operation.last_revision == Some(revision) {
+            return None;
+        }
+        operation.last_revision = Some(revision);
+        if operation.attempts >= 2 {
+            return None;
+        }
+        operation.attempts += 1;
+        Some(*operation)
     }
 
     pub fn confirm_operation(&mut self, window_id: WindowId, generation: u64) -> bool {
@@ -1374,8 +1399,10 @@ impl WindowStore {
                 debug_assert_eq!(record.native_space, self.window_server_space(wsid));
             }
             if let Some(workspace) = record.workspace {
-                let indexed =
-                    self.workspace_windows.get(&workspace).is_some_and(|ids| ids.contains(&wid));
+                let indexed = self
+                    .workspace_windows
+                    .get(&workspace.workspace_id)
+                    .is_some_and(|ids| ids.contains(&wid));
                 debug_assert_eq!(indexed, record.state.is_some());
             }
         }
@@ -1393,7 +1420,10 @@ impl WindowStore {
         for (workspace, ids) in &self.workspace_windows {
             debug_assert!(ids.iter().all(|wid| {
                 self.windows.get(wid).is_some_and(|record| {
-                    record.state.is_some() && record.workspace == Some(*workspace)
+                    record.state.is_some()
+                        && record
+                            .workspace
+                            .is_some_and(|assignment| assignment.workspace_id == *workspace)
                 })
             }));
         }
@@ -1509,8 +1539,8 @@ mod tests {
                 workspace_id: source_workspace,
             })
         );
-        assert!(window_store.workspace_windows(space, target_workspace).is_empty());
-        assert_eq!(window_store.workspace_windows(space, source_workspace), vec![to]);
+        assert!(window_store.workspace_windows(target_workspace).is_empty());
+        assert_eq!(window_store.workspace_windows(source_workspace), vec![to]);
     }
 
     #[test]
@@ -1798,7 +1828,7 @@ mod tests {
 
         assert_eq!(store.workspace_for_window(new, moved), Some(workspace_id));
         assert_eq!(store.workspace_for_window(new, present), Some(workspace_id));
-        assert_eq!(store.workspace_window_count(new, workspace_id), 2);
-        assert_eq!(store.workspace_window_count(old, workspace_id), 0);
+        assert_eq!(store.workspace_window_count(workspace_id), 2);
+        assert_eq!(store.workspace_for_window(old, moved), None);
     }
 }

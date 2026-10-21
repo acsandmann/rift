@@ -291,19 +291,27 @@ impl Reactor {
         menu_tx.send(menu_bar::Event::Update(update));
     }
 
+    fn visible_workspace_view(&self, space: SpaceId) -> Vec<(usize, VirtualWorkspaceId, String)> {
+        let visible: Vec<_> = self.iter_active_spaces().collect();
+        self.layout_manager.layout_engine.workspaces().workspace_view(
+            crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible },
+        )
+    }
+
     fn menu_workspaces(&mut self, space: SpaceId) -> Vec<menu_bar::Workspace> {
         use crate::common::config::{MenuBarDisplayMode, WorkspaceDisplayStyle};
         let settings = &self.config.settings.ui.menu_bar;
         let show_layout =
             settings.enabled && settings.display_style == WorkspaceDisplayStyle::Layout;
         let active_only = settings.mode == MenuBarDisplayMode::Active;
-        let workspaces = self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
-        let active = self.layout_manager.layout_engine.workspaces().active_workspace(space);
+        let workspaces = self.visible_workspace_view(space);
         workspaces
             .into_iter()
-            .enumerate()
-            .map(|(index, (id, name))| {
-                let is_active = active == Some(id);
+            .map(|(index, id, name)| {
+                let space = self.layout_manager.layout_engine.workspaces()[id].space;
+                let is_active =
+                    self.layout_manager.layout_engine.workspaces().active_workspace(space)
+                        == Some(id);
                 let mut windows = self.layout_manager.layout_engine.workspaces().workspace_windows(
                     &self.state.windows,
                     space,
@@ -412,14 +420,18 @@ impl Reactor {
         let mut workspaces = Vec::new();
 
         let space_id = space_id_param.or_else(|| self.default_query_space());
-        let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
-            if let Some(space) = space_id {
-                self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space)
-            } else {
-                Vec::new()
-            };
+        let mut workspace_list =
+            space_id.map(|space| self.visible_workspace_view(space)).unwrap_or_default();
+        if let Some(owner) = space_id_param {
+            workspace_list.retain(|(_, id, _)| {
+                self.layout_manager.layout_engine.workspaces()[*id].space == owner
+            });
+        }
 
-        for (index, (workspace_id, workspace_name)) in workspace_list.iter().enumerate() {
+        for (index, workspace_id, workspace_name) in &workspace_list {
+            let space_id =
+                Some(self.layout_manager.layout_engine.workspaces()[*workspace_id].space);
+            let index = *index;
             let is_active = if let Some(space) = space_id {
                 self.layout_manager.layout_engine.workspaces().active_workspace(space)
                     == Some(*workspace_id)
@@ -545,30 +557,24 @@ impl Reactor {
             return Vec::new();
         };
 
-        let workspace_list =
-            self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
-        let active_workspace =
-            self.layout_manager.layout_engine.workspaces().active_workspace(space);
-
-        workspace_list
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| workspace_id.map(|target| target == *index).unwrap_or(true))
-            .filter_map(|(index, (id, name))| {
-                let layout_mode = self
-                    .layout_manager
-                    .layout_engine
-                    .workspaces()
-                    .workspace_info(space, *id)
-                    .map(|ws| ws.layout_mode().to_string())?;
-
-                Some(WorkspaceLayoutData {
-                    id: format!("{:?}", id),
+        self.visible_workspace_view(space)
+            .into_iter()
+            .filter(|(index, id, _)| {
+                workspace_id.is_none_or(|target| target == *index)
+                    && space_id_param.is_none_or(|owner| {
+                        self.layout_manager.layout_engine.workspaces()[*id].space == owner
+                    })
+            })
+            .map(|(index, id, name)| {
+                let workspaces = self.layout_manager.layout_engine.workspaces();
+                let workspace = &workspaces[id];
+                WorkspaceLayoutData {
+                    id: format!("{id:?}"),
                     index,
-                    name: name.clone(),
-                    layout_mode,
-                    is_active: active_workspace == Some(*id),
-                })
+                    name,
+                    layout_mode: workspace.layout_mode().to_string(),
+                    is_active: workspaces.active_workspace(workspace.space) == Some(id),
+                }
             })
             .collect()
     }
@@ -631,15 +637,29 @@ impl Reactor {
     ///
     /// `workspace_index` of `None` means the space's active workspace. The map is
     /// empty for layout modes without column semantics.
+    fn resolve_query_workspace(
+        &self,
+        space: SpaceId,
+        index: Option<usize>,
+    ) -> Option<crate::model::virtual_workspace::WorkspaceTarget> {
+        let store = self.layout_manager.layout_engine.workspaces();
+        let index =
+            index.or_else(|| store.workspace_index(space, store.active_workspace(space)?))?;
+        let visible: Vec<_> = self.iter_active_spaces().collect();
+        store.resolve_workspace(
+            crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible },
+            &crate::common::config::WorkspaceSelector::Index(index),
+        )
+    }
+
     fn logical_window_positions_for(
         &self,
         space_id: Option<SpaceId>,
         workspace_index: Option<usize>,
     ) -> HashMap<WindowId, WindowLayoutPosition> {
         space_id
-            .and_then(|space| {
-                self.layout_manager.layout_engine.query_workspace_layout(space, workspace_index)
-            })
+            .and_then(|space| self.resolve_query_workspace(space, workspace_index))
+            .and_then(|target| self.layout_manager.layout_engine.query_workspace_layout(target))
             .map(|snapshot| logical_window_positions(&snapshot.container_tree))
             .unwrap_or_default()
     }
@@ -714,14 +734,12 @@ impl Reactor {
             Some(space_id) => SpaceId::new(space_id),
             None => self.default_query_space()?,
         };
+        let target = self.resolve_query_workspace(space_id, workspace_id)?;
+        let space_id = target.space;
         if !self.space_state.iter_known_spaces().any(|space| space == space_id) {
             return None;
         }
-
-        let mut snapshot = self
-            .layout_manager
-            .layout_engine
-            .query_workspace_layout(space_id, workspace_id)?;
+        let mut snapshot = self.layout_manager.layout_engine.query_workspace_layout(target)?;
         let screen = self.space_state.screen_by_space(space_id)?;
         let display_uuid = screen.display_uuid_owned();
         let gaps = self.config.settings.layout.gaps.effective_for_display(display_uuid.as_deref());
@@ -811,7 +829,7 @@ impl Reactor {
         )> = Vec::new();
 
         for screen in &self.space_state.screens {
-            if let Some(space) = screen.space {
+            if let Some(space) = screen.space.filter(|space| self.is_space_active(*space)) {
                 let workspaces =
                     self.layout_manager.layout_engine.workspaces_mut().list_workspaces(space);
                 let active_ws =
@@ -820,7 +838,7 @@ impl Reactor {
                 let mut ws_entries = Vec::new();
                 for (workspace_id, workspace_name) in workspaces {
                     let window_ids: Vec<crate::actor::app::WindowId> =
-                        self.state.windows.workspace_windows(space, workspace_id);
+                        self.state.windows.workspace_windows(workspace_id);
 
                     let last_focused = self
                         .layout_manager
@@ -831,7 +849,7 @@ impl Reactor {
                     let floating_positions = self
                         .layout_manager
                         .layout_engine
-                        .workspace_floating_positions(space, workspace_id);
+                        .workspace_floating_positions(workspace_id);
 
                     ws_entries.push((
                         workspace_id,

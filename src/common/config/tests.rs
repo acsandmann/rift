@@ -704,3 +704,18 @@ fn stack_tab_geometry_rejects_unusable_values() {
         assert_eq!(tabs.validate().len(), 1, "{text}");
     }
 }
+
+#[test]
+fn display_workspace_mode_has_a_compatible_default_and_rejects_unknown_values() {
+    assert_eq!(
+        toml::from_str::<VirtualWorkspaceSettings>("").unwrap().display_mode,
+        DisplayMode::Independent
+    );
+    assert_eq!(
+        toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'shared'")
+            .unwrap()
+            .display_mode,
+        DisplayMode::Shared
+    );
+    assert!(toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'mirrored'").is_err());
+}

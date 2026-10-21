@@ -281,6 +281,9 @@ drop_zone_fraction = 0.25
 preview = true
 
 [virtual_workspaces]
+# independent: a local namespace per native Space (default).
+# shared: one namespace across visible managed Spaces; selecting a workspace focuses its owner.
+display_mode = "independent"
 # Virtual workspaces
 # - enabled: if false, rift behaves like a simple tiling WM with a single space
 # - default_workspace_count: number of workspaces to create on startup (1–32)

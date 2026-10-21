@@ -300,7 +300,7 @@ pub fn handle_window_frame_changed(
         && layout.layout_engine.workspaces().workspaces[workspace].layout_mode()
             == crate::common::config::LayoutMode::Floating
     {
-        layout.layout_engine.store_floating_position(space, workspace, wid, new_frame);
+        layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
     let dragging = mouse_state == Some(MouseState::Down) || drag.actor.is_active();

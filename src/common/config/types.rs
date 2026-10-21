@@ -25,9 +25,21 @@ pub fn config_file() -> PathBuf {
     dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayMode {
+    #[default]
+    Independent,
+    Shared,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualWorkspaceSettings {
+    #[serde(default)]
+    /// Workspace namespace across visible managed displays.
+    #[setting(label = "Display workspace mode", choices)]
+    pub display_mode: DisplayMode,
     #[serde(default = "yes")]
     /// Organize windows into separate virtual workspaces.
     #[setting(ignore)]
@@ -176,6 +188,7 @@ impl Default for VirtualWorkspaceSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            display_mode: DisplayMode::Independent,
             default_workspace_count: default_workspace_count(),
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,

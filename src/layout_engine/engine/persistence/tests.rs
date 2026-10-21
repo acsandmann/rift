@@ -260,7 +260,7 @@ fn full_save_records_floating_window_in_its_inactive_workspace() {
         Some((space, inactive_workspace)),
     );
     assert_eq!(
-        loaded.floating_positions.get(space, inactive_workspace, window),
+        loaded.floating_positions.get(inactive_workspace, window),
         Some(frame),
     );
     assert!(loaded.floating.is_floating(window));
@@ -308,7 +308,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
     ));
     engine.add_window_to_layout(&mut window_store, space, window);
     // Model stale state left behind by an earlier floating-to-tiled transition.
-    engine.floating_positions.store(space, workspace, window, frame);
+    engine.floating_positions.store(workspace, window, frame);
     let path = std::env::temp_dir().join(format!(
         "rift-stale-floating-save-test-{}-{}.ron",
         std::process::id(),
@@ -323,7 +323,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
         loaded.restored_location_for_window(window),
         Some((space, workspace))
     );
-    assert_eq!(loaded.floating_positions.get(space, workspace, window), None);
+    assert_eq!(loaded.floating_positions.get(workspace, window), None);
     assert!(!loaded.floating.is_floating(window));
 }
 
@@ -395,7 +395,6 @@ fn load_removes_serialized_window_state_without_a_fingerprint() {
     let workspace = engine.workspaces().active_workspace(space).unwrap();
     engine.floating.add_floating(ghost);
     engine.floating_positions.store(
-        space,
         workspace,
         ghost,
         objc2_core_foundation::CGRect::new(
@@ -411,7 +410,7 @@ fn load_removes_serialized_window_state_without_a_fingerprint() {
 
     assert!(!loaded.workspaces[workspace].layout_system.contains_window(layout, ghost));
     assert!(!loaded.floating.is_floating(ghost));
-    assert_eq!(loaded.floating_positions.get(space, workspace, ghost), None);
+    assert_eq!(loaded.floating_positions.get(workspace, ghost), None);
     assert_eq!(loaded.workspaces.last_focused_window(space, workspace), None);
 }
 
@@ -485,9 +484,7 @@ fn workspace_restore_discards_unmatched_scoped_windows_and_floating_state() {
         CGSize::new(500.0, 400.0),
     );
     snapshot.floating.add_floating(floating);
-    snapshot
-        .floating_positions
-        .store(space, source_workspace, floating, floating_frame);
+    snapshot.floating_positions.store(source_workspace, floating, floating_frame);
     for window in [tiled, floating, out_of_scope] {
         snapshot.persistence.windows.insert(window, WindowFingerprint {
             window_server_id: Some(window.idx.get()),
@@ -526,10 +523,7 @@ fn workspace_restore_discards_unmatched_scoped_windows_and_floating_state() {
     assert_eq!(report.workspaces_replaced, 1);
     assert_eq!(report.unmatched, 2);
     assert_eq!(report.warnings, vec![RestoreWarning::UnmatchedWindows(2)]);
-    assert_eq!(
-        engine.floating_positions.get(space, target_workspace, floating),
-        None,
-    );
+    assert_eq!(engine.floating_positions.get(target_workspace, floating), None,);
 }
 
 #[test]
@@ -606,7 +600,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
     }
     engine.add_window_to_layout(&mut window_store, space, live);
     engine.floating.add_floating(live_floating);
-    engine.floating_positions.store(space, target_workspace, live_floating, frame);
+    engine.floating_positions.store(target_workspace, live_floating, frame);
     engine.focused_window = Some(live);
 
     engine
@@ -637,7 +631,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
     );
     assert!(engine.floating.is_floating(live_floating));
     assert_eq!(
-        engine.floating_positions.get(space, target_workspace, live_floating),
+        engine.floating_positions.get(target_workspace, live_floating),
         Some(frame)
     );
     assert_eq!(engine.focused_window, Some(live));
@@ -1143,12 +1137,12 @@ fn completed_app_discovery_discards_unmatched_startup_ghosts() {
 fn persisted_layout_schema_is_versioned_and_legacy_files_still_load() {
     let engine = test_engine();
     let serialized = engine.serialize_to_string();
-    assert!(serialized.contains("\"schema_version\":3"), "{serialized}");
+    assert!(serialized.contains("\"schema_version\":4"), "{serialized}");
 
-    let legacy = serialized.replacen("\"schema_version\":3,", "", 1);
+    let legacy = serialized.replacen("\"schema_version\":4,", "", 1);
     LayoutEngine::deserialize_from_str(&legacy).unwrap();
 
-    let future = serialized.replacen("\"schema_version\":3", "\"schema_version\":4", 1);
+    let future = serialized.replacen("\"schema_version\":4", "\"schema_version\":5", 1);
     let error = match LayoutEngine::deserialize_from_str(&future) {
         Ok(_) => panic!("future schema version should be rejected"),
         Err(error) => error,
@@ -1218,7 +1212,6 @@ fn invalid_persisted_floating_frame_is_rejected() {
     );
     let workspace = engine.workspaces().active_workspace(space).unwrap();
     engine.floating_positions.store(
-        space,
         workspace,
         window,
         objc2_core_foundation::CGRect::new(
@@ -2318,9 +2311,9 @@ fn load_heals_disagreeing_tiled_and_floating_ownership() {
     );
     engine.floating.add_floating(marked_without_frame);
     engine.floating.add_floating(agreed_floating);
-    engine.floating_positions.store(space, active, agreed_floating, frame);
-    engine.floating_positions.store(space, other, agreed_floating, frame);
-    engine.floating_positions.store(space, active, frame_without_marker, frame);
+    engine.floating_positions.store(active, agreed_floating, frame);
+    engine.floating_positions.store(other, agreed_floating, frame);
+    engine.floating_positions.store(active, frame_without_marker, frame);
     engine.floating.set_last_focus(Some(frame_without_marker));
 
     let loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
@@ -2384,10 +2377,10 @@ fn legacy_workspace_layouts_migrate_and_round_trip() {
         );
         loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
         let second = loaded.workspaces[id].active_layout().unwrap();
-        assert_ne!(first, second);
+        assert_eq!(first, second);
         assert_eq!(
             loaded.workspaces[id].layout_system.selected_window(second),
-            Some(WindowId::new(9, 1))
+            Some(WindowId::new(9, 2))
         );
         loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1200.0, 800.0));
         assert_eq!(loaded.workspaces[id].active_layout(), Some(first));
@@ -2400,7 +2393,7 @@ fn legacy_workspace_layouts_migrate_and_round_trip() {
         );
         assert!(reloaded.floating.is_floating(WindowId::new(9, 3)));
         assert_eq!(
-            reloaded.floating_positions.get(space, id, WindowId::new(9, 3)),
+            reloaded.floating_positions.get(id, WindowId::new(9, 3)),
             Some(objc2_core_foundation::CGRect::new(
                 objc2_core_foundation::CGPoint::new(12.0, 34.0),
                 CGSize::new(400.0, 300.0)

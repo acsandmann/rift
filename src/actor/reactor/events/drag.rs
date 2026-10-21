@@ -131,7 +131,6 @@ pub fn handle_mouse_up(
             .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
         {
             layout.layout_engine.store_floating_position(
-                space,
                 workspace,
                 window,
                 commit.source.last_frame,

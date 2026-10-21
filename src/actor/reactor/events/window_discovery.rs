@@ -164,14 +164,16 @@ pub(crate) fn update_window_states(
 
 /// Assignment and rejection handling shared by discovery and rule reapplication.
 /// Callers decide whether successful, unchanged membership needs a layout refresh.
-pub(crate) fn assign_window(
+pub(crate) fn assign_window<'a>(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
     wid: WindowId,
-    space: SpaceId,
+    context: impl Into<crate::model::virtual_workspace::WorkspaceContext<'a>>,
     app_info: Option<&AppInfo>,
     reapply: bool,
 ) -> (Option<AppRuleEffects>, Option<LayoutEvent>) {
+    let context = context.into();
+    let space = context.space;
     let result = if let Some(window) = state.windows.window(wid) {
         let (title, role, subrole) = (
             window.info.title.clone(),
@@ -181,7 +183,7 @@ pub(crate) fn assign_window(
         layout.layout_engine.assign_window_with_app_info(
             &mut state.windows,
             wid,
-            space,
+            context,
             WindowRuleContext {
                 app_bundle_id: app_info.and_then(|app| app.bundle_id.as_deref()),
                 app_name: app_info.and_then(|app| app.localized_name.as_deref()),
@@ -283,8 +285,17 @@ pub(crate) fn emit_layout_events(
     for (space, mut windows_for_space) in app_windows {
         windows_for_space.sort_unstable();
         for wid in windows_for_space {
-            let (effects, removal) =
-                assign_window(state, layout, wid, space, app_info.as_ref(), false);
+            let (effects, removal) = assign_window(
+                state,
+                layout,
+                wid,
+                crate::model::virtual_workspace::WorkspaceContext {
+                    space,
+                    visible: &active_spaces,
+                },
+                app_info.as_ref(),
+                false,
+            );
             if let Some(event) = removal {
                 outcome = outcome.with_layout_event(event);
             }

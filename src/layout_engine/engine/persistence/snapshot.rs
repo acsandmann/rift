@@ -1,6 +1,8 @@
+use objc2_core_foundation::CGRect;
+
 use super::*;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 fn legacy_schema_version() -> u32 { 0 }
 
@@ -24,7 +26,7 @@ pub(super) struct PersistedLayout {
     #[serde(default)]
     pub(super) workspace_layouts: LegacyWorkspaceLayouts,
     pub(super) floating: FloatingManager,
-    pub(super) floating_positions: FloatingPositionStore,
+    pub(super) floating_positions: Box<ron::value::RawValue>,
     #[serde(rename = "virtual_workspace_manager")]
     pub(super) workspaces: WorkspaceStore,
     #[serde(default)]
@@ -91,14 +93,49 @@ impl PersistedLayout {
             .map_err(|error| anyhow::anyhow!("invalid workspace layouts: {error}"))
     }
 
-    pub(super) fn into_engine(self) -> LayoutEngine {
-        LayoutEngine {
+    pub(super) fn into_engine(self) -> anyhow::Result<LayoutEngine> {
+        let floating_positions = if self.schema_version >= 4 {
+            self.floating_positions.into_rust::<FloatingPositionStore>()?
+        } else {
+            // Validate legacy native keys before discarding the redundant ownership dimension.
+            #[serde_with::serde_as]
+            #[derive(Deserialize)]
+            struct LegacyPositions {
+                #[serde_as(as = "HashMap<_, crate::sys::geometry::CGRectDef>")]
+                positions: HashMap<(SpaceId, VirtualWorkspaceId, WindowId), CGRect>,
+            }
+            // Versionless files produced by current tools also remain readable.
+            if let Ok(current) = self.floating_positions.into_rust::<FloatingPositionStore>() {
+                current
+            } else {
+                let legacy = self.floating_positions.into_rust::<LegacyPositions>()?;
+                let mut positions = FloatingPositionStore::default();
+                for ((space, workspace, window), frame) in legacy.positions {
+                    if self
+                        .workspaces
+                        .workspaces
+                        .get(workspace)
+                        .is_none_or(|owner| owner.space != space)
+                    {
+                        anyhow::bail!(
+                            "invalid floating positions: legacy frame is stored under the wrong native Space"
+                        );
+                    }
+                    positions.store(workspace, window, frame);
+                }
+                positions
+            }
+        };
+        floating_positions
+            .validate_persisted(&self.workspaces)
+            .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
+        Ok(LayoutEngine {
             scroll_boundary: None,
             native_layouts: HashMap::default(),
             native_reconcile_batch: None,
             evicted: HashMap::default(),
             floating: self.floating,
-            floating_positions: self.floating_positions,
+            floating_positions,
             app_rules: AppRuleEngine::default(),
             focused_window: None,
             window_layout_constraints: HashMap::default(),
@@ -109,6 +146,6 @@ impl PersistedLayout {
             display_last_space: self.display_last_space,
             persistence: self.persistence,
             startup_restore_pending: false,
-        }
+        })
     }
 }

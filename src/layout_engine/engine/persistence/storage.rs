@@ -69,13 +69,9 @@ impl LayoutEngine {
             .validate_persisted_topology()
             .map_err(|error| anyhow::anyhow!("invalid workspace topology: {error}"))?;
         persisted.normalize_workspace_layouts()?;
-        persisted
-            .floating_positions
-            .validate_persisted(&persisted.workspaces)
-            .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
         persisted.persistence.validate()?;
         let schema_version = persisted.schema_version;
-        let mut engine = persisted.into_engine();
+        let mut engine = persisted.into_engine()?;
         engine.normalize_loaded_floating_state();
         engine.normalize_loaded_workspace_focus();
         let fingerprinted: HashSet<_> = engine.persistence.windows.keys().copied().collect();
@@ -200,10 +196,8 @@ impl LayoutEngine {
                     self.floating_positions.remove_window(window);
                     continue;
                 };
-                self.floating_positions
-                    .retain_window_location(window, (assignment.space, assignment.workspace_id));
+                self.floating_positions.retain_window_location(window, assignment.workspace_id);
                 self.floating_positions.store(
-                    assignment.space,
                     assignment.workspace_id,
                     window,
                     state.frame_monotonic,

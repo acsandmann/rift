@@ -9,7 +9,8 @@ use crate::common::collections::HashMap;
 pub(crate) struct WorkspaceLayoutState {
     pub(crate) configurations: HashMap<Size, LayoutId>,
     active_size: Size,
-    pub(crate) last_saved: Option<LayoutId>,
+    #[serde(default, rename = "last_saved", skip_serializing)]
+    legacy_last_saved: Option<LayoutId>,
 }
 
 #[derive(
@@ -40,24 +41,30 @@ impl WorkspaceLayoutState {
     }
 
     pub(crate) fn all_layouts(&self) -> impl Iterator<Item = LayoutId> + '_ {
-        self.configurations.values().copied().chain(self.last_saved)
+        self.configurations.values().copied().chain(self.legacy_last_saved)
     }
 
     pub(crate) fn ensure_active(&mut self, size: CGSize, tree: &mut impl LayoutSystem) {
-        let previous = self.active();
-        self.active_size = Size::from(size);
-        match self.configurations.entry(self.active_size) {
-            crate::common::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(if let Some(source) = previous.or(self.last_saved) {
-                    tree.clone_layout(source)
-                } else {
-                    tree.create_layout()
-                });
-            }
-            crate::common::collections::hash_map::Entry::Occupied(entry) => {
-                self.last_saved = Some(*entry.get());
+        let size = Size::from(size);
+        if self.active_size == size
+            && self.configurations.len() == 1
+            && self.legacy_last_saved.is_none()
+        {
+            return;
+        }
+        let layout =
+            self.active().or(self.legacy_last_saved).unwrap_or_else(|| tree.create_layout());
+        // One logical arrangement follows the workspace between viewports. Old snapshots
+        // can contain divergent per-size trees; their active tree is authoritative.
+        for old in self.all_layouts().collect::<std::collections::BTreeSet<_>>() {
+            if old != layout {
+                tree.remove_layout(old);
             }
         }
+        self.configurations.clear();
+        self.active_size = size;
+        self.configurations.insert(size, layout);
+        self.legacy_last_saved = None;
     }
 
     pub(crate) fn replace(&mut self, layout: LayoutId) {
@@ -66,11 +73,11 @@ impl WorkspaceLayoutState {
         }
         self.configurations.clear();
         self.configurations.insert(self.active_size, layout);
-        self.last_saved = Some(layout);
+        self.legacy_last_saved = None;
     }
 
     pub(crate) fn validate(&self, tree: &impl LayoutSystem) -> Result<(), String> {
-        if self.configurations.is_empty() && self.last_saved.is_none() {
+        if self.configurations.is_empty() && self.legacy_last_saved.is_none() {
             // Never shown yet; `ensure_active` creates the first layout when it is.
             return Ok(());
         }
