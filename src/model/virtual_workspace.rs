@@ -397,7 +397,10 @@ impl WorkspaceStore {
             self.repair_activation_after_transfer();
             return changed;
         }
+        let displaced = self.active_workspace(target);
+        let source_previous = self.active_workspace_per_space.get(&source).and_then(|e| e.0);
         let workspace = &mut self[id];
+        let source_display = workspace.preferred_display.clone();
         if reason == WorkspaceTransferReason::Explicit {
             workspace.preferred_display = display.map(str::to_owned);
             workspace.home_space = Some(target);
@@ -411,11 +414,56 @@ impl WorkspaceStore {
         } else if !self.active_workspace_per_space.contains_key(&target) {
             self.set_active_workspace(target, id);
         }
+        if reason == WorkspaceTransferReason::Explicit
+            && self.display_mode == DisplayMode::Shared
+            && let Some(next) = self.shared_move_successor(
+                windows,
+                source,
+                target,
+                [id, displaced.unwrap_or(id)],
+                source_previous,
+                source_display,
+            )
+        {
+            self.active_workspace_per_space.insert(source, (None, next));
+        }
         self.repair_activation_after_transfer();
         if reason == WorkspaceTransferReason::Explicit && self.active_workspace(source).is_none() {
             self.ensure_space_initialized(source);
         }
         true
+    }
+
+    /// What the source display shows after a shared workspace moves away: its previous
+    /// workspace, else another it owns, else an empty hidden workspace adopted from the
+    /// target. Never the target's visible workspace, and never a new catalog entry when
+    /// an empty one is available.
+    fn shared_move_successor(
+        &mut self,
+        windows: &mut WindowStore,
+        source: SpaceId,
+        target: SpaceId,
+        excluded: [VirtualWorkspaceId; 2],
+        previous: Option<VirtualWorkspaceId>,
+        source_display: Option<String>,
+    ) -> Option<VirtualWorkspaceId> {
+        let owned =
+            |id: &VirtualWorkspaceId| self.workspaces.get(*id).is_some_and(|w| w.space == source);
+        if let Some(id) = previous.filter(owned).or_else(|| self.order.iter().copied().find(owned))
+        {
+            return Some(id);
+        }
+        let adopted = self.order.iter().copied().find(|&id| {
+            self[id].space == target
+                && !excluded.contains(&id)
+                && windows.workspace_windows(id).is_empty()
+        })?;
+        let workspace = &mut self[adopted];
+        workspace.space = source;
+        workspace.home_space = Some(source);
+        workspace.preferred_display = source_display;
+        windows.set_workspace_space(adopted, source);
+        Some(adopted)
     }
 
     fn repair_activation_after_transfer(&mut self) {

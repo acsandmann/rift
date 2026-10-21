@@ -9345,3 +9345,75 @@ fn shared_title_rule_uses_visible_catalog_and_ignores_dormant_target() {
         Some(original)
     );
 }
+
+#[test]
+fn shared_move_workspace_to_display_keeps_target_and_restores_source_previous() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        display_mode: crate::common::config::DisplayMode::Shared,
+        default_workspace_count: 6,
+        ..Default::default()
+    };
+    let mut apps = Apps::new();
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let left = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 900.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1600., 1000.));
+    let (a, b) = (SpaceId::new(151), SpaceId::new(251));
+    reactor.handle_event(space_state_event(vec![left, right], vec![Some(a), Some(b)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), None);
+    // Round robin: a owns [0, 2, 4], b owns [1, 3, 5].
+    let ids: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+    assert!(reactor.set_test_active_workspace(a, ids[4]));
+    assert!(reactor.set_test_active_workspace(a, ids[0]));
+    let move_right = || {
+        Event::Command(Command::Reactor(ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        }))
+    };
+    reactor.handle_event(move_right());
+    apps.simulate_until_quiet(&mut reactor);
+    let ws = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(ws.active_workspace(b), Some(ids[0]));
+    assert_eq!(ws.active_workspace(a), Some(ids[4]), "source returns to its previous workspace");
+    assert_eq!(ws[ids[1]].space, b, "displaced target workspace stays on target");
+    assert_eq!(ws.catalog().count(), 6);
+    for window in [WindowId::new(1, 1), WindowId::new(1, 2)] {
+        let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+        assert!(right.contains(frame.mid()), "{window:?} on target display");
+    }
+}
+
+#[test]
+fn shared_move_workspace_to_display_adopts_empty_hidden_workspace_for_source() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        display_mode: crate::common::config::DisplayMode::Shared,
+        default_workspace_count: 4,
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let left = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 900.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1600., 1000.));
+    let (a, b) = (SpaceId::new(161), SpaceId::new(261));
+    reactor.handle_event(space_state_event(vec![left, right], vec![Some(a), Some(b)]));
+    let ids: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+    let move_right = || {
+        Event::Command(Command::Reactor(ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        }))
+    };
+    // a owns [0, 2], b owns [1, 3]. Move 2 away, leaving a with only 0.
+    assert!(reactor.set_test_active_workspace(a, ids[2]));
+    reactor.handle_event(move_right());
+    assert!(reactor.set_test_active_workspace(a, ids[0]));
+    reactor.space_state.command_space = Some(a);
+    reactor.handle_event(move_right());
+    let ws = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(ws.active_workspace(b), Some(ids[0]));
+    assert_eq!(ws[ids[2]].space, b, "displaced visible workspace is not swapped back");
+    assert_eq!(ws.active_workspace(a), Some(ids[1]), "empty hidden workspace adopted");
+    assert_eq!(ws.catalog().count(), 4, "no workspace is created");
+    ws.validate_persisted_topology().unwrap();
+}
