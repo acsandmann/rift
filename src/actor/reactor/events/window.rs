@@ -32,7 +32,7 @@ pub fn handle_window_created(
         window,
         window_server_info: ws_info,
     } = payload;
-    if let Some(previous) = state.windows.reconcile_ax_identity(wid, window.sys_id, None) {
+    if let Some(previous) = state.windows.reconcile_ax_identity(wid, window.sys_id) {
         layout.layout_engine.transfer_persistent_window_identity(previous, wid);
     }
     if let Some(info) = ws_info {
@@ -76,6 +76,10 @@ pub fn handle_window_destroyed(
     payload: WindowDestroyedPayload,
 ) -> EventOutcome {
     let wid = payload.window;
+    if state.windows.suspend_fullscreen_ax_identity(wid) {
+        return EventOutcome::no_change()
+            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+    }
     let Some(record) = state.windows.remove_window(wid) else {
         return EventOutcome::no_change();
     };
@@ -107,9 +111,14 @@ pub fn handle_window_minimized(
     if !state.windows.observe_minimized(wid) {
         return Ok(EventOutcome::no_change());
     }
+    let removal = if state.windows.native_fullscreen_record_for_window(wid).is_some() {
+        LayoutEvent::WindowRemovedPreserveFloating(wid)
+    } else {
+        LayoutEvent::WindowRemoved(wid)
+    };
     Ok(EventOutcome::window_membership_changed(false, false)
         .with_arrange_passes(0)
-        .with_layout_event(LayoutEvent::WindowRemoved(wid)))
+        .with_layout_event(removal))
 }
 
 #[derive(Debug, Clone, Copy)]

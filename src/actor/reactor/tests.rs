@@ -2645,12 +2645,21 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
         !has_window_in_layout(&mut reactor, user_space, frame, duplicate_wid),
         "fullscreen restore must evict non-queryable duplicate layout ghosts"
     );
-    assert_eq!(reactor.assigned_space_for_window_id(duplicate_wid), None);
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(duplicate_wid),
+        Some(active_workspace)
+    );
 
     reactor.handle_event(space_state_event(vec![frame], vec![Some(other_space)]));
-    assert_eq!(reactor.assigned_space_for_window_id(duplicate_wid), None);
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(duplicate_wid),
+        Some(active_workspace)
+    );
     reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)]));
-    assert_eq!(reactor.assigned_space_for_window_id(duplicate_wid), None);
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(duplicate_wid),
+        Some(active_workspace)
+    );
     assert!(
         !has_window_in_layout(&mut reactor, user_space, frame, duplicate_wid),
         "ghost must not reappear when switching back to the original space"
@@ -5618,8 +5627,15 @@ fn unfullscreen_restores_window_tracking() {
     apps.simulate_until_quiet(&mut reactor);
     assert!(reactor.state.windows.native_fullscreen_record_for_window(window_id).is_some());
 
-    // Exit fullscreen: its Space is destroyed (return to user space).
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(user_space)]));
+    // Positive destruction, corroborated by an accepted snapshot. Bare omission
+    // of an inactive fullscreen Space does not carry this authority.
+    reactor.handle_event(space_state_event_with(
+        vec![full_screen],
+        vec![Some(user_space)],
+        |state| {
+            state.destroyed_spaces.insert(fullscreen_space);
+        },
+    ));
 
     // The reactor should trigger a window inventory request.
     let mut saw_get_visible_windows = false;
@@ -9910,8 +9926,7 @@ fn shared_history_navigation_never_targets_a_dormant_native_space() {
         |a| space_state_event(vec![shared_left(), shared_right()], vec![Some(a), Some(b1)]);
     reactor.space_state.command_space = Some(a1);
     reactor.dispatch_test_layout_command(LayoutCommand::SwitchToWorkspace(3));
-    let workspaces =
-        |r: &Reactor| (r.layout_manager.layout_engine.workspaces().active_workspace(b1));
+    let workspaces = |r: &Reactor| r.layout_manager.layout_engine.workspaces().active_workspace(b1);
     assert_eq!(workspaces(&reactor), Some(ids[3]));
     reactor.handle_event(screens(a2));
     reactor.space_state.command_space = Some(b1);
@@ -9971,6 +9986,10 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
     // The owner is visible and b shows its desktop, but the fullscreen Space lives.
     reactor.handle_event(snapshot(Some(a), Some(b), true, &[]));
     assert!(reactor.state.windows.native_fullscreen_record_for_window(window).is_some());
+    // An unrelated desktop switch and omission on the other display cannot
+    // release a window whose fullscreen membership has not positively ended.
+    reactor.handle_event(snapshot(Some(a2), Some(b), false, &[]));
+    assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
     // Exit while the owner is dormant: membership kept, placement deferred.
     reactor.handle_event(snapshot(Some(a2), Some(b), false, &[(wsids[0], b)]));
     window_server_destroyed(&mut reactor, wsids[0], fullscreen, SpaceEventKind::Fullscreen);
@@ -9985,4 +10004,245 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
     apps.simulate_until_quiet(&mut reactor);
     assert!(shared_left().contains(apps.windows[&window].frame.mid()));
+}
+
+#[test]
+fn fullscreen_omission_is_inconclusive_and_completed_exits_do_not_resuspend() {
+    for destruction_first in [false, true] {
+        for exit_by_membership in [false, true] {
+            let (mut reactor, window, wsid, user, _, screen) = reactor_with_window_on_space1();
+            let fullscreen = SpaceId::new(0x400000000 + user.get());
+            let workspace = reactor.state.windows.workspace_for_window(window);
+            let snapshot = |present: bool, complete: bool, returned: bool, destroyed: bool| {
+                space_state_event_with(vec![screen], vec![Some(user)], |state| {
+                    state.fullscreen_spaces.extend(present.then_some(fullscreen));
+                    state.active_window_spaces.clear();
+                    if returned {
+                        state.active_window_spaces.insert(wsid, user);
+                    }
+                    state.membership_complete = complete;
+                    state.destroyed_spaces.extend(destroyed.then_some(fullscreen));
+                })
+            };
+            window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+            reactor.handle_event(snapshot(true, true, false, false));
+            // A carried-forward membership map on reconnect has no positive authority.
+            reactor.handle_event(snapshot(false, false, true, false));
+            assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
+            assert!(!has_window_in_layout(&mut reactor, user, screen, window));
+            reactor.handle_event(snapshot(false, true, false, false));
+            assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
+            reactor.handle_event(snapshot(true, true, false, false));
+            assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
+            if destruction_first {
+                for _ in 0..2 {
+                    window_server_destroyed(
+                        &mut reactor,
+                        wsid,
+                        fullscreen,
+                        SpaceEventKind::Fullscreen,
+                    );
+                }
+                assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
+            }
+            // Positive normal membership wins even while another observation lists
+            // the old fullscreen Space; otherwise explicit Space destruction is needed.
+            reactor.handle_event(snapshot(
+                exit_by_membership,
+                true,
+                exit_by_membership,
+                !exit_by_membership,
+            ));
+            assert!(reactor.state.windows.native_fullscreen_record_for_window(window).is_none());
+            assert_eq!(reactor.state.windows.workspace_for_window(window), workspace);
+            if !exit_by_membership {
+                assert_eq!(
+                    reactor
+                        .state
+                        .windows
+                        .record(window)
+                        .unwrap()
+                        .pending_transfer()
+                        .map(|operation| operation.requested_space),
+                    Some(user),
+                    "historical user Space is not physical placement confirmation"
+                );
+            }
+            // Even stale cached fullscreen membership cannot resurrect a completed exit.
+            reactor.state.windows.set_window_server_space(wsid, Some(fullscreen));
+            reactor.state.windows.mark_window_hidden(wsid);
+            for _ in 0..2 {
+                window_server_destroyed(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+            }
+            assert!(reactor.state.windows.native_fullscreen_record_for_window(window).is_none());
+            assert!(has_window_in_layout(&mut reactor, user, screen, window));
+            let next = SpaceId::new(fullscreen.get() + 10);
+            for _ in 0..2 {
+                window_server_appeared(&mut reactor, wsid, next, SpaceEventKind::Fullscreen);
+            }
+            window_server_destroyed(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+            assert_eq!(
+                reactor
+                    .state
+                    .windows
+                    .native_fullscreen_record_for_window(window)
+                    .unwrap()
+                    .fullscreen_space,
+                next
+            );
+            assert!(!has_window_in_layout(&mut reactor, user, screen, window));
+            reactor.state.windows.debug_assert_invariants();
+        }
+    }
+}
+
+#[test]
+fn fullscreen_exit_waits_for_ax_identity_and_admission_without_losing_workspace() {
+    for unavailable in ["missing AX", "unmanageable", "minimized"] {
+        let (mut reactor, window, wsid, user, _, screen) = reactor_with_window_on_space1();
+        let fullscreen = SpaceId::new(0x400000000 + user.get());
+        let workspace = reactor.state.windows.workspace_for_window(window).unwrap();
+        let info = reactor.state.windows.window(window).unwrap().info.clone();
+        window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+        if unavailable == "missing AX" {
+            let outcome = window_workflow::handle_window_destroyed(
+                &mut reactor.state,
+                &reactor.transaction_manager,
+                &mut reactor.drag_manager,
+                window_workflow::WindowDestroyedPayload { window },
+            );
+            reactor.apply_event_outcome(outcome);
+        } else if unavailable == "minimized" {
+            let outcome =
+                window_workflow::handle_window_minimized(&mut reactor.state, window).unwrap();
+            reactor.apply_event_outcome(outcome);
+        } else {
+            reactor.state.windows.window_mut(window).unwrap().is_manageable = false;
+        }
+        reactor.handle_event(space_state_event_with(vec![screen], vec![Some(user)], |state| {
+            state.active_window_spaces.insert(wsid, user);
+            state.membership_complete = true;
+        }));
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(window),
+            Some(workspace)
+        );
+        assert!(reactor.state.windows.native_fullscreen_record_for_window(window).is_some());
+        assert!(!has_window_in_layout(&mut reactor, user, screen, window));
+        // A duplicate appearance of the exiting Space cannot roll recovery back
+        // while AX admission is still unavailable.
+        window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+        // The surviving WindowServer identity binds a replacement AX identity.
+        let replacement = WindowId::new(window.pid, 99);
+        reactor.discover_test_windows(window.pid, vec![(replacement, info)], vec![replacement]);
+        assert!(reactor.state.windows.native_fullscreen_record_for_window(replacement).is_none());
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(replacement),
+            Some(workspace)
+        );
+        assert!(has_window_in_layout(&mut reactor, user, screen, replacement));
+        assert!(!has_window_in_layout(&mut reactor, user, screen, window));
+        window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+        reactor.handle_event(Event::WindowClosed(wsid));
+        assert!(reactor.state.windows.native_fullscreen_record_for_window(replacement).is_none());
+        assert!(reactor.state.windows.workspace_for_window(replacement).is_none());
+        reactor.state.windows.debug_assert_invariants();
+    }
+}
+
+#[test]
+fn transfer_exhaustion_preserves_written_geometry_and_accepts_later_membership() {
+    let (mut reactor, window, wsid, _, target, _) = reactor_with_window_on_space1();
+    let stale = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    let written = CGRect::new(CGPoint::new(1300., 200.), CGSize::new(700., 500.));
+    reactor.state.windows.window_mut(window).unwrap().frame_monotonic = written;
+    reactor.track_test_window_server_info(wsid, window.pid, stale);
+    let store = &mut reactor.state.windows;
+    store.accept_topology_revision(10);
+    assert!(store.request_transfer(window, Some(written), target, true));
+    let generation = store.record(window).unwrap().pending_transfer().unwrap().generation;
+    assert!(store.advance_transfer(window, 11, true).is_some());
+    // Resize the destination without restarting membership retries.
+    let resized = CGRect::new(CGPoint::new(1400., 200.), CGSize::new(600., 500.));
+    assert!(store.request_transfer(window, Some(resized), target, true));
+    let operation = store.record(window).unwrap().pending_transfer().unwrap();
+    assert_eq!(operation.generation, generation);
+    assert_eq!(operation.attempts, 1);
+    assert!(store.advance_transfer(window, 12, true).is_some());
+    assert!(store.advance_transfer(window, 13, true).is_none());
+    assert_eq!(store.record(window).unwrap().frame(), Some(written));
+    assert_eq!(
+        store.record(window).unwrap().pending_transfer().unwrap().status,
+        crate::model::window_store::TransferStatus::Deferred
+    );
+    assert!(!store.confirm_transfer(window, generation, 14, None));
+    assert!(store.confirm_transfer(window, generation, 14, Some(target)));
+    assert!(store.record(window).unwrap().pending_transfer().is_none());
+    assert_eq!(store.record(window).unwrap().frame(), Some(written));
+}
+
+#[test]
+fn startup_discovers_fullscreen_without_an_entry_notification() {
+    let mut reactor = test_reactor();
+    let user = SpaceId::new(1);
+    let fullscreen = SpaceId::new(0x400000001);
+    let window = WindowId::new(61, 1);
+    let wsid = WindowServerId::new(610001);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+    let frame = CGRect::new(CGPoint::new(50., 50.), CGSize::new(900., 700.));
+    reactor.handle_event(space_state_event_with(vec![screen], vec![Some(user)], |state| {
+        state.fullscreen_spaces.insert(fullscreen);
+    }));
+    reactor.add_test_app(window.pid);
+    reactor.track_test_window_server_info(wsid, window.pid, frame);
+    let info = make_window_info(frame, Some(wsid), "Already Fullscreen", None);
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![fullscreen.get()]));
+    reactor.discover_test_windows(window.pid, vec![(window, info.clone())], vec![window]);
+    assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
+    assert!(!has_window_in_layout(&mut reactor, user, screen, window));
+    assert!(
+        reactor.layout_manager.layout_engine.workspaces().catalog().all(|id| reactor
+            .layout_manager
+            .layout_engine
+            .workspaces()[id]
+            .space
+            != fullscreen)
+    );
+    // The membership query can be transitional; a user Space alongside a
+    // fullscreen Space in the same response is not an unambiguous return.
+    crate::sys::window_server::set_window_spaces_override(
+        wsid,
+        Some(vec![fullscreen.get(), user.get()]),
+    );
+    reactor.discover_test_windows(window.pid, vec![(window, info.clone())], vec![window]);
+    assert!(reactor.state.windows.is_window_native_fullscreen_suspended(window));
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![user.get()]));
+    reactor.discover_test_windows(window.pid, vec![(window, info)], vec![window]);
+    assert!(reactor.state.windows.native_fullscreen_record_for_window(window).is_none());
+    assert!(has_window_in_layout(&mut reactor, user, screen, window));
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+}
+
+#[test]
+fn fullscreen_space_replacement_during_churn_keeps_geometry_suspended() {
+    let (mut reactor, window, wsid, user, _, screen) = reactor_with_window_on_space1();
+    let old = SpaceId::new(0x400000001);
+    let new = SpaceId::new(0x400000002);
+    let workspace = reactor.state.windows.workspace_for_window(window);
+    window_server_appeared(&mut reactor, wsid, old, SpaceEventKind::Fullscreen);
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![new.get()]));
+    reactor.handle_event(space_state_event_with(vec![screen], vec![Some(user)], |state| {
+        state.fullscreen_spaces.insert(new);
+        state.destroyed_spaces.insert(old);
+        state.active_window_spaces.clear();
+    }));
+    let record = reactor.state.windows.native_fullscreen_record_for_window(window).unwrap();
+    assert_eq!(record.fullscreen_space, new);
+    assert_eq!(reactor.state.windows.workspace_for_window(window), workspace);
+    assert!(!has_window_in_layout(&mut reactor, user, screen, window));
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![user.get()]));
+    window_server_appeared(&mut reactor, wsid, user, SpaceEventKind::User);
+    assert!(reactor.state.windows.native_fullscreen_record_for_window(window).is_none());
+    assert!(has_window_in_layout(&mut reactor, user, screen, window));
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
 }

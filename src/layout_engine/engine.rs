@@ -681,6 +681,14 @@ impl LayoutEngine {
 
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
+        if &self.layout_settings != settings {
+            self.apply_layout_settings(settings);
+        }
+    }
+
+    // Hydrated systems carry saved settings even though the runtime settings
+    // field starts at its default. Loading must apply the current configuration.
+    fn apply_layout_settings(&mut self, settings: &LayoutSettings) {
         self.native_layouts.clear();
         self.layout_settings = settings.clone();
 
@@ -1696,6 +1704,9 @@ impl LayoutEngine {
 
     pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
         // Runs on every arrangement; an unchanged mapping is a no-op.
+        if display_uuid.is_none() && !self.space_display_map.contains_key(&space) {
+            return;
+        }
         if let Some(uuid) = display_uuid.as_deref()
             && self.display_uuid_for_space(space) == Some(uuid)
             && self.display_last_space.get(uuid) == Some(&space)

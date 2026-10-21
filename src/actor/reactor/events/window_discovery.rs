@@ -109,7 +109,6 @@ fn should_emit_window_for_space(
 pub(crate) struct ObservedWindow {
     pub(crate) wid: WindowId,
     pub(crate) info: WindowInfo,
-    pub(crate) current_native_space: Option<SpaceId>,
     pub(crate) active_space: Option<SpaceId>,
 }
 
@@ -126,15 +125,8 @@ pub(crate) fn process_window_list(
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
 
     for window in observed {
-        let ObservedWindow {
-            wid,
-            info,
-            current_native_space,
-            active_space,
-        } = window;
-        if let Some(previous) =
-            state.windows.reconcile_ax_identity(wid, info.sys_id, current_native_space)
-        {
+        let ObservedWindow { wid, info, active_space } = window;
+        if let Some(previous) = state.windows.reconcile_ax_identity(wid, info.sys_id) {
             layout.layout_engine.transfer_persistent_window_identity(previous, wid);
             outcome =
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));

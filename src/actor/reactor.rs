@@ -89,6 +89,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
+use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
@@ -1638,6 +1639,8 @@ impl Reactor {
                 if self.retain_native_tab_slot_on_departure(wid) {
                     return Ok(EventOutcome::default());
                 }
+                // This is a native window close, unlike AX identity destruction.
+                self.state.windows.restore_window_from_native_fullscreen(wid);
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
@@ -1684,14 +1687,14 @@ impl Reactor {
                 {
                     return Ok(EventOutcome::default());
                 }
-                let last_known_user_space = tracked_window
-                    .and_then(|window| self.best_space_for_window_id(window))
-                    .or_else(|| self.space_state.iter_known_spaces().next());
                 let observations = topology_workflow::WindowServerDestroyedObservations {
-                    resolved_space: self.resolve_native_space(wsid, None),
+                    resolved_space: matches!(kind, SpaceEventKind::User)
+                        .then(|| self.resolve_native_space(wsid, None))
+                        .flatten(),
                     active_spaces: self.active_spaces.clone(),
-                    ordered_in: window_server::window_ordered_in(wsid),
-                    last_known_user_space,
+                    ordered_in: matches!(kind, SpaceEventKind::User)
+                        .then(|| window_server::window_ordered_in(wsid))
+                        .flatten(),
                 };
                 return topology_workflow::handle_window_server_destroyed(
                     &mut self.state,
@@ -2729,6 +2732,11 @@ impl Reactor {
             self.maybe_reapply_app_rules_for_window(window);
         }
         for window in outcome.finalize_created_windows {
+            if self.state.windows.native_fullscreen_record_for_window(window).is_some() {
+                let restored = self.restore_native_fullscreen(None, window, None);
+                self.apply_event_outcome(restored);
+                continue;
+            }
             let active_space = self.state.windows.window(window).and_then(|state| {
                 self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
                     .filter(|space| self.is_space_active(*space))
@@ -3101,27 +3109,60 @@ impl Reactor {
         }
     }
 
-    /// Fullscreen ends only on native evidence: the window listed on a visible user
-    /// Space, or its fullscreen Space gone after an inventory listed it. The owner
-    /// becoming visible somewhere is not evidence.
-    fn reconcile_native_fullscreen_exits(&mut self) -> EventOutcome {
-        let visible = &self.space_state.active_window_spaces;
-        let mut exits =
-            self.state.windows.note_fullscreen_spaces(&self.space_state.fullscreen_spaces);
-        exits.extend(
-            self.state.windows.iter_native_fullscreen_records().filter(|record| {
-                record.window_server_id.is_some_and(|wsid| visible.contains_key(&wsid))
-            }),
-        );
+    /// Recover confirmed exits once, retaining the record while AX is unavailable.
+    fn reconcile_native_fullscreen_exits(&mut self, query_membership: bool) -> EventOutcome {
+        let exits: Vec<_> = self
+            .state
+            .windows
+            .iter_native_fullscreen_records()
+            .filter(|record| {
+                matches!(record.transition, NativeFullscreenTransition::ExitObserved(_))
+            })
+            .collect();
         let mut outcome = EventOutcome::no_change();
         for record in exits {
-            let wsid = record.window_server_id;
-            let observed = wsid.and_then(|wsid| self.space_state.active_window_spaces.get(&wsid));
-            let observed = observed.copied();
+            if record.transition == NativeFullscreenTransition::ExitObserved(None) {
+                // Discovery already queried membership. Unknown membership waits
+                // for the next accepted topology, rather than querying it twice.
+                if !query_membership {
+                    continue;
+                }
+                if let Some(wsid) = record.window_server_id {
+                    let membership = window_server::window_spaces(wsid);
+                    if let Some(space) =
+                        membership.iter().copied().find(|space| self.is_fullscreen_space(*space))
+                    {
+                        // macOS can replace a fullscreen Space during display churn
+                        // without the window ever returning to normal management.
+                        self.state.windows.observe_native_fullscreen(
+                            wsid,
+                            space,
+                            record.last_known_user_space,
+                            None,
+                        );
+                        continue;
+                    }
+                    if membership.iter().any(|space| {
+                        *space == record.fullscreen_space
+                            || !self
+                                .space_state
+                                .display_space_ids
+                                .values()
+                                .any(|spaces| spaces.contains(space))
+                    }) {
+                        continue;
+                    }
+                    if membership.len() == 1 {
+                        self.state
+                            .windows
+                            .note_fullscreen_exit(record.current_window_id, membership[0]);
+                    }
+                }
+            }
             outcome.absorb(self.restore_native_fullscreen(
-                wsid,
+                record.window_server_id,
                 record.current_window_id,
-                observed,
+                None,
             ));
         }
         outcome
@@ -3136,27 +3177,35 @@ impl Reactor {
         window: WindowId,
         observed: Option<SpaceId>,
     ) -> EventOutcome {
+        if let Some(space) = observed {
+            self.state.windows.note_fullscreen_exit(window, space);
+        }
         let Some(restored) = self.state.windows.restore_native_identity(wsid, window) else {
             return EventOutcome::no_change();
         };
-        let mut outcome = EventOutcome::no_change()
-            .with_window_inventory_request(restored.record.current_window_id.pid);
+        let mut outcome = EventOutcome::no_change();
         if let Some(previous) = restored.removed_window {
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(previous));
         }
-        let Some(window) = restored.window else { return outcome };
-        if !self.state.windows.reconcile_admission(window) {
-            return outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
-        }
-        let native = observed.or(restored.record.last_known_user_space);
+        let Some(window) = restored.window else {
+            return outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(
+                restored.record.current_window_id,
+            ));
+        };
+        // Readiness is checked without rejecting logical ownership. A temporary
+        // admission failure keeps both the lifecycle and its preserved layout slot.
+        let native = observed.or(match restored.record.transition {
+            NativeFullscreenTransition::ExitObserved(space) => space,
+            _ => None,
+        });
         let engine = &mut self.layout_manager.layout_engine;
         let Some((workspace, target)) = (self.state.windows.workspace_for_window(window))
             .or(restored.record.workspace)
             .and_then(|id| Some((id, engine.workspaces().workspace_space(id)?)))
         else {
-            if let Some(space) = native {
-                self.reassign_window_to_authoritative_space(window, space, false);
-            }
+            let Some(space) = native else { return outcome };
+            self.state.windows.restore_window_from_native_fullscreen(window);
+            self.reassign_window_to_authoritative_space(window, space, false);
             return outcome;
         };
         engine.workspaces_mut().assign_window_to_workspace(
@@ -3165,8 +3214,11 @@ impl Reactor {
             window,
             workspace,
         );
+        // Ownership is recovered before releasing suspension to the existing
+        // placement/projection paths. History never confirms physical placement.
+        self.state.windows.restore_window_from_native_fullscreen(window);
         let available = self.is_space_active(target);
-        if native.is_some_and(|space| space != target) {
+        if native != Some(target) {
             let screen = self.space_state.screen_by_space(target).filter(|_| available);
             let frame = self.state.windows.window(window).map(|state| {
                 screen.map_or(state.frame_monotonic, |screen| {
@@ -3444,6 +3496,7 @@ impl Reactor {
         let ForwardedSpaceState {
             screens,
             fullscreen_spaces,
+            destroyed_spaces,
             active_spaces,
             menu_bar_space,
             command_space,
@@ -3477,6 +3530,16 @@ impl Reactor {
             screens.len(),
         );
 
+        let empty = HashMap::default();
+        self.state.windows.note_fullscreen_exits(
+            &fullscreen_spaces,
+            &destroyed_spaces,
+            if membership_complete {
+                &self.space_state.active_window_spaces
+            } else {
+                &empty
+            },
+        );
         self.space_state.fullscreen_spaces = fullscreen_spaces;
         self.space_state.active_spaces = active_spaces;
         if command_space_only_update {
@@ -3549,9 +3612,8 @@ impl Reactor {
                 .layout_engine
                 .update_space_display(space, Some(display_uuid.to_string()));
         }
-        let current_screens = self.space_state.screens.clone();
         self.space_activation_policy
-            .on_spaces_updated(activation_config, &current_screens);
+            .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
         if display_set_changed
             || invalidates_pending_targets
@@ -3569,7 +3631,7 @@ impl Reactor {
             ));
         }
         outcome.absorb(self.advance_workspace_transfers());
-        outcome.absorb(self.reconcile_native_fullscreen_exits());
+        outcome.absorb(self.reconcile_native_fullscreen_exits(true));
 
         for (space, size) in resized_spaces {
             if !self.is_space_active(space) {
@@ -3872,6 +3934,7 @@ impl Reactor {
         // window metadata, but existing workspace ownership comes from the snapshot.
         // Resolve each native identity once for this inventory observation.
         let mut native_spaces = HashMap::default();
+        let mut fullscreen_observations = HashMap::default();
         for wsid in self
             .state
             .windows
@@ -3879,9 +3942,42 @@ impl Reactor {
             .filter_map(|wid| self.state.windows.record(wid)?.window_server_id())
             .chain(new.iter().filter_map(|(_, info)| info.sys_id))
         {
-            native_spaces
-                .entry(wsid)
-                .or_insert_with(|| self.resolve_native_space(wsid, None));
+            native_spaces.entry(wsid).or_insert_with(|| {
+                let recovering = self
+                    .state
+                    .windows
+                    .native_fullscreen_record_for_window_server_id(wsid)
+                    .is_some()
+                    || self
+                        .state
+                        .windows
+                        .pending_native_fullscreen_record_for_window_server_id(wsid)
+                        .is_some();
+                if recovering || self.state.windows.tracked_window_id(wsid).is_none() {
+                    // Multiple memberships are transitional, even if one is a
+                    // user Space. Do not let the generic user-Space preference
+                    // turn contradictory evidence into a completed exit.
+                    let spaces = window_server::window_spaces(wsid);
+                    let live = (spaces.len() == 1).then(|| spaces[0]);
+                    if let Some(space) = live.filter(|space| {
+                        self.is_fullscreen_space(*space)
+                            || self
+                                .space_state
+                                .display_space_ids
+                                .values()
+                                .any(|spaces| spaces.contains(space))
+                    }) {
+                        fullscreen_observations.insert(wsid, space);
+                    }
+                    live.or_else(|| {
+                        (!recovering)
+                            .then(|| self.state.windows.window_server_space(wsid))
+                            .flatten()
+                    })
+                } else {
+                    self.resolve_native_space(wsid, None)
+                }
+            });
         }
         if self.state.windows.window_ids_for_pid(pid).any(|wid| {
             let assigned = self.assigned_space_for_window_id(wid);
@@ -3958,12 +4054,7 @@ impl Reactor {
                     .or_else(|| {
                         info.sys_id.is_none().then(|| self.workspace_command_space()).flatten()
                     });
-                window_discovery::ObservedWindow {
-                    wid,
-                    info,
-                    current_native_space,
-                    active_space,
-                }
+                window_discovery::ObservedWindow { wid, info, active_space }
             })
             .collect();
         let (new_windows, process_outcome) = window_discovery::process_window_list(
@@ -3975,6 +4066,27 @@ impl Reactor {
         outcome.absorb(process_outcome);
         let new_window_ids: Vec<_> = new_windows.iter().map(|(wid, _)| *wid).collect();
         window_discovery::update_window_states(&mut self.state, new_windows);
+        for (wsid, space) in fullscreen_observations {
+            if self.is_fullscreen_space(space) {
+                let user = self
+                    .state
+                    .windows
+                    .tracked_window_id(wsid)
+                    .and_then(|window| self.assigned_space_for_window_id(window));
+                if let Some(window) =
+                    self.state.windows.observe_native_fullscreen(wsid, space, user, Some(pid))
+                {
+                    outcome = outcome
+                        .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(window));
+                }
+            } else if let Some(window) = self.state.windows.tracked_window_id(wsid) {
+                self.state
+                    .windows
+                    .observe_native_space(wsid, space, self.is_space_active(space));
+                outcome.absorb(self.restore_native_fullscreen(Some(wsid), window, Some(space)));
+            }
+        }
+        outcome.absorb(self.reconcile_native_fullscreen_exits(false));
         let has_admitted_windows = new_window_ids
             .iter()
             .any(|wid| self.state.windows.window(*wid).is_some_and(WindowState::is_admitted));
@@ -4285,12 +4397,13 @@ impl Reactor {
             .iter()
             .filter_map(|&(wsid, observed_space)| {
                 let wid = self.state.windows.tracked_window_id(wsid)?;
-                if self
-                    .state
-                    .windows
-                    .record(wid)
-                    .and_then(|record| record.pending_transfer())
-                    .is_some()
+                if self.state.windows.native_fullscreen_record_for_window(wid).is_some()
+                    || self
+                        .state
+                        .windows
+                        .record(wid)
+                        .and_then(|record| record.pending_transfer())
+                        .is_some()
                 {
                     return None;
                 }
@@ -4387,6 +4500,9 @@ impl Reactor {
         native: Option<SpaceId>,
     ) -> (Option<SpaceId>, Option<SpaceId>) {
         let authoritative = native.or_else(|| self.assigned_space_for_window_id(wid));
+        if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {
+            return (authoritative, None);
+        }
         let discovery = self.assigned_space_for_window_id(wid).or(authoritative).or_else(|| {
             let window = self.state.windows.window(wid)?;
             self.best_space_for_frame(&window.frame_monotonic).filter(|space| {

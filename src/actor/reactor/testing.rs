@@ -342,6 +342,7 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
             .collect(),
         screens: screens.clone(),
         fullscreen_spaces: Default::default(),
+        destroyed_spaces: Default::default(),
         active_spaces,
         menu_bar_space: command_space,
         command_space,

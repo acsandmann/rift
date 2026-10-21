@@ -117,6 +117,8 @@ pub struct ForwardedSpaceState {
     pub membership_complete: bool,
     pub screens: Vec<ScreenInfo>,
     pub fullscreen_spaces: HashSet<SpaceId>,
+    /// Positive native destruction deltas, forwarded only with accepted topology.
+    pub destroyed_spaces: HashSet<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
     pub menu_bar_space: Option<SpaceId>,
     pub command_space: Option<SpaceId>,
@@ -161,6 +163,7 @@ pub struct AuthorityState {
     awaiting_space_switch_confirmation: bool,
     recovering_membership: bool,
     visible_window_spaces: HashMap<WindowServerId, SpaceId>,
+    destroyed_spaces: HashSet<SpaceId>,
     revision: u64,
     last_forwarded: Option<ForwardedSpaceState>,
     timers_enabled: bool,
@@ -187,6 +190,7 @@ impl Default for AuthorityState {
             awaiting_space_switch_confirmation: false,
             recovering_membership: false,
             visible_window_spaces: HashMap::default(),
+            destroyed_spaces: HashSet::default(),
             revision: 0,
             last_forwarded: None,
             timers_enabled: true,
@@ -329,7 +333,12 @@ impl SpacesActor {
             Event::SpaceInventoryChanged => {
                 self.handle_space_inventory_changed();
             }
-            Event::SpaceCreated(_) | Event::SpaceDestroyed(_) => {
+            Event::SpaceCreated(space) => {
+                self.state.destroyed_spaces.remove(&space);
+                self.handle_space_inventory_changed();
+            }
+            Event::SpaceDestroyed(space) => {
+                self.state.destroyed_spaces.insert(space);
                 self.handle_space_inventory_changed();
             }
             Event::WindowServerAppeared(wsid, sid) => {
@@ -509,8 +518,7 @@ impl SpacesActor {
         inventory: HashMap<String, Vec<SpaceId>>,
     ) -> ForwardedSpaceState {
         let previous_screens = self.state.screens.clone();
-        // Every existing fullscreen Space, shown or not: its disappearance is the
-        // reactor's evidence that an application left native fullscreen.
+        // Positive presence only: inactive fullscreen enumeration may be incomplete.
         let fullscreen_spaces: HashSet<SpaceId> = screens
             .iter()
             .filter_map(|screen| screen.space)
@@ -607,12 +615,24 @@ impl SpacesActor {
         self.state.visible_window_spaces = membership;
         self.state.screens = screens.clone();
         self.state.recovering_membership = false;
+        let destroyed_spaces: HashSet<_> = self
+            .state
+            .destroyed_spaces
+            .iter()
+            .copied()
+            .filter(|space| {
+                !inventory.values().any(|spaces| spaces.contains(space))
+                    && !fullscreen_spaces.contains(space)
+            })
+            .collect();
+        self.state.destroyed_spaces.retain(|space| !destroyed_spaces.contains(space));
         let mut forwarded = ForwardedSpaceState {
             revision: self.state.revision,
             authoritative: true,
             membership_complete,
             screens,
             fullscreen_spaces,
+            destroyed_spaces,
             active_spaces: self.state.screens.iter().filter_map(|screen| screen.space).collect(),
             menu_bar_space,
             command_space,
@@ -625,7 +645,8 @@ impl SpacesActor {
             active_window_spaces: self.state.visible_window_spaces.clone(),
         };
         if self.state.last_forwarded.as_ref().is_none_or(|previous| {
-            previous.screens != forwarded.screens
+            !forwarded.destroyed_spaces.is_empty()
+                || previous.screens != forwarded.screens
                 || previous.fullscreen_spaces != forwarded.fullscreen_spaces
                 || previous.display_space_ids != forwarded.display_space_ids
                 || previous.active_window_spaces != forwarded.active_window_spaces

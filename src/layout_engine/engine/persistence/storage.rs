@@ -324,7 +324,7 @@ impl LayoutEngine {
         broadcast_tx: Option<BroadcastSender>,
     ) {
         self.broadcast_tx = broadcast_tx;
-        self.set_layout_settings(layout_settings);
+        self.apply_layout_settings(layout_settings);
         self.app_rules = AppRuleEngine::new(&virtual_workspace_config.app_rules);
         self.workspaces.update_settings(virtual_workspace_config, layout_settings);
     }

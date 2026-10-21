@@ -504,7 +504,7 @@ impl LayoutEngine {
         // The source topology is file data, not a live engine to be reconciled with the current
         // workspace-count setting. Only refresh layout-system settings; the installed workspace
         // inherits the already-hydrated target manager's runtime configuration.
-        snapshot.set_layout_settings(layout_settings);
+        snapshot.apply_layout_settings(layout_settings);
         self.refresh_window_fingerprints(window_store);
         let live_windows = self.persistence.live_fingerprints();
         let plan = RestorePlan::build(snapshot, self, window_store, request)?;

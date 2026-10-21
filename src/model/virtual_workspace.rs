@@ -54,40 +54,86 @@ pub(crate) struct WorkspaceTarget {
     pub space: SpaceId,
 }
 
-/// Owners for a fresh shared catalog over `displays` in physical order. Pins win;
-/// unpinned positions fill displays left to right as balanced contiguous runs, at
-/// least one each, appending empty workspaces rather than stealing a pinned one.
-fn distribute(displays: usize, pins: Vec<Option<usize>>) -> Vec<usize> {
+/// Allocate only a fresh catalog. Pins are hard constraints. Minimize owner runs
+/// first, then squared run loads (including pins outside each run), then physical
+/// owner order. Unpinned displays need only one run, in physical order: splitting
+/// or permuting those unconstrained runs cannot improve the transition count.
+fn distribute(displays: usize, mut pins: Vec<Option<usize>>) -> Vec<usize> {
     let mut pinned = vec![0; displays];
     pins.iter().flatten().for_each(|&d| pinned[d] += 1);
-    let mut owners = pins;
-    let bare = pinned.iter().filter(|&&n| n == 0).count();
-    while owners.iter().filter(|o| o.is_none()).count() < bare && owners.len() < MAX_WORKSPACES {
-        owners.push(None);
+    let mut bare: Vec<_> = (0..displays).filter(|&d| pinned[d] == 0).collect();
+    let free = pins.iter().filter(|pin| pin.is_none()).count();
+    pins.resize(
+        (pins.len() + bare.len().saturating_sub(free)).min(MAX_WORKSPACES),
+        None,
+    );
+    bare.truncate(pins.iter().filter(|pin| pin.is_none()).count());
+
+    // (number of runs, balance penalty, owners); tuple ordering supplies a stable
+    // physical left-to-right tie break without reordering workspace identities.
+    type Allocation = (usize, usize, Vec<usize>);
+    struct Allocator<'a> {
+        pins: &'a [Option<usize>],
+        pinned: &'a [usize],
+        bare: &'a [usize],
+        memo: HashMap<(usize, usize, usize), Option<Allocation>>,
     }
-    let total = owners.len();
-    let floor = |d: usize| usize::from(pinned[d] == 0);
-    let mut quota: Vec<_> = (0..displays)
-        .map(|d| {
-            (total / displays + usize::from(d < total % displays))
-                .saturating_sub(pinned[d])
-                .max(floor(d))
-        })
-        .collect();
-    let free = owners.iter().filter(|o| o.is_none()).count();
-    // Trim the most loaded display (rightmost on ties) until the quotas fit.
-    while quota.iter().sum::<usize>() > free
-        && let Some(d) = (0..displays)
-            .filter(|&d| quota[d] > floor(d))
-            .max_by_key(|&d| (pinned[d] + quota[d], d))
-    {
-        quota[d] -= 1;
+    impl Allocator<'_> {
+        fn solve(&mut self, start: usize, used: usize, previous: usize) -> Option<Allocation> {
+            if start == self.pins.len() {
+                return (used == self.bare.len()).then(|| (0, 0, Vec::new()));
+            }
+            let key = (start, used, previous);
+            if let Some(result) = self.memo.get(&key) {
+                return result.clone();
+            }
+            let mut best = None;
+            for owner in 0..self.pinned.len() {
+                if owner == previous {
+                    continue;
+                }
+                let unpinned = self.pinned[owner] == 0;
+                if unpinned && self.bare.get(used) != Some(&owner) {
+                    continue;
+                }
+                let mut pins_in_run = 0;
+                for end in start..self.pins.len() {
+                    if self.pins[end].is_some_and(|pin| pin != owner) {
+                        break;
+                    }
+                    pins_in_run += usize::from(self.pins[end].is_some());
+                    let Some((runs, balance, tail)) =
+                        self.solve(end + 1, used + usize::from(unpinned), owner)
+                    else {
+                        continue;
+                    };
+                    let len = end + 1 - start;
+                    let mut owners = Vec::with_capacity(len + tail.len());
+                    owners.resize(len, owner);
+                    owners.extend(tail);
+                    let candidate = (
+                        runs + 1,
+                        balance + len * len + 2 * len * (self.pinned[owner] - pins_in_run),
+                        owners,
+                    );
+                    if best.as_ref().is_none_or(|best| &candidate < best) {
+                        best = Some(candidate);
+                    }
+                }
+            }
+            self.memo.insert(key, best.clone());
+            best
+        }
     }
-    let mut next = (0..displays).flat_map(|d| std::iter::repeat_n(d, quota[d]));
-    owners
-        .into_iter()
-        .map(|o| o.or_else(|| next.next()).unwrap_or(displays - 1))
-        .collect()
+    Allocator {
+        pins: &pins,
+        pinned: &pinned,
+        bare: &bare,
+        memo: HashMap::default(),
+    }
+    .solve(0, 0, displays)
+    .expect("pins and appended empty slots admit a distribution")
+    .2
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1414,7 +1460,11 @@ impl WorkspaceStore {
             window.manage_override = rule_override;
         }
         if !admitted {
-            window_store.clear_rule_floating(window_id);
+            if window_store.native_fullscreen_record_for_window(window_id).is_none()
+                || rule_override == Some(false)
+            {
+                window_store.clear_rule_floating(window_id);
+            }
             return Ok(AppRuleResult::Rejected(if rule_override == Some(false) {
                 AppRuleRejection::ExplicitRule
             } else {
@@ -1708,8 +1758,8 @@ mod tests {
         let cases: &[(usize, usize, &[(usize, usize)], &[usize])] = &[
             (2, 6, &[], &[0, 0, 0, 1, 1, 1]),
             (3, 9, &[], &[0, 0, 0, 1, 1, 1, 2, 2, 2]),
-            (2, 6, &[(2, 1)], &[0, 1, 0, 0, 1, 1]),
-            (3, 6, &[(1, 2)], &[2, 0, 0, 1, 1, 2]),
+            (2, 6, &[(2, 1)], &[1, 1, 1, 0, 0, 0]),
+            (3, 6, &[(1, 2)], &[2, 2, 0, 0, 1, 1]),
             (2, 6, &[(1, 0), (2, 0), (3, 0), (4, 0)], &[0, 0, 0, 0, 1, 1]),
             (2, 4, &[(1, 0), (2, 1), (3, 0), (4, 1)], &[0, 1, 0, 1]),
             // Everything pinned to one display: append rather than steal.
@@ -1725,6 +1775,55 @@ mod tests {
                 expected,
                 "{displays} displays {pinned:?}"
             );
+        }
+    }
+
+    #[test]
+    fn fresh_distribution_minimizes_transitions_against_exhaustive_allocations() {
+        let transitions =
+            |owners: &[usize]| owners.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        for displays in 1usize..=3 {
+            for count in 1u32..=5 {
+                for mut pattern in 0..(displays + 1).pow(count) {
+                    let pins: Vec<_> = (0..count)
+                        .map(|_| {
+                            let value = pattern % (displays + 1);
+                            pattern /= displays + 1;
+                            (value < displays).then_some(value)
+                        })
+                        .collect();
+                    let owners = distribute(displays, pins.clone());
+                    assert!(
+                        pins.iter()
+                            .zip(&owners)
+                            .all(|(pin, owner)| pin.is_none_or(|pin| pin == *owner))
+                    );
+                    assert!((0..displays).all(|owner| owners.contains(&owner)));
+                    let mut reference = usize::MAX;
+                    for mut assignment in 0..displays.pow(owners.len() as u32) {
+                        let candidate: Vec<_> = (0..owners.len())
+                            .map(|_| {
+                                let owner = assignment % displays;
+                                assignment /= displays;
+                                owner
+                            })
+                            .collect();
+                        if pins
+                            .iter()
+                            .zip(&candidate)
+                            .all(|(pin, owner)| pin.is_none_or(|pin| pin == *owner))
+                            && (0..displays).all(|owner| candidate.contains(&owner))
+                        {
+                            reference = reference.min(transitions(&candidate));
+                        }
+                    }
+                    assert_eq!(
+                        transitions(&owners),
+                        reference,
+                        "{displays} {pins:?}: {owners:?}"
+                    );
+                }
+            }
         }
     }
 

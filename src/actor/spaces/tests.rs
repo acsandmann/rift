@@ -896,3 +896,30 @@ fn a_space_switch_revokes_queued_geometry_before_the_reactor_receives_it() {
         );
     }
 }
+
+#[test]
+fn native_space_destruction_is_forwarded_only_after_topology_corroborates_it() {
+    let mut rig = Rig::new();
+    let fullscreen = SpaceId::new(0x400000001);
+    let mut initial = sample(vec![screen(1, "left", 1)]);
+    initial.inventory.get_mut("left").unwrap().push(fullscreen);
+    rig.tick(0, Some(initial.clone())).unwrap();
+    // Hold the event until sampling is safe; the test supplies native snapshots,
+    // while production owns quarantine, retry, acceptance and delta forwarding.
+    rig.event(Event::SystemWillSleep);
+    rig.event(Event::SpaceDestroyed(fullscreen));
+    assert!(rig.tick(0, Some(initial.clone())).is_none());
+    rig.event(Event::SystemDidWake);
+    rig.tick(0, Some(initial.clone()));
+    let still_present = rig.tick(0, Some(initial)).unwrap();
+    assert!(still_present.destroyed_spaces.is_empty());
+    let missing = sample(vec![screen(1, "left", 1)]);
+    let destroyed = rig.tick(0, Some(missing.clone())).unwrap();
+    assert!(destroyed.destroyed_spaces.contains(&fullscreen));
+    assert!(!destroyed.fullscreen_spaces.contains(&fullscreen));
+    let next = rig.tick(0, Some(missing)).unwrap();
+    assert!(
+        next.destroyed_spaces.is_empty(),
+        "destruction deltas are consumed once"
+    );
+}

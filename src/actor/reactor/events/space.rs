@@ -53,6 +53,7 @@ pub(crate) fn analyze_space_snapshot(
         && current.display_space_ids == incoming.display_space_ids
         && current.last_user_space_by_display == incoming.last_user_space_by_display
         && current.membership_complete == incoming.membership_complete
+        && incoming.destroyed_spaces.is_empty()
         && !active_window_membership_changed;
     let invalidates_pending_targets = incoming.display_set_changed
         || incoming.should_force_refresh_layout
@@ -79,6 +80,7 @@ pub(crate) fn merge_space_deltas(
         .retain(|(space, _)| !newer.resized_spaces.iter().any(|(next, _)| space == next));
     older.resized_spaces.append(&mut newer.resized_spaces);
     newer.resized_spaces = older.resized_spaces;
+    newer.destroyed_spaces.extend(older.destroyed_spaces);
     newer.should_force_refresh_layout |= older.should_force_refresh_layout;
     newer.display_set_changed |= older.display_set_changed;
     newer
@@ -99,7 +101,6 @@ pub struct WindowServerDestroyedObservations {
     pub resolved_space: Option<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
     pub ordered_in: Option<bool>,
-    pub last_known_user_space: Option<SpaceId>,
 }
 
 #[derive(Debug)]
@@ -129,23 +130,11 @@ pub fn handle_window_server_destroyed(
         resolved_space,
         active_spaces,
         ordered_in,
-        last_known_user_space,
     } = observations;
     let mut outcome = EventOutcome::default();
     if matches!(kind, SpaceEventKind::Fullscreen) {
-        // Leaving a fullscreen Space never starts a suspension. Only a window whose
-        // entry was missed (e.g. fullscreen before launch) is recorded here; one
-        // already tracked or already back on a user Space is left alone, whatever
-        // order the notifications arrive in.
-        let returned = state.windows.is_window_visible(wsid)
-            && state.windows.window_server_space(wsid).is_some_and(|space| space != sid);
-        if !returned
-            && !state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
-            && let Some(wid) =
-                state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, None)
-        {
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
-        }
+        // Departure alone cannot establish entry. Startup recovery uses positive
+        // fullscreen appearance/discovery, even if this notification arrives late.
         if let Some(wid) = state.windows.tracked_window_id(wsid) {
             outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
         }
@@ -228,6 +217,7 @@ pub fn handle_window_server_appeared(
             }
 
             state.windows.observe_native_space(wsid, resolved_space, true);
+            state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
             outcome.confirmed_window_spaces.push((wsid, resolved_space));
         }
     }
@@ -238,6 +228,9 @@ pub fn handle_window_server_appeared(
                 SpaceEventKind::User => {
                     if let Some(wid) = state.windows.tracked_window_id(wsid) {
                         outcome.fullscreen_restorations.push((wsid, sid, wid));
+                        if state.windows.native_fullscreen_record_for_window(wid).is_some() {
+                            outcome = outcome.with_window_inventory_request(wid.pid);
+                        }
                     } else if let Some(pid) =
                         state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
                     {
