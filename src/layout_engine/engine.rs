@@ -895,28 +895,43 @@ impl LayoutEngine {
         id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
-        let space = self.workspaces[id].space;
-        if self.workspaces.active_workspace(space) == Some(id) {
-            if command_space != space {
-                return EventResponse {
-                    changed: false,
-                    workspace_space: Some(space),
-                    focus_window: self.preferred_focus_for_workspace(
-                        window_store,
-                        space,
-                        id,
-                        preferred_focus_window,
-                    ),
-                    ..EventResponse::default()
-                };
-            }
+        let current = self.workspaces.active_workspace(command_space);
+        if current == Some(id) {
             return if self.workspaces.settings.workspace_auto_back_and_forth {
                 self.workspaces
-                    .last_workspace(space)
-                    .map(|last| self.activate_workspace(window_store, space, last, None))
+                    .last_workspace(command_space)
+                    .map(|last| self.navigate_to_workspace(window_store, command_space, last, None))
                     .unwrap_or_default()
             } else {
                 EventResponse::default()
+            };
+        }
+        self.navigate_to_workspace(window_store, command_space, id, preferred_focus_window)
+    }
+
+    fn navigate_to_workspace(
+        &mut self,
+        window_store: &WindowStore,
+        command_space: SpaceId,
+        id: VirtualWorkspaceId,
+        preferred_focus_window: Option<WindowId>,
+    ) -> EventResponse {
+        let space = self.workspaces[id].space;
+        let was_active = self.workspaces.active_workspace(space) == Some(id);
+        if !self.workspaces.set_active_workspace_from(command_space, id) {
+            return EventResponse::default();
+        }
+        if was_active && command_space != space {
+            return EventResponse {
+                changed: false,
+                workspace_space: Some(space),
+                focus_window: self.preferred_focus_for_workspace(
+                    window_store,
+                    space,
+                    id,
+                    preferred_focus_window,
+                ),
+                ..EventResponse::default()
             };
         }
         self.activate_workspace(window_store, space, id, preferred_focus_window)
@@ -3237,7 +3252,7 @@ impl LayoutEngine {
             },
             LayoutCommand::SwitchToLastWorkspace => {
                 if let Some(last_workspace) = self.workspaces.last_workspace(space) {
-                    return self.activate_workspace(window_store, space, last_workspace, None);
+                    return self.navigate_to_workspace(window_store, space, last_workspace, None);
                 }
                 EventResponse::default()
             }
@@ -5163,6 +5178,59 @@ mod tests {
             &LayoutCommand::SwitchToWorkspace(1),
         );
         assert!(switched.changed);
+    }
+
+    #[test]
+    fn shared_workspace_back_and_forth_follows_cross_display_selection() {
+        for auto in [false, true] {
+            let settings = VirtualWorkspaceSettings {
+                display_mode: crate::common::config::DisplayMode::Shared,
+                default_workspace_count: 4,
+                workspace_auto_back_and_forth: auto,
+                ..Default::default()
+            };
+            let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+            let mut windows = WindowStore::default();
+            let (a, b) = (SpaceId::new(83), SpaceId::new(84));
+            let screen = CGSize::new(1000., 800.);
+            for space in [a, b] {
+                let _ = engine.handle_event(&mut windows, LayoutEvent::SpaceExposed(space, screen));
+            }
+            let origin = engine.workspaces.active_workspace(a).unwrap();
+            let target = engine.workspaces.active_workspace(b).unwrap();
+            let index = engine.workspaces.workspace_index(b, target).unwrap();
+            let response = engine.handle_virtual_workspace_command(
+                &mut windows,
+                crate::model::virtual_workspace::WorkspaceContext {
+                    space: a,
+                    visible: &[a, b],
+                    navigation: Default::default(),
+                },
+                &LayoutCommand::SwitchToWorkspace(index),
+            );
+            assert_eq!(response.workspace_space, Some(b));
+            for (from, to, id) in [(b, a, origin), (a, b, target), (b, a, origin)] {
+                let command = if auto {
+                    let current = engine.workspaces.active_workspace(from).unwrap();
+                    LayoutCommand::SwitchToWorkspace(
+                        engine.workspaces.workspace_index(from, current).unwrap(),
+                    )
+                } else {
+                    LayoutCommand::SwitchToLastWorkspace
+                };
+                let response = engine.handle_virtual_workspace_command(
+                    &mut windows,
+                    crate::model::virtual_workspace::WorkspaceContext {
+                        space: from,
+                        visible: &[a, b],
+                        navigation: Default::default(),
+                    },
+                    &command,
+                );
+                assert_eq!(response.workspace_space, Some(to), "auto={auto}");
+                assert_eq!(engine.workspaces.active_workspace(to), Some(id));
+            }
+        }
     }
 
     #[test]

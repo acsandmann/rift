@@ -199,6 +199,7 @@ impl VirtualWorkspace {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct SpaceActivation {
     pub current: Option<VirtualWorkspaceId>,
+    /// Navigation history; shared mode can return to a workspace on another display.
     pub previous: Option<VirtualWorkspaceId>,
     pub remembered: Option<VirtualWorkspaceId>,
 }
@@ -445,8 +446,7 @@ impl WorkspaceStore {
             workspace.home_space = Some(target);
         }
         workspace.space = target;
-        // Per-native-Space history may reference a workspace temporarily away at
-        // its home display. It becomes active again only when ownership returns.
+        // Remembered presentation becomes active again only when ownership returns.
         if reason == WorkspaceTransferReason::Explicit {
             self.set_active_workspace(target, id);
         } else if self.active_workspace(target).is_none()
@@ -477,13 +477,6 @@ impl WorkspaceStore {
                 activation.current =
                     self.order.iter().copied().find(|id| self.workspaces[*id].space == space);
             }
-            if activation.previous.is_some_and(|id| {
-                self.workspaces.get(id).is_some_and(|workspace| {
-                    workspace.space != space && workspace.home_space == Some(space)
-                })
-            }) {
-                activation.previous = None;
-            }
             if activation.previous == activation.current {
                 activation.previous = None;
             }
@@ -500,8 +493,11 @@ impl WorkspaceStore {
                 .filter(|&id| owned(id))
                 .or_else(|| self.workspaces_on(space).next());
         }
-        activation.previous =
-            activation.previous.filter(|&id| owned(id) && Some(id) != activation.current);
+        activation.previous = activation.previous.filter(|&id| {
+            self.workspaces.contains_key(id)
+                && Some(id) != activation.current
+                && (self.settings.display_mode == DisplayMode::Shared || owned(id))
+        });
         self.active_workspace_per_space.insert(space, activation);
     }
 
@@ -831,7 +827,8 @@ impl WorkspaceStore {
                 ("previous", activation.previous),
             ] {
                 if id.is_some_and(|id| {
-                    self.workspace_space(id) != Some(space)
+                    !self.workspaces.contains_key(id)
+                        || (kind == "active" && self.workspace_space(id) != Some(space))
                         || (kind == "previous" && Some(id) == activation.current)
                 }) {
                     return Err(format!(
@@ -958,6 +955,26 @@ impl WorkspaceStore {
     pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
         self.workspace_index(space, self.active_workspace(space)?)
             .map(|index| index as u64)
+    }
+
+    /// Select a workspace and remember where navigation started, even when the
+    /// destination is already visible on another display.
+    pub fn set_active_workspace_from(
+        &mut self,
+        source: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> bool {
+        let Some(target) = self.workspace_space(workspace_id) else {
+            return false;
+        };
+        let previous = self.active_workspace(source);
+        if !self.set_active_workspace(target, workspace_id) {
+            return false;
+        }
+        if self.settings.display_mode == DisplayMode::Shared && source != target {
+            self.active_workspace_per_space.get_mut(&target).unwrap().previous = previous;
+        }
+        true
     }
 
     pub fn set_active_workspace(
