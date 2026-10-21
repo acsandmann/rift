@@ -416,6 +416,28 @@ impl LayoutManager {
                     |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
+            if all_screen_frames.len() == 1
+                && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+                    == LayoutMode::Scrolling
+            {
+                let active_workspace_windows: HashSet<WindowId> = reactor
+                    .layout_manager
+                    .layout_engine
+                    .workspaces()
+                    .windows_in_active_workspace(&reactor.state.windows, space)
+                    .into_iter()
+                    .collect();
+                for (wid, frame) in &mut layout {
+                    if active_workspace_windows.contains(wid)
+                        && !reactor.layout_manager.layout_engine.is_window_floating(*wid)
+                    {
+                        *frame = crate::layout_engine::systems::scrolling::park_offscreen_at_corner(
+                            *frame,
+                            screen.frame,
+                        );
+                    }
+                }
+            }
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                 == LayoutMode::Scrolling
                 && let Some(bounds) =

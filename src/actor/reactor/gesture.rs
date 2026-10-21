@@ -852,6 +852,7 @@ mod tests {
             for (wid, frame) in initial {
                 r.insert_test_window_state(wid, frame, None, true);
             }
+            let window_ids = r.test_active_workspace_windows(ctx.space);
             r.start_gesture_presentation();
             r.viewport_gesture.as_mut().unwrap().context.action.animate = Some(released);
             motion.publish(sample(1, 300.0, 100));
@@ -920,7 +921,17 @@ mod tests {
                     _ => {}
                 }
             }
-            assert_eq!(hidden.len(), 4);
+            // Offscreen columns may already be at their workspace hiding position,
+            // so a switch need not issue another position write for every window.
+            assert_eq!(window_ids.len(), 4);
+            let screen = r.space_state.screen_by_space(ctx.space).unwrap().frame;
+            for wid in window_ids {
+                assert!(crate::model::HiddenWindowPlacement::is_hidden(
+                    screen,
+                    r.state.windows.window(wid).unwrap().frame_monotonic,
+                    &[],
+                ));
+            }
             assert!(!reconciled.is_empty());
             assert!(written.is_subset(&reconciled));
         }

@@ -276,10 +276,20 @@ impl PresentedWindow {
                 if self.fixed && self.announced {
                     return None;
                 }
-                let frame = presentation.frame_at_offset(self.to, self.fixed, scale, offset);
-                let mut frame = bound.map_or(frame, |bounds| bounds.apply(frame));
-                frame.origin.x += self.move_from.x * movement;
-                frame.origin.y += self.move_from.y * movement;
+                let frame = if presentation.corner_parking() {
+                    let mut frame =
+                        presentation.logical_frame_at_offset(self.to, self.fixed, scale, offset);
+                    frame.origin.x += self.move_from.x * movement;
+                    frame.origin.y += self.move_from.y * movement;
+                    // Park after structural motion so returning windows keep their row.
+                    presentation.park_frame(frame, self.fixed)
+                } else {
+                    let frame = presentation.frame_at_offset(self.to, self.fixed, scale, offset);
+                    let mut frame = bound.map_or(frame, |bounds| bounds.apply(frame));
+                    frame.origin.x += self.move_from.x * movement;
+                    frame.origin.y += self.move_from.y * movement;
+                    frame
+                };
                 (
                     frame,
                     !frame.size.same_as(self.frame.size),
@@ -409,17 +419,27 @@ impl CameraAnimation {
         // Retired cameras start from the retained presenter publication.
         for window in &mut self.windows {
             if self.animate && !window.fixed {
-                let frame = self.presentation.frame_at_offset(
+                if self.presentation.is_corner_parked(window.frame) {
+                    // A native parking position is not a structural animation origin.
+                    window.move_from = CGPoint::ZERO;
+                    continue;
+                }
+                let frame = self.presentation.logical_frame_at_offset(
                     window.to,
                     window.fixed,
                     self.scale,
                     self.presentation.offset(),
                 );
+                let frame = self.presentation.park_frame(frame, window.fixed);
                 let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
-                window.move_from = CGPoint::new(
-                    window.frame.origin.x - frame.origin.x,
-                    window.frame.origin.y - frame.origin.y,
-                );
+                window.move_from = if self.presentation.is_corner_parked(frame) {
+                    CGPoint::ZERO
+                } else {
+                    CGPoint::new(
+                        window.frame.origin.x - frame.origin.x,
+                        window.frame.origin.y - frame.origin.y,
+                    )
+                };
             }
         }
         let distance = self.windows.iter().fold(0.0_f64, |distance, window| {
@@ -634,6 +654,7 @@ impl Reactor {
             return None;
         };
         let (mut presentation, frames) = system.presentation(layout)?;
+        presentation.set_corner_parking(screen_frames.len() == 1);
         let previous = self.presentations.remove(&space).and_then(|p| p.headless);
         let gesture = gesture.or_else(|| {
             self.viewport_gesture
@@ -1057,7 +1078,14 @@ impl AnimationManager {
             if let Some(wsid) = window_server_id {
                 reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
             }
-            if is_active {
+            // Leaving Scrolling must not animate a parked window up from a corner.
+            let corner_parked = reactor.space_state.screens.len() == 1
+                && !reactor.layout_manager.layout_engine.is_window_floating(wid)
+                && crate::layout_engine::systems::scrolling::is_corner_parked(
+                    current_frame,
+                    screen.frame,
+                );
+            if is_active && !corner_parked {
                 trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
                 anim.add_window(&app_state.handle, wid, current_frame, target_frame, txid);
             } else {
@@ -1066,7 +1094,7 @@ impl AnimationManager {
                     ?wid,
                     ?current_frame,
                     ?target_frame,
-                    "Direct positioning hidden window"
+                    "Direct positioning hidden or parked window"
                 );
                 if let Err(e) =
                     app_state.handle.send(Request::set_window_frame(wid, target_frame, txid, true))
@@ -1775,6 +1803,61 @@ mod tests {
         );
     }
 
+    fn scrolling_camera(
+        system: &crate::layout_engine::systems::ScrollingLayoutSystem,
+        layout: LayoutId,
+        native: &[(WindowId, CGRect)],
+        control: &PresenterControl,
+        handle: &AppThreadHandle,
+    ) -> CameraAnimation {
+        let (presentation, frames) = system.presentation(layout).unwrap();
+        let state = Arc::new(Mutex::new(PresentedCamera {
+            viewport: presentation.snapshot(Instant::now()),
+            gesture: None,
+            active: true,
+            stopped: false,
+        }));
+        CameraAnimation {
+            presentation,
+            movement: None,
+            windows: frames
+                .into_iter()
+                .map(|(wid, world, fixed)| {
+                    let frame =
+                        control.frame(wid, native.iter().find(|(id, _)| *id == wid).unwrap().1);
+                    PresentedWindow {
+                        handle: handle.clone(),
+                        wid,
+                        wsid: None,
+                        from: frame,
+                        to: world,
+                        fixed,
+                        announced: false,
+                        leased: false,
+                        frame,
+                        move_from: CGPoint::ZERO,
+                        txid: TransactionId::default(),
+                    }
+                })
+                .collect(),
+            gesture: None,
+            active: true,
+            identity: CameraIdentity {
+                space: SpaceId::new(1),
+                workspace: VirtualWorkspaceId::default(),
+                layout,
+            },
+            events: None,
+            state,
+            display: 1,
+            animate: true,
+            scale: 1.0,
+            store: WindowTxStore::new(),
+            interval: Duration::from_secs_f64(1.0 / 60.0),
+            bound: None,
+        }
+    }
+
     #[test]
     fn completed_camera_keeps_its_offset_after_native_window_clamping() {
         use crate::common::config::{ScrollingAlignment, ScrollingLayoutSettings};
@@ -1804,52 +1887,7 @@ mod tests {
         let make_camera = |system: &ScrollingLayoutSystem,
                            native: &[(WindowId, CGRect)],
                            control: &PresenterControl| {
-            let (presentation, frames) = system.presentation(layout).unwrap();
-            let state = Arc::new(Mutex::new(PresentedCamera {
-                viewport: presentation.snapshot(Instant::now()),
-                gesture: None,
-                active: true,
-                stopped: false,
-            }));
-            CameraAnimation {
-                presentation,
-                movement: None,
-                windows: frames
-                    .into_iter()
-                    .map(|(wid, world, fixed)| {
-                        let frame =
-                            control.frame(wid, native.iter().find(|(id, _)| *id == wid).unwrap().1);
-                        PresentedWindow {
-                            handle: handle.clone(),
-                            wid,
-                            wsid: None,
-                            from: frame,
-                            to: world,
-                            fixed,
-                            announced: false,
-                            leased: false,
-                            frame,
-                            move_from: CGPoint::ZERO,
-                            txid: TransactionId::default(),
-                        }
-                    })
-                    .collect(),
-                gesture: None,
-                active: true,
-                identity: CameraIdentity {
-                    space: SpaceId::new(1),
-                    workspace: VirtualWorkspaceId::default(),
-                    layout,
-                },
-                events: None,
-                state,
-                display: 1,
-                animate: true,
-                scale: 1.0,
-                store: WindowTxStore::new(),
-                interval: Duration::from_secs_f64(1.0 / 60.0),
-                bound: None,
-            }
+            scrolling_camera(system, layout, native, control, &handle)
         };
         let mut control = PresenterControl::default();
         let native = vec![
@@ -2008,6 +2046,111 @@ mod tests {
         let handoff = replacement.presentation.snapshot(started);
         assert!((handoff.offset - position - delta).abs() < 1e-9);
         assert!((handoff.velocity - velocity).abs() < 1e-9);
+    }
+
+    #[test]
+    fn corner_parked_cameras_reenter_without_native_clamping_offsets() {
+        use crate::common::config::{ScrollingAlignment, ScrollingLayoutSettings};
+        use crate::layout_engine::systems::ScrollingLayoutSystem;
+
+        let (handle, _rx) = AppThreadHandle::channel();
+        let hidden = WindowId::new(1, 1);
+        let visible = WindowId::new(1, 2);
+        for hidden_on_left in [false, true] {
+            for retain_camera in [false, true] {
+                for parked_y in [799.0, 768.0] {
+                    let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings {
+                        column_width_ratio: 1.0,
+                        max_column_width_ratio: 1.0,
+                        preserve_window_sizes: false,
+                        alignment: ScrollingAlignment::Left,
+                        ..Default::default()
+                    });
+                    let layout = system.create_layout();
+                    let order = if hidden_on_left {
+                        [hidden, visible]
+                    } else {
+                        [visible, hidden]
+                    };
+                    for wid in order {
+                        system.add_window_after_selection(layout, wid);
+                    }
+                    system.select_window(layout, visible);
+                    system.prepare_layout(
+                        layout,
+                        rect(0.0, 0.0, 1000.0, 800.0),
+                        &Default::default(),
+                        &Default::default(),
+                    );
+                    let native = vec![
+                        (
+                            hidden,
+                            rect(
+                                if hidden_on_left { -960.0 } else { 960.0 },
+                                parked_y,
+                                1000.0,
+                                800.0,
+                            ),
+                        ),
+                        (visible, rect(0.0, 0.0, 1000.0, 800.0)),
+                    ];
+                    let control = PresenterControl::default();
+                    let mut parked = scrolling_camera(&system, layout, &native, &control, &handle);
+                    parked.presentation.set_corner_parking(true);
+                    parked.replace(None);
+                    assert!(parked.windows.iter().all(|w| w.move_from == CGPoint::ZERO));
+                    parked.sample(Instant::now() + Duration::from_secs(2));
+                    system.commit_presented_viewport(layout, &parked.state.lock().viewport);
+                    system.select_window(layout, hidden);
+                    let mut returning =
+                        scrolling_camera(&system, layout, &native, &control, &handle);
+                    returning.presentation.set_corner_parking(true);
+                    returning.replace(retain_camera.then_some(parked));
+                    let window = returning.windows.iter().find(|w| w.wid == hidden).unwrap();
+                    assert_eq!(window.move_from, CGPoint::ZERO);
+                    let started = Instant::now();
+                    for millis in [0, 16, 40, 100, 2000] {
+                        returning.sample(started + Duration::from_millis(millis));
+                        for window in &returning.windows {
+                            assert!(window.frame.origin.y == 0.0 || window.frame.origin.y == 799.0);
+                            assert_eq!(window.frame.size, window.to.size);
+                        }
+                    }
+                    assert_eq!(
+                        returning.windows.iter().find(|w| w.wid == hidden).unwrap().frame,
+                        rect(0.0, 0.0, 1000.0, 800.0)
+                    );
+                    system.commit_presented_viewport(layout, &returning.state.lock().viewport);
+                    system.select_window(layout, visible);
+                    let mut reversed =
+                        scrolling_camera(&system, layout, &native, &control, &handle);
+                    reversed.presentation.set_corner_parking(true);
+                    reversed.replace(Some(returning));
+                    reversed.sample(Instant::now() + Duration::from_millis(40));
+                    assert!(reversed.active);
+                    system.commit_presented_viewport(layout, &reversed.state.lock().viewport);
+                    system.select_window(layout, hidden);
+                    let mut interrupted =
+                        scrolling_camera(&system, layout, &native, &control, &handle);
+                    interrupted.presentation.set_corner_parking(true);
+                    interrupted.replace(Some(reversed));
+                    let started = Instant::now();
+                    for millis in [0, 16, 40, 2000] {
+                        interrupted.sample(started + Duration::from_millis(millis));
+                        assert!(
+                            interrupted
+                                .windows
+                                .iter()
+                                .all(|w| { w.frame.origin.y == 0.0 || w.frame.origin.y == 799.0 })
+                        );
+                    }
+                    assert_eq!(
+                        interrupted.windows.iter().find(|w| w.wid == hidden).unwrap().frame,
+                        rect(0.0, 0.0, 1000.0, 800.0)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
