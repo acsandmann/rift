@@ -291,15 +291,22 @@ impl Reactor {
         menu_tx.send(menu_bar::Event::Update(update));
     }
 
-    fn visible_workspace_view(&self, space: SpaceId) -> Vec<(usize, VirtualWorkspaceId, String)> {
+    /// Eligible workspaces with selection indices, optionally only those `owner` owns.
+    fn visible_workspace_view(
+        &self,
+        space: SpaceId,
+        owner: Option<SpaceId>,
+    ) -> Vec<(usize, VirtualWorkspaceId)> {
         let visible: Vec<_> = self.iter_active_spaces().collect();
-        self.layout_manager.layout_engine.workspaces().workspace_view(
-            crate::model::virtual_workspace::WorkspaceContext {
-                space,
-                visible: &visible,
-                navigation: Default::default(),
-            },
-        )
+        let store = self.layout_manager.layout_engine.workspaces();
+        let context = crate::model::virtual_workspace::WorkspaceContext {
+            space,
+            visible: &visible,
+            navigation: Default::default(),
+        };
+        let view = store.workspace_view(context);
+        view.filter(|(_, id)| owner.is_none_or(|owner| store[*id].space == owner))
+            .collect()
     }
 
     /// The workspaces `space` owns. A shared catalog view spans every visible display,
@@ -311,11 +318,11 @@ impl Reactor {
         let show_layout =
             settings.enabled && settings.display_style == WorkspaceDisplayStyle::Layout;
         let active_only = settings.mode == MenuBarDisplayMode::Active;
-        let workspaces = self.visible_workspace_view(space);
+        let workspaces = self.visible_workspace_view(space, Some(space));
         workspaces
             .into_iter()
-            .filter(|(_, id, _)| self.layout_manager.layout_engine.workspaces()[*id].space == space)
-            .map(|(index, id, name)| {
+            .map(|(index, id)| {
+                let name = self.layout_manager.layout_engine.workspaces()[id].name.clone();
                 let space = self.layout_manager.layout_engine.workspaces()[id].space;
                 let is_active =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
@@ -424,15 +431,13 @@ impl Reactor {
         let mut workspaces = Vec::new();
 
         let space_id = space_id_param.or_else(|| self.default_query_space());
-        let mut workspace_list =
-            space_id.map(|space| self.visible_workspace_view(space)).unwrap_or_default();
-        if let Some(owner) = space_id_param {
-            workspace_list.retain(|(_, id, _)| {
-                self.layout_manager.layout_engine.workspaces()[*id].space == owner
-            });
-        }
+        let workspace_list = space_id
+            .map(|space| self.visible_workspace_view(space, space_id_param))
+            .unwrap_or_default();
 
-        for (index, workspace_id, workspace_name) in &workspace_list {
+        for (index, workspace_id) in &workspace_list {
+            let workspace_name =
+                &self.layout_manager.layout_engine.workspaces()[*workspace_id].name;
             let space = self.layout_manager.layout_engine.workspaces()[*workspace_id].space;
             let index = *index;
             let is_active = self.layout_manager.layout_engine.workspaces().active_workspace(space)
@@ -529,21 +534,16 @@ impl Reactor {
             return Vec::new();
         };
 
-        self.visible_workspace_view(space)
+        self.visible_workspace_view(space, space_id_param)
             .into_iter()
-            .filter(|(index, id, _)| {
-                workspace_id.is_none_or(|target| target == *index)
-                    && space_id_param.is_none_or(|owner| {
-                        self.layout_manager.layout_engine.workspaces()[*id].space == owner
-                    })
-            })
-            .map(|(index, id, name)| {
+            .filter(|(index, _)| workspace_id.is_none_or(|target| target == *index))
+            .map(|(index, id)| {
                 let workspaces = self.layout_manager.layout_engine.workspaces();
                 let workspace = &workspaces[id];
                 WorkspaceLayoutData {
                     id: format!("{id:?}"),
                     index,
-                    name,
+                    name: workspace.name.clone(),
                     layout_mode: workspace.layout_mode().to_string(),
                     is_active: workspaces.active_workspace(workspace.space) == Some(id),
                 }

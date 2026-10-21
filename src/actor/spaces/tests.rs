@@ -652,6 +652,41 @@ fn fullscreen_changes_preserve_other_displays_user_context_in_any_enumeration_or
 }
 
 #[test]
+fn fullscreen_space_lifecycle_is_neither_identity_loss_nor_display_churn() {
+    let fullscreen = SpaceId::new(0x400000002);
+    let mut rig = Rig::new();
+    let base = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+    rig.tick(0, Some(base.clone())).unwrap();
+    rig.notifications();
+    let mut entered = base.clone();
+    entered.screens[1].space = Some(fullscreen);
+    entered.inventory.get_mut("right").unwrap().push(fullscreen);
+    let state = rig.tick(0, Some(entered)).unwrap();
+    assert!(state.fullscreen_spaces.contains(&fullscreen));
+    assert_eq!(state.display_space_ids["right"], vec![SpaceId::new(2)]);
+    // Switching away keeps the fullscreen Space alive and still reported.
+    let mut away = base.clone();
+    away.inventory.get_mut("right").unwrap().push(fullscreen);
+    let state = rig.tick(0, Some(away)).unwrap();
+    assert!(
+        state.fullscreen_spaces.contains(&fullscreen),
+        "a hidden fullscreen Space exists"
+    );
+    // Exiting destroys it: that is an application lifecycle, not display churn.
+    let state = rig.tick(0, Some(base)).unwrap();
+    assert!(state.fullscreen_spaces.is_empty());
+    assert!(!state.should_force_refresh_layout && !state.display_set_changed);
+    assert!(state.space_remaps.is_empty());
+    assert!(!rig.actor.state.display_churn_active);
+    assert!(
+        !rig.notifications()
+            .iter()
+            .any(|event| matches!(event, reactor::Event::TopologyInvalidated(_))),
+        "fullscreen exit must not revoke frame authority like a display change"
+    );
+}
+
+#[test]
 fn duplicate_window_listings_use_previous_active_home_then_live_native_home() {
     for (previous, native, expected) in [
         (Some(1), None, 1),

@@ -500,8 +500,9 @@ mod tests {
             ],
             vec![Some(a), Some(b)],
         ));
-        // a owns [0, 2], b owns [1, 3]; a shows 0, b shows 1.
+        // Contiguous allocation: a owns [0, 1], b owns [2, 3]; a shows 1, b shows 2.
         let ids: Vec<_> = r.layout_manager.layout_engine.workspaces().catalog().collect();
+        assert!(r.layout_manager.layout_engine.workspaces_mut().set_active_workspace(a, ids[1]));
         let mut config = Config::default();
         config.settings.layout.scrolling.gestures.enabled = true;
         config.settings.layout.scrolling.gestures.animate = Some(false);
@@ -513,7 +514,7 @@ mod tests {
             .map(|&id| r.layout_manager.layout_engine.workspaces()[id].space)
             .collect();
         let before = r.layout_update_count;
-        assert!(r.gesture_workspace(&context, true), "1 is already visible on b");
+        assert!(r.gesture_workspace(&context, true), "2 is already visible on b");
         assert_eq!(r.space_state.command_space, Some(b));
         assert_eq!(
             r.layout_update_count, before,
@@ -522,13 +523,13 @@ mod tests {
         // Keep the original gesture context deliberately: navigation must follow
         // the newly focused display, not the old origin.
         for (next, owner, index) in [
-            (true, a, 2),
             (true, b, 3),
             (true, a, 0),
-            (false, b, 3),
-            (false, a, 2),
-            (false, b, 1),
+            (true, a, 1),
             (false, a, 0),
+            (false, b, 3),
+            (false, b, 2),
+            (false, a, 1),
         ] {
             assert!(r.gesture_workspace(&context, next));
             assert_eq!(r.space_state.command_space, Some(owner));

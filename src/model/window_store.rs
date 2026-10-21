@@ -72,6 +72,8 @@ pub struct NativeFullscreenRecord {
     pub last_known_user_space: Option<SpaceId>,
     pub fullscreen_space: SpaceId,
     pub transition: NativeFullscreenTransition,
+    /// An accepted inventory listed `fullscreen_space`; only then is its absence an exit.
+    pub space_observed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -877,6 +879,8 @@ impl WindowStore {
                 .or_else(|| existing.and_then(|record| record.last_known_user_space)),
             fullscreen_space,
             transition,
+            space_observed: existing
+                .is_some_and(|r| r.space_observed && r.fullscreen_space == fullscreen_space),
         };
         self.windows.entry(window_id).or_default();
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
@@ -955,6 +959,22 @@ impl WindowStore {
         &self,
     ) -> impl Iterator<Item = NativeFullscreenRecord> + '_ {
         self.native_fullscreen_records_by_original_window.values().copied()
+    }
+
+    /// Returns records whose fullscreen Space was listed before and is gone now.
+    pub(crate) fn note_fullscreen_spaces(
+        &mut self,
+        existing: &HashSet<SpaceId>,
+    ) -> Vec<NativeFullscreenRecord> {
+        let records = self.native_fullscreen_records_by_original_window.values_mut();
+        records
+            .filter_map(|record| {
+                let present = existing.contains(&record.fullscreen_space);
+                let exited = record.space_observed && !present;
+                record.space_observed |= present;
+                exited.then_some(*record)
+            })
+            .collect()
     }
 
     pub fn restore_window_from_native_fullscreen(
@@ -1284,9 +1304,15 @@ impl WindowStore {
         if let Some(operation) = record.pending_transfer.as_mut()
             && operation.requested_space == target
         {
+            use crate::sys::geometry::SameAs;
             let resumed = available && operation.status == TransferStatus::Unavailable;
-            let new_frame = operation.requested_frame.is_none() && frame.is_some();
-            operation.requested_frame = operation.requested_frame.or(frame);
+            // Newer geometry supersedes stale frames without resetting the budget.
+            let new_frame = frame.is_some_and(|frame| {
+                operation.requested_frame.is_none_or(|requested| !requested.same_as(frame))
+            });
+            if new_frame {
+                operation.requested_frame = frame;
+            }
             if !available {
                 operation.status = TransferStatus::Unavailable;
             } else if resumed {
@@ -1327,6 +1353,11 @@ impl WindowStore {
         available: bool,
     ) -> Option<PendingWindowTransfer> {
         let available = available && self.can_place_window(window);
+        let observed = self
+            .record(window)
+            .and_then(|record| self.get_window_server_info(record.window_server_id?))
+            .filter(|info| info.layer == 0)
+            .map(|info| info.frame);
         let record = self.windows.get_mut(&window)?;
         let frame = record.frame();
         let operation = record.pending_transfer.as_mut()?;
@@ -1348,11 +1379,25 @@ impl WindowStore {
         }
         operation.last_revision = Some(revision);
         if operation.attempts >= 2 {
+            // Stop claiming the window reached the target.
             operation.status = TransferStatus::Deferred;
+            if let (Some(state), Some(observed)) = (record.state.as_mut(), observed) {
+                state.frame_monotonic = observed;
+            }
             return None;
         }
         operation.attempts += 1;
         Some(*operation)
+    }
+
+    /// A new display set or Space identity is a new chance; unchanged topology never is.
+    pub(crate) fn resume_deferred_transfers(&mut self) {
+        for operation in self.windows.values_mut().filter_map(|r| r.pending_transfer.as_mut()) {
+            if operation.status == TransferStatus::Deferred {
+                operation.status = TransferStatus::Pending;
+                operation.attempts = 0;
+            }
+        }
     }
 
     /// Only an accepted native membership snapshot can complete a transfer.

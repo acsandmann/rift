@@ -509,9 +509,12 @@ impl SpacesActor {
         inventory: HashMap<String, Vec<SpaceId>>,
     ) -> ForwardedSpaceState {
         let previous_screens = self.state.screens.clone();
+        // Every existing fullscreen Space, shown or not: its disappearance is the
+        // reactor's evidence that an application left native fullscreen.
         let fullscreen_spaces: HashSet<SpaceId> = screens
             .iter()
             .filter_map(|screen| screen.space)
+            .chain(inventory.values().flatten().copied())
             .filter(|space| Self::is_fullscreen_space(*space))
             .collect();
         let mut screens = screens;
@@ -591,6 +594,15 @@ impl SpacesActor {
                     })
                 })
             });
+        // Fullscreen Spaces come and go with applications. They are not desktops a
+        // display owns, so their destruction is neither identity loss nor churn.
+        let inventory: HashMap<_, Vec<_>> = inventory
+            .into_iter()
+            .map(|(display, spaces)| {
+                let spaces = spaces.into_iter().filter(|space| !fullscreen_spaces.contains(space));
+                (display, spaces.collect())
+            })
+            .collect();
         let (membership, membership_complete) = self.visible_window_spaces_for_screens(&screens);
         self.state.visible_window_spaces = membership;
         self.state.screens = screens.clone();

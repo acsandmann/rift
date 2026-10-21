@@ -133,8 +133,16 @@ pub fn handle_window_server_destroyed(
     } = observations;
     let mut outcome = EventOutcome::default();
     if matches!(kind, SpaceEventKind::Fullscreen) {
-        if let Some(wid) =
-            state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, None)
+        // Leaving a fullscreen Space never starts a suspension. Only a window whose
+        // entry was missed (e.g. fullscreen before launch) is recorded here; one
+        // already tracked or already back on a user Space is left alone, whatever
+        // order the notifications arrive in.
+        let returned = state.windows.is_window_visible(wsid)
+            && state.windows.window_server_space(wsid).is_some_and(|space| space != sid);
+        if !returned
+            && !state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
+            && let Some(wid) =
+                state.windows.observe_native_fullscreen(wsid, sid, last_known_user_space, None)
         {
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
         }

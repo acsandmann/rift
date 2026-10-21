@@ -54,6 +54,42 @@ pub(crate) struct WorkspaceTarget {
     pub space: SpaceId,
 }
 
+/// Owners for a fresh shared catalog over `displays` in physical order. Pins win;
+/// unpinned positions fill displays left to right as balanced contiguous runs, at
+/// least one each, appending empty workspaces rather than stealing a pinned one.
+fn distribute(displays: usize, pins: Vec<Option<usize>>) -> Vec<usize> {
+    let mut pinned = vec![0; displays];
+    pins.iter().flatten().for_each(|&d| pinned[d] += 1);
+    let mut owners = pins;
+    let bare = pinned.iter().filter(|&&n| n == 0).count();
+    while owners.iter().filter(|o| o.is_none()).count() < bare && owners.len() < MAX_WORKSPACES {
+        owners.push(None);
+    }
+    let total = owners.len();
+    let floor = |d: usize| usize::from(pinned[d] == 0);
+    let mut quota: Vec<_> = (0..displays)
+        .map(|d| {
+            (total / displays + usize::from(d < total % displays))
+                .saturating_sub(pinned[d])
+                .max(floor(d))
+        })
+        .collect();
+    let free = owners.iter().filter(|o| o.is_none()).count();
+    // Trim the most loaded display (rightmost on ties) until the quotas fit.
+    while quota.iter().sum::<usize>() > free
+        && let Some(d) = (0..displays)
+            .filter(|&d| quota[d] > floor(d))
+            .max_by_key(|&d| (pinned[d] + quota[d], d))
+    {
+        quota[d] -= 1;
+    }
+    let mut next = (0..displays).flat_map(|d| std::iter::repeat_n(d, quota[d]));
+    owners
+        .into_iter()
+        .map(|o| o.or_else(|| next.next()).unwrap_or(displays - 1))
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceTransferReason {
     Explicit,
@@ -358,8 +394,17 @@ impl WorkspaceStore {
     }
 
     fn eligible(&self, context: WorkspaceContext<'_>, id: VirtualWorkspaceId) -> bool {
+        let space = self[id].space;
         self.settings.display_mode != DisplayMode::Shared
-            || context.visible.contains(&self[id].space)
+            || context.visible.contains(&space)
+            || (context.visible.is_empty() && space == context.space)
+    }
+
+    /// Navigation history, validated like any target. Unreachable history is kept.
+    pub(crate) fn previous_target(&self, context: WorkspaceContext<'_>) -> Option<WorkspaceTarget> {
+        let id = self.last_workspace(context.space)?;
+        let space = self.workspaces.get(id)?.space;
+        self.eligible(context, id).then_some(WorkspaceTarget { id, space })
     }
 
     pub(crate) fn resolve_workspace<'a>(
@@ -389,15 +434,13 @@ impl WorkspaceStore {
         self.scope_ids(space).position(|candidate| candidate == id)
     }
 
-    pub(crate) fn workspace_view(
-        &self,
-        context: WorkspaceContext<'_>,
-    ) -> Vec<(usize, VirtualWorkspaceId, String)> {
+    pub(crate) fn workspace_view<'a>(
+        &'a self,
+        context: WorkspaceContext<'a>,
+    ) -> impl Iterator<Item = (usize, VirtualWorkspaceId)> + 'a {
         self.scope_ids(context.space)
             .enumerate()
-            .filter(|(_, id)| self.eligible(context, *id))
-            .map(|(index, id)| (index, id, self[id].name.clone()))
-            .collect()
+            .filter(move |(_, id)| self.eligible(context, *id))
     }
 
     pub(crate) fn catalog(&self) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
@@ -719,18 +762,22 @@ impl WorkspaceStore {
         }
         if self.settings.display_mode == DisplayMode::Shared && self.order.is_empty() {
             let count = self.settings.default_workspace_count.max(spaces.len()).min(MAX_WORKSPACES);
-            for index in 0..count {
-                let name = self.default_workspace_name(index);
-                let space = self
-                    .settings
-                    .workspace_rules
-                    .iter()
-                    .rev()
-                    .filter(|rule| selector_matches(&rule.workspace, index, &name))
-                    .find_map(|rule| rule.display.as_deref())
-                    .and_then(&rule_space)
-                    .filter(|space| spaces.contains(space))
-                    .unwrap_or(spaces[index % spaces.len()]);
+            let pins: Vec<_> = (0..count)
+                .map(|index| {
+                    let name = self.default_workspace_name(index);
+                    let space = self
+                        .settings
+                        .workspace_rules
+                        .iter()
+                        .rev()
+                        .filter(|rule| selector_matches(&rule.workspace, index, &name))
+                        .find_map(|rule| rule.display.as_deref())
+                        .and_then(&rule_space)?;
+                    spaces.iter().position(|candidate| *candidate == space)
+                })
+                .collect();
+            for (index, owner) in distribute(spaces.len(), pins).into_iter().enumerate() {
+                let space = spaces[owner];
                 let id = self.append_default_workspace(space);
                 if index == self.settings.default_workspace
                     || !self.active_workspace_per_space.contains_key(&space)
@@ -1644,7 +1691,7 @@ mod tests {
             let catalog: Vec<_> = store.catalog().collect();
             assert_eq!(catalog.len(), count.max(2));
             for (index, &id) in catalog.iter().enumerate() {
-                assert_eq!(store[id].space, if index % 2 == 0 { a } else { b });
+                assert_eq!(store[id].space, if index < count.max(2) / 2 { a } else { b });
             }
             store.ensure_visible_spaces(&[a, b, c], |_| None);
             assert_eq!(store.workspace_ids(c).len(), 1);
@@ -1652,6 +1699,32 @@ mod tests {
             store.ensure_visible_spaces(&[a, b, c], |_| None);
             assert_eq!(store.catalog().count(), catalog.len() + 1);
             store.validate_persisted_topology().unwrap();
+        }
+    }
+
+    #[test]
+    fn initial_distribution_is_contiguous_balanced_and_pins_win() {
+        // (displays, workspaces, 1-based pins (workspace, display)) -> owner per workspace.
+        let cases: &[(usize, usize, &[(usize, usize)], &[usize])] = &[
+            (2, 6, &[], &[0, 0, 0, 1, 1, 1]),
+            (3, 9, &[], &[0, 0, 0, 1, 1, 1, 2, 2, 2]),
+            (2, 6, &[(2, 1)], &[0, 1, 0, 0, 1, 1]),
+            (3, 6, &[(1, 2)], &[2, 0, 0, 1, 1, 2]),
+            (2, 6, &[(1, 0), (2, 0), (3, 0), (4, 0)], &[0, 0, 0, 0, 1, 1]),
+            (2, 4, &[(1, 0), (2, 1), (3, 0), (4, 1)], &[0, 1, 0, 1]),
+            // Everything pinned to one display: append rather than steal.
+            (3, 2, &[(1, 0), (2, 0)], &[0, 0, 1, 2]),
+        ];
+        for &(displays, count, pinned, expected) in cases {
+            let mut pins = vec![None; count];
+            for &(workspace, display) in pinned {
+                pins[workspace - 1] = Some(display);
+            }
+            assert_eq!(
+                distribute(displays, pins),
+                expected,
+                "{displays} displays {pinned:?}"
+            );
         }
     }
 
@@ -1761,11 +1834,7 @@ mod tests {
             b[0].0
         );
         assert_eq!(
-            store
-                .workspace_view(switched)
-                .iter()
-                .map(|(index, _, _)| *index)
-                .collect::<Vec<_>>(),
+            store.workspace_view(switched).map(|(index, _)| index).collect::<Vec<_>>(),
             [2, 3, 4]
         );
         assert_eq!(store.active_workspace(a1), Some(a[0].0));

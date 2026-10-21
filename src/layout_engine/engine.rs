@@ -891,22 +891,30 @@ impl LayoutEngine {
     fn switch_to_workspace_id(
         &mut self,
         window_store: &WindowStore,
-        command_space: SpaceId,
+        context: WorkspaceContext<'_>,
         id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
-        let current = self.workspaces.active_workspace(command_space);
-        if current == Some(id) {
+        let command_space = context.space;
+        if self.workspaces.active_workspace(command_space) == Some(id) {
             return if self.workspaces.settings.workspace_auto_back_and_forth {
-                self.workspaces
-                    .last_workspace(command_space)
-                    .map(|last| self.navigate_to_workspace(window_store, command_space, last, None))
-                    .unwrap_or_default()
+                self.switch_to_previous_workspace(window_store, context)
             } else {
                 EventResponse::default()
             };
         }
         self.navigate_to_workspace(window_store, command_space, id, preferred_focus_window)
+    }
+
+    fn switch_to_previous_workspace(
+        &mut self,
+        window_store: &WindowStore,
+        context: WorkspaceContext<'_>,
+    ) -> EventResponse {
+        self.workspaces
+            .previous_target(context)
+            .map(|target| self.navigate_to_workspace(window_store, context.space, target.id, None))
+            .unwrap_or_default()
     }
 
     fn navigate_to_workspace(
@@ -1687,6 +1695,18 @@ impl LayoutEngine {
     }
 
     pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
+        // Runs on every arrangement; an unchanged mapping is a no-op.
+        if let Some(uuid) = display_uuid.as_deref()
+            && self.display_uuid_for_space(space) == Some(uuid)
+            && self.display_last_space.get(uuid) == Some(&space)
+            && !self
+                .workspaces
+                .workspaces
+                .values()
+                .any(|ws| ws.space == space && ws.preferred_display.is_none())
+        {
+            return;
+        }
         if let Some(uuid) = display_uuid {
             for workspace in self
                 .workspaces
@@ -2963,7 +2983,11 @@ impl LayoutEngine {
             positions.insert(wid, hidden_rect);
         }
 
-        positions.into_iter().collect()
+        // Membership survives native fullscreen; geometry never targets it.
+        positions
+            .into_iter()
+            .filter(|(wid, _)| window_store.native_fullscreen_record_for_window(*wid).is_none())
+            .collect()
     }
 
     pub fn collect_group_containers_in_selection_path(
@@ -3071,7 +3095,7 @@ impl LayoutEngine {
                 );
                 // Shared targets on another display are shown there and focus follows.
                 if let Some(target) = target.filter(|&target| target != current) {
-                    return self.switch_to_workspace_id(window_store, space, target, None);
+                    return self.switch_to_workspace_id(window_store, context, target, None);
                 }
                 EventResponse::default()
             }
@@ -3082,7 +3106,7 @@ impl LayoutEngine {
                 else {
                     return EventResponse::default();
                 };
-                self.switch_to_workspace_id(window_store, space, target.id, None)
+                self.switch_to_workspace_id(window_store, context, target.id, None)
             }
             LayoutCommand::MoveWindowToWorkspace {
                 workspace,
@@ -3251,10 +3275,7 @@ impl LayoutEngine {
                 }
             },
             LayoutCommand::SwitchToLastWorkspace => {
-                if let Some(last_workspace) = self.workspaces.last_workspace(space) {
-                    return self.navigate_to_workspace(window_store, space, last_workspace, None);
-                }
-                EventResponse::default()
+                self.switch_to_previous_workspace(window_store, context)
             }
             LayoutCommand::SetWorkspaceLayout { workspace, mode } => {
                 let workspace_id = if let Some(index) = workspace {
