@@ -269,17 +269,13 @@ impl Reactor {
                 .then_with(|| a.0.origin.y.total_cmp(&b.0.origin.y))
                 .then_with(|| a.1.cmp(&b.1))
         });
-        let shared = (self.config.virtual_workspaces.display_mode
-            == crate::common::config::DisplayMode::Shared)
-            .then(|| screens.first().map(|(_, _, space)| self.menu_workspaces(*space)))
-            .flatten();
         let displays = screens
             .into_iter()
             .map(|(_, display_uuid, space)| menu_bar::DisplayWorkspaces {
                 display_uuid,
                 space,
                 is_active_context: Some(space) == active_space,
-                workspaces: shared.clone().unwrap_or_else(|| self.menu_workspaces(space)),
+                workspaces: self.menu_workspaces(space),
             })
             .collect();
 
@@ -306,6 +302,9 @@ impl Reactor {
         )
     }
 
+    /// The workspaces `space` owns. A shared catalog view spans every visible display,
+    /// but each display's menu entry lists only its own, or the others would repeat.
+    /// Indices stay catalog positions, which is what switching resolves them against.
     fn menu_workspaces(&mut self, space: SpaceId) -> Vec<menu_bar::Workspace> {
         use crate::common::config::{MenuBarDisplayMode, WorkspaceDisplayStyle};
         let settings = &self.config.settings.ui.menu_bar;
@@ -315,6 +314,7 @@ impl Reactor {
         let workspaces = self.visible_workspace_view(space);
         workspaces
             .into_iter()
+            .filter(|(_, id, _)| self.layout_manager.layout_engine.workspaces()[*id].space == space)
             .map(|(index, id, name)| {
                 let space = self.layout_manager.layout_engine.workspaces()[id].space;
                 let is_active =
