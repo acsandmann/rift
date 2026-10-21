@@ -25,6 +25,7 @@ pub struct Workspace {
     pub is_active: bool,
     pub window_count: usize,
     pub windows: Vec<CGRect>,
+    pub has_fullscreen: bool,
 }
 
 /// Menu-bar-only projection; workspace indices remain local to each space.
@@ -385,6 +386,7 @@ pub(crate) fn sig(update: &Update) -> u64 {
             workspace.layout_mode.hash(&mut hash);
             workspace.is_active.hash(&mut hash);
             workspace.window_count.hash(&mut hash);
+            workspace.has_fullscreen.hash(&mut hash);
             workspace.windows.len().hash(&mut hash);
             for window in &workspace.windows {
                 let frame = *window;
@@ -414,6 +416,7 @@ mod tests {
             is_active: true,
             window_count: 1,
             windows: Vec::new(),
+            has_fullscreen: false,
         }
     }
 
@@ -465,5 +468,14 @@ mod tests {
         let after = sig(&update(changed));
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn signature_changes_when_workspace_fullscreen_changes() {
+        let base = vec![workspace("bsp")];
+        let mut changed = base.clone();
+        changed[0].has_fullscreen = true;
+
+        assert_ne!(sig(&update(base)), sig(&update(changed)));
     }
 }

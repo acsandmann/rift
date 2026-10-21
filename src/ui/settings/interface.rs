@@ -60,7 +60,7 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     );
     let appearance = f.fields(
         Section::new(&ui, "Workspaces"),
-        &["mode", "active_label", "display_style"],
+        &["mode", "active_label", "display_style", "show_fullscreen_indicator"],
         |s| &s.settings.ui.menu_bar,
         |s| &mut s.settings.ui.menu_bar,
     );
