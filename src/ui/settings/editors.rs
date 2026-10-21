@@ -256,7 +256,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     )
 }
 
-fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
+pub(super) fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let name = f.text(
         "Name",
@@ -293,7 +293,179 @@ fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         |s| s.settings.layout.mode,
         move |s, mode| set_workspace_layout(s, i, mode),
     );
-    f.finish(Section::new(&ui, "").row(name).row(layout))
+    let display = workspace_display_row(&mut f, model, i);
+    f.finish(Section::new(&ui, "").row(name).row(layout).row(display))
+}
+
+/// Pin a workspace to a connected display, or enter any display's UUID or name, the
+/// way per-display overrides accept displays that are not connected. The row is
+/// active only while displays share workspaces, since that is when the rule applies.
+fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> SettingsRow {
+    const ENTER: &str = "Enter Display…";
+    const HINT: &str = "Press Return to set. Find displays with rift-cli query displays.";
+    const ACTIVE: &str = "Active: Display workspace mode is Shared.";
+    const INACTIVE: &str = "Inactive: set Display workspace mode to Shared to use this.";
+    struct State {
+        model: Weak<Model>,
+        popup: std::cell::OnceCell<Rc<Popup>>,
+        field: Rc<TextField>,
+        status: Caption,
+        message: Rc<ValidationMessage>,
+        /// Popup choices before Enter Display…; `None` is Any display.
+        choices: RefCell<Vec<Option<String>>>,
+        /// The popup index of the saved choice.
+        saved: Cell<usize>,
+        active: Cell<bool>,
+    }
+    impl State {
+        fn set(&self, i: usize, display: Option<String>) {
+            Model::submit(
+                &self.model,
+                Box::new(move |s| {
+                    set_workspace_display(s, i, display);
+                    Ok(())
+                }),
+                Rc::downgrade(&self.message),
+            );
+        }
+
+        /// Show or hide the entry field; the popup always shows the saved choice.
+        fn entering(&self, open: bool) {
+            self.field.set_hidden(!open);
+            if open {
+                self.field.focus();
+            } else {
+                self.field.set_value("");
+            }
+            self.show_state();
+        }
+
+        fn show_state(&self) {
+            if let Some(popup) = self.popup.get() {
+                popup.set_selected(self.saved.get());
+            }
+            let open = !self.field.ns_view().isHidden();
+            self.status.set_text(match (open, self.active.get()) {
+                (true, _) => HINT,
+                (false, true) => ACTIVE,
+                (false, false) => INACTIVE,
+            });
+        }
+
+        /// Return or leaving the field sets a display; an empty field just closes it.
+        fn submit(&self, i: usize, value: &str) {
+            let value = value.trim().to_owned();
+            if self.field.ns_view().isHidden() {
+                return;
+            }
+            self.entering(false);
+            if !value.is_empty() {
+                self.set(i, Some(value));
+            }
+        }
+
+        fn refresh(&self, source: &ConfigSource, i: usize) {
+            let (Some(model), Some(popup)) = (self.model.upgrade(), self.popup.get()) else {
+                return;
+            };
+            let displays = model.env.displays.borrow();
+            let saved = workspace_display(source, i);
+            let mut choices = vec![None];
+            choices.extend(displays.iter().map(|d| Some(d.display_uuid.clone())));
+            let connected = choices.len();
+            // A display entered by name, or one that is not connected, stays selectable.
+            if saved.as_ref().is_some_and(|id| !choices.contains(&Some(id.clone()))) {
+                choices.push(saved.clone());
+            }
+            let title = |choice: &Option<String>| {
+                let Some(id) = choice else {
+                    return "Any display".to_owned();
+                };
+                display_name(&displays, id)
+                    .or_else(|| {
+                        displays.iter().any(|d| d.name.as_deref() == Some(id)).then(|| id.clone())
+                    })
+                    .unwrap_or_else(|| {
+                        // Shorten UUIDs as the per-display overrides do, so the popup
+                        // keeps the sheet's width.
+                        let short = if id.len() > 12 {
+                            format!("Display {}…", &id[..8])
+                        } else {
+                            id.clone()
+                        };
+                        format!("{short} (not connected)")
+                    })
+            };
+            popup.set_sections([
+                vec![title(&None)],
+                choices[1..connected].iter().map(title).collect(),
+                choices[connected..].iter().map(title).collect(),
+                vec![ENTER.into()],
+            ]);
+            popup.set_item_badge(0, Some("Default"));
+            self.saved.set(choices.iter().position(|c| *c == saved).unwrap_or(0));
+            *self.choices.borrow_mut() = choices;
+            let active = source.virtual_workspaces.display_mode == DisplayMode::Shared;
+            self.active.set(active);
+            popup.set_enabled(active);
+            if !active {
+                self.entering(false);
+            }
+            self.show_state();
+        }
+    }
+
+    let ui = f.ui;
+    let state = Rc::new_cyclic(|weak: &Weak<State>| {
+        let owner = weak.clone();
+        let field = Rc::new(
+            TextField::new(&ui).placeholder("Display UUID or name").on_commit(move |value| {
+                if let Some(state) = owner.upgrade() {
+                    state.submit(i, &value);
+                }
+            }),
+        );
+        field.accessibility_label("Display UUID or name");
+        field.set_hidden(true);
+        let status = Caption::new(&ui, "");
+        status.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
+        State {
+            model: Rc::downgrade(model),
+            popup: std::cell::OnceCell::new(),
+            field,
+            status,
+            message: Rc::new(ValidationMessage::new(&ui)),
+            choices: RefCell::default(),
+            saved: Cell::new(0),
+            active: Cell::new(false),
+        }
+    });
+    let owner = Rc::downgrade(&state);
+    let popup = Rc::new(Popup::new(&ui).on_change(move |index| {
+        let Some(state) = owner.upgrade() else { return };
+        let choice = state.choices.borrow().get(index).cloned();
+        match choice {
+            Some(display) => state.set(i, display),
+            None => state.entering(true),
+        }
+    }));
+    popup.accessibility_label("Display");
+    _ = state.popup.set(popup.clone());
+
+    let weak = Rc::downgrade(&state);
+    f.sync.push(Box::new(move |source| {
+        if let Some(state) = weak.upgrade() {
+            state.refresh(source, i);
+        }
+    }));
+    let control = VStack::new(&ui)
+        .spacing(6.0)
+        .push(HStack::new(&ui).push(Spacer::new(&ui)).push(popup.clone()))
+        .push(state.field.clone())
+        .push(objc2::Message::retain(state.status.ns_view()));
+    let message = state.message.clone();
+    SettingsRow::with_validation(&ui, "Display", control.keep(state), message)
+        .label_baseline(popup.ns_view())
 }
 
 fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) -> bool {
@@ -319,6 +491,35 @@ pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<
             display: None,
         });
     }
+}
+
+/// Pin workspace `i` to a display, or let it move freely with `None`.
+pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Option<String>) {
+    let name = s.virtual_workspaces.workspace_names.get(i).cloned();
+    s.virtual_workspaces.workspace_rules.retain_mut(|r| {
+        if selector_matches(&r.workspace, i, name.as_deref()) {
+            r.display = None;
+        }
+        r.layout.is_some() || r.display.is_some()
+    });
+    if display.is_some() {
+        s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Index(i),
+            layout: None,
+            display,
+        });
+    }
+}
+
+/// The display workspace `i` is pinned to, if any. Later rules win, as at runtime.
+pub(super) fn workspace_display(s: &ConfigSource, i: usize) -> Option<String> {
+    let name = s.virtual_workspaces.workspace_names.get(i).map(String::as_str);
+    s.virtual_workspaces
+        .workspace_rules
+        .iter()
+        .rev()
+        .filter(|r| selector_matches(&r.workspace, i, name))
+        .find_map(|r| r.display.clone())
 }
 
 /// The layout workspace `i` sets for itself, if any.
