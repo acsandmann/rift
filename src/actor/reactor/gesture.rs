@@ -889,7 +889,7 @@ mod tests {
                         });
                     }
                     Request::EndWindowAnimation(wid, _)
-                    | Request::CancelWindowAnimation(wid, _) => {
+                    | Request::CancelWindowAnimation(wid, _, _) => {
                         assert!(
                             !hidden.contains(&wid),
                             "terminal viewport frames must precede workspace hiding"

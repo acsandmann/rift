@@ -7562,47 +7562,27 @@ fn sample_superseded_before_it_is_handled_keeps_its_remap_for_the_next_sample() 
 }
 
 #[test]
-fn inconclusive_membership_defers_only_for_the_bounded_resample_budget() {
+fn inconclusive_membership_never_becomes_authoritative_by_retry_exhaustion() {
     use crate::actor::spaces::REFRESH_MAX_RETRIES;
-    let (mut reactor, wid, _wsid, origin, _, frame) = reactor_with_window_on_space1();
+    let (mut reactor, wid, wsid, origin, _, frame) = reactor_with_window_on_space1();
     let workspace = reactor.test_workspace_for_window(origin, wid).unwrap();
     let target = SpaceId::new(39);
-    // The display's Space id vanished with no remap and every membership query fails.
-    let sample = || {
+    for _ in 0..REFRESH_MAX_RETRIES * 2 {
         let mut sample =
             forwarded_space_state(make_screen_snapshots(vec![frame], vec![Some(target)]));
         sample.display_set_changed = true;
         sample.should_force_refresh_layout = true;
-        sample
-    };
-
-    for resample in 1..REFRESH_MAX_RETRIES {
-        reactor.handle_event(Event::SpaceStateChanged(sample()));
-        assert!(
-            reactor.pending_space_change_manager.pending_space_change.is_some(),
-            "resample {resample} must still be deferred"
-        );
-        assert!(reactor.refreshes_blocked(), "resample {resample}");
-        assert_ne!(reactor.workspace_command_space(), Some(target));
+        reactor.handle_event(Event::SpaceStateChanged(sample));
+        assert!(reactor.refreshes_blocked());
+        assert_eq!(reactor.test_workspace_for_window(origin, wid), Some(workspace));
     }
-
-    let last = sample();
-    let revision = last.revision;
-    reactor.handle_event(Event::SpaceStateChanged(last));
-
-    assert!(reactor.pending_space_change_manager.pending_space_change.is_none());
-    assert!(
-        !reactor.refreshes_blocked(),
-        "giving up must release the write revocation"
-    );
-    assert_eq!(reactor.space_state.revision, revision);
-    assert_eq!(reactor.workspace_command_space(), Some(target));
-    assert_eq!(reactor.pending_space_change_manager.inconclusive_samples, 0);
-    assert_eq!(
-        reactor.test_workspace_for_window(origin, wid),
-        Some(workspace),
-        "a window the inconclusive sample could not place keeps its assignment"
-    );
+    let mut complete =
+        forwarded_space_state(make_screen_snapshots(vec![frame], vec![Some(target)]));
+    complete.membership_complete = true;
+    complete.active_window_spaces.insert(wsid, target);
+    reactor.handle_event(Event::SpaceStateChanged(complete));
+    assert!(!reactor.refreshes_blocked());
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(target));
 }
 
 #[test]

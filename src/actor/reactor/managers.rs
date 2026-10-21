@@ -561,8 +561,6 @@ impl LayoutManager {
 /// Manages pending space changes
 pub struct PendingSpaceChangeManager {
     pub pending_space_change: Option<ForwardedSpaceState>,
-    /// Consecutive samples held back for inconclusive membership since the last commit.
-    pub inconclusive_samples: u8,
 }
 
 #[cfg(test)]

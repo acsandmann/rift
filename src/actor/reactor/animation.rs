@@ -2079,7 +2079,7 @@ mod tests {
         };
         manager.handle_message(Message::Camera(Box::new(camera)));
         assert!(transition_state(&manager).is_none());
-        let Request::CancelWindowAnimation(_, through) = rx.try_recv().unwrap().1 else {
+        let Request::CancelWindowAnimation(_, through, _) = rx.try_recv().unwrap().1 else {
             panic!("cancel");
         };
         assert!(
@@ -2126,7 +2126,7 @@ mod tests {
             panic!("wake");
         };
         manager.handle_message(Message::Stop(vec![wid]));
-        let Request::CancelWindowAnimation(_, through) = rx.try_recv().unwrap().1 else {
+        let Request::CancelWindowAnimation(_, through, _) = rx.try_recv().unwrap().1 else {
             panic!("cancel");
         };
         let dragged = rect(12.0, 34.0, 10.0, 10.0);
@@ -2411,7 +2411,7 @@ mod tests {
         runner.join().unwrap();
         let requests = collect_requests(&mut rx);
         assert!(requests.iter().any(
-            |r| matches!(r, Observed::Request(Request::CancelWindowAnimation(id, _)) if *id == wid)
+            |r| matches!(r, Observed::Request(Request::CancelWindowAnimation(id, _, _)) if *id == wid)
         ));
         assert!(
             requests.iter().all(|r| matches!(

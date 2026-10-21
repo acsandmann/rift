@@ -310,6 +310,11 @@ pub struct AppThreadHandle {
 pub struct FrameAuthority(Option<(crate::actor::spaces::TopologyGuard, u64)>);
 
 impl FrameAuthority {
+    fn is_older_than(&self, other: &Self) -> bool {
+        self.0.as_ref().map(|(_, revision)| *revision)
+            < other.0.as_ref().map(|(_, revision)| *revision)
+    }
+
     pub(crate) fn is_current(&self) -> bool {
         self.0
             .as_ref()
@@ -501,13 +506,19 @@ impl AppThreadHandle {
 
     pub(crate) fn cancel_interactive_frame(&self, wid: WindowId) -> u64 {
         let mut frames = self.interactive_frames.0.lock().unwrap();
-        frames.latest.remove(&wid);
+        if self.frame_authority.is_current() {
+            frames.latest.remove(&wid);
+        }
         frames.sequence
     }
 
     pub(crate) fn cancel_window_animation(&self, wid: WindowId) {
         let through = self.cancel_interactive_frame(wid);
-        let _ = self.send(Request::CancelWindowAnimation(wid, through));
+        let _ = self.send(Request::CancelWindowAnimation(
+            wid,
+            through,
+            self.frame_authority.clone(),
+        ));
     }
 
     /// Publish a high-frequency interactive frame without growing the actor queue.
@@ -603,7 +614,7 @@ pub enum Request {
 
     BeginWindowAnimation(WindowId, FrameAuthority),
     EndWindowAnimation(WindowId, FrameAuthority),
-    CancelWindowAnimation(WindowId, u64),
+    CancelWindowAnimation(WindowId, u64, FrameAuthority),
 
     /// Raise the windows within a single space, in the given order. All windows must be
     /// in the same space, or they will not be raised correctly.
@@ -625,11 +636,16 @@ impl Request {
         let authority = match &self {
             Self::SetWindowFrames(_, _, _, _, authority)
             | Self::BeginWindowAnimation(_, authority)
-            | Self::EndWindowAnimation(_, authority) => authority.clone(),
+            | Self::EndWindowAnimation(_, authority)
+            | Self::CancelWindowAnimation(_, _, authority) => authority.clone(),
             _ => FrameAuthority::default(),
         };
-        (authority.is_current() || matches!(self, Self::EndWindowAnimation(..)))
-            .then_some((self, authority))
+        (authority.is_current()
+            || matches!(
+                self,
+                Self::EndWindowAnimation(..) | Self::CancelWindowAnimation(..)
+            ))
+        .then_some((self, authority))
     }
 
     pub fn set_window_frame(wid: WindowId, frame: CGRect, txid: TransactionId, eui: bool) -> Self {
@@ -1454,28 +1470,36 @@ impl State {
             request @ (Request::EndWindowAnimation(_, _) | Request::CancelWindowAnimation(..)) => {
                 let (wid, through) = match request {
                     Request::EndWindowAnimation(wid, _) => (wid, None),
-                    Request::CancelWindowAnimation(wid, through) => (wid, Some(through)),
+                    Request::CancelWindowAnimation(wid, through, _) => (wid, Some(through)),
                     _ => unreachable!(),
                 };
                 // An old presenter may retire after a replacement has begun.
                 // It can clean up its own lease, never the replacement's lease.
-                if through.is_none()
-                    && self.window_mut(wid).is_ok_and(|window| {
-                        authority.0.as_ref().map(|(_, revision)| *revision)
-                            < window.animation_authority.0.as_ref().map(|(_, revision)| *revision)
-                    })
+                if self
+                    .window_mut(wid)
+                    .is_ok_and(|window| authority.is_older_than(&window.animation_authority))
                 {
                     return Ok(false);
                 }
                 if let Some(through) = through {
-                    if pending_frames.get(&wid).is_some_and(|frame| frame.sequence <= through) {
+                    if pending_frames.get(&wid).is_some_and(|frame| {
+                        frame.sequence <= through && !authority.is_older_than(&frame.authority)
+                    }) {
                         pending_frames.remove(&wid);
                     }
-                    if let Ok(window) = self.window_mut(wid) {
+                    if let Ok(window) = self.window_mut(wid)
+                        && window
+                            .last_animation_frame
+                            .as_ref()
+                            .is_some_and(|(_, owner)| !authority.is_older_than(owner))
+                    {
                         window.last_animation_frame = None;
                     }
                 }
                 if through.is_none()
+                    && pending_frames
+                        .get(&wid)
+                        .is_some_and(|frame| !authority.is_older_than(&frame.authority))
                     && let Some(frame) = pending_frames.remove(&wid)
                     && let Err(err) = self.apply_interactive_frame(wid, frame)
                 {
@@ -1490,7 +1514,15 @@ impl State {
                         (
                             window.elem.clone(),
                             window.last_seen_txid,
-                            window.last_animation_frame.take(),
+                            if window
+                                .last_animation_frame
+                                .as_ref()
+                                .is_some_and(|(_, owner)| authority.is_older_than(owner))
+                            {
+                                None
+                            } else {
+                                window.last_animation_frame.take()
+                            },
                             ended_animation,
                         )
                     }
@@ -2834,6 +2866,14 @@ mod frame_tests {
             let Request::InteractiveFramesPending(queue) = requests.try_recv().unwrap().1 else {
                 panic!("frame wake");
             };
+            // An obsolete producer cannot clear its replacement's pending frame.
+            old_presenter.cancel_window_animation(wid);
+            let cancel = requests.try_recv().unwrap().1;
+            let (_, authority) = cancel.authorized().unwrap();
+            assert!(
+                !authority.is_current(),
+                "cleanup must retain the old producer's authority"
+            );
             let mut delivered = false;
             queue.drain_with(|_, _, _, _, _, _, _| delivered = true);
             assert_eq!(delivered, expected, "old presenters cannot mint fresh authority");

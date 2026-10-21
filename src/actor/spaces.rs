@@ -153,7 +153,10 @@ pub struct AuthorityState {
     display_churn_flags: DisplayReconfigFlags,
     display_topology_state: Option<DisplayTopologyState>,
     last_user_space_by_display: HashMap<String, SpaceId>,
-    display_space_ids: HashMap<String, Vec<SpaceId>>,
+    // Last trustworthy user-Space catalog per display, retained while absent.
+    // Classify while IDs are live; querying a destroyed Space's type is unreliable.
+    // Forwarded snapshots carry only the current inventory.
+    last_known_display_space_ids: HashMap<String, Vec<SpaceId>>,
     active_display_uuid: Option<String>,
     awaiting_space_switch_confirmation: bool,
     recovering_membership: bool,
@@ -179,7 +182,7 @@ impl Default for AuthorityState {
             display_churn_flags: DisplayReconfigFlags::empty(),
             display_topology_state: None,
             last_user_space_by_display: HashMap::default(),
-            display_space_ids: HashMap::default(),
+            last_known_display_space_ids: HashMap::default(),
             active_display_uuid: None,
             awaiting_space_switch_confirmation: false,
             recovering_membership: false,
@@ -420,7 +423,14 @@ impl SpacesActor {
     }
 
     fn handle_active_space_changed(&mut self) {
+        // Revoke queued geometry at the signal, before the native query settles.
+        // This is presentation invalidation, not physical display churn.
         self.state.awaiting_space_switch_confirmation = true;
+        if self.topology_is_authoritative() {
+            self.invalidate_topology();
+            self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, 0);
+            return;
+        }
 
         if self.should_buffer_topology_updates() {
             self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, 0);
@@ -553,9 +563,7 @@ impl SpacesActor {
             })
             .collect();
 
-        self.state.display_space_ids = inventory;
-
-        let space_remaps = self.compute_space_remaps(&screens);
+        let space_remaps = self.compute_space_remaps(&screens, &inventory);
         let menu_bar_space = self.resolve_menu_bar_space(&screens);
         #[cfg(not(test))]
         let active_display_uuid = crate::sys::screen::active_menu_bar_display_uuid();
@@ -579,11 +587,7 @@ impl SpacesActor {
             || self.state.last_forwarded.as_ref().is_some_and(|previous| {
                 previous.display_space_ids.iter().any(|(display, spaces)| {
                     spaces.iter().any(|space| {
-                        !self
-                            .state
-                            .display_space_ids
-                            .get(display)
-                            .is_some_and(|current| current.contains(space))
+                        !inventory.get(display).is_some_and(|current| current.contains(space))
                     })
                 })
             });
@@ -600,7 +604,7 @@ impl SpacesActor {
             active_spaces: self.state.screens.iter().filter_map(|screen| screen.space).collect(),
             menu_bar_space,
             command_space,
-            display_space_ids: self.state.display_space_ids.clone(),
+            display_space_ids: inventory,
             last_user_space_by_display: self.state.last_user_space_by_display.clone(),
             space_remaps,
             display_set_changed,
@@ -617,6 +621,9 @@ impl SpacesActor {
         }) {
             self.state.revision = self.state.revision.wrapping_add(1);
             forwarded.revision = self.state.revision;
+            // Revoke queued app-actor frames before publishing a changed presentation,
+            // including ordinary native Space switches without physical churn.
+            self.state.topology_guard.invalidate(self.state.revision);
         }
         self.state.last_forwarded = Some(forwarded.clone());
         forwarded
@@ -668,29 +675,88 @@ impl SpacesActor {
         }
     }
 
-    fn compute_space_remaps(&mut self, screens: &[ScreenInfo]) -> Vec<(SpaceId, SpaceId)> {
-        let history = self.state.last_user_space_by_display.clone();
-        let live: HashSet<_> = self.state.display_space_ids.values().flatten().copied().collect();
+    fn space_replacements_are_ambiguous(&self, inventory: &HashMap<String, Vec<SpaceId>>) -> bool {
+        let history = &self.state.last_known_display_space_ids;
+        inventory.iter().any(|(display, current)| {
+            let Some(previous) = history.get(display) else {
+                return false;
+            };
+            let removed = previous
+                .iter()
+                .filter(|space| !inventory.values().any(|spaces| spaces.contains(space)))
+                .take(2)
+                .count();
+            let added = current
+                .iter()
+                .filter(|space| {
+                    !history.values().any(|spaces| spaces.contains(space))
+                        && Self::is_user_space(**space)
+                })
+                .take(2)
+                .count();
+            removed > 0 && added > 0 && (removed != 1 || added != 1)
+        })
+    }
+
+    fn compute_space_remaps(
+        &mut self,
+        screens: &[ScreenInfo],
+        inventory: &HashMap<String, Vec<SpaceId>>,
+    ) -> Vec<(SpaceId, SpaceId)> {
+        let history = &self.state.last_known_display_space_ids;
+        let live: HashSet<_> = inventory.values().flatten().copied().collect();
+        let known: HashSet<_> = history.values().flatten().copied().collect();
         let mut remaps = Vec::new();
+        let mut accepted = Vec::new();
         for screen in screens {
-            let (Some(space), Some(display)) = (screen.space, screen.display_uuid_opt()) else {
+            let Some(display) = screen.display_uuid_opt() else {
                 continue;
             };
-            // Do not learn another display's remembered desktop during a partial return.
-            if history.iter().any(|(owner, old)| owner != display && *old == space) {
+            let Some(current) = inventory.get(display) else {
+                continue;
+            };
+            // A partial return can temporarily show another display's desktop.
+            // Neither learn that ownership nor use it as replacement evidence.
+            if current.iter().any(|space| {
+                history.iter().any(|(owner, spaces)| owner != display && spaces.contains(space))
+            }) {
                 continue;
             }
-            if let Some(&old) = history.get(display) {
-                let target_was_known = self.state.last_forwarded.as_ref().is_some_and(|previous| {
-                    previous.display_space_ids.values().any(|spaces| spaces.contains(&space))
-                });
-                // Only a vanished desktop can be replaced, and only by a new one.
-                // A resolution change plus a native Space switch must not destroy either catalog.
-                if old != space && !live.contains(&old) && !target_was_known {
-                    remaps.push((old, space));
+            if let Some(previous) = history.get(display) {
+                if previous.iter().any(|space| {
+                    inventory
+                        .iter()
+                        .any(|(owner, spaces)| owner != display && spaces.contains(space))
+                }) {
+                    continue;
+                }
+                let mut removed = previous.iter().copied().filter(|space| !live.contains(space));
+                let mut added = current
+                    .iter()
+                    .copied()
+                    .filter(|space| !known.contains(space) && Self::is_user_space(*space));
+                if let (Some(old), None, Some(new), None) =
+                    (removed.next(), removed.next(), added.next(), added.next())
+                {
+                    // A unique same-display inventory delta also identifies an inactive
+                    // replacement. Multiple vanished/new IDs have no trustworthy pairing.
+                    remaps.push((old, new));
                 }
             }
-            self.state.last_user_space_by_display.insert(display.to_owned(), space);
+            accepted.push(display.to_owned());
+            if let Some(space) = screen.space {
+                self.state.last_user_space_by_display.insert(display.to_owned(), space);
+            }
+        }
+        for display in accepted {
+            self.state.last_known_display_space_ids.insert(
+                display.clone(),
+                inventory[&display]
+                    .iter()
+                    .copied()
+                    .filter(|space| known.contains(space) || Self::is_user_space(*space))
+                    .collect(),
+            );
         }
         remaps
     }
@@ -772,8 +838,7 @@ impl SpacesActor {
     fn is_user_space(space: SpaceId) -> bool {
         #[cfg(test)]
         {
-            let _ = space;
-            true
+            !Self::is_fullscreen_space(space)
         }
         #[cfg(not(test))]
         {
@@ -959,16 +1024,21 @@ impl SpacesActor {
         let Some(NativeSnapshot {
             screens,
             converter,
-            inventory,
+            mut inventory,
             quiet,
         }) = snapshot
         else {
             self.reject_native_snapshot();
             return false;
         };
+        // Native Space enumeration order carries no identity or geometry authority.
+        for spaces in inventory.values_mut() {
+            spaces.sort_unstable();
+        }
         if !Self::screen_snapshot_is_valid_for_commit(&screens)
             || !Self::inventory_matches_screens(&screens, &inventory)
             || self.fullscreen_snapshot_crosses_display_ownership(&screens)
+            || self.space_replacements_are_ambiguous(&inventory)
         {
             self.reject_native_snapshot();
             return false;
@@ -996,9 +1066,7 @@ impl SpacesActor {
         {
             self.begin_display_churn(DisplayReconfigFlags::empty());
         }
-        let recovering = self.state.display_churn_active
-            || self.state.recovering_membership
-            || self.state.revision > self.state.last_forwarded.as_ref().map_or(0, |s| s.revision);
+        let recovering = self.state.display_churn_active || self.state.recovering_membership;
         if recovering && !self.observe_stable_topology(&screens, &inventory, quiet) {
             return false;
         }

@@ -647,7 +647,7 @@ impl Apps {
                 Request::BeginWindowAnimation(wid, _) => {
                     self.windows.entry(wid).or_default().animating = true;
                 }
-                Request::CancelWindowAnimation(wid, _) => {
+                Request::CancelWindowAnimation(wid, _, _) => {
                     self.windows.entry(wid).or_default().animating = false;
                 }
                 Request::EndWindowAnimation(wid, _) => {

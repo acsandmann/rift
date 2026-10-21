@@ -561,7 +561,6 @@ impl Reactor {
             suppress_auto_workspace_switch_until_input: false,
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
-                inconclusive_samples: 0,
             },
             spaces_tx: None,
             topology_guard: Default::default(),
@@ -1929,6 +1928,9 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 self.cancel_window_presentations(vec![window]);
+                self.layout_manager
+                    .layout_engine
+                    .forget_native_layout_for_window(&self.state.windows, window);
                 let space = self.best_space_for_window(&frame, server_id);
                 let tiled = !self.layout_manager.layout_engine.is_window_floating(window);
                 let scene = if tiled && action == crate::common::config::MouseAction::Move {
@@ -3285,25 +3287,12 @@ impl Reactor {
             .filter(|space| !space_state.space_remaps.iter().any(|(previous, _)| previous == space))
             .collect();
         if !space_state.membership_complete && !invalidated_spaces.is_empty() {
-            // Defer geometry and membership together so the old ownership survives
-            // an inconclusive query. Safe whole-Space remaps can still proceed. The
-            // spaces actor resamples within a bounded budget; once that is spent,
-            // commit what is known (missing windows keep their assignments) and let
-            // the inventory refresh below ask each window where it is.
-            let manager = &mut self.pending_space_change_manager;
-            manager.inconclusive_samples = manager.inconclusive_samples.saturating_add(1);
-            if manager.inconclusive_samples < crate::actor::spaces::REFRESH_MAX_RETRIES {
-                self.space_state.authoritative = false;
-                manager.pending_space_change = Some(space_state);
-                return Ok(EventOutcome::default());
-            }
-            tracing::warn!(
-                revision = space_state.revision,
-                ?invalidated_spaces,
-                "Space membership still inconclusive after bounded resampling; committing known ownership"
-            );
+            // Retry exhaustion is not evidence of ownership. SpacesActor owns paced
+            // resampling; retain the logical model until membership is observable.
+            self.space_state.authoritative = false;
+            self.pending_space_change_manager.pending_space_change = Some(space_state);
+            return Ok(EventOutcome::default());
         }
-        self.pending_space_change_manager.inconclusive_samples = 0;
         self.space_state.revision = space_state.revision;
         self.space_state.authoritative = true;
         if self.spaces_tx.is_some() {

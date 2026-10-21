@@ -358,7 +358,8 @@ fn inconclusive_samples_never_erase_accepted_topology_or_history_and_can_recover
 
 #[test]
 fn recovery_requires_consecutive_full_samples_and_a_quiet_window_server() {
-    let base = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+    let mut base = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+    base.inventory.get_mut("left").unwrap().push(SpaceId::new(4));
     for change in [
         "origin",
         "size",
@@ -366,6 +367,7 @@ fn recovery_requires_consecutive_full_samples_and_a_quiet_window_server() {
         "native ID",
         "inactive inventory",
         "enumeration",
+        "inventory enumeration",
         "busy",
     ] {
         let mut rig = Rig::new();
@@ -383,11 +385,12 @@ fn recovery_requires_consecutive_full_samples_and_a_quiet_window_server() {
             "native ID" => next.screens[0].id = crate::sys::screen::ScreenId::new(9),
             "inactive inventory" => next.inventory.get_mut("left").unwrap().push(SpaceId::new(3)),
             "enumeration" => next.screens.reverse(),
+            "inventory enumeration" => next.inventory.get_mut("left").unwrap().reverse(),
             "busy" => next.quiet = false,
             _ => unreachable!(),
         }
         let observed = rig.tick(1, Some(next));
-        if change == "enumeration" {
+        if matches!(change, "enumeration" | "inventory enumeration") {
             assert!(observed.is_some());
             continue;
         }
@@ -482,6 +485,9 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
         "old migrated hidden",
         "old migrated visible",
         "incomplete then replacement",
+        "ambiguous replacement",
+        "inactive replacement",
+        "inactive replacement after disconnect",
     ] {
         let mut rig = Rig::new();
         let mut initial = base.clone();
@@ -489,7 +495,7 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
         let before = rig.tick(0, Some(initial)).unwrap();
         let mut next = base.clone();
         next.screens[0].space = Some(SpaceId::new(4));
-        next.inventory.insert("left".into(), vec![SpaceId::new(4)]);
+        next.inventory.insert("left".into(), vec![SpaceId::new(3), SpaceId::new(4)]);
         match case {
             "ordinary switch" => {
                 next.screens[0].space = Some(SpaceId::new(3));
@@ -499,10 +505,21 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
                 next.screens[0].space = Some(SpaceId::new(3));
                 next.inventory.insert("left".into(), vec![SpaceId::new(3)]);
             }
-            "old migrated hidden" => next.inventory.get_mut("right").unwrap().push(SpaceId::new(1)),
+            "old migrated hidden" => {
+                next.inventory.insert("left".into(), vec![SpaceId::new(4)]);
+                next.inventory.get_mut("right").unwrap().push(SpaceId::new(1));
+            }
             "old migrated visible" => {
+                next.inventory.insert("left".into(), vec![SpaceId::new(4)]);
                 next.screens[1].space = Some(SpaceId::new(1));
                 next.inventory.insert("right".into(), vec![SpaceId::new(1), SpaceId::new(2)]);
+            }
+            "ambiguous replacement" => {
+                next.inventory.insert("left".into(), vec![SpaceId::new(4)]);
+            }
+            "inactive replacement" | "inactive replacement after disconnect" => {
+                next.screens[0].space = Some(SpaceId::new(1));
+                next.inventory.insert("left".into(), vec![SpaceId::new(1), SpaceId::new(4)]);
             }
             "incomplete then replacement" => {
                 let mut invalid = next.clone();
@@ -515,10 +532,32 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
             }
             _ => {}
         }
+        if case == "inactive replacement after disconnect" {
+            let detached = sample(vec![screen(2, "right", 2)]);
+            assert!(rig.tick(0, Some(detached.clone())).is_none());
+            rig.tick(1, Some(detached)).unwrap();
+        }
         // Coalesce with a queued native query; the notification carries no remap hint.
         rig.event(Event::ScreenRefreshRequested);
         rig.event(Event::SpaceInventoryChanged);
         let first = rig.tick(0, Some(next.clone()));
+        if case == "ambiguous replacement" {
+            assert!(first.is_none());
+            for attempt in 1..=REFRESH_MAX_RETRIES {
+                assert!(rig.tick(attempt, Some(next.clone())).is_none());
+            }
+            assert_eq!(
+                rig.actor.state.last_forwarded.as_ref().unwrap().revision,
+                before.revision
+            );
+            assert_eq!(
+                rig.actor.state.last_known_display_space_ids,
+                before.display_space_ids
+            );
+            assert!(rig.tick(0, Some(base.clone())).is_none());
+            assert!(rig.tick(1, Some(base.clone())).is_some());
+            continue;
+        }
         let after = if case == "ordinary switch" {
             first.unwrap()
         } else {
@@ -527,6 +566,8 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
         };
         let expected = if matches!(case, "new replacement" | "incomplete then replacement") {
             vec![(SpaceId::new(1), SpaceId::new(4))]
+        } else if case.starts_with("inactive replacement") {
+            vec![(SpaceId::new(3), SpaceId::new(4))]
         } else {
             vec![]
         };
@@ -584,7 +625,7 @@ fn fullscreen_changes_preserve_other_displays_user_context_in_any_enumeration_or
             assert!(rig.tick(0, Some(next.clone())).is_none());
             assert!(rig.tick(1, Some(next)).is_none());
             assert_eq!(rig.actor.state.screens, base.screens);
-            assert_eq!(rig.actor.state.display_space_ids, base.inventory);
+            assert_eq!(rig.actor.state.last_known_display_space_ids, base.inventory);
             // A fresh inventory/current-space pair resolves the contamination.
             next = base.clone();
             next.screens[1].space = Some(fullscreen);
@@ -741,6 +782,9 @@ fn queued_active_space_notification_waits_for_a_real_switch_or_bounded_membershi
         let before = rig.tick(0, Some(base.clone())).unwrap();
         rig.event(Event::ScreenRefreshRequested);
         rig.event(Event::ActiveSpaceChanged);
+        assert!(matches!(rig.notifications().as_slice(), [
+            reactor::Event::TopologyInvalidated(_)
+        ]));
         rig.membership(1, &[]);
         rig.membership(2, &[7]);
         for attempt in 0..REFRESH_MAX_RETRIES {
@@ -772,5 +816,48 @@ fn queued_active_space_notification_waits_for_a_real_switch_or_bounded_membershi
         );
         assert_eq!(after.screens[0].display_uuid, before.screens[0].display_uuid);
         assert!(rig.notifications().is_empty());
+    }
+}
+
+#[test]
+fn a_space_switch_revokes_queued_geometry_before_the_reactor_receives_it() {
+    use crate::actor::app::{AppThreadHandle, Request, WindowId};
+    for notify in [false, true] {
+        let mut rig = Rig::new();
+        let mut native = sample(vec![screen(1, "display", 1)]);
+        native.inventory.get_mut("display").unwrap().push(SpaceId::new(2));
+        let before = rig.tick(0, Some(native.clone())).unwrap();
+        let (mut producer, mut requests) = AppThreadHandle::channel();
+        producer.set_topology_authority(&rig.actor.topology_guard(), before.revision);
+        let old = producer.clone();
+        let request = || {
+            Request::set_window_frame(WindowId::new(1, 1), CGRect::ZERO, Default::default(), false)
+        };
+        old.send(request()).unwrap();
+        let queued = requests.try_recv().unwrap().1;
+        if notify {
+            rig.event(Event::ActiveSpaceChanged);
+            assert!(
+                !producer.can_write_frames(),
+                "the switch signal revokes old producers before sampling"
+            );
+        }
+        native.screens[0].space = Some(SpaceId::new(2));
+        let after = rig.tick(0, Some(native.clone())).unwrap();
+        assert!(
+            queued.authorized().is_none(),
+            "a published Space switch must revoke already queued geometry"
+        );
+        old.send(request()).unwrap();
+        assert!(requests.try_recv().unwrap().1.authorized().is_none());
+        producer.set_topology_authority(&rig.actor.topology_guard(), after.revision);
+        producer.send(request()).unwrap();
+        assert!(requests.try_recv().unwrap().1.authorized().is_some());
+        let unchanged = rig.tick(0, Some(native)).unwrap();
+        assert_eq!(after.revision, unchanged.revision);
+        assert!(
+            producer.can_write_frames(),
+            "unchanged samples must preserve presentation authority"
+        );
     }
 }
