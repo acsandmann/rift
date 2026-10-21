@@ -4,13 +4,59 @@ use serde::{Deserialize, Serialize};
 use super::{LayoutId, LayoutSystem};
 use crate::common::collections::HashMap;
 
-/// Display-size configurations belong to their workspace; layout systems own the arrangements.
-#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+/// One logical arrangement follows its workspace between viewports.
+#[derive(Clone, Serialize, Debug, Default)]
 pub(crate) struct WorkspaceLayoutState {
-    pub(crate) configurations: HashMap<Size, LayoutId>,
+    layout: Option<LayoutId>,
     active_size: Size,
-    #[serde(default, rename = "last_saved", skip_serializing)]
-    legacy_last_saved: Option<LayoutId>,
+    // Only populated while migrating an old multi-size snapshot. Retire these
+    // trees once the owning layout system is available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    obsolete: Vec<LayoutId>,
+}
+
+impl<'de> Deserialize<'de> for WorkspaceLayoutState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Snapshot {
+            #[serde(default)]
+            layout: Option<LayoutId>,
+            active_size: Size,
+            #[serde(default)]
+            configurations: HashMap<Size, LayoutId>,
+            #[serde(default, rename = "last_saved")]
+            legacy: Option<LayoutId>,
+            #[serde(default)]
+            obsolete: Vec<LayoutId>,
+        }
+        let saved = Snapshot::deserialize(deserializer)?;
+        if saved.layout.is_none()
+            && !saved.configurations.is_empty()
+            && !saved.configurations.contains_key(&saved.active_size)
+        {
+            return Err(serde::de::Error::custom(
+                "no configuration for its active display size",
+            ));
+        }
+        let layout = saved
+            .layout
+            .or_else(|| saved.configurations.get(&saved.active_size).copied())
+            .or(saved.legacy);
+        let mut obsolete: Vec<_> = saved
+            .configurations
+            .into_values()
+            .chain(saved.legacy)
+            .chain(saved.obsolete)
+            .filter(|id| Some(*id) != layout)
+            .collect();
+        obsolete.sort_unstable();
+        obsolete.dedup();
+        Ok(Self {
+            layout,
+            active_size: saved.active_size,
+            obsolete,
+        })
+    }
 }
 
 #[derive(
@@ -31,62 +77,34 @@ impl From<CGSize> for Size {
 }
 
 impl WorkspaceLayoutState {
-    pub(crate) fn active(&self) -> Option<LayoutId> {
-        self.configurations.get(&self.active_size).copied()
-    }
+    pub(crate) fn active(&self) -> Option<LayoutId> { self.layout }
 
     pub(crate) fn active_size(&self) -> Option<CGSize> {
-        self.active()
+        self.layout
             .map(|_| CGSize::new(self.active_size.width.into(), self.active_size.height.into()))
     }
 
     pub(crate) fn all_layouts(&self) -> impl Iterator<Item = LayoutId> + '_ {
-        self.configurations.values().copied().chain(self.legacy_last_saved)
+        self.layout.into_iter().chain(self.obsolete.iter().copied())
     }
 
     pub(crate) fn ensure_active(&mut self, size: CGSize, tree: &mut impl LayoutSystem) {
-        let size = Size::from(size);
-        if self.active_size == size
-            && self.configurations.len() == 1
-            && self.legacy_last_saved.is_none()
-        {
-            return;
+        for old in self.obsolete.drain(..) {
+            tree.remove_layout(old);
         }
-        let layout =
-            self.active().or(self.legacy_last_saved).unwrap_or_else(|| tree.create_layout());
-        // One logical arrangement follows the workspace between viewports. Old snapshots
-        // can contain divergent per-size trees; their active tree is authoritative.
-        for old in self.all_layouts().collect::<std::collections::BTreeSet<_>>() {
-            if old != layout {
-                tree.remove_layout(old);
-            }
-        }
-        self.configurations.clear();
-        self.active_size = size;
-        self.configurations.insert(size, layout);
-        self.legacy_last_saved = None;
+        self.layout.get_or_insert_with(|| tree.create_layout());
+        self.active_size = size.into();
     }
 
     pub(crate) fn replace(&mut self, layout: LayoutId) {
-        if self.configurations.is_empty() {
+        if self.layout.is_none() {
             self.active_size = Size::from(CGSize::new(1000.0, 1000.0));
         }
-        self.configurations.clear();
-        self.configurations.insert(self.active_size, layout);
-        self.legacy_last_saved = None;
+        self.layout = Some(layout);
+        self.obsolete.clear();
     }
 
     pub(crate) fn validate(&self, tree: &impl LayoutSystem) -> Result<(), String> {
-        if self.configurations.is_empty() && self.legacy_last_saved.is_none() {
-            // Never shown yet; `ensure_active` creates the first layout when it is.
-            return Ok(());
-        }
-        if self.configurations.is_empty() {
-            return Err("no layout configurations".into());
-        }
-        if self.active().is_none() {
-            return Err("no configuration for its active display size".into());
-        }
         for layout in self.all_layouts() {
             if !tree.contains_layout(layout) {
                 return Err(format!("references missing layout {layout:?}"));

@@ -91,7 +91,11 @@ fn should_emit_window_for_space(
     wid: WindowId,
 ) -> bool {
     let engine = &layout.layout_engine;
-    let assigned_workspace = state.windows.workspace_for_window(space, wid);
+    let assigned_workspace =
+        layout
+            .layout_engine
+            .workspaces()
+            .workspace_for_window(&state.windows, space, wid);
     let active_workspace = engine.workspaces().active_workspace(space);
 
     match (assigned_workspace, active_workspace) {
@@ -292,6 +296,7 @@ pub(crate) fn emit_layout_events(
                 crate::model::virtual_workspace::WorkspaceContext {
                     space,
                     visible: &active_spaces,
+                    navigation: Default::default(),
                 },
                 app_info.as_ref(),
                 false,

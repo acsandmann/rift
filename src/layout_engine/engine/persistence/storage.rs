@@ -64,6 +64,7 @@ impl LayoutEngine {
                 CURRENT_SCHEMA_VERSION,
             ));
         }
+        persisted.workspaces.migrate_legacy_activation();
         persisted
             .workspaces
             .validate_persisted_topology()
@@ -189,27 +190,23 @@ impl LayoutEngine {
             if self.floating.is_floating(window) {
                 // Floating and tiled are mutually exclusive persisted representations.
                 self.remove_window_from_all_tiling_trees(window);
-                let Some(assignment) = window_store.workspace_info_for_window(window) else {
+                let Some(assignment) = window_store.workspace_for_window(window) else {
                     // An unassigned live window has no restorable location. Keep its fingerprint
                     // for lifecycle continuity, but never serialize a stale frame from an older
                     // assignment as if it were current.
                     self.floating_positions.remove_window(window);
                     continue;
                 };
-                self.floating_positions.retain_window_location(window, assignment.workspace_id);
-                self.floating_positions.store(
-                    assignment.workspace_id,
-                    window,
-                    state.frame_monotonic,
-                );
+                self.floating_positions.retain_window_location(window, assignment);
+                self.floating_positions.store(assignment, window, state.frame_monotonic);
             } else {
                 // Floating frames are type-specific state. A tiled window retaining one creates a
                 // second persisted location and makes later reconciliation order-dependent.
                 self.floating_positions.remove_window(window);
-                if let Some(assignment) = window_store.workspace_info_for_window(window) {
+                if let Some(assignment) = window_store.workspace_for_window(window) {
                     self.remove_restored_tiling_duplicates(
                         window,
-                        (assignment.space, assignment.workspace_id),
+                        (self.workspaces[assignment].space, assignment),
                     );
                 } else {
                     self.remove_window_from_all_tiling_trees(window);

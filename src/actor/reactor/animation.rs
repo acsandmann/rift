@@ -1048,11 +1048,7 @@ impl AnimationManager {
                 continue;
             };
 
-            let is_active = reactor
-                .state
-                .windows
-                .workspace_for_window(space, wid)
-                .is_some_and(|ws| ws == active_ws);
+            let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
 
             if let Some(wsid) = window_server_id {
                 reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);

@@ -296,7 +296,11 @@ pub fn handle_window_frame_changed(
     // Requested frame acknowledgements have already been filtered by the classifier.
     if let Some(space) = assigned_space.or(old_space)
         && Some(space) == new_space
-        && let Some(workspace) = state.windows.workspace_for_window(space, wid)
+        && let Some(workspace) =
+            layout
+                .layout_engine
+                .workspaces()
+                .workspace_for_window(&state.windows, space, wid)
         && layout.layout_engine.workspaces().workspaces[workspace].layout_mode()
             == crate::common::config::LayoutMode::Floating
     {

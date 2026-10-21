@@ -55,7 +55,11 @@ impl Reactor {
         space: crate::sys::screen::SpaceId,
         wid: WindowId,
     ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
-        self.state.windows.workspace_for_window(space, wid)
+        self.layout_manager.layout_engine.workspaces().workspace_for_window(
+            &self.state.windows,
+            space,
+            wid,
+        )
     }
 
     pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
@@ -78,11 +82,11 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> Vec<WindowId> {
-        self.layout_manager.layout_engine.workspaces().workspace_windows(
-            &self.state.windows,
-            space,
-            workspace,
-        )
+        if self.layout_manager.layout_engine.workspaces()[workspace].space == space {
+            self.state.windows.workspace_windows(workspace)
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn assign_test_window_to_workspace(

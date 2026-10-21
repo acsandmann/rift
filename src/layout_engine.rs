@@ -51,7 +51,7 @@ pub use systems::{
     ScrollingLayoutSystem, StackLayoutSystem, TraditionalLayoutSystem,
 };
 
-pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStats, WorkspaceStore};
+pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStore};
 
 #[cfg(test)]
 mod drop_preview_tests;

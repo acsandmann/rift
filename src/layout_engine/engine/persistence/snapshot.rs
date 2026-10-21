@@ -2,7 +2,7 @@ use objc2_core_foundation::CGRect;
 
 use super::*;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 fn legacy_schema_version() -> u32 { 0 }
 

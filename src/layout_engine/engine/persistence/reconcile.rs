@@ -201,8 +201,8 @@ impl LayoutEngine {
         }
 
         let preferred_location = window_store
-            .workspace_info_for_window(live)
-            .map(|assignment| (assignment.space, assignment.workspace_id));
+            .workspace_for_window(live)
+            .map(|assignment| (self.workspaces[assignment].space, assignment));
         let candidates: Vec<_> = self
             .persistence
             .pending_windows

@@ -866,46 +866,48 @@ impl Reactor {
         for &(wsid, observed) in &active_windows {
             if let Some(window) = self.state.windows.tracked_window_id(wsid)
                 && let Some(operation) =
-                    self.state.windows.record(window).and_then(|record| record.pending_operation())
+                    self.state.windows.record(window).and_then(|record| record.pending_transfer())
                 && self.space_state.membership_complete
-                && operation.requested_space == observed
+                && Some(operation.requested_space) == observed
             {
-                self.state.windows.confirm_operation(window, operation.generation);
+                self.state.windows.confirm_transfer(
+                    window,
+                    operation.generation,
+                    self.space_state.revision,
+                    observed,
+                );
             }
         }
-        let resolved: Vec<_> = active_windows
+        let native: Vec<_> = active_windows
             .iter()
-            .map(|&(wsid, space)| {
-                let space = self.resolve_native_space(wsid, space);
-                if let Some(space) = space {
-                    self.clear_pending_target_if_confirmed_space(wsid, space);
-                }
-                (wsid, space)
-            })
-            .collect();
-        let native: Vec<_> = resolved
-            .iter()
-            .zip(&active_windows)
-            .map(|(&resolved, &observed)| {
+            .map(|&(wsid, observed)| {
                 let pending = self
                     .state
                     .windows
-                    .tracked_window_id(observed.0)
+                    .tracked_window_id(wsid)
                     .and_then(|wid| self.state.windows.record(wid))
-                    .and_then(|record| record.pending_operation())
-                    .is_some_and(|operation| operation.requested_space.is_some());
-                if pending { observed } else { resolved }
+                    .and_then(|record| record.pending_transfer())
+                    .is_some();
+                let resolved = self.resolve_native_space(wsid, observed);
+                if let Some(space) = resolved {
+                    self.clear_pending_target_if_confirmed_space(wsid, space);
+                }
+                (wsid, if pending { observed } else { resolved })
             })
             .collect();
-        let missing = self.state.windows.reconcile_native_snapshot(&native, &self.active_spaces);
+        let missing = self.state.windows.reconcile_native_snapshot(
+            self.layout_manager.layout_engine.workspaces(),
+            &native,
+            &self.active_spaces,
+        );
         for wsid in missing {
             if self
                 .state
                 .windows
                 .tracked_window_id(wsid)
                 .and_then(|wid| self.state.windows.record(wid))
-                .and_then(|record| record.pending_operation())
-                .is_some_and(|operation| operation.requested_space.is_some())
+                .and_then(|record| record.pending_transfer())
+                .is_some()
             {
                 continue;
             }
@@ -924,6 +926,7 @@ impl Reactor {
                     }
                 });
             if let Some((wid, target)) = self.state.windows.reconcile_native_absence(
+                self.layout_manager.layout_engine.workspaces(),
                 wsid,
                 &self.active_spaces,
                 inactive_target,
@@ -1828,7 +1831,12 @@ impl Reactor {
                     self.layout_manager.layout_engine.active_layout_mode_at(space)
                         == crate::common::config::LayoutMode::Scrolling
                         && !self.layout_manager.layout_engine.is_window_floating(wid)
-                        && self.state.windows.workspace_for_window(space, wid).is_some()
+                        && self
+                            .layout_manager
+                            .layout_engine
+                            .workspaces()
+                            .workspace_for_window(&self.state.windows, space, wid)
+                            .is_some()
                 });
                 let screens = if resized {
                     self.space_state
@@ -2030,7 +2038,7 @@ impl Reactor {
                 return Ok(outcome.with_layout_response(response, Some(space)));
             }
             Event::OverviewDrop { intent, reply } => {
-                let source = self.state.windows.workspace_info_for_window(intent.window);
+                let source = self.state.windows.workspace_for_window(intent.window);
                 let destination = self
                     .layout_manager
                     .layout_engine
@@ -2041,7 +2049,12 @@ impl Reactor {
                 let valid = self.state.windows.window(intent.window).is_some_and(|window| {
                     window.is_admitted() && window.info.is_standard && !window.info.is_minimized
                 }) && source.zip(destination).is_some_and(|(source, destination)| {
-                    [source.space, destination].into_iter().all(|space| {
+                    [
+                        self.layout_manager.layout_engine.workspaces()[source].space,
+                        destination,
+                    ]
+                    .into_iter()
+                    .all(|space| {
                         self.space_state.screen_by_space(space).is_some()
                             && !self.is_fullscreen_space(space)
                     })
@@ -2055,7 +2068,8 @@ impl Reactor {
                 if !changed {
                     return Ok(EventOutcome::no_change());
                 }
-                let source_space = source.unwrap().space;
+                let source_space =
+                    self.layout_manager.layout_engine.workspaces()[source.unwrap()].space;
                 let destination = destination.unwrap();
                 let mut outcome = EventOutcome::layout_changed(false);
                 outcome = outcome.with_arrange_space_scope(Some(destination));
@@ -2084,13 +2098,14 @@ impl Reactor {
                         frame.origin.y += destination.origin.y - source.origin.y;
                         frame
                     });
-                    self.state.windows.begin_operation(
+                    outcome.absorb(command_workflow::request_window_transfer(
+                        &mut self.state,
+                        &mut self.layout_manager,
                         intent.window,
+                        destination,
                         Some(frame),
-                        Some(destination),
-                    );
-                    outcome =
-                        outcome.with_pre_layout_window_frame_write(intent.window, frame, true);
+                        true,
+                    ));
                 }
                 return Ok(outcome);
             }
@@ -2236,6 +2251,21 @@ impl Reactor {
                     );
                     return Ok(EventOutcome::no_change());
                 }
+                let old = &self.config.virtual_workspaces;
+                let new = &new_cfg.virtual_workspaces;
+                let ownership_changed = old
+                    .workspace_rules
+                    .iter()
+                    .filter(|r| r.display.is_some())
+                    .map(|r| (&r.workspace, &r.display))
+                    .ne(new
+                        .workspace_rules
+                        .iter()
+                        .filter(|r| r.display.is_some())
+                        .map(|r| (&r.workspace, &r.display)))
+                    || (old.display_mode == new.display_mode
+                        && (old.workspace_names != new.workspace_names
+                            || old.default_workspace_count != new.default_workspace_count));
                 let mut outcome = command_workflow::handle_config_updated(
                     &mut self.config,
                     &mut self.layout_manager,
@@ -2243,9 +2273,10 @@ impl Reactor {
                     &mut self.drag_manager,
                     new_cfg,
                 )?;
-                // Apply workspace display rules without waiting for a topology change.
-                if self.config.virtual_workspaces.display_mode
-                    == crate::common::config::DisplayMode::Shared
+                // Namespace migration alone preserves native ownership.
+                if ownership_changed
+                    && self.config.virtual_workspaces.display_mode
+                        == crate::common::config::DisplayMode::Shared
                 {
                     outcome.absorb(self.reconcile_workspace_placements(
                         &self.active_spaces.clone(),
@@ -2458,6 +2489,7 @@ impl Reactor {
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
                     command_workflow::LayoutCommandPayload {
+                        navigation: Default::default(),
                         command,
                         command_space,
                         visible_spaces,
@@ -2553,7 +2585,6 @@ impl Reactor {
                     &mut self.layout_manager,
                     command_workflow::MoveWindowToDisplayPayload {
                         window,
-                        window_server_id,
                         source_space,
                         target_space,
                         target_screen: target_screen.frame,
@@ -2625,7 +2656,6 @@ impl Reactor {
                         let window_state = self.state.windows.window(window)?;
                         Some(command_workflow::WorkspaceWindowMove {
                             window,
-                            window_server_id: window_state.info.sys_id,
                             target_frame: Self::frame_on_display(
                                 window_state.frame_monotonic,
                                 self.space_state
@@ -2751,14 +2781,7 @@ impl Reactor {
             if write.coalesced && !self.drag_manager.actor.is_active() {
                 continue;
             }
-            if self.state.windows.record(write.window).is_some_and(|record| {
-                record.placement() == crate::model::WindowPlacement::NativeFullscreen
-                    || matches!(
-                        record.visibility(),
-                        crate::model::WindowVisibility::Hidden
-                            | crate::model::WindowVisibility::Minimized
-                    )
-            }) {
+            if !self.state.windows.can_place_window(write.window) {
                 continue;
             }
             let window_server_id =
@@ -3070,7 +3093,13 @@ impl Reactor {
                 .iter_native_fullscreen_records()
                 .filter(|record| {
                     record.last_known_user_space == Some(space)
-                        || record.workspace.is_some_and(|workspace| workspace.space == space)
+                        || record.workspace.is_some_and(|workspace| {
+                            self.layout_manager
+                                .layout_engine
+                                .workspaces()
+                                .workspace_space(workspace)
+                                == Some(space)
+                        })
                 })
                 .collect();
 
@@ -3091,7 +3120,9 @@ impl Reactor {
                 let record = restored.record;
                 let target_space = record
                     .workspace
-                    .map(|workspace| workspace.space)
+                    .and_then(|workspace| {
+                        self.layout_manager.layout_engine.workspaces().workspace_space(workspace)
+                    })
                     .or(record.last_known_user_space);
 
                 if let (Some(window_id), Some(target_space)) = (restored.window, target_space)
@@ -3110,7 +3141,7 @@ impl Reactor {
                             .layout_engine
                             .workspaces()
                             .workspaces
-                            .get(assignment.workspace_id)
+                            .get(assignment)
                             .is_some_and(|workspace| workspace.space == target_space)
                     }) {
                         if let Some(screen) = self.space_state.screen_by_space(target_space)
@@ -3118,19 +3149,17 @@ impl Reactor {
                         {
                             let frame =
                                 Self::center_frame_on_screen(window.frame_monotonic, screen.frame);
-                            self.state.windows.begin_operation(
+                            let outcome = command_workflow::request_window_transfer(
+                                &mut self.state,
+                                &mut self.layout_manager,
                                 window_id,
+                                target_space,
                                 Some(frame),
-                                Some(target_space),
-                            );
-                            self.apply_event_outcome(
-                                EventOutcome::layout_changed(false)
-                                    .with_pre_layout_window_frame_write(window_id, frame, true)
-                                    .with_layout_event(LayoutEvent::WindowAdded(
-                                        target_space,
-                                        window_id,
-                                    )),
-                            );
+                                true,
+                            )
+                            .with_arrange_passes(1)
+                            .with_layout_event(LayoutEvent::WindowAdded(target_space, window_id));
+                            self.apply_event_outcome(outcome);
                         }
                     } else {
                         let response = self.layout_manager.layout_engine.move_window_to_space(
@@ -3390,6 +3419,7 @@ impl Reactor {
             return Ok(EventOutcome::default());
         }
         self.space_state.revision = space_state.revision;
+        self.state.windows.accept_topology_revision(space_state.revision);
         self.space_state.authoritative = true;
         if self.spaces_tx.is_some() {
             for app in self.app_manager.apps.values_mut() {
@@ -3438,11 +3468,7 @@ impl Reactor {
             self.space_state.menu_bar_space = menu_bar_space;
             self.space_state.command_space = command_space;
             outcome.arrange.passes = 0;
-            outcome.absorb(self.reconcile_workspace_placements(
-                &self.active_spaces.clone(),
-                &self.space_state.screens.clone(),
-                false,
-            ));
+            outcome.absorb(self.advance_workspace_transfers());
             self.maybe_send_menu_update();
             return Ok(outcome);
         }
@@ -3496,11 +3522,21 @@ impl Reactor {
         self.space_activation_policy
             .on_spaces_updated(activation_config, &current_screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
-        outcome.absorb(self.reconcile_workspace_placements(
-            &previously_active,
-            &previous_screens,
-            invalidates_pending_targets,
-        ));
+        if display_set_changed
+            || invalidates_pending_targets
+            || previous_screens.iter().map(|s| (s.display_uuid_opt(), s.space)).ne(self
+                .space_state
+                .screens
+                .iter()
+                .map(|s| (s.display_uuid_opt(), s.space)))
+        {
+            outcome.absorb(self.reconcile_workspace_placements(
+                &previously_active,
+                &previous_screens,
+                invalidates_pending_targets,
+            ));
+        }
+        outcome.absorb(self.advance_workspace_transfers());
         self.restore_windows_after_fullscreen_exit(&spaces);
 
         for (space, size) in resized_spaces {
@@ -3537,207 +3573,183 @@ impl Reactor {
         if self.refreshes_blocked() {
             return outcome;
         }
-        let screens = self.space_state.screens.clone();
-        if self.layout_manager.layout_engine.workspaces().display_mode
-            == crate::common::config::DisplayMode::Shared
+        if self.layout_manager.layout_engine.workspaces().settings.display_mode
+            != crate::common::config::DisplayMode::Shared
         {
-            // macOS can return a display on a new desktop id, or leave its old desktop on
-            // another display. Workspaces homed on a desktop a returning display no longer
-            // lists re-home to the desktop it shows now, so they return with it.
-            let rehomed: Vec<_> = {
-                let workspaces = self.layout_manager.layout_engine.workspaces();
-                let inventory = &self.space_state.display_space_ids;
-                workspaces
-                    .catalog()
-                    .filter_map(|id| {
-                        let workspace = &workspaces[id];
-                        let display = workspace.preferred_display.as_deref()?;
-                        let home = workspace.home_space?;
+            return outcome;
+        }
+        let screens = &self.space_state.screens;
+        let live = |screen: &ScreenInfo| {
+            screen.space.is_some_and(|space| self.active_spaces.contains(&space))
+        };
+        // Plan only from the accepted topology. A desktop switch on a connected
+        // display never constitutes departure or a home-display restoration.
+        let placements: Vec<_> = {
+            let engine = &self.layout_manager.layout_engine;
+            let rules = engine.workspaces().rule_displays();
+            engine
+                .workspaces()
+                .catalog()
+                .filter_map(|id| {
+                    let workspace = &engine.workspaces()[id];
+                    let owner = engine.display_uuid_for_space(workspace.space);
+                    let home = workspace.home_space.zip(workspace.preferred_display.as_deref());
+                    let rehome = home.and_then(|(space, display)| {
                         if previous_screens
                             .iter()
                             .any(|screen| screen.display_uuid_opt() == Some(display))
+                            || !self
+                                .space_state
+                                .display_space_ids
+                                .get(display)
+                                .is_some_and(|spaces| !spaces.contains(&space))
                         {
                             return None;
                         }
-                        let space = screens
-                            .iter()
-                            .find(|screen| screen.display_uuid_opt() == Some(display))?
-                            .space
-                            .filter(|&space| space != home && self.is_space_active(space))?;
-                        inventory.get(display).is_some_and(|spaces| !spaces.contains(&home)).then(
-                            || {
-                                let active = workspaces
-                                    .active_workspace_per_space
-                                    .get(&home)
-                                    .map(|entry| entry.1);
-                                (id, space, active == Some(id))
-                            },
-                        )
-                    })
-                    .collect()
-            };
-            for &(id, space, _) in &rehomed {
-                self.layout_manager.layout_engine.workspaces_mut()[id].home_space = Some(space);
-            }
-            let placements: Vec<_> = {
-                let engine = &self.layout_manager.layout_engine;
-                let rule_displays = engine.workspaces().rule_displays();
-                engine
-                    .workspaces()
-                    .catalog()
-                    .filter_map(|id| {
-                        let workspace = &engine.workspaces()[id];
-                        // A rule display that is connected and showing a managed Space
-                        // owns the workspace; otherwise fall back to home/departure policy.
-                        if let Some(&(_, display)) =
-                            rule_displays.iter().find(|(rule_id, _)| *rule_id == id)
-                            && let Some(screen) = screens.iter().find(|screen| {
-                                screen_matches_display(screen, display)
-                                    && screen.space.is_some_and(|space| self.is_space_active(space))
+                        screens.iter().position(|screen| {
+                            live(screen)
+                                && screen.space != Some(space)
+                                && screen.display_uuid_opt() == Some(display)
+                        })
+                    });
+                    let ruled = rules.iter().find(|(rule_id, _)| *rule_id == id).and_then(
+                        |(_, display)| {
+                            screens.iter().position(|screen| {
+                                live(screen) && screen_matches_display(screen, display)
                             })
-                        {
-                            let owner = engine.display_uuid_for_space(workspace.space);
-                            return (owner.as_deref() != screen.display_uuid_opt()).then(|| {
-                                (
-                                    id,
-                                    screen.space.unwrap(),
-                                    screen.frame,
-                                    WorkspaceTransferReason::Restoration,
-                                )
-                            });
-                        }
-                        let home_display = workspace.preferred_display.as_deref()?;
-                        let home_space = workspace.home_space?;
-                        let home = screens.iter().find(|screen| {
-                            screen.display_uuid_opt() == Some(home_display)
-                                && screen.space == Some(home_space)
-                                && self.is_space_active(home_space)
-                        });
-                        if workspace.space != home_space
-                            && let Some(screen) = home
-                        {
-                            return Some((
-                                id,
-                                home_space,
-                                screen.frame,
-                                WorkspaceTransferReason::Restoration,
-                            ));
-                        }
-                        let owner_display = engine.display_uuid_for_space(workspace.space)?;
-                        if screens
+                        },
+                    );
+                    let placement = if let Some(target) = ruled {
+                        (owner != screens[target].display_uuid_opt())
+                            .then_some((target, WorkspaceTransferReason::Restoration))
+                    } else if let Some(target) = rehome
+                        .or_else(|| {
+                            home.and_then(|(space, display)| {
+                                screens.iter().position(|screen| {
+                                    live(screen)
+                                        && screen.space == Some(space)
+                                        && screen.display_uuid_opt() == Some(display)
+                                })
+                            })
+                        })
+                        .filter(|&target| screens[target].space != Some(workspace.space))
+                    {
+                        Some((target, WorkspaceTransferReason::Restoration))
+                    } else if home.is_some()
+                        && owner.is_some_and(|display| {
+                            !screens.iter().any(|screen| screen.display_uuid_opt() == Some(display))
+                                && (previously_active.contains(&workspace.space)
+                                    || engine.last_space_for_display_uuid(display)
+                                        == Some(workspace.space))
+                        })
+                    {
+                        screens
                             .iter()
-                            .any(|screen| screen.display_uuid_opt() == Some(owner_display.as_str()))
-                        {
-                            return None;
-                        }
-                        // The departed display's visible desktop leaves with it, even when an
-                        // empty display list (sleep, clamshell) cleared the active set first.
-                        // Its other desktops stay dormant.
-                        if !previously_active.contains(&workspace.space)
-                            && engine.last_space_for_display_uuid(&owner_display)
-                                != Some(workspace.space)
-                        {
-                            return None;
-                        }
-                        let screen = screens.iter().find(|screen| {
-                            screen.space.is_some_and(|space| self.is_space_active(space))
-                        })?;
-                        Some((
-                            id,
-                            screen.space?,
-                            screen.frame,
-                            WorkspaceTransferReason::DisplayDeparture,
-                        ))
-                    })
-                    .collect()
-            };
-            for (id, target, frame, reason) in placements {
-                let source = self.layout_manager.layout_engine.workspaces()[id].space;
-                let source_frame = screens
-                    .iter()
-                    .chain(previous_screens)
-                    .find(|screen| screen.space == Some(source))
-                    .map(|screen| screen.frame);
-                let display = screens
-                    .iter()
-                    .find(|screen| screen.space == Some(target))
-                    .and_then(|screen| screen.display_uuid_owned());
-                let response = self.layout_manager.layout_engine.transfer_workspace(
-                    &mut self.state.windows,
-                    id,
-                    target,
-                    frame.size,
-                    display.as_deref(),
-                    reason,
-                );
-                for &window in &response.transferred_windows {
-                    if let Some(state) = self.state.windows.window(window) {
-                        let frame =
-                            Self::frame_on_display(state.frame_monotonic, source_frame, frame);
-                        self.layout_manager.layout_engine.prepare_window_placement(
-                            &mut self.state.windows,
-                            window,
-                            frame,
-                        );
-                        self.state.windows.begin_operation(window, Some(frame), Some(target));
-                        outcome = outcome.with_pre_layout_window_frame_write(window, frame, true);
+                            .position(live)
+                            .map(|target| (target, WorkspaceTransferReason::DisplayDeparture))
+                    } else {
+                        None
+                    };
+                    (rehome.is_some() || placement.is_some()).then_some((id, rehome, placement))
+                })
+                .collect()
+        };
+        // Commit ownership and remembered presentation together, then dispatch
+        // native effects through the same boundary as commands and app rules.
+        for (id, rehome, placement) in placements {
+            if let Some(target) = rehome {
+                let workspaces = self.layout_manager.layout_engine.workspaces_mut();
+                let old = workspaces[id].home_space.unwrap();
+                let target = screens[target].space.unwrap();
+                workspaces[id].home_space = Some(target);
+                if let Some(activation) = workspaces.active_workspace_per_space.get_mut(&old)
+                    && activation.remembered.or(activation.current) == Some(id)
+                {
+                    activation.remembered = None;
+                    if workspaces[id].space == target {
+                        workspaces.set_active_workspace(target, id);
+                    } else {
+                        workspaces
+                            .active_workspace_per_space
+                            .entry(target)
+                            .or_default()
+                            .remembered = Some(id);
                     }
                 }
-                if response.changed {
-                    outcome.arrange.passes = 1;
+            }
+            let Some((target, reason)) = placement else { continue };
+            let screen = &screens[target];
+            let target = screen.space.unwrap();
+            let source = self.layout_manager.layout_engine.workspaces()[id].space;
+            let source_frame = screens
+                .iter()
+                .chain(previous_screens)
+                .find(|screen| screen.space == Some(source))
+                .map(|screen| screen.frame);
+            let response = self.layout_manager.layout_engine.transfer_workspace(
+                &mut self.state.windows,
+                id,
+                target,
+                screen.frame.size,
+                screen.display_uuid_opt(),
+                reason,
+            );
+            for window in response.transferred_windows {
+                if let Some(state) = self.state.windows.window(window) {
+                    let frame =
+                        Self::frame_on_display(state.frame_monotonic, source_frame, screen.frame);
+                    outcome.absorb(command_workflow::request_window_transfer(
+                        &mut self.state,
+                        &mut self.layout_manager,
+                        window,
+                        target,
+                        Some(frame),
+                        true,
+                    ));
                 }
             }
-            // The returning display shows what it showed before it left.
-            for (id, space, was_active) in rehomed {
-                if was_active && self.layout_manager.layout_engine.workspaces()[id].space == space {
-                    self.layout_manager
-                        .layout_engine
-                        .workspaces_mut()
-                        .set_active_workspace(space, id);
-                }
+            if response.changed {
+                outcome.arrange.passes = 1;
             }
-            if preserve_membership {
-                // Physical display transitions do not express a logical window move.
-                // Preserve even dormant assignments; native effects wait for an eligible
-                // destination and conclusive membership. Ordinary native user moves still
-                // follow the established reconciliation path outside this transition.
-                let intents: Vec<_> = self
-                    .state
-                    .windows
-                    .iter_workspace_assignments()
-                    .filter_map(|(window, assignment)| {
-                        let record = self.state.windows.record(window)?;
-                        if record
-                            .pending_operation()
-                            .is_some_and(|operation| operation.last_revision.is_none())
-                        {
-                            return None;
-                        }
-                        let target = self
-                            .layout_manager
-                            .layout_engine
-                            .workspaces()
-                            .workspaces
-                            .get(assignment.workspace_id)?
-                            .space;
-                        let observed = record
-                            .window_server_id()
-                            .and_then(|id| self.space_state.active_window_spaces.get(&id).copied());
-                        if observed == Some(target) && self.space_state.membership_complete {
-                            return None;
-                        }
-                        let frame = self
-                            .layout_manager
-                            .layout_engine
-                            .get_floating_position(assignment.workspace_id, window)
-                            .or_else(|| record.frame());
-                        Some((window, target, frame))
-                    })
-                    .collect();
-                for (window, target, frame) in intents {
-                    self.state.windows.begin_operation(window, frame, Some(target));
-                }
+        }
+        if preserve_membership {
+            let engine = &self.layout_manager.layout_engine;
+            let intents: Vec<_> = self
+                .state
+                .windows
+                .iter_workspace_assignments()
+                .filter_map(|(window, assignment)| {
+                    let record = self.state.windows.record(window)?;
+                    let target = engine.workspaces().workspaces.get(assignment)?.space;
+                    if record
+                        .pending_transfer()
+                        .is_some_and(|operation| operation.requested_space == target)
+                    {
+                        return None;
+                    }
+                    let observed = record
+                        .window_server_id()
+                        .and_then(|id| self.space_state.active_window_spaces.get(&id).copied());
+                    if observed == Some(target) && self.space_state.membership_complete {
+                        return None;
+                    }
+                    let frame =
+                        engine.get_floating_position(assignment, window).or_else(|| record.frame());
+                    Some((window, target, frame))
+                })
+                .collect();
+            for (window, target, frame) in intents {
+                // Unknown membership preserves intent without issuing a speculative write.
+                self.state.windows.request_transfer(window, frame, target, false);
             }
+        }
+        outcome
+    }
+
+    fn advance_workspace_transfers(&mut self) -> EventOutcome {
+        let mut outcome = EventOutcome::no_change();
+        if self.refreshes_blocked() {
+            return outcome;
         }
         if self.space_state.membership_complete {
             let pending: Vec<_> = self
@@ -3746,21 +3758,13 @@ impl Reactor {
                 .iter_windows()
                 .filter_map(|(window, _)| {
                     let record = self.state.windows.record(window)?;
-                    if record.placement() == crate::model::WindowPlacement::NativeFullscreen
-                        || matches!(
-                            record.visibility(),
-                            crate::model::WindowVisibility::Hidden
-                                | crate::model::WindowVisibility::Minimized
-                        )
-                    {
-                        return None;
-                    }
-                    let operation = record.pending_operation()?;
-                    let target = operation.requested_space?;
-                    self.is_space_active(target).then_some((window, target, operation))
+                    let operation = record.pending_transfer()?;
+                    let target = operation.requested_space;
+                    Some((window, target, operation))
                 })
                 .collect();
             for (window, target, operation) in pending {
+                let available = self.is_space_active(target);
                 let observed = self
                     .state
                     .windows
@@ -3768,14 +3772,30 @@ impl Reactor {
                     .and_then(|record| record.window_server_id())
                     .and_then(|id| self.space_state.active_window_spaces.get(&id).copied());
                 if observed == Some(target) {
-                    self.state.windows.confirm_operation(window, operation.generation);
-                } else if let Some(operation) =
-                    self.state.windows.advance_transfer(window, self.space_state.revision)
-                    && let Some(frame) = operation.requested_frame
+                    self.state.windows.confirm_transfer(
+                        window,
+                        operation.generation,
+                        self.space_state.revision,
+                        observed,
+                    );
+                } else if let Some(operation) = self.state.windows.advance_transfer(
+                    window,
+                    self.space_state.revision,
+                    available,
+                ) && let Some(frame) = operation.requested_frame
                 {
                     if let Some(screen) = self.space_state.screen_by_space(target) {
                         let frame = Self::frame_on_display(frame, Some(screen.frame), screen.frame);
-                        outcome = outcome.with_pre_layout_window_frame_write(window, frame, true);
+                        self.layout_manager.layout_engine.prepare_window_placement(
+                            &mut self.state.windows,
+                            window,
+                            frame,
+                        );
+                        outcome.absorb(
+                            EventOutcome::layout_changed(false)
+                                .with_arrange_space_scope(Some(target))
+                                .with_pre_layout_window_frame_write(window, frame, true),
+                        );
                     }
                 }
             }
@@ -4112,13 +4132,10 @@ impl Reactor {
     }
 
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        let id = self.state.windows.workspace_info_for_window(wid)?.workspace_id;
         self.layout_manager
             .layout_engine
             .workspaces()
-            .workspaces
-            .get(id)
-            .map(|workspace| workspace.space)
+            .workspace_space(self.state.windows.workspace_for_window(wid)?)
     }
 
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
@@ -4127,8 +4144,8 @@ impl Reactor {
             .state
             .windows
             .record(wid)
-            .and_then(|record| record.pending_operation())
-            .and_then(|operation| operation.requested_space)
+            .and_then(|record| record.pending_transfer())
+            .map(|operation| operation.requested_space)
         {
             return Some(space);
         }
@@ -4173,15 +4190,15 @@ impl Reactor {
             return;
         }
         if self.assigned_space_for_window_id(wid) != Some(space) {
-            let departed_from = self.state.windows.workspace_info_for_window(wid);
+            let departed_from = self.state.windows.workspace_for_window(wid);
             // A window a departure moved off this display goes back where it was.
             let returning =
                 self.layout_manager.layout_engine.take_eviction(&self.state.windows, wid, space);
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             let engine = &mut self.layout_manager.layout_engine;
             engine.workspaces_mut().list_workspaces(space);
-            let remembered = returning
-                .and_then(|ordinal| engine.workspaces().workspace_ids(space).get(ordinal).copied());
+            let remembered =
+                returning.and_then(|ordinal| engine.workspaces().workspaces_on(space).nth(ordinal));
             let assigned = if let Some(workspace) = remembered {
                 engine.workspaces_mut().assign_window_to_workspace(
                     &mut self.state.windows,
@@ -4236,13 +4253,17 @@ impl Reactor {
             .iter()
             .filter_map(|&(wsid, observed_space)| {
                 let wid = self.state.windows.tracked_window_id(wsid)?;
-                let authoritative_space = self
+                if self
                     .state
                     .windows
                     .record(wid)
-                    .and_then(|record| record.pending_operation())
-                    .and_then(|operation| operation.requested_space)
-                    .or_else(|| self.state.windows.window_server_space(wsid).or(observed_space))?;
+                    .and_then(|record| record.pending_transfer())
+                    .is_some()
+                {
+                    return None;
+                }
+                let authoritative_space =
+                    self.state.windows.window_server_space(wsid).or(observed_space)?;
                 Some((wid, authoritative_space))
             })
             .collect();
@@ -4290,15 +4311,15 @@ impl Reactor {
         wsid: WindowServerId,
         observation: Option<SpaceId>,
     ) -> Option<SpaceId> {
-        if let Some(target) = self
+        let transferring = self
             .state
             .windows
             .tracked_window_id(wsid)
             .and_then(|wid| self.state.windows.record(wid))
-            .and_then(|record| record.pending_operation())
-            .and_then(|operation| operation.requested_space)
-        {
-            return Some(target);
+            .and_then(|record| record.pending_transfer())
+            .is_some();
+        if transferring {
+            return observation.or_else(|| self.state.windows.window_server_space(wsid));
         }
         let pending = self.pending_target_space_for_window_server_id(wsid);
         let live =
@@ -4483,30 +4504,40 @@ impl Reactor {
         // Discovery and title-rule refreshes share this effect boundary. Logical
         // assignment has already resolved the target, while native observations
         // continue to describe physical placement until membership catches up.
-        if let LayoutEvent::WindowObserved(_, resolved) = &event {
+        if let LayoutEvent::WindowObserved(source, resolved) = &event {
             let window = resolved.info.window_id;
             let target =
                 self.layout_manager.layout_engine.workspaces()[resolved.effects.workspace_id].space;
-            let frame = self.state.windows.record(window).and_then(|record| {
-                if record.native_space().is_none_or(|space| space == target)
-                    || record.pending_operation().is_some()
-                {
-                    return None;
-                }
-                let screen = self.space_state.screen_by_space(target)?;
-                Some(Self::center_frame_on_screen(record.frame()?, screen.frame))
+            let record = self.state.windows.record(window);
+            let needs_transfer = record.is_some_and(|record| {
+                self.state
+                    .windows
+                    .native_space(window)
+                    .map_or(*source != target, |space| space != target)
+                    || record
+                        .pending_transfer()
+                        .is_some_and(|operation| operation.requested_space != target)
             });
-            if let Some(frame) = frame {
-                self.layout_manager.layout_engine.prepare_window_placement(
-                    &mut self.state.windows,
+            if needs_transfer {
+                let screen = self
+                    .space_state
+                    .screen_by_space(target)
+                    .filter(|_| self.is_space_active(target));
+                let frame = record.and_then(|record| record.frame()).map(|frame| {
+                    screen
+                        .map(|screen| Self::center_frame_on_screen(frame, screen.frame))
+                        .unwrap_or(frame)
+                });
+                let available = screen.is_some();
+                let outcome = command_workflow::request_window_transfer(
+                    &mut self.state,
+                    &mut self.layout_manager,
                     window,
+                    target,
                     frame,
+                    available,
                 );
-                self.state.windows.begin_operation(window, Some(frame), Some(target));
-                self.apply_event_outcome(
-                    EventOutcome::no_change()
-                        .with_pre_layout_window_frame_write(window, frame, true),
-                );
+                self.apply_event_outcome(outcome);
             }
         }
 
@@ -4602,8 +4633,11 @@ impl Reactor {
             };
 
             let window_server_id = window.info.sys_id;
-            if let Some(workspace) =
-                self.state.windows.workspace_for_window(placement.space, placement.window)
+            if let Some(workspace) = self
+                .layout_manager
+                .layout_engine
+                .workspaces()
+                .workspace_for_window(&self.state.windows, placement.space, placement.window)
                 && self.layout_manager.layout_engine.workspaces().workspaces[workspace]
                     .layout_mode()
                     == crate::common::config::LayoutMode::Floating
@@ -4806,7 +4840,11 @@ impl Reactor {
                 let (previous_workspace, was_floating, was_ignored) = {
                     let engine = &self.layout_manager.layout_engine;
                     (
-                        self.state.windows.workspace_for_window(space, *wid),
+                        self.layout_manager.layout_engine.workspaces().workspace_for_window(
+                            &self.state.windows,
+                            space,
+                            *wid,
+                        ),
                         engine.is_window_floating(*wid),
                         self.state
                             .windows
@@ -4818,7 +4856,11 @@ impl Reactor {
                     &mut self.state,
                     &mut self.layout_manager,
                     *wid,
-                    crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible },
+                    crate::model::virtual_workspace::WorkspaceContext {
+                        space,
+                        visible: &visible,
+                        navigation: Default::default(),
+                    },
                     Some(&app_info),
                     reapply_effects,
                 );
@@ -4943,8 +4985,11 @@ impl Reactor {
         app_window_id: WindowId,
         window_space: SpaceId,
     ) -> EventOutcome {
-        let Some(window_workspace) =
-            self.state.windows.workspace_for_window(window_space, app_window_id)
+        let Some(window_workspace) = self
+            .layout_manager
+            .layout_engine
+            .workspaces()
+            .workspace_for_window(&self.state.windows, window_space, app_window_id)
         else {
             return EventOutcome::no_change();
         };
@@ -5030,46 +5075,27 @@ impl Reactor {
         if let Some(dir) = boundary_hit
             && self.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe
         {
-            let skip_empty = self.config.settings.gestures.skip_empty;
-            let invert_horizontal =
-                self.config.settings.layout.scrolling.gestures.invert_horizontal;
-            let cmd = if invert_horizontal {
-                match dir {
-                    Direction::Left => Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty))),
-                    Direction::Right => {
-                        Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty)))
-                    }
-                    _ => None,
-                }
-            } else {
-                match dir {
-                    Direction::Left => Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty))),
-                    Direction::Right => {
-                        Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty)))
-                    }
-                    _ => None,
-                }
+            let invert = self.config.settings.layout.scrolling.gestures.invert_horizontal;
+            let next = match dir {
+                Direction::Left => Some(invert),
+                Direction::Right => Some(!invert),
+                _ => None,
             };
-            if let Some(cmd) = cmd {
-                let space = workspace_switch_space.or_else(|| self.command_context_space());
-                if let Some(space) = space {
-                    let resp = self.layout_manager.layout_engine.handle_virtual_workspace_command(
-                        &mut self.state.windows,
-                        space,
-                        &cmd,
-                    );
-
-                    if self.config.settings.gestures.haptics_enabled {
-                        let _ = crate::sys::haptics::perform_haptic(
-                            self.config.settings.gestures.haptic_pattern,
-                        );
-                    }
-
-                    // Recurse to handle the new response (e.g. focus window on the new workspace)
-                    self.handle_layout_response(resp, Some(space));
-                    self.update_event_tap_layout_mode();
-                    return;
-                }
+            if let (Some(next), Some(space)) = (
+                next,
+                workspace_switch_space.or_else(|| self.command_context_space()),
+            ) {
+                self.swipe_workspace(
+                    space,
+                    Some(self.config.settings.gestures.skip_empty),
+                    next,
+                    self.config
+                        .settings
+                        .gestures
+                        .haptics_enabled
+                        .then_some(self.config.settings.gestures.haptic_pattern),
+                );
+                return;
             }
         }
 
@@ -5377,9 +5403,10 @@ impl Reactor {
         else {
             return false;
         };
-        self.state
-            .windows
-            .workspace_for_window(space, window_id)
+        self.layout_manager
+            .layout_engine
+            .workspaces()
+            .workspace_for_window(&self.state.windows, space, window_id)
             .is_some_and(|window_workspace| window_workspace != active_workspace)
     }
 
