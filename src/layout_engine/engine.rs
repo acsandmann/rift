@@ -16,7 +16,7 @@ use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::app_rules::{AppRuleOutcome, AppRuleResize, AppRuleWorkspaceFocus};
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
-use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStore};
+use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
     WindowStore, WindowWorkspaceInfo,
@@ -3039,12 +3039,13 @@ impl LayoutEngine {
                     return EventResponse::default();
                 };
                 let target = if matches!(command, LayoutCommand::NextWorkspace(_)) {
-                    self.workspaces.next_workspace(window_store, space, current, *skip_empty)
+                    self.workspaces.next_workspace(window_store, context, current, *skip_empty)
                 } else {
-                    self.workspaces.prev_workspace(window_store, space, current, *skip_empty)
+                    self.workspaces.prev_workspace(window_store, context, current, *skip_empty)
                 };
+                // Shared targets on another display are shown there and focus follows.
                 if let Some(target) = target.filter(|&target| target != current) {
-                    return self.activate_workspace(window_store, space, target, None);
+                    return self.switch_to_workspace_id(window_store, space, target, None);
                 }
                 EventResponse::default()
             }
@@ -3088,12 +3089,28 @@ impl LayoutEngine {
                     return EventResponse::default();
                 };
                 let target_workspace_id = match workspace {
-                    WorkspaceSelector::Name(name) if name == "next" => self
-                        .workspaces
-                        .next_workspace(window_store, op_space, current_workspace_id, None),
-                    WorkspaceSelector::Name(name) if name == "prev" => self
-                        .workspaces
-                        .prev_workspace(window_store, op_space, current_workspace_id, None),
+                    WorkspaceSelector::Name(name) if name == "next" => {
+                        self.workspaces.next_workspace(
+                            window_store,
+                            WorkspaceContext {
+                                space: op_space,
+                                visible: context.visible,
+                            },
+                            current_workspace_id,
+                            None,
+                        )
+                    }
+                    WorkspaceSelector::Name(name) if name == "prev" => {
+                        self.workspaces.prev_workspace(
+                            window_store,
+                            WorkspaceContext {
+                                space: op_space,
+                                visible: context.visible,
+                            },
+                            current_workspace_id,
+                            None,
+                        )
+                    }
                     selector => {
                         self.workspaces.resolve_workspace(context, selector).map(|target| target.id)
                     }

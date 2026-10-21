@@ -3541,6 +3541,44 @@ impl Reactor {
         if self.layout_manager.layout_engine.workspaces().display_mode
             == crate::common::config::DisplayMode::Shared
         {
+            // macOS can return a display on a new desktop id, or leave its old desktop on
+            // another display. Workspaces homed on a desktop a returning display no longer
+            // lists re-home to the desktop it shows now, so they return with it.
+            let rehomed: Vec<_> = {
+                let workspaces = self.layout_manager.layout_engine.workspaces();
+                let inventory = &self.space_state.display_space_ids;
+                workspaces
+                    .catalog()
+                    .filter_map(|id| {
+                        let workspace = &workspaces[id];
+                        let display = workspace.preferred_display.as_deref()?;
+                        let home = workspace.home_space?;
+                        if previous_screens
+                            .iter()
+                            .any(|screen| screen.display_uuid_opt() == Some(display))
+                        {
+                            return None;
+                        }
+                        let space = screens
+                            .iter()
+                            .find(|screen| screen.display_uuid_opt() == Some(display))?
+                            .space
+                            .filter(|&space| space != home && self.is_space_active(space))?;
+                        inventory.get(display).is_some_and(|spaces| !spaces.contains(&home)).then(
+                            || {
+                                let active = workspaces
+                                    .active_workspace_per_space
+                                    .get(&home)
+                                    .map(|entry| entry.1);
+                                (id, space, active == Some(id))
+                            },
+                        )
+                    })
+                    .collect()
+            };
+            for &(id, space, _) in &rehomed {
+                self.layout_manager.layout_engine.workspaces_mut()[id].home_space = Some(space);
+            }
             let placements: Vec<_> = {
                 let engine = &self.layout_manager.layout_engine;
                 let rule_displays = engine.workspaces().rule_displays();
@@ -3585,13 +3623,19 @@ impl Reactor {
                                 WorkspaceTransferReason::Restoration,
                             ));
                         }
-                        if !previously_active.contains(&workspace.space) {
-                            return None;
-                        }
                         let owner_display = engine.display_uuid_for_space(workspace.space)?;
                         if screens
                             .iter()
                             .any(|screen| screen.display_uuid_opt() == Some(owner_display.as_str()))
+                        {
+                            return None;
+                        }
+                        // The departed display's visible desktop leaves with it, even when an
+                        // empty display list (sleep, clamshell) cleared the active set first.
+                        // Its other desktops stay dormant.
+                        if !previously_active.contains(&workspace.space)
+                            && engine.last_space_for_display_uuid(&owner_display)
+                                != Some(workspace.space)
                         {
                             return None;
                         }
@@ -3641,6 +3685,15 @@ impl Reactor {
                 }
                 if response.changed {
                     outcome.arrange.passes = 1;
+                }
+            }
+            // The returning display shows what it showed before it left.
+            for (id, space, was_active) in rehomed {
+                if was_active && self.layout_manager.layout_engine.workspaces()[id].space == space {
+                    self.layout_manager
+                        .layout_engine
+                        .workspaces_mut()
+                        .set_active_workspace(space, id);
                 }
             }
             if preserve_membership {

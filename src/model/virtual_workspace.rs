@@ -964,15 +964,25 @@ impl WorkspaceStore {
         })
     }
 
+    /// Independent mode steps through `space`'s workspaces. Shared mode steps through
+    /// the whole visible catalog, so the target may live on another display.
     fn step_workspace(
         &self,
         window_store: &WindowStore,
-        space: SpaceId,
+        context: WorkspaceContext<'_>,
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
         dir: Direction,
     ) -> Option<VirtualWorkspaceId> {
-        let ids = self.workspace_ids(space);
+        let own = [context.space];
+        let visible = if context.visible.is_empty() {
+            &own[..]
+        } else {
+            context.visible
+        };
+        let context = WorkspaceContext { space: context.space, visible };
+        let ids: Vec<_> =
+            self.scope_ids(context.space).filter(|&id| self.eligible(context, id)).collect();
         if ids.is_empty() {
             return None;
         }
@@ -989,31 +999,43 @@ impl WorkspaceStore {
             };
 
             let id = ids[index];
-            if !require_non_empty || !self.workspace_windows(window_store, space, id).is_empty() {
+            if !require_non_empty || !window_store.workspace_windows(id).is_empty() {
                 return Some(id);
             }
         }
         None
     }
 
-    pub fn next_workspace(
+    pub(crate) fn next_workspace<'a>(
         &self,
         window_store: &WindowStore,
-        space: SpaceId,
+        context: impl Into<WorkspaceContext<'a>>,
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        self.step_workspace(window_store, space, current, skip_empty, Direction::Right)
+        self.step_workspace(
+            window_store,
+            context.into(),
+            current,
+            skip_empty,
+            Direction::Right,
+        )
     }
 
-    pub fn prev_workspace(
+    pub(crate) fn prev_workspace<'a>(
         &self,
         window_store: &WindowStore,
-        space: SpaceId,
+        context: impl Into<WorkspaceContext<'a>>,
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        self.step_workspace(window_store, space, current, skip_empty, Direction::Left)
+        self.step_workspace(
+            window_store,
+            context.into(),
+            current,
+            skip_empty,
+            Direction::Left,
+        )
     }
 
     pub fn assign_window_to_workspace(

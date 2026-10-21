@@ -318,7 +318,10 @@ impl Reactor {
             },
         );
         let Ok(outcome) = result else { return false };
-        if !outcome.layout_responses.iter().any(|(response, _)| response.changed) {
+        // A shared target visible on another display only moves focus there.
+        if !outcome.layout_responses.iter().any(|(response, _)| {
+            response.changed || response.workspace_space.is_some_and(|s| s != context.space)
+        }) {
             return false;
         }
         // Reconcile cached viewport frames before the switch parks outgoing windows.
@@ -454,6 +457,43 @@ mod tests {
             control: c.clone(),
         });
         (context, c, motion)
+    }
+
+    #[test]
+    fn shared_workspace_swipe_crosses_displays() {
+        let settings = crate::common::config::VirtualWorkspaceSettings {
+            display_mode: crate::common::config::DisplayMode::Shared,
+            default_workspace_count: 4,
+            ..Default::default()
+        };
+        let mut r = test_reactor_with_workspace_settings(&settings);
+        r.config.virtual_workspaces = settings;
+        let (a, b) = (SpaceId::new(11), SpaceId::new(21));
+        r.handle_loop_event(space_state_event(
+            vec![
+                CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0)),
+                CGRect::new(CGPoint::new(1000.0, 0.0), CGSize::new(1000.0, 1000.0)),
+            ],
+            vec![Some(a), Some(b)],
+        ));
+        // a owns [0, 2], b owns [1, 3]; a shows 0, b shows 1.
+        let ids: Vec<_> = r.layout_manager.layout_engine.workspaces().catalog().collect();
+        let mut config = Config::default();
+        config.settings.layout.scrolling.gestures.enabled = true;
+        config.settings.layout.scrolling.gestures.animate = Some(false);
+        config.settings.gestures.haptics_enabled = false;
+        config.settings.gestures.skip_empty = false;
+        let (context, _, _) = begin(&mut r, &config, a);
+        assert!(
+            r.gesture_workspace(&context, true),
+            "1 is visible on b: focus moves there"
+        );
+        let (context, _, _) = begin(&mut r, &config, b);
+        assert!(r.gesture_workspace(&context, true));
+        assert_eq!(
+            r.layout_manager.layout_engine.workspaces().active_workspace(a),
+            Some(ids[2])
+        );
     }
 
     #[test]

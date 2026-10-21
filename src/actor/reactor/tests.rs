@@ -9044,7 +9044,14 @@ fn shared_display_departure_restores_only_the_recorded_native_context() {
             "dormant Spaces are not display-departure candidates"
         );
     }
-    reactor.handle_event(space_state_event(vec![left, right], vec![Some(a1), Some(b2)]));
+    // The returning display still lists its old desktop, so this is a plain desktop choice.
+    reactor.handle_event(space_state_event_with(
+        vec![left, right],
+        vec![Some(a1), Some(b2)],
+        |s| {
+            s.display_space_ids.insert("test-display-1".into(), vec![b1, b2]);
+        },
+    ));
     assert_eq!(
         reactor.layout_manager.layout_engine.workspaces()[id].space,
         a1,
@@ -9375,7 +9382,11 @@ fn shared_move_workspace_to_display_keeps_target_and_restores_source_previous() 
     apps.simulate_until_quiet(&mut reactor);
     let ws = reactor.layout_manager.layout_engine.workspaces();
     assert_eq!(ws.active_workspace(b), Some(ids[0]));
-    assert_eq!(ws.active_workspace(a), Some(ids[4]), "source returns to its previous workspace");
+    assert_eq!(
+        ws.active_workspace(a),
+        Some(ids[4]),
+        "source returns to its previous workspace"
+    );
     assert_eq!(ws[ids[1]].space, b, "displaced target workspace stays on target");
     assert_eq!(ws.catalog().count(), 6);
     for window in [WindowId::new(1, 1), WindowId::new(1, 2)] {
@@ -9412,8 +9423,185 @@ fn shared_move_workspace_to_display_adopts_empty_hidden_workspace_for_source() {
     reactor.handle_event(move_right());
     let ws = reactor.layout_manager.layout_engine.workspaces();
     assert_eq!(ws.active_workspace(b), Some(ids[0]));
-    assert_eq!(ws[ids[2]].space, b, "displaced visible workspace is not swapped back");
-    assert_eq!(ws.active_workspace(a), Some(ids[1]), "empty hidden workspace adopted");
+    assert_eq!(
+        ws[ids[2]].space, b,
+        "displaced visible workspace is not swapped back"
+    );
+    assert_eq!(
+        ws.active_workspace(a),
+        Some(ids[1]),
+        "empty hidden workspace adopted"
+    );
     assert_eq!(ws.catalog().count(), 4, "no workspace is created");
     ws.validate_persisted_topology().unwrap();
+}
+
+/// Shared fixture: four workspaces, workspace 0 (two windows) moved to the right display.
+fn shared_two_display_fixture(
+    a: SpaceId,
+    b: SpaceId,
+) -> (
+    Apps,
+    Reactor,
+    Vec<crate::model::VirtualWorkspaceId>,
+    [WindowServerId; 2],
+) {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        display_mode: crate::common::config::DisplayMode::Shared,
+        default_workspace_count: 4,
+        ..Default::default()
+    };
+    let mut apps = Apps::new();
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+        Some(a),
+        Some(b),
+    ]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), None);
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    let ids = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+    let wsids = [1, 2].map(|i| reactor.test_window_server_id(WindowId::new(1, i)));
+    (apps, reactor, ids, wsids)
+}
+
+fn shared_left() -> CGRect { CGRect::new(CGPoint::ZERO, CGSize::new(1000., 900.)) }
+fn shared_right() -> CGRect { CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1600., 1000.)) }
+
+fn lose_right_display(reactor: &mut Reactor, a: SpaceId, b: SpaceId, wsids: [WindowServerId; 2]) {
+    reactor.handle_event(space_state_event_with(vec![shared_left()], vec![Some(a)], |s| {
+        s.display_set_changed = true;
+        s.membership_complete = true;
+        // macOS migrates the lost display's desktop onto the remaining display.
+        s.display_space_ids.insert("test-display-0".into(), vec![a, b]);
+        for wsid in wsids {
+            s.active_window_spaces.insert(wsid, a);
+        }
+    }));
+}
+
+#[test]
+fn shared_display_loss_after_empty_display_list_keeps_workspaces_reachable() {
+    let (a, b) = (SpaceId::new(171), SpaceId::new(271));
+    let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture(a, b);
+    // Sleep or clamshell reports no displays before the external one is gone.
+    reactor.handle_event(space_state_event_with(vec![], vec![], |s| {
+        s.display_set_changed = true;
+        s.membership_complete = true;
+    }));
+    lose_right_display(&mut reactor, a, b, wsids);
+    apps.simulate_until_quiet(&mut reactor);
+    let ws = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(
+        ws[ids[0]].space, a,
+        "departed visible workspace joins the survivor"
+    );
+    assert_eq!(
+        reactor.query_workspaces(None).len(),
+        4,
+        "whole set stays reachable"
+    );
+    reactor.dispatch_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(a),
+        Some(ids[0])
+    );
+}
+
+#[test]
+fn shared_display_returning_on_new_desktop_restores_its_workspaces() {
+    let (a, b, b_new) = (SpaceId::new(181), SpaceId::new(281), SpaceId::new(282));
+    let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture(a, b);
+    lose_right_display(&mut reactor, a, b, wsids);
+    apps.simulate_until_quiet(&mut reactor);
+    // The old desktop stays on the built-in display; the external returns on a new one.
+    reactor.handle_event(space_state_event_with(
+        vec![shared_left(), shared_right()],
+        vec![Some(a), Some(b_new)],
+        |s| {
+            s.display_set_changed = true;
+            s.membership_complete = true;
+            s.display_space_ids.insert("test-display-0".into(), vec![a, b]);
+            for wsid in wsids {
+                s.active_window_spaces.insert(wsid, a);
+            }
+        },
+    ));
+    apps.simulate_until_quiet(&mut reactor);
+    let ws = reactor.layout_manager.layout_engine.workspaces();
+    for &id in [ids[0], ids[1], ids[3]].iter() {
+        assert_eq!(ws[id].space, b_new);
+    }
+    assert_eq!(
+        ws.active_workspace(b_new),
+        Some(ids[0]),
+        "shows what it showed before"
+    );
+    assert_eq!(ws.active_workspace(a), Some(ids[2]));
+    assert_eq!(
+        ws.catalog().count(),
+        4,
+        "no workspace is created for the new desktop"
+    );
+    for window in [WindowId::new(1, 1), WindowId::new(1, 2)] {
+        let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+        assert!(
+            shared_right().contains(frame.mid()),
+            "{window:?} returns to the display"
+        );
+    }
+}
+
+#[test]
+fn shared_next_workspace_steps_global_set_and_focuses_owner_display() {
+    let (a, b) = (SpaceId::new(191), SpaceId::new(291));
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        display_mode: crate::common::config::DisplayMode::Shared,
+        default_workspace_count: 4,
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+        Some(a),
+        Some(b),
+    ]));
+    // a owns [0, 2], b owns [1, 3]; a shows 0, b shows 1.
+    let ids: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+    reactor.space_state.command_space = Some(a);
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(
+        outcome.mouse_warps,
+        [shared_right().mid()],
+        "1 is visible on b: focus it"
+    );
+    reactor.space_state.command_space = Some(b);
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(outcome.layout_responses[0].1, Some(a));
+    let ws = reactor.layout_manager.layout_engine.workspaces();
+    assert_eq!(
+        ws.active_workspace(a),
+        Some(ids[2]),
+        "2 is shown on its own display"
+    );
+    assert_eq!(ws.active_workspace(b), Some(ids[1]));
+    reactor.space_state.command_space = Some(a);
+    reactor.dispatch_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(b),
+        Some(ids[3])
+    );
+    reactor.space_state.command_space = Some(b);
+    reactor.dispatch_test_layout_command(LayoutCommand::PrevWorkspace(None));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(b),
+        Some(ids[3]),
+        "prev from 3 is 2, visible on a: only focus moves"
+    );
 }
