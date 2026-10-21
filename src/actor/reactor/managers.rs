@@ -160,6 +160,7 @@ pub struct WorkspaceSwitchManager {
     pub active_workspace_switch: Option<u64>,
     pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
     pub pending_workspace_mouse_warp: Option<WindowId>,
+    pub pending_display_warp: Option<crate::sys::screen::SpaceId>,
 }
 
 impl WorkspaceSwitchManager {

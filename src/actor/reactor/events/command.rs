@@ -172,11 +172,13 @@ pub fn handle_command_layout(
             ));
         }
     }
+    // Switching within the command's display leaves the cursor alone.
     if let Some(space) = workspace_space
         && is_workspace_switch
-        && let Some(frame) = visible_space_frames.get(&space)
+        && command_space != Some(space)
+        && visible_space_frames.contains_key(&space)
     {
-        outcome = outcome.with_mouse_warp(frame.mid());
+        outcome.display_switch_warp = Some(space);
     }
     if !response_changed || arrange_space_scope.is_some() {
         if !outcome.pre_layout_window_frame_writes.is_empty() && command_space != workspace_space {

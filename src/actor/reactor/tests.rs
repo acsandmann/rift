@@ -9088,7 +9088,8 @@ fn shared_selection_focuses_owner_and_native_switch_only_changes_eligibility() {
         ron::ser::to_string(&reactor.layout_manager.layout_engine.workspaces()[b[1]]).unwrap();
     let outcome = reactor.dispatch_test_layout_command(LayoutCommand::SwitchToWorkspace(3));
     assert_eq!(outcome.layout_responses[0].1, Some(b1));
-    assert_eq!(outcome.mouse_warps, [right.mid()]);
+    assert_eq!(outcome.display_switch_warp, Some(b1));
+    assert!(outcome.mouse_warps.is_empty());
     assert_eq!(
         reactor.layout_manager.layout_engine.workspaces().active_workspace(b1),
         Some(b[1])
@@ -9112,7 +9113,7 @@ fn shared_selection_focuses_owner_and_native_switch_only_changes_eligibility() {
             workspace: b[1],
         })
         .unwrap();
-    assert_eq!(overview.mouse_warps, [right.mid()]);
+    assert_eq!(overview.display_switch_warp, Some(b1));
     assert_eq!(overview.arrange.passes, 0);
     assert_eq!(
         reactor.layout_manager.layout_engine.workspaces().active_workspace(b1),
@@ -9843,4 +9844,35 @@ fn shared_next_workspace_commands_remain_display_local() {
         reactor.layout_manager.layout_engine.workspaces().active_workspace(a),
         Some(ids[0])
     );
+}
+
+#[test]
+fn workspace_switch_on_same_display_leaves_cursor_in_place() {
+    let mut reactor = test_reactor_with_workspace_count(3);
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 900.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+    reactor.space_state.command_space = Some(space);
+    let ids = reactor.test_workspace_ids(space);
+
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(space),
+        Some(ids[1])
+    );
+    assert!(outcome.mouse_warps.is_empty() && outcome.display_switch_warp.is_none());
+    let outcome = reactor.dispatch_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
+    assert!(outcome.mouse_warps.is_empty() && outcome.display_switch_warp.is_none());
+
+    let overview = reactor
+        .dispatch_workflow(Event::OverviewSelectWorkspace {
+            display: "test-display-0".into(),
+            workspace: ids[0],
+        })
+        .unwrap();
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(space),
+        Some(ids[0])
+    );
+    assert!(overview.mouse_warps.is_empty() && overview.display_switch_warp.is_none());
 }

@@ -524,6 +524,7 @@ impl Reactor {
                 active_workspace_switch: None,
                 pending_workspace_switch_origin: None,
                 pending_workspace_mouse_warp: None,
+                pending_display_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
@@ -2000,7 +2001,7 @@ impl Reactor {
                 }
                 return Ok(EventOutcome::no_change());
             }
-            Event::OverviewSelectWorkspace { display: _, workspace } => {
+            Event::OverviewSelectWorkspace { display, workspace } => {
                 let Some(space) = self
                     .layout_manager
                     .layout_engine
@@ -2032,8 +2033,14 @@ impl Reactor {
                 } else {
                     EventOutcome::focus_changed(None, false)
                 };
-                if let Some(screen) = self.space_state.screen_by_space(space) {
-                    outcome = outcome.with_mouse_warp(screen.frame.mid());
+                // The cursor is already on the overview's display; follow only a
+                // workspace that lives on another one.
+                if self
+                    .space_state
+                    .screen_by_space(space)
+                    .is_some_and(|screen| screen.display_uuid != display)
+                {
+                    outcome.display_switch_warp = Some(space);
                 }
                 return Ok(outcome.with_layout_response(response, Some(space)));
             }
@@ -2697,6 +2704,9 @@ impl Reactor {
     fn apply_event_outcome(&mut self, outcome: EventOutcome) {
         #[cfg(test)]
         self.event_outcome_phase_trace.push("model");
+        if outcome.display_switch_warp.is_some() {
+            self.workspace_switch_manager.pending_display_warp = outcome.display_switch_warp;
+        }
         if !outcome.window_server_updates.is_empty() {
             self.update_partial_window_server_info(outcome.window_server_updates);
         }
@@ -2951,10 +2961,26 @@ impl Reactor {
         }
 
         // Execute deferred mouse warp after workspace switch completes
-        if let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take() {
-            if let Some(window_center) = self.window_center_on_known_screen(wid) {
-                self.warp_mouse(window_center);
+        let focused = self.workspace_switch_manager.pending_workspace_mouse_warp.take();
+        if let Some(space) = self.workspace_switch_manager.pending_display_warp.take() {
+            // Land at the same spot within the newly focused window that the cursor
+            // held in the old one, or the display itself when the workspace is empty.
+            let to = focused
+                .or_else(|| self.layout_manager.layout_engine.selected_window(space))
+                .and_then(|wid| self.window_frame_on_known_screen(wid))
+                .or_else(|| self.space_state.screen_by_space(space).map(|screen| screen.frame));
+            let from = self
+                .main_window()
+                .and_then(|wid| self.state.windows.window(wid))
+                .map(|window| window.frame_monotonic);
+            if let Some(to) = to
+                && let Some(input_tx) = &self.communication_manager.input_tx
+            {
+                _ = input_tx.send(crate::actor::input::Request::WarpRelative { from, to });
             }
+        } else if let Some(center) = focused.and_then(|wid| self.window_center_on_known_screen(wid))
+        {
+            self.warp_mouse(center);
         }
 
         #[cfg(test)]
@@ -4391,9 +4417,13 @@ impl Reactor {
         self.state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
     }
 
+    fn window_frame_on_known_screen(&self, wid: WindowId) -> Option<CGRect> {
+        let frame = self.state.windows.window(wid)?.frame_monotonic;
+        self.screen_for_point(frame.mid()).map(|_| frame)
+    }
+
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
-        let window_center = self.state.windows.window(wid)?.frame_monotonic.mid();
-        self.screen_for_point(window_center).map(|_| window_center)
+        self.window_frame_on_known_screen(wid).map(|frame| frame.mid())
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {
@@ -5219,16 +5249,16 @@ impl Reactor {
                 .push(wid);
         }
         let focus_window_with_warp = focus_window.map(|wid| {
-            let warp = if self.config.settings.mouse_follows_focus {
-                if self.workspace_switch_manager.workspace_switch_state
-                    == WorkspaceSwitchState::Active
-                {
-                    // During workspace switches, defer mouse warping until after layout completes.
-                    self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
-                    None
-                } else {
-                    self.window_center_on_known_screen(wid)
-                }
+            let switching = self.workspace_switch_manager.workspace_switch_state
+                == WorkspaceSwitchState::Active;
+            let warp = if self.workspace_switch_manager.pending_display_warp.is_some()
+                || (self.config.settings.mouse_follows_focus && switching)
+            {
+                // Defer workspace-switch warps until after layout completes.
+                self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
+                None
+            } else if self.config.settings.mouse_follows_focus {
+                self.window_center_on_known_screen(wid)
             } else {
                 None
             };
