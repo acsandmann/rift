@@ -2236,13 +2236,24 @@ impl Reactor {
                     );
                     return Ok(EventOutcome::no_change());
                 }
-                return command_workflow::handle_config_updated(
+                let mut outcome = command_workflow::handle_config_updated(
                     &mut self.config,
                     &mut self.layout_manager,
                     &self.state,
                     &mut self.drag_manager,
                     new_cfg,
-                );
+                )?;
+                // Apply workspace display rules without waiting for a topology change.
+                if self.config.virtual_workspaces.display_mode
+                    == crate::common::config::DisplayMode::Shared
+                {
+                    outcome.absorb(self.reconcile_workspace_placements(
+                        &self.active_spaces.clone(),
+                        &self.space_state.screens.clone(),
+                        false,
+                    ));
+                }
+                return Ok(outcome);
             }
             Event::Command(Command::Metrics(cmd)) => {
                 return command_workflow::handle_command_metrics(cmd);
@@ -3532,11 +3543,31 @@ impl Reactor {
         {
             let placements: Vec<_> = {
                 let engine = &self.layout_manager.layout_engine;
+                let rule_displays = engine.workspaces().rule_displays();
                 engine
                     .workspaces()
                     .catalog()
                     .filter_map(|id| {
                         let workspace = &engine.workspaces()[id];
+                        // A rule display that is connected and showing a managed Space
+                        // owns the workspace; otherwise fall back to home/departure policy.
+                        if let Some(&(_, display)) =
+                            rule_displays.iter().find(|(rule_id, _)| *rule_id == id)
+                            && let Some(screen) = screens.iter().find(|screen| {
+                                screen_matches_display(screen, display)
+                                    && screen.space.is_some_and(|space| self.is_space_active(space))
+                            })
+                        {
+                            let owner = engine.display_uuid_for_space(workspace.space);
+                            return (owner.as_deref() != screen.display_uuid_opt()).then(|| {
+                                (
+                                    id,
+                                    screen.space.unwrap(),
+                                    screen.frame,
+                                    WorkspaceTransferReason::Restoration,
+                                )
+                            });
+                        }
                         let home_display = workspace.preferred_display.as_deref()?;
                         let home_space = workspace.home_space?;
                         let home = screens.iter().find(|screen| {
@@ -4346,10 +4377,17 @@ impl Reactor {
                 .map(|screen| &screen.display_uuid)
                 .cmp(&self.space_state.screen_by_space(*right).map(|screen| &screen.display_uuid))
         });
+        let screens = &self.space_state.screens;
+        let rule_space = |display: &str| {
+            screens
+                .iter()
+                .find(|screen| screen_matches_display(screen, display))
+                .and_then(|screen| screen.space)
+        };
         self.layout_manager
             .layout_engine
             .workspaces_mut()
-            .ensure_visible_spaces(&spaces);
+            .ensure_visible_spaces(&spaces, rule_space);
         for space in spaces {
             self.expose_space_if_known(space);
         }
@@ -5804,4 +5842,9 @@ impl Reactor {
                 false
             })
     }
+}
+
+/// Workspace rules name a display by UUID or by its localized name.
+fn screen_matches_display(screen: &ScreenInfo, display: &str) -> bool {
+    screen.display_uuid == display || screen.name.as_deref() == Some(display)
 }

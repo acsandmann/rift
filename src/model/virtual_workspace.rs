@@ -223,6 +223,13 @@ pub struct WorkspaceStore {
     pub layout_settings: LayoutSettings,
 }
 
+fn selector_matches(selector: &WorkspaceSelector, index: usize, name: &str) -> bool {
+    match selector {
+        WorkspaceSelector::Index(i) => *i == index,
+        WorkspaceSelector::Name(n) => n == name,
+    }
+}
+
 // Schema 4 uses one ordered catalog. Older snapshots group IDs by native Space;
 // migrate deterministically, preserving the legacy ordinal contract.
 fn deserialize_workspace_order<'de, D: serde::Deserializer<'de>>(
@@ -582,27 +589,44 @@ impl WorkspaceStore {
         id
     }
 
-    fn append_default_workspace(&mut self, space: SpaceId) -> VirtualWorkspaceId {
-        let index = self.scope_ids(space).count();
-        let name = self
-            .default_workspace_names
+    fn default_workspace_name(&self, index: usize) -> String {
+        self.default_workspace_names
             .get(index)
             .cloned()
-            .unwrap_or_else(|| format!("Workspace {}", index + 1));
+            .unwrap_or_else(|| format!("Workspace {}", index + 1))
+    }
+
+    fn append_default_workspace(&mut self, space: SpaceId) -> VirtualWorkspaceId {
+        let index = self.scope_ids(space).count();
+        let name = self.default_workspace_name(index);
         let mode = self.resolve_layout_mode_for_workspace(index, &name);
         self.insert_workspace(space, name, mode)
     }
 
     /// Allocate the initial shared target once, distributed over visible managed
     /// desktops. Subsequent native desktop arrivals get only their minimum state.
-    pub(crate) fn ensure_visible_spaces(&mut self, spaces: &[SpaceId]) {
+    /// `rule_space` resolves a workspace rule's display to one of `spaces`.
+    pub(crate) fn ensure_visible_spaces(
+        &mut self,
+        spaces: &[SpaceId],
+        rule_space: impl Fn(&str) -> Option<SpaceId>,
+    ) {
         if spaces.is_empty() {
             return;
         }
         if self.display_mode == DisplayMode::Shared && self.order.is_empty() {
             let count = self.default_workspace_count.max(spaces.len()).min(self.max_workspaces);
             for index in 0..count {
-                let space = spaces[index % spaces.len()];
+                let name = self.default_workspace_name(index);
+                let space = self
+                    .workspace_rules
+                    .iter()
+                    .rev()
+                    .filter(|rule| selector_matches(&rule.workspace, index, &name))
+                    .find_map(|rule| rule.display.as_deref())
+                    .and_then(&rule_space)
+                    .filter(|space| spaces.contains(space))
+                    .unwrap_or(spaces[index % spaces.len()]);
                 let id = self.append_default_workspace(space);
                 if index == self.default_workspace
                     || !self.active_workspace_per_space.contains_key(&space)
@@ -639,15 +663,36 @@ impl WorkspaceStore {
 
     fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
         // Check workspace_rules (last matching rule wins, like app_rules)
-        for rule in self.workspace_rules.iter().rev() {
-            match &rule.workspace {
-                WorkspaceSelector::Index(idx) if *idx == index => return rule.layout,
-                WorkspaceSelector::Name(n) if n == name => return rule.layout,
-                _ => continue,
-            }
+        self.workspace_rules
+            .iter()
+            .rev()
+            .filter(|rule| selector_matches(&rule.workspace, index, name))
+            .find_map(|rule| rule.layout)
+            .unwrap_or(self.default_layout_mode)
+    }
+
+    /// Shared-mode display assignments from workspace rules (last matching rule wins).
+    /// Empty unless shared mode is active and some rule names a display.
+    pub(crate) fn rule_displays(&self) -> Vec<(VirtualWorkspaceId, &str)> {
+        if self.display_mode != DisplayMode::Shared
+            || !self.workspace_rules.iter().any(|rule| rule.display.is_some())
+        {
+            return Vec::new();
         }
-        // Fall back to global default
-        self.default_layout_mode
+        self.order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &id)| {
+                let name = &self[id].name;
+                let display = self
+                    .workspace_rules
+                    .iter()
+                    .rev()
+                    .filter(|rule| selector_matches(&rule.workspace, index, name))
+                    .find_map(|rule| rule.display.as_deref())?;
+                Some((id, display))
+            })
+            .collect()
     }
 
     pub fn desired_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
@@ -1491,16 +1536,16 @@ mod tests {
                 ..Default::default()
             };
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-            store.ensure_visible_spaces(&[a, b]);
+            store.ensure_visible_spaces(&[a, b], |_| None);
             let catalog: Vec<_> = store.catalog().collect();
             assert_eq!(catalog.len(), count.max(2));
             for (index, &id) in catalog.iter().enumerate() {
                 assert_eq!(store[id].space, if index % 2 == 0 { a } else { b });
             }
-            store.ensure_visible_spaces(&[a, b, c]);
+            store.ensure_visible_spaces(&[a, b, c], |_| None);
             assert_eq!(store.workspace_ids(c).len(), 1);
             assert_eq!(store.catalog().take(catalog.len()).collect::<Vec<_>>(), catalog);
-            store.ensure_visible_spaces(&[a, b, c]);
+            store.ensure_visible_spaces(&[a, b, c], |_| None);
             assert_eq!(store.catalog().count(), catalog.len() + 1);
             store.validate_persisted_topology().unwrap();
         }

@@ -305,13 +305,18 @@ fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) 
 /// Give workspace `i` its own layout, or let it follow the default with `None`.
 pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<LayoutMode>) {
     let name = s.virtual_workspaces.workspace_names.get(i).cloned();
-    s.virtual_workspaces
-        .workspace_rules
-        .retain(|r| !selector_matches(&r.workspace, i, name.as_deref()));
+    // Keep display assignments; only the layout field belongs to this editor.
+    s.virtual_workspaces.workspace_rules.retain_mut(|r| {
+        if selector_matches(&r.workspace, i, name.as_deref()) {
+            r.layout = None;
+        }
+        r.layout.is_some() || r.display.is_some()
+    });
     if let Some(layout) = mode {
         s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(i),
-            layout,
+            layout: Some(layout),
+            display: None,
         });
     }
 }
@@ -321,14 +326,14 @@ pub(super) fn workspace_layout(s: &ConfigSource, i: usize) -> Option<LayoutMode>
     s.virtual_workspaces
         .workspace_rules
         .iter()
-        .find(|r| {
+        .filter(|r| {
             selector_matches(
                 &r.workspace,
                 i,
                 s.virtual_workspaces.workspace_names.get(i).map(String::as_str),
             )
         })
-        .map(|r| r.layout)
+        .find_map(|r| r.layout)
 }
 pub(super) fn workspace_name(s: &ConfigSource, i: usize) -> String {
     s.virtual_workspaces

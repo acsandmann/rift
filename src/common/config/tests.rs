@@ -473,7 +473,8 @@ fn typed_collections_keep_source_aliases_and_inline_commands() {
             });
             source.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
                 workspace: WorkspaceSelector::Index(1),
-                layout: LayoutMode::Scrolling,
+                layout: Some(LayoutMode::Scrolling),
+                display: None,
             });
             source.keys.insert("comb1 + Q".into(), source.keys["Alt + H"].clone());
             source.binding_modes.insert(
@@ -560,11 +561,13 @@ fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
     settings.workspace_rules = vec![
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Name("three".into()),
-            layout: LayoutMode::Stack,
+            layout: Some(LayoutMode::Stack),
+            display: None,
         },
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(0),
-            layout: LayoutMode::Bsp,
+            layout: Some(LayoutMode::Bsp),
+            display: None,
         },
     ];
     settings.app_rules = vec![AppWorkspaceRule {

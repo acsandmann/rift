@@ -9081,6 +9081,57 @@ fn shared_display_departure_restores_only_the_recorded_native_context() {
 }
 
 #[test]
+fn shared_workspace_rule_display_owns_workspace_and_falls_back_while_disconnected() {
+    use crate::common::config::{DisplayMode, VirtualWorkspaceSettings, WorkspaceLayoutRule};
+    let rule = |display: &str| WorkspaceLayoutRule {
+        workspace: WorkspaceSelector::Index(0),
+        layout: None,
+        display: Some(display.into()),
+    };
+    let settings = VirtualWorkspaceSettings {
+        display_mode: DisplayMode::Shared,
+        default_workspace_count: 4,
+        workspace_rules: vec![rule("test-display-1")],
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 900.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1600., 1000.));
+    let (a1, b1, b2) = (SpaceId::new(131), SpaceId::new(231), SpaceId::new(232));
+    reactor.handle_event(space_state_event(vec![left, right], vec![Some(a1), Some(b1)]));
+    let id = reactor.layout_manager.layout_engine.workspaces().catalog().next().unwrap();
+    let space = |reactor: &Reactor| reactor.layout_manager.layout_engine.workspaces()[id].space;
+    assert_eq!(space(&reactor), b1, "rule display owns workspace 0");
+
+    reactor.handle_event(space_state_event(vec![left], vec![Some(a1)]));
+    assert_eq!(space(&reactor), a1, "disconnected rule display falls back");
+    reactor.handle_event(space_state_event(vec![left, right], vec![Some(a1), Some(b1)]));
+    assert_eq!(
+        space(&reactor),
+        b1,
+        "reconnecting rule display reclaims workspace"
+    );
+
+    reactor.handle_event(space_state_event(vec![left, right], vec![Some(a1), Some(b2)]));
+    assert_eq!(
+        space(&reactor),
+        b1,
+        "native switch on the same display does not move it"
+    );
+
+    // Rules apply on config reload, and are ignored in independent mode.
+    let mut config = reactor.config.clone();
+    config.virtual_workspaces = VirtualWorkspaceSettings {
+        workspace_rules: vec![rule("test-display-0")],
+        ..settings.clone()
+    };
+    reactor.handle_event(Event::ConfigUpdated(config));
+    assert_eq!(space(&reactor), a1);
+    reactor.layout_manager.layout_engine.workspaces_mut().display_mode = DisplayMode::Independent;
+    assert!(reactor.layout_manager.layout_engine.workspaces().rule_displays().is_empty());
+}
+
+#[test]
 fn shared_window_transfer_keeps_logical_target_through_stale_native_membership() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(1);
     let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 900.));

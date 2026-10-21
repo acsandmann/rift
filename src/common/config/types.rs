@@ -108,7 +108,12 @@ pub struct VirtualWorkspaceSettings {
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
     pub workspace: WorkspaceSelector,
-    pub layout: LayoutMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutMode>,
+    /// Display UUID or name that owns this workspace. Only applies when
+    /// `display_mode = "shared"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
 }
 
 // Allow specifying a workspace by numeric index or by name in the config.
@@ -247,6 +252,12 @@ impl VirtualWorkspaceSettings {
                 "default_workspace ({}) must be less than default_workspace_count ({})",
                 self.default_workspace, self.default_workspace_count
             ));
+        }
+
+        for (index, rule) in self.workspace_rules.iter().enumerate() {
+            if rule.layout.is_none() && rule.display.as_deref().is_none_or(str::is_empty) {
+                issues.push(format!("Workspace rule {index} has no layout or display"));
+            }
         }
 
         // Validate rules and check duplicates in a single pass
