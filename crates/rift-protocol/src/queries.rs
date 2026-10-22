@@ -136,7 +136,15 @@ pub struct WorkspaceData {
     pub index: usize,
     pub name: String,
     pub layout_mode: String,
+    /// Shown on its display. In shared mode several workspaces are active at once,
+    /// one per display.
     pub is_active: bool,
+    /// UUID of the display the workspace belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_uuid: Option<String>,
+    /// Active on the display that holds command focus.
+    #[serde(default)]
+    pub is_focused: bool,
     pub window_count: usize,
     /// Workspace windows in logical column-major order when the layout has column semantics.
     /// Windows without a logical position follow in their existing stable order.

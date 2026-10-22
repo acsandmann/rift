@@ -10472,3 +10472,41 @@ fn shared_move_workspace_to_display_keeps_a_rule_bound_workspace_on_its_display(
     );
     assert_eq!(space(&reactor, unbound), b, "an unbound workspace still moves");
 }
+
+#[test]
+fn shared_workspace_query_names_each_display_and_the_focused_workspace() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        display_mode: crate::common::config::DisplayMode::Shared,
+        default_workspace_count: 4,
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let (a, b) = (SpaceId::new(151), SpaceId::new(251));
+    reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+        Some(a),
+        Some(b),
+    ]));
+    reactor.space_state.command_space = Some(b);
+
+    let workspaces = reactor.query_workspaces(None);
+    let engine = &reactor.layout_manager.layout_engine;
+    assert_eq!(
+        workspaces.iter().filter(|w| w.is_active).count(),
+        2,
+        "one per display"
+    );
+    let focused: Vec<_> = workspaces.iter().filter(|w| w.is_focused).collect();
+    assert_eq!(focused.len(), 1);
+    assert_eq!(
+        Some(focused[0].workspace_id),
+        engine.workspaces().active_workspace(b)
+    );
+    for workspace in &workspaces {
+        let display = match engine.workspaces()[workspace.workspace_id].space {
+            space if space == a => "test-display-0",
+            _ => "test-display-1",
+        };
+        assert_eq!(workspace.display_uuid.as_deref(), Some(display));
+    }
+}
