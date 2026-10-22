@@ -10315,7 +10315,7 @@ fn shared_mode_opens_new_windows_on_the_pointer_display() {
 }
 
 #[test]
-fn shared_move_workspace_to_display_keeps_a_rule_bound_workspace_on_its_display() {
+fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_the_rule() {
     let mut settings = shared_settings();
     settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
         workspace: WorkspaceSelector::Index(0),
@@ -10323,21 +10323,37 @@ fn shared_move_workspace_to_display_keeps_a_rule_bound_workspace_on_its_display(
         display: Some("test-display-0".into()),
     }];
     let (_apps, mut reactor, a, b) = two_displays(settings);
-    let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
-    for id in [catalog[0], catalog[1]] {
-        reactor
-            .layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .set_active_workspace(a, id);
-        reactor.space_state.command_space = Some(a);
+    let pinned = reactor.layout_manager.layout_engine.workspaces().catalog().next().unwrap();
+    let move_to = |reactor: &mut Reactor, index| {
+        let space = reactor.layout_manager.layout_engine.workspaces()[pinned].space;
+        reactor.layout_manager.layout_engine.workspaces_mut().set_active_workspace(space, pinned);
+        reactor.space_state.command_space = Some(space);
         reactor.handle_event(Event::Command(Command::Reactor(
             ReactorCommand::MoveWorkspaceToDisplay {
-                selector: DisplaySelector::Index(1),
+                selector: DisplaySelector::Index(index),
                 wrap_around: false,
             },
         )));
-    }
-    let space = |id| reactor.layout_manager.layout_engine.workspaces()[id].space;
-    assert_eq!((space(catalog[0]), space(catalog[1])), (a, b));
+    };
+    let reconcile = |reactor: &mut Reactor| {
+        let outcome = reactor.reconcile_workspace_placements(
+            &reactor.active_spaces.clone(),
+            &reactor.space_state.screens.clone(),
+            false,
+            None,
+        );
+        reactor.apply_event_outcome(outcome);
+    };
+    let workspace = |reactor: &Reactor| {
+        let workspace = &reactor.layout_manager.layout_engine.workspaces()[pinned];
+        (workspace.space, workspace.rule_overridden)
+    };
+
+    move_to(&mut reactor, 1);
+    assert_eq!(workspace(&reactor), (b, true));
+    reconcile(&mut reactor);
+    assert_eq!(workspace(&reactor), (b, true));
+
+    move_to(&mut reactor, 0);
+    assert_eq!(workspace(&reactor), (a, false));
 }

@@ -2281,6 +2281,10 @@ impl Reactor {
                     .map(|(id, _)| id)
                     .collect();
                 if !activated.is_empty() {
+                    let workspaces = self.layout_manager.layout_engine.workspaces_mut();
+                    for &id in &activated {
+                        workspaces[id].rule_overridden = false;
+                    }
                     outcome.absorb(self.reconcile_workspace_placements(
                         &self.active_spaces.clone(),
                         &self.space_state.screens.clone(),
@@ -2649,20 +2653,19 @@ impl Reactor {
                         );
                     return Ok(EventOutcome::no_change().with_layout_response(response, None));
                 }
-                // The rule would move a bound workspace back on the next display change.
+                // Moving a rule-bound workspace off its (connected) display suspends
+                // the rule so the next display change doesn't move it back.
                 let workspaces = self.layout_manager.layout_engine.workspaces();
-                let active = workspaces.active_workspace(source_space);
-                if workspaces.rule_displays().into_iter().any(|(id, display)| {
-                    Some(id) == active
-                        && !screen_matches_display(&target_screen, display)
+                let rule_override = workspaces.active_workspace(source_space).and_then(|active| {
+                    let (_, display) =
+                        workspaces.rule_displays().into_iter().find(|(id, _)| *id == active)?;
+                    let overridden = !screen_matches_display(&target_screen, display)
                         && self.space_state.screens.iter().any(|screen| {
                             screen.space.is_some_and(|space| self.is_space_active(space))
                                 && screen_matches_display(screen, display)
-                        })
-                }) {
-                    warn!("Move workspace to display ignored: a workspace rule binds it");
-                    return Ok(EventOutcome::no_change());
-                }
+                        });
+                    Some((active, overridden))
+                });
 
                 let windows = self
                     .layout_manager
@@ -2689,7 +2692,7 @@ impl Reactor {
                         })
                     })
                     .collect::<Vec<_>>();
-                return command_workflow::handle_command_reactor_move_workspace_to_display(
+                let outcome = command_workflow::handle_command_reactor_move_workspace_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -2700,6 +2703,13 @@ impl Reactor {
                         target_screen: target_screen.frame,
                     },
                 );
+                if let Some((id, overridden)) = rule_override {
+                    let workspaces = self.layout_manager.layout_engine.workspaces_mut();
+                    if workspaces[id].space == target_space {
+                        workspaces[id].rule_overridden = overridden;
+                    }
+                }
+                return outcome;
             }
             _ => (),
         }
@@ -3731,8 +3741,10 @@ impl Reactor {
                                 && screen.display_uuid_opt() == Some(display)
                         })
                     });
-                    let ruled = rules.iter().find(|(rule_id, _)| *rule_id == id).and_then(
-                        |(_, rule_display)| {
+                    let ruled = rules
+                        .iter()
+                        .find(|(rule_id, _)| *rule_id == id && !workspace.rule_overridden)
+                        .and_then(|(_, rule_display)| {
                             let matching = |screen: &&ScreenInfo| {
                                 live(screen) && screen_matches_display(screen, rule_display)
                             };
@@ -3743,8 +3755,7 @@ impl Reactor {
                                 );
                             }
                             screens.iter().position(|screen| matching(&screen))
-                        },
-                    );
+                        });
                     let placement = if let Some(target) = ruled {
                         (owner != screens[target].display_uuid_opt())
                             .then_some((target, WorkspaceTransferReason::Restoration))

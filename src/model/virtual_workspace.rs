@@ -178,6 +178,10 @@ pub struct VirtualWorkspace {
     pub preferred_display: Option<String>,
     #[serde(default)]
     pub home_space: Option<SpaceId>,
+    /// An explicit move away from a display rule suspends that rule until the
+    /// workspace returns to the rule's display or the rule is (re)activated.
+    #[serde(default)]
+    pub rule_overridden: bool,
     last_focused: Option<WindowId>,
     #[serde(default = "default_layout_system_kind")]
     pub layout_system: LayoutSystemKind,
@@ -199,6 +203,7 @@ impl VirtualWorkspace {
             space,
             preferred_display: None,
             home_space: None,
+            rule_overridden: false,
             last_focused: None,
             layout_system,
             layout_mode: mode,
