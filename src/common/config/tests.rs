@@ -722,3 +722,18 @@ fn display_workspace_mode_has_a_compatible_default_and_rejects_unknown_values() 
     );
     assert!(toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'mirrored'").is_err());
 }
+
+#[test]
+fn display_rules_outside_shared_mode_are_reported_as_ignored() {
+    let mut settings: VirtualWorkspaceSettings = toml::from_str(
+        r#"workspace_rules = [
+            { workspace = 0, display = "DELL U2720Q" },
+            { workspace = 1, layout = "bsp" },
+            { workspace = 2, display = "37D8832A-2D66-02CA-B9F7-8F30A301B230" },
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(settings.ignored_display_rules(), [0, 2]);
+    settings.display_mode = DisplayMode::Shared;
+    assert!(settings.ignored_display_rules().is_empty());
+}

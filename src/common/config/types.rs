@@ -209,6 +209,20 @@ impl Default for VirtualWorkspaceSettings {
 }
 
 impl VirtualWorkspaceSettings {
+    /// Indices of workspace rules whose `display` has no effect, because it only
+    /// applies with `display_mode = "shared"`.
+    pub fn ignored_display_rules(&self) -> Vec<usize> {
+        if self.display_mode == DisplayMode::Shared {
+            return Vec::new();
+        }
+        self.workspace_rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| rule.display.as_deref().is_some_and(|display| !display.is_empty()))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     pub fn resize(&mut self, count: usize) {
         self.default_workspace_count = count;
         // Invalid counts are left for the shared validator, without large allocations.

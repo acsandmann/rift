@@ -3742,9 +3742,18 @@ impl Reactor {
                     });
                     let ruled = rules.iter().find(|(rule_id, _)| *rule_id == id).and_then(
                         |(_, display)| {
-                            screens.iter().position(|screen| {
+                            let matching = |screen: &&ScreenInfo| {
                                 live(screen) && screen_matches_display(screen, display)
-                            })
+                            };
+                            if screens.iter().filter(matching).count() > 1 {
+                                let rule_display: &str = display;
+                                warn!(
+                                    rule_display,
+                                    "Workspace rule display matches several displays; using the \
+                                     first. Name it by UUID instead"
+                                );
+                            }
+                            screens.iter().position(|screen| matching(&screen))
                         },
                     );
                     let placement = if let Some(target) = ruled {

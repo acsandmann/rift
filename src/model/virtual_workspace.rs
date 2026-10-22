@@ -349,6 +349,16 @@ pub struct WorkspaceStore {
     pub layout_settings: LayoutSettings,
 }
 
+/// A rule's `display` is ignored outside shared mode; say so rather than ignore it silently.
+fn warn_on_ignored_display_rules(config: &VirtualWorkspaceSettings) {
+    for index in config.ignored_display_rules() {
+        warn!(
+            index,
+            "Workspace rule sets display, which only applies with display_mode = \"shared\""
+        );
+    }
+}
+
 fn selector_matches(selector: &WorkspaceSelector, index: usize, name: &str) -> bool {
     match selector {
         WorkspaceSelector::Index(i) => *i == index,
@@ -635,6 +645,7 @@ impl WorkspaceStore {
         config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
     ) -> Self {
+        warn_on_ignored_display_rules(config);
         Self {
             workspaces: SlotMap::default(),
             order: Vec::new(),
@@ -735,6 +746,7 @@ impl WorkspaceStore {
         layout_settings: &LayoutSettings,
         plan: WorkspaceSettingsPlan,
     ) {
+        warn_on_ignored_display_rules(config);
         self.settings = config.clone();
         self.layout_settings = layout_settings.clone();
         for (id, name) in plan.names {
