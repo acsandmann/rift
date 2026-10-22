@@ -183,8 +183,6 @@ impl AppLifecycle {
         Some((handle, rx))
     }
 
-    fn is_tracked(&self, pid: pid_t) -> bool { self.0.contains_key(&pid) }
-
     fn terminate(&mut self, pid: pid_t) {
         if let Some((handle, phase)) = self.0.get_mut(&pid) {
             *phase = AppPhase::Stopping(None);
@@ -443,18 +441,14 @@ impl WmController {
         }
     }
 
-    /// Give an app without an app actor another attach attempt when the user
-    /// activates it. Attaching fails when an app refuses accessibility requests at
-    /// that moment, and otherwise nothing retries until the app relaunches or opens
-    /// a new window, leaving its windows unmanaged.
+    /// Attaching fails while an app refuses AX requests; retry when the user activates it.
     fn retry_unattached_app(&mut self, pid: pid_t) {
-        if self.apps.is_tracked(pid) {
+        if self.apps.0.contains_key(&pid) {
             return;
         }
         let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
             return;
         };
-        debug!(?pid, "Retrying attach to an activated app without an app actor");
         self.new_app(pid, AppInfo::from(&*running_app), AppDiscoverySource::Process);
     }
 

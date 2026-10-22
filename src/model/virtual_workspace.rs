@@ -349,13 +349,18 @@ pub struct WorkspaceStore {
     pub layout_settings: LayoutSettings,
 }
 
-/// A rule's `display` is ignored outside shared mode; say so rather than ignore it silently.
+/// A rule's `display` only applies in shared mode; say so rather than ignore it silently.
 fn warn_on_ignored_display_rules(config: &VirtualWorkspaceSettings) {
-    for index in config.ignored_display_rules() {
-        warn!(
-            index,
-            "Workspace rule sets display, which only applies with display_mode = \"shared\""
-        );
+    if config.display_mode == DisplayMode::Shared {
+        return;
+    }
+    for (index, rule) in config.workspace_rules.iter().enumerate() {
+        if rule.display.as_deref().is_some_and(|display| !display.is_empty()) {
+            warn!(
+                index,
+                "Workspace rule display only applies with display_mode = \"shared\""
+            );
+        }
     }
 }
 

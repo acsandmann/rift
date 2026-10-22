@@ -1248,9 +1248,7 @@ impl State {
                     Duration::from_secs(60)
                 }
 
-                // A brief grace period for everyone else: a busy app can reject the
-                // first accessibility requests, and giving up at once would leave it
-                // unmanaged until it relaunches.
+                // Busy apps can reject the first AX requests.
                 _ => Duration::from_secs(2),
             };
         let mut sleep_dur = Duration::from_millis(20);
