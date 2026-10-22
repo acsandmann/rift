@@ -10423,3 +10423,52 @@ fn a_new_window_moved_to_the_pointer_display_stays_despite_lagging_reports() {
     crate::sys::window_server::set_window_spaces_override(wsid, None);
     crate::sys::window_server::set_cursor_location_override(None);
 }
+
+#[test]
+fn shared_move_workspace_to_display_keeps_a_rule_bound_workspace_on_its_display() {
+    use crate::common::config::{DisplayMode, VirtualWorkspaceSettings, WorkspaceLayoutRule};
+    let settings = VirtualWorkspaceSettings {
+        display_mode: DisplayMode::Shared,
+        default_workspace_count: 4,
+        workspace_rules: vec![WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Index(0),
+            layout: None,
+            display: Some("test-display-0".into()),
+        }],
+        ..Default::default()
+    };
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 900.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1600., 1000.));
+    let (a, b) = (SpaceId::new(141), SpaceId::new(241));
+    reactor.handle_event(space_state_event(vec![left, right], vec![Some(a), Some(b)]));
+    let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+    let space = |reactor: &Reactor, id| reactor.layout_manager.layout_engine.workspaces()[id].space;
+    let move_right = || {
+        Event::Command(Command::Reactor(ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        }))
+    };
+    let (bound, unbound) = (catalog[0], catalog[1]);
+    assert_eq!((space(&reactor, bound), space(&reactor, unbound)), (a, a));
+
+    for id in [bound, unbound] {
+        assert!(
+            reactor
+                .layout_manager
+                .layout_engine
+                .workspaces_mut()
+                .set_active_workspace(a, id)
+        );
+        reactor.space_state.command_space = Some(a);
+        reactor.handle_event(move_right());
+    }
+    assert_eq!(
+        space(&reactor, bound),
+        a,
+        "a workspace bound to a connected display stays there"
+    );
+    assert_eq!(space(&reactor, unbound), b, "an unbound workspace still moves");
+}

@@ -2649,6 +2649,29 @@ impl Reactor {
                         );
                     return Ok(EventOutcome::no_change().with_layout_response(response, None));
                 }
+                // A rule binds the workspace to a connected display: keep it there, as
+                // the rule would move it back on the next display change anyway.
+                let workspaces = self.layout_manager.layout_engine.workspaces();
+                let bound_display = workspaces.active_workspace(source_space).and_then(|id| {
+                    workspaces
+                        .rule_displays()
+                        .into_iter()
+                        .find(|(rule_id, _)| *rule_id == id)
+                        .map(|(_, display)| display.to_owned())
+                });
+                if let Some(rule_display) = bound_display
+                    && !screen_matches_display(&target_screen, &rule_display)
+                    && self.space_state.screens.iter().any(|screen| {
+                        screen.space.is_some_and(|space| self.active_spaces.contains(&space))
+                            && screen_matches_display(screen, &rule_display)
+                    })
+                {
+                    warn!(
+                        %rule_display,
+                        "Move workspace to display ignored: a workspace rule binds it to its display"
+                    );
+                    return Ok(EventOutcome::no_change());
+                }
 
                 let windows = self
                     .layout_manager
