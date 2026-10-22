@@ -3125,7 +3125,16 @@ impl LayoutEngine {
                 window_id: maybe_id,
             } => {
                 let focused_window = if let Some(spec_u32) = maybe_id {
-                    match self.workspaces.find_window_by_idx(window_store, space, *spec_u32) {
+                    // A window named by id may live on any display, not just the
+                    // one holding the command context.
+                    match self
+                        .workspaces
+                        .find_window_by_idx(window_store, space, *spec_u32)
+                        .or_else(|| {
+                            window_store
+                                .iter_workspace_assignments()
+                                .find_map(|(wid, _)| (wid.idx.get() == *spec_u32).then_some(wid))
+                        }) {
                         Some(w) => w,
                         None => return EventResponse::default(),
                     }
@@ -5263,6 +5272,54 @@ mod tests {
                 assert_eq!(engine.workspaces.active_workspace(to), Some(id));
             }
         }
+    }
+
+    #[test]
+    fn move_window_by_id_finds_a_window_on_another_display() {
+        let settings = VirtualWorkspaceSettings {
+            display_mode: crate::common::config::DisplayMode::Shared,
+            default_workspace_count: 4,
+            ..Default::default()
+        };
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let mut windows = WindowStore::default();
+        let (a, b) = (SpaceId::new(85), SpaceId::new(86));
+        let screen = CGSize::new(1000., 800.);
+        for space in [a, b] {
+            let _ = engine.handle_event(&mut windows, LayoutEvent::SpaceExposed(space, screen));
+        }
+        let window = WindowId::new(5154, 1);
+        let _ = engine.handle_event(
+            &mut windows,
+            LayoutEvent::windows_observed(
+                b,
+                window.pid,
+                vec![window_layout_info(window, CGSize::new(500., 500.))],
+                None,
+            ),
+        );
+        let target = engine.workspaces.active_workspace(a).unwrap();
+        let index = engine.workspaces.workspace_index(a, target).unwrap();
+
+        // The command comes from display a; the window lives on display b.
+        let _ = engine.handle_virtual_workspace_command(
+            &mut windows,
+            crate::model::virtual_workspace::WorkspaceContext {
+                space: a,
+                visible: &[a, b],
+                navigation: Default::default(),
+            },
+            &LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Index(index),
+                follow: false,
+                window_id: Some(window.idx.get()),
+            },
+        );
+
+        assert_eq!(
+            engine.workspaces().workspace_for_window(&windows, a, window),
+            Some(target)
+        );
     }
 
     #[test]
