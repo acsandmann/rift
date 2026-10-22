@@ -2290,6 +2290,7 @@ impl Reactor {
                         &self.space_state.screens.clone(),
                         false,
                         Some(&activated),
+                        &[],
                     ));
                 }
                 return Ok(outcome);
@@ -3658,6 +3659,7 @@ impl Reactor {
                 &previous_screens,
                 invalidates_pending_targets,
                 None,
+                &invalidated_spaces,
             ));
         }
         outcome.absorb(self.advance_workspace_transfers());
@@ -3692,6 +3694,7 @@ impl Reactor {
         previous_screens: &[ScreenInfo],
         preserve_membership: bool,
         pins_only: Option<&HashSet<crate::model::VirtualWorkspaceId>>,
+        invalidated_spaces: &[SpaceId],
     ) -> EventOutcome {
         use crate::model::virtual_workspace::WorkspaceTransferReason;
         let mut outcome = EventOutcome::no_change();
@@ -3707,8 +3710,9 @@ impl Reactor {
         let live = |screen: &ScreenInfo| {
             screen.space.is_some_and(|space| self.active_spaces.contains(&space))
         };
-        // Plan only from the accepted topology. A desktop switch on a connected
-        // display never constitutes departure or a home-display restoration.
+        // Plan only from the accepted topology. Switching away from a desktop
+        // still in the native inventory is dormancy; losing it is departure,
+        // even when its display stays connected and borrows another desktop.
         let placements: Vec<_> = {
             let engine = &self.layout_manager.layout_engine;
             let rules = engine.workspaces().rule_displays();
@@ -3723,6 +3727,12 @@ impl Reactor {
                         .home_space
                         .zip(workspace.preferred_display.as_deref())
                         .filter(|_| pins_only.is_none());
+                    let desktop_lost = invalidated_spaces.contains(&workspace.space)
+                        && !self
+                            .space_state
+                            .display_space_ids
+                            .values()
+                            .any(|spaces| spaces.contains(&workspace.space));
                     let rehome = home.and_then(|(space, display)| {
                         if previous_screens
                             .iter()
@@ -3757,8 +3767,22 @@ impl Reactor {
                             screens.iter().position(|screen| matching(&screen))
                         });
                     let placement = if let Some(target) = ruled {
-                        (owner != screens[target].display_uuid_opt())
-                            .then_some((target, WorkspaceTransferReason::Restoration))
+                        let native_owner = self
+                            .space_state
+                            .display_space_ids
+                            .iter()
+                            .find(|(_, spaces)| spaces.contains(&workspace.space))
+                            .map(|(display, _)| display.as_str())
+                            .or(owner);
+                        (native_owner != screens[target].display_uuid_opt() || desktop_lost)
+                            .then_some((
+                                target,
+                                if desktop_lost {
+                                    WorkspaceTransferReason::DisplayDeparture
+                                } else {
+                                    WorkspaceTransferReason::Restoration
+                                },
+                            ))
                     } else if let Some(target) = rehome
                         .or_else(|| {
                             home.and_then(|(space, display)| {
@@ -3774,7 +3798,10 @@ impl Reactor {
                         Some((target, WorkspaceTransferReason::Restoration))
                     } else if home.is_some()
                         && owner.is_some_and(|display| {
-                            !screens.iter().any(|screen| screen.display_uuid_opt() == Some(display))
+                            (!screens
+                                .iter()
+                                .any(|screen| screen.display_uuid_opt() == Some(display))
+                                || desktop_lost)
                                 && (previously_active.contains(&workspace.space)
                                     || engine.last_space_for_display_uuid(display)
                                         == Some(workspace.space))

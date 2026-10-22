@@ -9069,6 +9069,70 @@ fn retrying_native_transfer_does_not_reveal_an_inactive_virtual_workspace() {
 }
 
 #[test]
+fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
+    let (a, b, replacement) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
+    let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture();
+    let mut config = reactor.config.clone();
+    config.virtual_workspaces.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        workspace: WorkspaceSelector::Index(2),
+        layout: None,
+        display: Some("test-display-1".into()),
+    }];
+    reactor.handle_event(Event::ConfigUpdated(config));
+    let mut survivor = reactor.space_state.screens[1].clone();
+    // Clamshell transition from the log: the LG stays connected but borrows the
+    // built-in desktop, and its original native desktop is destroyed.
+    survivor.space = Some(a);
+    survivor.frame.origin = CGPoint::ZERO;
+    let mut snapshot = forwarded_space_state(vec![survivor.clone()]);
+    snapshot.display_set_changed = true;
+    snapshot.should_force_refresh_layout = true;
+    snapshot.membership_complete = true;
+    snapshot.destroyed_spaces.insert(b);
+    snapshot.active_window_spaces.extend(wsids.map(|wsid| (wsid, a)));
+    reactor.handle_event(Event::SpaceStateChanged(snapshot));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    for &id in &ids {
+        assert_eq!(
+            workspaces[id].space, a,
+            "no workspace may remain on a destroyed desktop"
+        );
+    }
+    for window in [WindowId::new(1, 1), WindowId::new(2, 1)] {
+        assert_eq!(reactor.state.windows.workspace_for_window(window), Some(ids[0]));
+    }
+    assert_eq!(workspaces[ids[0]].home_space, Some(b));
+
+    // A later accepted sample identifies the external display's replacement.
+    survivor.space = Some(replacement);
+    let mut snapshot = forwarded_space_state(vec![survivor]);
+    snapshot.display_space_ids.insert("test-display-0".into(), vec![a]);
+    snapshot.space_remaps.push((b, replacement));
+    snapshot.should_force_refresh_layout = true;
+    snapshot.membership_complete = true;
+    snapshot.active_window_spaces.extend(wsids.map(|wsid| (wsid, replacement)));
+    reactor.handle_event(Event::SpaceStateChanged(snapshot));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspaces = reactor.layout_manager.layout_engine.workspaces();
+    for &id in &[ids[0], ids[2], ids[3]] {
+        assert_eq!(
+            workspaces[id].space, replacement,
+            "{id:?} returns to its home display"
+        );
+    }
+    assert_eq!(workspaces.active_workspace(replacement), Some(ids[0]));
+    assert_eq!(
+        workspaces[ids[1]].space, a,
+        "the built-in desktop is dormant, not destroyed"
+    );
+    assert_eq!(workspaces.catalog().count(), 4);
+    for window in [WindowId::new(1, 1), WindowId::new(2, 1)] {
+        assert_eq!(reactor.state.windows.workspace_for_window(window), Some(ids[0]));
+    }
+}
+
+#[test]
 fn shared_display_returning_on_new_desktop_restores_its_workspaces() {
     let (a, b, b_new) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
     let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture();
@@ -9486,6 +9550,7 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
             &reactor.space_state.screens.clone(),
             false,
             None,
+            &[],
         );
         reactor.apply_event_outcome(outcome);
         let workspace = &reactor.layout_manager.layout_engine.workspaces()[pinned];
