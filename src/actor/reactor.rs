@@ -2487,8 +2487,9 @@ impl Reactor {
                 let post_arrange_mouse_warp =
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
+                let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
                 let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
-                return command_workflow::handle_command_layout(
+                let outcome = command_workflow::handle_command_layout(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -2500,7 +2501,11 @@ impl Reactor {
                         visible_space_frames,
                         post_arrange_mouse_warp,
                     },
-                );
+                )?;
+                if is_move_node {
+                    self.follow_focused_window_to_its_display(command_space);
+                }
+                return Ok(outcome);
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
                 selector,
@@ -2644,6 +2649,20 @@ impl Reactor {
                         );
                     return Ok(EventOutcome::no_change().with_layout_response(response, None));
                 }
+                // The rule would move a bound workspace back on the next display change.
+                let workspaces = self.layout_manager.layout_engine.workspaces();
+                let active = workspaces.active_workspace(source_space);
+                if workspaces.rule_displays().into_iter().any(|(id, display)| {
+                    Some(id) == active
+                        && !screen_matches_display(&target_screen, display)
+                        && self.space_state.screens.iter().any(|screen| {
+                            screen.space.is_some_and(|space| self.is_space_active(space))
+                                && screen_matches_display(screen, display)
+                        })
+                }) {
+                    warn!("Move workspace to display ignored: a workspace rule binds it");
+                    return Ok(EventOutcome::no_change());
+                }
 
                 let windows = self
                     .layout_manager
@@ -2757,6 +2776,7 @@ impl Reactor {
                 }
                 if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                    self.place_new_window_on_pointer_display(window, space);
                 }
             }
         }
@@ -3712,10 +3732,17 @@ impl Reactor {
                         })
                     });
                     let ruled = rules.iter().find(|(rule_id, _)| *rule_id == id).and_then(
-                        |(_, display)| {
-                            screens.iter().position(|screen| {
-                                live(screen) && screen_matches_display(screen, display)
-                            })
+                        |(_, rule_display)| {
+                            let matching = |screen: &&ScreenInfo| {
+                                live(screen) && screen_matches_display(screen, rule_display)
+                            };
+                            if screens.iter().filter(matching).count() > 1 {
+                                warn!(
+                                    rule_display,
+                                    "Workspace rule display is ambiguous; use a UUID"
+                                );
+                            }
+                            screens.iter().position(|screen| matching(&screen))
                         },
                     );
                     let placement = if let Some(target) = ruled {
@@ -5992,6 +6019,52 @@ impl Reactor {
         frame
     }
 
+    /// In shared mode, open a new window on the pointer's display unless an app rule
+    /// names its workspace: launchers can activate an app on another display.
+    fn place_new_window_on_pointer_display(&mut self, window: WindowId, space: SpaceId) {
+        let engine = &self.layout_manager.layout_engine;
+        if engine.workspaces().settings.display_mode != crate::common::config::DisplayMode::Shared {
+            return;
+        }
+        let Some(target_screen) = window_server::current_cursor_location()
+            .ok()
+            .and_then(|point| self.screen_for_point(point))
+            .filter(|screen| screen.space.is_some_and(|s| s != space && self.is_space_active(s)))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(state) = self.state.windows.window(window).filter(|s| s.info.is_standard) else {
+            return;
+        };
+        let app = self.app_manager.apps.get(&window.pid).map(|app| &app.info);
+        if engine.app_rule_names_workspace(crate::model::WindowRuleContext {
+            app_bundle_id: app.and_then(|info| info.bundle_id.as_deref()),
+            app_name: app.and_then(|info| info.localized_name.as_deref()),
+            window_title: Some(&state.info.title),
+            ax_role: state.info.ax_role.as_deref(),
+            ax_subrole: state.info.ax_subrole.as_deref(),
+        }) {
+            return;
+        }
+        let target_frame = Self::center_frame_on_screen(state.frame_monotonic, target_screen.frame);
+        let payload = command_workflow::MoveWindowToDisplayPayload {
+            window,
+            source_space: space,
+            target_space: target_screen.space.unwrap(),
+            target_screen: target_screen.frame,
+            target_frame,
+        };
+        match command_workflow::handle_command_reactor_move_window_to_display(
+            &mut self.state,
+            &mut self.layout_manager,
+            payload,
+        ) {
+            Ok(outcome) => self.apply_event_outcome(outcome),
+            Err(error) => warn!(?window, %error, "Could not open new window on pointer display"),
+        }
+    }
+
     fn center_frame_on_screen(frame: CGRect, screen: CGRect) -> CGRect {
         let min = screen.min();
         let max = screen.max();
@@ -6001,6 +6074,27 @@ impl Reactor {
         origin.x = (origin.x - frame.size.width / 2.0).clamp(min.x, max_x);
         origin.y = (origin.y - frame.size.height / 2.0).clamp(min.y, max_y);
         CGRect::new(origin, frame.size)
+    }
+
+    /// macOS moves its active display with the key window only later; until then the
+    /// next command would act on the display move-node just carried the window off.
+    fn follow_focused_window_to_its_display(&mut self, previous_space: Option<SpaceId>) {
+        let Some(space) = self
+            .layout_manager
+            .layout_engine
+            .focused_window()
+            .and_then(|window| self.assigned_space_for_window_id(window))
+            .filter(|space| Some(*space) != previous_space && self.is_space_active(*space))
+        else {
+            return;
+        };
+        let Some(uuid) = self.display_uuid_for_space(space) else {
+            return;
+        };
+        if crate::sys::screen::set_active_menu_bar_display_uuid(&uuid) {
+            self.space_state.menu_bar_space = Some(space);
+        }
+        self.space_state.command_space = Some(space);
     }
 
     fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {

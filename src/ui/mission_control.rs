@@ -2093,6 +2093,8 @@ mod tests {
             name: index.to_string(),
             layout_mode: "scrolling".into(),
             is_active: index == 1,
+            display_uuid: None,
+            is_focused: index == 1,
             window_count: windows.len(),
             windows,
         }

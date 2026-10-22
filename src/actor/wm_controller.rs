@@ -304,6 +304,7 @@ impl WmController {
             AppGloballyActivated(pid) => {
                 _ = self.input_tx.send(input::Request::EnforceHidden);
                 self.events_tx.send(Event::ApplicationGloballyActivated(pid));
+                self.retry_unattached_app(pid);
             }
             AppGloballyDeactivated(pid) => {
                 self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
@@ -438,6 +439,17 @@ impl WmController {
         if refresh_overview && let Some(tx) = &self.mission_control_tx {
             tx.send(mission_control::Event::RefreshCurrentWorkspace);
         }
+    }
+
+    /// Attaching fails while an app refuses AX requests; retry when the user activates it.
+    fn retry_unattached_app(&mut self, pid: pid_t) {
+        if self.apps.0.contains_key(&pid) {
+            return;
+        }
+        let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
+            return;
+        };
+        self.new_app(pid, AppInfo::from(&*running_app), AppDiscoverySource::Process);
     }
 
     fn new_app(&mut self, pid: pid_t, info: AppInfo, source: AppDiscoverySource) {

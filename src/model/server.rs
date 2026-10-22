@@ -22,6 +22,8 @@ pub struct RuntimeWorkspaceData {
     pub name: String,
     pub layout_mode: String,
     pub is_active: bool,
+    pub display_uuid: Option<String>,
+    pub is_focused: bool,
     pub window_count: usize,
     pub windows: Vec<RuntimeWindowData>,
 }
@@ -99,6 +101,8 @@ impl From<RuntimeWorkspaceData> for protocol::WorkspaceData {
             name: value.name,
             layout_mode: value.layout_mode,
             is_active: value.is_active,
+            display_uuid: value.display_uuid,
+            is_focused: value.is_focused,
             window_count: value.window_count,
             windows: value.windows.into_iter().map(Into::into).collect(),
         }

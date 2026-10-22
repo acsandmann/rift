@@ -3125,7 +3125,14 @@ impl LayoutEngine {
                 window_id: maybe_id,
             } => {
                 let focused_window = if let Some(spec_u32) = maybe_id {
-                    match self.workspaces.find_window_by_idx(window_store, space, *spec_u32) {
+                    match self
+                        .workspaces
+                        .find_window_by_idx(window_store, space, *spec_u32)
+                        .or_else(|| {
+                            window_store
+                                .iter_workspace_assignments()
+                                .find_map(|(wid, _)| (wid.idx.get() == *spec_u32).then_some(wid))
+                        }) {
                         Some(w) => w,
                         None => return EventResponse::default(),
                     }
@@ -3532,6 +3539,13 @@ impl LayoutEngine {
             display.as_deref(),
             crate::model::virtual_workspace::WorkspaceTransferReason::Explicit,
         )
+    }
+
+    /// Whether an app rule names the workspace for a window with this context.
+    pub fn app_rule_names_workspace(&self, context: crate::model::WindowRuleContext<'_>) -> bool {
+        self.app_rules
+            .evaluate(context)
+            .is_some_and(|decision| decision.workspace.is_some())
     }
 
     pub(crate) fn transfer_workspace(

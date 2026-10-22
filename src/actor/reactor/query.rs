@@ -430,7 +430,8 @@ impl Reactor {
     ) -> Vec<RuntimeWorkspaceData> {
         let mut workspaces = Vec::new();
 
-        let space_id = space_id_param.or_else(|| self.default_query_space());
+        let focused_space = self.default_query_space();
+        let space_id = space_id_param.or(focused_space);
         let workspace_list = space_id
             .map(|space| self.visible_workspace_view(space, space_id_param))
             .unwrap_or_default();
@@ -516,6 +517,12 @@ impl Reactor {
                 name: workspace_name.to_string(),
                 layout_mode,
                 is_active,
+                display_uuid: self
+                    .layout_manager
+                    .layout_engine
+                    .display_uuid_for_space(space)
+                    .map(str::to_owned),
+                is_focused: is_active && Some(space) == focused_space,
                 window_count: windows.len(),
                 windows,
                 index,

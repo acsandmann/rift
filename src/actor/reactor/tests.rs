@@ -10246,3 +10246,98 @@ fn fullscreen_space_replacement_during_churn_keeps_geometry_suspended() {
     assert!(has_window_in_layout(&mut reactor, user, screen, window));
     crate::sys::window_server::set_window_spaces_override(wsid, None);
 }
+
+fn two_displays(
+    settings: crate::common::config::VirtualWorkspaceSettings,
+) -> (Apps, Reactor, SpaceId, SpaceId) {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let (a, b) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+        Some(a),
+        Some(b),
+    ]));
+    let mut apps = Apps::new();
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        make_windows(1),
+        Some(WindowId::new(1, 1)),
+    );
+    (apps, reactor, a, b)
+}
+
+fn shared_settings() -> crate::common::config::VirtualWorkspaceSettings {
+    crate::common::config::VirtualWorkspaceSettings {
+        display_mode: crate::common::config::DisplayMode::Shared,
+        default_workspace_count: 4,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn commands_follow_a_window_move_node_carried_to_another_display() {
+    let (mut apps, mut reactor, a, b) = two_displays(Default::default());
+    let window = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Right));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(b));
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Left));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(a));
+}
+
+#[test]
+fn shared_mode_opens_new_windows_on_the_pointer_display() {
+    let mut ruled = shared_settings();
+    ruled.app_rules = vec![crate::common::config::AppWorkspaceRule {
+        app_id: Some("com.testapp1".into()),
+        workspace: Some(WorkspaceSelector::Index(1)),
+        ..Default::default()
+    }];
+    for (settings, follows_pointer) in [(shared_settings(), true), (ruled, false)] {
+        let (mut apps, mut reactor, a, b) = two_displays(settings);
+        let window = WindowId::new(1, 1002);
+        let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(400., 400.));
+        crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(1500., 500.)));
+        reactor.handle_event(Event::WindowCreated(
+            window,
+            make_window_info(frame, None, "New Window", None),
+            None,
+            None,
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        crate::sys::window_server::set_cursor_location_override(None);
+        let expected = if follows_pointer { b } else { a };
+        assert_eq!(reactor.assigned_space_for_window_id(window), Some(expected));
+    }
+}
+
+#[test]
+fn shared_move_workspace_to_display_keeps_a_rule_bound_workspace_on_its_display() {
+    let mut settings = shared_settings();
+    settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        workspace: WorkspaceSelector::Index(0),
+        layout: None,
+        display: Some("test-display-0".into()),
+    }];
+    let (_apps, mut reactor, a, b) = two_displays(settings);
+    let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+    for id in [catalog[0], catalog[1]] {
+        reactor
+            .layout_manager
+            .layout_engine
+            .workspaces_mut()
+            .set_active_workspace(a, id);
+        reactor.space_state.command_space = Some(a);
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWorkspaceToDisplay {
+                selector: DisplaySelector::Index(1),
+                wrap_around: false,
+            },
+        )));
+    }
+    let space = |id| reactor.layout_manager.layout_engine.workspaces()[id].space;
+    assert_eq!((space(catalog[0]), space(catalog[1])), (a, b));
+}
