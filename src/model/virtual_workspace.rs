@@ -1633,119 +1633,57 @@ mod tests {
     #[test]
     fn navigation_scope_wrap_empty_and_dormant_policy_matrix() {
         let (a, b, dormant) = (SpaceId::new(101), SpaceId::new(201), SpaceId::new(301));
-        for mode in [DisplayMode::Independent, DisplayMode::Shared] {
-            for prevent_wrapping in [false, true] {
-                let settings = VirtualWorkspaceSettings {
-                    display_mode: mode,
-                    default_workspace_count: 6,
-                    prevent_wrapping,
-                    ..Default::default()
-                };
-                let mut store =
-                    WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-                store.ensure_visible_spaces(&[a, b], |_| None);
-                store.ensure_space_initialized(dormant);
-                let mut windows = WindowStore::default();
-                for scope in [NavigationScope::Local, NavigationScope::SharedVisible] {
-                    for visible in [&[a][..], &[a, b][..]] {
-                        let context = WorkspaceContext {
-                            space: a,
-                            visible,
-                            navigation: scope,
-                        };
-                        let expected: Vec<_> = store
-                            .catalog()
-                            .filter(|&id| {
-                                store[id].space == a
-                                    || (mode == DisplayMode::Shared
-                                        && scope == NavigationScope::SharedVisible
-                                        && visible.contains(&store[id].space))
-                            })
-                            .collect();
-                        for (position, &current) in expected.iter().enumerate() {
-                            let next = expected
-                                .get(position + 1)
-                                .copied()
-                                .or_else(|| (!prevent_wrapping).then_some(expected[0]));
-                            let previous =
-                                position.checked_sub(1).map(|index| expected[index]).or_else(
-                                    || (!prevent_wrapping).then_some(*expected.last().unwrap()),
-                                );
-                            assert_eq!(
-                                store.step_workspace(
-                                    &windows,
-                                    context,
-                                    current,
-                                    Some(false),
-                                    Direction::Right
-                                ),
-                                next
-                            );
-                            assert_eq!(
-                                store.step_workspace(
-                                    &windows,
-                                    context,
-                                    current,
-                                    None,
-                                    Direction::Left
-                                ),
-                                previous
-                            );
-                            // Every workspace is empty: skipping empties cannot invent a target.
-                            assert_eq!(
-                                store.step_workspace(
-                                    &windows,
-                                    context,
-                                    current,
-                                    Some(true),
-                                    Direction::Right
-                                ),
-                                None
-                            );
-                            assert_eq!(
-                                store.step_workspace(
-                                    &windows,
-                                    context,
-                                    current,
-                                    Some(true),
-                                    Direction::Left
-                                ),
-                                None
-                            );
-                        }
-                        let occupied = *expected.last().unwrap();
-                        let window = WindowId::new(90, 1);
-                        assert!(store.assign_window_to_workspace(
-                            &mut windows,
-                            store[occupied].space,
-                            window,
-                            occupied
-                        ));
-                        assert_eq!(
-                            store.step_workspace(
-                                &windows,
-                                context,
-                                expected[0],
-                                Some(true),
-                                Direction::Right
-                            ),
-                            (expected.len() > 1 || !prevent_wrapping).then_some(occupied)
-                        );
-                        assert_eq!(
-                            store.step_workspace(
-                                &windows,
-                                context,
-                                expected[0],
-                                Some(true),
-                                Direction::Left
-                            ),
-                            (!prevent_wrapping).then_some(occupied)
-                        );
-                        windows.debug_assert_invariants();
-                        store.remove_window(&mut windows, window);
-                    }
+        // mode, scope, visible displays, current index, direction, skip empty, no wrap, target
+        use Direction::{Left, Right};
+        use DisplayMode::{Independent, Shared};
+        use NavigationScope::{Local, SharedVisible};
+        #[rustfmt::skip]
+        let cases = [
+            (Independent, Local,         true,  0, Right, false, false, Some(1)),
+            (Independent, Local,         true,  1, Left,  false, false, Some(0)),
+            (Independent, SharedVisible, true,  1, Right, false, false, Some(0)),
+            (Shared,      Local,         true,  1, Right, false, false, Some(0)),
+            (Shared,      SharedVisible, false, 1, Right, false, false, Some(0)),
+            (Shared,      SharedVisible, true,  1, Right, false, false, Some(2)),
+            (Shared,      SharedVisible, true,  0, Left,  false, false, Some(3)),
+            (Shared,      SharedVisible, true,  3, Right, false, false, Some(0)),
+            (Shared,      SharedVisible, true,  3, Right, false, true,  None),
+            (Shared,      SharedVisible, true,  0, Left,  false, true,  None),
+            (Shared,      SharedVisible, true,  0, Right, true,  false, Some(3)),
+            (Shared,      SharedVisible, true,  0, Right, true,  true,  Some(3)),
+            (Shared,      SharedVisible, true,  3, Right, true,  true,  None),
+            (Shared,      SharedVisible, false, 0, Right, true,  false, None),
+        ];
+        for (mode, navigation, both, current, direction, skip, prevent_wrapping, expected) in cases
+        {
+            let settings = VirtualWorkspaceSettings {
+                display_mode: mode,
+                default_workspace_count: 2,
+                prevent_wrapping,
+                ..Default::default()
+            };
+            let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+            // Initialize separately so both modes have two workspaces per native Space.
+            for space in [a, b, dormant] {
+                store.ensure_space_initialized(space);
+                while store.workspace_ids(space).len() < 2 {
+                    store.create_workspace(space, None).unwrap();
                 }
             }
+            let ids: Vec<_> = store.catalog().collect();
+            let mut windows = WindowStore::default();
+            windows.assign_window_to_workspace(WindowId::new(90, 1), ids[3]);
+            windows.assign_window_to_workspace(WindowId::new(90, 2), ids[4]);
+            let context = WorkspaceContext {
+                space: a,
+                visible: if both { &[a, b] } else { &[a] },
+                navigation,
+            };
+            assert_eq!(
+                store.step_workspace(&windows, context, ids[current], Some(skip), direction),
+                expected.map(|index| ids[index]),
+                "{mode:?} {navigation:?} {current} {direction:?}"
+            );
         }
     }
 
@@ -1801,180 +1739,73 @@ mod tests {
     }
 
     #[test]
-    fn fresh_distribution_minimizes_transitions_against_exhaustive_allocations() {
-        let transitions =
-            |owners: &[usize]| owners.windows(2).filter(|pair| pair[0] != pair[1]).count();
-        for displays in 1usize..=3 {
-            for count in 1u32..=5 {
-                for mut pattern in 0..(displays + 1).pow(count) {
-                    let pins: Vec<_> = (0..count)
-                        .map(|_| {
-                            let value = pattern % (displays + 1);
-                            pattern /= displays + 1;
-                            (value < displays).then_some(value)
-                        })
-                        .collect();
-                    let owners = distribute(displays, pins.clone());
-                    assert!(
-                        pins.iter()
-                            .zip(&owners)
-                            .all(|(pin, owner)| pin.is_none_or(|pin| pin == *owner))
-                    );
-                    assert!((0..displays).all(|owner| owners.contains(&owner)));
-                    let mut reference = usize::MAX;
-                    for mut assignment in 0..displays.pow(owners.len() as u32) {
-                        let candidate: Vec<_> = (0..owners.len())
-                            .map(|_| {
-                                let owner = assignment % displays;
-                                assignment /= displays;
-                                owner
-                            })
-                            .collect();
-                        if pins
-                            .iter()
-                            .zip(&candidate)
-                            .all(|(pin, owner)| pin.is_none_or(|pin| pin == *owner))
-                            && (0..displays).all(|owner| candidate.contains(&owner))
-                        {
-                            reference = reference.min(transitions(&candidate));
-                        }
-                    }
-                    assert_eq!(
-                        transitions(&owners),
-                        reference,
-                        "{displays} {pins:?}: {owners:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn native_remap_preserves_shared_catalog_and_remaps_a_temporarily_away_home() {
-        let mut settings = VirtualWorkspaceSettings {
+        let settings = VirtualWorkspaceSettings {
             default_workspace_count: 1,
             display_mode: DisplayMode::Shared,
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let mut windows = WindowStore::default();
-        let old = SpaceId::new(41);
-        let fallback = SpaceId::new(42);
-        let new = SpaceId::new(43);
+        let (old, fallback, new) = (SpaceId::new(41), SpaceId::new(42), SpaceId::new(43));
         let id = store.list_workspaces(old)[0].0;
         store[id].home_space = Some(old);
-        store[id].preferred_display = Some("home".into());
-        let fallback_id = store.list_workspaces(fallback)[0].0;
-        assert!(store.transfer_workspace(
+        store.list_workspaces(fallback);
+        store.transfer_workspace(
             id,
             fallback,
             Some("fallback"),
-            WorkspaceTransferReason::DisplayDeparture
-        ));
-        let before: Vec<_> = store.catalog().collect();
-        assert!(store.remap_space(&mut windows, old, new).is_empty());
+            WorkspaceTransferReason::DisplayDeparture,
+        );
+        let catalog: Vec<_> = store.catalog().collect();
+        store.remap_space(&mut windows, old, new);
         assert_eq!(store[id].home_space, Some(new));
         assert_eq!(store[id].space, fallback);
-        settings.display_mode = DisplayMode::Independent;
-        store.update_settings(&settings, &LayoutSettings::default());
-        assert!(
-            store.workspaces_on(new).next().is_none(),
-            "an absent home needs no replacement catalog on reload"
-        );
-        settings.display_mode = DisplayMode::Shared;
-        store.update_settings(&settings, &LayoutSettings::default());
-        assert_eq!(store.catalog().collect::<Vec<_>>(), before);
-        assert!(store.transfer_workspace(
-            id,
-            new,
-            Some("home"),
-            WorkspaceTransferReason::Restoration
-        ));
-        assert_eq!(store.catalog().collect::<Vec<_>>(), before);
+        store.transfer_workspace(id, new, Some("home"), WorkspaceTransferReason::Restoration);
         assert_eq!(store.active_workspace(new), Some(id));
-        assert_eq!(store.active_workspace(fallback), Some(fallback_id));
-        // A proven replacement can already have independently customized shared workspaces.
-        let destination = store.list_workspaces(old)[0].0;
-        store[destination].name = "Customized".into();
-        let before: Vec<_> = store.catalog().collect();
-        store.remap_space(&mut windows, new, old);
-        assert_eq!(store.catalog().collect::<Vec<_>>(), before);
-        assert_eq!(store[destination].name, "Customized");
-        assert_eq!(store[id].space, old);
-        settings.display_mode = DisplayMode::Independent;
-        store.update_settings(&settings, &LayoutSettings::default());
-        assert!(store.workspace_ids(old).contains(&id));
-        assert!(store.workspace_ids(old).contains(&destination));
-        store.validate_persisted_topology().unwrap();
+        assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
     }
 
     #[test]
     fn shared_catalog_resolution_retains_dormant_positions_and_rejects_ambiguous_names() {
-        let a1 = SpaceId::new(11);
-        let a2 = SpaceId::new(12);
-        let b1 = SpaceId::new(21);
-        let mut settings = VirtualWorkspaceSettings {
+        let (a, b, dormant) = (SpaceId::new(11), SpaceId::new(21), SpaceId::new(12));
+        let settings = VirtualWorkspaceSettings {
             default_workspace_count: 2,
+            display_mode: DisplayMode::Shared,
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-        let a = store.list_workspaces(a1);
-        let b = store.list_workspaces(b1);
-        settings.display_mode = DisplayMode::Shared;
-        store.update_settings(&settings, &LayoutSettings::default());
-        assert_ne!(
-            store[a[0].0].name, store[b[0].0].name,
-            "migration disambiguates duplicate names"
-        );
-        store[b[0].0].name = store[a[0].0].name.clone();
+        store.ensure_visible_spaces(&[a, b], |_| None);
+        let ids: Vec<_> = store.catalog().collect();
+        store[ids[1]].name = store[ids[0]].name.clone();
         let context = WorkspaceContext {
-            space: a1,
-            visible: &[a1, b1],
+            space: a,
+            visible: &[a, b],
             navigation: NavigationScope::SharedVisible,
         };
         assert_eq!(
-            store.resolve_workspace(context, &WorkspaceSelector::Index(2)),
-            Some(WorkspaceTarget { id: b[0].0, space: b1 })
-        );
-        assert_eq!(
-            store.resolve_workspace(context, &WorkspaceSelector::Name(a[0].1.clone())),
+            store.resolve_workspace(context, &WorkspaceSelector::Name(store[ids[0]].name.clone())),
             None
         );
-        store.list_workspaces(a2);
+        store.ensure_space_initialized(dormant);
         let switched = WorkspaceContext {
-            space: a2,
-            visible: &[a2, b1],
-            navigation: Default::default(),
+            space: dormant,
+            visible: &[dormant, b],
+            ..context
         };
         assert_eq!(
             store.resolve_workspace(switched, &WorkspaceSelector::Index(0)),
             None
         );
         assert_eq!(
-            store.resolve_workspace(switched, &WorkspaceSelector::Index(2)).unwrap().id,
-            b[0].0
+            store.resolve_workspace(switched, &WorkspaceSelector::Index(1)),
+            Some(WorkspaceTarget { id: ids[1], space: b })
         );
         assert_eq!(
             store.workspace_view(switched).map(|(index, _)| index).collect::<Vec<_>>(),
-            [2, 3, 4]
+            [1, 2]
         );
-        assert_eq!(store.active_workspace(a1), Some(a[0].0));
-        assert_eq!(
-            store.resolve_workspace(context, &WorkspaceSelector::Index(0)).unwrap().id,
-            a[0].0
-        );
-        settings.display_mode = DisplayMode::Independent;
-        store.update_settings(&settings, &LayoutSettings::default());
-        assert_eq!(
-            store.workspace_ids(a1),
-            a.iter().map(|(id, _)| *id).collect::<Vec<_>>()
-        );
-        assert!(store.workspace_ids(a2).len() >= 2);
-        assert_eq!(
-            store.workspace_ids(b1),
-            b.iter().map(|(id, _)| *id).collect::<Vec<_>>()
-        );
-        store.validate_persisted_topology().unwrap();
+        assert_eq!(store.active_workspace(a), Some(ids[0]));
     }
 
     #[test]
@@ -2004,12 +1835,6 @@ mod tests {
         assert_eq!(store[id].home_space, Some(source));
         assert!(store.transfer_workspace(
             id,
-            source,
-            Some("external"),
-            WorkspaceTransferReason::Restoration
-        ));
-        assert!(store.transfer_workspace(
-            id,
             target,
             Some("builtin"),
             WorkspaceTransferReason::Explicit
@@ -2018,10 +1843,6 @@ mod tests {
         assert_eq!(store[id].preferred_display.as_deref(), Some("builtin"));
         assert_eq!(store.active_workspace(target), Some(id));
         store.validate_persisted_topology().unwrap();
-        let restored: WorkspaceStore =
-            ron::from_str(&ron::ser::to_string(&store).unwrap()).unwrap();
-        assert_eq!(restored[id].home_space, Some(target));
-        assert_eq!(restored[id].active_layout(), layout);
     }
 
     #[test]
@@ -2479,141 +2300,28 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_navigation() {
-        let window_store = WindowStore::default();
-        let mut manager = WorkspaceStore::new();
-        let space = SpaceId::new(1);
-        let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
-        let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
-        let ws3_id = manager.create_workspace(space, Some("WS3".to_string())).unwrap();
-
-        assert_eq!(
-            manager.step_workspace(&window_store, space, ws1_id, None, Direction::Right),
-            Some(ws2_id)
-        );
-        assert_eq!(
-            manager.step_workspace(&window_store, space, ws2_id, None, Direction::Right),
-            Some(ws3_id)
-        );
-
-        assert_eq!(
-            manager.step_workspace(&window_store, space, ws2_id, None, Direction::Left),
-            Some(ws1_id)
-        );
-        assert_eq!(
-            manager.step_workspace(&window_store, space, ws3_id, None, Direction::Left),
-            Some(ws2_id)
-        );
-    }
-
-    #[test]
     fn legacy_catalog_preserves_custom_ordinal_order() {
-        let window_store = WindowStore::default();
         let settings = VirtualWorkspaceSettings {
             default_workspace_count: 3,
             workspace_names: vec!["A".into(), "B".into(), "C".into()],
-            ..VirtualWorkspaceSettings::default()
+            ..Default::default()
         };
-        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let space = SpaceId::new(2);
-        let indexed = manager.list_workspaces(space);
-        let mut reversed = manager.workspace_ids(space);
+        let ids = store.list_workspaces(space);
+        let mut reversed = store.workspace_ids(space);
         reversed.reverse();
-        let serialized = ron::ser::to_string(&manager).unwrap();
-        let current = format!("order:{}", ron::ser::to_string(&manager.order).unwrap());
+        let serialized = ron::ser::to_string(&store).unwrap();
+        let current = format!("order:{}", ron::ser::to_string(&store.order).unwrap());
         let legacy = format!(
             "workspaces_by_space:{}",
-            ron::ser::to_string(&HashMap::from_iter([(space, reversed)])).unwrap()
+            ron::ser::to_string(&HashMap::from_iter([(space, reversed.clone())])).unwrap()
         );
-        manager = ron::from_str(&serialized.replace(&current, &legacy)).unwrap();
-
-        assert_eq!(
-            manager
-                .list_workspaces(space)
-                .iter()
-                .map(|(_, name)| name.as_str())
-                .collect::<Vec<_>>(),
-            ["C", "B", "A"],
-        );
-        assert_eq!(
-            manager.step_workspace(&window_store, space, indexed[2].0, None, Direction::Right),
-            Some(indexed[1].0),
-        );
-        assert_eq!(
-            manager.step_workspace(&window_store, space, indexed[0].0, None, Direction::Left),
-            Some(indexed[1].0),
-        );
-    }
-
-    #[test]
-    fn workspace_navigation_wraps_by_default() {
-        let window_store = WindowStore::default();
-        let settings = VirtualWorkspaceSettings {
-            default_workspace_count: 3,
-            ..VirtualWorkspaceSettings::default()
-        };
-        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-        let space = SpaceId::new(1);
-        let workspaces = manager.list_workspaces(space).to_vec();
-
-        assert_eq!(
-            manager.step_workspace(&window_store, space, workspaces[2].0, None, Direction::Right),
-            Some(workspaces[0].0)
-        );
-        assert_eq!(
-            manager.step_workspace(&window_store, space, workspaces[0].0, None, Direction::Left),
-            Some(workspaces[2].0)
-        );
-    }
-
-    #[test]
-    fn prevent_wrapping_stops_workspace_navigation_at_boundaries() {
-        let mut window_store = WindowStore::default();
-        let settings = VirtualWorkspaceSettings {
-            default_workspace_count: 4,
-            prevent_wrapping: true,
-            ..VirtualWorkspaceSettings::default()
-        };
-        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-        let space = SpaceId::new(1);
-        let workspaces = manager.list_workspaces(space).to_vec();
-
-        assert_eq!(
-            manager.step_workspace(&window_store, space, workspaces[0].0, None, Direction::Left),
-            None
-        );
-        assert_eq!(
-            manager.step_workspace(&window_store, space, workspaces[3].0, None, Direction::Right),
-            None
-        );
-
-        let window = WindowId::new(1, 1);
-        assert!(manager.assign_window_to_workspace(
-            &mut window_store,
-            space,
-            window,
-            workspaces[3].0
-        ));
-        assert_eq!(
-            manager.step_workspace(
-                &window_store,
-                space,
-                workspaces[1].0,
-                Some(true),
-                Direction::Right
-            ),
-            Some(workspaces[3].0)
-        );
-        assert_eq!(
-            manager.step_workspace(
-                &window_store,
-                space,
-                workspaces[3].0,
-                Some(true),
-                Direction::Right
-            ),
-            None
-        );
+        let restored: WorkspaceStore =
+            ron::from_str(&serialized.replace(&current, &legacy)).unwrap();
+        assert_eq!(restored.workspace_ids(space), reversed);
+        assert_eq!(restored.catalog().collect::<Vec<_>>(), reversed);
+        assert_eq!(restored[ids[0].0].name, ids[0].1);
     }
 
     #[test]

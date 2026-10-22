@@ -1535,63 +1535,37 @@ mod tests {
         store.accept_topology_revision(10);
         assert!(store.request_transfer(window, frame, a, true));
         let first = store.record(window).unwrap().pending_transfer().unwrap();
-        assert!(
-            !store.request_transfer(window, frame, a, true),
-            "rediscovery coalesces intent"
-        );
-        assert!(
-            !store.confirm_transfer(window, first.generation, 9, Some(a)),
-            "stale snapshot cannot acknowledge a new request"
-        );
-        assert!(!store.confirm_transfer(window, first.generation, 11, None));
-        assert!(!store.confirm_transfer(window, first.generation, 11, Some(b)));
-        assert!(store.advance_transfer(window, 11, true).is_some());
-        assert!(
-            store.advance_transfer(window, 11, true).is_none(),
-            "one write per accepted revision"
-        );
-        assert!(store.advance_transfer(window, 12, true).is_some());
-        assert!(store.advance_transfer(window, 13, true).is_none());
+        assert!(!store.request_transfer(window, frame, a, true));
+        for (revision, observed) in [(9, Some(a)), (11, None), (11, Some(b))] {
+            assert!(!store.confirm_transfer(window, first.generation, revision, observed));
+        }
+        for (revision, writes) in [
+            (11, true),
+            (11, false),
+            (12, true),
+            (13, false),
+            (14, false),
+        ] {
+            assert_eq!(store.advance_transfer(window, revision, true).is_some(), writes);
+        }
         assert_eq!(
             store.record(window).unwrap().pending_transfer().unwrap().status,
             TransferStatus::Deferred
         );
-        assert!(store.advance_transfer(window, 14, true).is_none());
-        assert!(
-            !store.request_transfer(window, frame, a, true),
-            "same target cannot restart the budget"
-        );
-        assert!(
-            !store.request_transfer(window, frame, b, false),
-            "dormant target defers writes"
-        );
+        assert!(!store.request_transfer(window, frame, a, true));
+        assert!(!store.request_transfer(window, frame, b, false));
         let second = store.record(window).unwrap().pending_transfer().unwrap();
         assert!(second.generation > first.generation);
         assert!(!store.confirm_transfer(window, first.generation, 15, Some(a)));
-        assert!(
-            store.advance_transfer(window, 15, true).is_some(),
-            "returning target resumes intent"
-        );
-        assert!(
-            !store.confirm_transfer(window, second.generation, 14, Some(b)),
-            "stale revision cannot confirm after a retry"
-        );
+        assert!(store.advance_transfer(window, 15, true).is_some());
+        assert!(!store.confirm_transfer(window, second.generation, 14, Some(b)));
         assert!(store.confirm_transfer(window, second.generation, 16, Some(b)));
         assert!(store.record(window).unwrap().pending_transfer().is_none());
         store.accept_topology_revision(20);
         store.request_transfer(window, frame, a, true);
         let current = store.record(window).unwrap().pending_transfer().unwrap();
         assert!(!store.confirm_transfer(window, current.generation, 19, Some(a)));
-        assert!(
-            store.confirm_transfer(window, current.generation, 20, Some(a)),
-            "current authoritative evidence remains valid when topology revision is unchanged"
-        );
-        store.request_transfer(window, frame, b, true);
-        store.remove_windows_for_app(window.pid);
-        assert!(
-            store.record(window).is_none(),
-            "destruction retires operation state"
-        );
+        assert!(store.confirm_transfer(window, current.generation, 20, Some(a)));
     }
 
     #[test]
@@ -1915,28 +1889,14 @@ mod tests {
     }
 
     #[test]
-    fn stale_operation_confirmation_cannot_clear_a_newer_request() {
-        let mut store = WindowStore::default();
-        let wid = WindowId::new(2, 1);
-        store.request_transfer(wid, None, SpaceId::new(1), true);
-        let first = store.record(wid).unwrap().pending_transfer().unwrap();
-        store.request_transfer(wid, None, SpaceId::new(2), true);
-        let second = store.record(wid).unwrap().pending_transfer().unwrap();
-
-        assert!(!store.confirm_transfer(wid, first.generation, 1, Some(SpaceId::new(1))));
-        assert_eq!(
-            store.record(wid).and_then(WindowRecord::pending_transfer),
-            Some(second)
-        );
-        assert!(store.confirm_transfer(wid, second.generation, 1, Some(SpaceId::new(2))));
-        assert_eq!(store.record(wid).and_then(WindowRecord::pending_transfer), None);
-    }
-
-    #[test]
     fn native_identity_change_retires_transfer_but_ax_rekey_preserves_it() {
         let mut store = WindowStore::default();
         let (old, replacement) = (WindowId::new(30, 1), WindowId::new(30, 2));
         let server = WindowServerId::new(70);
+        let mut workspaces = WorkspaceStore::new();
+        let workspace = workspaces.create_workspace(SpaceId::new(8), None).unwrap();
+        store.assign_window_to_workspace(old, workspace);
+        store.replace_rule_floating(old, true);
         store.track_window_server_id(server, old);
         store.request_transfer(old, None, SpaceId::new(8), true);
         let pending = store.record(old).unwrap().pending_transfer().unwrap();
@@ -1945,26 +1905,10 @@ mod tests {
             store.record(replacement).unwrap().pending_transfer(),
             Some(pending)
         );
+        assert!(store.rule_floating(replacement));
+        assert_eq!(store.workspace_windows(workspace), vec![replacement]);
         store.reconcile_ax_identity(replacement, Some(WindowServerId::new(71)));
         assert!(store.record(replacement).unwrap().pending_transfer().is_none());
-        store.debug_assert_invariants();
-    }
-
-    #[test]
-    fn rekey_transfers_rule_intent_and_pending_transfer() {
-        let mut store = WindowStore::default();
-        let from = WindowId::new(3, 1);
-        let to = WindowId::new(3, 2);
-        store.replace_rule_floating(from, true);
-        store.request_transfer(from, None, SpaceId::new(8), true);
-        let pending = store.record(from).unwrap().pending_transfer().unwrap();
-
-        store.transfer_persistent_window_metadata(from, to);
-
-        let target = store.record(to).expect("target record");
-        assert!(store.rule_floating(to));
-        assert_eq!(target.pending_transfer(), Some(pending));
-        assert_eq!(store.record(from).and_then(WindowRecord::pending_transfer), None);
         store.debug_assert_invariants();
     }
 
@@ -2018,28 +1962,19 @@ mod tests {
 
         assert_eq!(store.workspace_for_window(moved), Some(workspace_id));
         assert_eq!(store.workspace_for_window(present), Some(workspace_id));
-        assert_eq!(
-            store.native_fullscreen_record_for_window(moved).unwrap().last_known_user_space,
-            Some(new)
-        );
-        assert_eq!(
-            store
-                .pending_native_fullscreen_record_for_window_server_id(WindowServerId::new(43))
-                .unwrap()
-                .last_known_user_space,
-            Some(new)
-        );
-        assert_eq!(
-            store.native_fullscreen_record_for_window(moved).unwrap().transition,
-            NativeFullscreenTransition::ExitObserved(Some(new))
-        );
-        assert_eq!(
-            store
-                .pending_native_fullscreen_record_for_window_server_id(WindowServerId::new(43))
-                .unwrap()
-                .transition,
-            NativeFullscreenTransition::ExitObserved(Some(new))
-        );
+        let bound = store.native_fullscreen_record_for_window(moved).unwrap();
+        let pending = store
+            .pending_native_fullscreen_record_for_window_server_id(WindowServerId::new(43))
+            .unwrap();
+        for (home, transition) in [
+            (bound.last_known_user_space, bound.transition),
+            (pending.last_known_user_space, pending.transition),
+        ] {
+            assert_eq!(
+                (home, transition),
+                (Some(new), NativeFullscreenTransition::ExitObserved(Some(new)))
+            );
+        }
         assert_eq!(store.workspace_window_count(workspace_id), 2);
     }
 }

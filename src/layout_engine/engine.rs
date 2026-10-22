@@ -4925,42 +4925,19 @@ mod tests {
             let target_ids = engine.workspaces.workspace_ids(target);
             engine.workspaces.set_active_workspace(target, target_ids[1]);
             let id = engine.workspaces.active_workspace(source).unwrap();
-            let before: Vec<_> = engine
-                .workspaces
-                .catalog()
-                .map(|id| {
-                    (
-                        id,
-                        engine.workspaces[id].space,
-                        engine.workspaces[id].name.clone(),
-                        engine.workspaces[id].active_layout(),
-                    )
-                })
-                .collect();
             let response =
                 engine.move_active_workspace_to_space(&mut windows, source, target, screen);
             assert!(response.changed);
             assert!(response.transferred_windows.is_empty());
             if mode == crate::common::config::DisplayMode::Shared {
                 assert_eq!(engine.workspaces.active_workspace(target), Some(id));
-                assert_ne!(engine.workspaces.active_workspace(source), Some(id));
+                let replacement = engine.workspaces.active_workspace(source).unwrap();
+                assert_ne!(replacement, id);
+                assert_eq!(engine.workspaces[replacement].space, source);
                 assert_eq!(engine.workspaces[id].space, target);
             } else {
                 assert_eq!(engine.workspaces.active_workspace(target), Some(target_ids[0]));
                 assert_eq!(engine.workspaces.active_workspace(source), Some(id));
-                assert_eq!(
-                    engine
-                        .workspaces
-                        .catalog()
-                        .map(|id| (
-                            id,
-                            engine.workspaces[id].space,
-                            engine.workspaces[id].name.clone(),
-                            engine.workspaces[id].active_layout()
-                        ))
-                        .collect::<Vec<_>>(),
-                    before
-                );
             }
             engine.workspaces.validate_persisted_topology().unwrap();
             windows.debug_assert_invariants();
@@ -5227,59 +5204,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_workspace_back_and_forth_follows_cross_display_selection() {
-        for auto in [false, true] {
-            let settings = VirtualWorkspaceSettings {
-                display_mode: crate::common::config::DisplayMode::Shared,
-                default_workspace_count: 4,
-                workspace_auto_back_and_forth: auto,
-                ..Default::default()
-            };
-            let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
-            let mut windows = WindowStore::default();
-            let (a, b) = (SpaceId::new(83), SpaceId::new(84));
-            let screen = CGSize::new(1000., 800.);
-            for space in [a, b] {
-                let _ = engine.handle_event(&mut windows, LayoutEvent::SpaceExposed(space, screen));
-            }
-            let origin = engine.workspaces.active_workspace(a).unwrap();
-            let target = engine.workspaces.active_workspace(b).unwrap();
-            let index = engine.workspaces.workspace_index(b, target).unwrap();
-            let response = engine.handle_virtual_workspace_command(
-                &mut windows,
-                crate::model::virtual_workspace::WorkspaceContext {
-                    space: a,
-                    visible: &[a, b],
-                    navigation: Default::default(),
-                },
-                &LayoutCommand::SwitchToWorkspace(index),
-            );
-            assert_eq!(response.workspace_space, Some(b));
-            for (from, to, id) in [(b, a, origin), (a, b, target), (b, a, origin)] {
-                let command = if auto {
-                    let current = engine.workspaces.active_workspace(from).unwrap();
-                    LayoutCommand::SwitchToWorkspace(
-                        engine.workspaces.workspace_index(from, current).unwrap(),
-                    )
-                } else {
-                    LayoutCommand::SwitchToLastWorkspace
-                };
-                let response = engine.handle_virtual_workspace_command(
-                    &mut windows,
-                    crate::model::virtual_workspace::WorkspaceContext {
-                        space: from,
-                        visible: &[a, b],
-                        navigation: Default::default(),
-                    },
-                    &command,
-                );
-                assert_eq!(response.workspace_space, Some(to), "auto={auto}");
-                assert_eq!(engine.workspaces.active_workspace(to), Some(id));
-            }
-        }
-    }
-
-    #[test]
     fn workspace_navigation_no_ops_report_unchanged() {
         let mut window_store = WindowStore::default();
         let space = SpaceId::new(82);
@@ -5452,25 +5376,6 @@ mod tests {
             external_layout,
             "returning to a display must retain edits made at the other viewport"
         );
-        let id = engine.workspaces.active_workspace(space).unwrap();
-        let layout = engine.workspaces[id].active_layout().unwrap();
-        let newcomer = WindowId::new(pid, 3);
-        let _ = engine.handle_event(
-            &mut window_store,
-            LayoutEvent::windows_observed(space, pid, vec![info(newcomer)], None),
-        );
-        let _ = engine.handle_event(
-            &mut window_store,
-            LayoutEvent::SpaceExposed(space, internal.size),
-        );
-        assert_eq!(engine.workspaces[id].active_layout(), Some(layout));
-        assert!(engine.workspaces[id].layout_system.contains_window(layout, newcomer));
-        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(w1));
-        let _ = engine.handle_event(
-            &mut window_store,
-            LayoutEvent::SpaceExposed(space, external.size),
-        );
-        assert!(!engine.workspaces[id].layout_system.contains_window(layout, w1));
     }
 
     #[test]

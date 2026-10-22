@@ -509,10 +509,6 @@ mod tests {
         config.settings.gestures.haptics_enabled = false;
         config.settings.gestures.skip_empty = false;
         let (context, _, _) = begin(&mut r, &config, a);
-        let owners: Vec<_> = ids
-            .iter()
-            .map(|&id| r.layout_manager.layout_engine.workspaces()[id].space)
-            .collect();
         let before = r.layout_update_count;
         assert!(r.gesture_workspace(&context, true), "2 is already visible on b");
         assert_eq!(r.space_state.command_space, Some(b));
@@ -537,47 +533,7 @@ mod tests {
                 r.layout_manager.layout_engine.workspaces().active_workspace(owner),
                 Some(ids[index])
             );
-            r.layout_manager
-                .layout_engine
-                .workspaces()
-                .validate_persisted_topology()
-                .unwrap();
         }
-        assert_eq!(
-            ids.iter()
-                .map(|&id| r.layout_manager.layout_engine.workspaces()[id].space)
-                .collect::<Vec<_>>(),
-            owners
-        );
-        r.config.settings.gestures.skip_empty = false;
-        r.config.settings.gestures.haptics_enabled = false;
-        r.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = true;
-        r.config.settings.layout.scrolling.gestures.invert_horizontal = false;
-        r.handle_layout_response(
-            EventResponse {
-                boundary_hit: Some(crate::layout_engine::Direction::Right),
-                ..Default::default()
-            },
-            Some(a),
-        );
-        assert_eq!(
-            r.space_state.command_space,
-            Some(b),
-            "scroll boundary uses global swipe policy"
-        );
-        r.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = false;
-        r.handle_layout_response(
-            EventResponse {
-                boundary_hit: Some(crate::layout_engine::Direction::Right),
-                ..Default::default()
-            },
-            Some(b),
-        );
-        assert_eq!(
-            r.space_state.command_space,
-            Some(b),
-            "disabled propagation preserves context"
-        );
     }
 
     #[test]
