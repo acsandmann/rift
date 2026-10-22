@@ -3543,6 +3543,13 @@ impl LayoutEngine {
         )
     }
 
+    /// Whether an app rule names the workspace for a window with this context.
+    pub fn app_rule_names_workspace(&self, context: crate::model::WindowRuleContext<'_>) -> bool {
+        self.app_rules
+            .evaluate(context)
+            .is_some_and(|decision| decision.workspace.is_some())
+    }
+
     pub(crate) fn transfer_workspace(
         &mut self,
         windows: &mut WindowStore,

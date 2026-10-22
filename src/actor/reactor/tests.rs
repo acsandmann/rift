@@ -10277,3 +10277,149 @@ fn fullscreen_space_replacement_during_churn_keeps_geometry_suspended() {
     assert!(has_window_in_layout(&mut reactor, user, screen, window));
     crate::sys::window_server::set_window_spaces_override(wsid, None);
 }
+
+fn shared_reactor_for_new_window_placement(
+    settings: crate::common::config::VirtualWorkspaceSettings,
+) -> (Apps, Reactor, SpaceId, SpaceId) {
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let (left_space, right_space) = (SpaceId::new(1), SpaceId::new(2));
+    connect_displays(&mut reactor, vec![left_screen(), right_screen()], vec![
+        Some(left_space),
+        Some(right_space),
+    ]);
+    let mut apps = Apps::new();
+    make_active_app(
+        &mut apps,
+        &mut reactor,
+        1,
+        make_windows(1),
+        Some(WindowId::new(1, 1)),
+    );
+    (apps, reactor, left_space, right_space)
+}
+
+fn shared_new_window_settings() -> crate::common::config::VirtualWorkspaceSettings {
+    crate::common::config::VirtualWorkspaceSettings {
+        display_mode: crate::common::config::DisplayMode::Shared,
+        default_workspace_count: 4,
+        ..Default::default()
+    }
+}
+
+/// The app opens a new window on the left display, as macOS decided.
+fn open_new_window_on_left(reactor: &mut Reactor, apps: &mut Apps) -> WindowId {
+    let window = WindowId::new(1, 1002);
+    let wsid = WindowServerId::new(10002);
+    let frame = CGRect::new(CGPoint::new(200., 200.), CGSize::new(400., 400.));
+    reactor.handle_event(Event::WindowCreated(
+        window,
+        make_window_info(frame, Some(wsid), "New Window", None),
+        Some(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        }),
+        None,
+    ));
+    apps.simulate_until_quiet(reactor);
+    window
+}
+
+#[test]
+fn shared_mode_opens_new_windows_on_the_pointer_display() {
+    let on_right = CGPoint::new(1500., 500.);
+
+    let (mut apps, mut reactor, _left, right_space) =
+        shared_reactor_for_new_window_placement(shared_new_window_settings());
+    crate::sys::window_server::set_cursor_location_override(Some(on_right));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    let right_active =
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(right_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().workspace_for_window(
+            &reactor.state.windows,
+            right_space,
+            window
+        ),
+        right_active
+    );
+
+    // Independent mode leaves the window where macOS put it.
+    let (mut apps, mut reactor, left_space, _right) = shared_reactor_for_new_window_placement(
+        crate::common::config::VirtualWorkspaceSettings::default(),
+    );
+    crate::sys::window_server::set_cursor_location_override(Some(on_right));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+}
+
+#[test]
+fn an_app_rule_naming_a_workspace_wins_over_the_pointer_display() {
+    let mut settings = shared_new_window_settings();
+    settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+        app_id: Some("com.testapp1".into()),
+        workspace: Some(WorkspaceSelector::Index(1)),
+        ..Default::default()
+    }];
+    let (mut apps, mut reactor, left_space, _right) =
+        shared_reactor_for_new_window_placement(settings);
+    crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(1500., 500.)));
+    let window = open_new_window_on_left(&mut reactor, &mut apps);
+    crate::sys::window_server::set_cursor_location_override(None);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+}
+
+#[test]
+fn a_new_window_moved_to_the_pointer_display_stays_despite_lagging_reports() {
+    let (mut apps, mut reactor, left_space, right_space) =
+        shared_reactor_for_new_window_placement(shared_new_window_settings());
+    crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(500., 500.)));
+    let window = WindowId::new(1, 1002);
+    let wsid = WindowServerId::new(10002);
+    let frame = CGRect::new(CGPoint::new(1200., 200.), CGSize::new(400., 400.));
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![right_space.get()]));
+    reactor.handle_event(Event::WindowCreated(
+        window,
+        make_window_info(frame, Some(wsid), "New Window", None),
+        Some(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        }),
+        None,
+    ));
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(left_space));
+
+    // macOS and the app still report the old display while the move lands.
+    reactor.reconcile_authoritative_active_window_snapshot(
+        vec![(wsid, Some(right_space))],
+        false,
+        &[],
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        window,
+        frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(left_space),
+        "reports of the old display while macOS catches up must not move the window back"
+    );
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+    crate::sys::window_server::set_cursor_location_override(None);
+}
