@@ -67,6 +67,16 @@ pub enum WmCommand {
     Wm(WmCmd),
     ConfiguredLayout(ConfiguredLayoutCommand),
     ReactorCommand(reactor::Command),
+    Sequence(Vec<WmCommand>),
+}
+
+impl WmCommand {
+    pub fn steps(&self) -> Box<dyn Iterator<Item = &WmCommand> + '_> {
+        match self {
+            WmCommand::Sequence(commands) => Box::new(commands.iter().flat_map(WmCommand::steps)),
+            command => Box::new(std::iter::once(command)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -434,6 +444,11 @@ impl WmController {
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
             }
+            Command(Sequence(commands)) => {
+                for command in commands {
+                    self.handle_event(Command(command));
+                }
+            }
         }
         if refresh_overview && let Some(tx) = &self.mission_control_tx {
             tx.send(mission_control::Event::RefreshCurrentWorkspace);
@@ -603,5 +618,50 @@ mod app_lifecycle_tests {
             assert!(!new.same_actor(&old));
             assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    use crate::layout_engine::LayoutCommand;
+
+    #[test]
+    fn sequences_dispatch_each_step_in_order() {
+        let (config_tx, _config_rx) = actor::channel();
+        let (events_tx, mut events_rx) = actor::channel();
+        let (input_tx, mut input_rx) = actor::channel();
+        let (stack_line_tx, _stack_line_rx) = actor::channel();
+        let config = Config {
+            restore_file: PathBuf::new(),
+            config: crate::common::config::Config::default(),
+        };
+        let (mut wm, _) =
+            WmController::new(config, config_tx, events_tx, input_tx, stack_line_tx, None, None);
+
+        wm.handle_event(WmEvent::Command(WmCommand::Sequence(vec![
+            WmCommand::Wm(MoveWindowToWorkspace(WorkspaceSelector::Index(0))),
+            WmCommand::Sequence(vec![WmCommand::Wm(BindingMode("default".into()))]),
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::NextWindow)),
+        ])));
+
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            reactor::Event::Command(reactor::Command::Layout(
+                LayoutCommand::MoveWindowToWorkspace {
+                    workspace: WorkspaceSelector::Index(0),
+                    ..
+                }
+            ))
+        ));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            reactor::Event::Command(reactor::Command::Layout(LayoutCommand::NextWindow))
+        ));
+        assert!(events_rx.try_recv().is_err());
+        assert!(matches!(
+            input_rx.try_recv().unwrap().1,
+            input::Request::SetBindingMode(mode) if mode == "default"
+        ));
     }
 }

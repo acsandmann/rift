@@ -186,6 +186,7 @@ fn resize_command_config_supports_legacy_and_oriented_forms() {
             legacy = "resize_window_grow"
             vertical = { resize_window_shrink = "vertical" }
             smart = { resize_window_grow = "smart" }
+            sequence = ["resize_window_shrink", { resize_window_grow = "vertical" }]
             "#,
     )
     .unwrap();
@@ -209,6 +210,17 @@ fn resize_command_config_supports_legacy_and_oriented_forms() {
         WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
             ResizeOrientation::Smart
         )))
+    );
+    assert_eq!(
+        config.keys["sequence"],
+        WmCommand::Sequence(vec![
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowShrink(
+                ResizeOrientation::Horizontal
+            ))),
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
+                ResizeOrientation::Vertical
+            ))),
+        ])
     );
 }
 
@@ -421,11 +433,68 @@ fn binding_mode_config_rejects_bad_targets_reserved_default_and_bad_hotkeys() {
 }
 
 #[test]
+fn command_arrays_parse_save_and_follow_keymap_renames() {
+    use crate::actor::wm_controller::WmCmd;
+
+    let text = r#"
+            [settings]
+            [keys]
+            "Alt + 1" = [{ move_window_to_workspace = 0 }, { binding_mode = "move" }]
+            [binding_modes.move]
+            "1" = [{ move_window_to_workspace = 0 }, { binding_mode = "default" }]
+        "#;
+    let sequence = |mode: &str| {
+        WmCommand::Sequence(vec![
+            WmCommand::Wm(WmCmd::MoveWindowToWorkspace(WorkspaceSelector::Index(0))),
+            WmCommand::Wm(WmCmd::BindingMode(mode.into())),
+        ])
+    };
+    let config = Config::parse(text).unwrap();
+    assert_eq!(config.binding_mode_specs[0].1, [(
+        "Alt + 1".to_string(),
+        sequence("move")
+    )]);
+    assert_eq!(config.binding_mode_specs[1].1, [(
+        "1".to_string(),
+        sequence("default")
+    )]);
+
+    let missing = text.replace("\"default\" }]", "\"missing\" }]");
+    assert!(Config::parse(&missing).unwrap_err().to_string().contains("missing"));
+    for empty in ["[]", "[[]]"] {
+        let config = format!("[settings]\n[keys]\n\"A\" = {empty}");
+        assert!(Config::parse(&config).unwrap_err().to_string().contains("empty"));
+    }
+
+    let mut document = ConfigDocument::parse(text).unwrap();
+    document
+        .update(|source| source.rename_keymap("move", "go".into()).unwrap())
+        .unwrap();
+    let saved = document.to_string();
+    assert!(
+        saved
+            .contains(r#""Alt + 1" = [{ move_window_to_workspace = 0 }, { binding_mode = "go" }]"#),
+        "{saved}"
+    );
+    let source = document.source().unwrap();
+    assert_eq!(source.keys["Alt + 1"], sequence("go"));
+    assert_eq!(source.binding_modes["go"]["1"], sequence("default"));
+}
+
+#[test]
 fn config_validation_rejects_duplicate_binding_mode_names() {
     let mut json = serde_json::to_value(Config::default()).unwrap();
     json["binding_mode_specs"] = serde_json::json!([["default", []], ["default", []]]);
     let config: Config = serde_json::from_value(json).unwrap();
     assert!(config.validate().iter().any(|issue| issue.contains("unique")));
+}
+
+#[test]
+fn config_validation_rejects_empty_command_arrays() {
+    let mut json = serde_json::to_value(Config::default()).unwrap();
+    json["binding_mode_specs"] = serde_json::json!([["default", [["A", []]]]]);
+    let config: Config = serde_json::from_value(json).unwrap();
+    assert!(config.validate().iter().any(|issue| issue.contains("empty")));
 }
 
 #[test]
