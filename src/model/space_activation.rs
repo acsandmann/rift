@@ -159,6 +159,7 @@ mod tests {
 
     fn input(screen_id: u32, space: Option<u64>, display_uuid: Option<&str>) -> ScreenInfo {
         ScreenInfo {
+            is_builtin: false,
             backing_scale: 1.0,
             id: ScreenId::new(screen_id),
             frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0)),

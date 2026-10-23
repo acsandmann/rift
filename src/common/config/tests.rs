@@ -722,3 +722,32 @@ fn display_workspace_mode_has_a_compatible_default_and_rejects_unknown_values() 
     );
     assert!(toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'mirrored'").is_err());
 }
+
+#[test]
+fn ordered_display_preferences_round_trip_and_validate() {
+    let mut document = ConfigDocument::default();
+    for display in [r#""builtin""#, r#"["builtin", "right"]"#] {
+        let rule: WorkspaceLayoutRule =
+            toml::from_str(&format!("workspace = 0\ndisplay = {display}")).unwrap();
+        let expected: toml::Table = toml::from_str(&format!("display = {display}")).unwrap();
+        assert_eq!(
+            toml::Value::try_from(&rule).unwrap()["display"],
+            expected["display"]
+        );
+        document
+            .update(|s| s.virtual_workspaces.workspace_rules = vec![rule.clone()])
+            .unwrap();
+        assert_eq!(document.runtime().unwrap().virtual_workspaces.workspace_rules, [
+            rule
+        ]);
+    }
+    for values in [vec![], vec![""], vec!["builtin", " "]] {
+        let error = document
+            .update(|s| {
+                s.virtual_workspaces.workspace_rules[0].display =
+                    Some(values.into_iter().map(String::from).collect());
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("Workspace rule 0 display preferences"));
+    }
+}

@@ -5130,6 +5130,7 @@ fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
     let display_uuid = "11111111-1111-1111-1111-111111111111".to_string();
     let screens_for = |space: SpaceId| -> Vec<ScreenInfo> {
         vec![ScreenInfo {
+            is_builtin: false,
             backing_scale: 1.0,
             id: crate::sys::screen::ScreenId::new(0),
             frame,
@@ -5252,6 +5253,7 @@ fn fullscreen_screen_params_preserves_window_layout() {
     // with the fullscreen space id.
     reactor.space_state.fullscreen_spaces.insert(fullscreen_space);
     reactor.handle_event(space_state_event_from_screens(vec![ScreenInfo {
+        is_builtin: false,
         backing_scale: 1.0,
         id: crate::sys::screen::ScreenId::new(0),
         frame: full_screen,
@@ -9076,7 +9078,7 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     config.virtual_workspaces.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
         workspace: WorkspaceSelector::Index(2),
         layout: None,
-        display: Some("test-display-1".into()),
+        display: Some(vec!["test-display-1".into()]),
     }];
     reactor.handle_event(Event::ConfigUpdated(config));
     let mut survivor = reactor.space_state.screens[1].clone();
@@ -9261,7 +9263,7 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
     config.virtual_workspaces.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
         workspace: WorkspaceSelector::Index(0),
         layout: None,
-        display: Some("test-display-0".into()),
+        display: Some(vec!["test-display-0".into()]),
     }];
     reactor.handle_event(Event::ConfigUpdated(config));
     apps.simulate_until_quiet(&mut reactor);
@@ -9534,7 +9536,7 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
     settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
         workspace: WorkspaceSelector::Index(0),
         layout: None,
-        display: Some("test-display-0".into()),
+        display: Some(vec!["test-display-0".into(), "right".into()]),
     }];
     let (_apps, mut reactor, a, b) = two_displays(settings);
     let pinned = reactor.test_workspace_ids(a)[0];
@@ -9602,7 +9604,7 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
     settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
         workspace: WorkspaceSelector::Index(0),
         layout: None,
-        display: Some("offline-pin".into()),
+        display: Some(vec!["offline-pin".into()]),
     }];
     let (_, mut reactor, a, b) = two_displays(settings);
     let id = reactor.test_workspace_ids(a)[0];
@@ -9655,4 +9657,11 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
         );
         assert_eq!(workspace.layout_mode(), LayoutMode::Stack);
     }
+    // A changed ordered rule explicitly reactivates automatic placement.
+    let mut config = reactor.config.clone();
+    config.virtual_workspaces.workspace_rules.last_mut().unwrap().display =
+        Some(vec!["test-display-1".into(), "offline-pin".into()]);
+    reactor.handle_event(Event::ConfigUpdated(config));
+    let workspace = &reactor.layout_manager.layout_engine.workspaces()[id];
+    assert_eq!((workspace.space, workspace.rule_overridden), (b, false));
 }

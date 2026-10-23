@@ -2644,7 +2644,28 @@ impl Reactor {
                     );
                     return Ok(EventOutcome::no_change());
                 };
+                // An explicit destination overrides the pin even while its display
+                // is unavailable; reconnecting must not undo the user's choice.
+                let workspaces = self.layout_manager.layout_engine.workspaces();
+                let rule_override = workspaces.active_workspace(source_space).and_then(|active| {
+                    let (_, display) = workspaces.rule_displays().find(|(id, _)| *id == active)?;
+                    let preferred = crate::sys::screen::resolve_display_preference(
+                        display,
+                        &self.space_state.screens,
+                        |screen| {
+                            screen.space.is_some_and(|space| self.active_spaces.contains(&space))
+                        },
+                    );
+                    let overridden = preferred
+                        .is_none_or(|screen| screen.display_uuid != target_screen.display_uuid);
+                    Some((active, overridden))
+                });
+
                 if source_space == target_space {
+                    if let Some((id, overridden)) = rule_override {
+                        self.layout_manager.layout_engine.workspaces_mut()[id].rule_overridden =
+                            overridden;
+                    }
                     let response =
                         self.layout_manager.layout_engine.move_active_workspace_to_space(
                             &mut self.state.windows,
@@ -2654,14 +2675,6 @@ impl Reactor {
                         );
                     return Ok(EventOutcome::no_change().with_layout_response(response, None));
                 }
-                // An explicit destination overrides the pin even while its display
-                // is unavailable; reconnecting must not undo the user's choice.
-                let workspaces = self.layout_manager.layout_engine.workspaces();
-                let rule_override = workspaces.active_workspace(source_space).and_then(|active| {
-                    let (_, display) = workspaces.rule_displays().find(|(id, _)| *id == active)?;
-                    let overridden = !screen_matches_display(&target_screen, display);
-                    Some((active, overridden))
-                });
 
                 let windows = self
                     .layout_manager
@@ -3630,11 +3643,14 @@ impl Reactor {
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
         if display_set_changed
             || invalidates_pending_targets
-            || previous_screens.iter().map(|s| (s.display_uuid_opt(), s.space)).ne(self
-                .space_state
-                .screens
+            || previous_screens
                 .iter()
-                .map(|s| (s.display_uuid_opt(), s.space)))
+                .map(|s| (s.display_uuid_opt(), s.space, s.frame))
+                .ne(self
+                    .space_state
+                    .screens
+                    .iter()
+                    .map(|s| (s.display_uuid_opt(), s.space, s.frame)))
         {
             outcome.absorb(self.reconcile_workspace_placements(
                 &previously_active,
@@ -3692,6 +3708,19 @@ impl Reactor {
         let live = |screen: &ScreenInfo| {
             screen.space.is_some_and(|space| self.active_spaces.contains(&space))
         };
+        // Native desktop switches (including entering fullscreen) do not change
+        // physical ownership. Retry deferred pins when a user desktop returns.
+        let resolve_pins = pins_only.is_some()
+            || preserve_membership
+            || screens.len() != previous_screens.len()
+            || screens.iter().any(|screen| {
+                previous_screens
+                    .iter()
+                    .find(|old| old.display_uuid == screen.display_uuid)
+                    .is_none_or(|old| {
+                        old.frame != screen.frame || (old.space.is_none() && screen.space.is_some())
+                    })
+            });
         // Plan only from the accepted topology. Switching away from a desktop
         // still in the native inventory is dormancy; losing it is departure,
         // even when its display stays connected and borrows another desktop.
@@ -3741,23 +3770,20 @@ impl Reactor {
                         .filter(|_| !workspace.rule_overridden)
                         .and_then(|rule_display| {
                             *rule_targets.entry(rule_display).or_insert_with(|| {
-                                let mut matching =
-                                    screens.iter().enumerate().filter(|(_, screen)| {
-                                        live(screen) && screen_matches_display(screen, rule_display)
-                                    });
-                                let first = matching.next().map(|(index, _)| index);
-                                if matching.next().is_some() {
-                                    warn!(
-                                        rule_display,
-                                        "Workspace rule display is ambiguous; use a UUID"
-                                    );
-                                }
-                                first
+                                crate::sys::screen::resolve_display_preference(
+                                    rule_display,
+                                    screens,
+                                    live,
+                                )
+                                .and_then(|target| {
+                                    screens.iter().position(|screen| std::ptr::eq(screen, target))
+                                })
                             })
                         });
                     let placement = if let Some(target) = ruled {
-                        (native_owner.or(owner) != screens[target].display_uuid_opt()
-                            || desktop_lost)
+                        ((resolve_pins || desktop_lost)
+                            && (native_owner.or(owner) != screens[target].display_uuid_opt()
+                                || desktop_lost))
                             .then_some((
                                 target,
                                 if desktop_lost {
@@ -4659,11 +4685,11 @@ impl Reactor {
             .filter(|space| self.is_space_active(*space))
             .collect();
         let screens = &self.space_state.screens;
-        let rule_space = |display: &str| {
-            screens
-                .iter()
-                .find(|screen| screen_matches_display(screen, display))
-                .and_then(|screen| screen.space)
+        let rule_space = |preferences: &[String]| {
+            crate::sys::screen::resolve_display_preference(preferences, screens, |screen| {
+                screen.space.is_some_and(|space| spaces.contains(&space))
+            })
+            .and_then(|screen| screen.space)
         };
         self.layout_manager
             .layout_engine
@@ -6181,9 +6207,4 @@ impl Reactor {
                 false
             })
     }
-}
-
-/// Workspace rules name a display by UUID or by its localized name.
-fn screen_matches_display(screen: &ScreenInfo, display: &str) -> bool {
-    screen.display_uuid == display || screen.name.as_deref() == Some(display)
 }

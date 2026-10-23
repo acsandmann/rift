@@ -823,7 +823,7 @@ impl WorkspaceStore {
     pub(crate) fn ensure_visible_spaces(
         &mut self,
         spaces: &[SpaceId],
-        rule_space: impl Fn(&str) -> Option<SpaceId>,
+        rule_space: impl Fn(&[String]) -> Option<SpaceId>,
     ) {
         if spaces.is_empty() {
             return;
@@ -898,7 +898,7 @@ impl WorkspaceStore {
 
     /// Shared-mode display assignments from workspace rules (last matching rule wins).
     /// Empty unless shared mode is active and some rule names a display.
-    pub(crate) fn rule_displays(&self) -> impl Iterator<Item = (VirtualWorkspaceId, &str)> {
+    pub(crate) fn rule_displays(&self) -> impl Iterator<Item = (VirtualWorkspaceId, &[String])> {
         let order = if self.settings.display_mode == DisplayMode::Shared
             && self.settings.workspace_rules.iter().any(|rule| rule.display.is_some())
         {

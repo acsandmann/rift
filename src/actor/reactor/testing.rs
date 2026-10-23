@@ -290,6 +290,7 @@ pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) 
         .zip(spaces.into_iter())
         .enumerate()
         .map(|(idx, (frame, space))| ScreenInfo {
+            is_builtin: false,
             backing_scale: 1.0,
             id: crate::sys::screen::ScreenId::new(idx as u32),
             frame,
@@ -366,6 +367,7 @@ pub fn fullscreen_startup_space_state(
     fullscreen_space: SpaceId,
 ) -> Event {
     let mut state = forwarded_space_state(vec![ScreenInfo {
+        is_builtin: false,
         backing_scale: 1.0,
         id: crate::sys::screen::ScreenId::new(0),
         frame: screen,

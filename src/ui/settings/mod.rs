@@ -517,6 +517,12 @@ impl Settings {
             return;
         }
         *env.displays.borrow_mut() = displays;
+        if let Some(draft) = self.model().sheet_model.borrow().as_ref()
+            && let Some(page) = draft.draft.as_ref().and_then(|draft| draft.page.borrow().clone())
+        {
+            page.synced_revision.set(None);
+            page.synchronize(draft);
+        }
         if let Some(layouts) = self.router.layouts.get() {
             layouts.refresh_displays();
         }

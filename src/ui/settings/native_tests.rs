@@ -241,6 +241,7 @@ pub fn run(ui: Ui) {
             display_uuid: "test-display".into(),
             name: Some("Test display".into()),
             frame: Default::default(),
+            is_builtin: false,
             backing_scale: 1.0,
             space: None,
         }]);
@@ -826,6 +827,7 @@ pub fn run(ui: Ui) {
                 display_uuid: "focused-display".into(),
                 name: Some("Focused display".into()),
                 frame: Default::default(),
+                is_builtin: false,
                 backing_scale: 1.0,
                 space: None,
             }]);
@@ -947,6 +949,7 @@ pub fn run(ui: Ui) {
                 display_uuid: "disp-a".into(),
                 name: Some("Display A".into()),
                 frame: Default::default(),
+                is_builtin: false,
                 backing_scale: 1.0,
                 space: None,
             }]);
@@ -1656,7 +1659,11 @@ pub fn render(
             crate::common::config::WorkspaceLayoutRule {
                 workspace: crate::common::config::WorkspaceSelector::Index(1),
                 layout: None,
-                display: Some("37D8832A-2D66-02CA-B9F7-8F30A301B230".into()),
+                display: Some(vec![
+                    "builtin".into(),
+                    "right".into(),
+                    "37D8832A-2D66-02CA-B9F7-8F30A301B230".into(),
+                ]),
             },
         );
     }
@@ -1669,6 +1676,7 @@ pub fn render(
             displays.push(ScreenInfo {
                 id: crate::sys::screen::ScreenId::new(id),
                 frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1512.0, 982.0)),
+                is_builtin: false,
                 backing_scale: 2.0,
                 display_uuid: uuid.into(),
                 name: Some(name.into()),
@@ -1771,7 +1779,8 @@ pub fn render(
         sheet_window.setAppearance(window.appearance().as_deref());
         let view = sheet_window.contentView().unwrap();
         if scope == Some(23) {
-            let popup = named::<objc2_app_kit::NSPopUpButton>(&view, "Display").unwrap();
+            let popup =
+                named::<objc2_app_kit::NSPopUpButton>(&view, "Add Display Preference").unwrap();
             popup.selectItemAtIndex(popup.numberOfItems() - 1);
             assert!(unsafe { popup.sendAction_to(popup.action(), popup.target().as_deref()) });
         }

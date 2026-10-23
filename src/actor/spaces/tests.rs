@@ -12,6 +12,7 @@ fn screen(id: u32, display: &str, space: u64) -> ScreenInfo {
             CGPoint::new((id - 1) as f64 * 1000.0, 0.0),
             CGSize::new(1000.0, 800.0),
         ),
+        is_builtin: false,
         backing_scale: 1.0,
         space: Some(SpaceId::new(space)),
     }

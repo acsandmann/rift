@@ -302,15 +302,20 @@ workspace_auto_back_and_forth = false
 prevent_wrapping = false
 reapply_app_rules_on_title_change = false
 
-# Workspace-specific rules
-# - workspace: target workspace by index (integer) or name (string)
-# - layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling", "floating")
-# - display: display UUID or name that owns the workspace (display_mode = "shared" only).
-#   Falls back to normal placement while that display is disconnected.
+# Workspace rules: workspace is a zero-based index or name.
+# The last matching rule wins for each property independently.
+# - layout: "traditional", "bsp", "stack", "master_stack", "scrolling", or "floating".
+# - display: UUID, exact name, or lowercase builtin/left/right/top/bottom (shared mode only).
+#   A string is one preference; lists use the first eligible match, otherwise normal placement.
+#   builtin selects the Mac's built-in panel. Directions select eligible screen-center extremes,
+#   so preferences after a direction usually won't be reached.
+#   Explicit moves override placement until moved back or the display rule changes/reactivates.
 # workspace_rules = [
 #   { workspace = 1, layout = "bsp" },
 #   { workspace = "second", layout = "scrolling" },
-#   { workspace = "chat", display = "DELL U2720Q" }
+#   { workspace = 0, display = "builtin" },
+#   { workspace = 1, display = ["builtin", "right"] },
+#   { workspace = 2, display = ["DELL U2720Q", "left"] }
 # ]
 workspace_rules = []
 

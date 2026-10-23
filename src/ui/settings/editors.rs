@@ -1,3 +1,5 @@
+use objc2_app_kit::NSAccessibility;
+
 use super::pages::{layouts, optional_number};
 use super::*;
 use crate::common::config::*;
@@ -294,127 +296,167 @@ pub(super) fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         move |s, mode| set_workspace_layout(s, i, mode),
     );
     let display = workspace_display_row(&mut f, model, i);
-    f.finish(Section::new(&ui, "").row(name).row(layout).row(display))
+    f.finish(
+        VStack::new(&ui)
+            .spacing(16.0)
+            .push(Section::new(&ui, "").row(name).row(layout))
+            .push(display),
+    )
 }
 
-/// Pin a workspace to a connected display, or enter any display's UUID or name, the
-/// way per-display overrides accept displays that are not connected. The row is
-/// active only while displays share workspaces, since that is when the rule applies.
-fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> SettingsRow {
-    const ENTER: &str = "Enter Display…";
-    const HINT: &str = "Press Return to set. Find displays with rift-cli query displays.";
-    const ACTIVE: &str = "Active: Display workspace mode is Shared.";
-    const INACTIVE: &str = "Inactive: set Display workspace mode to Shared to use this.";
+/// The list is ordered intent; all mutations use the workspace sheet's draft.
+fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Section {
+    type Entry = (String, String, String);
     struct State {
         model: Weak<Model>,
         popup: std::cell::OnceCell<Rc<Popup>>,
+        list: std::cell::OnceCell<Rc<SettingsList<Entry>>>,
+        remove: std::cell::OnceCell<Rc<IconButton>>,
+        edit: std::cell::OnceCell<Rc<IconButton>>,
         field: Rc<TextField>,
+        editing: RefCell<Option<String>>,
         status: Caption,
         message: Rc<ValidationMessage>,
-        /// Popup choices before Enter Display…; `None` is Any display.
-        choices: RefCell<Vec<Option<String>>>,
-        /// The popup index of the saved choice.
-        saved: Cell<usize>,
+        choices: RefCell<Vec<String>>,
         active: Cell<bool>,
     }
     impl State {
-        fn set(&self, i: usize, display: Option<String>) {
+        fn change(&self, i: usize, edit: impl FnOnce(&mut Vec<String>) + Send + 'static) {
+            if !self.active.get() {
+                return;
+            }
             Model::submit(
                 &self.model,
                 Box::new(move |s| {
-                    set_workspace_display(s, i, display);
+                    let mut values = workspace_display(s, i).to_vec();
+                    edit(&mut values);
+                    set_workspace_display(s, i, values);
                     Ok(())
                 }),
                 Rc::downgrade(&self.message),
             );
         }
 
-        /// Show or hide the entry field; the popup always shows the saved choice.
-        fn entering(&self, open: bool) {
-            self.field.set_hidden(!open);
-            if open {
-                self.field.focus();
-            } else {
-                self.field.set_value("");
+        fn enter(&self, value: Option<String>) {
+            if !self.active.get() {
+                return;
             }
-            self.show_state();
+            self.field.set_value(value.as_deref().unwrap_or(""));
+            *self.editing.borrow_mut() = value;
+            self.field.set_hidden(false);
+            self.field.focus();
         }
 
-        fn show_state(&self) {
-            if let Some(popup) = self.popup.get() {
-                popup.set_selected(self.saved.get());
-            }
-            let open = !self.field.ns_view().isHidden();
-            self.status.set_text(match (open, self.active.get()) {
-                (true, _) => HINT,
-                (false, true) => ACTIVE,
-                (false, false) => INACTIVE,
-            });
-        }
-
-        /// Return or leaving the field sets a display; an empty field just closes it.
         fn submit(&self, i: usize, value: &str) {
-            let value = value.trim().to_owned();
             if self.field.ns_view().isHidden() {
                 return;
             }
-            self.entering(false);
-            if !value.is_empty() {
-                self.set(i, Some(value));
+            self.field.set_hidden(true);
+            let value = value.trim().to_owned();
+            let old = self.editing.borrow_mut().take();
+            if value.is_empty() {
+                return;
             }
+            self.change(i, move |values| {
+                if values.contains(&value) {
+                    return;
+                }
+                if let Some(index) = old.and_then(|old| values.iter().position(|v| *v == old)) {
+                    values[index] = value;
+                } else {
+                    values.push(value);
+                }
+            });
+        }
+
+        fn selected(&self) -> Option<String> {
+            let list = self.list.get()?;
+            list.row(list.selection()?).map(|entry| entry.0)
         }
 
         fn refresh(&self, source: &ConfigSource, i: usize) {
-            let (Some(model), Some(popup)) = (self.model.upgrade(), self.popup.get()) else {
+            let (Some(model), Some(popup), Some(list)) =
+                (self.model.upgrade(), self.popup.get(), self.list.get())
+            else {
                 return;
             };
             let displays = model.env.displays.borrow();
             let saved = workspace_display(source, i);
-            let mut choices = vec![None];
-            choices.extend(displays.iter().map(|d| Some(d.display_uuid.clone())));
-            let connected = choices.len();
-            // A display entered by name, or one that is not connected, stays selectable.
-            if saved.as_ref().is_some_and(|id| !choices.contains(&Some(id.clone()))) {
-                choices.push(saved.clone());
-            }
-            let title = |choice: &Option<String>| {
-                let Some(id) = choice else {
-                    return "Any display".to_owned();
-                };
-                display_name(&displays, id)
-                    .or_else(|| {
-                        displays.iter().any(|d| d.name.as_deref() == Some(id)).then(|| id.clone())
-                    })
+            let label = |value: &str| {
+                display_preference_title(value)
+                    .map(str::to_owned)
+                    .or_else(|| display_name(&displays, value))
                     .unwrap_or_else(|| {
-                        // Shorten UUIDs as the per-display overrides do, so the popup
-                        // keeps the sheet's width.
-                        let short = if id.len() > 12 {
-                            format!("Display {}…", &id[..8])
+                        if value.len() == 36
+                            && value.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+                        {
+                            format!("{}…", &value[..8])
                         } else {
-                            id.clone()
-                        };
-                        format!("{short} (not connected)")
+                            value.to_owned()
+                        }
                     })
             };
-            popup.set_sections([
-                vec![title(&None)],
-                choices[1..connected].iter().map(title).collect(),
-                choices[connected..].iter().map(title).collect(),
-                vec![ENTER.into()],
-            ]);
-            popup.set_item_badge(0, Some("Default"));
-            self.saved.set(choices.iter().position(|c| *c == saved).unwrap_or(0));
+            list.set_rows_if_changed(
+                saved
+                    .iter()
+                    .map(|value| {
+                        let connected = display_preference_title(value).is_some()
+                            || displays.iter().any(|d| {
+                                d.display_uuid == *value || d.name.as_deref() == Some(value)
+                            });
+                        (
+                            value.clone(),
+                            label(value),
+                            if connected {
+                                String::new()
+                            } else {
+                                "Not connected".into()
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            let mut choices: Vec<String> =
+                displays.iter().map(|d| d.display_uuid.clone()).collect();
+            for value in ["builtin", "left", "right", "top", "bottom"] {
+                if !choices.iter().any(|v| v == value) {
+                    choices.push(value.into());
+                }
+            }
+            popup.set_items(
+                std::iter::once("Add Display Preference…".into())
+                    .chain(choices.iter().map(|value| label(value)))
+                    .chain(std::iter::once("Enter UUID or Name…".into())),
+            );
+            for (index, value) in choices.iter().enumerate() {
+                if let Some(item) = popup.ns_popup_button().itemAtIndex((index + 1) as isize) {
+                    item.setState(if saved.contains(value) {
+                        objc2_app_kit::NSControlStateValueOn
+                    } else {
+                        objc2_app_kit::NSControlStateValueOff
+                    });
+                }
+            }
+            popup.set_selected(0);
             *self.choices.borrow_mut() = choices;
             let active = source.virtual_workspaces.display_mode == DisplayMode::Shared;
             self.active.set(active);
             popup.set_enabled(active);
+            list.ns_table_view().setEnabled(active);
+            self.field.set_enabled(active);
             if !active {
-                self.entering(false);
+                self.field.set_hidden(true);
             }
-            self.show_state();
+            for button in [self.remove.get(), self.edit.get()].into_iter().flatten() {
+                button.set_enabled(active && list.selection().is_some());
+            }
+            self.status.set_text(if active {
+                "First available display is preferred. Drag to change priority."
+            } else {
+                "Display preferences apply only in Shared workspace mode."
+            });
         }
     }
-
     let ui = f.ui;
     let state = Rc::new_cyclic(|weak: &Weak<State>| {
         let owner = weak.clone();
@@ -427,45 +469,120 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
         );
         field.accessibility_label("Display UUID or name");
         field.set_hidden(true);
-        let status = Caption::new(&ui, "");
-        status.ns_text_field().setAlignment(objc2_app_kit::NSTextAlignment::Right);
         State {
             model: Rc::downgrade(model),
-            popup: std::cell::OnceCell::new(),
+            popup: Default::default(),
+            list: Default::default(),
+            remove: Default::default(),
+            edit: Default::default(),
             field,
-            status,
+            editing: RefCell::default(),
+            status: Caption::new(&ui, ""),
             message: Rc::new(ValidationMessage::new(&ui)),
             choices: RefCell::default(),
-            saved: Cell::new(0),
             active: Cell::new(false),
         }
     });
     let owner = Rc::downgrade(&state);
     let popup = Rc::new(Popup::new(&ui).on_change(move |index| {
         let Some(state) = owner.upgrade() else { return };
-        let choice = state.choices.borrow().get(index).cloned();
-        match choice {
-            Some(display) => state.set(i, display),
-            None => state.entering(true),
+        if index == 0 {
+            return;
+        }
+        let value = state.choices.borrow().get(index - 1).cloned();
+        if let Some(value) = value {
+            state.change(i, move |values| {
+                if let Some(index) = values.iter().position(|v| *v == value) {
+                    values.remove(index);
+                } else {
+                    values.push(value);
+                }
+            });
+        } else {
+            state.enter(None);
         }
     }));
-    popup.accessibility_label("Display");
+    popup.accessibility_label("Add Display Preference");
     _ = state.popup.set(popup.clone());
-
-    let weak = Rc::downgrade(&state);
+    let owner = Rc::downgrade(&state);
+    let list = Rc::new(
+        SettingsList::<Entry>::new(&ui, |entry| entry.1.clone(), |entry| entry.2.clone())
+            .empty_message("Any display")
+            .full_length()
+            .symbol("line.3.horizontal")
+            .reorderable(true)
+            .on_reorder(move |from, to| {
+                if let Some(state) = owner.upgrade() {
+                    state.change(i, move |values| {
+                        if from < values.len() && to < values.len() {
+                            let value = values.remove(from);
+                            values.insert(to, value);
+                        }
+                    });
+                }
+            }),
+    );
+    list.ns_table_view()
+        .setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
+            "Display Preferences",
+        )));
+    _ = state.list.set(list.clone());
+    let owner = Rc::downgrade(&state);
+    let remove = Rc::new(
+        IconButton::new(&ui, "minus", "Remove Display Preference").on_click(move || {
+            if let Some(state) = owner.upgrade()
+                && let Some(value) = state.selected()
+            {
+                state.change(i, move |values| values.retain(|v| *v != value));
+            }
+        }),
+    );
+    let owner = Rc::downgrade(&state);
+    let edit = Rc::new(
+        IconButton::new(&ui, "pencil", "Edit Display Preference").on_click(move || {
+            if let Some(state) = owner.upgrade()
+                && let Some(value) = state.selected()
+            {
+                state.enter(Some(value));
+            }
+        }),
+    );
+    _ = state.remove.set(remove.clone());
+    _ = state.edit.set(edit.clone());
+    let owner = Rc::downgrade(&state);
+    list.set_on_select(move |selected| {
+        if let Some(state) = owner.upgrade() {
+            for button in [state.remove.get(), state.edit.get()].into_iter().flatten() {
+                button.set_enabled(state.active.get() && selected.is_some());
+            }
+        }
+    });
+    let owner = Rc::downgrade(&state);
     f.sync.push(Box::new(move |source| {
-        if let Some(state) = weak.upgrade() {
+        if let Some(state) = owner.upgrade() {
             state.refresh(source, i);
         }
     }));
     let control = VStack::new(&ui)
-        .spacing(6.0)
-        .push(HStack::new(&ui).push(Spacer::new(&ui)).push(popup.clone()))
+        .spacing(8.0)
+        .push(list)
+        .push(HStack::new(&ui).push(popup).push(Spacer::new(&ui)).push(edit).push(remove))
         .push(state.field.clone())
         .push(objc2::Message::retain(state.status.ns_view()));
     let message = state.message.clone();
-    SettingsRow::with_validation(&ui, "Display", control.keep(state), message)
-        .label_baseline(popup.ns_view())
+    Section::new(&ui, "Display Preferences")
+        .content(VStack::new(&ui).spacing(4.0).push(control.keep(state)).push(message))
+}
+
+fn display_preference_title(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "builtin" => "Built-in Display",
+        "left" => "Leftmost Display",
+        "right" => "Rightmost Display",
+        "top" => "Topmost Display",
+        "bottom" => "Bottommost Display",
+        _ => return None,
+    })
 }
 
 fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) -> bool {
@@ -493,8 +610,9 @@ pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<
     }
 }
 
-/// Pin workspace `i` to a display, or let it move freely with `None`.
-pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Option<String>) {
+/// Set ordered display intent; an empty collection removes the display property.
+pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Vec<String>) {
+    let display = (!display.is_empty()).then_some(display);
     let name = s.virtual_workspaces.workspace_names.get(i).map(String::as_str);
     let rules = &mut s.virtual_workspaces.workspace_rules;
     // Keep the last matching selector and layout; earlier display pins must not reappear.
@@ -517,15 +635,16 @@ pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Opt
     }
 }
 
-/// The display workspace `i` is pinned to, if any. Later rules win, as at runtime.
-pub(super) fn workspace_display(s: &ConfigSource, i: usize) -> Option<String> {
+/// Ordered preferences from the last matching display rule, independently of layout.
+pub(super) fn workspace_display(s: &ConfigSource, i: usize) -> &[String] {
     let name = s.virtual_workspaces.workspace_names.get(i).map(String::as_str);
     s.virtual_workspaces
         .workspace_rules
         .iter()
         .rev()
         .filter(|r| selector_matches(&r.workspace, i, name))
-        .find_map(|r| r.display.clone())
+        .find_map(|r| r.display.as_deref())
+        .unwrap_or_default()
 }
 
 /// The layout workspace `i` sets for itself, if any.

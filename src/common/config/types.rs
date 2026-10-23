@@ -99,21 +99,24 @@ pub struct VirtualWorkspaceSettings {
     #[setting(label = "App rules", custom)]
     pub app_rules: Vec<AppWorkspaceRule>,
     #[serde(default)]
-    /// Choose layouts for individual workspaces.
+    /// Choose independent layouts and ordered display preferences for individual workspaces.
     #[setting(label = "Workspace rules", custom)]
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
 }
 
+#[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
     pub workspace: WorkspaceSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<LayoutMode>,
-    /// Display UUID or name that owns this workspace. Only applies when
+    /// Ordered display UUIDs, names, or builtin/left/right/top/bottom selectors.
+    /// The first eligible preference wins. Only applies when
     /// `display_mode = "shared"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<String>,
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    pub display: Option<Vec<String>>,
 }
 
 // Allow specifying a workspace by numeric index or by name in the config.
@@ -255,8 +258,14 @@ impl VirtualWorkspaceSettings {
         }
 
         for (index, rule) in self.workspace_rules.iter().enumerate() {
-            if rule.layout.is_none() && rule.display.as_deref().is_none_or(str::is_empty) {
+            if rule.layout.is_none() && rule.display.is_none() {
                 issues.push(format!("Workspace rule {index} has no layout or display"));
+            }
+            if let Some(preferences) = &rule.display
+                && (preferences.is_empty()
+                    || preferences.iter().any(|value| value.trim().is_empty()))
+            {
+                issues.push(format!("Workspace rule {index} display preferences must contain nonempty UUIDs, names, or keywords"));
             }
         }
 
