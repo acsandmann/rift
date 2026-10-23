@@ -346,6 +346,34 @@ impl BspLayoutSystem {
         }
     }
 
+    fn rebalance_node(&mut self, node: NodeId) -> usize {
+        let Some(&NodeKind::Split { orientation, .. }) = self.kind.get(node) else {
+            return 1;
+        };
+
+        let (Some(first), Some(second)) =
+            (node.first_child(&self.tree.map), node.last_child(&self.tree.map))
+        else {
+            return 1;
+        };
+
+        let span = |system: &mut Self, child: NodeId| {
+            let span = system.rebalance_node(child);
+            match system.kind.get(child) {
+                Some(NodeKind::Split { orientation: split, .. }) if *split == orientation => span,
+                _ => 1,
+            }
+        };
+        let first_span = span(self, first);
+        let second_span = span(self, second);
+
+        if let Some(NodeKind::Split { ratio, .. }) = self.kind.get_mut(node) {
+            *ratio = (first_span as f32 / (first_span + second_span) as f32).clamp(0.05, 0.95);
+        }
+
+        first_span + second_span
+    }
+
     fn cleanup_after_removal(&mut self, node: NodeId) -> NodeId {
         let Some(parent_id) = node.parent(&self.tree.map) else {
             return node;
@@ -987,6 +1015,65 @@ mod tests {
             assert_eq!(tree.matches("Horizontal").count(), horizontal);
             assert_eq!(tree.matches("Vertical").count(), vertical);
         }
+    }
+
+    #[test]
+    fn rebalance_splits_each_axis_evenly() {
+        let size = CGSize::new(1200.0, 900.0);
+
+        let (mut system, layout) = tiled(&[1, 2, 3]);
+        assert!(system.select_window(layout, w(1)));
+        system.resize_selection_by(layout, -0.4, ResizeOrientation::Smart);
+
+        system.rebalance(layout);
+
+        let frames = calculate_frames(&system, layout, size, &Default::default());
+        assert_frame(&frames, w(1), (0.0, 0.0, 600.0, 900.0));
+        assert_frame(&frames, w(2), (600.0, 0.0, 600.0, 450.0));
+        assert_frame(&frames, w(3), (600.0, 450.0, 600.0, 450.0));
+    }
+
+    #[test]
+    fn rebalance_shares_an_axis_across_nested_splits() {
+        let size = CGSize::new(1200.0, 900.0);
+
+        let (mut system, layout) = tiled(&[1]);
+        system.split_selection(layout, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(2));
+        system.split_selection(layout, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(3));
+
+        let frames = calculate_frames(&system, layout, size, &Default::default());
+        assert_frame(&frames, w(1), (0.0, 0.0, 600.0, 900.0));
+
+        system.rebalance(layout);
+
+        let frames = calculate_frames(&system, layout, size, &Default::default());
+        for window in [1, 2, 3] {
+            assert!((frames[&w(window)].size.width - 400.0).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn rebalance_counts_a_stacked_leaf_as_one_tile() {
+        let size = CGSize::new(1200.0, 900.0);
+
+        let (mut system, layout) = tiled(&[1]);
+        system.split_selection(layout, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(2));
+        system.split_selection(layout, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(3));
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        assert_eq!(system.stack_members(layout, w(2)), vec![w(2), w(3)]);
+
+        assert!(system.select_window(layout, w(1)));
+        system.resize_selection_by(layout, -0.4, ResizeOrientation::Smart);
+
+        system.rebalance(layout);
+
+        let frames = calculate_frames(&system, layout, size, &Default::default());
+        assert_frame(&frames, w(1), (0.0, 0.0, 600.0, 900.0));
     }
 
     #[test]
@@ -2135,6 +2222,12 @@ impl LayoutSystem for BspLayoutSystem {
                 break;
             }
             node = parent;
+        }
+    }
+
+    fn rebalance(&mut self, layout: LayoutId) {
+        if let Some(state) = self.layouts.get(layout).copied() {
+            self.rebalance_node(state.root);
         }
     }
 
