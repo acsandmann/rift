@@ -9,7 +9,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::AppWorkspaceRule;
 use crate::common::config::{
     DisplayMode, LayoutMode, LayoutSettings, MAX_WORKSPACES, VirtualWorkspaceSettings,
-    WorkspaceSelector,
+    WorkspaceLayoutRule, WorkspaceSelector,
 };
 use crate::common::log::trace_misc;
 use crate::layout_engine::systems::LayoutSystemKind;
@@ -834,11 +834,7 @@ impl WorkspaceStore {
                 .map(|index| {
                     let name = self.default_workspace_name(index);
                     let space = self
-                        .settings
-                        .workspace_rules
-                        .iter()
-                        .rev()
-                        .filter(|rule| selector_matches(&rule.workspace, index, &name))
+                        .matching_rules(index, &name)
                         .find_map(|rule| rule.display.as_deref())
                         .and_then(&rule_space)?;
                     spaces.iter().position(|candidate| *candidate == space)
@@ -881,40 +877,41 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
-        // Check workspace_rules (last matching rule wins, like app_rules)
+    /// Resolve each property independently, with the last matching rule winning.
+    pub(crate) fn matching_rules<'a>(
+        &'a self,
+        index: usize,
+        name: &'a str,
+    ) -> impl Iterator<Item = &'a WorkspaceLayoutRule> {
         self.settings
             .workspace_rules
             .iter()
             .rev()
-            .filter(|rule| selector_matches(&rule.workspace, index, name))
+            .filter(move |rule| selector_matches(&rule.workspace, index, name))
+    }
+
+    pub(crate) fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
+        self.matching_rules(index, name)
             .find_map(|rule| rule.layout)
             .unwrap_or(self.layout_settings.mode)
     }
 
     /// Shared-mode display assignments from workspace rules (last matching rule wins).
     /// Empty unless shared mode is active and some rule names a display.
-    pub(crate) fn rule_displays(&self) -> Vec<(VirtualWorkspaceId, &str)> {
-        if self.settings.display_mode != DisplayMode::Shared
-            || !self.settings.workspace_rules.iter().any(|rule| rule.display.is_some())
+    pub(crate) fn rule_displays(&self) -> impl Iterator<Item = (VirtualWorkspaceId, &str)> {
+        let order = if self.settings.display_mode == DisplayMode::Shared
+            && self.settings.workspace_rules.iter().any(|rule| rule.display.is_some())
         {
-            return Vec::new();
-        }
-        self.order
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &id)| {
-                let name = &self[id].name;
-                let display = self
-                    .settings
-                    .workspace_rules
-                    .iter()
-                    .rev()
-                    .filter(|rule| selector_matches(&rule.workspace, index, name))
-                    .find_map(|rule| rule.display.as_deref())?;
-                Some((id, display))
-            })
-            .collect()
+            self.order.as_slice()
+        } else {
+            &[]
+        };
+        order.iter().enumerate().filter_map(|(index, &id)| {
+            let display = self
+                .matching_rules(index, &self[id].name)
+                .find_map(|rule| rule.display.as_deref())?;
+            Some((id, display))
+        })
     }
 
     pub fn initialized_spaces(&self) -> Vec<SpaceId> {

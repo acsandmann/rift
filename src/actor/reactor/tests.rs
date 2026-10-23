@@ -9560,3 +9560,99 @@ fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_th
         );
     }
 }
+
+#[test]
+fn shared_destroyed_dormant_desktop_releases_ownership_without_rebuilding_catalog() {
+    let (_, mut reactor, a, b) = two_displays(shared_settings());
+    let dormant = reactor.test_workspace_ids(b);
+    let next = SpaceId::new(3);
+    // Switching desktops preserves the old desktop's ownership while it exists.
+    reactor.handle_event(space_state_event_with(
+        vec![shared_left(), shared_right()],
+        vec![Some(a), Some(next)],
+        |s| {
+            s.display_space_ids.insert("test-display-1".into(), vec![b, next]);
+            s.membership_complete = true;
+        },
+    ));
+    assert!(
+        dormant
+            .iter()
+            .all(|&id| reactor.layout_manager.layout_engine.workspaces()[id].space == b)
+    );
+    let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+    // Deleting that inactive desktop does not change either visible desktop.
+    reactor.handle_event(space_state_event_with(
+        vec![shared_left(), shared_right()],
+        vec![Some(a), Some(next)],
+        |s| {
+            s.destroyed_spaces.insert(b);
+            s.should_force_refresh_layout = true;
+            s.membership_complete = true;
+        },
+    ));
+    let store = reactor.layout_manager.layout_engine.workspaces();
+    assert!(dormant.iter().all(|&id| store[id].space == next));
+    assert_eq!(store.catalog().collect::<Vec<_>>(), catalog);
+}
+
+#[test]
+fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() {
+    let mut settings = shared_settings();
+    settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        workspace: WorkspaceSelector::Index(0),
+        layout: None,
+        display: Some("offline-pin".into()),
+    }];
+    let (_, mut reactor, a, b) = two_displays(settings);
+    let id = reactor.test_workspace_ids(a)[0];
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        },
+    )));
+    reactor.handle_event(Event::ConfigUpdated(reactor.config.clone()));
+    let mut snapshot =
+        forwarded_space_state(make_screen_snapshots(vec![shared_left(), shared_right()], vec![
+            Some(a),
+            Some(b),
+        ]));
+    snapshot.screens[0].display_uuid = "offline-pin".into();
+    snapshot.display_space_ids.remove("test-display-0");
+    snapshot.display_space_ids.insert("offline-pin".into(), vec![a]);
+    snapshot.display_set_changed = true;
+    snapshot.membership_complete = true;
+    reactor.handle_event(Event::SpaceStateChanged(snapshot));
+    let workspace = &reactor.layout_manager.layout_engine.workspaces()[id];
+    assert_eq!(
+        workspace.space, b,
+        "reconnecting a pin must preserve the explicit destination"
+    );
+    assert!(workspace.rule_overridden);
+
+    let pin = reactor.config.virtual_workspaces.workspace_rules[0].clone();
+    let layout = crate::common::config::WorkspaceLayoutRule {
+        workspace: WorkspaceSelector::Name(workspace.name.clone()),
+        layout: Some(LayoutMode::Stack),
+        display: None,
+    };
+    // Layout-only rules and reordering leave the effective pin unchanged.
+    // Removing it keeps ownership; adding it back explicitly reactivates it.
+    for (rules, target, overridden) in [
+        (vec![pin.clone(), layout.clone()], b, true),
+        (vec![layout.clone(), pin.clone()], b, true),
+        (vec![layout.clone()], b, true),
+        (vec![layout, pin], a, false),
+    ] {
+        let mut config = reactor.config.clone();
+        config.virtual_workspaces.workspace_rules = rules;
+        reactor.handle_event(Event::ConfigUpdated(config));
+        let workspace = &reactor.layout_manager.layout_engine.workspaces()[id];
+        assert_eq!(
+            (workspace.space, workspace.rule_overridden),
+            (target, overridden)
+        );
+        assert_eq!(workspace.layout_mode(), LayoutMode::Stack);
+    }
+}

@@ -2265,7 +2265,7 @@ impl Reactor {
                 // effective (including on entering shared mode) relocate.
                 let pins = |engine: &LayoutEngine| -> Vec<_> {
                     let pins = engine.workspaces().rule_displays();
-                    pins.into_iter().map(|(id, display)| (id, display.to_owned())).collect()
+                    pins.map(|(id, display)| (id, display.to_owned())).collect()
                 };
                 let before = pins(&self.layout_manager.layout_engine);
                 let mut outcome = command_workflow::handle_config_updated(
@@ -2654,17 +2654,12 @@ impl Reactor {
                         );
                     return Ok(EventOutcome::no_change().with_layout_response(response, None));
                 }
-                // Moving a rule-bound workspace off its (connected) display suspends
-                // the rule so the next display change doesn't move it back.
+                // An explicit destination overrides the pin even while its display
+                // is unavailable; reconnecting must not undo the user's choice.
                 let workspaces = self.layout_manager.layout_engine.workspaces();
                 let rule_override = workspaces.active_workspace(source_space).and_then(|active| {
-                    let (_, display) =
-                        workspaces.rule_displays().into_iter().find(|(id, _)| *id == active)?;
-                    let overridden = !screen_matches_display(&target_screen, display)
-                        && self.space_state.screens.iter().any(|screen| {
-                            screen.space.is_some_and(|space| self.is_space_active(space))
-                                && screen_matches_display(screen, display)
-                        });
+                    let (_, display) = workspaces.rule_displays().find(|(id, _)| *id == active)?;
+                    let overridden = !screen_matches_display(&target_screen, display);
                     Some((active, overridden))
                 });
 
@@ -3250,20 +3245,7 @@ impl Reactor {
         self.state.windows.restore_window_from_native_fullscreen(window);
         let available = self.is_space_active(target);
         if native != Some(target) {
-            let screen = self.space_state.screen_by_space(target).filter(|_| available);
-            let frame = self.state.windows.window(window).map(|state| {
-                screen.map_or(state.frame_monotonic, |screen| {
-                    Self::center_frame_on_screen(state.frame_monotonic, screen.frame)
-                })
-            });
-            outcome.absorb(command_workflow::request_window_transfer(
-                &mut self.state,
-                &mut self.layout_manager,
-                window,
-                target,
-                frame,
-                available,
-            ));
+            outcome.absorb(self.request_window_transfer(window, target, None));
         }
         // Rejoin the tree even while the owner is dormant; arrange only a visible one.
         outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(target, window));
@@ -3715,66 +3697,67 @@ impl Reactor {
         // even when its display stays connected and borrows another desktop.
         let placements: Vec<_> = {
             let engine = &self.layout_manager.layout_engine;
-            let rules = engine.workspaces().rule_displays();
+            // Resolve each configured display once, rather than scanning all pins
+            // and displays again for every workspace.
+            let mut rule_targets = HashMap::default();
             engine
                 .workspaces()
                 .catalog()
-                .filter(|id| pins_only.is_none_or(|ids| ids.contains(id)))
-                .filter_map(|id| {
+                .enumerate()
+                .filter(|(_, id)| pins_only.is_none_or(|ids| ids.contains(id)))
+                .filter_map(|(index, id)| {
                     let workspace = &engine.workspaces()[id];
                     let owner = engine.display_uuid_for_space(workspace.space);
                     let home = workspace
                         .home_space
                         .zip(workspace.preferred_display.as_deref())
                         .filter(|_| pins_only.is_none());
-                    let desktop_lost = invalidated_spaces.contains(&workspace.space)
-                        && !self
-                            .space_state
-                            .display_space_ids
-                            .values()
-                            .any(|spaces| spaces.contains(&workspace.space));
-                    let rehome = home.and_then(|(space, display)| {
-                        if previous_screens
+                    let native_owner =
+                        self.space_state.display_space_ids.iter().find_map(|(display, spaces)| {
+                            spaces.contains(&workspace.space).then_some(display.as_str())
+                        });
+                    let desktop_lost =
+                        invalidated_spaces.contains(&workspace.space) && native_owner.is_none();
+                    let home_target = home.and_then(|(space, display)| {
+                        let target = screens.iter().position(|screen| {
+                            live(screen) && screen.display_uuid_opt() == Some(display)
+                        })?;
+                        let returned = !previous_screens
                             .iter()
                             .any(|screen| screen.display_uuid_opt() == Some(display))
-                            || !self
+                            && self
                                 .space_state
                                 .display_space_ids
                                 .get(display)
-                                .is_some_and(|spaces| !spaces.contains(&space))
-                        {
-                            return None;
-                        }
-                        screens.iter().position(|screen| {
-                            live(screen)
-                                && screen.space != Some(space)
-                                && screen.display_uuid_opt() == Some(display)
-                        })
+                                .is_some_and(|spaces| !spaces.contains(&space));
+                        (screens[target].space == Some(space) || returned).then_some(target)
                     });
-                    let ruled = rules
-                        .iter()
-                        .find(|(rule_id, _)| *rule_id == id && !workspace.rule_overridden)
-                        .and_then(|(_, rule_display)| {
-                            let matching = |screen: &&ScreenInfo| {
-                                live(screen) && screen_matches_display(screen, rule_display)
-                            };
-                            if screens.iter().filter(matching).count() > 1 {
-                                warn!(
-                                    rule_display,
-                                    "Workspace rule display is ambiguous; use a UUID"
-                                );
-                            }
-                            screens.iter().position(|screen| matching(&screen))
+                    let rehome =
+                        home_target.filter(|&target| screens[target].space != workspace.home_space);
+                    let ruled = engine
+                        .workspaces()
+                        .matching_rules(index, &workspace.name)
+                        .find_map(|rule| rule.display.as_deref())
+                        .filter(|_| !workspace.rule_overridden)
+                        .and_then(|rule_display| {
+                            *rule_targets.entry(rule_display).or_insert_with(|| {
+                                let mut matching =
+                                    screens.iter().enumerate().filter(|(_, screen)| {
+                                        live(screen) && screen_matches_display(screen, rule_display)
+                                    });
+                                let first = matching.next().map(|(index, _)| index);
+                                if matching.next().is_some() {
+                                    warn!(
+                                        rule_display,
+                                        "Workspace rule display is ambiguous; use a UUID"
+                                    );
+                                }
+                                first
+                            })
                         });
                     let placement = if let Some(target) = ruled {
-                        let native_owner = self
-                            .space_state
-                            .display_space_ids
-                            .iter()
-                            .find(|(_, spaces)| spaces.contains(&workspace.space))
-                            .map(|(display, _)| display.as_str())
-                            .or(owner);
-                        (native_owner != screens[target].display_uuid_opt() || desktop_lost)
+                        (native_owner.or(owner) != screens[target].display_uuid_opt()
+                            || desktop_lost)
                             .then_some((
                                 target,
                                 if desktop_lost {
@@ -3783,33 +3766,26 @@ impl Reactor {
                                     WorkspaceTransferReason::Restoration
                                 },
                             ))
-                    } else if let Some(target) = rehome
-                        .or_else(|| {
-                            home.and_then(|(space, display)| {
-                                screens.iter().position(|screen| {
-                                    live(screen)
-                                        && screen.space == Some(space)
-                                        && screen.display_uuid_opt() == Some(display)
-                                })
-                            })
-                        })
-                        .filter(|&target| screens[target].space != Some(workspace.space))
+                    } else if let Some(target) =
+                        home_target.filter(|&target| screens[target].space != Some(workspace.space))
                     {
                         Some((target, WorkspaceTransferReason::Restoration))
-                    } else if home.is_some()
-                        && owner.is_some_and(|display| {
-                            (!screens
-                                .iter()
-                                .any(|screen| screen.display_uuid_opt() == Some(display))
-                                || desktop_lost)
-                                && (previously_active.contains(&workspace.space)
-                                    || engine.last_space_for_display_uuid(display)
-                                        == Some(workspace.space))
-                        })
+                    } else if pins_only.is_none()
+                        && (desktop_lost
+                            || (home.is_some()
+                                && owner.is_some_and(|display| {
+                                    !screens
+                                        .iter()
+                                        .any(|screen| screen.display_uuid_opt() == Some(display))
+                                        && (previously_active.contains(&workspace.space)
+                                            || engine.last_space_for_display_uuid(display)
+                                                == Some(workspace.space))
+                                })))
                     {
                         screens
                             .iter()
-                            .position(live)
+                            .position(|screen| live(screen) && screen.display_uuid_opt() == owner)
+                            .or_else(|| screens.iter().position(live))
                             .map(|target| (target, WorkspaceTransferReason::DisplayDeparture))
                     } else {
                         None
@@ -3824,7 +3800,7 @@ impl Reactor {
             if let Some(target) = rehome {
                 let workspaces = self.layout_manager.layout_engine.workspaces_mut();
                 let old = workspaces[id].home_space.unwrap();
-                let target = screens[target].space.unwrap();
+                let target = self.space_state.screens[target].space.unwrap();
                 workspaces[id].home_space = Some(target);
                 if let Some(activation) = workspaces.active_workspace_per_space.get_mut(&old)
                     && activation.remembered.or(activation.current) == Some(id)
@@ -3842,10 +3818,12 @@ impl Reactor {
                 }
             }
             let Some((target, reason)) = placement else { continue };
-            let screen = &screens[target];
+            let screen = &self.space_state.screens[target];
             let target = screen.space.unwrap();
             let source = self.layout_manager.layout_engine.workspaces()[id].space;
-            let source_frame = screens
+            let source_frame = self
+                .space_state
+                .screens
                 .iter()
                 .chain(previous_screens)
                 .find(|screen| screen.space == Some(source))
@@ -3859,18 +3837,7 @@ impl Reactor {
                 reason,
             );
             for window in response.transferred_windows {
-                if let Some(state) = self.state.windows.window(window) {
-                    let frame =
-                        Self::frame_on_display(state.frame_monotonic, source_frame, screen.frame);
-                    outcome.absorb(command_workflow::request_window_transfer(
-                        &mut self.state,
-                        &mut self.layout_manager,
-                        window,
-                        target,
-                        Some(frame),
-                        true,
-                    ));
-                }
+                outcome.absorb(self.request_window_transfer(window, target, source_frame));
             }
             if response.changed {
                 outcome.arrange.passes = 1;
@@ -3908,6 +3875,38 @@ impl Reactor {
             }
         }
         outcome
+    }
+
+    /// Prepare physical intent from accepted geometry. An unavailable destination
+    /// keeps the original frame until a later accepted topology can place it.
+    fn request_window_transfer(
+        &mut self,
+        window: WindowId,
+        target: SpaceId,
+        source_frame: Option<CGRect>,
+    ) -> EventOutcome {
+        let screen = self
+            .space_state
+            .screen_by_space(target)
+            .filter(|_| self.is_space_active(target));
+        let frame =
+            self.state
+                .windows
+                .record(window)
+                .and_then(|record| record.frame())
+                .map(|frame| {
+                    screen.map_or(frame, |screen| {
+                        Self::frame_on_display(frame, source_frame, screen.frame)
+                    })
+                });
+        command_workflow::request_window_transfer(
+            &mut self.state,
+            &mut self.layout_manager,
+            window,
+            target,
+            frame,
+            screen.is_some(),
+        )
     }
 
     fn advance_workspace_transfers(&mut self) -> EventOutcome {
@@ -4727,24 +4726,7 @@ impl Reactor {
                         .is_some_and(|operation| operation.requested_space != target)
             });
             if needs_transfer {
-                let screen = self
-                    .space_state
-                    .screen_by_space(target)
-                    .filter(|_| self.is_space_active(target));
-                let frame = record.and_then(|record| record.frame()).map(|frame| {
-                    screen
-                        .map(|screen| Self::center_frame_on_screen(frame, screen.frame))
-                        .unwrap_or(frame)
-                });
-                let available = screen.is_some();
-                let outcome = command_workflow::request_window_transfer(
-                    &mut self.state,
-                    &mut self.layout_manager,
-                    window,
-                    target,
-                    frame,
-                    available,
-                );
+                let outcome = self.request_window_transfer(window, target, None);
                 self.apply_event_outcome(outcome);
             }
         }
