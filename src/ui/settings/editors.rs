@@ -495,15 +495,21 @@ pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<
 
 /// Pin workspace `i` to a display, or let it move freely with `None`.
 pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Option<String>) {
-    let name = s.virtual_workspaces.workspace_names.get(i).cloned();
-    s.virtual_workspaces.workspace_rules.retain_mut(|r| {
-        if selector_matches(&r.workspace, i, name.as_deref()) {
-            r.display = None;
+    let name = s.virtual_workspaces.workspace_names.get(i).map(String::as_str);
+    let rules = &mut s.virtual_workspaces.workspace_rules;
+    // Keep the last matching selector and layout; earlier display pins must not reappear.
+    if let Some(last) = rules.iter().rposition(|r| selector_matches(&r.workspace, i, name)) {
+        for rule in &mut rules[..last] {
+            if selector_matches(&rule.workspace, i, name) {
+                rule.display = None;
+            }
         }
-        r.layout.is_some() || r.display.is_some()
-    });
-    if display.is_some() {
-        s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
+        rules[last].display = display;
+        rules.retain(|r| {
+            !selector_matches(&r.workspace, i, name) || r.layout.is_some() || r.display.is_some()
+        });
+    } else if display.is_some() {
+        rules.push(WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(i),
             layout: None,
             display,
@@ -527,6 +533,7 @@ pub(super) fn workspace_layout(s: &ConfigSource, i: usize) -> Option<LayoutMode>
     s.virtual_workspaces
         .workspace_rules
         .iter()
+        .rev()
         .filter(|r| {
             selector_matches(
                 &r.workspace,
