@@ -2623,6 +2623,11 @@ impl LayoutEngine {
                     default_orientation,
                 )
             }
+            LayoutCommand::Balance => {
+                self.workspaces[workspace_id].layout_state.last_saved = Some(layout);
+                self.workspaces[workspace_id].layout_system.rebalance(layout);
+                EventResponse::default()
+            }
             LayoutCommand::ResizeWindowGrow(_)
             | LayoutCommand::ResizeWindowShrink(_)
             | LayoutCommand::ResizeWindowBy { .. } => {
@@ -5130,6 +5135,70 @@ mod tests {
         assert!(locked_frame.origin.y >= screen.origin.y - epsilon);
         assert!(locked_frame.origin.x + locked_frame.size.width <= max_x);
         assert!(locked_frame.origin.y + locked_frame.size.height <= max_y);
+    }
+
+    #[test]
+    fn balance_command_evens_out_a_resized_layout() {
+        let space = SpaceId::new(97);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 900.0));
+        let pid: pid_t = 5158;
+        let w1 = WindowId::new(pid, 1);
+        let w2 = WindowId::new(pid, 2);
+        let info = |wid| window_layout_info(wid, CGSize::new(500.0, 500.0));
+
+        for mode in [LayoutMode::Traditional, LayoutMode::Bsp] {
+            let mut window_store = WindowStore::default();
+            let mut engine = LayoutEngine::new(
+                &VirtualWorkspaceSettings::default(),
+                &LayoutSettings { mode, ..Default::default() },
+                None,
+            );
+
+            let _ = engine
+                .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+            let _ = engine.handle_event(
+                &mut window_store,
+                LayoutEvent::windows_observed(space, pid, vec![info(w1), info(w2)], None),
+            );
+            let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, w1));
+            let _ = engine.handle_command(
+                &mut window_store,
+                Some(space),
+                &[space],
+                &HashMap::default(),
+                LayoutCommand::ResizeWindowBy { amount: 0.2 },
+            );
+
+            let gaps = engine.layout_settings.gaps.clone();
+            let widths = |engine: &mut LayoutEngine| -> HashMap<WindowId, f64> {
+                engine
+                    .calculate_layout(space, screen, &gaps, Default::default())
+                    .into_iter()
+                    .map(|(wid, frame)| (wid, frame.size.width))
+                    .collect()
+            };
+            let skewed = widths(&mut engine);
+
+            assert!(
+                (skewed[&w1] - skewed[&w2]).abs() > 1.0,
+                "{mode:?} was not skewed"
+            );
+
+            let _ = engine.handle_command(
+                &mut window_store,
+                Some(space),
+                &[space],
+                &HashMap::default(),
+                LayoutCommand::Balance,
+            );
+
+            let balanced = widths(&mut engine);
+
+            assert!(
+                (balanced[&w1] - balanced[&w2]).abs() < 1.0,
+                "{mode:?} was not balanced"
+            );
+        }
     }
 
     #[test]
