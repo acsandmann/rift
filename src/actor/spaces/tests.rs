@@ -997,3 +997,30 @@ fn native_space_destruction_is_forwarded_only_after_topology_corroborates_it() {
         "destruction deltas are consumed once"
     );
 }
+
+#[test]
+fn a_window_moving_between_spaces_keeps_the_frames_in_flight() {
+    let mut rig = Rig::new();
+    let base = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+    rig.membership(1, &[7]);
+    rig.membership(2, &[]);
+    let before = rig.tick(0, Some(base.clone())).unwrap();
+    let revoked = rig.actor.topology_guard().invalidated_revision();
+    // The window goes to the other display, as move_window_to_display sends it.
+    rig.membership(1, &[]);
+    rig.membership(2, &[7]);
+    let after = rig.tick(0, Some(base)).unwrap();
+    assert_eq!(
+        after.active_window_spaces.get(&WindowServerId::new(7)),
+        Some(&SpaceId::new(2))
+    );
+    assert!(
+        after.revision > before.revision,
+        "the move is still a new revision"
+    );
+    assert_eq!(
+        rig.actor.topology_guard().invalidated_revision(),
+        revoked,
+        "a membership change alone must not revoke frames"
+    );
+}
