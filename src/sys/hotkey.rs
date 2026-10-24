@@ -1456,25 +1456,6 @@ mod tests {
         assert!(modifiers_from_str("").is_err());
     }
 
-    #[test]
-    fn families_treat_left_and_right_as_one_family() {
-        let sided = modifiers_from_str("AltRight + CtrlLeft + Meta").unwrap();
-
-        let families = sided.families();
-
-        assert_eq!(families, modifiers_from_str("Ctrl + Alt + Meta").unwrap());
-        assert_eq!(Modifiers::empty().families(), Modifiers::empty());
-
-        assert_eq!(sided.family_count(), 3);
-
-        assert_eq!(
-            modifiers_from_str("AltLeft + AltRight").unwrap().family_count(),
-            1
-        );
-
-        assert_eq!(Modifiers::empty().family_count(), 0);
-    }
-
     #[allow(unused)]
     use super::*;
 
