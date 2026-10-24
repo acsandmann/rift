@@ -130,7 +130,9 @@ impl EventTap {
         let port = unsafe {
             CGEvent::tap_create(
                 location,
-                CGTapPlace::HeadInsertEventTap,
+                // Append so active taps installed earlier at the HID level, such as
+                // Raycast's Hyper Key remap, see events before rift does.
+                CGTapPlace::TailAppendEventTap,
                 options,
                 mask,
                 Some(trampoline_callback),
