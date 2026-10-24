@@ -1779,10 +1779,9 @@ pub fn render(
         sheet_window.setAppearance(window.appearance().as_deref());
         let view = sheet_window.contentView().unwrap();
         if scope == Some(23) {
-            let popup =
-                named::<objc2_app_kit::NSPopUpButton>(&view, "Add Display Preference").unwrap();
-            popup.selectItemAtIndex(popup.numberOfItems() - 1);
-            assert!(unsafe { popup.sendAction_to(popup.action(), popup.target().as_deref()) });
+            let add = named::<NSButton>(&view, "Add Display Preference").unwrap();
+            let menu = add.menu().unwrap();
+            menu.performActionForItemAtIndex(menu.numberOfItems() - 1);
         }
         view.layoutSubtreeIfNeeded();
         sheet_window.setContentSize(CGSize::new(

@@ -308,16 +308,17 @@ pub(super) fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
 fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Section {
     type Entry = (String, String, String);
     struct State {
+        this: Weak<State>,
+        ui: Ui,
         model: Weak<Model>,
-        popup: std::cell::OnceCell<Rc<Popup>>,
+        menu: Menu,
         list: std::cell::OnceCell<Rc<SettingsList<Entry>>>,
-        remove: std::cell::OnceCell<Rc<IconButton>>,
+        controls: std::cell::OnceCell<Rc<AddRemoveControl>>,
         edit: std::cell::OnceCell<Rc<IconButton>>,
         field: Rc<TextField>,
         editing: RefCell<Option<String>>,
         status: Caption,
         message: Rc<ValidationMessage>,
-        choices: RefCell<Vec<String>>,
         active: Cell<bool>,
     }
     impl State {
@@ -374,84 +375,96 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
             list.row(list.selection()?).map(|entry| entry.0)
         }
 
+        fn add_item(&self, ui: &Ui, i: usize, title: &str, value: String, saved: &[String]) {
+            let owner = self.this.clone();
+            let added = saved.contains(&value);
+            let item = MenuItem::new(ui, title).on_click(move || {
+                if let Some(state) = owner.upgrade() {
+                    let value = value.clone();
+                    state.change(i, move |values| {
+                        if !values.contains(&value) {
+                            values.push(value);
+                        }
+                    });
+                }
+            });
+            item.set_checked(added);
+            item.set_enabled(!added);
+            self.menu.add(item);
+        }
+
         fn refresh(&self, source: &ConfigSource, i: usize) {
-            let (Some(model), Some(popup), Some(list)) =
-                (self.model.upgrade(), self.popup.get(), self.list.get())
-            else {
+            let (Some(model), Some(list)) = (self.model.upgrade(), self.list.get()) else {
                 return;
             };
+            let ui = self.ui;
             let displays = model.env.displays.borrow();
             let saved = workspace_display(source, i);
-            let label = |value: &str| {
-                display_preference_title(value)
-                    .map(str::to_owned)
-                    .or_else(|| display_name(&displays, value))
-                    .unwrap_or_else(|| {
-                        if value.len() == 36
-                            && value.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-                        {
-                            format!("{}…", &value[..8])
-                        } else {
-                            value.to_owned()
-                        }
-                    })
-            };
             list.set_rows_if_changed(
                 saved
                     .iter()
                     .map(|value| {
-                        let connected = display_preference_title(value).is_some()
-                            || displays.iter().any(|d| {
-                                d.display_uuid == *value || d.name.as_deref() == Some(value)
-                            });
-                        (
-                            value.clone(),
-                            label(value),
-                            if connected {
-                                String::new()
-                            } else {
-                                "Not connected".into()
-                            },
-                        )
+                        if let Some(title) = display_preference_title(value) {
+                            return (value.clone(), title.into(), String::new());
+                        }
+                        if let Some(name) = display_name(&displays, value).or_else(|| {
+                            displays
+                                .iter()
+                                .any(|d| d.name.as_deref() == Some(value))
+                                .then(|| value.clone())
+                        }) {
+                            return (value.clone(), name, String::new());
+                        }
+                        let uuid = value.len() == 36
+                            && value.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+                        if uuid {
+                            let id = &value[..8];
+                            (
+                                value.clone(),
+                                "Unknown Display".into(),
+                                format!("Not connected · {id}"),
+                            )
+                        } else {
+                            (value.clone(), value.clone(), "Not connected".into())
+                        }
                     })
                     .collect(),
             );
-            let mut choices: Vec<String> =
-                displays.iter().map(|d| d.display_uuid.clone()).collect();
+            self.menu.clear();
+            self.menu.add_section_header("Connected Displays");
+            for display in displays.iter() {
+                let title = display_name(&displays, &display.display_uuid).unwrap_or_default();
+                self.add_item(&ui, i, &title, display.display_uuid.clone(), saved);
+            }
+            self.menu.add_section_header("Automatic");
             for value in ["builtin", "left", "right", "top", "bottom"] {
-                if !choices.iter().any(|v| v == value) {
-                    choices.push(value.into());
-                }
+                let title = display_preference_title(value).unwrap_or_default();
+                self.add_item(&ui, i, title, value.into(), saved);
             }
-            popup.set_items(
-                std::iter::once("Add Display Preference…".into())
-                    .chain(choices.iter().map(|value| label(value)))
-                    .chain(std::iter::once("Enter UUID or Name…".into())),
-            );
-            for (index, value) in choices.iter().enumerate() {
-                if let Some(item) = popup.ns_popup_button().itemAtIndex((index + 1) as isize) {
-                    item.setState(if saved.contains(value) {
-                        objc2_app_kit::NSControlStateValueOn
-                    } else {
-                        objc2_app_kit::NSControlStateValueOff
-                    });
+            self.menu.add_separator();
+            let owner = self.this.clone();
+            self.menu.add(MenuItem::new(&ui, "Other Display…").on_click(move || {
+                if let Some(state) = owner.upgrade() {
+                    state.enter(None);
                 }
-            }
-            popup.set_selected(0);
-            *self.choices.borrow_mut() = choices;
+            }));
             let active = source.virtual_workspaces.display_mode == DisplayMode::Shared;
             self.active.set(active);
-            popup.set_enabled(active);
             list.ns_table_view().setEnabled(active);
             self.field.set_enabled(active);
             if !active {
                 self.field.set_hidden(true);
             }
-            for button in [self.remove.get(), self.edit.get()].into_iter().flatten() {
-                button.set_enabled(active && list.selection().is_some());
+            let selected = active && list.selection().is_some();
+            if let Some(controls) = self.controls.get() {
+                WeakView::new(&**controls).set_enabled(active);
+                controls.set_remove_enabled(selected);
+            }
+            if let Some(edit) = self.edit.get() {
+                edit.set_enabled(selected);
             }
             self.status.set_text(if active {
-                "First available display is preferred. Drag to change priority."
+                "Uses the first connected display in the list. Drag to reorder."
             } else {
                 "Display preferences apply only in Shared workspace mode."
             });
@@ -469,47 +482,29 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
         );
         field.accessibility_label("Display UUID or name");
         field.set_hidden(true);
+        let menu = Menu::new(&ui);
+        menu.ns_menu().setAutoenablesItems(false);
         State {
+            this: weak.clone(),
+            ui,
             model: Rc::downgrade(model),
-            popup: Default::default(),
+            menu,
             list: Default::default(),
-            remove: Default::default(),
+            controls: Default::default(),
             edit: Default::default(),
             field,
             editing: RefCell::default(),
             status: Caption::new(&ui, ""),
             message: Rc::new(ValidationMessage::new(&ui)),
-            choices: RefCell::default(),
             active: Cell::new(false),
         }
     });
-    let owner = Rc::downgrade(&state);
-    let popup = Rc::new(Popup::new(&ui).on_change(move |index| {
-        let Some(state) = owner.upgrade() else { return };
-        if index == 0 {
-            return;
-        }
-        let value = state.choices.borrow().get(index - 1).cloned();
-        if let Some(value) = value {
-            state.change(i, move |values| {
-                if let Some(index) = values.iter().position(|v| *v == value) {
-                    values.remove(index);
-                } else {
-                    values.push(value);
-                }
-            });
-        } else {
-            state.enter(None);
-        }
-    }));
-    popup.accessibility_label("Add Display Preference");
-    _ = state.popup.set(popup.clone());
     let owner = Rc::downgrade(&state);
     let list = Rc::new(
         SettingsList::<Entry>::new(&ui, |entry| entry.1.clone(), |entry| entry.2.clone())
             .empty_message("Any display")
             .full_length()
-            .symbol("line.3.horizontal")
+            .symbol("display")
             .reorderable(true)
             .on_reorder(move |from, to| {
                 if let Some(state) = owner.upgrade() {
@@ -527,16 +522,38 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
             "Display Preferences",
         )));
     _ = state.list.set(list.clone());
+    let add_owner = Rc::downgrade(&state);
     let owner = Rc::downgrade(&state);
-    let remove = Rc::new(
-        IconButton::new(&ui, "minus", "Remove Display Preference").on_click(move || {
-            if let Some(state) = owner.upgrade()
-                && let Some(value) = state.selected()
-            {
-                state.change(i, move |values| values.retain(|v| *v != value));
-            }
-        }),
+    let controls = Rc::new(
+        AddRemoveControl::new(&ui)
+            .on_add(move || {
+                let Some(state) = add_owner.upgrade() else { return };
+                let Some(controls) = state.controls.get() else { return };
+                let Some(add) = controls.ns_view().subviews().firstObject() else {
+                    return;
+                };
+                let y = if add.isFlipped() {
+                    add.bounds().size.height + 4.0
+                } else {
+                    -4.0
+                };
+                state.menu.popup(CGPoint::new(0.0, y), &add);
+            })
+            .on_remove(move || {
+                if let Some(state) = owner.upgrade()
+                    && let Some(value) = state.selected()
+                {
+                    state.change(i, move |values| values.retain(|v| *v != value));
+                }
+            }),
     );
+    if let Some(add) = controls.ns_view().subviews().firstObject() {
+        add.setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
+            "Add Display Preference",
+        )));
+        // The button retains the menu; this also exposes it to secondary clicks.
+        unsafe { add.setMenu(Some(state.menu.ns_menu())) };
+    }
     let owner = Rc::downgrade(&state);
     let edit = Rc::new(
         IconButton::new(&ui, "pencil", "Edit Display Preference").on_click(move || {
@@ -547,13 +564,17 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
             }
         }),
     );
-    _ = state.remove.set(remove.clone());
+    _ = state.controls.set(controls.clone());
     _ = state.edit.set(edit.clone());
     let owner = Rc::downgrade(&state);
     list.set_on_select(move |selected| {
         if let Some(state) = owner.upgrade() {
-            for button in [state.remove.get(), state.edit.get()].into_iter().flatten() {
-                button.set_enabled(state.active.get() && selected.is_some());
+            let enabled = state.active.get() && selected.is_some();
+            if let Some(controls) = state.controls.get() {
+                controls.set_remove_enabled(enabled);
+            }
+            if let Some(edit) = state.edit.get() {
+                edit.set_enabled(enabled);
             }
         }
     });
@@ -566,7 +587,7 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
     let control = VStack::new(&ui)
         .spacing(8.0)
         .push(list)
-        .push(HStack::new(&ui).push(popup).push(Spacer::new(&ui)).push(edit).push(remove))
+        .push(HStack::new(&ui).push(controls).push(Spacer::new(&ui)).push(edit))
         .push(state.field.clone())
         .push(objc2::Message::retain(state.status.ns_view()));
     let message = state.message.clone();
