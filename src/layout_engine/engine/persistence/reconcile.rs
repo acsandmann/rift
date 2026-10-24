@@ -150,7 +150,9 @@ impl LayoutEngine {
                 locations.push(location);
             }
         }
-        for location @ (space, workspace) in self.floating_positions.locations_for_window(window) {
+        for workspace in self.floating_positions.locations_for_window(window) {
+            let space = self.workspaces[workspace].space;
+            let location = (space, workspace);
             if !locations.contains(&location)
                 && self.workspaces.active_layout(space, workspace).is_some()
             {
@@ -199,8 +201,8 @@ impl LayoutEngine {
         }
 
         let preferred_location = window_store
-            .workspace_info_for_window(live)
-            .map(|assignment| (assignment.space, assignment.workspace_id));
+            .workspace_for_window(live)
+            .map(|assignment| (self.workspaces[assignment].space, assignment));
         let candidates: Vec<_> = self
             .persistence
             .pending_windows
@@ -243,7 +245,7 @@ impl LayoutEngine {
         if let Some((space, workspace)) = restored_location {
             self.remove_restored_tiling_duplicates(live, (space, workspace));
             self.workspaces.retain_window_focus_location(live, workspace);
-            self.floating_positions.retain_window_location(live, (space, workspace));
+            self.floating_positions.retain_window_location(live, workspace);
             let _ =
                 self.workspaces.assign_window_to_workspace(window_store, space, live, workspace);
         }

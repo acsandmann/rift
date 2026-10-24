@@ -281,6 +281,9 @@ drop_zone_fraction = 0.25
 preview = true
 
 [virtual_workspaces]
+# independent: a local namespace per native Space (default).
+# shared: one namespace across visible managed Spaces; selecting a workspace focuses its owner.
+display_mode = "independent"
 # Virtual workspaces
 # - enabled: if false, rift behaves like a simple tiling WM with a single space
 # - default_workspace_count: number of workspaces to create on startup (1–32)
@@ -299,12 +302,20 @@ workspace_auto_back_and_forth = false
 prevent_wrapping = false
 reapply_app_rules_on_title_change = false
 
-# Workspace-specific rules
-# - workspace: target workspace by index (integer) or name (string)
-# - layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling", "floating")
+# Workspace rules: workspace is a zero-based index or name.
+# The last matching rule wins for each property independently.
+# - layout: "traditional", "bsp", "stack", "master_stack", "scrolling", or "floating".
+# - display: UUID, exact name, or lowercase builtin/left/right/top/bottom (shared mode only).
+#   A string is one preference; lists use the first eligible match, otherwise normal placement.
+#   builtin selects the Mac's built-in panel. Directions select eligible screen-center extremes,
+#   so preferences after a direction usually won't be reached.
+#   Explicit moves override placement until moved back or the display rule changes/reactivates.
 # workspace_rules = [
 #   { workspace = 1, layout = "bsp" },
-#   { workspace = "second", layout = "scrolling" }
+#   { workspace = "second", layout = "scrolling" },
+#   { workspace = 0, display = "builtin" },
+#   { workspace = 1, display = ["builtin", "right"] },
+#   { workspace = 2, display = ["DELL U2720Q", "left"] }
 # ]
 workspace_rules = []
 

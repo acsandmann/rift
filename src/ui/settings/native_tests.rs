@@ -241,6 +241,7 @@ pub fn run(ui: Ui) {
             display_uuid: "test-display".into(),
             name: Some("Test display".into()),
             frame: Default::default(),
+            is_builtin: false,
             backing_scale: 1.0,
             space: None,
         }]);
@@ -826,6 +827,7 @@ pub fn run(ui: Ui) {
                 display_uuid: "focused-display".into(),
                 name: Some("Focused display".into()),
                 frame: Default::default(),
+                is_builtin: false,
                 backing_scale: 1.0,
                 space: None,
             }]);
@@ -947,6 +949,7 @@ pub fn run(ui: Ui) {
                 display_uuid: "disp-a".into(),
                 name: Some("Display A".into()),
                 frame: Default::default(),
+                is_builtin: false,
                 backing_scale: 1.0,
                 space: None,
             }]);
@@ -1645,7 +1648,26 @@ pub fn render(
         snapshot.settings.layout.gaps.outer.top = 5.0;
     }
     let mut displays = vec![];
-    if scope == Some(8) {
+    // 20..=23: a workspace sheet's Display row, independent, shared, pinned to a
+    // disconnected display, and entering a display by hand.
+    let workspace_sheet = matches!(scope, Some(20..=23));
+    if matches!(scope, Some(21..=23)) {
+        snapshot.virtual_workspaces.display_mode = crate::common::config::DisplayMode::Shared;
+    }
+    if scope == Some(22) {
+        snapshot.virtual_workspaces.workspace_rules.push(
+            crate::common::config::WorkspaceLayoutRule {
+                workspace: crate::common::config::WorkspaceSelector::Index(1),
+                layout: None,
+                display: Some(vec![
+                    "builtin".into(),
+                    "right".into(),
+                    "37D8832A-2D66-02CA-B9F7-8F30A301B230".into(),
+                ]),
+            },
+        );
+    }
+    if scope == Some(8) || workspace_sheet {
         snapshot.settings.layout.gaps.outer.top = 5.0;
         for (id, uuid, name) in [
             (1, "studio", "Studio Display"),
@@ -1654,6 +1676,7 @@ pub fn render(
             displays.push(ScreenInfo {
                 id: crate::sys::screen::ScreenId::new(id),
                 frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1512.0, 982.0)),
+                is_builtin: false,
                 backing_scale: 2.0,
                 display_uuid: uuid.into(),
                 name: Some(name.into()),
@@ -1736,6 +1759,50 @@ pub fn render(
         })
         .as_deref(),
     );
+    if workspace_sheet {
+        // Mirror record_editor's sheet chrome in an unpresented window.
+        let page = super::editors::workspace_detail(ui, settings.model(), 1);
+        page.synchronize(settings.model());
+        let content = VStack::new(&ui)
+            .insets(Insets {
+                top: 24.0,
+                left: 24.0,
+                bottom: 20.0,
+                right: 24.0,
+            })
+            .spacing(16.0)
+            .push(SectionTitle::new(&ui, "Workspace 2"))
+            .push(page.view.clone())
+            .push(SheetActions::new(&ui));
+        let sheet = cgs::Window::new(&ui).title("Workspace 2").content(content);
+        let sheet_window = sheet.ns_window();
+        sheet_window.setAppearance(window.appearance().as_deref());
+        let view = sheet_window.contentView().unwrap();
+        if scope == Some(23) {
+            let add = named::<NSButton>(&view, "Add Display Preference").unwrap();
+            let menu = add.menu().unwrap();
+            menu.performActionForItemAtIndex(menu.numberOfItems() - 1);
+        }
+        view.layoutSubtreeIfNeeded();
+        sheet_window.setContentSize(CGSize::new(
+            viewport.map_or(480.0, |size| size.width),
+            view.fittingSize().height,
+        ));
+        // Capture the frame view so the window background is drawn, as below.
+        let view = unsafe { view.superview() }.unwrap_or(view);
+        view.layoutSubtreeIfNeeded();
+        let bitmap = view.bitmapImageRepForCachingDisplayInRect(view.bounds()).unwrap();
+        view.cacheDisplayInRect_toBitmapImageRep(view.bounds(), &bitmap);
+        let png = unsafe {
+            bitmap.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )
+        }
+        .unwrap();
+        assert!(png.writeToFile_atomically(&NSString::from_str(path), true));
+        return;
+    }
     // Hidden AppKit windows can adjust their fitting size as controls are inserted.
     // Capture the requested viewport after the selected editor has been mounted.
     window.setContentSize(viewport.unwrap_or(if small {

@@ -36,7 +36,8 @@ pub(crate) fn rejection_needs_removal(
     space: SpaceId,
 ) -> bool {
     let engine = &layout.layout_engine;
-    state.windows.workspace_for_window(space, wid).is_some() || engine.is_window_floating(wid)
+    engine.workspaces().workspace_for_window(&state.windows, space, wid).is_some()
+        || engine.is_window_floating(wid)
 }
 
 pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {

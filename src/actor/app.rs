@@ -1248,7 +1248,8 @@ impl State {
                     Duration::from_secs(60)
                 }
 
-                _ => Duration::ZERO,
+                // Busy apps can reject the first AX requests.
+                _ => Duration::from_secs(2),
             };
         let mut sleep_dur = Duration::from_millis(20);
         let mut sleep = || {

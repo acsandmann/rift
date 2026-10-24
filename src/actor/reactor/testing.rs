@@ -55,7 +55,11 @@ impl Reactor {
         space: crate::sys::screen::SpaceId,
         wid: WindowId,
     ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
-        self.state.windows.workspace_for_window(space, wid)
+        self.layout_manager.layout_engine.workspaces().workspace_for_window(
+            &self.state.windows,
+            space,
+            wid,
+        )
     }
 
     pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
@@ -78,11 +82,11 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> Vec<WindowId> {
-        self.layout_manager.layout_engine.workspaces().workspace_windows(
-            &self.state.windows,
-            space,
-            workspace,
-        )
+        if self.layout_manager.layout_engine.workspaces()[workspace].space == space {
+            self.state.windows.workspace_windows(workspace)
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn assign_test_window_to_workspace(
@@ -286,6 +290,7 @@ pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) 
         .zip(spaces.into_iter())
         .enumerate()
         .map(|(idx, (frame, space))| ScreenInfo {
+            is_builtin: false,
             backing_scale: 1.0,
             id: crate::sys::screen::ScreenId::new(idx as u32),
             frame,
@@ -338,6 +343,7 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
             .collect(),
         screens: screens.clone(),
         fullscreen_spaces: Default::default(),
+        destroyed_spaces: Default::default(),
         active_spaces,
         menu_bar_space: command_space,
         command_space,
@@ -361,6 +367,7 @@ pub fn fullscreen_startup_space_state(
     fullscreen_space: SpaceId,
 ) -> Event {
     let mut state = forwarded_space_state(vec![ScreenInfo {
+        is_builtin: false,
         backing_scale: 1.0,
         id: crate::sys::screen::ScreenId::new(0),
         frame: screen,

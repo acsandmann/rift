@@ -473,7 +473,8 @@ fn typed_collections_keep_source_aliases_and_inline_commands() {
             });
             source.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
                 workspace: WorkspaceSelector::Index(1),
-                layout: LayoutMode::Scrolling,
+                layout: Some(LayoutMode::Scrolling),
+                display: None,
             });
             source.keys.insert("comb1 + Q".into(), source.keys["Alt + H"].clone());
             source.binding_modes.insert(
@@ -560,11 +561,13 @@ fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
     settings.workspace_rules = vec![
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Name("three".into()),
-            layout: LayoutMode::Stack,
+            layout: Some(LayoutMode::Stack),
+            display: None,
         },
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(0),
-            layout: LayoutMode::Bsp,
+            layout: Some(LayoutMode::Bsp),
+            display: None,
         },
     ];
     settings.app_rules = vec![AppWorkspaceRule {
@@ -702,5 +705,49 @@ fn stack_tab_geometry_rejects_unusable_values() {
     ] {
         let tabs: StackLineSettings = toml::from_str(text).unwrap();
         assert_eq!(tabs.validate().len(), 1, "{text}");
+    }
+}
+
+#[test]
+fn display_workspace_mode_has_a_compatible_default_and_rejects_unknown_values() {
+    assert_eq!(
+        toml::from_str::<VirtualWorkspaceSettings>("").unwrap().display_mode,
+        DisplayMode::Independent
+    );
+    assert_eq!(
+        toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'shared'")
+            .unwrap()
+            .display_mode,
+        DisplayMode::Shared
+    );
+    assert!(toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'mirrored'").is_err());
+}
+
+#[test]
+fn ordered_display_preferences_round_trip_and_validate() {
+    let mut document = ConfigDocument::default();
+    for display in [r#""builtin""#, r#"["builtin", "right"]"#] {
+        let rule: WorkspaceLayoutRule =
+            toml::from_str(&format!("workspace = 0\ndisplay = {display}")).unwrap();
+        let expected: toml::Table = toml::from_str(&format!("display = {display}")).unwrap();
+        assert_eq!(
+            toml::Value::try_from(&rule).unwrap()["display"],
+            expected["display"]
+        );
+        document
+            .update(|s| s.virtual_workspaces.workspace_rules = vec![rule.clone()])
+            .unwrap();
+        assert_eq!(document.runtime().unwrap().virtual_workspaces.workspace_rules, [
+            rule
+        ]);
+    }
+    for values in [vec![], vec![""], vec!["builtin", " "]] {
+        let error = document
+            .update(|s| {
+                s.virtual_workspaces.workspace_rules[0].display =
+                    Some(values.into_iter().map(String::from).collect());
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("Workspace rule 0 display preferences"));
     }
 }

@@ -25,9 +25,21 @@ pub fn config_file() -> PathBuf {
     dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayMode {
+    #[default]
+    Independent,
+    Shared,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualWorkspaceSettings {
+    #[serde(default)]
+    /// Workspace namespace across visible managed displays.
+    #[setting(label = "Display workspace mode", choices)]
+    pub display_mode: DisplayMode,
     #[serde(default = "yes")]
     /// Organize windows into separate virtual workspaces.
     #[setting(ignore)]
@@ -87,16 +99,24 @@ pub struct VirtualWorkspaceSettings {
     #[setting(label = "App rules", custom)]
     pub app_rules: Vec<AppWorkspaceRule>,
     #[serde(default)]
-    /// Choose layouts for individual workspaces.
+    /// Choose independent layouts and ordered display preferences for individual workspaces.
     #[setting(label = "Workspace rules", custom)]
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
 }
 
+#[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
     pub workspace: WorkspaceSelector,
-    pub layout: LayoutMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutMode>,
+    /// Ordered display UUIDs, names, or builtin/left/right/top/bottom selectors.
+    /// The first eligible preference wins. Only applies when
+    /// `display_mode = "shared"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    pub display: Option<Vec<String>>,
 }
 
 // Allow specifying a workspace by numeric index or by name in the config.
@@ -176,6 +196,7 @@ impl Default for VirtualWorkspaceSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            display_mode: DisplayMode::Independent,
             default_workspace_count: default_workspace_count(),
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,
@@ -234,6 +255,18 @@ impl VirtualWorkspaceSettings {
                 "default_workspace ({}) must be less than default_workspace_count ({})",
                 self.default_workspace, self.default_workspace_count
             ));
+        }
+
+        for (index, rule) in self.workspace_rules.iter().enumerate() {
+            if rule.layout.is_none() && rule.display.is_none() {
+                issues.push(format!("Workspace rule {index} has no layout or display"));
+            }
+            if let Some(preferences) = &rule.display
+                && (preferences.is_empty()
+                    || preferences.iter().any(|value| value.trim().is_empty()))
+            {
+                issues.push(format!("Workspace rule {index} display preferences must contain nonempty UUIDs, names, or keywords"));
+            }
         }
 
         // Validate rules and check duplicates in a single pass
