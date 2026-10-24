@@ -4289,7 +4289,7 @@ fn windows_query_exposes_scrolling_order() {
 }
 
 #[test]
-fn independent_workspace_to_display_moves_contents_to_corresponding_ordinal() {
+fn per_display_workspace_to_display_moves_contents_to_corresponding_ordinal() {
     let (mut apps, mut reactor, a, b) = two_displays(Default::default());
     let window = WindowId::new(1, 1);
     reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
@@ -8936,11 +8936,11 @@ fn rejected_config_preserves_live_graph_and_mode_migration_preserves_dormant_mem
     let dormant = reactor.test_workspace_ids(b);
     let assignments: Vec<_> = reactor.state.windows.iter_workspace_assignments().collect();
     for mode in [
-        crate::common::config::DisplayMode::Shared,
-        crate::common::config::DisplayMode::Independent,
+        crate::common::config::WorkspaceMode::Global,
+        crate::common::config::WorkspaceMode::PerDisplay,
     ] {
         let mut config = reactor.config.clone();
-        config.virtual_workspaces.display_mode = mode;
+        config.virtual_workspaces.mode = mode;
         reactor.handle_event(Event::ConfigUpdated(config));
         assert_eq!(reactor.test_workspace_ids(b), dormant);
         assert_eq!(
@@ -9486,7 +9486,7 @@ fn two_displays(
 
 fn shared_settings() -> crate::common::config::VirtualWorkspaceSettings {
     crate::common::config::VirtualWorkspaceSettings {
-        display_mode: crate::common::config::DisplayMode::Shared,
+        mode: crate::common::config::WorkspaceMode::Global,
         default_workspace_count: 4,
         ..Default::default()
     }

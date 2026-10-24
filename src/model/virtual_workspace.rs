@@ -8,8 +8,8 @@ use crate::common::collections::{HashMap, HashSet};
 #[cfg(test)]
 use crate::common::config::AppWorkspaceRule;
 use crate::common::config::{
-    DisplayMode, LayoutMode, LayoutSettings, MAX_WORKSPACES, VirtualWorkspaceSettings,
-    WorkspaceLayoutRule, WorkspaceSelector,
+    LayoutMode, LayoutSettings, MAX_WORKSPACES, VirtualWorkspaceSettings, WorkspaceLayoutRule,
+    WorkspaceMode, WorkspaceSelector,
 };
 use crate::common::log::trace_misc;
 use crate::layout_engine::systems::LayoutSystemKind;
@@ -27,7 +27,7 @@ new_key_type! {
 pub(crate) enum NavigationScope {
     #[default]
     Local,
-    SharedVisible,
+    GlobalVisible,
 }
 
 /// Resolution consumes accepted Reactor topology, never the full native inventory.
@@ -286,7 +286,7 @@ impl VirtualWorkspace {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct SpaceActivation {
     pub current: Option<VirtualWorkspaceId>,
-    /// Navigation history; shared mode can return to a workspace on another display.
+    /// Navigation history; global mode can return to a workspace on another display.
     pub previous: Option<VirtualWorkspaceId>,
     pub remembered: Option<VirtualWorkspaceId>,
 }
@@ -354,16 +354,16 @@ pub struct WorkspaceStore {
     pub layout_settings: LayoutSettings,
 }
 
-/// A rule's `display` only applies in shared mode; say so rather than ignore it silently.
+/// A rule's `display` only applies in global mode; say so rather than ignore it silently.
 fn warn_on_ignored_display_rules(config: &VirtualWorkspaceSettings) {
-    if config.display_mode == DisplayMode::Shared {
+    if config.mode == WorkspaceMode::Global {
         return;
     }
     for (index, rule) in config.workspace_rules.iter().enumerate() {
         if rule.display.as_deref().is_some_and(|display| !display.is_empty()) {
             warn!(
                 index,
-                "Workspace rule display only applies with display_mode = \"shared\""
+                "Workspace rule display only applies with mode = \"global\""
             );
         }
     }
@@ -455,13 +455,13 @@ impl WorkspaceStore {
     }
 
     fn scope_ids(&self, space: SpaceId) -> impl Iterator<Item = VirtualWorkspaceId> + '_ {
-        let shared = self.settings.display_mode == DisplayMode::Shared;
-        self.order.iter().copied().filter(move |id| shared || self[*id].space == space)
+        let global = self.settings.mode == WorkspaceMode::Global;
+        self.order.iter().copied().filter(move |id| global || self[*id].space == space)
     }
 
     fn eligible(&self, context: WorkspaceContext<'_>, id: VirtualWorkspaceId) -> bool {
         let space = self[id].space;
-        self.settings.display_mode != DisplayMode::Shared
+        self.settings.mode != WorkspaceMode::Global
             || context.visible.contains(&space)
             || (context.visible.is_empty() && space == context.space)
     }
@@ -605,7 +605,7 @@ impl WorkspaceStore {
         activation.previous = activation.previous.filter(|&id| {
             self.workspaces.contains_key(id)
                 && Some(id) != activation.current
-                && (self.settings.display_mode == DisplayMode::Shared || owned(id))
+                && (self.settings.mode == WorkspaceMode::Global || owned(id))
         });
         self.active_workspace_per_space.insert(space, activation);
     }
@@ -675,10 +675,10 @@ impl WorkspaceStore {
         if !(1..=MAX_WORKSPACES).contains(&config.default_workspace_count) {
             return Err("invalid default workspace count".into());
         }
-        if config.display_mode == DisplayMode::Shared && self.order.len() > MAX_WORKSPACES {
-            return Err(format!("shared catalog exceeds {MAX_WORKSPACES} workspaces"));
+        if config.mode == WorkspaceMode::Global && self.order.len() > MAX_WORKSPACES {
+            return Err(format!("global catalog exceeds {MAX_WORKSPACES} workspaces"));
         }
-        let mode_changed = self.settings.display_mode != config.display_mode;
+        let mode_changed = self.settings.mode != config.mode;
         let mut plan = WorkspaceSettingsPlan {
             names: Vec::new(),
             additions: Vec::new(),
@@ -686,7 +686,7 @@ impl WorkspaceStore {
         let mut seen = HashSet::default();
         for (global, id) in self.catalog().enumerate() {
             let workspace = &self[id];
-            let index = if config.display_mode == DisplayMode::Shared {
+            let index = if config.mode == WorkspaceMode::Global {
                 global
             } else {
                 self.workspaces_on(workspace.space)
@@ -698,7 +698,7 @@ impl WorkspaceStore {
             } else {
                 config.workspace_names.get(index).unwrap_or(&workspace.name).clone()
             };
-            if mode_changed && config.display_mode == DisplayMode::Shared {
+            if mode_changed && config.mode == WorkspaceMode::Global {
                 let base = name.clone();
                 let mut suffix = 2;
                 while !seen.insert(name.clone()) {
@@ -716,13 +716,13 @@ impl WorkspaceStore {
             if count == 0 {
                 continue;
             } // Absent presentation contexts allocate on exposure.
-            let missing = if config.display_mode == DisplayMode::Shared {
+            let missing = if config.mode == WorkspaceMode::Global {
                 config.default_workspace_count.saturating_sub(total)
             } else {
                 config.default_workspace_count.saturating_sub(count)
             };
             for local in count..count + missing {
-                let index = if config.display_mode == DisplayMode::Shared {
+                let index = if config.mode == WorkspaceMode::Global {
                     total
                 } else {
                     local
@@ -817,7 +817,7 @@ impl WorkspaceStore {
         self.insert_workspace(space, name, mode)
     }
 
-    /// Allocate the initial shared target once, distributed over visible managed
+    /// Allocate the initial global target once, distributed over visible managed
     /// desktops. Subsequent native desktop arrivals get only their minimum state.
     /// `rule_space` resolves a workspace rule's display to one of `spaces`.
     pub(crate) fn ensure_visible_spaces(
@@ -828,7 +828,7 @@ impl WorkspaceStore {
         if spaces.is_empty() {
             return;
         }
-        if self.settings.display_mode == DisplayMode::Shared && self.order.is_empty() {
+        if self.settings.mode == WorkspaceMode::Global && self.order.is_empty() {
             let count = self.settings.default_workspace_count.max(spaces.len()).min(MAX_WORKSPACES);
             let pins: Vec<_> = (0..count)
                 .map(|index| {
@@ -866,7 +866,7 @@ impl WorkspaceStore {
             return;
         }
         let target = self.settings.default_workspace_count.max(1).min(MAX_WORKSPACES);
-        let count = if self.settings.display_mode == DisplayMode::Shared {
+        let count = if self.settings.mode == WorkspaceMode::Global {
             target.saturating_sub(self.order.len()).max(1)
         } else {
             target
@@ -896,10 +896,10 @@ impl WorkspaceStore {
             .unwrap_or(self.layout_settings.mode)
     }
 
-    /// Shared-mode display assignments from workspace rules (last matching rule wins).
-    /// Empty unless shared mode is active and some rule names a display.
+    /// Global-mode display assignments from workspace rules (last matching rule wins).
+    /// Empty unless global mode is active and some rule names a display.
     pub(crate) fn rule_displays(&self) -> impl Iterator<Item = (VirtualWorkspaceId, &[String])> {
-        let order = if self.settings.display_mode == DisplayMode::Shared
+        let order = if self.settings.mode == WorkspaceMode::Global
             && self.settings.workspace_rules.iter().any(|rule| rule.display.is_some())
         {
             self.order.as_slice()
@@ -987,8 +987,7 @@ impl WorkspaceStore {
             return Vec::new();
         }
 
-        let deleted_target_workspace_ids = if self.settings.display_mode == DisplayMode::Independent
-        {
+        let deleted_target_workspace_ids = if self.settings.mode == WorkspaceMode::PerDisplay {
             self.workspace_ids(new_space)
         } else {
             Vec::new()
@@ -1030,7 +1029,7 @@ impl WorkspaceStore {
         space: SpaceId,
         name: Option<String>,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
-        if self.settings.display_mode == DisplayMode::Shared && self.order.len() >= MAX_WORKSPACES {
+        if self.settings.mode == WorkspaceMode::Global && self.order.len() >= MAX_WORKSPACES {
             return Err(WorkspaceError::InconsistentState(
                 "Maximum global workspace limit reached".into(),
             ));
@@ -1083,7 +1082,7 @@ impl WorkspaceStore {
         if !self.set_active_workspace(target, workspace_id) {
             return false;
         }
-        if self.settings.display_mode == DisplayMode::Shared && source != target {
+        if self.settings.mode == WorkspaceMode::Global && source != target {
             self.active_workspace_per_space.get_mut(&target).unwrap().previous = previous;
         }
         true
@@ -1111,7 +1110,7 @@ impl WorkspaceStore {
         })
     }
 
-    /// Independent mode steps through `space`'s workspaces. Shared mode steps through
+    /// Per-display mode steps through `space`'s workspaces. Global mode steps through
     /// the whole visible catalog, so the target may live on another display.
     pub(crate) fn step_workspace<'a>(
         &self,
@@ -1131,8 +1130,8 @@ impl WorkspaceStore {
         let context = WorkspaceContext { visible, ..context };
         let eligible = |id| {
             self.eligible(context, id)
-                && ((self.settings.display_mode == DisplayMode::Shared
-                    && context.navigation == NavigationScope::SharedVisible)
+                && ((self.settings.mode == WorkspaceMode::Global
+                    && context.navigation == NavigationScope::GlobalVisible)
                     || self[id].space == context.space)
         };
         if !self.workspaces.contains_key(current) || !eligible(current) {
@@ -1632,29 +1631,29 @@ mod tests {
         let (a, b, dormant) = (SpaceId::new(101), SpaceId::new(201), SpaceId::new(301));
         // mode, scope, visible displays, current index, direction, skip empty, no wrap, target
         use Direction::{Left, Right};
-        use DisplayMode::{Independent, Shared};
-        use NavigationScope::{Local, SharedVisible};
+        use NavigationScope::{GlobalVisible, Local};
+        use WorkspaceMode::{Global, PerDisplay};
         #[rustfmt::skip]
         let cases = [
-            (Independent, Local,         true,  0, Right, false, false, Some(1)),
-            (Independent, Local,         true,  1, Left,  false, false, Some(0)),
-            (Independent, SharedVisible, true,  1, Right, false, false, Some(0)),
-            (Shared,      Local,         true,  1, Right, false, false, Some(0)),
-            (Shared,      SharedVisible, false, 1, Right, false, false, Some(0)),
-            (Shared,      SharedVisible, true,  1, Right, false, false, Some(2)),
-            (Shared,      SharedVisible, true,  0, Left,  false, false, Some(3)),
-            (Shared,      SharedVisible, true,  3, Right, false, false, Some(0)),
-            (Shared,      SharedVisible, true,  3, Right, false, true,  None),
-            (Shared,      SharedVisible, true,  0, Left,  false, true,  None),
-            (Shared,      SharedVisible, true,  0, Right, true,  false, Some(3)),
-            (Shared,      SharedVisible, true,  0, Right, true,  true,  Some(3)),
-            (Shared,      SharedVisible, true,  3, Right, true,  true,  None),
-            (Shared,      SharedVisible, false, 0, Right, true,  false, None),
+            (PerDisplay,  Local,         true,  0, Right, false, false, Some(1)),
+            (PerDisplay,  Local,         true,  1, Left,  false, false, Some(0)),
+            (PerDisplay,  GlobalVisible, true,  1, Right, false, false, Some(0)),
+            (Global,      Local,         true,  1, Right, false, false, Some(0)),
+            (Global,      GlobalVisible, false, 1, Right, false, false, Some(0)),
+            (Global,      GlobalVisible, true,  1, Right, false, false, Some(2)),
+            (Global,      GlobalVisible, true,  0, Left,  false, false, Some(3)),
+            (Global,      GlobalVisible, true,  3, Right, false, false, Some(0)),
+            (Global,      GlobalVisible, true,  3, Right, false, true,  None),
+            (Global,      GlobalVisible, true,  0, Left,  false, true,  None),
+            (Global,      GlobalVisible, true,  0, Right, true,  false, Some(3)),
+            (Global,      GlobalVisible, true,  0, Right, true,  true,  Some(3)),
+            (Global,      GlobalVisible, true,  3, Right, true,  true,  None),
+            (Global,      GlobalVisible, false, 0, Right, true,  false, None),
         ];
         for (mode, navigation, both, current, direction, skip, prevent_wrapping, expected) in cases
         {
             let settings = VirtualWorkspaceSettings {
-                display_mode: mode,
+                mode,
                 default_workspace_count: 2,
                 prevent_wrapping,
                 ..Default::default()
@@ -1689,7 +1688,7 @@ mod tests {
         let (a, b, c) = (SpaceId::new(51), SpaceId::new(52), SpaceId::new(53));
         for count in [1, 6] {
             let settings = VirtualWorkspaceSettings {
-                display_mode: DisplayMode::Shared,
+                mode: WorkspaceMode::Global,
                 default_workspace_count: count,
                 ..Default::default()
             };
@@ -1739,7 +1738,7 @@ mod tests {
     fn native_remap_preserves_shared_catalog_and_remaps_a_temporarily_away_home() {
         let settings = VirtualWorkspaceSettings {
             default_workspace_count: 1,
-            display_mode: DisplayMode::Shared,
+            mode: WorkspaceMode::Global,
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
@@ -1768,7 +1767,7 @@ mod tests {
         let (a, b, dormant) = (SpaceId::new(11), SpaceId::new(21), SpaceId::new(12));
         let settings = VirtualWorkspaceSettings {
             default_workspace_count: 2,
-            display_mode: DisplayMode::Shared,
+            mode: WorkspaceMode::Global,
             ..Default::default()
         };
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
@@ -1778,7 +1777,7 @@ mod tests {
         let context = WorkspaceContext {
             space: a,
             visible: &[a, b],
-            navigation: NavigationScope::SharedVisible,
+            navigation: NavigationScope::GlobalVisible,
         };
         assert_eq!(
             store.resolve_workspace(context, &WorkspaceSelector::Name(store[ids[0]].name.clone())),

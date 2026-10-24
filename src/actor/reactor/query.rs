@@ -309,7 +309,7 @@ impl Reactor {
             .collect()
     }
 
-    /// The workspaces `space` owns. A shared catalog view spans every visible display,
+    /// The workspaces `space` owns. A global catalog view spans every visible display,
     /// but each display's menu entry lists only its own, or the others would repeat.
     /// Indices stay catalog positions, which is what switching resolves them against.
     fn menu_workspaces(&mut self, space: SpaceId) -> Vec<menu_bar::Workspace> {

@@ -1648,11 +1648,11 @@ pub fn render(
         snapshot.settings.layout.gaps.outer.top = 5.0;
     }
     let mut displays = vec![];
-    // 20..=23: a workspace sheet's Display row, independent, shared, pinned to a
+    // 20..=23: a workspace sheet's Display row, per-display, global, pinned to a
     // disconnected display, and entering a display by hand.
     let workspace_sheet = matches!(scope, Some(20..=23));
     if matches!(scope, Some(21..=23)) {
-        snapshot.virtual_workspaces.display_mode = crate::common::config::DisplayMode::Shared;
+        snapshot.virtual_workspaces.mode = crate::common::config::WorkspaceMode::Global;
     }
     if scope == Some(22) {
         snapshot.virtual_workspaces.workspace_rules.push(

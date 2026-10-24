@@ -1156,7 +1156,7 @@ fn persisted_layout_schema_is_versioned_and_legacy_files_still_load() {
 fn legacy_home_activation_migrates_to_remembered_without_foreign_current() {
     use crate::model::virtual_workspace::WorkspaceTransferReason;
     let settings = VirtualWorkspaceSettings {
-        display_mode: crate::common::config::DisplayMode::Shared,
+        mode: crate::common::config::WorkspaceMode::Global,
         default_workspace_count: 2,
         ..Default::default()
     };

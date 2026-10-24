@@ -114,8 +114,21 @@ fn record_editor(
 
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut section = f.schema_section(
-        "Workspace behavior",
+    let mode = VirtualWorkspaceSettings::field("mode").unwrap();
+    let separate = f.switch(
+        mode.title,
+        |s| s.virtual_workspaces.mode == WorkspaceMode::PerDisplay,
+        |s, on| {
+            s.virtual_workspaces.mode = if on {
+                WorkspaceMode::PerDisplay
+            } else {
+                WorkspaceMode::Global
+            };
+        },
+    );
+    let separate = f.schema_metadata(separate, mode, |s| &s.virtual_workspaces);
+    let mut section = f.schema_rows(
+        Section::new(&ui, "Workspace behavior").row(separate),
         "",
         |s| &s.virtual_workspaces,
         |s| &mut s.virtual_workspaces,
@@ -448,7 +461,7 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
                     state.enter(None);
                 }
             }));
-            let active = source.virtual_workspaces.display_mode == DisplayMode::Shared;
+            let active = source.virtual_workspaces.mode == WorkspaceMode::Global;
             self.active.set(active);
             list.ns_table_view().setEnabled(active);
             self.field.set_enabled(active);
@@ -466,7 +479,7 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
             self.status.set_text(if active {
                 "Uses the first connected display in the list. Drag to reorder."
             } else {
-                "Display preferences apply only in Shared workspace mode."
+                "To use display preferences, turn off “Displays have separate workspaces.”"
             });
         }
     }

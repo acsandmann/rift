@@ -709,18 +709,30 @@ fn stack_tab_geometry_rejects_unusable_values() {
 }
 
 #[test]
-fn display_workspace_mode_has_a_compatible_default_and_rejects_unknown_values() {
+fn workspace_mode_defaults_to_per_display_and_round_trips() {
     assert_eq!(
-        toml::from_str::<VirtualWorkspaceSettings>("").unwrap().display_mode,
-        DisplayMode::Independent
+        toml::from_str::<VirtualWorkspaceSettings>("").unwrap().mode,
+        WorkspaceMode::PerDisplay
     );
-    assert_eq!(
-        toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'shared'")
-            .unwrap()
-            .display_mode,
-        DisplayMode::Shared
-    );
-    assert!(toml::from_str::<VirtualWorkspaceSettings>("display_mode = 'mirrored'").is_err());
+    for (text, mode) in [
+        ("per_display", WorkspaceMode::PerDisplay),
+        ("global", WorkspaceMode::Global),
+    ] {
+        let settings =
+            toml::from_str::<VirtualWorkspaceSettings>(&format!("mode = '{text}'")).unwrap();
+        assert_eq!(settings.mode, mode);
+        assert_eq!(serde_json::to_value(&settings).unwrap()["mode"], text);
+    }
+    for text in [
+        "mode = 'shared'",
+        "mode = 'independent'",
+        "display_mode = 'shared'",
+    ] {
+        assert!(
+            toml::from_str::<VirtualWorkspaceSettings>(text).is_err(),
+            "{text}"
+        );
+    }
 }
 
 #[test]

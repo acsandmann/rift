@@ -27,19 +27,26 @@ pub fn config_file() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
 #[serde(rename_all = "snake_case")]
-pub enum DisplayMode {
+pub enum WorkspaceMode {
+    /// Each macOS desktop has its own set of workspaces, numbered independently.
     #[default]
-    Independent,
-    Shared,
+    PerDisplay,
+    /// One set of workspaces across all displays. Each workspace belongs to one display at a time.
+    Global,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualWorkspaceSettings {
     #[serde(default)]
-    /// Workspace namespace across visible managed displays.
-    #[setting(label = "Display workspace mode", choices)]
-    pub display_mode: DisplayMode,
+    /// Each display has its own workspaces, numbered from 1. When off, workspaces are numbered
+    /// across all displays, and each one stays on a single display.
+    #[setting(
+        label = "Displays have separate workspaces",
+        aliases = "workspace mode global per display multiple monitors spaces",
+        custom
+    )]
+    pub mode: WorkspaceMode,
     #[serde(default = "yes")]
     /// Organize windows into separate virtual workspaces.
     #[setting(ignore)]
@@ -113,7 +120,7 @@ pub struct WorkspaceLayoutRule {
     pub layout: Option<LayoutMode>,
     /// Ordered display UUIDs, names, or builtin/left/right/top/bottom selectors.
     /// The first eligible preference wins. Only applies when
-    /// `display_mode = "shared"`.
+    /// `mode = "global"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
     pub display: Option<Vec<String>>,
@@ -196,7 +203,7 @@ impl Default for VirtualWorkspaceSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            display_mode: DisplayMode::Independent,
+            mode: WorkspaceMode::PerDisplay,
             default_workspace_count: default_workspace_count(),
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,

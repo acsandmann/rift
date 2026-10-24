@@ -281,9 +281,11 @@ drop_zone_fraction = 0.25
 preview = true
 
 [virtual_workspaces]
-# independent: a local namespace per native Space (default).
-# shared: one namespace across visible managed Spaces; selecting a workspace focuses its owner.
-display_mode = "independent"
+# - per_display (default): each display has its own workspaces, numbered from 1. Like macOS
+#   Spaces, each desktop on a display has its own set.
+# - global: workspaces are numbered across all displays. Each one stays on a single display and
+#   is never mirrored; selecting it focuses that display.
+mode = "per_display"
 # Virtual workspaces
 # - enabled: if false, rift behaves like a simple tiling WM with a single space
 # - default_workspace_count: number of workspaces to create on startup (1–32)
@@ -305,7 +307,7 @@ reapply_app_rules_on_title_change = false
 # Workspace rules: workspace is a zero-based index or name.
 # The last matching rule wins for each property independently.
 # - layout: "traditional", "bsp", "stack", "master_stack", "scrolling", or "floating".
-# - display: UUID, exact name, or lowercase builtin/left/right/top/bottom (shared mode only).
+# - display: UUID, exact name, or lowercase builtin/left/right/top/bottom (global mode only).
 #   A string is one preference; lists use the first eligible match, otherwise normal placement.
 #   builtin selects the Mac's built-in panel. Directions select eligible screen-center extremes,
 #   so preferences after a direction usually won't be reached.

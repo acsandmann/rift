@@ -2252,17 +2252,16 @@ impl Reactor {
                 return Ok(system_workflow::handle_raise_timeout(sequence_id)?);
             }
             Event::ConfigUpdated(new_cfg) => {
-                if new_cfg.virtual_workspaces.display_mode
-                    == crate::common::config::DisplayMode::Shared
+                if new_cfg.virtual_workspaces.mode == crate::common::config::WorkspaceMode::Global
                     && !crate::sys::screen::displays_have_separate_spaces()
                 {
                     warn!(
-                        "Shared workspaces require separate native Spaces for displays; retaining current configuration"
+                        "Global workspaces require separate native Spaces for displays; retaining current configuration"
                     );
                     return Ok(EventOutcome::no_change());
                 }
                 // Namespace migration preserves ownership; only pins that became
-                // effective (including on entering shared mode) relocate.
+                // effective (including on entering global mode) relocate.
                 let pins = |engine: &LayoutEngine| -> Vec<_> {
                     let pins = engine.workspaces().rule_displays();
                     pins.map(|(id, display)| (id, display.to_owned())).collect()
@@ -3684,7 +3683,7 @@ impl Reactor {
         Ok(outcome)
     }
 
-    /// Shared visibility is derived here from the accepted snapshot and activation policy.
+    /// Global-mode visibility is derived here from the accepted snapshot and activation policy.
     /// A connected display on a different desktop is dormant, never a display departure.
     fn reconcile_workspace_placements(
         &mut self,
@@ -3699,8 +3698,8 @@ impl Reactor {
         if self.refreshes_blocked() {
             return outcome;
         }
-        if self.layout_manager.layout_engine.workspaces().settings.display_mode
-            != crate::common::config::DisplayMode::Shared
+        if self.layout_manager.layout_engine.workspaces().settings.mode
+            != crate::common::config::WorkspaceMode::Global
         {
             return outcome;
         }
@@ -6065,11 +6064,11 @@ impl Reactor {
         frame
     }
 
-    /// In shared mode, open a new window on the pointer's display unless an app rule
+    /// In global mode, open a new window on the pointer's display unless an app rule
     /// names its workspace: launchers can activate an app on another display.
     fn place_new_window_on_pointer_display(&mut self, window: WindowId, space: SpaceId) {
         let engine = &self.layout_manager.layout_engine;
-        if engine.workspaces().settings.display_mode != crate::common::config::DisplayMode::Shared {
+        if engine.workspaces().settings.mode != crate::common::config::WorkspaceMode::Global {
             return;
         }
         let Some(target_screen) = window_server::current_cursor_location()

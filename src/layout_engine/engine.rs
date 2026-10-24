@@ -731,7 +731,7 @@ impl LayoutEngine {
         settings: &crate::common::config::VirtualWorkspaceSettings,
         plan: crate::model::virtual_workspace::WorkspaceSettingsPlan,
     ) {
-        let mode_changed = self.workspaces.settings.display_mode != settings.display_mode;
+        let mode_changed = self.workspaces.settings.mode != settings.mode;
         let previous_modes: HashMap<_, _> = self
             .workspaces
             .catalog()
@@ -3104,7 +3104,7 @@ impl LayoutEngine {
                     *skip_empty,
                     direction,
                 );
-                // Shared targets on another display are shown there and focus follows.
+                // Global targets on another display are shown there and focus follows.
                 if let Some(target) = target.filter(|&target| target != current) {
                     return self.switch_to_workspace_id(window_store, context, target, None);
                 }
@@ -3485,8 +3485,7 @@ impl LayoutEngine {
         let Some(id) = self.workspaces.active_workspace(source_space) else {
             return EventResponse::default();
         };
-        if self.workspaces.settings.display_mode == crate::common::config::DisplayMode::Independent
-        {
+        if self.workspaces.settings.mode == crate::common::config::WorkspaceMode::PerDisplay {
             if source_space == target_space {
                 return EventResponse::default();
             }
@@ -4903,13 +4902,13 @@ mod tests {
     }
 
     #[test]
-    fn moving_empty_workspace_respects_display_mode_contract() {
+    fn moving_empty_workspace_respects_workspace_mode_contract() {
         for mode in [
-            crate::common::config::DisplayMode::Independent,
-            crate::common::config::DisplayMode::Shared,
+            crate::common::config::WorkspaceMode::PerDisplay,
+            crate::common::config::WorkspaceMode::Global,
         ] {
             let settings = VirtualWorkspaceSettings {
-                display_mode: mode,
+                mode,
                 default_workspace_count: 2,
                 ..Default::default()
             };
@@ -4929,7 +4928,7 @@ mod tests {
                 engine.move_active_workspace_to_space(&mut windows, source, target, screen);
             assert!(response.changed);
             assert!(response.transferred_windows.is_empty());
-            if mode == crate::common::config::DisplayMode::Shared {
+            if mode == crate::common::config::WorkspaceMode::Global {
                 assert_eq!(engine.workspaces.active_workspace(target), Some(id));
                 let replacement = engine.workspaces.active_workspace(source).unwrap();
                 assert_ne!(replacement, id);

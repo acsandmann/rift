@@ -312,13 +312,13 @@ impl Reactor {
     ) -> bool {
         let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
         let navigation = if visible_spaces.len() > 1 {
-            crate::model::virtual_workspace::NavigationScope::SharedVisible
+            crate::model::virtual_workspace::NavigationScope::GlobalVisible
         } else {
             crate::model::virtual_workspace::NavigationScope::Local
         };
-        let space = if navigation == crate::model::virtual_workspace::NavigationScope::SharedVisible
-            && self.layout_manager.layout_engine.workspaces().settings.display_mode
-                == crate::common::config::DisplayMode::Shared
+        let space = if navigation == crate::model::virtual_workspace::NavigationScope::GlobalVisible
+            && self.layout_manager.layout_engine.workspaces().settings.mode
+                == crate::common::config::WorkspaceMode::Global
         {
             self.command_context_space().unwrap_or(space)
         } else {
@@ -342,7 +342,7 @@ impl Reactor {
             },
         );
         let Ok(outcome) = result else { return false };
-        // A shared target visible on another display only moves focus there.
+        // A global target visible on another display only moves focus there.
         if !outcome.layout_responses.iter().any(|(response, _)| {
             response.changed || response.workspace_space.is_some_and(|s| s != space)
         }) {
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn shared_workspace_swipe_crosses_displays() {
         let settings = crate::common::config::VirtualWorkspaceSettings {
-            display_mode: crate::common::config::DisplayMode::Shared,
+            mode: crate::common::config::WorkspaceMode::Global,
             default_workspace_count: 4,
             ..Default::default()
         };
