@@ -952,6 +952,170 @@ mod tests {
     }
 
     #[test]
+    fn unjoining_retiles_the_stack_in_place() {
+        for (windows, direction, joined) in [
+            // Stack directly under the root: [1 | stack(2, 3)].
+            (&[1, 2, 3][..], Direction::Up, [2, 3]),
+            // Deeper stack in the spiral: [1 | [2 / stack(3, 4)]].
+            (&[1, 2, 3, 4][..], Direction::Left, [3, 4]),
+        ] {
+            let (mut system, layout) = tiled(windows);
+            let tiled_tree = system.draw_tree(layout);
+            let focused = w(joined[1]);
+
+            system.join_selection_with_direction(layout, direction);
+
+            assert_eq!(system.stack_members(layout, focused), joined.map(w));
+
+            system.unjoin_selection(layout);
+
+            assert_eq!(system.draw_tree(layout), tiled_tree);
+            assert!(system.stack_members(layout, focused).is_empty());
+            assert_eq!(system.selected_window(layout), Some(focused));
+        }
+
+        // Members keep their stack order and the active member keeps the selection.
+        let (mut system, layout) = tiled(&[1, 2, 3]);
+        system.join_selection_with_direction(layout, Direction::Up);
+        assert!(system.select_window(layout, w(2)));
+
+        system.unjoin_selection(layout);
+
+        assert_eq!(system.visible_windows_in_layout(layout), vec![w(1), w(3), w(2)]);
+        assert_eq!(system.selected_window(layout), Some(w(2)));
+    }
+
+    #[test]
+    fn unjoining_a_window_that_is_not_stacked_is_a_noop() {
+        for windows in [&[1][..], &[1, 2], &[1, 2, 3], &[1, 2, 3, 4]] {
+            let (mut system, layout) = tiled(windows);
+            let tree = system.draw_tree(layout);
+            let selected = system.selected_window(layout);
+
+            system.unjoin_selection(layout);
+
+            assert_eq!(system.draw_tree(layout), tree);
+            assert_eq!(system.selected_window(layout), selected);
+        }
+    }
+
+    #[test]
+    fn unjoining_keeps_fullscreen_on_the_visible_member() {
+        let toggles: [fn(&mut BspLayoutSystem, LayoutId) -> Vec<WindowId>; 2] = [
+            BspLayoutSystem::toggle_fullscreen_of_selection,
+            BspLayoutSystem::toggle_fullscreen_within_gaps_of_selection,
+        ];
+
+        for toggle in toggles {
+            let (mut system, layout) = tiled(&[1, 2, 3]);
+            system.join_selection_with_direction(layout, Direction::Up);
+            toggle(&mut system, layout);
+
+            system.unjoin_selection(layout);
+
+            assert_eq!(system.selected_window(layout), Some(w(3)));
+            assert!(system.has_any_fullscreen_node(layout));
+
+            let frames =
+                calculate_frames(&system, layout, CGSize::new(1000.0, 800.0), &Default::default());
+
+            assert_frame(&frames, w(2), (500.0, 0.0, 500.0, 400.0));
+            assert_frame(&frames, w(3), (0.0, 0.0, 1000.0, 800.0));
+
+            toggle(&mut system, layout);
+
+            assert!(!system.has_any_fullscreen_node(layout));
+        }
+    }
+
+    #[test]
+    fn consume_or_expel_toggles_between_joined_and_unjoined() {
+        for (windows, direction, joined) in [
+            (&[1, 2, 3][..], Direction::Up, [2, 3]),
+            (&[1, 2, 3, 4][..], Direction::Left, [3, 4]),
+        ] {
+            let (mut system, layout) = tiled(windows);
+            let tiled_tree = system.draw_tree(layout);
+
+            system.consume_or_expel_selection(layout, direction);
+
+            assert_eq!(system.stack_members(layout, w(joined[0])), joined.map(w));
+
+            system.consume_or_expel_selection(layout, direction);
+
+            assert_eq!(system.draw_tree(layout), tiled_tree);
+        }
+
+        // A joined first child keeps its side: [[2 / 5] / [3 | 4]].
+        let (mut system, layout) = tiled(&[1, 2, 3, 4]);
+        system.remove_window(w(1));
+        assert!(system.select_window(layout, w(2)));
+        system.add_window_after_selection(layout, w(5));
+        assert!(system.select_window(layout, w(5)));
+        let tiled_tree = system.draw_tree(layout);
+
+        system.consume_or_expel_selection(layout, Direction::Up);
+
+        assert_eq!(system.stack_members(layout, w(5)), vec![w(2), w(5)]);
+        assert_eq!(system.visible_windows_in_layout(layout), [5, 3, 4].map(w));
+
+        system.consume_or_expel_selection(layout, Direction::Up);
+
+        assert_eq!(system.draw_tree(layout), tiled_tree);
+        assert_eq!(system.visible_windows_in_layout(layout), [2, 5, 3, 4].map(w));
+    }
+
+    #[test]
+    fn consume_or_expel_joins_a_window_left_alone_in_its_stack() {
+        // [1 | [2 / stack(3)]] once the other stacked window has closed.
+        let (mut system, layout) = tiled(&[1, 2, 3, 4]);
+        system.join_selection_with_direction(layout, Direction::Left);
+        system.remove_window(w(4));
+
+        assert_eq!(system.stack_members(layout, w(3)), vec![w(3)]);
+
+        system.consume_or_expel_selection(layout, Direction::Up);
+
+        assert_eq!(system.stack_members(layout, w(3)), vec![w(2), w(3)]);
+    }
+
+    #[test]
+    fn unjoining_a_window_left_alone_in_its_stack_clears_the_stack() {
+        // [1 | [2 / stack(3)]] once the other stacked window has closed.
+        let (mut system, layout) = tiled(&[1, 2, 3, 4]);
+        system.join_selection_with_direction(layout, Direction::Left);
+        system.remove_window(w(4));
+        let tree = system.draw_tree(layout);
+
+        assert_eq!(system.stack_members(layout, w(3)), vec![w(3)]);
+
+        system.unjoin_selection(layout);
+
+        assert_eq!(system.draw_tree(layout), tree);
+        assert!(system.stack_members(layout, w(3)).is_empty());
+        assert_eq!(system.selected_window(layout), Some(w(3)));
+    }
+
+    #[test]
+    fn joining_keeps_the_selected_window_visible() {
+        let (mut system, layout) = tiled(&[1, 2, 3]);
+        assert!(system.select_window(layout, w(2)));
+
+        system.join_selection_with_direction(layout, Direction::Down);
+
+        assert_eq!(system.stack_members(layout, w(2)), vec![w(3), w(2)]);
+        assert_eq!(system.visible_windows_in_layout(layout), vec![w(1), w(2)]);
+        assert_eq!(system.selected_window(layout), Some(w(2)));
+
+        system.unjoin_selection(layout);
+
+        let (reference, reference_layout) = tiled(&[1, 3, 2]);
+
+        assert_eq!(system.draw_tree(layout), reference.draw_tree(reference_layout));
+        assert_eq!(system.selected_window(layout), Some(w(2)));
+    }
+
+    #[test]
     fn legacy_ron_index_is_ignored_when_loading_saved_layouts() {
         let (system, original) = tiled(&[1, 2]);
         let node = system.node_for_window_in_layout(original, w(1)).unwrap();
@@ -2020,22 +2184,33 @@ impl LayoutSystem for BspLayoutSystem {
         while let Some(parent) = current.parent(&self.tree.map) {
             let children: Vec<_> = parent.children(&self.tree.map).collect();
             if children.contains(&neighbor) {
-                if let Some(grandparent) = parent.parent(&self.tree.map) {
+                if parent.parent(&self.tree.map).is_some() {
                     let mut windows = Vec::new();
                     self.collect_windows_under(parent, &mut windows);
 
-                    let ids: Vec<_> = parent.traverse_preorder(&self.tree.map).collect();
-                    for id in ids {
-                        self.kind.remove(id);
-                        self.stacks.remove(&id);
+                    // The last member is the visible one, so keep the selected window there.
+                    let selected = self.selected_window(layout);
+
+                    if let Some(index) = windows.iter().position(|window| Some(*window) == selected)
+                    {
+                        windows[index..].rotate_left(1);
                     }
-                    parent.detach(&mut self.tree).remove();
 
-                    if let Some(visible) = windows.last() {
-                        let new_leaf = self.make_leaf(Some(*visible));
-                        new_leaf.detach(&mut self.tree).push_back(grandparent);
+                    if let Some(visible) = windows.last().copied() {
+                        // Take the collapsed split's place so a first child stays first.
+                        let new_leaf = self.make_leaf(Some(visible));
+                        new_leaf.detach(&mut self.tree).insert_after(parent);
+
+                        let ids: Vec<_> = parent.traverse_preorder(&self.tree.map).collect();
+
+                        for id in ids {
+                            self.kind.remove(id);
+                            self.stacks.remove(&id);
+                        }
+
+                        parent.detach(&mut self.tree).remove();
+
                         self.stacks.insert(new_leaf, windows);
-
                         self.tree.data.selection.select(&self.tree.map, new_leaf);
                     }
                 }
@@ -2049,9 +2224,8 @@ impl LayoutSystem for BspLayoutSystem {
         let is_joined = self
             .selection_of_layout(layout)
             .map(|selection| self.descend_to_leaf(selection))
-            .and_then(|leaf| leaf.parent(&self.tree.map))
-            .and_then(|parent| parent.parent(&self.tree.map))
-            .is_some();
+            .and_then(|leaf| self.stacks.get(&leaf))
+            .is_some_and(|members| members.len() > 1);
 
         if is_joined {
             self.unjoin_selection(layout);
@@ -2064,42 +2238,42 @@ impl LayoutSystem for BspLayoutSystem {
         let Some(sel) = self.selection_of_layout(layout) else {
             return;
         };
-        let sel_leaf = self.descend_to_leaf(sel);
-        let map = &self.tree.map;
 
-        let Some(parent) = sel_leaf.parent(map) else {
+        let leaf = self.descend_to_leaf(sel);
+        let Some(NodeKind::Leaf {
+            window,
+            fullscreen,
+            fullscreen_within_gaps,
+            ..
+        }) = self.kind.get_mut(leaf)
+        else {
             return;
         };
 
-        let Some(grandparent) = parent.parent(map) else {
+        let Some(members) = self.stacks.remove(&leaf) else {
             return;
         };
 
-        let mut windows: Vec<WindowId> = Vec::new();
-        self.collect_windows_under(parent, &mut windows);
-        if windows.is_empty() {
-            return;
+        let flags = (*fullscreen, *fullscreen_within_gaps);
+
+        // Retile this stack in place using depth-based splits.
+        // The visible member is last in the stack, so it ends up selected.
+        *window = None;
+        self.tree.data.selection.select(&self.tree.map, leaf);
+
+        for member in members {
+            self.insert_window_at_selection(layout, member);
         }
 
-        let ids: Vec<_> = parent.traverse_preorder(&self.tree.map).collect();
-        for id in ids {
-            self.kind.remove(id);
-            self.stacks.remove(&id);
-        }
-        parent.detach(&mut self.tree).remove();
-
-        let mut first_new_leaf: Option<NodeId> = None;
-        for w in windows {
-            let new_leaf = self.make_leaf(Some(w));
-            new_leaf.detach(&mut self.tree).push_back(grandparent);
-
-            if first_new_leaf.is_none() {
-                first_new_leaf = Some(new_leaf);
-            }
-        }
-
-        if let Some(n) = first_new_leaf {
-            self.tree.data.selection.select(&self.tree.map, n);
+        // Insertion rebuilds leaves without fullscreen, so hand it back to the visible member.
+        if let Some(visible) = self.selection_of_layout(layout)
+            && let Some(NodeKind::Leaf {
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            }) = self.kind.get_mut(visible)
+        {
+            (*fullscreen, *fullscreen_within_gaps) = flags;
         }
     }
 
