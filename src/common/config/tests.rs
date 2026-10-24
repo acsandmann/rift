@@ -8,6 +8,7 @@ use crate::actor::reactor;
 use crate::actor::wm_controller::WmCommand;
 use crate::common::collections::HashMap;
 use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+use crate::sys::hotkey::{Modifiers, modifiers_from_str};
 
 #[test]
 fn scrolling_display_widths_merge_and_validate() {
@@ -283,19 +284,77 @@ fn mouse_settings_defaults_and_variants_parse() {
             "#,
     )
     .unwrap();
-    assert_eq!(settings.modifier, MouseModifier::Ctrl);
+    assert_eq!(settings.modifier, MouseModifier::Keys(Modifiers::CONTROL));
     assert_eq!(settings.action1, MouseAction::None);
     assert_eq!(settings.action2, MouseAction::Move);
     assert_eq!(settings.drop_action, MouseDropAction::Stack);
 
     for (alias, expected) in [
-        ("command", MouseModifier::Cmd),
-        ("option", MouseModifier::Alt),
-        ("control", MouseModifier::Ctrl),
+        ("command", MouseModifier::Keys(Modifiers::META)),
+        ("option", MouseModifier::Keys(Modifiers::ALT)),
+        ("control", MouseModifier::Keys(Modifiers::CONTROL)),
     ] {
         let parsed: DragDropSettings = toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
         assert_eq!(parsed.modifier, expected);
     }
+}
+
+#[test]
+fn drag_modifier_accepts_single_modifiers_and_combinations() {
+    let hyper = modifiers_from_str("Ctrl + Alt + Shift + Meta").unwrap();
+    let parse = |value: &str| {
+        toml::from_str::<DragDropSettings>(&format!("modifier = \"{value}\"")).map(|s| s.modifier)
+    };
+
+    assert_eq!(parse("fn").unwrap(), MouseModifier::Fn);
+    assert_eq!(parse("cmd").unwrap(), MouseModifier::Keys(Modifiers::META));
+    assert_eq!(parse("Meta").unwrap(), MouseModifier::Keys(Modifiers::META));
+    assert_eq!(parse("AltLeft").unwrap(), MouseModifier::Keys(Modifiers::ALT));
+
+    assert_eq!(
+        parse("Ctrl + Alt + Shift + Meta").unwrap(),
+        MouseModifier::Keys(hyper)
+    );
+    assert_eq!(
+        parse("cmd+ShiftRight+option+control").unwrap(),
+        MouseModifier::Keys(hyper)
+    );
+
+    assert!(parse("Alt + T").is_err());
+    assert!(parse("Fn + Ctrl").is_err());
+    assert!(parse("").is_err());
+}
+
+#[test]
+fn drag_modifier_serializes_single_names_and_canonical_combinations() {
+    for (spec, name) in [
+        ("cmd", "cmd"),
+        ("fn", "fn"),
+        ("Meta", "cmd"),
+        ("AltLeft", "alt"),
+    ] {
+        let settings = DragDropSettings {
+            modifier: spec.parse().unwrap(),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(settings).unwrap();
+
+        assert_eq!(json["modifier"], name, "{spec}");
+    }
+
+    let settings = DragDropSettings {
+        modifier: "Shift + Meta + Alt + Ctrl".parse().unwrap(),
+        ..Default::default()
+    };
+
+    let json = serde_json::to_value(settings).unwrap();
+
+    assert_eq!(json["modifier"], "Ctrl + Alt + Shift + Meta");
+    assert_eq!(
+        serde_json::from_value::<DragDropSettings>(json).unwrap(),
+        settings
+    );
 }
 
 #[test]
@@ -324,7 +383,10 @@ fn drag_drop_settings_take_precedence_over_legacy_window_snapping() {
             "#,
     )
     .unwrap();
-    assert_eq!(cfg.settings.drag_drop.modifier, MouseModifier::Alt);
+    assert_eq!(
+        cfg.settings.drag_drop.modifier,
+        MouseModifier::Keys(Modifiers::ALT)
+    );
     assert_eq!(cfg.settings.drag_drop.drop_action, MouseDropAction::Stack);
 }
 

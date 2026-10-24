@@ -25,7 +25,7 @@ use crate::common::config::{
 };
 use crate::sys::event::{self, Hotkey, KeyCode};
 use crate::sys::hotkey::{
-    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active,
+    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active, modifiers_from_flags,
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
@@ -777,10 +777,12 @@ impl Input {
                 } else {
                     state.mouse_settings.action2
                 };
-                let flag = mouse_modifier_flag(state.mouse_settings.modifier);
                 if state.mouse_features_enabled
                     && action != MouseAction::None
-                    && CGEvent::flags(Some(event)).contains(flag)
+                    && mouse_modifier_held(
+                        state.mouse_settings.modifier,
+                        CGEvent::flags(Some(event)),
+                    )
                 {
                     state.captured_button = Some(button);
                     self.events_tx.send(Event::ModifierMouseDown {
@@ -867,7 +869,7 @@ impl Input {
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
             && state.captured_button.is_none()
-            && !state.current_flags.contains(mouse_modifier_flag(state.mouse_settings.modifier))
+            && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)
         {
             // Secondary pointer consumers above do not participate in focus
             // suppression or window resolution.
@@ -1235,13 +1237,20 @@ impl State {
     }
 }
 
-fn mouse_modifier_flag(modifier: MouseModifier) -> CGEventFlags {
+/// Single modifiers match while held; combinations reject extra modifiers, including Fn.
+/// As with hotkeys, Caps Lock is ignored and either a family or left/right bit counts.
+fn mouse_modifier_held(modifier: MouseModifier, flags: CGEventFlags) -> bool {
     match modifier {
-        MouseModifier::Cmd => CGEventFlags::MaskCommand,
-        MouseModifier::Alt => CGEventFlags::MaskAlternate,
-        MouseModifier::Shift => CGEventFlags::MaskShift,
-        MouseModifier::Ctrl => CGEventFlags::MaskControl,
-        MouseModifier::Fn => CGEventFlags::MaskSecondaryFn,
+        MouseModifier::Fn => flags.contains(CGEventFlags::MaskSecondaryFn),
+        MouseModifier::Keys(keys) => {
+            let held = modifiers_from_flags(flags);
+
+            if keys.family_count() == 1 {
+                held.contains(keys)
+            } else {
+                held == keys && !flags.contains(CGEventFlags::MaskSecondaryFn)
+            }
+        }
     }
 }
 
@@ -2054,6 +2063,102 @@ mod tests {
             events_rx.try_recv().unwrap().1,
             Event::MouseUp(crate::actor::drag::MouseButton::Right)
         ));
+    }
+
+    const HYPER_FLAGS: CGEventFlags = CGEventFlags::MaskControl
+        .union(CGEventFlags::MaskAlternate)
+        .union(CGEventFlags::MaskShift)
+        .union(CGEventFlags::MaskCommand);
+
+    #[test]
+    fn modifier_combinations_match_exactly_and_single_modifiers_match_while_held() {
+        let ctrl_alt: MouseModifier = "Ctrl + Alt".parse().unwrap();
+        let ctrl_alt_flags = CGEventFlags::MaskControl | CGEventFlags::MaskAlternate;
+
+        assert!(mouse_modifier_held(ctrl_alt, ctrl_alt_flags));
+        assert!(!mouse_modifier_held(
+            ctrl_alt,
+            ctrl_alt_flags | CGEventFlags::MaskShift
+        ));
+        assert!(!mouse_modifier_held(ctrl_alt, CGEventFlags::MaskControl));
+
+        let hyper: MouseModifier = "Ctrl + Alt + Shift + Meta".parse().unwrap();
+        let cmd: MouseModifier = "cmd".parse().unwrap();
+        // Left Control, Option, Shift and Command, as some remapping tools send them.
+        let hyper_device_bits = CGEventFlags::from_bits_retain(0x01 | 0x20 | 0x02 | 0x08);
+        let left_command_bit = CGEventFlags::from_bits_retain(0x08);
+
+        assert!(mouse_modifier_held(hyper, HYPER_FLAGS));
+        assert!(mouse_modifier_held(
+            hyper,
+            HYPER_FLAGS | hyper_device_bits | CGEventFlags::MaskAlphaShift
+        ));
+        assert!(mouse_modifier_held(hyper, hyper_device_bits));
+
+        assert!(!mouse_modifier_held(hyper, CGEventFlags::MaskCommand));
+        assert!(!mouse_modifier_held(
+            hyper,
+            HYPER_FLAGS - CGEventFlags::MaskShift
+        ));
+        assert!(!mouse_modifier_held(
+            hyper,
+            HYPER_FLAGS | CGEventFlags::MaskSecondaryFn
+        ));
+
+        assert!(mouse_modifier_held(cmd, CGEventFlags::MaskCommand));
+        assert!(mouse_modifier_held(cmd, HYPER_FLAGS));
+        assert!(mouse_modifier_held(cmd, left_command_bit));
+        assert!(mouse_modifier_held(
+            MouseModifier::Fn,
+            CGEventFlags::MaskSecondaryFn | CGEventFlags::MaskShift
+        ));
+        assert!(!mouse_modifier_held(cmd, CGEventFlags::MaskAlternate));
+        assert!(!mouse_modifier_held(MouseModifier::Fn, HYPER_FLAGS));
+    }
+
+    #[test]
+    fn hyper_drag_modifier_captures_hyper_clicks_but_not_plain_command_clicks() {
+        let (input, _, mut events_rx) = input();
+        {
+            let mut state = input.state.borrow_mut();
+            state.mouse_features_enabled = true;
+            state.mouse_settings.modifier = "Ctrl + Alt + Shift + Meta".parse().unwrap();
+        }
+
+        let event = CGEvent::new_mouse_event(
+            None,
+            CGEventType::LeftMouseDown,
+            CGPoint::new(20.0, 30.0),
+            objc2_core_graphics::CGMouseButton::Left,
+        )
+        .unwrap();
+        let hyper_with_caps_lock = HYPER_FLAGS | CGEventFlags::MaskAlphaShift;
+
+        CGEvent::set_flags(Some(&event), CGEventFlags::MaskCommand);
+
+        let delivered = input.on_event(CGEventType::LeftMouseDown, &event, None);
+
+        assert!(delivered);
+        assert!(events_rx.try_recv().is_err());
+        assert_eq!(input.state.borrow().captured_button, None);
+
+        CGEvent::set_flags(Some(&event), hyper_with_caps_lock);
+
+        let delivered = input.on_event(CGEventType::LeftMouseDown, &event, None);
+
+        assert!(!delivered);
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::ModifierMouseDown {
+                button: crate::actor::drag::MouseButton::Left,
+                action: MouseAction::Move,
+                ..
+            }
+        ));
+        assert_eq!(
+            input.state.borrow().captured_button,
+            Some(crate::actor::drag::MouseButton::Left)
+        );
     }
 
     #[test]

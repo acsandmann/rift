@@ -265,7 +265,10 @@ haptics_enabled = true
 [settings.drag_drop]
 # Disable to leave all mouse gestures entirely to macOS and applications.
 enabled = true
-# Modifier used with action1/action2: cmd | alt | shift | ctrl | fn.
+# Modifier used with action1/action2: cmd | alt | shift | ctrl | fn, or a combination such as
+# "Ctrl + Alt + Shift + Meta" (fn can't be combined). Left/right spellings such as AltRight
+# match either side. A single modifier works while held, even with others; a combination must
+# be held exactly (Caps Lock is ignored).
 modifier = "fn"
 # Left-button and right-button actions: move.
 # With the modifier held, the action works from anywhere inside a managed window.

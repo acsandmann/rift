@@ -935,13 +935,34 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
     }
     page =
         page.section(section.content(Disclosure::new(&ui, "Advanced scrolling settings", tuning)));
-    let section = f.schema_section(
-        "Drag & Drop",
-        "",
-        |s| &s.settings.drag_drop,
-        |s| &mut s.settings.drag_drop,
-    );
+
+    let mut section = Section::new(&ui, "Drag & Drop");
+
+    for field in DragDropSettings::fields() {
+        let row = if field.key == "modifier" {
+            let row = f.text(
+                field.title,
+                |s| s.settings.drag_drop.modifier.to_string(),
+                |s, value| {
+                    s.settings.drag_drop.modifier =
+                        value.parse().map_err(|error: anyhow::Error| error.to_string())?;
+
+                    Ok(())
+                },
+            );
+
+            Some(f.schema_metadata(row, field, |s| &s.settings.drag_drop))
+        } else {
+            f.schema_field(field, |s| &s.settings.drag_drop, |s| &mut s.settings.drag_drop)
+        };
+
+        if let Some(row) = row {
+            section = section.row(row);
+        }
+    }
+
     page = page.section(section);
+
     let section = Section::new(&ui, "Pointer movement").row(f.popup(
         "Horizontal pointer warp",
         vec![

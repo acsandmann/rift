@@ -45,6 +45,21 @@ impl Modifiers {
         MOD_FAMILIES.iter().any(|m| self.contains(m.generic))
     }
 
+    /// Widens each left/right modifier to its whole family, so `AltRight` becomes `Alt`.
+    pub fn families(&self) -> Modifiers {
+        let bits = MOD_FAMILIES
+            .iter()
+            .filter(|m| self.intersects(m.generic))
+            .fold(0, |bits, m| bits | m.generic.0);
+
+        Modifiers(bits)
+    }
+
+    /// Number of modifier families present, counting left and right as one.
+    pub fn family_count(&self) -> usize {
+        MOD_FAMILIES.iter().filter(|m| self.intersects(m.generic)).count()
+    }
+
     pub fn expand_to_specific(&self) -> Vec<Modifiers> {
         let mut variants = vec![Modifiers::empty()];
 
@@ -1440,6 +1455,26 @@ mod tests {
         assert!(modifiers_from_str("Alt + T").is_err());
         assert!(modifiers_from_str("").is_err());
     }
+
+    #[test]
+    fn families_treat_left_and_right_as_one_family() {
+        let sided = modifiers_from_str("AltRight + CtrlLeft + Meta").unwrap();
+
+        let families = sided.families();
+
+        assert_eq!(families, modifiers_from_str("Ctrl + Alt + Meta").unwrap());
+        assert_eq!(Modifiers::empty().families(), Modifiers::empty());
+
+        assert_eq!(sided.family_count(), 3);
+
+        assert_eq!(
+            modifiers_from_str("AltLeft + AltRight").unwrap().family_count(),
+            1
+        );
+
+        assert_eq!(Modifiers::empty().family_count(), 0);
+    }
+
     #[allow(unused)]
     use super::*;
 
