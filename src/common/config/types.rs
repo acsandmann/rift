@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use regex::RegexBuilder;
 pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
 use serde::{Deserialize, Serialize};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 use super::{ConfigEnum, ConfigSchema};
 use crate::actor::wm_controller::WmCommand;
 use crate::common::collections::HashMap;
-use crate::sys::hotkey::{Hotkey, HotkeySpec};
+use crate::sys::hotkey::{Hotkey, HotkeySpec, Modifiers, modifiers_from_str};
 
 pub const MAX_WORKSPACES: usize = 128;
 
@@ -698,27 +699,43 @@ impl Default for GestureSettings {
 }
 
 ///
-/// Serialized values are `cmd`, `alt`, `shift`, `ctrl`, and `fn`.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
-#[serde(rename_all = "snake_case")]
+/// Serialized values are `cmd`, `alt`, `shift`, `ctrl`, `fn`, or a combination in
+/// key-binding syntax such as `Ctrl + Alt + Shift + Meta`.
+#[derive(Debug, PartialEq, Clone, Copy, Default, Eq, SerializeDisplay, DeserializeFromStr)]
 pub enum MouseModifier {
-    /// Command (⌘). The alias `command` is also accepted.
-    #[serde(alias = "command")]
-    #[setting(label = "⌘ Command")]
-    Cmd,
-    /// Option (⌥). The alias `option` is also accepted.
-    #[serde(alias = "option")]
-    #[setting(label = "⌥ Option")]
-    Alt,
-    #[setting(label = "⇧ Shift")]
-    Shift,
-    #[serde(alias = "control")]
-    #[setting(label = "⌃ Control")]
-    Ctrl,
     /// Globe/Fn. This is the default because it rarely conflicts with apps.
     #[default]
-    #[setting(label = "Fn")]
     Fn,
+    /// One or more modifier families. One family matches while held, two or more match exactly.
+    Keys(Modifiers),
+}
+
+impl std::str::FromStr for MouseModifier {
+    type Err = anyhow::Error;
+
+    /// Parses a key binding's modifiers, such as `command` or `Ctrl + Alt`. Left/right
+    /// spellings stand for either side.
+    fn from_str(spec: &str) -> Result<Self, Self::Err> {
+        if spec.trim().eq_ignore_ascii_case("fn") {
+            return Ok(Self::Fn);
+        }
+
+        Ok(Self::Keys(modifiers_from_str(spec)?.families()))
+    }
+}
+
+impl std::fmt::Display for MouseModifier {
+    /// Use the legacy canonical names when serializing single modifiers.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fn => f.write_str("fn"),
+            Self::Keys(Modifiers::META) => f.write_str("cmd"),
+            Self::Keys(Modifiers::ALT) => f.write_str("alt"),
+            Self::Keys(Modifiers::SHIFT) => f.write_str("shift"),
+            Self::Keys(Modifiers::CONTROL) => f.write_str("ctrl"),
+            Self::Keys(modifiers) => write!(f, "{modifiers}"),
+        }
+    }
 }
 
 /// Operation reserved for a modifier-plus-mouse-button gesture.
@@ -757,9 +774,12 @@ pub struct DragDropSettings {
     #[serde(default = "yes")]
     #[setting(order = 0)]
     pub enabled: bool,
-    /// Modifier held with `action1` or `action2`.
+    /// Modifier held with `action1` or `action2`: `cmd`, `alt`, `shift`, `ctrl`, `fn`,
+    /// or a combination such as `Ctrl + Alt + Shift + Meta` (`fn` can't be combined).
+    /// Left/right spellings such as `AltRight` match either side. A single modifier works
+    /// while held; a combination must be held exactly.
     #[serde(default)]
-    #[setting(choices, order = 1)]
+    #[setting(custom, order = 1)]
     pub modifier: MouseModifier,
     /// Left-button action while the configured modifier is held.
     #[serde(default)]

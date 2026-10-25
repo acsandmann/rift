@@ -25,7 +25,7 @@ use crate::common::config::{
 };
 use crate::sys::event::{self, Hotkey, KeyCode};
 use crate::sys::hotkey::{
-    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active,
+    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active, modifiers_from_flags,
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
@@ -789,10 +789,12 @@ impl Input {
                 } else {
                     state.mouse_settings.action2
                 };
-                let flag = mouse_modifier_flag(state.mouse_settings.modifier);
                 if state.mouse_features_enabled
                     && action != MouseAction::None
-                    && CGEvent::flags(Some(event)).contains(flag)
+                    && mouse_modifier_held(
+                        state.mouse_settings.modifier,
+                        CGEvent::flags(Some(event)),
+                    )
                 {
                     state.captured_button = Some(button);
                     self.events_tx.send(Event::ModifierMouseDown {
@@ -879,7 +881,7 @@ impl Input {
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
             && state.captured_button.is_none()
-            && !state.current_flags.contains(mouse_modifier_flag(state.mouse_settings.modifier))
+            && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)
         {
             // Secondary pointer consumers above do not participate in focus
             // suppression or window resolution.
@@ -1247,13 +1249,20 @@ impl State {
     }
 }
 
-fn mouse_modifier_flag(modifier: MouseModifier) -> CGEventFlags {
+/// Single modifiers match while held; combinations reject extra modifiers, including Fn.
+/// As with hotkeys, Caps Lock is ignored and either a family or left/right bit counts.
+fn mouse_modifier_held(modifier: MouseModifier, flags: CGEventFlags) -> bool {
     match modifier {
-        MouseModifier::Cmd => CGEventFlags::MaskCommand,
-        MouseModifier::Alt => CGEventFlags::MaskAlternate,
-        MouseModifier::Shift => CGEventFlags::MaskShift,
-        MouseModifier::Ctrl => CGEventFlags::MaskControl,
-        MouseModifier::Fn => CGEventFlags::MaskSecondaryFn,
+        MouseModifier::Fn => flags.contains(CGEventFlags::MaskSecondaryFn),
+        MouseModifier::Keys(keys) => {
+            let held = modifiers_from_flags(flags);
+
+            if keys.family_count() == 1 {
+                held.contains(keys)
+            } else {
+                held == keys && !flags.contains(CGEventFlags::MaskSecondaryFn)
+            }
+        }
     }
 }
 

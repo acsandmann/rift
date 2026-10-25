@@ -8,6 +8,7 @@ use crate::actor::reactor;
 use crate::actor::wm_controller::WmCommand;
 use crate::common::collections::HashMap;
 use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+use crate::sys::hotkey::Modifiers;
 
 #[test]
 fn scrolling_display_widths_merge_and_validate() {
@@ -283,15 +284,15 @@ fn mouse_settings_defaults_and_variants_parse() {
             "#,
     )
     .unwrap();
-    assert_eq!(settings.modifier, MouseModifier::Ctrl);
+    assert_eq!(settings.modifier, MouseModifier::Keys(Modifiers::CONTROL));
     assert_eq!(settings.action1, MouseAction::None);
     assert_eq!(settings.action2, MouseAction::Move);
     assert_eq!(settings.drop_action, MouseDropAction::Stack);
 
     for (alias, expected) in [
-        ("command", MouseModifier::Cmd),
-        ("option", MouseModifier::Alt),
-        ("control", MouseModifier::Ctrl),
+        ("command", MouseModifier::Keys(Modifiers::META)),
+        ("option", MouseModifier::Keys(Modifiers::ALT)),
+        ("control", MouseModifier::Keys(Modifiers::CONTROL)),
     ] {
         let parsed: DragDropSettings = toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
         assert_eq!(parsed.modifier, expected);
@@ -324,7 +325,10 @@ fn drag_drop_settings_take_precedence_over_legacy_window_snapping() {
             "#,
     )
     .unwrap();
-    assert_eq!(cfg.settings.drag_drop.modifier, MouseModifier::Alt);
+    assert_eq!(
+        cfg.settings.drag_drop.modifier,
+        MouseModifier::Keys(Modifiers::ALT)
+    );
     assert_eq!(cfg.settings.drag_drop.drop_action, MouseDropAction::Stack);
 }
 
