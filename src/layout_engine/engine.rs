@@ -3439,36 +3439,15 @@ impl LayoutEngine {
             return EventResponse::default();
         };
 
-        let target_workspace_id = match self.workspaces.active_workspace(target_space) {
-            Some(id) => id,
-            None if self.workspaces.settings.mode
-                == crate::common::config::WorkspaceMode::Global =>
-            {
-                // Reuse a real empty workspace where possible. If none is free,
-                // membership stays intact and the source workspace follows the window.
-                let id = self
-                    .workspaces
-                    .catalog()
-                    .find(|&id| window_store.workspace_window_count(id) == 0)
-                    .unwrap_or(source_workspace_id);
-                let display = self.space_display_map.get(&target_space).cloned().flatten();
-                let mut response = self.transfer_workspace(
-                    window_store,
-                    id,
-                    target_space,
-                    target_screen_size,
-                    display.as_deref(),
-                    crate::model::virtual_workspace::WorkspaceTransferReason::Explicit,
-                );
-                if id == source_workspace_id {
-                    self.workspaces.set_last_focused_window(target_space, id, Some(window_id));
-                    self.focused_window = Some(window_id);
-                    response.focus_window = Some(window_id);
-                    return response;
-                }
-                id
-            }
-            None => return EventResponse::default(),
+        // A window move never relocates a workspace. A Space owning none (global
+        // mode) is not a destination until a workspace is moved or created there.
+        let Some(target_workspace_id) = self.workspaces.active_workspace(target_space) else {
+            debug!(
+                ?window_id,
+                ?target_space,
+                "Window move ignored: destination has no workspace"
+            );
+            return EventResponse::default();
         };
 
         self.ensure_workspace_layouts(target_space, target_screen_size);
@@ -4135,12 +4114,13 @@ mod tests {
                 departed[2]
             ));
             let from = store.workspace_for_window(window).unwrap();
-            assert!(
-                engine
-                    .workspaces_mut()
-                    .assign_window_to_workspace_preserving_ordinal(store, home, window)
-                    .is_some()
-            );
+            let landed = engine.workspaces().workspace_at_window_ordinal(store, home, window);
+            assert!(engine.workspaces_mut().assign_window_to_workspace(
+                store,
+                home,
+                window,
+                landed.unwrap()
+            ));
             engine.note_eviction(store, window, from);
         };
 

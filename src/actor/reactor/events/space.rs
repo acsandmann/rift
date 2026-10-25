@@ -51,7 +51,6 @@ pub(crate) fn analyze_space_snapshot(
         && current.fullscreen_spaces == incoming.fullscreen_spaces
         && current_effective_active_spaces == &effective_active_spaces
         && current.display_space_ids == incoming.display_space_ids
-        && current.last_user_space_by_display == incoming.last_user_space_by_display
         && current.membership_complete == incoming.membership_complete
         && incoming.destroyed_spaces.is_empty()
         && !active_window_membership_changed;

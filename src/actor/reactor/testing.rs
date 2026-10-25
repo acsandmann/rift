@@ -351,7 +351,6 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
             .iter()
             .filter_map(|screen| Some((screen.display_uuid.clone(), vec![screen.space?])))
             .collect(),
-        last_user_space_by_display: Default::default(),
         space_remaps: Vec::new(),
         display_set_changed: false,
         should_force_refresh_layout: false,
@@ -376,12 +375,12 @@ pub fn fullscreen_startup_space_state(
         name: None,
     }]);
     state.fullscreen_spaces.insert(fullscreen_space);
+    state
+        .display_space_ids
+        .insert(state.screens[0].display_uuid.clone(), vec![user_space]);
     state.active_spaces.clear();
     state.menu_bar_space = None;
     state.command_space = None;
-    state
-        .last_user_space_by_display
-        .insert(state.screens[0].display_uuid.clone(), user_space);
     Event::SpaceStateChanged(state)
 }
 

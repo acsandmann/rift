@@ -1265,29 +1265,19 @@ impl WorkspaceStore {
         })
     }
 
-    /// Moves a window to `space` while retaining the ordinal of its current
-    /// virtual workspace. This is used for native-space identity churn, where
-    /// WindowServer can briefly report a different space without a user moving
-    /// the window to the destination's active workspace.
-    pub fn assign_window_to_workspace_preserving_ordinal(
-        &mut self,
-        window_store: &mut WindowStore,
+    /// The workspace on `space` at the ordinal of the window's current workspace,
+    /// for native-space identity churn: WindowServer can briefly report another
+    /// space without a user moving the window to that space's active workspace.
+    pub fn workspace_at_window_ordinal(
+        &self,
+        window_store: &WindowStore,
         space: SpaceId,
         window_id: WindowId,
     ) -> Option<VirtualWorkspaceId> {
-        self.ensure_space_initialized(space);
-
-        let existing_assignment = window_store.workspace_for_window(window_id)?;
-        let existing_space = self.workspace_space(existing_assignment)?;
-        if existing_space == space {
-            return Some(existing_assignment);
-        }
-        let source_index =
-            self.workspaces_on(existing_space).position(|id| id == existing_assignment)?;
-        let target_workspace_id = self.workspaces_on(space).nth(source_index)?;
-
-        self.assign_window_to_workspace(window_store, space, window_id, target_workspace_id)
-            .then_some(target_workspace_id)
+        let existing = window_store.workspace_for_window(window_id)?;
+        let source = self.workspace_space(existing)?;
+        let ordinal = self.workspaces_on(source).position(|id| id == existing)?;
+        self.workspaces_on(space).nth(ordinal)
     }
 
     pub fn remove_window(&mut self, window_store: &mut WindowStore, window_id: WindowId) {
@@ -2289,15 +2279,7 @@ mod tests {
         ));
 
         assert_eq!(
-            manager.assign_window_to_workspace_preserving_ordinal(
-                &mut window_store,
-                destination_space,
-                moved_window
-            ),
-            Some(destination_workspaces[2].0)
-        );
-        assert_eq!(
-            window_store.workspace_for_window(moved_window),
+            manager.workspace_at_window_ordinal(&window_store, destination_space, moved_window),
             Some(destination_workspaces[2].0)
         );
     }

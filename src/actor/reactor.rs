@@ -2595,20 +2595,7 @@ impl Reactor {
                 // Retained scrolling frames belong to the source Space. Fence queued
                 // presentation work before the transfer installs its destination frame.
                 self.cancel_window_presentations(vec![window]);
-                return command_workflow::handle_command_reactor_move_window_to_display(
-                    &mut self.state,
-                    &mut self.layout_manager,
-                    command_workflow::MoveWindowToDisplayPayload {
-                        window,
-                        source_space,
-                        target_space,
-                        source_screen: self
-                            .space_state
-                            .screen_by_space(source_space)
-                            .map(|s| s.frame),
-                        target_screen: target_screen.frame,
-                    },
-                );
+                return Ok(self.move_window_to_display(window, source_space, target_space));
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWorkspaceToDisplay {
                 selector,
@@ -3161,9 +3148,12 @@ impl Reactor {
             .collect();
         let mut outcome = EventOutcome::no_change();
         for record in exits {
-            if record.transition == NativeFullscreenTransition::ExitObserved(None) {
-                // Discovery already queried membership. Unknown membership waits
-                // for the next accepted topology, rather than querying it twice.
+            // Destruction alone, or a listing while some fullscreen Space (perhaps
+            // a replacement) exists, is corroborated by one live membership query.
+            // Discovery already queried; it waits for the next accepted topology.
+            if record.transition == NativeFullscreenTransition::ExitObserved(None)
+                || !self.space_state.fullscreen_spaces.is_empty()
+            {
                 if !query_membership {
                     continue;
                 }
@@ -3528,7 +3518,6 @@ impl Reactor {
             menu_bar_space,
             command_space,
             display_space_ids,
-            last_user_space_by_display,
             space_remaps,
             display_set_changed,
             should_force_refresh_layout,
@@ -3587,7 +3576,6 @@ impl Reactor {
         self.space_state.menu_bar_space = menu_bar_space;
         self.space_state.command_space = command_space;
         self.space_state.display_space_ids = display_space_ids;
-        self.space_state.last_user_space_by_display = last_user_space_by_display;
 
         if screens.is_empty() {
             self.refocus_manager.stale_cleanup_state = StaleCleanupState::Suppressed;
@@ -4496,47 +4484,43 @@ impl Reactor {
         }
         if self.assigned_space_for_window_id(wid) != Some(space) {
             let departed_from = self.state.windows.workspace_for_window(wid);
+            let engine = &mut self.layout_manager.layout_engine;
             // A window a departure moved off this display goes back where it was.
-            let returning =
-                self.layout_manager.layout_engine.take_eviction(&self.state.windows, wid, space);
+            let returning = engine.take_eviction(&self.state.windows, wid, space);
+            // Resolve the destination before touching the source: a global-mode
+            // Space can own no workspace, and then the current owner is kept.
+            engine.workspaces_mut().ensure_space_initialized(space);
+            let workspaces = engine.workspaces();
+            let remembered =
+                returning.and_then(|ordinal| workspaces.workspaces_on(space).nth(ordinal));
+            let destination = if remembered.is_some() {
+                remembered
+            } else if preserve_workspace_ordinal {
+                workspaces.workspace_at_window_ordinal(&self.state.windows, space, wid)
+            } else {
+                engine.ensure_active_workspace_info(space).map(|(id, _)| id)
+            };
+            let Some(workspace) = destination else {
+                debug!(
+                    ?wid,
+                    ?space,
+                    "Native Space has no destination workspace; keeping owner"
+                );
+                return;
+            };
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             let engine = &mut self.layout_manager.layout_engine;
-            engine.workspaces_mut().list_workspaces(space);
-            let remembered =
-                returning.and_then(|ordinal| engine.workspaces().workspaces_on(space).nth(ordinal));
-            let assigned = if let Some(workspace) = remembered {
-                engine.workspaces_mut().assign_window_to_workspace(
-                    &mut self.state.windows,
-                    space,
-                    wid,
-                    workspace,
-                )
-            } else if preserve_workspace_ordinal {
-                let assigned = engine
-                    .workspaces_mut()
-                    .assign_window_to_workspace_preserving_ordinal(
-                        &mut self.state.windows,
-                        space,
-                        wid,
-                    )
-                    .is_some();
-                if assigned && let Some(from) = departed_from {
-                    engine.note_eviction(&self.state.windows, wid, from);
-                }
-                assigned
-            } else {
-                let Some((workspace, _)) = engine.ensure_active_workspace_info(space) else {
-                    return;
-                };
-                engine.workspaces_mut().assign_window_to_workspace(
-                    &mut self.state.windows,
-                    space,
-                    wid,
-                    workspace,
-                )
-            };
-            if !assigned {
-                return;
+            engine.workspaces_mut().assign_window_to_workspace(
+                &mut self.state.windows,
+                space,
+                wid,
+                workspace,
+            );
+            if remembered.is_none()
+                && preserve_workspace_ordinal
+                && let Some(from) = departed_from
+            {
+                engine.note_eviction(&self.state.windows, wid, from);
             }
         }
         if self.is_space_active(space) && self.state.windows.is_visible_admitted(wid) {
@@ -6158,21 +6142,35 @@ impl Reactor {
         }) {
             return;
         }
-        let payload = command_workflow::MoveWindowToDisplayPayload {
-            window,
-            source_space: space,
-            target_space: target_screen.space.unwrap(),
-            source_screen: self.space_state.screen_by_space(space).map(|s| s.frame),
-            target_screen: target_screen.frame,
+        let outcome = self.move_window_to_display(window, space, target_screen.space.unwrap());
+        self.apply_event_outcome(outcome);
+    }
+
+    /// Moves one window into the destination's active workspace; a destination
+    /// without one rejects the move, which never relocates a workspace.
+    fn move_window_to_display(
+        &mut self,
+        window: WindowId,
+        source: SpaceId,
+        target: SpaceId,
+    ) -> EventOutcome {
+        let Some(screen) = self.space_state.screen_by_space(target) else {
+            return EventOutcome::no_change();
         };
-        match command_workflow::handle_command_reactor_move_window_to_display(
-            &mut self.state,
-            &mut self.layout_manager,
-            payload,
-        ) {
-            Ok(outcome) => self.apply_event_outcome(outcome),
-            Err(error) => warn!(?window, %error, "Could not open new window on pointer display"),
+        let response = self.layout_manager.layout_engine.move_window_to_space(
+            &mut self.state.windows,
+            source,
+            target,
+            screen.frame.size,
+            window,
+        );
+        if !response.changed {
+            return EventOutcome::no_change();
         }
+        let source_frame = self.space_state.screen_by_space(source).map(|screen| screen.frame);
+        let mut outcome = EventOutcome::layout_changed(false).with_layout_response(response, None);
+        outcome.absorb(self.request_window_transfer(window, target, source_frame));
+        outcome
     }
 
     fn center_frame_on_screen(frame: CGRect, screen: CGRect) -> CGRect {

@@ -1013,19 +1013,22 @@ impl WindowStore {
         self.native_fullscreen_records_by_original_window.values().copied()
     }
 
-    /// Absence is inconclusive. Only positive user membership or a destruction
-    /// notification corroborated by accepted topology can begin recovery.
+    /// Absence is inconclusive. Exit evidence is positive user membership or a
+    /// corroborated destruction, and either counts only once the fullscreen Space
+    /// is gone: a window listed beside its live fullscreen Space is transitional.
     pub(crate) fn note_fullscreen_exits(
         &mut self,
         existing: &HashSet<SpaceId>,
         destroyed: &HashSet<SpaceId>,
         membership: &HashMap<WindowServerId, SpaceId>,
     ) {
+        let exited = |wsid: Option<WindowServerId>, space: SpaceId| {
+            !existing.contains(&space)
+                && (wsid.is_some_and(|id| membership.contains_key(&id))
+                    || destroyed.contains(&space))
+        };
         for record in self.native_fullscreen_records_by_original_window.values_mut() {
-            if record.window_server_id.is_some_and(|id| membership.contains_key(&id))
-                || (destroyed.contains(&record.fullscreen_space)
-                    && !existing.contains(&record.fullscreen_space))
-            {
+            if exited(record.window_server_id, record.fullscreen_space) {
                 let observed = record.window_server_id.and_then(|id| membership.get(&id).copied());
                 record.transition = NativeFullscreenTransition::ExitObserved(observed.or(
                     match record.transition {
@@ -1037,9 +1040,7 @@ impl WindowStore {
         }
         for (&id, server) in &mut self.window_servers {
             if let Some(record) = server.pending_native_fullscreen.as_mut()
-                && (membership.contains_key(&id)
-                    || (destroyed.contains(&record.fullscreen_space)
-                        && !existing.contains(&record.fullscreen_space)))
+                && exited(Some(id), record.fullscreen_space)
             {
                 record.transition =
                     NativeFullscreenTransition::ExitObserved(membership.get(&id).copied());
