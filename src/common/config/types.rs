@@ -871,6 +871,10 @@ pub struct MenuBarSettings {
     /// Show workspace labels or layout indicators.
     #[setting(label = "Display style", choices, enabled_by = "enabled")]
     pub display_style: WorkspaceDisplayStyle,
+    #[serde(default)]
+    /// Wrap workspace labels in brackets when a window is fullscreen.
+    #[setting(label = "Show fullscreen indicator", enabled_by = "enabled")]
+    pub show_fullscreen_indicator: bool,
     #[serde(default = "default_layout_folder")]
     /// Folder containing custom layout indicator images.
     #[setting(label = "Layout folder", custom, enabled_by = "enabled")]
@@ -897,6 +901,7 @@ impl Default for MenuBarSettings {
             mode: MenuBarDisplayMode::default(),
             active_label: ActiveWorkspaceLabel::default(),
             display_style: WorkspaceDisplayStyle::default(),
+            show_fullscreen_indicator: false,
             layout_folder: default_layout_folder(),
         }
     }

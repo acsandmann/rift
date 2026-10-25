@@ -7257,6 +7257,78 @@ fn floating_window_toggles_to_fullscreen_within_gaps() {
     );
 }
 
+fn menu_fullscreen_flags(
+    reactor: &mut Reactor,
+    rx: &mut crate::actor::Receiver<menu_bar::Event>,
+) -> Vec<bool> {
+    reactor.maybe_send_menu_update();
+    let mut latest = None;
+    while let Ok((_, event)) = rx.try_recv() {
+        if let menu_bar::Event::Update(update) = event {
+            latest = Some(update);
+        }
+    }
+    let update = latest.expect("expected menu update");
+    update.displays[0].workspaces.iter().map(|ws| ws.has_fullscreen).collect()
+}
+
+#[test]
+fn menu_bar_reports_tiled_fullscreen_per_workspace() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let (tx, mut rx) = crate::actor::channel();
+    reactor.menu_manager.menu_tx = Some(tx);
+
+    assert!(!menu_fullscreen_flags(&mut reactor, &mut rx)[0]);
+
+    for command in [
+        LayoutCommand::ToggleFullscreen,
+        LayoutCommand::ToggleFullscreenWithinGaps,
+    ] {
+        reactor.handle_test_layout_command(command.clone());
+        assert!(menu_fullscreen_flags(&mut reactor, &mut rx)[0], "{command:?}");
+
+        // Inactive workspaces keep reporting their fullscreen window.
+        reactor.handle_test_workspace_command(space, &LayoutCommand::SwitchToWorkspace(1));
+        let flags = menu_fullscreen_flags(&mut reactor, &mut rx);
+        assert!(flags[0] && !flags[1], "{command:?}: {flags:?}");
+        reactor.handle_test_workspace_command(space, &LayoutCommand::SwitchToWorkspace(0));
+
+        reactor.handle_test_layout_command(command.clone());
+        assert!(!menu_fullscreen_flags(&mut reactor, &mut rx)[0], "{command:?}");
+    }
+}
+
+#[test]
+fn menu_bar_ignores_fullscreen_toggle_on_empty_workspace() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let (tx, mut rx) = crate::actor::channel();
+    reactor.menu_manager.menu_tx = Some(tx);
+
+    reactor.handle_test_workspace_command(space, &LayoutCommand::SwitchToWorkspace(1));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleFullscreen);
+    let flags = menu_fullscreen_flags(&mut reactor, &mut rx);
+    assert!(!flags[0] && !flags[1], "{flags:?}");
+}
+
+#[test]
+fn menu_bar_reports_floating_fullscreen() {
+    let (mut reactor, _wid, _space, _screen, _frame) = reactor_with_floating_window();
+    let (tx, mut rx) = crate::actor::channel();
+    reactor.menu_manager.menu_tx = Some(tx);
+
+    assert!(!menu_fullscreen_flags(&mut reactor, &mut rx)[0]);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleFullscreen);
+    assert!(menu_fullscreen_flags(&mut reactor, &mut rx)[0]);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleFullscreen);
+    assert!(!menu_fullscreen_flags(&mut reactor, &mut rx)[0]);
+}
+
 #[test]
 fn binding_mode_changes_update_query_state_before_broadcast() {
     let mut reactor = test_reactor();
