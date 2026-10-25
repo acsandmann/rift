@@ -763,3 +763,23 @@ fn ordered_display_preferences_round_trip_and_validate() {
         assert!(error.to_string().contains("Workspace rule 0 display preferences"));
     }
 }
+
+#[test]
+fn workspace_names_reject_explicit_and_generated_collisions() {
+    for names in [vec!["Main", "Dev", "Main"], vec!["Workspace 3"], vec![
+        "",
+        "Workspace 1",
+    ]] {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 3,
+            workspace_names: names.into_iter().map(String::from).collect(),
+            ..Default::default()
+        };
+        assert!(
+            settings
+                .validate()
+                .iter()
+                .any(|issue| issue.contains("Duplicate workspace name"))
+        );
+    }
+}

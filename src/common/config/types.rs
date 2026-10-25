@@ -219,6 +219,14 @@ impl Default for VirtualWorkspaceSettings {
 }
 
 impl VirtualWorkspaceSettings {
+    pub fn workspace_name(&self, index: usize) -> String {
+        self.workspace_names
+            .get(index)
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("Workspace {}", index + 1))
+    }
+
     pub fn resize(&mut self, count: usize) {
         self.default_workspace_count = count;
         // Invalid counts are left for the shared validator, without large allocations.
@@ -262,6 +270,19 @@ impl VirtualWorkspaceSettings {
                 "default_workspace ({}) must be less than default_workspace_count ({})",
                 self.default_workspace, self.default_workspace_count
             ));
+        }
+
+        let mut names = crate::common::collections::HashMap::default();
+        for index in 0..self.default_workspace_count.min(MAX_WORKSPACES) {
+            let name = self.workspace_name(index);
+            if let Some(first) = names.get(&name) {
+                issues.push(format!(
+                    "Duplicate workspace name {name:?} (workspaces {} and {}). Workspace names must be unique.",
+                    first + 1, index + 1
+                ));
+            } else {
+                names.insert(name, index);
+            }
         }
 
         for (index, rule) in self.workspace_rules.iter().enumerate() {

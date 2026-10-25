@@ -498,8 +498,8 @@ pub struct MoveWindowToDisplayPayload {
     pub window: WindowId,
     pub source_space: SpaceId,
     pub target_space: SpaceId,
+    pub source_screen: Option<objc2_core_foundation::CGRect>,
     pub target_screen: objc2_core_foundation::CGRect,
-    pub target_frame: objc2_core_foundation::CGRect,
 }
 
 pub fn handle_command_reactor_move_window_to_display(
@@ -512,7 +512,7 @@ pub fn handle_command_reactor_move_window_to_display(
         return Ok(EventOutcome::no_change());
     }
 
-    let response = layout.layout_engine.move_window_to_space(
+    let mut response = layout.layout_engine.move_window_to_space(
         &mut state.windows,
         payload.source_space,
         payload.target_space,
@@ -523,15 +523,44 @@ pub fn handle_command_reactor_move_window_to_display(
     if !response.changed {
         return Ok(EventOutcome::no_change());
     }
+    let mut transferred = std::mem::take(&mut response.transferred_windows);
+    if !transferred.contains(&payload.window) {
+        transferred.push(payload.window);
+    }
     let mut outcome = EventOutcome::layout_changed(false).with_layout_response(response, None);
-    outcome.absorb(request_window_transfer(
-        state,
-        layout,
-        payload.window,
-        payload.target_space,
-        Some(payload.target_frame),
-        true,
-    ));
+    for window in transferred {
+        let frame = state
+            .windows
+            .workspace_for_window(window)
+            .and_then(|workspace| layout.layout_engine.get_floating_position(workspace, window))
+            .or_else(|| {
+                state
+                    .windows
+                    .window(window)
+                    .filter(|_| state.windows.can_place_window(window))
+                    .map(|s| s.frame_monotonic)
+            })
+            .map(|frame| {
+                if layout.layout_engine.is_window_floating(window) {
+                    state.windows.project_floating_frame(
+                        window,
+                        frame,
+                        payload.source_screen,
+                        payload.target_screen,
+                    )
+                } else {
+                    super::super::Reactor::center_frame_on_screen(frame, payload.target_screen)
+                }
+            });
+        outcome.absorb(request_window_transfer(
+            state,
+            layout,
+            window,
+            payload.target_space,
+            frame,
+            true,
+        ));
+    }
     Ok(outcome)
 }
 

@@ -69,6 +69,10 @@ impl LayoutEngine {
             .workspaces
             .validate_persisted_topology()
             .map_err(|error| anyhow::anyhow!("invalid workspace topology: {error}"))?;
+        // Unknown preview-only metadata (including display_fallback) is ignored
+        // by serde. Keep its workspace identity rather than guessing whether it
+        // has since become intentional user state.
+        persisted.workspaces.normalize_loaded_names();
         persisted.normalize_workspace_layouts()?;
         persisted.persistence.validate()?;
         let schema_version = persisted.schema_version;
@@ -322,11 +326,13 @@ impl LayoutEngine {
         virtual_workspace_config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
         broadcast_tx: Option<BroadcastSender>,
-    ) {
+    ) -> Result<(), String> {
+        let plan = self.workspaces.plan_settings_names(virtual_workspace_config, true)?;
         self.broadcast_tx = broadcast_tx;
         self.apply_layout_settings(layout_settings);
         self.app_rules = AppRuleEngine::new(&virtual_workspace_config.app_rules);
-        self.workspaces.update_settings(virtual_workspace_config, layout_settings);
+        self.workspaces.apply_settings(virtual_workspace_config, layout_settings, plan);
+        Ok(())
     }
 }
 

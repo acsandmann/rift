@@ -625,92 +625,77 @@ fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) 
         WorkspaceSelector::Name(n) => Some(n.as_str()) == name,
     }
 }
-/// Merge the effective properties into one rule, preserving a handwritten named selector.
-fn edit_workspace_rule(
+/// Change only this property's effective rule. Clearing removes every matching
+/// override so an earlier rule cannot unexpectedly become effective again.
+fn edit_workspace_rule<T>(
     s: &mut ConfigSource,
     i: usize,
-    edit: impl FnOnce(&mut WorkspaceLayoutRule),
+    property: fn(&mut WorkspaceLayoutRule) -> &mut Option<T>,
+    value: Option<T>,
 ) {
-    let name = s.virtual_workspaces.workspace_names.get(i).cloned();
-    let rules = &s.virtual_workspaces.workspace_rules;
-    let matches = |r: &WorkspaceLayoutRule| selector_matches(&r.workspace, i, name.as_deref());
-    let target = rules
-        .iter()
-        .rposition(|r| matches(r) && matches!(r.workspace, WorkspaceSelector::Name(_)))
-        .or_else(|| rules.iter().rposition(matches));
-    let mut merged = WorkspaceLayoutRule {
-        workspace: target.map(|index| rules[index].workspace.clone()).unwrap_or_else(|| {
-            name.clone()
-                .filter(|name| !name.is_empty())
-                .map(WorkspaceSelector::Name)
-                .unwrap_or(WorkspaceSelector::Index(i))
-        }),
-        layout: workspace_layout(s, i),
-        display: (!workspace_display(s, i).is_empty()).then(|| workspace_display(s, i).to_vec()),
-    };
-    edit(&mut merged);
+    let name = s.virtual_workspaces.workspace_name(i);
     let rules = &mut s.virtual_workspaces.workspace_rules;
-    let target = target.unwrap_or(rules.len());
-    if target == rules.len() {
-        rules.push(merged);
+    let matches = |r: &WorkspaceLayoutRule| selector_matches(&r.workspace, i, Some(&name));
+    let target = rules.iter_mut().rposition(|r| matches(r) && property(r).is_some());
+    if let Some(value) = value {
+        if let Some(index) = target.or_else(|| rules.iter().rposition(matches)) {
+            *property(&mut rules[index]) = Some(value);
+        } else {
+            let mut rule = WorkspaceLayoutRule {
+                workspace: WorkspaceSelector::Name(name),
+                layout: None,
+                display: None,
+            };
+            *property(&mut rule) = Some(value);
+            rules.push(rule);
+        }
     } else {
-        rules[target] = merged;
+        for rule in rules.iter_mut().filter(|r| matches(r)) {
+            *property(rule) = None;
+        }
+        rules.retain(|rule| !matches(rule) || rule.layout.is_some() || rule.display.is_some());
     }
-    let mut index = 0;
-    rules.retain(|rule| {
-        let keep = !matches(rule)
-            || (index == target && (rule.layout.is_some() || rule.display.is_some()));
-        index += 1;
-        keep
-    });
 }
 
 /// Give workspace `i` its own layout, or let it follow the default with `None`.
 pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<LayoutMode>) {
-    edit_workspace_rule(s, i, |rule| rule.layout = mode);
+    edit_workspace_rule(s, i, |rule| &mut rule.layout, mode);
 }
 
 /// Set ordered display intent; an empty collection removes the display property.
 pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Vec<String>) {
-    edit_workspace_rule(s, i, |rule| {
-        rule.display = (!display.is_empty()).then_some(display)
-    });
+    edit_workspace_rule(
+        s,
+        i,
+        |rule| &mut rule.display,
+        (!display.is_empty()).then_some(display),
+    );
 }
 
 /// Ordered preferences from the last matching display rule, independently of layout.
 pub(super) fn workspace_display(s: &ConfigSource, i: usize) -> &[String] {
-    let name = s.virtual_workspaces.workspace_names.get(i).map(String::as_str);
+    let name = s.virtual_workspaces.workspace_name(i);
     s.virtual_workspaces
         .workspace_rules
         .iter()
         .rev()
-        .filter(|r| selector_matches(&r.workspace, i, name))
+        .filter(|r| selector_matches(&r.workspace, i, Some(&name)))
         .find_map(|r| r.display.as_deref())
         .unwrap_or_default()
 }
 
 /// The layout workspace `i` sets for itself, if any.
 pub(super) fn workspace_layout(s: &ConfigSource, i: usize) -> Option<LayoutMode> {
+    let name = s.virtual_workspaces.workspace_name(i);
     s.virtual_workspaces
         .workspace_rules
         .iter()
         .rev()
-        .filter(|r| {
-            selector_matches(
-                &r.workspace,
-                i,
-                s.virtual_workspaces.workspace_names.get(i).map(String::as_str),
-            )
-        })
+        .filter(|r| selector_matches(&r.workspace, i, Some(&name)))
         .find_map(|r| r.layout)
 }
 pub(super) fn workspace_name(s: &ConfigSource, i: usize) -> String {
-    s.virtual_workspaces
-        .workspace_names
-        .get(i)
-        .filter(|n| !n.is_empty())
-        .cloned()
-        .unwrap_or_else(|| format!("Workspace {}", i + 1))
+    s.virtual_workspaces.workspace_name(i)
 }
 
 fn workspace_popup(
@@ -2076,34 +2061,62 @@ mod tests {
 
     #[test]
     fn workspace_edits_preserve_named_rule_and_file_style() {
+        let mut repeated = ConfigDocument::parse(
+            r#"[settings]
+[keys]
+[virtual_workspaces]
+workspace_names = ["Dev"]
+workspace_rules = [
+    # first
+    {workspace="Dev", layout="stack", display="right"},
+    # second
+    { workspace = "Dev", display = "right" },
+    {workspace="Dev", layout="stack"},
+]
+"#,
+        )
+        .unwrap();
+        repeated.update(|s| set_workspace_layout(s, 0, None)).unwrap();
+        assert!(repeated.to_string().contains("# first\n    {workspace="));
+        assert!(repeated.to_string().contains("# second\n    { workspace ="));
+        assert!(repeated.to_string().find("# first") < repeated.to_string().find("# second"));
         let mut document = ConfigDocument::parse(
             r#"[settings]
 [keys]
 [virtual_workspaces]
 workspace_names = ["a", "b", "c", "d"]
 workspace_rules = [
-    { workspace = 3, layout = "stack" },
-    { workspace = "d", display = "portrait" }, # pinned
+    # layout
+    {workspace = "d", layout = "stack"},
+    { workspace = 3, layout = "stack", display = "right" },
+    # pinned
+    { workspace = "d", display = "portrait" },
 ]
 "#,
         )
         .unwrap();
         document.update(|s| set_workspace_layout(s, 3, Some(LayoutMode::Bsp))).unwrap();
         document.update(|s| set_workspace_display(s, 3, vec!["laptop".into()])).unwrap();
-        assert_eq!(document.source().unwrap().virtual_workspaces.workspace_rules, [
-            WorkspaceLayoutRule {
-                workspace: WorkspaceSelector::Name("d".into()),
-                layout: Some(LayoutMode::Bsp),
-                display: Some(vec!["laptop".into()]),
-            }
-        ]);
+        let rules = document.source().unwrap().virtual_workspaces.workspace_rules;
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].workspace, WorkspaceSelector::Name("d".into()));
+        assert_eq!(rules[0].layout, Some(LayoutMode::Stack));
+        assert_eq!(rules[1].workspace, WorkspaceSelector::Index(3));
+        assert_eq!(rules[1].layout, Some(LayoutMode::Bsp));
+        assert_eq!(rules[1].display, Some(vec!["right".into()]));
+        assert_eq!(rules[2].display, Some(vec!["laptop".into()]));
         assert!(document.to_string().contains("\n    { workspace = \"d\""));
-        assert!(document.to_string().contains("# pinned"));
+        assert_eq!(document.to_string().matches("# pinned").count(), 1);
+        assert_eq!(document.to_string().matches("# layout").count(), 1);
+        let unchanged = document.to_string();
+        document.update(|s| set_workspace_display(s, 3, vec!["laptop".into()])).unwrap();
+        assert_eq!(document.to_string(), unchanged);
         document.update(|s| set_workspace_layout(s, 3, None)).unwrap();
         assert_eq!(
             document.source().unwrap().virtual_workspaces.workspace_rules[0].display,
-            Some(vec!["laptop".into()])
+            Some(vec!["right".into()])
         );
+        assert_eq!(workspace_layout(&document.source().unwrap(), 3), None);
         document.update(|s| set_workspace_display(s, 3, vec![])).unwrap();
         assert!(document.source().unwrap().virtual_workspaces.workspace_rules.is_empty());
     }

@@ -41,6 +41,15 @@ pub struct WindowRecord {
     visibility: WindowVisibility,
     pending_transfer: Option<PendingWindowTransfer>,
     rule_floating: bool,
+    floating_display_geometry: Option<FloatingDisplayGeometry>,
+}
+
+/// Only retained while display projection differs from the user's geometry.
+/// Lives with the window identity, never in the persisted layout.
+#[derive(Debug, Clone, Copy)]
+struct FloatingDisplayGeometry {
+    intended: objc2_core_foundation::CGRect,
+    viewport: objc2_core_foundation::CGRect,
 }
 
 impl WindowRecord {
@@ -601,6 +610,41 @@ impl WindowStore {
         }
     }
 
+    pub(crate) fn project_floating_frame(
+        &mut self,
+        window: WindowId,
+        frame: objc2_core_foundation::CGRect,
+        source: Option<objc2_core_foundation::CGRect>,
+        target: objc2_core_foundation::CGRect,
+    ) -> objc2_core_foundation::CGRect {
+        let Some(record) = self.windows.get_mut(&window) else {
+            return frame;
+        };
+        let retained = record.floating_display_geometry;
+        let (intended, viewport) = retained.map_or((frame, source), |intent| {
+            (intent.intended, Some(intent.viewport))
+        });
+        let minimum = record.state.as_ref().map_or_else(Default::default, |state| {
+            if state.info.is_resizable {
+                state.info.min_size.unwrap_or_default()
+            } else {
+                intended.size
+            }
+        });
+        let projected = crate::sys::geometry::frame_on_display(intended, viewport, target, minimum);
+        record.floating_display_geometry = viewport
+            .filter(|_| projected != intended)
+            .map(|viewport| FloatingDisplayGeometry { intended, viewport });
+        projected
+    }
+
+    /// Accepted user geometry supersedes any temporary display projection.
+    pub(crate) fn clear_floating_display_geometry(&mut self, window: WindowId) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.floating_display_geometry = None;
+        }
+    }
+
     pub fn record(&self, window_id: WindowId) -> Option<&WindowRecord> {
         self.windows.get(&window_id)
     }
@@ -1141,12 +1185,13 @@ impl WindowStore {
             return;
         }
 
-        let (workspace, rule_floating, visibility, pending) = match self.windows.get(&from) {
+        let (workspace, rule_floating, visibility, pending, geom) = match self.windows.get(&from) {
             Some(record) => (
                 record.workspace,
                 record.rule_floating,
                 record.visibility,
                 record.pending_transfer,
+                record.floating_display_geometry,
             ),
             None => return,
         };
@@ -1168,12 +1213,14 @@ impl WindowStore {
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
         target.pending_transfer = pending;
+        target.floating_display_geometry = geom;
         self.app_windows.entry(to.pid).or_default().insert(to);
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
             source.rule_floating = false;
             source.pending_transfer = None;
+            source.floating_display_geometry = None;
         }
 
         if let Some(original_window_id) = self.native_fullscreen_original_window(from)
@@ -1670,8 +1717,9 @@ mod tests {
         let space = SpaceId::new(10);
         let fullscreen_space = SpaceId::new(0x400000000 + space.get());
         let mut workspaces = WorkspaceStore::new();
-        let workspace_id =
-            workspaces.create_workspace(space, Some("Main".to_string())).expect("workspace");
+        let workspace_id = workspaces
+            .create_workspace(space, Some("Fullscreen".to_string()))
+            .expect("workspace");
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
         let wsid = WindowServerId::new(77);

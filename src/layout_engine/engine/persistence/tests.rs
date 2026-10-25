@@ -1551,7 +1551,7 @@ fn startup_restore_reapplies_configured_workspace_names() {
     let mut current_settings = saved_settings;
     current_settings.workspace_names = vec!["A".into(), "S".into()];
 
-    restored.finish_loading(&current_settings, &layout_settings, None);
+    restored.finish_loading(&current_settings, &layout_settings, None).unwrap();
 
     let names = restored
         .workspaces
@@ -2492,4 +2492,55 @@ fn legacy_workspace_layouts_migrate_and_round_trip() {
                 .contains("invalid workspace layouts")
         );
     }
+}
+
+#[test]
+fn loading_disambiguates_saved_extra_names_without_losing_workspace_identity() {
+    let settings = VirtualWorkspaceSettings::default();
+    let mut engine = test_engine();
+    let space = SpaceId::new(903);
+    let first = engine.workspaces.list_workspaces(space)[0].0;
+    assert!(engine.workspaces.rename_workspace(space, first, "Old main".into()));
+    let extra = engine.workspaces.create_workspace(space, Some("Main".into())).unwrap();
+    let ids: Vec<_> = engine.workspaces.catalog().collect();
+    let mut restored = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+    restored.finish_loading(&settings, &LayoutSettings::default(), None).unwrap();
+    assert_eq!(restored.workspaces.catalog().collect::<Vec<_>>(), ids);
+    assert_eq!(restored.workspaces[first].name, "Main");
+    assert_ne!(restored.workspaces[extra].name, "Main");
+    let mut unnamed = settings.clone();
+    unnamed.workspace_names.clear();
+    let mut restored = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+    restored.finish_loading(&unnamed, &LayoutSettings::default(), None).unwrap();
+    assert_eq!(restored.workspaces[first].name, "Old main");
+    assert_eq!(restored.workspaces[extra].name, "Main");
+
+    // A serialized Global store does not retain its runtime settings. Explicit
+    // names must still take precedence over saved names before adding entries.
+    let mut settings = VirtualWorkspaceSettings::default();
+    settings.mode = crate::common::config::WorkspaceMode::Global;
+    settings.default_workspace_count = 3;
+    settings.workspace_names.truncate(3);
+    let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+    engine.workspaces.ensure_space_initialized(SpaceId::new(903));
+    let ids: Vec<_> = engine.workspaces.catalog().collect();
+    let mut restored = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+    settings.default_workspace_count = 4;
+    settings.workspace_names = ["Other", "Development", "Communication", "Main"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    restored.finish_loading(&settings, &LayoutSettings::default(), None).unwrap();
+    assert_eq!(
+        restored.workspaces.catalog().take(ids.len()).collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(
+        restored
+            .workspaces
+            .catalog()
+            .map(|id| restored.workspaces[id].name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Other", "Development", "Communication", "Main"]
+    );
 }

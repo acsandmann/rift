@@ -301,6 +301,7 @@ pub fn handle_window_frame_changed(
     }
     outcome = EventOutcome::layout_changed(false);
 
+    state.windows.clear_floating_display_geometry(wid);
     // External moves as well as resizes are authoritative for floating layouts.
     // Requested frame acknowledgements have already been filtered by the classifier.
     if let Some(space) = assigned_space.or(old_space)
@@ -310,8 +311,7 @@ pub fn handle_window_frame_changed(
                 .layout_engine
                 .workspaces()
                 .workspace_for_window(&state.windows, space, wid)
-        && layout.layout_engine.workspaces().workspaces[workspace].layout_mode()
-            == crate::common::config::LayoutMode::Floating
+        && layout.layout_engine.is_window_floating(wid)
     {
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }

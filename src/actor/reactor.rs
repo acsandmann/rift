@@ -2595,7 +2595,6 @@ impl Reactor {
                 // Retained scrolling frames belong to the source Space. Fence queued
                 // presentation work before the transfer installs its destination frame.
                 self.cancel_window_presentations(vec![window]);
-                let target_frame = Self::center_frame_on_screen(window_frame, target_screen.frame);
                 return command_workflow::handle_command_reactor_move_window_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -2603,8 +2602,11 @@ impl Reactor {
                         window,
                         source_space,
                         target_space,
+                        source_screen: self
+                            .space_state
+                            .screen_by_space(source_space)
+                            .map(|s| s.frame),
                         target_screen: target_screen.frame,
-                        target_frame,
                     },
                 );
             }
@@ -2690,17 +2692,14 @@ impl Reactor {
                 let moves = windows
                     .into_iter()
                     .filter_map(|window| {
-                        let window_state = self.state.windows.window(window)?;
-                        Some(command_workflow::WorkspaceWindowMove {
-                            window,
-                            target_frame: Self::frame_on_display(
-                                window_state.frame_monotonic,
-                                self.space_state
-                                    .screen_by_space(source_space)
-                                    .map(|screen| screen.frame),
-                                target_screen.frame,
-                            ),
-                        })
+                        let frame = self.state.windows.window(window)?.frame_monotonic;
+                        let source = self
+                            .space_state
+                            .screen_by_space(source_space)
+                            .map(|screen| screen.frame);
+                        let target_frame =
+                            self.frame_on_display(window, frame, source, target_screen.frame);
+                        Some(command_workflow::WorkspaceWindowMove { window, target_frame })
                     })
                     .collect::<Vec<_>>();
                 let outcome = command_workflow::handle_command_reactor_move_workspace_to_display(
@@ -3691,19 +3690,28 @@ impl Reactor {
                 continue;
             }
             for window in self.state.windows.workspace_windows(workspace) {
-                if !engine.is_window_floating(window) {
+                if !engine.is_window_floating(window)
+                    || self.state.windows.native_fullscreen_record_for_window(window).is_some()
+                {
                     continue;
                 }
-                if let Some(frame) = engine
-                    .get_floating_position(workspace, window)
-                    .or_else(|| self.state.windows.record(window)?.frame())
-                {
-                    engine.store_floating_position(
-                        workspace,
+                if let Some(frame) = engine.get_floating_position(workspace, window).or_else(|| {
+                    self.state
+                        .windows
+                        .can_place_window(window)
+                        .then(|| self.state.windows.record(window)?.frame())
+                        .flatten()
+                }) {
+                    let projected = self.state.windows.project_floating_frame(
                         window,
-                        Self::frame_on_display(frame, Some(source), target),
+                        frame,
+                        Some(source),
+                        target,
                     );
-                    outcome.arrange.passes = 1;
+                    if projected != frame {
+                        engine.store_floating_position(workspace, window, projected);
+                        outcome.arrange.passes = 1;
+                    }
                 }
             }
         }
@@ -3966,7 +3974,8 @@ impl Reactor {
         let screen = self
             .space_state
             .screen_by_space(target)
-            .filter(|_| self.is_space_active(target));
+            .filter(|_| self.is_space_active(target))
+            .map(|screen| screen.frame);
         let engine = &self.layout_manager.layout_engine;
         let frame = self
             .state
@@ -3977,7 +3986,7 @@ impl Reactor {
             .or_else(|| self.state.windows.record(window)?.frame())
             .map(|frame| {
                 screen.map_or(frame, |screen| {
-                    Self::frame_on_display(frame, source_frame, screen.frame)
+                    self.frame_on_display(window, frame, source_frame, screen)
                 })
             });
         command_workflow::request_window_transfer(
@@ -4015,6 +4024,8 @@ impl Reactor {
                     .record(window)
                     .and_then(|record| record.window_server_id())
                     .and_then(|id| self.space_state.active_window_spaces.get(&id).copied());
+                let was_unavailable =
+                    operation.status == crate::model::window_store::TransferStatus::Unavailable;
                 if observed == Some(target) {
                     self.state.windows.confirm_transfer(
                         window,
@@ -4031,7 +4042,12 @@ impl Reactor {
                     if let Some(screen) = self.space_state.screen_by_space(target) {
                         // Intent recorded while unavailable may describe another display.
                         let source = self.screen_for_point(frame.mid()).map(|source| source.frame);
-                        let frame = Self::frame_on_display(frame, source, screen.frame);
+                        let frame = if was_unavailable {
+                            self.frame_on_display(window, frame, source, screen.frame)
+                        } else {
+                            frame
+                        };
+                        self.state.windows.request_transfer(window, Some(frame), target, true);
                         self.layout_manager.layout_engine.prepare_window_placement(
                             &mut self.state.windows,
                             window,
@@ -4735,9 +4751,6 @@ impl Reactor {
     }
 
     fn expose_all_spaces(&mut self) {
-        self.layout_manager
-            .layout_engine
-            .retire_empty_display_fallbacks(&self.state.windows);
         let spaces: Vec<SpaceId> = (self.screens_in_physical_order().into_iter())
             .filter_map(|screen| screen.space)
             .filter(|space| self.is_space_active(*space))
@@ -4912,6 +4925,7 @@ impl Reactor {
             };
 
             let window_server_id = window.info.sys_id;
+            self.state.windows.clear_floating_display_geometry(placement.window);
             if let Some(workspace) = self
                 .layout_manager
                 .layout_engine
@@ -6102,27 +6116,18 @@ impl Reactor {
         self.screen_for_direction_from_point(wrapped_origin, *direction)
     }
 
-    fn frame_on_display(mut frame: CGRect, source: Option<CGRect>, target: CGRect) -> CGRect {
-        frame.size.width = frame.size.width.min(target.size.width);
-        frame.size.height = frame.size.height.min(target.size.height);
-        let Some(source) =
-            source.filter(|source| source.size.width > 0.0 && source.size.height > 0.0)
-        else {
-            return Self::center_frame_on_screen(frame, target);
-        };
-        frame.origin.x = (target.origin.x
-            + (frame.origin.x - source.origin.x) * target.size.width / source.size.width)
-            .clamp(
-                target.origin.x,
-                (target.max().x - frame.size.width).max(target.origin.x),
-            );
-        frame.origin.y = (target.origin.y
-            + (frame.origin.y - source.origin.y) * target.size.height / source.size.height)
-            .clamp(
-                target.origin.y,
-                (target.max().y - frame.size.height).max(target.origin.y),
-            );
-        frame
+    fn frame_on_display(
+        &mut self,
+        window: WindowId,
+        frame: CGRect,
+        source: Option<CGRect>,
+        target: CGRect,
+    ) -> CGRect {
+        if self.layout_manager.layout_engine.is_window_floating(window) {
+            self.state.windows.project_floating_frame(window, frame, source, target)
+        } else {
+            crate::sys::geometry::frame_on_display(frame, source, target, Default::default())
+        }
     }
 
     /// In global mode, open a new window on the pointer's display unless an app rule
@@ -6153,13 +6158,12 @@ impl Reactor {
         }) {
             return;
         }
-        let target_frame = Self::center_frame_on_screen(state.frame_monotonic, target_screen.frame);
         let payload = command_workflow::MoveWindowToDisplayPayload {
             window,
             source_space: space,
             target_space: target_screen.space.unwrap(),
+            source_screen: self.space_state.screen_by_space(space).map(|s| s.frame),
             target_screen: target_screen.frame,
-            target_frame,
         };
         match command_workflow::handle_command_reactor_move_window_to_display(
             &mut self.state,

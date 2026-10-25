@@ -341,6 +341,7 @@ impl LayoutEngine {
             self.focused_window = None;
         }
         if let Some(frame) = drop.frame {
+            windows.clear_floating_display_geometry(drop.window);
             self.store_floating_position(destination, drop.window, frame);
         }
         self.workspaces.set_last_focused_window(space, destination, Some(drop.window));
@@ -1916,9 +1917,7 @@ impl LayoutEngine {
             LayoutEvent::SpaceExposed(space, size) => {
                 self.debug_tree(space);
 
-                self.workspaces.ensure_space_initialized(space);
-                self.sync_scrolling_widths_for_space(space);
-                self.workspaces.ensure_layouts_for_size(space, size);
+                self.ensure_workspace_layouts(space, size);
             }
             #[cfg(test)]
             LayoutEvent::TestWindowsObserved(space, windows, app_info) => {
@@ -2314,6 +2313,9 @@ impl LayoutEngine {
             _ => None,
         };
         if let Some(options) = floating_options {
+            if let Some(window) = self.focused_window {
+                window_store.clear_floating_display_geometry(window);
+            }
             if space.is_some_and(|space| self.active_layout_mode_at(space) == LayoutMode::Floating)
             {
                 return EventResponse::default();
@@ -3312,7 +3314,6 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
 
-                self.workspaces[workspace_id].display_fallback = false;
                 let is_active_workspace =
                     self.workspaces.active_workspace(space) == Some(workspace_id);
                 let raise_windows = if is_active_workspace {
@@ -3336,15 +3337,6 @@ impl LayoutEngine {
                 }
             }
             _ => EventResponse::default(),
-        }
-    }
-
-    pub(crate) fn retire_empty_display_fallbacks(&mut self, windows: &WindowStore) {
-        for id in self.workspaces.retire_empty_display_fallbacks(windows) {
-            self.native_layouts.remove(&id);
-            if let Some(batch) = &mut self.native_reconcile_batch {
-                batch.remove(&id);
-            }
         }
     }
 
@@ -3447,8 +3439,36 @@ impl LayoutEngine {
             return EventResponse::default();
         };
 
-        let Some(target_workspace_id) = self.workspaces.active_workspace(target_space) else {
-            return EventResponse::default();
+        let target_workspace_id = match self.workspaces.active_workspace(target_space) {
+            Some(id) => id,
+            None if self.workspaces.settings.mode
+                == crate::common::config::WorkspaceMode::Global =>
+            {
+                // Reuse a real empty workspace where possible. If none is free,
+                // membership stays intact and the source workspace follows the window.
+                let id = self
+                    .workspaces
+                    .catalog()
+                    .find(|&id| window_store.workspace_window_count(id) == 0)
+                    .unwrap_or(source_workspace_id);
+                let display = self.space_display_map.get(&target_space).cloned().flatten();
+                let mut response = self.transfer_workspace(
+                    window_store,
+                    id,
+                    target_space,
+                    target_screen_size,
+                    display.as_deref(),
+                    crate::model::virtual_workspace::WorkspaceTransferReason::Explicit,
+                );
+                if id == source_workspace_id {
+                    self.workspaces.set_last_focused_window(target_space, id, Some(window_id));
+                    self.focused_window = Some(window_id);
+                    response.focus_window = Some(window_id);
+                    return response;
+                }
+                id
+            }
+            None => return EventResponse::default(),
         };
 
         self.ensure_workspace_layouts(target_space, target_screen_size);
@@ -3595,7 +3615,6 @@ impl LayoutEngine {
             }
         }
 
-        self.retire_empty_display_fallbacks(windows);
         self.broadcast_workspace_changed(source);
         self.broadcast_workspace_changed(target);
         self.broadcast_windows_changed(windows, source);
@@ -3615,9 +3634,8 @@ impl LayoutEngine {
     }
 
     fn ensure_workspace_layouts(&mut self, space: SpaceId, screen_size: CGSize) {
-        self.workspaces.ensure_space_initialized(space);
-        self.sync_scrolling_widths_for_space(space);
         self.workspaces.ensure_layouts_for_size(space, screen_size);
+        self.sync_scrolling_widths_for_space(space);
     }
 
     fn relocate_window_to_workspace(
@@ -4929,8 +4947,8 @@ mod tests {
             let screen = CGSize::new(1000.0, 800.0);
             let _ = engine.handle_event(&mut windows, LayoutEvent::SpaceExposed(source, screen));
             let _ = engine.handle_event(&mut windows, LayoutEvent::SpaceExposed(target, screen));
-            if engine.workspaces.workspaces_on(target).count() == 1 {
-                engine.workspaces.create_workspace(target, Some("Second".into())).unwrap();
+            while engine.workspaces.workspaces_on(target).count() < 2 {
+                engine.workspaces.create_workspace(target, None).unwrap();
             }
             let target_ids = engine.workspaces.workspace_ids(target);
             engine.workspaces.set_active_workspace(target, target_ids[1]);
