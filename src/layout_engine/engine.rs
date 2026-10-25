@@ -3312,6 +3312,7 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
 
+                self.workspaces[workspace_id].display_fallback = false;
                 let is_active_workspace =
                     self.workspaces.active_workspace(space) == Some(workspace_id);
                 let raise_windows = if is_active_workspace {
@@ -3335,6 +3336,15 @@ impl LayoutEngine {
                 }
             }
             _ => EventResponse::default(),
+        }
+    }
+
+    pub(crate) fn retire_empty_display_fallbacks(&mut self, windows: &WindowStore) {
+        for id in self.workspaces.retire_empty_display_fallbacks(windows) {
+            self.native_layouts.remove(&id);
+            if let Some(batch) = &mut self.native_reconcile_batch {
+                batch.remove(&id);
+            }
         }
     }
 
@@ -3585,6 +3595,7 @@ impl LayoutEngine {
             }
         }
 
+        self.retire_empty_display_fallbacks(windows);
         self.broadcast_workspace_changed(source);
         self.broadcast_workspace_changed(target);
         self.broadcast_windows_changed(windows, source);

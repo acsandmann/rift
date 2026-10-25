@@ -9665,3 +9665,134 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
     let workspace = &reactor.layout_manager.layout_engine.workspaces()[id];
     assert_eq!((workspace.space, workspace.rule_overridden), (b, false));
 }
+
+#[test]
+fn named_pin_reload_moves_immediately_and_retires_empty_display_fallback() {
+    for keep_fallback in [false, true] {
+        let mut settings = shared_settings();
+        settings.default_workspace_count = 2;
+        settings.workspace_names = vec!["a".into(), "d".into()];
+        settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Name("d".into()),
+            layout: Some(LayoutMode::Bsp),
+            display: Some(vec!["test-display-1".into()]),
+        }];
+        let (mut apps, mut reactor, a, b) = two_displays(settings);
+        let window = WindowId::new(1, 1);
+        reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+            workspace: WorkspaceSelector::Name("d".into()),
+            follow: false,
+            window_id: Some(1),
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        let ids: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+        assert_eq!(reactor.state.windows.workspace_for_window(window), Some(ids[1]));
+        for (display, target) in [("test-display-0", a), ("test-display-1", b)] {
+            let mut config = reactor.config.clone();
+            config.virtual_workspaces.workspace_rules[0].display = Some(vec![display.into()]);
+            let outcome = reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
+            let screen = if target == a {
+                shared_left()
+            } else {
+                shared_right()
+            };
+            assert!(
+                outcome
+                    .pre_layout_window_frame_writes
+                    .iter()
+                    .any(|write| { write.window == window && screen.contains(write.frame.mid()) }),
+                "reloading a named pin must prepare the native move before any workspace switch"
+            );
+            reactor.apply_event_outcome(outcome);
+            apps.simulate_until_quiet(&mut reactor);
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces()[ids[1]].space,
+                target
+            );
+            // A topology refresh exposes the emptied display, allocating minimum state.
+            reactor.handle_event(space_state_event_with(
+                vec![shared_left(), shared_right()],
+                vec![Some(a), Some(b)],
+                |s| s.should_force_refresh_layout = true,
+            ));
+            if target == a {
+                if keep_fallback {
+                    let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
+                    let fallback = workspaces.active_workspace(b).unwrap();
+                    workspaces.rename_workspace(b, fallback, "scratch".into());
+                }
+                let snapshot = reactor.layout_manager.layout_engine.serialize_to_string();
+                reactor.layout_manager.layout_engine =
+                    LayoutEngine::deserialize_from_str(&snapshot).unwrap();
+                reactor.handle_event(Event::ConfigUpdated(reactor.config.clone()));
+            }
+        }
+        let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+        assert_eq!(&catalog[..ids.len()], &ids);
+        assert_eq!(catalog.len(), ids.len() + usize::from(keep_fallback));
+    }
+}
+
+#[test]
+fn floating_frames_follow_same_desktop_display_geometry_through_undock_and_redock() {
+    for (mode, width, fitted_width) in [
+        (LayoutMode::Bsp, 350., 350.),
+        (LayoutMode::Floating, 950., 700.),
+    ] {
+        let (mut apps, mut reactor, a, b) = two_displays(shared_settings());
+        let window = WindowId::new(1, 1);
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode,
+        });
+        if mode != LayoutMode::Floating {
+            reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+        }
+        apps.simulate_until_quiet(&mut reactor);
+        let workspace = reactor.state.windows.workspace_for_window(window).unwrap();
+        let original = CGRect::new(
+            CGPoint::new(if width == 350. { 600. } else { 50. }, 120.),
+            CGSize::new(width, 400.),
+        );
+        reactor.layout_manager.layout_engine.prepare_window_placement(
+            &mut reactor.state.windows,
+            window,
+            original,
+        );
+        apps.windows.get_mut(&window).unwrap().frame = original;
+        // The surviving native desktop shrinks without a workspace transfer.
+        let laptop = CGRect::new(CGPoint::new(0., 0.), CGSize::new(700., 600.));
+        for frame in [laptop, shared_left()] {
+            reactor.handle_event(space_state_event_with(vec![], vec![], |s| {
+                s.display_set_changed = true;
+                s.membership_complete = true;
+            }));
+            let (frames, spaces) = if frame == laptop {
+                (vec![frame], vec![Some(a)])
+            } else {
+                (vec![frame, shared_right()], vec![Some(a), Some(b)])
+            };
+            reactor.handle_event(space_state_event_with(frames, spaces, |s| {
+                s.display_set_changed = true;
+                s.should_force_refresh_layout = true;
+                s.membership_complete = true;
+                s.active_window_spaces.insert(WindowServerId::new(10_001), a);
+            }));
+            apps.simulate_until_quiet(&mut reactor);
+            let actual = reactor
+                .layout_manager
+                .layout_engine
+                .get_floating_position(workspace, window)
+                .unwrap();
+            assert!(
+                actual.min().x >= frame.min().x && actual.max().x <= frame.max().x,
+                "{mode:?}: {actual:?}"
+            );
+            assert!(actual.min().y >= frame.min().y && actual.max().y <= frame.max().y);
+            assert_eq!(actual.size, CGSize::new(fitted_width, 400.));
+            if mode == LayoutMode::Bsp {
+                assert_eq!(actual.origin.x, if frame == laptop { 350. } else { 500. });
+            }
+        }
+    }
+}

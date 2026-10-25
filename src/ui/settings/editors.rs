@@ -625,48 +625,56 @@ fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) 
         WorkspaceSelector::Name(n) => Some(n.as_str()) == name,
     }
 }
+/// Merge the effective properties into one rule, preserving a handwritten named selector.
+fn edit_workspace_rule(
+    s: &mut ConfigSource,
+    i: usize,
+    edit: impl FnOnce(&mut WorkspaceLayoutRule),
+) {
+    let name = s.virtual_workspaces.workspace_names.get(i).cloned();
+    let rules = &s.virtual_workspaces.workspace_rules;
+    let matches = |r: &WorkspaceLayoutRule| selector_matches(&r.workspace, i, name.as_deref());
+    let target = rules
+        .iter()
+        .rposition(|r| matches(r) && matches!(r.workspace, WorkspaceSelector::Name(_)))
+        .or_else(|| rules.iter().rposition(matches));
+    let mut merged = WorkspaceLayoutRule {
+        workspace: target.map(|index| rules[index].workspace.clone()).unwrap_or_else(|| {
+            name.clone()
+                .filter(|name| !name.is_empty())
+                .map(WorkspaceSelector::Name)
+                .unwrap_or(WorkspaceSelector::Index(i))
+        }),
+        layout: workspace_layout(s, i),
+        display: (!workspace_display(s, i).is_empty()).then(|| workspace_display(s, i).to_vec()),
+    };
+    edit(&mut merged);
+    let rules = &mut s.virtual_workspaces.workspace_rules;
+    let target = target.unwrap_or(rules.len());
+    if target == rules.len() {
+        rules.push(merged);
+    } else {
+        rules[target] = merged;
+    }
+    let mut index = 0;
+    rules.retain(|rule| {
+        let keep = !matches(rule)
+            || (index == target && (rule.layout.is_some() || rule.display.is_some()));
+        index += 1;
+        keep
+    });
+}
+
 /// Give workspace `i` its own layout, or let it follow the default with `None`.
 pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<LayoutMode>) {
-    let name = s.virtual_workspaces.workspace_names.get(i).cloned();
-    // Keep display assignments; only the layout field belongs to this editor.
-    s.virtual_workspaces.workspace_rules.retain_mut(|r| {
-        if selector_matches(&r.workspace, i, name.as_deref()) {
-            r.layout = None;
-        }
-        r.layout.is_some() || r.display.is_some()
-    });
-    if let Some(layout) = mode {
-        s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
-            workspace: WorkspaceSelector::Index(i),
-            layout: Some(layout),
-            display: None,
-        });
-    }
+    edit_workspace_rule(s, i, |rule| rule.layout = mode);
 }
 
 /// Set ordered display intent; an empty collection removes the display property.
 pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Vec<String>) {
-    let display = (!display.is_empty()).then_some(display);
-    let name = s.virtual_workspaces.workspace_names.get(i).map(String::as_str);
-    let rules = &mut s.virtual_workspaces.workspace_rules;
-    // Keep the last matching selector and layout; earlier display pins must not reappear.
-    if let Some(last) = rules.iter().rposition(|r| selector_matches(&r.workspace, i, name)) {
-        for rule in &mut rules[..last] {
-            if selector_matches(&rule.workspace, i, name) {
-                rule.display = None;
-            }
-        }
-        rules[last].display = display;
-        rules.retain(|r| {
-            !selector_matches(&r.workspace, i, name) || r.layout.is_some() || r.display.is_some()
-        });
-    } else if display.is_some() {
-        rules.push(WorkspaceLayoutRule {
-            workspace: WorkspaceSelector::Index(i),
-            layout: None,
-            display,
-        });
-    }
+    edit_workspace_rule(s, i, |rule| {
+        rule.display = (!display.is_empty()).then_some(display)
+    });
 }
 
 /// Ordered preferences from the last matching display rule, independently of layout.
@@ -2059,4 +2067,44 @@ fn inherited_field(
         },
     );
     input
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::config::ConfigDocument;
+
+    #[test]
+    fn workspace_edits_preserve_named_rule_and_file_style() {
+        let mut document = ConfigDocument::parse(
+            r#"[settings]
+[keys]
+[virtual_workspaces]
+workspace_names = ["a", "b", "c", "d"]
+workspace_rules = [
+    { workspace = 3, layout = "stack" },
+    { workspace = "d", display = "portrait" }, # pinned
+]
+"#,
+        )
+        .unwrap();
+        document.update(|s| set_workspace_layout(s, 3, Some(LayoutMode::Bsp))).unwrap();
+        document.update(|s| set_workspace_display(s, 3, vec!["laptop".into()])).unwrap();
+        assert_eq!(document.source().unwrap().virtual_workspaces.workspace_rules, [
+            WorkspaceLayoutRule {
+                workspace: WorkspaceSelector::Name("d".into()),
+                layout: Some(LayoutMode::Bsp),
+                display: Some(vec!["laptop".into()]),
+            }
+        ]);
+        assert!(document.to_string().contains("\n    { workspace = \"d\""));
+        assert!(document.to_string().contains("# pinned"));
+        document.update(|s| set_workspace_layout(s, 3, None)).unwrap();
+        assert_eq!(
+            document.source().unwrap().virtual_workspaces.workspace_rules[0].display,
+            Some(vec!["laptop".into()])
+        );
+        document.update(|s| set_workspace_display(s, 3, vec![])).unwrap();
+        assert!(document.source().unwrap().virtual_workspaces.workspace_rules.is_empty());
+    }
 }

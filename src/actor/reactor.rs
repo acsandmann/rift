@@ -409,6 +409,8 @@ pub struct Reactor {
     layout_manager: managers::LayoutManager,
     pub(crate) state: RiftState,
     space_state: ForwardedSpaceState,
+    // Presentation geometry survives empty/dormant topology samples; it is not ownership evidence.
+    last_screen_frames: HashMap<SpaceId, CGRect>,
     space_activation_policy: SpaceActivationPolicy,
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
@@ -505,6 +507,7 @@ impl Reactor {
             layout_manager: managers::LayoutManager { layout_engine },
             state: RiftState::default(),
             space_state: ForwardedSpaceState::default(),
+            last_screen_frames: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             pending_mouse_focus: None,
@@ -3621,6 +3624,9 @@ impl Reactor {
             }
         }
         for (previous_space, space) in space_remaps {
+            if let Some(frame) = self.last_screen_frames.remove(&previous_space) {
+                self.last_screen_frames.insert(space, frame);
+            }
             self.space_activation_policy.on_space_remapped(previous_space, space);
             self.layout_manager.layout_engine.remap_space(
                 &mut self.state.windows,
@@ -3640,6 +3646,24 @@ impl Reactor {
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
+        let engine = &self.layout_manager.layout_engine;
+        let mut refits = Vec::new();
+        for screen in &self.space_state.screens {
+            let Some(space) = screen.space.filter(|space| self.active_spaces.contains(space))
+            else {
+                continue;
+            };
+            if let Some(&source) =
+                self.last_screen_frames.get(&space).filter(|&&frame| frame != screen.frame)
+            {
+                refits.extend(
+                    engine
+                        .workspaces()
+                        .workspaces_on(space)
+                        .map(|workspace| (workspace, space, source, screen.frame)),
+                );
+            }
+        }
         if display_set_changed
             || invalidates_pending_targets
             || previous_screens
@@ -3658,6 +3682,30 @@ impl Reactor {
                 None,
                 &invalidated_spaces,
             ));
+        }
+        // Transfers already fitted their frames; refit only workspaces whose native
+        // desktop stayed put while its display geometry changed.
+        for (workspace, space, source, target) in refits {
+            let engine = &mut self.layout_manager.layout_engine;
+            if engine.workspaces().workspace_space(workspace) != Some(space) {
+                continue;
+            }
+            for window in self.state.windows.workspace_windows(workspace) {
+                if !engine.is_window_floating(window) {
+                    continue;
+                }
+                if let Some(frame) = engine
+                    .get_floating_position(workspace, window)
+                    .or_else(|| self.state.windows.record(window)?.frame())
+                {
+                    engine.store_floating_position(
+                        workspace,
+                        window,
+                        Self::frame_on_display(frame, Some(source), target),
+                    );
+                    outcome.arrange.passes = 1;
+                }
+            }
         }
         outcome.absorb(self.advance_workspace_transfers());
         outcome.absorb(self.reconcile_native_fullscreen_exits(true));
@@ -3680,6 +3728,12 @@ impl Reactor {
         if should_force_refresh_layout {
             outcome = outcome.with_arrange_passes(1);
         }
+        self.last_screen_frames.extend(
+            self.space_state
+                .screens
+                .iter()
+                .filter_map(|screen| Some((screen.space?, screen.frame))),
+        );
         Ok(outcome)
     }
 
@@ -3846,13 +3900,12 @@ impl Reactor {
             let screen = &self.space_state.screens[target];
             let target = screen.space.unwrap();
             let source = self.layout_manager.layout_engine.workspaces()[id].space;
-            let source_frame = self
-                .space_state
-                .screens
+            let source_frame = previous_screens
                 .iter()
-                .chain(previous_screens)
+                .chain(&self.space_state.screens)
                 .find(|screen| screen.space == Some(source))
-                .map(|screen| screen.frame);
+                .map(|screen| screen.frame)
+                .or_else(|| self.last_screen_frames.get(&source).copied());
             let response = self.layout_manager.layout_engine.transfer_workspace(
                 &mut self.state.windows,
                 id,
@@ -3914,16 +3967,19 @@ impl Reactor {
             .space_state
             .screen_by_space(target)
             .filter(|_| self.is_space_active(target));
-        let frame =
-            self.state
-                .windows
-                .record(window)
-                .and_then(|record| record.frame())
-                .map(|frame| {
-                    screen.map_or(frame, |screen| {
-                        Self::frame_on_display(frame, source_frame, screen.frame)
-                    })
-                });
+        let engine = &self.layout_manager.layout_engine;
+        let frame = self
+            .state
+            .windows
+            .workspace_for_window(window)
+            .filter(|_| engine.is_window_floating(window))
+            .and_then(|workspace| engine.get_floating_position(workspace, window))
+            .or_else(|| self.state.windows.record(window)?.frame())
+            .map(|frame| {
+                screen.map_or(frame, |screen| {
+                    Self::frame_on_display(frame, source_frame, screen.frame)
+                })
+            });
         command_workflow::request_window_transfer(
             &mut self.state,
             &mut self.layout_manager,
@@ -4679,6 +4735,9 @@ impl Reactor {
     }
 
     fn expose_all_spaces(&mut self) {
+        self.layout_manager
+            .layout_engine
+            .retire_empty_display_fallbacks(&self.state.windows);
         let spaces: Vec<SpaceId> = (self.screens_in_physical_order().into_iter())
             .filter_map(|screen| screen.space)
             .filter(|space| self.is_space_active(*space))
@@ -6044,6 +6103,8 @@ impl Reactor {
     }
 
     fn frame_on_display(mut frame: CGRect, source: Option<CGRect>, target: CGRect) -> CGRect {
+        frame.size.width = frame.size.width.min(target.size.width);
+        frame.size.height = frame.size.height.min(target.size.height);
         let Some(source) =
             source.filter(|source| source.size.width > 0.0 && source.size.height > 0.0)
         else {

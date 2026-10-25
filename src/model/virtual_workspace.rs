@@ -182,6 +182,10 @@ pub struct VirtualWorkspace {
     /// workspace returns to the rule's display or the rule is (re)activated.
     #[serde(default)]
     pub rule_overridden: bool,
+    /// Minimum presentation state for an otherwise empty display; retire it when
+    /// a real workspace returns. Persist this so restoring does not make it permanent.
+    #[serde(default)]
+    pub(crate) display_fallback: bool,
     last_focused: Option<WindowId>,
     #[serde(default = "default_layout_system_kind")]
     pub layout_system: LayoutSystemKind,
@@ -204,6 +208,7 @@ impl VirtualWorkspace {
             preferred_display: None,
             home_space: None,
             rule_overridden: false,
+            display_fallback: false,
             last_focused: None,
             layout_system,
             layout_mode: mode,
@@ -537,6 +542,7 @@ impl WorkspaceStore {
                 return false;
             }
             let workspace = &mut self[id];
+            workspace.display_fallback = false;
             let changed = workspace.home_space != Some(target)
                 || workspace.preferred_display.as_deref() != display;
             workspace.home_space = Some(target);
@@ -551,6 +557,7 @@ impl WorkspaceStore {
         }
         let workspace = &mut self[id];
         if reason == WorkspaceTransferReason::Explicit {
+            workspace.display_fallback = false;
             workspace.preferred_display = display.map(str::to_owned);
             workspace.home_space = Some(target);
         }
@@ -761,6 +768,7 @@ impl WorkspaceStore {
         self.layout_settings = layout_settings.clone();
         for (id, name) in plan.names {
             self[id].name = name;
+            self[id].display_fallback = false;
         }
         for (space, name) in plan.additions {
             let index = self.scope_ids(space).count();
@@ -871,10 +879,68 @@ impl WorkspaceStore {
         } else {
             target
         };
-        let ids: Vec<_> = (0..count).map(|_| self.append_default_workspace(space)).collect();
+        let fallback = self.settings.mode == WorkspaceMode::Global
+            && self.active_workspace_per_space.contains_key(&space);
+        let ids: Vec<_> = (0..count)
+            .map(|_| {
+                let id = self.append_default_workspace(space);
+                self[id].display_fallback = fallback;
+                id
+            })
+            .collect();
         if let Some(&id) = ids.get(self.settings.default_workspace.min(ids.len() - 1)) {
             self.active_workspace_per_space.insert(space, SpaceActivation::showing(id));
         }
+    }
+
+    /// A fallback becomes ordinary user state as soon as it is occupied or configured.
+    pub(crate) fn retire_empty_display_fallbacks(
+        &mut self,
+        windows: &WindowStore,
+    ) -> Vec<VirtualWorkspaceId> {
+        if self.settings.mode != WorkspaceMode::Global {
+            return Vec::new();
+        }
+        let mut removed = Vec::new();
+        let mut occupied: HashSet<_> = self
+            .workspaces
+            .values()
+            .filter(|workspace| !workspace.display_fallback)
+            .map(|workspace| workspace.space)
+            .collect();
+        for index in 0..self.order.len() {
+            let id = self.order[index];
+            if !self[id].display_fallback {
+                continue;
+            }
+            if index < self.settings.default_workspace_count
+                || self.settings.workspace_names.get(index).is_some()
+                || self.matching_rules(index, &self[id].name).next().is_some()
+                || !windows.workspace_windows(id).is_empty()
+            {
+                self[id].display_fallback = false;
+                occupied.insert(self[id].space);
+            }
+        }
+        self.order.retain(|id| {
+            let workspace = &self.workspaces[*id];
+            let retire = workspace.display_fallback && occupied.contains(&workspace.space);
+            if retire {
+                self.workspaces.remove(*id);
+                removed.push(*id);
+            }
+            !retire
+        });
+        if !removed.is_empty() {
+            for activation in self.active_workspace_per_space.values_mut() {
+                activation.remembered =
+                    activation.remembered.filter(|id| self.workspaces.contains_key(*id));
+            }
+            for space in self.initialized_spaces() {
+                self.repair_activation(space);
+            }
+        }
+        removed
     }
 
     /// Resolve each property independently, with the last matching rule winning.
@@ -1187,6 +1253,7 @@ impl WorkspaceStore {
 
             let previous_assignment = window_store.workspace_for_window(window_id);
             window_store.assign_window_to_workspace(window_id, workspace_id);
+            self[workspace_id].display_fallback = false;
             if let Some(previous_assignment) = previous_assignment
                 && previous_assignment != workspace_id
                 && let Some(previous_workspace) = self.workspaces.get_mut(previous_assignment)
@@ -1415,6 +1482,7 @@ impl WorkspaceStore {
         }
         if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
             workspace.name = new_name;
+            workspace.display_fallback = false;
 
             true
         } else {

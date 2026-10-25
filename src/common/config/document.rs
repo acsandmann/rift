@@ -233,6 +233,26 @@ fn patch(
                     && let Some(old) = old_array.and_then(|array| array.get(old_index))
                 {
                     *element = old.clone();
+                } else if key == "workspace_rules"
+                    && let Some(old_index) = old_values.and_then(|values| {
+                        values.iter().position(|old| {
+                            old.get("workspace") == new_values[index].get("workspace")
+                        })
+                    })
+                    && let Some(old) = old_array.and_then(|array| array.get(old_index))
+                    && let Some(old_table) = old.as_inline_table()
+                {
+                    // Edit the same rule in place: retain its indentation, comments,
+                    // selector spelling and field order instead of reserializing it.
+                    let mut updated = old_table.clone();
+                    patch(
+                        &mut updated,
+                        old_values.unwrap()[old_index].as_table().unwrap(),
+                        new_values[index].as_table().unwrap(),
+                        "workspace_rules",
+                        None,
+                    )?;
+                    *element = toml_edit::Value::InlineTable(updated);
                 } else if matches!(
                     key.as_str(),
                     "workspace_names" | "app_rules" | "workspace_rules"
@@ -243,7 +263,14 @@ fn patch(
             if matches!(key.as_str(), "workspace_names" | "app_rules" | "workspace_rules")
                 && !array.is_empty()
             {
-                array.set_trailing("\n");
+                if let Some(old) =
+                    old_array.filter(|old| key == "workspace_rules" && !old.is_empty())
+                {
+                    array.set_trailing(old.trailing().clone());
+                    array.set_trailing_comma(old.trailing_comma());
+                } else {
+                    array.set_trailing("\n");
+                }
             }
         }
         if let Some(old) = table.get(actual).and_then(Item::as_value) {
