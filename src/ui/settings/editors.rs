@@ -1,3 +1,5 @@
+use objc2_app_kit::NSAccessibility;
+
 use super::pages::{layouts, optional_number};
 use super::*;
 use crate::common::config::*;
@@ -112,8 +114,21 @@ fn record_editor(
 
 pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     let mut f = FormBuilder::new(ui, model);
-    let mut section = f.schema_section(
-        "Workspace behavior",
+    let mode = VirtualWorkspaceSettings::field("mode").unwrap();
+    let separate = f.switch(
+        mode.title,
+        |s| s.virtual_workspaces.mode == WorkspaceMode::PerDisplay,
+        |s, on| {
+            s.virtual_workspaces.mode = if on {
+                WorkspaceMode::PerDisplay
+            } else {
+                WorkspaceMode::Global
+            };
+        },
+    );
+    let separate = f.schema_metadata(separate, mode, |s| &s.virtual_workspaces);
+    let mut section = f.schema_rows(
+        Section::new(&ui, "Workspace behavior").row(separate),
         "",
         |s| &s.virtual_workspaces,
         |s| &mut s.virtual_workspaces,
@@ -256,7 +271,7 @@ pub(super) fn workspaces(ui: Ui, model: &Rc<Model>) -> Page {
     )
 }
 
-fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
+pub(super) fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
     let mut f = FormBuilder::new(ui, model);
     let name = f.text(
         "Name",
@@ -293,7 +308,315 @@ fn workspace_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
         |s| s.settings.layout.mode,
         move |s, mode| set_workspace_layout(s, i, mode),
     );
-    f.finish(Section::new(&ui, "").row(name).row(layout))
+    let display = workspace_display_row(&mut f, model, i);
+    f.finish(
+        VStack::new(&ui)
+            .spacing(16.0)
+            .push(Section::new(&ui, "").row(name).row(layout))
+            .push(display),
+    )
+}
+
+/// The list is ordered intent; all mutations use the workspace sheet's draft.
+fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Section {
+    type Entry = (String, String, String);
+    struct State {
+        this: Weak<State>,
+        ui: Ui,
+        model: Weak<Model>,
+        menu: Menu,
+        list: std::cell::OnceCell<Rc<SettingsList<Entry>>>,
+        controls: std::cell::OnceCell<Rc<AddRemoveControl>>,
+        edit: std::cell::OnceCell<Rc<IconButton>>,
+        field: Rc<TextField>,
+        editing: RefCell<Option<String>>,
+        status: Caption,
+        message: Rc<ValidationMessage>,
+        active: Cell<bool>,
+    }
+    impl State {
+        fn change(&self, i: usize, edit: impl FnOnce(&mut Vec<String>) + Send + 'static) {
+            if !self.active.get() {
+                return;
+            }
+            Model::submit(
+                &self.model,
+                Box::new(move |s| {
+                    let mut values = workspace_display(s, i).to_vec();
+                    edit(&mut values);
+                    set_workspace_display(s, i, values);
+                    Ok(())
+                }),
+                Rc::downgrade(&self.message),
+            );
+        }
+
+        fn enter(&self, value: Option<String>) {
+            if !self.active.get() {
+                return;
+            }
+            self.field.set_value(value.as_deref().unwrap_or(""));
+            *self.editing.borrow_mut() = value;
+            self.field.set_hidden(false);
+            self.field.focus();
+        }
+
+        fn submit(&self, i: usize, value: &str) {
+            if self.field.ns_view().isHidden() {
+                return;
+            }
+            self.field.set_hidden(true);
+            let value = value.trim().to_owned();
+            let old = self.editing.borrow_mut().take();
+            if value.is_empty() {
+                return;
+            }
+            self.change(i, move |values| {
+                if values.contains(&value) {
+                    return;
+                }
+                if let Some(index) = old.and_then(|old| values.iter().position(|v| *v == old)) {
+                    values[index] = value;
+                } else {
+                    values.push(value);
+                }
+            });
+        }
+
+        fn selected(&self) -> Option<String> {
+            let list = self.list.get()?;
+            list.row(list.selection()?).map(|entry| entry.0)
+        }
+
+        fn add_item(&self, ui: &Ui, i: usize, title: &str, value: String, saved: &[String]) {
+            let owner = self.this.clone();
+            let added = saved.contains(&value);
+            let item = MenuItem::new(ui, title).on_click(move || {
+                if let Some(state) = owner.upgrade() {
+                    let value = value.clone();
+                    state.change(i, move |values| {
+                        if !values.contains(&value) {
+                            values.push(value);
+                        }
+                    });
+                }
+            });
+            item.set_checked(added);
+            item.set_enabled(!added);
+            self.menu.add(item);
+        }
+
+        fn refresh(&self, source: &ConfigSource, i: usize) {
+            let (Some(model), Some(list)) = (self.model.upgrade(), self.list.get()) else {
+                return;
+            };
+            let ui = self.ui;
+            let displays = model.env.displays.borrow();
+            let saved = workspace_display(source, i);
+            list.set_rows_if_changed(
+                saved
+                    .iter()
+                    .map(|value| {
+                        if let Some(title) = display_preference_title(value) {
+                            return (value.clone(), title.into(), String::new());
+                        }
+                        if let Some(name) = display_name(&displays, value).or_else(|| {
+                            displays
+                                .iter()
+                                .any(|d| d.name.as_deref() == Some(value))
+                                .then(|| value.clone())
+                        }) {
+                            return (value.clone(), name, String::new());
+                        }
+                        let uuid = value.len() == 36
+                            && value.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+                        if uuid {
+                            let id = &value[..8];
+                            (
+                                value.clone(),
+                                "Unknown Display".into(),
+                                format!("Not connected · {id}"),
+                            )
+                        } else {
+                            (value.clone(), value.clone(), "Not connected".into())
+                        }
+                    })
+                    .collect(),
+            );
+            self.menu.clear();
+            self.menu.add_section_header("Connected Displays");
+            for display in displays.iter() {
+                let title = display_name(&displays, &display.display_uuid).unwrap_or_default();
+                self.add_item(&ui, i, &title, display.display_uuid.clone(), saved);
+            }
+            self.menu.add_section_header("Automatic");
+            for value in ["builtin", "left", "right", "top", "bottom"] {
+                let title = display_preference_title(value).unwrap_or_default();
+                self.add_item(&ui, i, title, value.into(), saved);
+            }
+            self.menu.add_separator();
+            let owner = self.this.clone();
+            self.menu.add(MenuItem::new(&ui, "Other Display…").on_click(move || {
+                if let Some(state) = owner.upgrade() {
+                    state.enter(None);
+                }
+            }));
+            let active = source.virtual_workspaces.mode == WorkspaceMode::Global;
+            self.active.set(active);
+            list.ns_table_view().setEnabled(active);
+            self.field.set_enabled(active);
+            if !active {
+                self.field.set_hidden(true);
+            }
+            let selected = active && list.selection().is_some();
+            if let Some(controls) = self.controls.get() {
+                WeakView::new(&**controls).set_enabled(active);
+                controls.set_remove_enabled(selected);
+            }
+            if let Some(edit) = self.edit.get() {
+                edit.set_enabled(selected);
+            }
+            self.status.set_text(if active {
+                "Uses the first connected display in the list. Drag to reorder."
+            } else {
+                "To use display preferences, turn off “Displays have separate workspaces.”"
+            });
+        }
+    }
+    let ui = f.ui;
+    let state = Rc::new_cyclic(|weak: &Weak<State>| {
+        let owner = weak.clone();
+        let field = Rc::new(
+            TextField::new(&ui).placeholder("Display UUID or name").on_commit(move |value| {
+                if let Some(state) = owner.upgrade() {
+                    state.submit(i, &value);
+                }
+            }),
+        );
+        field.accessibility_label("Display UUID or name");
+        field.set_hidden(true);
+        let menu = Menu::new(&ui);
+        menu.ns_menu().setAutoenablesItems(false);
+        State {
+            this: weak.clone(),
+            ui,
+            model: Rc::downgrade(model),
+            menu,
+            list: Default::default(),
+            controls: Default::default(),
+            edit: Default::default(),
+            field,
+            editing: RefCell::default(),
+            status: Caption::new(&ui, ""),
+            message: Rc::new(ValidationMessage::new(&ui)),
+            active: Cell::new(false),
+        }
+    });
+    let owner = Rc::downgrade(&state);
+    let list = Rc::new(
+        SettingsList::<Entry>::new(&ui, |entry| entry.1.clone(), |entry| entry.2.clone())
+            .empty_message("Any display")
+            .full_length()
+            .symbol("display")
+            .reorderable(true)
+            .on_reorder(move |from, to| {
+                if let Some(state) = owner.upgrade() {
+                    state.change(i, move |values| {
+                        if from < values.len() && to < values.len() {
+                            let value = values.remove(from);
+                            values.insert(to, value);
+                        }
+                    });
+                }
+            }),
+    );
+    list.ns_table_view()
+        .setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
+            "Display Preferences",
+        )));
+    _ = state.list.set(list.clone());
+    let add_owner = Rc::downgrade(&state);
+    let owner = Rc::downgrade(&state);
+    let controls = Rc::new(
+        AddRemoveControl::new(&ui)
+            .on_add(move || {
+                let Some(state) = add_owner.upgrade() else { return };
+                let Some(controls) = state.controls.get() else { return };
+                let Some(add) = controls.ns_view().subviews().firstObject() else {
+                    return;
+                };
+                let y = if add.isFlipped() {
+                    add.bounds().size.height + 4.0
+                } else {
+                    -4.0
+                };
+                state.menu.popup(CGPoint::new(0.0, y), &add);
+            })
+            .on_remove(move || {
+                if let Some(state) = owner.upgrade()
+                    && let Some(value) = state.selected()
+                {
+                    state.change(i, move |values| values.retain(|v| *v != value));
+                }
+            }),
+    );
+    if let Some(add) = controls.ns_view().subviews().firstObject() {
+        add.setAccessibilityLabel(Some(&objc2_foundation::NSString::from_str(
+            "Add Display Preference",
+        )));
+        // The button retains the menu; this also exposes it to secondary clicks.
+        unsafe { add.setMenu(Some(state.menu.ns_menu())) };
+    }
+    let owner = Rc::downgrade(&state);
+    let edit = Rc::new(
+        IconButton::new(&ui, "pencil", "Edit Display Preference").on_click(move || {
+            if let Some(state) = owner.upgrade()
+                && let Some(value) = state.selected()
+            {
+                state.enter(Some(value));
+            }
+        }),
+    );
+    _ = state.controls.set(controls.clone());
+    _ = state.edit.set(edit.clone());
+    let owner = Rc::downgrade(&state);
+    list.set_on_select(move |selected| {
+        if let Some(state) = owner.upgrade() {
+            let enabled = state.active.get() && selected.is_some();
+            if let Some(controls) = state.controls.get() {
+                controls.set_remove_enabled(enabled);
+            }
+            if let Some(edit) = state.edit.get() {
+                edit.set_enabled(enabled);
+            }
+        }
+    });
+    let owner = Rc::downgrade(&state);
+    f.sync.push(Box::new(move |source| {
+        if let Some(state) = owner.upgrade() {
+            state.refresh(source, i);
+        }
+    }));
+    let control = VStack::new(&ui)
+        .spacing(8.0)
+        .push(list)
+        .push(HStack::new(&ui).push(controls).push(Spacer::new(&ui)).push(edit))
+        .push(state.field.clone())
+        .push(objc2::Message::retain(state.status.ns_view()));
+    let message = state.message.clone();
+    Section::new(&ui, "Display Preferences")
+        .content(VStack::new(&ui).spacing(4.0).push(control.keep(state)).push(message))
+}
+
+fn display_preference_title(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "builtin" => "Built-in Display",
+        "left" => "Leftmost Display",
+        "right" => "Rightmost Display",
+        "top" => "Topmost Display",
+        "bottom" => "Bottommost Display",
+        _ => return None,
+    })
 }
 
 fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) -> bool {
@@ -302,41 +625,77 @@ fn selector_matches(selector: &WorkspaceSelector, i: usize, name: Option<&str>) 
         WorkspaceSelector::Name(n) => Some(n.as_str()) == name,
     }
 }
+/// Change only this property's effective rule. Clearing removes every matching
+/// override so an earlier rule cannot unexpectedly become effective again.
+fn edit_workspace_rule<T>(
+    s: &mut ConfigSource,
+    i: usize,
+    property: fn(&mut WorkspaceLayoutRule) -> &mut Option<T>,
+    value: Option<T>,
+) {
+    let name = s.virtual_workspaces.workspace_name(i);
+    let rules = &mut s.virtual_workspaces.workspace_rules;
+    let matches = |r: &WorkspaceLayoutRule| selector_matches(&r.workspace, i, Some(&name));
+    let target = rules.iter_mut().rposition(|r| matches(r) && property(r).is_some());
+    if let Some(value) = value {
+        if let Some(index) = target.or_else(|| rules.iter().rposition(matches)) {
+            *property(&mut rules[index]) = Some(value);
+        } else {
+            let mut rule = WorkspaceLayoutRule {
+                workspace: WorkspaceSelector::Name(name),
+                layout: None,
+                display: None,
+            };
+            *property(&mut rule) = Some(value);
+            rules.push(rule);
+        }
+    } else {
+        for rule in rules.iter_mut().filter(|r| matches(r)) {
+            *property(rule) = None;
+        }
+        rules.retain(|rule| !matches(rule) || rule.layout.is_some() || rule.display.is_some());
+    }
+}
+
 /// Give workspace `i` its own layout, or let it follow the default with `None`.
 pub(super) fn set_workspace_layout(s: &mut ConfigSource, i: usize, mode: Option<LayoutMode>) {
-    let name = s.virtual_workspaces.workspace_names.get(i).cloned();
+    edit_workspace_rule(s, i, |rule| &mut rule.layout, mode);
+}
+
+/// Set ordered display intent; an empty collection removes the display property.
+pub(super) fn set_workspace_display(s: &mut ConfigSource, i: usize, display: Vec<String>) {
+    edit_workspace_rule(
+        s,
+        i,
+        |rule| &mut rule.display,
+        (!display.is_empty()).then_some(display),
+    );
+}
+
+/// Ordered preferences from the last matching display rule, independently of layout.
+pub(super) fn workspace_display(s: &ConfigSource, i: usize) -> &[String] {
+    let name = s.virtual_workspaces.workspace_name(i);
     s.virtual_workspaces
         .workspace_rules
-        .retain(|r| !selector_matches(&r.workspace, i, name.as_deref()));
-    if let Some(layout) = mode {
-        s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
-            workspace: WorkspaceSelector::Index(i),
-            layout,
-        });
-    }
+        .iter()
+        .rev()
+        .filter(|r| selector_matches(&r.workspace, i, Some(&name)))
+        .find_map(|r| r.display.as_deref())
+        .unwrap_or_default()
 }
 
 /// The layout workspace `i` sets for itself, if any.
 pub(super) fn workspace_layout(s: &ConfigSource, i: usize) -> Option<LayoutMode> {
+    let name = s.virtual_workspaces.workspace_name(i);
     s.virtual_workspaces
         .workspace_rules
         .iter()
-        .find(|r| {
-            selector_matches(
-                &r.workspace,
-                i,
-                s.virtual_workspaces.workspace_names.get(i).map(String::as_str),
-            )
-        })
-        .map(|r| r.layout)
+        .rev()
+        .filter(|r| selector_matches(&r.workspace, i, Some(&name)))
+        .find_map(|r| r.layout)
 }
 pub(super) fn workspace_name(s: &ConfigSource, i: usize) -> String {
-    s.virtual_workspaces
-        .workspace_names
-        .get(i)
-        .filter(|n| !n.is_empty())
-        .cloned()
-        .unwrap_or_else(|| format!("Workspace {}", i + 1))
+    s.virtual_workspaces.workspace_name(i)
 }
 
 fn workspace_popup(
@@ -1693,4 +2052,72 @@ fn inherited_field(
         },
     );
     input
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::config::ConfigDocument;
+
+    #[test]
+    fn workspace_edits_preserve_named_rule_and_file_style() {
+        let mut repeated = ConfigDocument::parse(
+            r#"[settings]
+[keys]
+[virtual_workspaces]
+workspace_names = ["Dev"]
+workspace_rules = [
+    # first
+    {workspace="Dev", layout="stack", display="right"},
+    # second
+    { workspace = "Dev", display = "right" },
+    {workspace="Dev", layout="stack"},
+]
+"#,
+        )
+        .unwrap();
+        repeated.update(|s| set_workspace_layout(s, 0, None)).unwrap();
+        assert!(repeated.to_string().contains("# first\n    {workspace="));
+        assert!(repeated.to_string().contains("# second\n    { workspace ="));
+        assert!(repeated.to_string().find("# first") < repeated.to_string().find("# second"));
+        let mut document = ConfigDocument::parse(
+            r#"[settings]
+[keys]
+[virtual_workspaces]
+workspace_names = ["a", "b", "c", "d"]
+workspace_rules = [
+    # layout
+    {workspace = "d", layout = "stack"},
+    { workspace = 3, layout = "stack", display = "right" },
+    # pinned
+    { workspace = "d", display = "portrait" },
+]
+"#,
+        )
+        .unwrap();
+        document.update(|s| set_workspace_layout(s, 3, Some(LayoutMode::Bsp))).unwrap();
+        document.update(|s| set_workspace_display(s, 3, vec!["laptop".into()])).unwrap();
+        let rules = document.source().unwrap().virtual_workspaces.workspace_rules;
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].workspace, WorkspaceSelector::Name("d".into()));
+        assert_eq!(rules[0].layout, Some(LayoutMode::Stack));
+        assert_eq!(rules[1].workspace, WorkspaceSelector::Index(3));
+        assert_eq!(rules[1].layout, Some(LayoutMode::Bsp));
+        assert_eq!(rules[1].display, Some(vec!["right".into()]));
+        assert_eq!(rules[2].display, Some(vec!["laptop".into()]));
+        assert!(document.to_string().contains("\n    { workspace = \"d\""));
+        assert_eq!(document.to_string().matches("# pinned").count(), 1);
+        assert_eq!(document.to_string().matches("# layout").count(), 1);
+        let unchanged = document.to_string();
+        document.update(|s| set_workspace_display(s, 3, vec!["laptop".into()])).unwrap();
+        assert_eq!(document.to_string(), unchanged);
+        document.update(|s| set_workspace_layout(s, 3, None)).unwrap();
+        assert_eq!(
+            document.source().unwrap().virtual_workspaces.workspace_rules[0].display,
+            Some(vec!["right".into()])
+        );
+        assert_eq!(workspace_layout(&document.source().unwrap(), 3), None);
+        document.update(|s| set_workspace_display(s, 3, vec![])).unwrap();
+        assert!(document.source().unwrap().virtual_workspaces.workspace_rules.is_empty());
+    }
 }

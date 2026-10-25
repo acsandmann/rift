@@ -473,7 +473,8 @@ fn typed_collections_keep_source_aliases_and_inline_commands() {
             });
             source.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
                 workspace: WorkspaceSelector::Index(1),
-                layout: LayoutMode::Scrolling,
+                layout: Some(LayoutMode::Scrolling),
+                display: None,
             });
             source.keys.insert("comb1 + Q".into(), source.keys["Alt + H"].clone());
             source.binding_modes.insert(
@@ -560,11 +561,13 @@ fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
     settings.workspace_rules = vec![
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Name("three".into()),
-            layout: LayoutMode::Stack,
+            layout: Some(LayoutMode::Stack),
+            display: None,
         },
         WorkspaceLayoutRule {
             workspace: WorkspaceSelector::Index(0),
-            layout: LayoutMode::Bsp,
+            layout: Some(LayoutMode::Bsp),
+            display: None,
         },
     ];
     settings.app_rules = vec![AppWorkspaceRule {
@@ -702,5 +705,81 @@ fn stack_tab_geometry_rejects_unusable_values() {
     ] {
         let tabs: StackLineSettings = toml::from_str(text).unwrap();
         assert_eq!(tabs.validate().len(), 1, "{text}");
+    }
+}
+
+#[test]
+fn workspace_mode_defaults_to_per_display_and_round_trips() {
+    assert_eq!(
+        toml::from_str::<VirtualWorkspaceSettings>("").unwrap().mode,
+        WorkspaceMode::PerDisplay
+    );
+    for (text, mode) in [
+        ("per_display", WorkspaceMode::PerDisplay),
+        ("global", WorkspaceMode::Global),
+    ] {
+        let settings =
+            toml::from_str::<VirtualWorkspaceSettings>(&format!("mode = '{text}'")).unwrap();
+        assert_eq!(settings.mode, mode);
+        assert_eq!(serde_json::to_value(&settings).unwrap()["mode"], text);
+    }
+    for text in [
+        "mode = 'shared'",
+        "mode = 'independent'",
+        "display_mode = 'shared'",
+    ] {
+        assert!(
+            toml::from_str::<VirtualWorkspaceSettings>(text).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn ordered_display_preferences_round_trip_and_validate() {
+    let mut document = ConfigDocument::default();
+    for display in [r#""builtin""#, r#"["builtin", "right"]"#] {
+        let rule: WorkspaceLayoutRule =
+            toml::from_str(&format!("workspace = 0\ndisplay = {display}")).unwrap();
+        let expected: toml::Table = toml::from_str(&format!("display = {display}")).unwrap();
+        assert_eq!(
+            toml::Value::try_from(&rule).unwrap()["display"],
+            expected["display"]
+        );
+        document
+            .update(|s| s.virtual_workspaces.workspace_rules = vec![rule.clone()])
+            .unwrap();
+        assert_eq!(document.runtime().unwrap().virtual_workspaces.workspace_rules, [
+            rule
+        ]);
+    }
+    for values in [vec![], vec![""], vec!["builtin", " "]] {
+        let error = document
+            .update(|s| {
+                s.virtual_workspaces.workspace_rules[0].display =
+                    Some(values.into_iter().map(String::from).collect());
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("Workspace rule 0 display preferences"));
+    }
+}
+
+#[test]
+fn workspace_names_reject_explicit_and_generated_collisions() {
+    for names in [vec!["Main", "Dev", "Main"], vec!["Workspace 3"], vec![
+        "",
+        "Workspace 1",
+    ]] {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 3,
+            workspace_names: names.into_iter().map(String::from).collect(),
+            ..Default::default()
+        };
+        assert!(
+            settings
+                .validate()
+                .iter()
+                .any(|issue| issue.contains("Duplicate workspace name"))
+        );
     }
 }

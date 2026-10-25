@@ -122,16 +122,17 @@ pub fn handle_mouse_up(
     if let Some(space) = payload.final_space
         && layout.layout_engine.is_window_floating(window)
     {
+        state.windows.clear_floating_display_geometry(window);
         if commit.source.origin_space != payload.final_space {
             layout.layout_engine.remove_floating_position(window);
         }
-        if let Some(workspace) = state
-            .windows
-            .workspace_for_window(space, window)
+        if let Some(workspace) = layout
+            .layout_engine
+            .workspaces()
+            .workspace_for_window(&state.windows, space, window)
             .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
         {
             layout.layout_engine.store_floating_position(
-                space,
                 workspace,
                 window,
                 commit.source.last_frame,

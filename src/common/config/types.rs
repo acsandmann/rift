@@ -25,9 +25,28 @@ pub fn config_file() -> PathBuf {
     dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, ConfigEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    /// Each macOS desktop has its own set of workspaces, numbered independently.
+    #[default]
+    PerDisplay,
+    /// One set of workspaces across all displays. Each workspace belongs to one display at a time.
+    Global,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualWorkspaceSettings {
+    #[serde(default)]
+    /// Each display has its own workspaces, numbered from 1. When off, workspaces are numbered
+    /// across all displays, and each one stays on a single display.
+    #[setting(
+        label = "Displays have separate workspaces",
+        aliases = "workspace mode global per display multiple monitors spaces",
+        custom
+    )]
+    pub mode: WorkspaceMode,
     #[serde(default = "yes")]
     /// Organize windows into separate virtual workspaces.
     #[setting(ignore)]
@@ -87,16 +106,24 @@ pub struct VirtualWorkspaceSettings {
     #[setting(label = "App rules", custom)]
     pub app_rules: Vec<AppWorkspaceRule>,
     #[serde(default)]
-    /// Choose layouts for individual workspaces.
+    /// Choose independent layouts and ordered display preferences for individual workspaces.
     #[setting(label = "Workspace rules", custom)]
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
 }
 
+#[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
     pub workspace: WorkspaceSelector,
-    pub layout: LayoutMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<LayoutMode>,
+    /// Ordered display UUIDs, names, or builtin/left/right/top/bottom selectors.
+    /// The first eligible preference wins. Only applies when
+    /// `mode = "global"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde_as(as = "Option<serde_with::OneOrMany<_>>")]
+    pub display: Option<Vec<String>>,
 }
 
 // Allow specifying a workspace by numeric index or by name in the config.
@@ -176,6 +203,7 @@ impl Default for VirtualWorkspaceSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            mode: WorkspaceMode::PerDisplay,
             default_workspace_count: default_workspace_count(),
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,
@@ -191,6 +219,14 @@ impl Default for VirtualWorkspaceSettings {
 }
 
 impl VirtualWorkspaceSettings {
+    pub fn workspace_name(&self, index: usize) -> String {
+        self.workspace_names
+            .get(index)
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("Workspace {}", index + 1))
+    }
+
     pub fn resize(&mut self, count: usize) {
         self.default_workspace_count = count;
         // Invalid counts are left for the shared validator, without large allocations.
@@ -234,6 +270,31 @@ impl VirtualWorkspaceSettings {
                 "default_workspace ({}) must be less than default_workspace_count ({})",
                 self.default_workspace, self.default_workspace_count
             ));
+        }
+
+        let mut names = crate::common::collections::HashMap::default();
+        for index in 0..self.default_workspace_count.min(MAX_WORKSPACES) {
+            let name = self.workspace_name(index);
+            if let Some(first) = names.get(&name) {
+                issues.push(format!(
+                    "Duplicate workspace name {name:?} (workspaces {} and {}). Workspace names must be unique.",
+                    first + 1, index + 1
+                ));
+            } else {
+                names.insert(name, index);
+            }
+        }
+
+        for (index, rule) in self.workspace_rules.iter().enumerate() {
+            if rule.layout.is_none() && rule.display.is_none() {
+                issues.push(format!("Workspace rule {index} has no layout or display"));
+            }
+            if let Some(preferences) = &rule.display
+                && (preferences.is_empty()
+                    || preferences.iter().any(|value| value.trim().is_empty()))
+            {
+                issues.push(format!("Workspace rule {index} display preferences must contain nonempty UUIDs, names, or keywords"));
+            }
         }
 
         // Validate rules and check duplicates in a single pass

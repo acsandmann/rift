@@ -137,6 +137,10 @@ pub struct WorkspaceData {
     pub name: String,
     pub layout_mode: String,
     pub is_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_uuid: Option<String>,
+    #[serde(default)]
+    pub is_focused: bool,
     pub window_count: usize,
     /// Workspace windows in logical column-major order when the layout has column semantics.
     /// Windows without a logical position follow in their existing stable order.

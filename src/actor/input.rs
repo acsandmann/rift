@@ -38,6 +38,11 @@ const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 32_000_000; // 32ms ~= 31 Hz
 #[derive(Debug)]
 pub enum Request {
     Warp(CGPoint),
+    /// Carry the cursor's position within `from` to the same spot in `to`.
+    WarpRelative {
+        from: Option<CGRect>,
+        to: CGRect,
+    },
     HideOnFocus,
     EnforceHidden,
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
@@ -447,7 +452,14 @@ impl Input {
                 }
                 should_rebuild_mask = true;
             }
-            Request::Warp(point) => {
+            Request::Warp(_) | Request::WarpRelative { .. } => {
+                let point = match request {
+                    Request::WarpRelative { from, to } => {
+                        relative_point(event::current_cursor_location().ok(), from, to)
+                    }
+                    Request::Warp(point) => point,
+                    _ => unreachable!(),
+                };
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 }
@@ -1363,9 +1375,38 @@ fn build_event_mask(
     mask
 }
 
+/// Map `cursor` from its spot in `from` to the same spot in `to`, or `to`'s
+/// center when the cursor is not inside `from`.
+fn relative_point(cursor: Option<CGPoint>, from: Option<CGRect>, to: CGRect) -> CGPoint {
+    use crate::sys::geometry::CGRectExt;
+    match (cursor, from) {
+        (Some(p), Some(from))
+            if from.size.width > 0. && from.size.height > 0. && from.contains(p) =>
+        {
+            CGPoint::new(
+                to.origin.x + (p.x - from.origin.x) / from.size.width * to.size.width,
+                to.origin.y + (p.y - from.origin.y) / from.size.height * to.size.height,
+            )
+        }
+        _ => to.mid(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_warp_keeps_cursor_spot_or_centers() {
+        use objc2_core_foundation::CGSize;
+        let from = CGRect::new(CGPoint::new(100., 100.), CGSize::new(200., 100.));
+        let to = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(800., 600.));
+        let inside = Some(CGPoint::new(150., 175.));
+        assert_eq!(relative_point(inside, Some(from), to), CGPoint::new(1200., 450.));
+        assert_eq!(relative_point(Some(CGPoint::ZERO), Some(from), to), to.mid());
+        assert_eq!(relative_point(inside, None, to), to.mid());
+        assert_eq!(relative_point(None, Some(from), to), to.mid());
+    }
 
     #[test]
     fn native_hold_timeout_does_not_reject_a_slow_physical_stroke() {

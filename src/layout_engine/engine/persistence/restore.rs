@@ -56,7 +56,7 @@ impl RestorePlan {
                     // that interval until the next master save.
                     engine
                         .display_uuid_for_space(request.active_space)
-                        .and_then(|display| snapshot.display_last_space.get(&display).copied())
+                        .and_then(|display| snapshot.display_last_space.get(display).copied())
                         .filter(|space| saved_spaces.contains(space))
                 }),
         };
@@ -217,12 +217,11 @@ impl RestorePlan {
                 .copied()
                 .filter(|window| snapshot.floating.is_floating(*window))
                 .collect();
-            let floating_positions = snapshot
-                .floating_positions
-                .workspace_positions(mapping.source_space, mapping.source_workspace);
+            let floating_positions =
+                snapshot.floating_positions.workspace_positions(mapping.source_workspace);
             let mut replaced_windows: HashSet<_> = engine
                 .floating_positions
-                .workspace_positions(mapping.target_space, mapping.target_workspace)
+                .workspace_positions(mapping.target_workspace)
                 .into_iter()
                 .map(|(window, _)| window)
                 .collect();
@@ -230,9 +229,7 @@ impl RestorePlan {
             for layout in target.layout_state.all_layouts() {
                 replaced_windows.extend(target.layout_system.all_windows_in_layout(layout));
             }
-            replaced_windows.extend(
-                window_store.workspace_windows(mapping.target_space, mapping.target_workspace),
-            );
+            replaced_windows.extend(window_store.workspace_windows(mapping.target_workspace));
             let mut workspace = snapshot
                 .workspaces
                 .workspaces
@@ -293,10 +290,7 @@ impl RestorePlan {
         if self.request.scope == RestoreScope::Space
             && let Some(target_active) = self.target_active
         {
-            engine
-                .workspaces
-                .active_workspace_per_space
-                .insert(self.request.active_space, (None, target_active));
+            engine.workspaces.set_active_workspace(self.request.active_space, target_active);
         }
         // Only identities imported by this transaction are restoration candidates. Deriving this
         // set from the whole live persistence map can arm unrelated windows which merely happen
@@ -319,15 +313,15 @@ impl RestorePlan {
             if !engine.persistence.pending_windows.contains(live) {
                 continue;
             }
-            let live_assignment = window_store.workspace_info_for_window(*live);
+            let live_assignment = window_store.workspace_for_window(*live);
             let live_space = window_store
                 .current_window_server_space_for_window(*live)
-                .or_else(|| live_assignment.map(|assignment| assignment.space));
+                .or_else(|| live_assignment.map(|assignment| engine.workspaces[assignment].space));
             // WorkspaceStore is the authoritative Rift ownership record. WindowServer space can
             // briefly lag or lead during native-space transitions, so it must not make an
             // externally assigned window eligible for a restore transaction.
             let live_is_in_scope = live_assignment.is_some_and(|assignment| {
-                restored_targets.contains(&(assignment.space, assignment.workspace_id))
+                restored_targets.contains(&(engine.workspaces[assignment].space, assignment))
             });
             let identity_is_compatible = engine
                 .persistence
@@ -340,7 +334,7 @@ impl RestorePlan {
             preempted_candidates += 1;
             for &(space, workspace) in &restored_targets {
                 engine.workspaces[workspace].layout_system.remove_window(*live);
-                engine.floating_positions.remove_workspace_window(space, workspace, *live);
+                engine.floating_positions.remove_workspace_window(workspace, *live);
                 if engine.workspaces.last_focused_window(space, workspace) == Some(*live) {
                     engine.workspaces.set_last_focused_window(space, workspace, None);
                 }
@@ -367,13 +361,13 @@ impl RestorePlan {
             if !window_store.contains_window(live) {
                 continue;
             }
-            let live_assignment = window_store.workspace_info_for_window(live);
+            let live_assignment = window_store.workspace_for_window(live);
             let live_space = window_store
                 .current_window_server_space_for_window(live)
-                .or_else(|| live_assignment.map(|assignment| assignment.space))
+                .or_else(|| live_assignment.map(|assignment| engine.workspaces[assignment].space))
                 .unwrap_or(self.request.active_space);
             let live_is_in_scope = live_assignment.is_some_and(|assignment| {
-                restored_targets.contains(&(assignment.space, assignment.workspace_id))
+                restored_targets.contains(&(engine.workspaces[assignment].space, assignment))
             });
             if !live_is_in_scope {
                 continue;
@@ -389,15 +383,10 @@ impl RestorePlan {
                 if live_floating.contains(&live) {
                     engine.floating.add_floating(live);
                     if let (Some(workspace), Some(window)) = (
-                        window_store.workspace_for_window(live_space, live),
+                        engine.workspaces().workspace_for_window(&window_store, live_space, live),
                         window_store.window(live),
                     ) {
-                        engine.floating_positions.store(
-                            live_space,
-                            workspace,
-                            live,
-                            window.frame_monotonic,
-                        );
+                        engine.floating_positions.store(workspace, live, window.frame_monotonic);
                     }
                 } else {
                     engine.floating.remove_floating(live);
@@ -408,7 +397,8 @@ impl RestorePlan {
             // windows the operation is idempotent when reconciliation already replaced the node.
             engine.add_window_to_layout(window_store, live_space, live);
             if engine.focused_window == Some(live)
-                && let Some(workspace) = window_store.workspace_for_window(live_space, live)
+                && let Some(workspace) =
+                    engine.workspaces().workspace_for_window(&window_store, live_space, live)
             {
                 engine.workspaces.set_last_focused_window(live_space, workspace, Some(live));
             }
@@ -437,8 +427,7 @@ impl LayoutEngine {
         targets: &[(SpaceId, VirtualWorkspaceId)],
     ) {
         for &(space, workspace) in targets {
-            let expected_assignment =
-                crate::model::window_store::WindowWorkspaceInfo { space, workspace_id: workspace };
+            let expected_assignment = workspace;
             let entry = &self.workspaces[workspace];
             let tiled_windows = entry
                 .layout_state
@@ -447,7 +436,7 @@ impl LayoutEngine {
                 .collect::<HashSet<_>>();
             for window in tiled_windows {
                 let valid = live_windows.contains(&window)
-                    && window_store.workspace_info_for_window(window) == Some(expected_assignment)
+                    && window_store.workspace_for_window(window) == Some(expected_assignment)
                     && !self.floating.is_floating(window);
                 if !valid {
                     self.workspaces[workspace].layout_system.remove_window(window);
@@ -456,22 +445,22 @@ impl LayoutEngine {
 
             let positioned_windows = self
                 .floating_positions
-                .workspace_positions(space, workspace)
+                .workspace_positions(workspace)
                 .into_iter()
                 .map(|(window, _)| window)
                 .collect::<Vec<_>>();
             for window in positioned_windows {
                 let valid = live_windows.contains(&window)
-                    && window_store.workspace_info_for_window(window) == Some(expected_assignment)
+                    && window_store.workspace_for_window(window) == Some(expected_assignment)
                     && self.floating.is_floating(window);
                 if !valid {
-                    self.floating_positions.remove_workspace_window(space, workspace, window);
+                    self.floating_positions.remove_workspace_window(workspace, window);
                 }
             }
 
             if self.workspaces.last_focused_window(space, workspace).is_some_and(|window| {
                 !live_windows.contains(&window)
-                    || window_store.workspace_info_for_window(window) != Some(expected_assignment)
+                    || window_store.workspace_for_window(window) != Some(expected_assignment)
             }) {
                 self.workspaces.set_last_focused_window(space, workspace, None);
             }
@@ -515,7 +504,7 @@ impl LayoutEngine {
         // The source topology is file data, not a live engine to be reconciled with the current
         // workspace-count setting. Only refresh layout-system settings; the installed workspace
         // inherits the already-hydrated target manager's runtime configuration.
-        snapshot.set_layout_settings(layout_settings);
+        snapshot.apply_layout_settings(layout_settings);
         self.refresh_window_fingerprints(window_store);
         let live_windows = self.persistence.live_fingerprints();
         let plan = RestorePlan::build(snapshot, self, window_store, request)?;
@@ -541,11 +530,8 @@ impl LayoutEngine {
             self.persistence.forget_window(window);
         }
         self.workspaces[state.target_workspace] = state.workspace;
-        self.floating_positions.replace_workspace_positions(
-            state.target_space,
-            state.target_workspace,
-            state.floating_positions,
-        );
+        self.floating_positions
+            .replace_workspace_positions(state.target_workspace, state.floating_positions);
         for window in state.floating_windows {
             self.floating.add_floating(window);
         }
