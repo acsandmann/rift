@@ -9575,6 +9575,143 @@ fn shared_settings() -> crate::common::config::VirtualWorkspaceSettings {
 }
 
 #[test]
+fn native_return_waits_for_a_global_destination_without_losing_eviction() {
+    use crate::layout_engine::systems::LayoutSystem;
+    use crate::model::virtual_workspace::WorkspaceTransferReason;
+
+    let mut settings = shared_settings();
+    settings.default_workspace_count = 6;
+    let (mut apps, mut reactor, original, landing_space) = two_displays(settings);
+    let window = WindowId::new(1, 1);
+    let original_workspaces = reactor.test_workspace_ids(original);
+    let remembered = original_workspaces[2];
+    assert!(reactor.assign_test_window_to_workspace(original, window, remembered));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(original, window));
+    reactor.reassign_window_to_authoritative_space(window, landing_space, true);
+    let landed = reactor.state.windows.workspace_for_window(window).unwrap();
+    let landing_layout = reactor.layout_manager.layout_engine.workspaces()[landed]
+        .active_layout()
+        .unwrap();
+    assert!(
+        reactor.layout_manager.layout_engine.workspaces()[landed]
+            .layout_system
+            .contains_window(landing_layout, window)
+    );
+    let dormant = SpaceId::new(99);
+    for &workspace in &original_workspaces {
+        assert!(
+            reactor.layout_manager.layout_engine.workspaces_mut().transfer_workspace(
+                workspace,
+                dormant,
+                None,
+                WorkspaceTransferReason::Restoration
+            )
+        );
+    }
+    apps.requests();
+    let snapshot = [(reactor.test_window_server_id(window), Some(original))];
+    for _ in 0..3 {
+        reactor.reconcile_windows_in_authoritative_active_snapshot(&snapshot, &[]);
+        assert_eq!(reactor.state.windows.workspace_for_window(window), Some(landed));
+        assert!(
+            reactor.layout_manager.layout_engine.workspaces()[landed]
+                .layout_system
+                .contains_window(landing_layout, window)
+        );
+        assert_eq!(
+            reactor.layout_manager.layout_engine.eviction_ordinal(
+                &reactor.state.windows,
+                window,
+                original
+            ),
+            Some(2)
+        );
+        assert!(reactor.test_workspace_ids(original).is_empty());
+        assert!(reactor.state.windows.record(window).unwrap().pending_transfer().is_none());
+        assert!(
+            apps.requests().is_empty(),
+            "incomplete recovery must not write geometry"
+        );
+    }
+    for &workspace in &original_workspaces {
+        assert!(
+            reactor.layout_manager.layout_engine.workspaces_mut().transfer_workspace(
+                workspace,
+                original,
+                None,
+                WorkspaceTransferReason::Restoration
+            )
+        );
+    }
+    assert!(reactor.set_test_active_workspace(original, original_workspaces[0]));
+    reactor.reconcile_windows_in_authoritative_active_snapshot(&snapshot, &[]);
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(window),
+        Some(remembered)
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.take_eviction(window),
+        None,
+        "successful restoration consumes the record"
+    );
+}
+
+#[test]
+fn native_return_preserves_normal_restoration_and_missing_ordinal_fallback() {
+    use crate::common::config::WorkspaceMode;
+    use crate::model::virtual_workspace::WorkspaceTransferReason;
+
+    for (mode, missing_ordinal) in [
+        (WorkspaceMode::Global, false),
+        (WorkspaceMode::PerDisplay, false),
+        (WorkspaceMode::Global, true),
+    ] {
+        let mut settings = shared_settings();
+        settings.mode = mode;
+        settings.default_workspace_count = 6;
+        let (_, mut reactor, original, landing_space) = two_displays(settings);
+        let window = WindowId::new(1, 1);
+        let workspaces = reactor.test_workspace_ids(original);
+        let remembered = workspaces[2];
+        assert!(reactor.assign_test_window_to_workspace(original, window, remembered));
+        reactor.send_layout_event(LayoutEvent::WindowAdded(original, window));
+        reactor.reassign_window_to_authoritative_space(window, landing_space, true);
+        assert_eq!(
+            reactor.layout_manager.layout_engine.eviction_ordinal(
+                &reactor.state.windows,
+                window,
+                original
+            ),
+            Some(2)
+        );
+        if missing_ordinal {
+            assert!(
+                reactor.layout_manager.layout_engine.workspaces_mut().transfer_workspace(
+                    remembered,
+                    SpaceId::new(99),
+                    None,
+                    WorkspaceTransferReason::Restoration
+                )
+            );
+        }
+        assert!(reactor.set_test_active_workspace(original, workspaces[0]));
+        let snapshot = [(reactor.test_window_server_id(window), Some(original))];
+        for _ in 0..2 {
+            reactor.reconcile_windows_in_authoritative_active_snapshot(&snapshot, &[]);
+            assert_eq!(
+                reactor.state.windows.workspace_for_window(window),
+                Some(if missing_ordinal {
+                    workspaces[0]
+                } else {
+                    remembered
+                })
+            );
+            assert_eq!(reactor.layout_manager.layout_engine.take_eviction(window), None);
+        }
+    }
+}
+
+#[test]
 fn commands_follow_a_window_move_node_carried_to_another_display() {
     let (mut apps, mut reactor, a, b) = two_displays(Default::default());
     let window = WindowId::new(1, 1);

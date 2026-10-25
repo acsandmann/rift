@@ -1421,22 +1421,25 @@ impl LayoutEngine {
     }
 
     /// The workspace position `wid` was evicted from, if the display now showing `space` is the
-    /// one it was evicted from and nothing has placed the window elsewhere since. Consumes the
-    /// record when it applies.
-    pub(crate) fn take_eviction(
-        &mut self,
+    /// one it was evicted from and nothing has placed the window elsewhere since.
+    pub(crate) fn eviction_ordinal(
+        &self,
         windows: &WindowStore,
         wid: WindowId,
         space: SpaceId,
     ) -> Option<usize> {
         let record = self.evicted.get(&wid)?;
         if windows.workspace_for_window(wid) != Some(record.landed) {
-            self.evicted.remove(&wid);
             return None;
         }
         if self.display_uuid_for_space(space).as_deref() != Some(record.display.as_str()) {
             return None;
         }
+        Some(record.ordinal)
+    }
+
+    /// Consume recovery only after native reassignment has succeeded, including a fallback.
+    pub(crate) fn take_eviction(&mut self, wid: WindowId) -> Option<usize> {
         self.evicted.remove(&wid).map(|record| record.ordinal)
     }
 
@@ -3947,7 +3950,7 @@ mod tests {
             assert_eq!(tabs(&mut engine), expected, "{mode:?}");
             assert_eq!(store.workspace_for_window(before[0]), Some(landing));
             assert_eq!(
-                engine.take_eviction(&store, before[0], origin),
+                engine.eviction_ordinal(&store, before[0], origin),
                 None,
                 "same-workspace user placement beats the old eviction"
             );
@@ -4127,9 +4130,17 @@ mod tests {
         // Waits for its own display, and is consumed exactly once.
         let window = WindowId::new(1, 1);
         evict(&mut engine, &mut store, window);
-        assert_eq!(engine.take_eviction(&store, window, other_display), None);
-        assert_eq!(engine.take_eviction(&store, window, original_display), Some(2));
-        assert_eq!(engine.take_eviction(&store, window, original_display), None);
+        assert_eq!(engine.eviction_ordinal(&store, window, other_display), None);
+        assert_eq!(
+            engine.eviction_ordinal(&store, window, original_display),
+            Some(2)
+        );
+        assert_eq!(
+            engine.eviction_ordinal(&store, window, original_display),
+            Some(2)
+        );
+        assert_eq!(engine.take_eviction(window), Some(2));
+        assert_eq!(engine.take_eviction(window), None);
 
         // A window placed somewhere else since no longer follows the record.
         let moved = WindowId::new(1, 2);
@@ -4140,7 +4151,24 @@ mod tests {
                 .workspaces_mut()
                 .assign_window_to_workspace(&mut store, home, moved, elsewhere)
         );
-        assert_eq!(engine.take_eviction(&store, moved, original_display), None);
+        assert_eq!(engine.eviction_ordinal(&store, moved, original_display), None);
+        engine.finish_native_reconcile(&store);
+        assert_eq!(engine.take_eviction(moved), None);
+
+        // An explicit workspace move revokes restoration immediately.
+        let placed = WindowId::new(1, 7);
+        evict(&mut engine, &mut store, placed);
+        let _ = engine.handle_virtual_workspace_command(
+            &mut store,
+            home,
+            &LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Index(0),
+                follow: false,
+                window_id: Some(placed.idx.get()),
+            },
+        );
+        assert_eq!(store.workspace_for_window(placed), Some(elsewhere));
+        assert_eq!(engine.take_eviction(placed), None);
 
         // A closed window leaves nothing behind.
         let closed = WindowId::new(1, 3);
@@ -4150,7 +4178,7 @@ mod tests {
             engine.evicted.is_empty(),
             "closing a window drops its record at once"
         );
-        assert_eq!(engine.take_eviction(&store, closed, original_display), None);
+        assert_eq!(engine.eviction_ordinal(&store, closed, original_display), None);
 
         // Moving between workspaces of one display is not an eviction.
         let same_display = WindowId::new(1, 4);
@@ -4175,7 +4203,10 @@ mod tests {
         let renamed = WindowId::new(1, 6);
         evict(&mut engine, &mut store, renamed);
         engine.remap_space(&mut store, home, SpaceId::new(5));
-        assert_eq!(engine.take_eviction(&store, renamed, original_display), Some(2));
+        assert_eq!(
+            engine.eviction_ordinal(&store, renamed, original_display),
+            Some(2)
+        );
     }
 
     fn test_engine() -> LayoutEngine {

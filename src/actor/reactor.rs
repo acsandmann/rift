@@ -4486,7 +4486,7 @@ impl Reactor {
             let departed_from = self.state.windows.workspace_for_window(wid);
             let engine = &mut self.layout_manager.layout_engine;
             // A window a departure moved off this display goes back where it was.
-            let returning = engine.take_eviction(&self.state.windows, wid, space);
+            let returning = engine.eviction_ordinal(&self.state.windows, wid, space);
             // Resolve the destination before touching the source: a global-mode
             // Space can own no workspace, and then the current owner is kept.
             engine.workspaces_mut().ensure_space_initialized(space);
@@ -4510,12 +4510,17 @@ impl Reactor {
             };
             self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             let engine = &mut self.layout_manager.layout_engine;
-            engine.workspaces_mut().assign_window_to_workspace(
+            if !engine.workspaces_mut().assign_window_to_workspace(
                 &mut self.state.windows,
                 space,
                 wid,
                 workspace,
-            );
+            ) {
+                return;
+            }
+            if returning.is_some() {
+                engine.take_eviction(wid);
+            }
             if remembered.is_none()
                 && preserve_workspace_ordinal
                 && let Some(from) = departed_from
