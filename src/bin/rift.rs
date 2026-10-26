@@ -75,6 +75,10 @@ struct Cli {
     #[arg(long, hide = true)]
     settings: bool,
 
+    /// Internal: recover offscreen windows after this daemon PID exits.
+    #[arg(long, hide = true)]
+    recover_windows: Option<i32>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -106,8 +110,13 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 
 fn main() {
     let entry = rift_wm::ui::settings::timing::start();
-    sigpipe::reset();
     let opt = Cli::parse();
+
+    if let Some(pid) = opt.recover_windows {
+        rift_wm::sys::window_recovery::run(pid).expect("window recovery failed");
+        return;
+    }
+    sigpipe::reset();
 
     if opt.settings {
         rift_wm::ui::settings::timing::finish(entry, "entry/argument parsing");
@@ -252,6 +261,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             process::exit(1);
         }
     };
+
+    let _window_recovery =
+        rift_wm::sys::window_recovery::start().expect("could not start window recovery");
 
     let mach_bridge_rx = broadcast_rx;
 
