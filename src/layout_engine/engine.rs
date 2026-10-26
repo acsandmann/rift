@@ -5406,17 +5406,16 @@ mod tests {
             );
 
             let gaps = engine.layout_settings.gaps.clone();
-            let widths = |engine: &mut LayoutEngine| -> HashMap<WindowId, f64> {
+            let frames = |engine: &mut LayoutEngine| -> HashMap<WindowId, CGRect> {
                 engine
                     .calculate_layout(space, screen, &gaps, Default::default())
                     .into_iter()
-                    .map(|(wid, frame)| (wid, frame.size.width))
                     .collect()
             };
-            let skewed = widths(&mut engine);
+            let skewed = frames(&mut engine);
 
             assert!(
-                (skewed[&w1] - skewed[&w2]).abs() > 1.0,
+                (skewed[&w1].size.width - skewed[&w2].size.width).abs() > 1.0,
                 "{mode:?} was not skewed"
             );
 
@@ -5428,11 +5427,17 @@ mod tests {
                 LayoutCommand::Balance,
             );
 
-            let balanced = widths(&mut engine);
+            let balanced = frames(&mut engine);
 
-            assert!(
-                (balanced[&w1] - balanced[&w2]).abs() < 1.0,
-                "{mode:?} was not balanced"
+            assert_eq!(
+                balanced[&w1],
+                CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(600.0, 900.0)),
+                "{mode:?}"
+            );
+            assert_eq!(
+                balanced[&w2],
+                CGRect::new(CGPoint::new(600.0, 0.0), CGSize::new(600.0, 900.0)),
+                "{mode:?}"
             );
         }
     }

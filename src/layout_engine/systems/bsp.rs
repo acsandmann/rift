@@ -1189,6 +1189,9 @@ mod tests {
         assert!(system.select_window(layout, w(1)));
         system.resize_selection_by(layout, -0.4, ResizeOrientation::Smart);
 
+        assert!(system.select_window(layout, w(2)));
+        system.resize_selection_by(layout, -0.3, ResizeOrientation::Vertical);
+
         system.rebalance(layout);
 
         let frames = calculate_frames(&system, layout, size, &Default::default());
