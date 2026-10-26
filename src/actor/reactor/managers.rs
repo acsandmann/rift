@@ -160,6 +160,7 @@ pub struct WorkspaceSwitchManager {
     pub active_workspace_switch: Option<u64>,
     pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
     pub pending_workspace_mouse_warp: Option<WindowId>,
+    pub pending_display_warp: Option<crate::sys::screen::SpaceId>,
 }
 
 impl WorkspaceSwitchManager {
@@ -381,12 +382,13 @@ impl LayoutManager {
         if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
-        let screens = reactor.space_state.screens.clone();
-        let all_screen_frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
+        let all_screen_frames: Vec<CGRect> =
+            reactor.space_state.screens.iter().map(|s| s.frame).collect();
         let mut layout_result = LayoutResult::new();
 
-        for screen in screens {
-            let Some(space) = screen.space else {
+        for index in 0..reactor.space_state.screens.len() {
+            let screen = &reactor.space_state.screens[index];
+            let (Some(space), frame) = (screen.space, screen.frame) else {
                 continue;
             };
             if space_scope.is_some_and(|scope| scope != space) {
@@ -410,7 +412,7 @@ impl LayoutManager {
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     &reactor.state.windows,
                     space,
-                    screen.frame.clone(),
+                    frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
                     |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
@@ -418,8 +420,7 @@ impl LayoutManager {
                 );
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                 == LayoutMode::Scrolling
-                && let Some(bounds) =
-                    ScrollingDisplayBounds::for_screen(screen.frame, &all_screen_frames)
+                && let Some(bounds) = ScrollingDisplayBounds::for_screen(frame, &all_screen_frames)
             {
                 let active_workspace_windows: HashSet<WindowId> = reactor
                     .layout_manager

@@ -1,4 +1,4 @@
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HideCorner {
@@ -43,19 +43,28 @@ impl HiddenWindowPlacement {
         preferred_corner: HideCorner,
         other_screens: &[CGRect],
     ) -> CGRect {
-        let preferred = Self::rect_for_corner(screen, window, preferred_corner);
-        let alternate = Self::rect_for_corner(screen, window, preferred_corner.opposite());
-        let overlap = |candidate| {
+        let overlap = |candidate: &CGRect| {
             other_screens
                 .iter()
-                .map(|other| Self::intersection_area(candidate, *other))
+                .filter(|other| **other != screen)
+                .map(|other| Self::intersection_area(*candidate, *other))
                 .sum::<f64>()
         };
-        if overlap(alternate) < overlap(preferred) {
-            alternate
-        } else {
-            preferred
-        }
+        // A bottom corner lands on any display stacked below; parking just past the
+        // side edge, top-aligned and no taller than the display, avoids that.
+        let corners = [preferred_corner, preferred_corner.opposite()];
+        let bottom = corners.map(|corner| Self::rect_for_corner(screen, window, corner));
+        let side = bottom.map(|rect| {
+            CGRect::new(
+                CGPoint::new(rect.origin.x, screen.origin.y),
+                CGSize::new(window.size.width, window.size.height.min(screen.size.height)),
+            )
+        });
+        bottom
+            .into_iter()
+            .chain(side)
+            .min_by(|a, b| overlap(a).total_cmp(&overlap(b)))
+            .unwrap_or(window)
     }
 
     pub fn is_hidden(screen: CGRect, window: CGRect, other_screens: &[CGRect]) -> bool {
@@ -70,7 +79,7 @@ impl HiddenWindowPlacement {
                     - window.origin.y.max(screen.origin.y))
                 .max(0.0);
                 visible_width <= Self::VISIBLE_THRESHOLD_PX
-                    && visible_height <= Self::VISIBLE_THRESHOLD_PX
+                    || visible_height <= Self::VISIBLE_THRESHOLD_PX
             }
     }
 }
@@ -106,5 +115,16 @@ mod tests {
             &[rect(1000.0, 0.0, 1000.0, 800.0)],
         );
         assert_eq!(hidden.origin.x, -199.0);
+    }
+
+    #[test]
+    fn parks_beside_the_display_when_another_display_sits_below() {
+        let upper = rect(81.0, -1049.0, 1920.0, 1049.0);
+        let lower = rect(0.0, 40.0, 2056.0, 1289.0);
+        let window = rect(16.0, 100.0, 1007.0, 1219.0);
+        let hidden =
+            HiddenWindowPlacement::calculate(upper, window, HideCorner::BottomRight, &[lower]);
+        assert_eq!(hidden, rect(2000.0, -1049.0, 1007.0, 1049.0));
+        assert!(HiddenWindowPlacement::is_hidden(upper, hidden, &[lower]));
     }
 }

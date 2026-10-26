@@ -208,11 +208,14 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             Some(broadcast_tx.clone()),
         )
     };
-    layout.finish_loading(
+    if let Err(error) = layout.finish_loading(
         &config.virtual_workspaces,
         &config.settings.layout,
         Some(broadcast_tx.clone()),
-    );
+    ) {
+        eprintln!("Could not apply workspace settings to restored layout: {error}");
+        process::exit(1);
+    }
     let (input_tx, input_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();

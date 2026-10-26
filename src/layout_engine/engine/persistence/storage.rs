@@ -64,18 +64,19 @@ impl LayoutEngine {
                 CURRENT_SCHEMA_VERSION,
             ));
         }
+        persisted.workspaces.migrate_legacy_activation();
         persisted
             .workspaces
             .validate_persisted_topology()
             .map_err(|error| anyhow::anyhow!("invalid workspace topology: {error}"))?;
+        // Unknown preview-only metadata (including display_fallback) is ignored
+        // by serde. Keep its workspace identity rather than guessing whether it
+        // has since become intentional user state.
+        persisted.workspaces.normalize_loaded_names();
         persisted.normalize_workspace_layouts()?;
-        persisted
-            .floating_positions
-            .validate_persisted(&persisted.workspaces)
-            .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
         persisted.persistence.validate()?;
         let schema_version = persisted.schema_version;
-        let mut engine = persisted.into_engine();
+        let mut engine = persisted.into_engine()?;
         engine.normalize_loaded_floating_state();
         engine.normalize_loaded_workspace_focus();
         let fingerprinted: HashSet<_> = engine.persistence.windows.keys().copied().collect();
@@ -193,29 +194,23 @@ impl LayoutEngine {
             if self.floating.is_floating(window) {
                 // Floating and tiled are mutually exclusive persisted representations.
                 self.remove_window_from_all_tiling_trees(window);
-                let Some(assignment) = window_store.workspace_info_for_window(window) else {
+                let Some(assignment) = window_store.workspace_for_window(window) else {
                     // An unassigned live window has no restorable location. Keep its fingerprint
                     // for lifecycle continuity, but never serialize a stale frame from an older
                     // assignment as if it were current.
                     self.floating_positions.remove_window(window);
                     continue;
                 };
-                self.floating_positions
-                    .retain_window_location(window, (assignment.space, assignment.workspace_id));
-                self.floating_positions.store(
-                    assignment.space,
-                    assignment.workspace_id,
-                    window,
-                    state.frame_monotonic,
-                );
+                self.floating_positions.retain_window_location(window, assignment);
+                self.floating_positions.store(assignment, window, state.frame_monotonic);
             } else {
                 // Floating frames are type-specific state. A tiled window retaining one creates a
                 // second persisted location and makes later reconciliation order-dependent.
                 self.floating_positions.remove_window(window);
-                if let Some(assignment) = window_store.workspace_info_for_window(window) {
+                if let Some(assignment) = window_store.workspace_for_window(window) {
                     self.remove_restored_tiling_duplicates(
                         window,
-                        (assignment.space, assignment.workspace_id),
+                        (self.workspaces[assignment].space, assignment),
                     );
                 } else {
                     self.remove_window_from_all_tiling_trees(window);
@@ -331,11 +326,13 @@ impl LayoutEngine {
         virtual_workspace_config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
         broadcast_tx: Option<BroadcastSender>,
-    ) {
+    ) -> Result<(), String> {
+        let plan = self.workspaces.plan_settings_names(virtual_workspace_config, true)?;
         self.broadcast_tx = broadcast_tx;
-        self.set_layout_settings(layout_settings);
+        self.apply_layout_settings(layout_settings);
         self.app_rules = AppRuleEngine::new(&virtual_workspace_config.app_rules);
-        self.workspaces.update_settings(virtual_workspace_config, layout_settings);
+        self.workspaces.apply_settings(virtual_workspace_config, layout_settings, plan);
+        Ok(())
     }
 }
 

@@ -12,7 +12,7 @@ use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
 use crate::common::log::{MetricsCommand, handle_command as handle_metrics_command};
-use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
+use crate::layout_engine::{LayoutCommand, LayoutEvent};
 use crate::model::RiftState;
 use crate::model::space_activation::{
     SpaceActivationConfig, SpaceActivationPolicy, ToggleSpaceContext,
@@ -24,6 +24,7 @@ use crate::sys::window_server::WindowServerId;
 pub struct LayoutCommandPayload {
     pub command: LayoutCommand,
     pub command_space: Option<SpaceId>,
+    pub(crate) navigation: crate::model::virtual_workspace::NavigationScope,
     pub visible_spaces: Vec<SpaceId>,
     pub visible_space_frames: HashMap<SpaceId, objc2_core_foundation::CGRect>,
     pub post_arrange_mouse_warp: Option<WindowId>,
@@ -38,6 +39,7 @@ pub fn handle_command_layout(
     let LayoutCommandPayload {
         command: cmd,
         command_space,
+        navigation,
         visible_spaces,
         visible_space_frames,
         post_arrange_mouse_warp,
@@ -52,34 +54,17 @@ pub fn handle_command_layout(
             | LayoutCommand::MoveFocus(_)
             | LayoutCommand::ToggleFocusFloating
     );
-    let is_workspace_switch = matches!(
-        cmd,
+    let (is_virtual_workspace_command, is_workspace_switch, requires_workspace_space) = match cmd {
         LayoutCommand::NextWorkspace(_)
-            | LayoutCommand::PrevWorkspace(_)
-            | LayoutCommand::SwitchToWorkspace(_)
-            | LayoutCommand::MoveWindowToWorkspace { follow: true, .. }
-            | LayoutCommand::SwitchToLastWorkspace
-    );
-    let requires_workspace_space = matches!(
-        cmd,
-        LayoutCommand::NextWorkspace(_)
-            | LayoutCommand::PrevWorkspace(_)
-            | LayoutCommand::SwitchToWorkspace(_)
-            | LayoutCommand::MoveWindowToWorkspace { follow: true, .. }
-            | LayoutCommand::SetWorkspaceLayout { .. }
-            | LayoutCommand::CreateWorkspace
-            | LayoutCommand::SwitchToLastWorkspace
-    );
-    let is_virtual_workspace_command = matches!(
-        cmd,
-        LayoutCommand::NextWorkspace(_)
-            | LayoutCommand::PrevWorkspace(_)
-            | LayoutCommand::SwitchToWorkspace(_)
-            | LayoutCommand::MoveWindowToWorkspace { .. }
-            | LayoutCommand::SetWorkspaceLayout { .. }
-            | LayoutCommand::CreateWorkspace
-            | LayoutCommand::SwitchToLastWorkspace
-    );
+        | LayoutCommand::PrevWorkspace(_)
+        | LayoutCommand::SwitchToWorkspace(_)
+        | LayoutCommand::SwitchToLastWorkspace => (true, true, true),
+        LayoutCommand::MoveWindowToWorkspace { follow, .. } => (true, follow, follow),
+        LayoutCommand::SetWorkspaceLayout { .. } | LayoutCommand::CreateWorkspace => {
+            (true, false, true)
+        }
+        _ => (false, false, false),
+    };
     if matches!(
         cmd,
         LayoutCommand::JoinWindow(_)
@@ -103,50 +88,35 @@ pub fn handle_command_layout(
         workspace_switch.mark_workspace_switch_inactive();
     }
 
-    let response = match &cmd {
-        LayoutCommand::NextWorkspace(_)
-        | LayoutCommand::PrevWorkspace(_)
-        | LayoutCommand::SwitchToWorkspace(_)
-        | LayoutCommand::SetWorkspaceLayout { .. }
-        | LayoutCommand::CreateWorkspace
-        | LayoutCommand::SwitchToLastWorkspace => {
-            if let Some(space) = workspace_space {
+    let response = if is_virtual_workspace_command {
+        command_space
+            .map(|space| {
                 layout.layout_engine.handle_virtual_workspace_command(
                     &mut state.windows,
-                    space,
+                    crate::model::virtual_workspace::WorkspaceContext {
+                        space,
+                        visible: &visible_spaces,
+                        navigation,
+                    },
                     &cmd,
                 )
-            } else {
-                EventResponse::default()
-            }
+            })
+            .unwrap_or_default()
+    } else {
+        if visible_spaces.is_empty() {
+            warn!("Layout command ignored: no active spaces");
+            return Ok(EventOutcome::no_change());
         }
-        LayoutCommand::MoveWindowToWorkspace { .. } => {
-            if let Some(space) = command_space {
-                layout.layout_engine.handle_virtual_workspace_command(
-                    &mut state.windows,
-                    space,
-                    &cmd,
-                )
-            } else {
-                EventResponse::default()
-            }
-        }
-        _ => {
-            if visible_spaces.is_empty() {
-                warn!("Layout command ignored: no active spaces");
-                return Ok(EventOutcome::no_change());
-            }
-            layout.layout_engine.handle_command(
-                &mut state.windows,
-                command_space,
-                &visible_spaces,
-                &visible_space_frames,
-                cmd,
-            )
-        }
+        layout.layout_engine.handle_command(
+            &mut state.windows,
+            command_space,
+            &visible_spaces,
+            &visible_space_frames,
+            cmd,
+        )
     };
 
-    if is_virtual_workspace_command && !response.changed {
+    if is_virtual_workspace_command && !response.changed && response.workspace_space.is_none() {
         if is_workspace_switch {
             workspace_switch.mark_workspace_switch_inactive();
             workspace_switch.active_workspace_switch = None;
@@ -155,10 +125,25 @@ pub fn handle_command_layout(
     }
 
     // Only begin the switch lifecycle once a real transition has been produced.
-    if is_workspace_switch {
+    if is_workspace_switch && response.changed {
         workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
     }
 
+    let workspace_space = response.workspace_space.or(workspace_space);
+    let placement_writes: Vec<_> = response
+        .transferred_windows
+        .iter()
+        .filter_map(|&window| {
+            let assignment = state.windows.workspace_for_window(window)?;
+            let screen =
+                visible_space_frames.get(&layout.layout_engine.workspaces()[assignment].space)?;
+            let frame = state.windows.window(window)?.frame_monotonic;
+            Some((
+                window,
+                super::super::Reactor::center_frame_on_screen(frame, *screen),
+            ))
+        })
+        .collect();
     let response_changed = response.changed;
     let selection_changed = is_selection_command && response_changed;
     let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
@@ -174,11 +159,57 @@ pub fn handle_command_layout(
     }
     .with_layout_response(response, workspace_space)
     .with_arrange_space_scope(arrange_space_scope);
+    for (window, frame) in placement_writes {
+        if let Some(assignment) = state.windows.workspace_for_window(window) {
+            let target = layout.layout_engine.workspaces()[assignment].space;
+            outcome.absorb(request_window_transfer(
+                state,
+                layout,
+                window,
+                target,
+                Some(frame),
+                true,
+            ));
+        }
+    }
+    // Switching within the command's display leaves the cursor alone.
+    if let Some(space) = workspace_space
+        && is_workspace_switch
+        && command_space != Some(space)
+        && visible_space_frames.contains_key(&space)
+    {
+        outcome.display_switch_warp = Some(space);
+    }
+    if !response_changed || arrange_space_scope.is_some() {
+        if !outcome.pre_layout_window_frame_writes.is_empty() && command_space != workspace_space {
+            outcome.arrange.secondary_space_scope = command_space;
+        }
+    }
     outcome.broadcast_selection_changed = selection_changed;
     if is_move_node && let Some(window) = post_arrange_mouse_warp {
         outcome.post_arrange_mouse_warp = Some(window);
     }
     Ok(outcome)
+}
+
+/// One physical placement boundary for commands, rules, and topology recovery.
+/// Logical membership has already been committed by the workspace model.
+pub(in crate::actor::reactor) fn request_window_transfer(
+    state: &mut RiftState,
+    layout: &mut LayoutManager,
+    window: WindowId,
+    target: SpaceId,
+    frame: Option<objc2_core_foundation::CGRect>,
+    available: bool,
+) -> EventOutcome {
+    if state.windows.request_transfer(window, frame, target, available)
+        && let Some(frame) = frame
+    {
+        layout.layout_engine.prepare_window_placement(&mut state.windows, window, frame);
+        EventOutcome::no_change().with_pre_layout_window_frame_write(window, frame, true)
+    } else {
+        EventOutcome::no_change()
+    }
 }
 
 fn current_floating_positions(
@@ -243,6 +274,19 @@ pub fn handle_config_updated(
     drag: &mut DragManager,
     new_config: Config,
 ) -> anyhow::Result<EventOutcome> {
+    let issues = new_config.validate();
+    anyhow::ensure!(
+        issues.is_empty(),
+        "configuration reload rejected: {}",
+        issues.join("; ")
+    );
+    let migration = layout
+        .layout_engine
+        .workspaces()
+        .plan_settings(&new_config.virtual_workspaces)
+        .map_err(|error| {
+            anyhow::anyhow!("configuration reload retained previous workspace graph: {error}")
+        })?;
     let mut outcome = if config.settings.drag_drop != new_config.settings.drag_drop {
         super::drag::handle_cancel(drag)
     } else {
@@ -251,9 +295,11 @@ pub fn handle_config_updated(
     *config = new_config;
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
-    layout
-        .layout_engine
-        .update_virtual_workspace_settings(&state.windows, &config.virtual_workspaces);
+    layout.layout_engine.update_virtual_workspace_settings(
+        &state.windows,
+        &config.virtual_workspaces,
+        migration,
+    );
 
     drag.update_config(config.settings.drag_drop);
 
@@ -448,53 +494,8 @@ pub fn handle_command_reactor_focus_window(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct MoveWindowToDisplayPayload {
-    pub window: WindowId,
-    pub window_server_id: Option<WindowServerId>,
-    pub source_space: SpaceId,
-    pub target_space: SpaceId,
-    pub target_screen: objc2_core_foundation::CGRect,
-    pub target_frame: objc2_core_foundation::CGRect,
-}
-
-pub fn handle_command_reactor_move_window_to_display(
-    state: &mut RiftState,
-    layout: &mut LayoutManager,
-    payload: MoveWindowToDisplayPayload,
-) -> anyhow::Result<EventOutcome> {
-    if let Some(window) = state.windows.window_mut(payload.window) {
-        window.frame_monotonic = payload.target_frame;
-    } else {
-        warn!(window = ?payload.window, "Move window to display ignored: unknown window");
-        return Ok(EventOutcome::no_change());
-    }
-
-    let response = layout.layout_engine.move_window_to_space(
-        &mut state.windows,
-        payload.source_space,
-        payload.target_space,
-        payload.target_screen.size,
-        payload.window,
-    );
-
-    if state
-        .windows
-        .workspace_for_window(payload.target_space, payload.window)
-        .is_some()
-        && let Some(window_server_id) = payload.window_server_id
-    {
-        state.windows.observe_native_space(window_server_id, payload.target_space, true);
-    }
-
-    Ok(EventOutcome::layout_changed(false)
-        .with_layout_response(response, None)
-        .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true))
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct WorkspaceWindowMove {
     pub window: WindowId,
-    pub window_server_id: Option<WindowServerId>,
     pub target_frame: objc2_core_foundation::CGRect,
 }
 
@@ -519,55 +520,35 @@ pub fn handle_command_reactor_move_workspace_to_display(
         target_screen,
     } = payload;
 
-    let moves = windows
-        .into_iter()
-        .filter(|window_move| {
-            if state.windows.window(window_move.window).is_some() {
-                true
-            } else {
-                warn!(
-                    window = ?window_move.window,
-                    "Skipping unknown window in workspace display move"
-                );
-                false
-            }
-        })
-        .collect::<Vec<_>>();
-    let window_ids = moves.iter().map(|window_move| window_move.window).collect::<Vec<_>>();
     let response = layout.layout_engine.move_active_workspace_to_space(
         &mut state.windows,
         source_space,
         target_space,
         target_screen.size,
-        &window_ids,
     );
     if !response.changed {
         return Ok(EventOutcome::no_change());
     }
 
-    let mut applied_moves = Vec::with_capacity(moves.len());
-    for window_move in moves {
-        if state.windows.workspace_for_window(target_space, window_move.window).is_none() {
-            continue;
-        }
-        if let Some(window) = state.windows.window_mut(window_move.window) {
-            window.frame_monotonic = window_move.target_frame;
-        }
-        if let Some(window_server_id) = window_move.window_server_id {
-            state.windows.observe_native_space(window_server_id, target_space, true);
-        }
-        applied_moves.push(window_move);
-    }
-
     workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
     let mut outcome =
         EventOutcome::layout_changed(false).with_layout_response(response, Some(target_space));
-    for window_move in applied_moves {
-        outcome = outcome.with_pre_layout_window_frame_write(
-            window_move.window,
-            window_move.target_frame,
-            true,
-        );
+    for window_move in windows {
+        if layout
+            .layout_engine
+            .workspaces()
+            .workspace_for_window(&state.windows, target_space, window_move.window)
+            .is_some()
+        {
+            outcome.absorb(request_window_transfer(
+                state,
+                layout,
+                window_move.window,
+                target_space,
+                Some(window_move.target_frame),
+                true,
+            ));
+        }
     }
     Ok(outcome)
 }

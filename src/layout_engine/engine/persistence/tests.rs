@@ -159,7 +159,7 @@ fn restored_workspace_is_resolved_before_app_rule_assignment() {
 
     assert_eq!(effects.workspace_id, restored_workspace);
     assert_eq!(
-        window_store.workspace_for_window(space, window),
+        engine.workspaces().workspace_for_window(&window_store, space, window),
         Some(restored_workspace)
     );
 }
@@ -260,7 +260,7 @@ fn full_save_records_floating_window_in_its_inactive_workspace() {
         Some((space, inactive_workspace)),
     );
     assert_eq!(
-        loaded.floating_positions.get(space, inactive_workspace, window),
+        loaded.floating_positions.get(inactive_workspace, window),
         Some(frame),
     );
     assert!(loaded.floating.is_floating(window));
@@ -308,7 +308,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
     ));
     engine.add_window_to_layout(&mut window_store, space, window);
     // Model stale state left behind by an earlier floating-to-tiled transition.
-    engine.floating_positions.store(space, workspace, window, frame);
+    engine.floating_positions.store(workspace, window, frame);
     let path = std::env::temp_dir().join(format!(
         "rift-stale-floating-save-test-{}-{}.ron",
         std::process::id(),
@@ -323,7 +323,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
         loaded.restored_location_for_window(window),
         Some((space, workspace))
     );
-    assert_eq!(loaded.floating_positions.get(space, workspace, window), None);
+    assert_eq!(loaded.floating_positions.get(workspace, window), None);
     assert!(!loaded.floating.is_floating(window));
 }
 
@@ -395,7 +395,6 @@ fn load_removes_serialized_window_state_without_a_fingerprint() {
     let workspace = engine.workspaces().active_workspace(space).unwrap();
     engine.floating.add_floating(ghost);
     engine.floating_positions.store(
-        space,
         workspace,
         ghost,
         objc2_core_foundation::CGRect::new(
@@ -411,7 +410,7 @@ fn load_removes_serialized_window_state_without_a_fingerprint() {
 
     assert!(!loaded.workspaces[workspace].layout_system.contains_window(layout, ghost));
     assert!(!loaded.floating.is_floating(ghost));
-    assert_eq!(loaded.floating_positions.get(space, workspace, ghost), None);
+    assert_eq!(loaded.floating_positions.get(workspace, ghost), None);
     assert_eq!(loaded.workspaces.last_focused_window(space, workspace), None);
 }
 
@@ -485,9 +484,7 @@ fn workspace_restore_discards_unmatched_scoped_windows_and_floating_state() {
         CGSize::new(500.0, 400.0),
     );
     snapshot.floating.add_floating(floating);
-    snapshot
-        .floating_positions
-        .store(space, source_workspace, floating, floating_frame);
+    snapshot.floating_positions.store(source_workspace, floating, floating_frame);
     for window in [tiled, floating, out_of_scope] {
         snapshot.persistence.windows.insert(window, WindowFingerprint {
             window_server_id: Some(window.idx.get()),
@@ -526,10 +523,7 @@ fn workspace_restore_discards_unmatched_scoped_windows_and_floating_state() {
     assert_eq!(report.workspaces_replaced, 1);
     assert_eq!(report.unmatched, 2);
     assert_eq!(report.warnings, vec![RestoreWarning::UnmatchedWindows(2)]);
-    assert_eq!(
-        engine.floating_positions.get(space, target_workspace, floating),
-        None,
-    );
+    assert_eq!(engine.floating_positions.get(target_workspace, floating), None,);
 }
 
 #[test]
@@ -606,7 +600,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
     }
     engine.add_window_to_layout(&mut window_store, space, live);
     engine.floating.add_floating(live_floating);
-    engine.floating_positions.store(space, target_workspace, live_floating, frame);
+    engine.floating_positions.store(target_workspace, live_floating, frame);
     engine.focused_window = Some(live);
 
     engine
@@ -632,12 +626,12 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
             .contains_window(target_layout, saved)
     );
     assert_eq!(
-        window_store.workspace_for_window(space, live),
+        engine.workspaces().workspace_for_window(&window_store, space, live),
         Some(target_workspace)
     );
     assert!(engine.floating.is_floating(live_floating));
     assert_eq!(
-        engine.floating_positions.get(space, target_workspace, live_floating),
+        engine.floating_positions.get(target_workspace, live_floating),
         Some(frame)
     );
     assert_eq!(engine.focused_window, Some(live));
@@ -749,7 +743,9 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
             .contains_window(target_layout, reused_id)
     );
     assert_eq!(
-        window_store.workspace_for_window(external_space, reused_id),
+        engine
+            .workspaces()
+            .workspace_for_window(&window_store, external_space, reused_id),
         Some(external_workspace)
     );
     assert!(engine.floating.is_floating(reused_id));
@@ -851,7 +847,7 @@ fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
     assert_eq!(report.matched, 0);
     assert_eq!(report.unmatched, 1);
     assert_eq!(
-        window_store.workspace_for_window(external_space, live),
+        engine.workspaces().workspace_for_window(&window_store, external_space, live),
         Some(external_workspace)
     );
     assert!(
@@ -962,7 +958,7 @@ fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
     assert_eq!(report.matched, 0);
     assert_eq!(report.unmatched, 1);
     assert_eq!(
-        window_store.workspace_for_window(space, live),
+        engine.workspaces().workspace_for_window(&window_store, space, live),
         Some(sibling_workspace)
     );
     assert!(
@@ -1067,7 +1063,7 @@ fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused
             .contains_window(target_layout, reused)
     );
     assert_eq!(
-        window_store.workspace_for_window(space, reused),
+        engine.workspaces().workspace_for_window(&window_store, space, reused),
         Some(target_workspace)
     );
     assert_eq!(engine.persistence.windows[&reused].window_server_id, Some(7601));
@@ -1143,17 +1139,64 @@ fn completed_app_discovery_discards_unmatched_startup_ghosts() {
 fn persisted_layout_schema_is_versioned_and_legacy_files_still_load() {
     let engine = test_engine();
     let serialized = engine.serialize_to_string();
-    assert!(serialized.contains("\"schema_version\":3"), "{serialized}");
+    assert!(serialized.contains("\"schema_version\":5"), "{serialized}");
 
-    let legacy = serialized.replacen("\"schema_version\":3,", "", 1);
+    let legacy = serialized.replacen("\"schema_version\":5,", "", 1);
     LayoutEngine::deserialize_from_str(&legacy).unwrap();
 
-    let future = serialized.replacen("\"schema_version\":3", "\"schema_version\":4", 1);
+    let future = serialized.replacen("\"schema_version\":5", "\"schema_version\":6", 1);
     let error = match LayoutEngine::deserialize_from_str(&future) {
         Ok(_) => panic!("future schema version should be rejected"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("newer than supported"));
+}
+
+#[test]
+fn legacy_home_activation_migrates_to_remembered_without_foreign_current() {
+    use crate::model::virtual_workspace::WorkspaceTransferReason;
+    let settings = VirtualWorkspaceSettings {
+        mode: crate::common::config::WorkspaceMode::Global,
+        default_workspace_count: 2,
+        ..Default::default()
+    };
+    let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+    let mut windows = WindowStore::default();
+    let (a, b) = (SpaceId::new(701), SpaceId::new(702));
+    for space in [a, b] {
+        let _ = engine.handle_event(
+            &mut windows,
+            LayoutEvent::SpaceExposed(space, CGSize::new(1200., 800.)),
+        );
+    }
+    let id = engine.workspaces.active_workspace(a).unwrap();
+    engine
+        .workspaces
+        .transfer_workspace(id, b, None, WorkspaceTransferReason::DisplayDeparture);
+    let replacement = engine.workspaces.active_workspace(a);
+    let current = ron::ser::to_string(&engine.workspaces.active_workspace_per_space).unwrap();
+    let legacy = ron::ser::to_string(&HashMap::from_iter([
+        (a, (None::<crate::model::VirtualWorkspaceId>, id)),
+        (b, (None, engine.workspaces.active_workspace(b).unwrap())),
+    ]))
+    .unwrap();
+    let serialized = engine.serialize_to_string().replacen(&current, &legacy, 1);
+    let mut restored = LayoutEngine::deserialize_from_str(&serialized).unwrap();
+    assert_eq!(restored.workspaces.active_workspace(a), replacement);
+    assert_eq!(
+        restored.workspaces.active_workspace_per_space[&a].remembered,
+        Some(id)
+    );
+    restored.workspaces.validate_persisted_topology().unwrap();
+    restored
+        .workspaces
+        .transfer_workspace(id, a, None, WorkspaceTransferReason::Restoration);
+    assert_eq!(restored.workspaces.active_workspace(a), Some(id));
+    assert_eq!(
+        restored.workspaces.active_workspace_per_space[&a].remembered,
+        None
+    );
+    restored.workspaces.validate_persisted_topology().unwrap();
 }
 
 #[test]
@@ -1166,14 +1209,9 @@ fn malformed_active_layout_configuration_is_rejected_at_load_boundary() {
         LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
     );
     let mut serialized = engine.serialize_to_string();
-    let active_size = serialized.find("active_size").unwrap_or_else(|| {
-        panic!("serialized workspace must contain an active size: {serialized}")
-    });
-    let width = serialized[active_size..]
-        .find("1200")
-        .map(|offset| active_size + offset)
-        .expect("serialized active size must contain the display width");
-    serialized.replace_range(width..width + 4, "9999");
+    let layout = serialized.find("layout:Some((idx:").expect("serialized canonical layout");
+    let version = serialized[layout..].find("version:1").map(|offset| layout + offset).unwrap();
+    serialized.replace_range(version..version + "version:1".len(), "version:9999");
 
     let error = match LayoutEngine::deserialize_from_str(&serialized) {
         Ok(_) => panic!("invalid active layout configuration should be rejected"),
@@ -1181,9 +1219,28 @@ fn malformed_active_layout_configuration_is_rejected_at_load_boundary() {
     };
 
     assert!(
-        error.to_string().contains("no configuration for its active display size"),
+        error.to_string().contains("references missing layout"),
         "{error}"
     );
+    let id = engine.workspaces.active_workspace(space).unwrap();
+    let layout = engine.workspaces[id].active_layout().unwrap();
+    let configurations = ron::ser::to_string(&HashMap::from_iter([(
+        crate::layout_engine::workspaces::Size::from(CGSize::new(1200., 800.)),
+        layout,
+    )]))
+    .unwrap();
+    let wrong_size = ron::ser::to_string(&crate::layout_engine::workspaces::Size::from(
+        CGSize::new(9999., 800.),
+    ))
+    .unwrap();
+    let legacy =
+        format!("(configurations:{configurations},active_size:{wrong_size},last_saved:None)");
+    let current = ron::ser::to_string(&engine.workspaces[id].layout_state).unwrap();
+    let malformed = engine.serialize_to_string().replacen(&current, &legacy, 1);
+    let error = LayoutEngine::deserialize_from_str(&malformed)
+        .err()
+        .expect("missing active legacy configuration must be rejected");
+    assert!(error.to_string().contains("no configuration for its active display size"));
 }
 
 #[test]
@@ -1218,7 +1275,6 @@ fn invalid_persisted_floating_frame_is_rejected() {
     );
     let workspace = engine.workspaces().active_workspace(space).unwrap();
     engine.floating_positions.store(
-        space,
         workspace,
         window,
         objc2_core_foundation::CGRect::new(
@@ -1495,7 +1551,7 @@ fn startup_restore_reapplies_configured_workspace_names() {
     let mut current_settings = saved_settings;
     current_settings.workspace_names = vec!["A".into(), "S".into()];
 
-    restored.finish_loading(&current_settings, &layout_settings, None);
+    restored.finish_loading(&current_settings, &layout_settings, None).unwrap();
 
     let names = restored
         .workspaces
@@ -1981,10 +2037,24 @@ fn runtime_restore_cleans_unmatched_windows_from_inactive_size_configurations() 
     let workspace = snapshot.workspaces().active_workspace(space).unwrap();
     let large_layout = snapshot.workspaces.active_layout(space, workspace).unwrap();
     let small_layout = snapshot.workspaces[workspace].layout_system.create_layout();
-    snapshot.workspaces[workspace]
-        .layout_state
-        .configurations
-        .insert(crate::layout_engine::workspaces::Size::from(small), small_layout);
+    // Exercise the actual legacy serialization boundary, including an inactive tree.
+    #[derive(serde::Serialize)]
+    struct LegacyLayouts {
+        configurations:
+            HashMap<crate::layout_engine::workspaces::Size, crate::layout_engine::LayoutId>,
+        active_size: crate::layout_engine::workspaces::Size,
+    }
+    snapshot.workspaces[workspace].layout_state = ron::from_str(
+        &ron::ser::to_string(&LegacyLayouts {
+            configurations: HashMap::from_iter([
+                (large.into(), large_layout),
+                (small.into(), small_layout),
+            ]),
+            active_size: large.into(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
     assert_ne!(small_layout, large_layout);
     snapshot.workspaces[workspace]
         .layout_system
@@ -2121,7 +2191,10 @@ fn restored_window_server_id_cannot_cross_known_application_identity() {
     assert!(!windows.contains(&titled_match));
     assert!(windows.contains(&live));
     assert!(windows.contains(&id_match));
-    assert_eq!(window_store.workspace_for_window(space, live), Some(workspace));
+    assert_eq!(
+        engine.workspaces().workspace_for_window(&window_store, space, live),
+        Some(workspace)
+    );
 }
 
 #[test]
@@ -2167,7 +2240,7 @@ fn duplicate_window_server_fingerprints_choose_live_assignment_and_are_healed() 
     engine.reconcile_restored_window(&mut window_store, space, live, &fingerprint("live"));
 
     assert_eq!(
-        window_store.workspace_for_window(space, live),
+        engine.workspaces().workspace_for_window(&window_store, space, live),
         Some(preferred_workspace),
     );
     assert!(!engine.persistence.windows.contains_key(&stale));
@@ -2225,7 +2298,7 @@ fn duplicate_restored_identity_prefers_live_workspace_assignment() {
     engine.reconcile_restored_window(&mut window_store, space, live, &fingerprint);
 
     assert_eq!(
-        window_store.workspace_for_window(space, live),
+        engine.workspaces().workspace_for_window(&window_store, space, live),
         Some(preferred_workspace),
     );
     assert!(
@@ -2318,9 +2391,9 @@ fn load_heals_disagreeing_tiled_and_floating_ownership() {
     );
     engine.floating.add_floating(marked_without_frame);
     engine.floating.add_floating(agreed_floating);
-    engine.floating_positions.store(space, active, agreed_floating, frame);
-    engine.floating_positions.store(space, other, agreed_floating, frame);
-    engine.floating_positions.store(space, active, frame_without_marker, frame);
+    engine.floating_positions.store(active, agreed_floating, frame);
+    engine.floating_positions.store(other, agreed_floating, frame);
+    engine.floating_positions.store(active, frame_without_marker, frame);
     engine.floating.set_last_focus(Some(frame_without_marker));
 
     let loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
@@ -2375,7 +2448,7 @@ fn legacy_workspace_layouts_migrate_and_round_trip() {
         let mut loaded = LayoutEngine::deserialize_from_str(&old).unwrap();
         let id = loaded.workspaces.active_workspace(space).unwrap();
         assert_eq!(loaded.workspaces[id].layout_mode, LayoutMode::Stack);
-        assert_eq!(loaded.workspaces[id].layout_state.configurations.len(), 2);
+        assert_eq!(loaded.workspaces[id].layout_state.all_layouts().count(), 2);
         assert_eq!(loaded.workspaces[id].last_focused(), Some(WindowId::new(9, 2)));
         let first = loaded.workspaces[id].active_layout().unwrap();
         assert_eq!(
@@ -2384,10 +2457,10 @@ fn legacy_workspace_layouts_migrate_and_round_trip() {
         );
         loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1600.0, 1000.0));
         let second = loaded.workspaces[id].active_layout().unwrap();
-        assert_ne!(first, second);
+        assert_eq!(first, second);
         assert_eq!(
             loaded.workspaces[id].layout_system.selected_window(second),
-            Some(WindowId::new(9, 1))
+            Some(WindowId::new(9, 2))
         );
         loaded.workspaces[id].ensure_layout_for_size(CGSize::new(1200.0, 800.0));
         assert_eq!(loaded.workspaces[id].active_layout(), Some(first));
@@ -2400,7 +2473,7 @@ fn legacy_workspace_layouts_migrate_and_round_trip() {
         );
         assert!(reloaded.floating.is_floating(WindowId::new(9, 3)));
         assert_eq!(
-            reloaded.floating_positions.get(space, id, WindowId::new(9, 3)),
+            reloaded.floating_positions.get(id, WindowId::new(9, 3)),
             Some(objc2_core_foundation::CGRect::new(
                 objc2_core_foundation::CGPoint::new(12.0, 34.0),
                 CGSize::new(400.0, 300.0)
@@ -2419,4 +2492,55 @@ fn legacy_workspace_layouts_migrate_and_round_trip() {
                 .contains("invalid workspace layouts")
         );
     }
+}
+
+#[test]
+fn loading_disambiguates_saved_extra_names_without_losing_workspace_identity() {
+    let settings = VirtualWorkspaceSettings::default();
+    let mut engine = test_engine();
+    let space = SpaceId::new(903);
+    let first = engine.workspaces.list_workspaces(space)[0].0;
+    assert!(engine.workspaces.rename_workspace(space, first, "Old main".into()));
+    let extra = engine.workspaces.create_workspace(space, Some("Main".into())).unwrap();
+    let ids: Vec<_> = engine.workspaces.catalog().collect();
+    let mut restored = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+    restored.finish_loading(&settings, &LayoutSettings::default(), None).unwrap();
+    assert_eq!(restored.workspaces.catalog().collect::<Vec<_>>(), ids);
+    assert_eq!(restored.workspaces[first].name, "Main");
+    assert_ne!(restored.workspaces[extra].name, "Main");
+    let mut unnamed = settings.clone();
+    unnamed.workspace_names.clear();
+    let mut restored = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+    restored.finish_loading(&unnamed, &LayoutSettings::default(), None).unwrap();
+    assert_eq!(restored.workspaces[first].name, "Old main");
+    assert_eq!(restored.workspaces[extra].name, "Main");
+
+    // A serialized Global store does not retain its runtime settings. Explicit
+    // names must still take precedence over saved names before adding entries.
+    let mut settings = VirtualWorkspaceSettings::default();
+    settings.mode = crate::common::config::WorkspaceMode::Global;
+    settings.default_workspace_count = 3;
+    settings.workspace_names.truncate(3);
+    let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+    engine.workspaces.ensure_space_initialized(SpaceId::new(903));
+    let ids: Vec<_> = engine.workspaces.catalog().collect();
+    let mut restored = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+    settings.default_workspace_count = 4;
+    settings.workspace_names = ["Other", "Development", "Communication", "Main"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    restored.finish_loading(&settings, &LayoutSettings::default(), None).unwrap();
+    assert_eq!(
+        restored.workspaces.catalog().take(ids.len()).collect::<Vec<_>>(),
+        ids
+    );
+    assert_eq!(
+        restored
+            .workspaces
+            .catalog()
+            .map(|id| restored.workspaces[id].name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Other", "Development", "Communication", "Main"]
+    );
 }

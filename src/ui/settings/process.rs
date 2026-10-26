@@ -645,6 +645,7 @@ fn screen(display: DisplayData) -> ScreenInfo {
             CGPoint::new(origin.x, origin.y),
             CGSize::new(size.width, size.height),
         ),
+        is_builtin: false,
         backing_scale: display.backing_scale,
         display_uuid: display.uuid,
         name: display.name,

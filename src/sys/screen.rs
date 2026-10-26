@@ -65,6 +65,8 @@ pub struct ScreenInfo {
     pub frame: CGRect,
     #[serde(default = "unit_scale")]
     pub backing_scale: f64,
+    #[serde(default)]
+    pub is_builtin: bool,
     pub display_uuid: String,
     pub name: Option<String>,
     pub space: Option<SpaceId>,
@@ -84,6 +86,54 @@ impl ScreenInfo {
     pub fn display_uuid_owned(&self) -> Option<String> {
         self.display_uuid_opt().map(|uuid| uuid.to_string())
     }
+}
+
+/// Resolve ordered intent against the caller's accepted managed user desktops.
+/// `eligible` excludes fullscreen/unknown Spaces without another WindowServer query.
+/// CoreGraphics coordinates increase downwards: top has the smallest center Y.
+pub fn resolve_display_preference<'a>(
+    preferences: &[String],
+    screens: &'a [ScreenInfo],
+    eligible: impl Fn(&ScreenInfo) -> bool,
+) -> Option<&'a ScreenInfo> {
+    for preference in preferences {
+        let directional = matches!(preference.as_str(), "left" | "right" | "top" | "bottom");
+        let matches = screens.iter().filter(|screen| {
+            screen.space.is_some()
+                && screen.display_uuid_opt().is_some()
+                && eligible(screen)
+                && match preference.as_str() {
+                    "builtin" => screen.is_builtin,
+                    "left" | "right" | "top" | "bottom" => true,
+                    value => screen.display_uuid == value || screen.name.as_deref() == Some(value),
+                }
+        });
+        let compare = |a: &&ScreenInfo, b: &&ScreenInfo| {
+            let a_center = a.frame.mid();
+            let b_center = b.frame.mid();
+            let geometric = match preference.as_str() {
+                "left" => a_center.x.total_cmp(&b_center.x).then(a_center.y.total_cmp(&b_center.y)),
+                "right" => {
+                    b_center.x.total_cmp(&a_center.x).then(a_center.y.total_cmp(&b_center.y))
+                }
+                "top" => a_center.y.total_cmp(&b_center.y).then(a_center.x.total_cmp(&b_center.x)),
+                "bottom" => {
+                    b_center.y.total_cmp(&a_center.y).then(a_center.x.total_cmp(&b_center.x))
+                }
+                _ => Ordering::Equal,
+            };
+            geometric.then(a.display_uuid.cmp(&b.display_uuid))
+        };
+        let mut count = 0;
+        let target = matches.inspect(|_| count += 1).min_by(compare);
+        if target.is_some() {
+            if count > 1 && !directional && preference != "builtin" {
+                warn!(preference, "Workspace rule display is ambiguous; use a UUID");
+            }
+            return target;
+        }
+    }
+    None
 }
 
 impl ScreenCache<Actual> {
@@ -211,6 +261,7 @@ impl<S: System> ScreenCache<S> {
                 ScreenInfo {
                     id: cg_id,
                     frame,
+                    is_builtin: self.system.is_builtin(cg_id.as_u32()),
                     backing_scale: ns_screens
                         .iter()
                         .find(|s| s.cg_id == cg_id)
@@ -432,6 +483,7 @@ pub trait System {
     fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError>;
     fn display_uuid(&self, screen: &CGScreenInfo) -> CFRetained<CFString>;
     fn ns_screens(&self) -> Vec<NSScreenInfo>;
+    fn is_builtin(&self, _did: u32) -> bool { false }
     fn notch_height(&self, _did: u32) -> f64 { 0.0 }
 }
 
@@ -527,6 +579,8 @@ impl System for Actual {
             })
             .collect()
     }
+
+    fn is_builtin(&self, did: u32) -> bool { unsafe { super::skylight::CGDisplayIsBuiltin(did) } }
 
     fn notch_height(&self, did: u32) -> f64 {
         let screens = NSScreen::screens(self.mtm);
@@ -781,6 +835,56 @@ mod test {
 
     use super::{CGScreenInfo, NSScreenInfo, ScreenCache, ScreenId, System};
     use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
+
+    #[test]
+    fn ordered_preferences_resolve_identity_geometry_and_eligibility_deterministically() {
+        use super::{ScreenInfo, resolve_display_preference};
+        let make = |uuid: &str, x, y, builtin| ScreenInfo {
+            id: ScreenId::new(1),
+            frame: CGRect::new(CGPoint::new(x, y), CGSize::new(100., 100.)),
+            backing_scale: 1.,
+            is_builtin: builtin,
+            display_uuid: uuid.into(),
+            name: Some("Built-in".into()),
+            space: Some(SpaceId::new(1)),
+        };
+        let mut screens = vec![
+            make("c", 100., 0., false),
+            make("b", 0., -100., true),
+            make("a", -100., 0., false),
+            make("d", -100., 0., false),
+        ];
+        for _ in 0..screens.len() {
+            for (preferences, expected) in [
+                (vec!["builtin", "right"], Some("b")),
+                (vec!["missing", "right"], Some("c")),
+                (vec!["left"], Some("a")),
+                (vec!["right"], Some("c")),
+                (vec!["top"], Some("b")),
+                (vec!["bottom"], Some("a")),
+                (vec!["d"], Some("d")),
+                (vec!["Built-in"], Some("a")),
+                (vec!["missing"], None),
+            ] {
+                let values = preferences.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+                assert_eq!(
+                    resolve_display_preference(&values, &screens, |_| true)
+                        .map(|s| s.display_uuid.as_str()),
+                    expected,
+                    "{preferences:?}"
+                );
+            }
+            let values = vec!["builtin".into(), "right".into()];
+            assert_eq!(
+                resolve_display_preference(&values, &screens, |s| !s.is_builtin)
+                    .unwrap()
+                    .display_uuid,
+                "c"
+            );
+            assert!(resolve_display_preference(&values, &screens, |_| false).is_none());
+            screens.rotate_left(1);
+        }
+    }
 
     #[test]
     fn auto_hidden_menu_bar_does_not_inset_a_display_without_a_notch() {
