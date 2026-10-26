@@ -639,7 +639,7 @@ mod command_tests {
     use crate::layout_engine::LayoutCommand;
 
     #[test]
-    fn sequences_dispatch_each_step_in_order() {
+    fn nested_sequences_preserve_reactor_order() {
         let (config_tx, _config_rx) = actor::channel();
         let (events_tx, mut events_rx) = actor::channel();
         let (input_tx, mut input_rx) = actor::channel();
@@ -653,8 +653,10 @@ mod command_tests {
 
         wm.handle_event(WmEvent::Command(WmCommand::Sequence(vec![
             WmCommand::Wm(MoveWindowToWorkspace(WorkspaceSelector::Index(0))),
-            WmCommand::Sequence(vec![WmCommand::Wm(BindingMode("default".into()))]),
-            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::NextWindow)),
+            WmCommand::Sequence(vec![
+                WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::NextWindow)),
+                WmCommand::Wm(BindingMode("default".into())),
+            ]),
         ])));
 
         assert!(matches!(
@@ -675,5 +677,6 @@ mod command_tests {
             input_rx.try_recv().unwrap().1,
             input::Request::SetBindingMode(mode) if mode == "default"
         ));
+        assert!(input_rx.try_recv().is_err());
     }
 }
