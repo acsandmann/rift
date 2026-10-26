@@ -227,12 +227,84 @@ fn patch(
             let old_array = table.get(actual).and_then(Item::as_array);
             let old_values = before.get(key).and_then(toml::Value::as_array);
             let new_values = new.as_array().unwrap();
+            let mut matched = Vec::new();
+            if key == "workspace_rules"
+                && let Some(values) = old_values
+            {
+                matched.resize(new_values.len(), None);
+                let mut used = vec![false; values.len()];
+                // Equal selector occurrence counts mean property edits, not row
+                // deletion. Pair them in source order. When clearing deletes empty
+                // rows, also match the surviving row with just that property removed.
+                for (index, new) in new_values.iter().enumerate() {
+                    let selector = new.get("workspace");
+                    let same_count = values
+                        .iter()
+                        .filter(|old| old.get("workspace") == selector)
+                        .count()
+                        == new_values.iter().filter(|new| new.get("workspace") == selector).count();
+                    if let Some(old) = values.iter().enumerate().position(|(i, old)| {
+                        !used[i]
+                            && if same_count {
+                                old.get("workspace") == selector
+                            } else {
+                                old == new
+                                    || ["layout", "display"].iter().any(|property| {
+                                        new.get(property).is_none()
+                                            && old.get(property).is_some()
+                                            && old
+                                                .as_table()
+                                                .unwrap()
+                                                .iter()
+                                                .filter(|(key, _)| key.as_str() != *property)
+                                                .eq(new.as_table().unwrap().iter())
+                                    })
+                            }
+                    }) {
+                        matched[index] = Some(old);
+                        used[old] = true;
+                    }
+                }
+                // Reserve unchanged occurrences before pairing edited selectors.
+                for (index, new) in new_values.iter().enumerate() {
+                    if matched[index].is_none()
+                        && let Some(old) = values.iter().enumerate().position(|(i, old)| {
+                            !used[i] && old.get("workspace") == new.get("workspace")
+                        })
+                    {
+                        matched[index] = Some(old);
+                        used[old] = true;
+                    }
+                }
+            }
             for (index, element) in array.iter_mut().enumerate() {
-                if let Some(old_index) = old_values
-                    .and_then(|values| values.iter().position(|old| old == &new_values[index]))
+                let source = if key == "workspace_rules" {
+                    matched.get(index).copied().flatten()
+                } else {
+                    old_values
+                        .and_then(|values| values.iter().position(|old| old == &new_values[index]))
+                };
+                if let Some(old_index) =
+                    source.filter(|&old| old_values.unwrap()[old] == new_values[index])
                     && let Some(old) = old_array.and_then(|array| array.get(old_index))
                 {
                     *element = old.clone();
+                } else if key == "workspace_rules"
+                    && let Some(old_index) = source
+                    && let Some(old) = old_array.and_then(|array| array.get(old_index))
+                    && let Some(old_table) = old.as_inline_table()
+                {
+                    // Edit the same rule in place: retain its indentation, comments,
+                    // selector spelling and field order instead of reserializing it.
+                    let mut updated = old_table.clone();
+                    patch(
+                        &mut updated,
+                        old_values.unwrap()[old_index].as_table().unwrap(),
+                        new_values[index].as_table().unwrap(),
+                        "workspace_rules",
+                        None,
+                    )?;
+                    *element = toml_edit::Value::InlineTable(updated);
                 } else if matches!(
                     key.as_str(),
                     "workspace_names" | "app_rules" | "workspace_rules"
@@ -243,7 +315,14 @@ fn patch(
             if matches!(key.as_str(), "workspace_names" | "app_rules" | "workspace_rules")
                 && !array.is_empty()
             {
-                array.set_trailing("\n");
+                if let Some(old) =
+                    old_array.filter(|old| key == "workspace_rules" && !old.is_empty())
+                {
+                    array.set_trailing(old.trailing().clone());
+                    array.set_trailing_comma(old.trailing_comma());
+                } else {
+                    array.set_trailing("\n");
+                }
             }
         }
         if let Some(old) = table.get(actual).and_then(Item::as_value) {

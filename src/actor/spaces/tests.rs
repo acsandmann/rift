@@ -12,6 +12,7 @@ fn screen(id: u32, display: &str, space: u64) -> ScreenInfo {
             CGPoint::new((id - 1) as f64 * 1000.0, 0.0),
             CGSize::new(1000.0, 800.0),
         ),
+        is_builtin: false,
         backing_scale: 1.0,
         space: Some(SpaceId::new(space)),
     }
@@ -218,6 +219,7 @@ fn sleep_lock_and_overlapping_holds_require_a_fresh_settled_sample_after_every_r
         let mut rig = Rig::new();
         rig.membership(1, &[7]);
         let before = rig.tick(0, Some(sample(vec![screen(1, "laptop", 1)]))).unwrap();
+        let history = rig.actor.state.last_user_space_by_display.clone();
         for hold in holds {
             rig.event(hold);
         }
@@ -256,10 +258,7 @@ fn sleep_lock_and_overlapping_holds_require_a_fresh_settled_sample_after_every_r
         let after = rig.tick(1, Some(fresh)).unwrap();
         assert!(after.authoritative && after.membership_complete);
         assert_eq!(after.active_window_spaces, before.active_window_spaces);
-        assert_eq!(
-            after.last_user_space_by_display,
-            before.last_user_space_by_display
-        );
+        assert_eq!(rig.actor.state.last_user_space_by_display, history);
     }
 }
 
@@ -321,6 +320,7 @@ fn inconclusive_samples_never_erase_accepted_topology_or_history_and_can_recover
     for (case, invalid) in invalid {
         let mut rig = Rig::new();
         let before = rig.tick(0, Some(good.clone())).unwrap();
+        let history = rig.actor.state.last_user_space_by_display.clone();
         assert!(rig.tick(0, invalid).is_none(), "{case}");
         assert_eq!(rig.actor.state.screens, before.screens, "{case}");
         assert_eq!(
@@ -349,10 +349,7 @@ fn inconclusive_samples_never_erase_accepted_topology_or_history_and_can_recover
         assert!(rig.tick(1, Some(good.clone())).is_none(), "{case}");
         let recovered = rig.tick(2, Some(good.clone())).unwrap();
         assert_eq!(recovered.screens, before.screens, "{case}");
-        assert_eq!(
-            recovered.last_user_space_by_display, before.last_user_space_by_display,
-            "{case}"
-        );
+        assert_eq!(rig.actor.state.last_user_space_by_display, history, "{case}");
     }
 }
 
@@ -526,8 +523,8 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
                 invalid.inventory.remove("left");
                 assert!(rig.tick(0, Some(invalid)).is_none());
                 assert_eq!(
-                    rig.actor.state.last_user_space_by_display,
-                    before.last_user_space_by_display
+                    rig.actor.state.last_user_space_by_display["left"],
+                    SpaceId::new(1)
                 );
             }
             _ => {}
@@ -536,6 +533,13 @@ fn desktop_replacement_switch_and_migration_follow_full_inventory_identity() {
             let detached = sample(vec![screen(2, "right", 2)]);
             assert!(rig.tick(0, Some(detached.clone())).is_none());
             rig.tick(1, Some(detached)).unwrap();
+        }
+        if case.starts_with("old migrated") {
+            // Desktops change displays only with a physical reconfiguration.
+            rig.event(Event::DisplayReconfigured {
+                display_id: 1,
+                flags: DisplayReconfigFlags::ADD,
+            });
         }
         // Coalesce with a queued native query; the notification carries no remap hint.
         rig.event(Event::ScreenRefreshRequested);
@@ -588,7 +592,7 @@ fn partial_return_does_not_steal_an_absent_displays_desktop_history() {
     let displaced = rig.tick(1, Some(transient)).unwrap();
     assert!(displaced.space_remaps.is_empty());
     assert_eq!(
-        displaced.last_user_space_by_display.get("external"),
+        rig.actor.state.last_user_space_by_display.get("external"),
         Some(&SpaceId::new(2))
     );
     let returned = sample(vec![screen(1, "builtin", 1), screen(2, "external", 4)]);
@@ -649,6 +653,111 @@ fn fullscreen_changes_preserve_other_displays_user_context_in_any_enumeration_or
         assert!(after.fullscreen_spaces.contains(&fullscreen));
         assert!(!after.active_window_spaces.values().any(|s| *s == fullscreen));
     }
+}
+
+#[test]
+fn borrowing_a_fullscreen_displays_desktop_needs_physical_evidence_or_persistence() {
+    let fullscreen = SpaceId::new(0x400000002);
+    for case in ["transient", "persistent", "set main"] {
+        let mut rig = Rig::new();
+        let base = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+        rig.tick(0, Some(base.clone())).unwrap();
+        let mut entered = base.clone();
+        entered.screens[1].space = Some(fullscreen);
+        entered.inventory.get_mut("right").unwrap().push(fullscreen);
+        let accepted = rig.tick(0, Some(entered.clone())).unwrap();
+        // Later, while right is already fullscreen, left reports right's desktop.
+        let mut borrowed = entered.clone();
+        borrowed.screens[0].space = Some(SpaceId::new(2));
+        borrowed.inventory.insert("left".into(), vec![SpaceId::new(1), SpaceId::new(2)]);
+        borrowed.inventory.insert("right".into(), vec![fullscreen]);
+        borrowed.screens.reverse();
+        let (samples, hits) = match case {
+            "transient" => (3, u8::MAX),
+            "persistent" => (REFRESH_MAX_RETRIES, REFRESH_MAX_RETRIES),
+            _ => {
+                rig.event(Event::DisplayReconfigured {
+                    display_id: 1,
+                    flags: DisplayReconfigFlags::SET_MAIN,
+                });
+                (DISPLAY_STABLE_REQUIRED_HITS, DISPLAY_STABLE_REQUIRED_HITS)
+            }
+        };
+        for attempt in 0..samples {
+            let forwarded = rig.tick(attempt, Some(borrowed.clone()));
+            if attempt + 1 < hits {
+                assert!(forwarded.is_none(), "{case} {attempt}");
+                let last = rig.actor.state.last_forwarded.as_ref().unwrap();
+                assert_eq!(last.display_space_ids, accepted.display_space_ids, "{case}");
+                assert_eq!(rig.actor.state.screens, accepted.screens, "{case}");
+            } else {
+                let moved = forwarded.expect(case);
+                assert_eq!(moved.display_space_ids["left"], vec![
+                    SpaceId::new(1),
+                    SpaceId::new(2)
+                ]);
+            }
+        }
+        if case == "transient" {
+            assert!(rig.tick(0, Some(entered.clone())).is_none());
+            let settled = rig.tick(1, Some(entered)).unwrap();
+            assert_eq!(settled.display_space_ids, accepted.display_space_ids);
+            assert_eq!(settled.screens, accepted.screens);
+        }
+    }
+    // A returning display reclaiming its own desktop later is not borrowing.
+    let mut rig = Rig::new();
+    let base = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+    rig.tick(0, Some(base.clone())).unwrap();
+    let mut departed = sample(vec![screen(1, "left", 1)]);
+    departed.inventory.insert("left".into(), vec![SpaceId::new(1), SpaceId::new(2)]);
+    let mut returned = sample(vec![screen(1, "left", 1), screen(2, "right", 4)]);
+    returned.inventory = departed.inventory.clone();
+    returned.inventory.insert("right".into(), vec![SpaceId::new(4)]);
+    for stage in [departed, returned] {
+        assert!(rig.tick(0, Some(stage.clone())).is_none());
+        rig.tick(1, Some(stage)).unwrap();
+    }
+    let mut reclaimed = sample(vec![screen(1, "left", 1), screen(2, "right", 4)]);
+    reclaimed
+        .inventory
+        .insert("right".into(), vec![SpaceId::new(2), SpaceId::new(4)]);
+    assert!(rig.tick(0, Some(reclaimed)).is_some());
+}
+
+#[test]
+fn fullscreen_space_lifecycle_is_neither_identity_loss_nor_display_churn() {
+    let fullscreen = SpaceId::new(0x400000002);
+    let mut rig = Rig::new();
+    let base = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+    rig.tick(0, Some(base.clone())).unwrap();
+    rig.notifications();
+    let mut entered = base.clone();
+    entered.screens[1].space = Some(fullscreen);
+    entered.inventory.get_mut("right").unwrap().push(fullscreen);
+    let state = rig.tick(0, Some(entered)).unwrap();
+    assert!(state.fullscreen_spaces.contains(&fullscreen));
+    assert_eq!(state.display_space_ids["right"], vec![SpaceId::new(2)]);
+    // Switching away keeps the fullscreen Space alive and still reported.
+    let mut away = base.clone();
+    away.inventory.get_mut("right").unwrap().push(fullscreen);
+    let state = rig.tick(0, Some(away)).unwrap();
+    assert!(
+        state.fullscreen_spaces.contains(&fullscreen),
+        "a hidden fullscreen Space exists"
+    );
+    // Exiting destroys it: that is an application lifecycle, not display churn.
+    let state = rig.tick(0, Some(base)).unwrap();
+    assert!(state.fullscreen_spaces.is_empty());
+    assert!(!state.should_force_refresh_layout && !state.display_set_changed);
+    assert!(state.space_remaps.is_empty());
+    assert!(!rig.actor.state.display_churn_active);
+    assert!(
+        !rig.notifications()
+            .iter()
+            .any(|event| matches!(event, reactor::Event::TopologyInvalidated(_))),
+        "fullscreen exit must not revoke frame authority like a display change"
+    );
 }
 
 #[test]
@@ -807,7 +916,7 @@ fn queued_active_space_notification_waits_for_a_real_switch_or_bounded_membershi
         assert!(after.space_remaps.is_empty());
         assert!(!after.display_set_changed && !after.should_force_refresh_layout);
         assert_eq!(
-            after.last_user_space_by_display.get("laptop"),
+            rig.actor.state.last_user_space_by_display.get("laptop"),
             Some(&SpaceId::new(if changed_space { 2 } else { 1 }))
         );
         assert_eq!(
@@ -860,4 +969,31 @@ fn a_space_switch_revokes_queued_geometry_before_the_reactor_receives_it() {
             "unchanged samples must preserve presentation authority"
         );
     }
+}
+
+#[test]
+fn native_space_destruction_is_forwarded_only_after_topology_corroborates_it() {
+    let mut rig = Rig::new();
+    let fullscreen = SpaceId::new(0x400000001);
+    let mut initial = sample(vec![screen(1, "left", 1)]);
+    initial.inventory.get_mut("left").unwrap().push(fullscreen);
+    rig.tick(0, Some(initial.clone())).unwrap();
+    // Hold the event until sampling is safe; the test supplies native snapshots,
+    // while production owns quarantine, retry, acceptance and delta forwarding.
+    rig.event(Event::SystemWillSleep);
+    rig.event(Event::SpaceDestroyed(fullscreen));
+    assert!(rig.tick(0, Some(initial.clone())).is_none());
+    rig.event(Event::SystemDidWake);
+    rig.tick(0, Some(initial.clone()));
+    let still_present = rig.tick(0, Some(initial)).unwrap();
+    assert!(still_present.destroyed_spaces.is_empty());
+    let missing = sample(vec![screen(1, "left", 1)]);
+    let destroyed = rig.tick(0, Some(missing.clone())).unwrap();
+    assert!(destroyed.destroyed_spaces.contains(&fullscreen));
+    assert!(!destroyed.fullscreen_spaces.contains(&fullscreen));
+    let next = rig.tick(0, Some(missing)).unwrap();
+    assert!(
+        next.destroyed_spaces.is_empty(),
+        "destruction deltas are consumed once"
+    );
 }

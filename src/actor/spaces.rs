@@ -117,11 +117,12 @@ pub struct ForwardedSpaceState {
     pub membership_complete: bool,
     pub screens: Vec<ScreenInfo>,
     pub fullscreen_spaces: HashSet<SpaceId>,
+    /// Positive native destruction deltas, forwarded only with accepted topology.
+    pub destroyed_spaces: HashSet<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
     pub menu_bar_space: Option<SpaceId>,
     pub command_space: Option<SpaceId>,
     pub display_space_ids: HashMap<String, Vec<SpaceId>>,
-    pub last_user_space_by_display: HashMap<String, SpaceId>,
     pub space_remaps: Vec<(SpaceId, SpaceId)>,
     pub display_set_changed: bool,
     pub should_force_refresh_layout: bool,
@@ -161,6 +162,7 @@ pub struct AuthorityState {
     awaiting_space_switch_confirmation: bool,
     recovering_membership: bool,
     visible_window_spaces: HashMap<WindowServerId, SpaceId>,
+    destroyed_spaces: HashSet<SpaceId>,
     revision: u64,
     last_forwarded: Option<ForwardedSpaceState>,
     timers_enabled: bool,
@@ -187,6 +189,7 @@ impl Default for AuthorityState {
             awaiting_space_switch_confirmation: false,
             recovering_membership: false,
             visible_window_spaces: HashMap::default(),
+            destroyed_spaces: HashSet::default(),
             revision: 0,
             last_forwarded: None,
             timers_enabled: true,
@@ -329,7 +332,12 @@ impl SpacesActor {
             Event::SpaceInventoryChanged => {
                 self.handle_space_inventory_changed();
             }
-            Event::SpaceCreated(_) | Event::SpaceDestroyed(_) => {
+            Event::SpaceCreated(space) => {
+                self.state.destroyed_spaces.remove(&space);
+                self.handle_space_inventory_changed();
+            }
+            Event::SpaceDestroyed(space) => {
+                self.state.destroyed_spaces.insert(space);
                 self.handle_space_inventory_changed();
             }
             Event::WindowServerAppeared(wsid, sid) => {
@@ -509,14 +517,18 @@ impl SpacesActor {
         inventory: HashMap<String, Vec<SpaceId>>,
     ) -> ForwardedSpaceState {
         let previous_screens = self.state.screens.clone();
+        // Positive presence only: inactive fullscreen enumeration may be incomplete.
         let fullscreen_spaces: HashSet<SpaceId> = screens
             .iter()
             .filter_map(|screen| screen.space)
+            .chain(inventory.values().flatten().copied())
             .filter(|space| Self::is_fullscreen_space(*space))
             .collect();
         let mut screens = screens;
-        self.null_fullscreen_spaces(&mut screens);
-        self.null_non_user_spaces(&mut screens);
+        // Only user desktops are presentation contexts; fullscreen shows none.
+        for screen in &mut screens {
+            screen.space = screen.space.filter(|space| Self::is_user_space(*space));
+        }
 
         let previous_displays: HashSet<String> =
             previous_screens.iter().map(|screen| screen.display_uuid.clone()).collect();
@@ -591,21 +603,41 @@ impl SpacesActor {
                     })
                 })
             });
+        // Fullscreen Spaces come and go with applications. They are not desktops a
+        // display owns, so their destruction is neither identity loss nor churn.
+        let inventory: HashMap<_, Vec<_>> = inventory
+            .into_iter()
+            .map(|(display, spaces)| {
+                let spaces = spaces.into_iter().filter(|space| !fullscreen_spaces.contains(space));
+                (display, spaces.collect())
+            })
+            .collect();
         let (membership, membership_complete) = self.visible_window_spaces_for_screens(&screens);
         self.state.visible_window_spaces = membership;
         self.state.screens = screens.clone();
         self.state.recovering_membership = false;
+        let destroyed_spaces: HashSet<_> = self
+            .state
+            .destroyed_spaces
+            .iter()
+            .copied()
+            .filter(|space| {
+                !inventory.values().any(|spaces| spaces.contains(space))
+                    && !fullscreen_spaces.contains(space)
+            })
+            .collect();
+        self.state.destroyed_spaces.retain(|space| !destroyed_spaces.contains(space));
         let mut forwarded = ForwardedSpaceState {
             revision: self.state.revision,
             authoritative: true,
             membership_complete,
             screens,
             fullscreen_spaces,
+            destroyed_spaces,
             active_spaces: self.state.screens.iter().filter_map(|screen| screen.space).collect(),
             menu_bar_space,
             command_space,
             display_space_ids: inventory,
-            last_user_space_by_display: self.state.last_user_space_by_display.clone(),
             space_remaps,
             display_set_changed,
             should_force_refresh_layout,
@@ -613,7 +645,8 @@ impl SpacesActor {
             active_window_spaces: self.state.visible_window_spaces.clone(),
         };
         if self.state.last_forwarded.as_ref().is_none_or(|previous| {
-            previous.screens != forwarded.screens
+            !forwarded.destroyed_spaces.is_empty()
+                || previous.screens != forwarded.screens
                 || previous.fullscreen_spaces != forwarded.fullscreen_spaces
                 || previous.display_space_ids != forwarded.display_space_ids
                 || previous.active_window_spaces != forwarded.active_window_spaces
@@ -637,42 +670,28 @@ impl SpacesActor {
         self.reactor_tx.send(reactor::Event::TopologyInvalidated(self.state.revision));
     }
 
-    fn fullscreen_snapshot_crosses_display_ownership(&self, screens: &[ScreenInfo]) -> bool {
-        let entering_fullscreen = screens.iter().any(|next| {
-            next.space.is_some_and(Self::is_fullscreen_space)
-                && self.state.screens.iter().any(|previous| {
-                    previous.display_uuid == next.display_uuid
-                        && previous.space.is_some_and(|space| !Self::is_fullscreen_space(space))
-                })
-        });
-        entering_fullscreen
-            && screens.iter().any(|next| {
-                next.space.is_some_and(|space| {
-                    !Self::is_fullscreen_space(space)
-                        && self.state.screens.iter().any(|previous| {
-                            previous.display_uuid != next.display_uuid
-                                && previous.space == Some(space)
-                        })
-                })
+    /// A user desktop listed by a connected display other than the one that owned
+    /// it in the last accepted inventory, and never this display's own. Displays
+    /// exchange desktops only with a physical reconfiguration (main display change);
+    /// otherwise this is transitional borrowing, e.g. beside a fullscreen display.
+    fn borrows_another_displays_desktop(
+        &self,
+        screens: &[ScreenInfo],
+        inventory: &HashMap<String, Vec<SpaceId>>,
+    ) -> bool {
+        let Some(accepted) = self.state.last_forwarded.as_ref() else {
+            return false;
+        };
+        inventory.iter().any(|(display, spaces)| {
+            let history = self.state.last_known_display_space_ids.get(display);
+            accepted.display_space_ids.iter().any(|(owner, owned)| {
+                owner != display
+                    && screens.iter().any(|screen| screen.display_uuid == *owner)
+                    && spaces.iter().any(|space| {
+                        owned.contains(space) && !history.is_some_and(|own| own.contains(space))
+                    })
             })
-    }
-
-    fn null_fullscreen_spaces(&self, screens: &mut [ScreenInfo]) {
-        for screen in screens {
-            if screen.space.is_some_and(Self::is_fullscreen_space) {
-                screen.space = None;
-            }
-        }
-    }
-
-    fn null_non_user_spaces(&self, screens: &mut [ScreenInfo]) {
-        for screen in screens {
-            if screen.space.is_some_and(|space| {
-                !Self::is_fullscreen_space(space) && !Self::is_user_space(space)
-            }) {
-                screen.space = None;
-            }
-        }
+        })
     }
 
     fn space_replacements_are_ambiguous(&self, inventory: &HashMap<String, Vec<SpaceId>>) -> bool {
@@ -1037,7 +1056,6 @@ impl SpacesActor {
         }
         if !Self::screen_snapshot_is_valid_for_commit(&screens)
             || !Self::inventory_matches_screens(&screens, &inventory)
-            || self.fullscreen_snapshot_crosses_display_ownership(&screens)
             || self.space_replacements_are_ambiguous(&inventory)
         {
             self.reject_native_snapshot();
@@ -1060,14 +1078,25 @@ impl SpacesActor {
                 .flatten()
                 .any(|old| !inventory.values().any(|spaces| spaces.contains(old)))
         });
+        let borrowed = self.borrows_another_displays_desktop(&screens, &inventory);
         if !self.state.screens.is_empty()
-            && (physical_topology_changed || identity_lost)
+            && (physical_topology_changed || identity_lost || borrowed)
             && !self.state.display_churn_active
         {
             self.begin_display_churn(DisplayReconfigFlags::empty());
         }
+        // Without physical evidence, borrowing is accepted only if it outlasts the
+        // whole retry burst: a real move is not frozen, a transition never commits.
+        let required_hits = if borrowed
+            && !physical_topology_changed
+            && self.state.display_churn_flags.is_empty()
+        {
+            REFRESH_MAX_RETRIES
+        } else {
+            DISPLAY_STABLE_REQUIRED_HITS
+        };
         let recovering = self.state.display_churn_active || self.state.recovering_membership;
-        if recovering && !self.observe_stable_topology(&screens, &inventory, quiet) {
+        if recovering && !self.observe_stable_topology(&screens, &inventory, quiet, required_hits) {
             return false;
         }
         let spaces: Vec<_> = screens.iter().map(|screen| screen.space).collect();
@@ -1193,6 +1222,7 @@ impl SpacesActor {
         screens: &[ScreenInfo],
         inventory: &HashMap<String, Vec<SpaceId>>,
         quiet: bool,
+        required_hits: u8,
     ) -> bool {
         // Compare the full sample, including inactive native desktops. Enumeration
         // order alone is irrelevant; physical identity, scale and geometry are not.
@@ -1212,7 +1242,7 @@ impl SpacesActor {
                 1
             }
         };
-        hits >= DISPLAY_STABLE_REQUIRED_HITS && quiet
+        hits >= required_hits && quiet
     }
 }
 

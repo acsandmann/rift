@@ -412,7 +412,12 @@ fn render_inputs<'a>(
                     label: if show_windows {
                         Cow::Borrowed("")
                     } else {
-                        workspace_label(workspace, settings.active_label)
+                        let label = workspace_label(workspace, settings.active_label);
+                        if settings.show_fullscreen_indicator && workspace.has_fullscreen {
+                            Cow::Owned(format!("[{label}]"))
+                        } else {
+                            label
+                        }
                     },
                     show_windows,
                 })
@@ -1222,6 +1227,7 @@ mod layout_library_tests {
             is_active: active,
             window_count: 0,
             windows: Vec::new(),
+            has_fullscreen: false,
         }
     }
 
@@ -1455,6 +1461,40 @@ mod layout_library_tests {
     }
 
     #[test]
+    fn fullscreen_indicator_brackets_labels_only_when_enabled() {
+        let mut displays = displays();
+        displays[0].workspaces[1].name = "Development".into();
+        displays[0].workspaces[1].has_fullscreen = true;
+        let labels = |displays: &[DisplayWorkspaces], settings: &MenuBarSettings| {
+            render_inputs(displays, settings)
+                .iter()
+                .map(|input| input.label.to_string())
+                .collect::<Vec<_>>()
+        };
+        let mut settings = MenuBarSettings {
+            display_style: WorkspaceDisplayStyle::Label,
+            active_label: ActiveWorkspaceLabel::Name,
+            show_empty: true,
+            ..Default::default()
+        };
+        assert_eq!(labels(&displays, &settings)[1], "Development");
+
+        settings.show_fullscreen_indicator = true;
+        let enabled = labels(&displays, &settings);
+        assert_eq!(enabled[1], "[Development]");
+        assert_eq!(enabled.iter().filter(|label| label.starts_with('[')).count(), 1);
+        let key = MenuIconRenderKey::from_inputs(&render_inputs(&displays, &settings));
+        displays[0].workspaces[1].has_fullscreen = false;
+        assert!(!key.matches_inputs(&render_inputs(&displays, &settings)));
+        assert_eq!(labels(&displays, &settings)[1], "Development");
+
+        // Layout style draws miniatures, not labels.
+        displays[0].workspaces[1].has_fullscreen = true;
+        settings.display_style = WorkspaceDisplayStyle::Layout;
+        assert!(labels(&displays, &settings).iter().all(String::is_empty));
+    }
+
+    #[test]
     fn render_key_tracks_second_display_identity_order_and_state() {
         let base = displays();
         let settings = MenuBarSettings {
@@ -1615,6 +1655,7 @@ impl MenuBarPreview {
             is_active: i == 1,
             window_count: windows.len(),
             windows,
+            has_fullscreen: name == "Reading",
         })
         .collect();
         // The containing native material owns the backdrop. Clear only the

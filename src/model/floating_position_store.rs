@@ -7,31 +7,21 @@ use crate::common::collections::HashMap;
 use crate::model::{VirtualWorkspaceId, WorkspaceStore};
 use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
-use crate::sys::screen::SpaceId;
 
-/// Saved floating frames. This is layout persistence, not workspace catalog
-/// state; callers must remove entries as part of the corresponding window
-/// lifecycle operation.
+/// Viewport placement belongs to workspace identity, independent of its native owner.
 #[serde_as]
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct FloatingPositionStore {
     #[serde_as(as = "HashMap<_, CGRectDef>")]
-    positions: HashMap<(SpaceId, VirtualWorkspaceId, WindowId), CGRect>,
+    positions: HashMap<(VirtualWorkspaceId, WindowId), CGRect>,
 }
 
 impl FloatingPositionStore {
     pub(crate) fn validate_persisted(&self, workspaces: &WorkspaceStore) -> Result<(), String> {
-        for (&(space, workspace, window), frame) in &self.positions {
-            let Some(workspace_info) = workspaces.workspaces.get(workspace) else {
+        for (&(workspace, window), frame) in &self.positions {
+            if !workspaces.workspaces.contains_key(workspace) {
                 return Err(format!(
                     "floating frame for window {window:?} references missing workspace {workspace:?}"
-                ));
-            };
-            if workspace_info.space != space {
-                return Err(format!(
-                    "floating frame for window {window:?} is stored under native space {} instead of {}",
-                    space.get(),
-                    workspace_info.space.get()
                 ));
             }
             if !frame.origin.x.is_finite()
@@ -48,7 +38,7 @@ impl FloatingPositionStore {
     }
 
     pub(crate) fn persisted_windows(&self) -> Vec<WindowId> {
-        self.positions.keys().map(|(_, _, window)| *window).collect()
+        self.positions.keys().map(|(_, window)| *window).collect()
     }
 
     pub(crate) fn positioned_windows(&self) -> Vec<WindowId> {
@@ -58,167 +48,103 @@ impl FloatingPositionStore {
         windows
     }
 
-    pub(crate) fn locations_for_window(
-        &self,
-        window: WindowId,
-    ) -> Vec<(SpaceId, VirtualWorkspaceId)> {
-        let mut locations = self
+    pub(crate) fn locations_for_window(&self, window: WindowId) -> Vec<VirtualWorkspaceId> {
+        let mut locations: Vec<_> = self
             .positions
             .keys()
-            .filter_map(|&(space, workspace, stored_window)| {
-                (stored_window == window).then_some((space, workspace))
-            })
-            .collect::<Vec<_>>();
+            .filter_map(|&(workspace, stored)| (stored == window).then_some(workspace))
+            .collect();
         locations.sort_unstable();
         locations.dedup();
         locations
     }
 
-    pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
-        if old_space == new_space {
-            return;
-        }
-        let old = std::mem::take(&mut self.positions);
-        self.positions = old
-            .into_iter()
-            .filter_map(|((space, workspace, window), frame)| {
-                (space != new_space).then_some((
-                    (
-                        if space == old_space { new_space } else { space },
-                        workspace,
-                        window,
-                    ),
-                    frame,
-                ))
-            })
-            .collect();
-    }
-
-    pub fn store(
-        &mut self,
-        space: SpaceId,
-        workspace: VirtualWorkspaceId,
-        window: WindowId,
-        frame: CGRect,
-    ) {
-        self.positions.insert((space, workspace, window), frame);
+    pub fn store(&mut self, workspace: VirtualWorkspaceId, window: WindowId, frame: CGRect) {
+        self.positions.insert((workspace, window), frame);
     }
 
     pub fn store_if_absent(
         &mut self,
-        space: SpaceId,
         workspace: VirtualWorkspaceId,
         window: WindowId,
         frame: CGRect,
     ) {
-        self.positions.entry((space, workspace, window)).or_insert(frame);
+        self.positions.entry((workspace, window)).or_insert(frame);
     }
 
-    pub fn get(
-        &self,
-        space: SpaceId,
-        workspace: VirtualWorkspaceId,
-        window: WindowId,
-    ) -> Option<CGRect> {
-        self.positions.get(&(space, workspace, window)).copied()
+    pub fn get(&self, workspace: VirtualWorkspaceId, window: WindowId) -> Option<CGRect> {
+        self.positions.get(&(workspace, window)).copied()
     }
 
-    pub fn workspace_positions(
-        &self,
-        space: SpaceId,
-        workspace: VirtualWorkspaceId,
-    ) -> Vec<(WindowId, CGRect)> {
-        let mut positions = self
+    pub fn workspace_positions(&self, workspace: VirtualWorkspaceId) -> Vec<(WindowId, CGRect)> {
+        let mut positions: Vec<_> = self
             .positions
             .iter()
-            .filter_map(|(&(stored_space, stored_workspace, window), &frame)| {
-                (stored_space == space && stored_workspace == workspace).then_some((window, frame))
-            })
-            .collect::<Vec<_>>();
+            .filter_map(|(&(id, window), &frame)| (id == workspace).then_some((window, frame)))
+            .collect();
         positions.sort_unstable_by_key(|(window, _)| *window);
         positions
     }
 
     pub fn remove_window(&mut self, window: WindowId) {
-        self.positions.retain(|(_, _, stored_window), _| *stored_window != window);
+        self.positions.retain(|(_, stored), _| *stored != window);
     }
 
     pub(crate) fn remove_workspace_window(
         &mut self,
-        space: SpaceId,
         workspace: VirtualWorkspaceId,
         window: WindowId,
     ) {
-        self.positions.retain(|(stored_space, stored_workspace, stored_window), _| {
-            (*stored_space, *stored_workspace, *stored_window) != (space, workspace, window)
-        });
+        self.positions.remove(&(workspace, window));
     }
 
-    /// Keep at most one persisted location for a window identity.
-    ///
-    /// Layout restore treats workspace membership as singular. Floating frames must obey the
-    /// same invariant or a stale frame can resurrect a window in a different workspace later.
-    pub fn retain_window_location(
-        &mut self,
-        window: WindowId,
-        keep: (SpaceId, VirtualWorkspaceId),
-    ) {
-        self.positions.retain(|(space, workspace, stored_window), _| {
-            *stored_window != window || (*space, *workspace) == keep
-        });
+    pub fn retain_window_location(&mut self, window: WindowId, keep: VirtualWorkspaceId) {
+        self.positions
+            .retain(|(workspace, stored), _| *stored != window || *workspace == keep);
     }
 
-    /// Replace one target workspace's saved floating frames from a snapshot.
-    /// Clearing first is essential: restore is replacement, not a merge with stale target state.
     pub fn replace_workspace_from(
         &mut self,
         source: &Self,
-        source_space: SpaceId,
         source_workspace: VirtualWorkspaceId,
-        target_space: SpaceId,
         target_workspace: VirtualWorkspaceId,
     ) {
-        self.positions.retain(|(space, workspace, _), _| {
-            (*space, *workspace) != (target_space, target_workspace)
-        });
-        for (window, frame) in source.workspace_positions(source_space, source_workspace) {
-            self.store(target_space, target_workspace, window, frame);
-        }
+        self.replace_workspace_positions(
+            target_workspace,
+            source.workspace_positions(source_workspace),
+        );
     }
 
     pub(crate) fn replace_workspace_positions(
         &mut self,
-        target_space: SpaceId,
-        target_workspace: VirtualWorkspaceId,
+        workspace: VirtualWorkspaceId,
         positions: Vec<(WindowId, CGRect)>,
     ) {
-        self.positions.retain(|(space, workspace, _), _| {
-            (*space, *workspace) != (target_space, target_workspace)
-        });
+        self.positions.retain(|(stored, _), _| *stored != workspace);
         for (window, frame) in positions {
-            self.store(target_space, target_workspace, window, frame);
+            self.store(workspace, window, frame);
         }
     }
 
     pub fn remove_app(&mut self, pid: pid_t) {
-        self.positions.retain(|(_, _, window), _| window.pid != pid);
+        self.positions.retain(|(_, window), _| window.pid != pid);
     }
 
     pub fn transfer_window_identity(&mut self, from: WindowId, to: WindowId) {
         if from == to {
             return;
         }
-        let transfers: Vec<_> = self
+        let frames: Vec<_> = self
             .positions
             .iter()
-            .filter_map(|(&(space, workspace, window), &frame)| {
-                (window == from).then_some((space, workspace, frame))
+            .filter_map(|(&(workspace, window), &frame)| {
+                (window == from).then_some((workspace, frame))
             })
             .collect();
         self.remove_window(from);
         self.remove_window(to);
-        for (space, workspace, frame) in transfers {
-            self.store(space, workspace, to, frame);
+        for (workspace, frame) in frames {
+            self.store(workspace, to, frame);
         }
     }
 }
@@ -238,13 +164,13 @@ mod tests {
     fn window_lifecycle_cleanup_removes_all_saved_frames() {
         let mut positions = FloatingPositionStore::default();
         let window = WindowId::new(42, 1);
-        positions.store(SpaceId::new(1), workspace(), window, frame());
-        positions.store(SpaceId::new(2), workspace(), window, frame());
+        positions.store(workspace(), window, frame());
+        positions.store(KeyData::from_ffi(2).into(), window, frame());
 
         positions.remove_window(window);
 
-        assert!(positions.workspace_positions(SpaceId::new(1), workspace()).is_empty());
-        assert!(positions.workspace_positions(SpaceId::new(2), workspace()).is_empty());
+        assert!(positions.workspace_positions(workspace()).is_empty());
+        assert!(positions.workspace_positions(KeyData::from_ffi(2).into()).is_empty());
     }
 
     #[test]
@@ -252,37 +178,26 @@ mod tests {
         let mut positions = FloatingPositionStore::default();
         let old = WindowId::new(42, 1);
         let new = WindowId::new(42, 2);
-        positions.store(SpaceId::new(1), workspace(), old, frame());
+        positions.store(workspace(), old, frame());
 
         positions.transfer_window_identity(old, new);
 
-        assert_eq!(positions.get(SpaceId::new(1), workspace(), old), None);
-        assert_eq!(positions.get(SpaceId::new(1), workspace(), new), Some(frame()));
+        assert_eq!(positions.get(workspace(), old), None);
+        assert_eq!(positions.get(workspace(), new), Some(frame()));
     }
 
     #[test]
     fn workspace_restore_replaces_target_frames_instead_of_merging() {
         let mut source = FloatingPositionStore::default();
         let mut target = FloatingPositionStore::default();
-        let source_space = SpaceId::new(1);
-        let target_space = SpaceId::new(2);
         let source_window = WindowId::new(1, 1);
         let stale_target_window = WindowId::new(2, 2);
 
-        source.store(source_space, workspace(), source_window, frame());
-        target.store(target_space, workspace(), stale_target_window, frame());
-        target.replace_workspace_from(
-            &source,
-            source_space,
-            workspace(),
-            target_space,
-            workspace(),
-        );
+        source.store(workspace(), source_window, frame());
+        target.store(workspace(), stale_target_window, frame());
+        target.replace_workspace_from(&source, workspace(), workspace());
 
-        assert_eq!(
-            target.get(target_space, workspace(), source_window),
-            Some(frame())
-        );
-        assert_eq!(target.get(target_space, workspace(), stale_target_window), None);
+        assert_eq!(target.get(workspace(), source_window), Some(frame()));
+        assert_eq!(target.get(workspace(), stale_target_window), None);
     }
 }

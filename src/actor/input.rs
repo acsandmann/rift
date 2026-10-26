@@ -25,7 +25,7 @@ use crate::common::config::{
 };
 use crate::sys::event::{self, Hotkey, KeyCode};
 use crate::sys::hotkey::{
-    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active,
+    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active, modifiers_from_flags,
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
@@ -38,6 +38,11 @@ const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 32_000_000; // 32ms ~= 31 Hz
 #[derive(Debug)]
 pub enum Request {
     Warp(CGPoint),
+    /// Carry the cursor's position within `from` to the same spot in `to`.
+    WarpRelative {
+        from: Option<CGRect>,
+        to: CGRect,
+    },
     HideOnFocus,
     EnforceHidden,
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
@@ -447,7 +452,14 @@ impl Input {
                 }
                 should_rebuild_mask = true;
             }
-            Request::Warp(point) => {
+            Request::Warp(_) | Request::WarpRelative { .. } => {
+                let point = match request {
+                    Request::WarpRelative { from, to } => {
+                        relative_point(event::current_cursor_location().ok(), from, to)
+                    }
+                    Request::Warp(point) => point,
+                    _ => unreachable!(),
+                };
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 }
@@ -777,10 +789,12 @@ impl Input {
                 } else {
                     state.mouse_settings.action2
                 };
-                let flag = mouse_modifier_flag(state.mouse_settings.modifier);
                 if state.mouse_features_enabled
                     && action != MouseAction::None
-                    && CGEvent::flags(Some(event)).contains(flag)
+                    && mouse_modifier_held(
+                        state.mouse_settings.modifier,
+                        CGEvent::flags(Some(event)),
+                    )
                 {
                     state.captured_button = Some(button);
                     self.events_tx.send(Event::ModifierMouseDown {
@@ -867,7 +881,7 @@ impl Input {
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
             && state.captured_button.is_none()
-            && !state.current_flags.contains(mouse_modifier_flag(state.mouse_settings.modifier))
+            && !mouse_modifier_held(state.mouse_settings.modifier, state.current_flags)
         {
             // Secondary pointer consumers above do not participate in focus
             // suppression or window resolution.
@@ -1235,13 +1249,20 @@ impl State {
     }
 }
 
-fn mouse_modifier_flag(modifier: MouseModifier) -> CGEventFlags {
+/// Single modifiers match while held; combinations reject extra modifiers, including Fn.
+/// As with hotkeys, Caps Lock is ignored and either a family or left/right bit counts.
+fn mouse_modifier_held(modifier: MouseModifier, flags: CGEventFlags) -> bool {
     match modifier {
-        MouseModifier::Cmd => CGEventFlags::MaskCommand,
-        MouseModifier::Alt => CGEventFlags::MaskAlternate,
-        MouseModifier::Shift => CGEventFlags::MaskShift,
-        MouseModifier::Ctrl => CGEventFlags::MaskControl,
-        MouseModifier::Fn => CGEventFlags::MaskSecondaryFn,
+        MouseModifier::Fn => flags.contains(CGEventFlags::MaskSecondaryFn),
+        MouseModifier::Keys(keys) => {
+            let held = modifiers_from_flags(flags);
+
+            if keys.family_count() == 1 {
+                held.contains(keys)
+            } else {
+                held == keys && !flags.contains(CGEventFlags::MaskSecondaryFn)
+            }
+        }
     }
 }
 
@@ -1363,9 +1384,38 @@ fn build_event_mask(
     mask
 }
 
+/// Map `cursor` from its spot in `from` to the same spot in `to`, or `to`'s
+/// center when the cursor is not inside `from`.
+fn relative_point(cursor: Option<CGPoint>, from: Option<CGRect>, to: CGRect) -> CGPoint {
+    use crate::sys::geometry::CGRectExt;
+    match (cursor, from) {
+        (Some(p), Some(from))
+            if from.size.width > 0. && from.size.height > 0. && from.contains(p) =>
+        {
+            CGPoint::new(
+                to.origin.x + (p.x - from.origin.x) / from.size.width * to.size.width,
+                to.origin.y + (p.y - from.origin.y) / from.size.height * to.size.height,
+            )
+        }
+        _ => to.mid(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_warp_keeps_cursor_spot_or_centers() {
+        use objc2_core_foundation::CGSize;
+        let from = CGRect::new(CGPoint::new(100., 100.), CGSize::new(200., 100.));
+        let to = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(800., 600.));
+        let inside = Some(CGPoint::new(150., 175.));
+        assert_eq!(relative_point(inside, Some(from), to), CGPoint::new(1200., 450.));
+        assert_eq!(relative_point(Some(CGPoint::ZERO), Some(from), to), to.mid());
+        assert_eq!(relative_point(inside, None, to), to.mid());
+        assert_eq!(relative_point(None, Some(from), to), to.mid());
+    }
 
     #[test]
     fn native_hold_timeout_does_not_reject_a_slow_physical_stroke() {

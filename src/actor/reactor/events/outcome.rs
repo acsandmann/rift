@@ -70,6 +70,8 @@ pub(crate) struct EventOutcome {
     pub(crate) make_key_windows: Vec<(pid_t, WindowServerId)>,
     pub(crate) mouse_warps: Vec<CGPoint>,
     pub(crate) post_arrange_mouse_warp: Option<WindowId>,
+    /// A workspace switch landed on this other display; carry the cursor there.
+    pub(crate) display_switch_warp: Option<SpaceId>,
     pub(crate) drop_haptic: bool,
     pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
     pub(crate) interactive_window_frame_write: Option<WindowFrameWriteRequest>,
@@ -127,6 +129,7 @@ impl EventOutcome {
         self.drop_haptic |= other.drop_haptic;
         self.post_arrange_mouse_warp =
             other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
+        self.display_switch_warp = other.display_switch_warp.or(self.display_switch_warp);
         if !other.pre_layout_window_frame_writes.is_empty()
             || other.interactive_window_frame_write.is_some()
         {

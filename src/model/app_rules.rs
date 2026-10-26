@@ -37,6 +37,8 @@ impl AppRuleDecision {
 /// independently re-derived at each integration point.
 #[derive(Debug, Clone, Copy)]
 pub struct AppRuleEffects {
+    /// Source captured by the membership mutation, used only to update layout projections.
+    pub source_workspace: Option<VirtualWorkspaceId>,
     pub workspace_id: VirtualWorkspaceId,
     pub floating: bool,
     pub position: Option<AppRulePosition>,
@@ -175,7 +177,7 @@ pub(crate) struct AppRuleResize {
 pub(crate) struct AppRuleWorkspaceFocus {
     pub(crate) window: WindowId,
     pub(crate) space: SpaceId,
-    pub(crate) workspace_index: usize,
+    pub(crate) workspace: VirtualWorkspaceId,
 }
 
 #[derive(Debug, Clone)]
