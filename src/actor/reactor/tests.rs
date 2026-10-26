@@ -1698,57 +1698,6 @@ fn matching_rift_frame_clears_pending_target() {
 }
 
 #[test]
-fn frame_acknowledgements_and_unchanged_frames_do_not_invalidate_layout() {
-    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
-    let target_frame = CGRect::new(
-        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
-        frame.size,
-    );
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
-
-    let acknowledgement = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            target_frame,
-            Some(txid),
-            Requested(true),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(acknowledgement.arrange.passes == 0);
-    assert!(!acknowledgement.refresh_layout_mode);
-
-    let unchanged = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            target_frame,
-            None,
-            Requested(false),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(unchanged.arrange.passes == 0);
-    assert!(!unchanged.refresh_layout_mode);
-
-    let explicitly_requested_frame = CGRect::new(
-        CGPoint::new(target_frame.origin.x + 10.0, target_frame.origin.y),
-        target_frame.size,
-    );
-    let requested = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            explicitly_requested_frame,
-            None,
-            Requested(true),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(requested.arrange.passes == 0);
-    assert!(!requested.refresh_layout_mode);
-}
-
-#[test]
 fn genuine_external_frame_changes_invalidate_layout() {
     let (mut reactor, wid, _wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
     let moved_frame = CGRect::new(
@@ -1769,72 +1718,6 @@ fn genuine_external_frame_changes_invalidate_layout() {
     assert!(outcome.arrange.passes > 0);
     assert_eq!(outcome.arrange.passes, 1);
     assert!(outcome.refresh_layout_mode);
-}
-
-#[test]
-fn stale_and_inactive_frame_events_request_no_arrange_passes() {
-    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
-    let target_frame = CGRect::new(
-        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
-        frame.size,
-    );
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
-    let acknowledgement = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            target_frame,
-            Some(txid),
-            Requested(true),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(acknowledgement.arrange.passes == 0);
-
-    let duplicate = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            target_frame,
-            None,
-            Requested(false),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(duplicate.arrange.passes == 0);
-
-    // Stale transaction notification while a newer target is pending.
-    let current_txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, current_txid, target_frame);
-    let stale = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            CGRect::new(
-                CGPoint::new(target_frame.origin.x + 20.0, target_frame.origin.y),
-                target_frame.size,
-            ),
-            Some(current_txid.next()),
-            Requested(false),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(stale.arrange.passes == 0);
-
-    // Geometry on an inactive native space.
-    reactor.transaction_manager.clear_target_for_window(wsid);
-    reactor.set_active_spaces(&[]);
-    let inactive = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            CGRect::new(
-                CGPoint::new(target_frame.origin.x + 30.0, target_frame.origin.y),
-                target_frame.size,
-            ),
-            None,
-            Requested(false),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
-    assert!(inactive.arrange.passes == 0);
 }
 
 #[test]
@@ -1948,34 +1831,67 @@ fn deminiaturize_refreshes_stale_snapshot_without_activation() {
 }
 
 #[test]
-fn duplicate_minimize_deminimize_and_unknown_window_events_do_not_arrange() {
-    let (mut reactor, wid, _wsid, _space1, _space2, _frame) = reactor_with_window_on_space1();
+fn events_that_change_no_managed_layout_do_not_arrange() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    let at = |dx| {
+        CGRect::new(
+            CGPoint::new(frame.origin.x + dx, frame.origin.y + 25.0),
+            frame.size,
+        )
+    };
+    let moved = |wid, frame, txid, requested| {
+        Event::WindowFrameChanged(wid, frame, txid, Requested(requested), Some(MouseState::Up))
+    };
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, at(40.0));
+    // Acknowledged, unchanged, and explicitly requested frames.
+    for event in [
+        moved(wid, at(40.0), Some(txid), true),
+        moved(wid, at(40.0), None, false),
+        moved(wid, at(50.0), None, true),
+    ] {
+        let outcome = reactor.dispatch_workflow(event).unwrap();
+        assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
+    }
 
-    reactor.dispatch_workflow(Event::WindowMinimized(wid)).unwrap();
-    let duplicate_minimize = reactor.dispatch_workflow(Event::WindowMinimized(wid)).unwrap();
-    assert!(duplicate_minimize.arrange.passes == 0);
-
-    reactor.dispatch_workflow(Event::WindowDeminiaturized(wid)).unwrap();
-    let duplicate_deminimize = reactor.dispatch_workflow(Event::WindowDeminiaturized(wid)).unwrap();
-    assert!(duplicate_deminimize.arrange.passes == 0);
-
+    // A stale transaction while a newer target is pending, duplicate minimize
+    // edges, and events for unknown windows.
+    let current = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, current, at(40.0));
     let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
-    let unknown_minimize = reactor.dispatch_workflow(Event::WindowMinimized(unknown)).unwrap();
-    let unknown_deminimize =
-        reactor.dispatch_workflow(Event::WindowDeminiaturized(unknown)).unwrap();
-    let unknown_frame = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            unknown,
-            CGRect::default(),
-            None,
-            Requested(false),
-            Some(MouseState::Up),
-        ))
-        .unwrap();
+    for (case, (event, checked)) in [
+        (moved(wid, at(60.0), Some(current.next()), false), true),
+        (Event::WindowMinimized(wid), false),
+        (Event::WindowMinimized(wid), true),
+        (Event::WindowDeminiaturized(wid), false),
+        (Event::WindowDeminiaturized(wid), true),
+        (Event::WindowMinimized(unknown), true),
+        (Event::WindowDeminiaturized(unknown), true),
+        (moved(unknown, CGRect::default(), None, false), true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let passes = reactor.dispatch_workflow(event).unwrap().arrange.passes;
+        assert!(!checked || passes == 0, "case {case}");
+    }
 
-    assert!(unknown_minimize.arrange.passes == 0);
-    assert!(unknown_deminimize.arrange.passes == 0);
-    assert!(unknown_frame.arrange.passes == 0);
+    // Windows rejected by admission keep lifecycle notifications only.
+    let popup = WindowId::new(wid.pid, 2);
+    let mut info = make_window(2);
+    (info.is_standard, info.is_root) = (false, false);
+    let created = reactor
+        .dispatch_workflow(Event::WindowCreated(popup, info, None, None))
+        .unwrap();
+    assert!(created.arrange.passes == 0 && created.refresh_window_notifications);
+    let destroyed = reactor.dispatch_workflow(Event::WindowDestroyed(popup)).unwrap();
+    assert_eq!(destroyed.arrange.passes, 0);
+
+    // Geometry on an inactive native space.
+    reactor.transaction_manager.clear_target_for_window(wsid);
+    reactor.set_active_spaces(&[]);
+    let inactive = reactor.dispatch_workflow(moved(wid, at(70.0), None, false)).unwrap();
+    assert_eq!(inactive.arrange.passes, 0);
 }
 
 #[test]
