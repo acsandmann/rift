@@ -5002,6 +5002,76 @@ mod tests {
     }
 
     #[test]
+    fn move_focus_returns_to_remembered_branch_across_displays() {
+        use crate::layout_engine::LayoutKind;
+
+        for (outward, inward, split) in [
+            (Direction::Down, Direction::Up, LayoutKind::Horizontal),
+            (Direction::Up, Direction::Down, LayoutKind::Horizontal),
+            (Direction::Right, Direction::Left, LayoutKind::Vertical),
+            (Direction::Left, Direction::Right, LayoutKind::Vertical),
+        ] {
+            let mut engine = test_engine();
+            let mut store = WindowStore::default();
+            let source = SpaceId::new(1);
+            let target = SpaceId::new(2);
+            let size = CGSize::new(1000.0, 1000.0);
+            for (space, ids) in [(source, vec![1, 2, 3]), (target, vec![4])] {
+                let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, size));
+                let _ = engine.handle_event(
+                    &mut store,
+                    LayoutEvent::windows_observed(
+                        space,
+                        1,
+                        ids.into_iter()
+                            .map(|idx| window_layout_info(WindowId::new(1, idx), size))
+                            .collect(),
+                        None,
+                    ),
+                );
+            }
+            let (ws, layout) = engine.workspaces.active_layout_for_space(source).unwrap();
+            let LayoutSystemKind::Traditional(system) = &mut engine.workspaces[ws].layout_system
+            else {
+                panic!("expected traditional layout");
+            };
+            system.set_layout(system.root(layout), split);
+            let offset = match outward {
+                Direction::Left => CGPoint::new(-1000.0, 0.0),
+                Direction::Right => CGPoint::new(1000.0, 0.0),
+                Direction::Up => CGPoint::new(0.0, -1000.0),
+                Direction::Down => CGPoint::new(0.0, 1000.0),
+            };
+            let frames = HashMap::from_iter([
+                (source, test_display_frame(CGPoint::new(0.0, 0.0))),
+                (target, test_display_frame(offset)),
+            ]);
+            // A middle branch exposes both first-child and last-child fallbacks.
+            for remembered in [2, 1, 3] {
+                let remembered = WindowId::new(1, remembered);
+                let _ =
+                    engine.handle_event(&mut store, LayoutEvent::WindowFocused(source, remembered));
+                let before = engine.workspaces[ws].layout_system.draw_tree(layout);
+                for (space, direction, expected) in [
+                    (source, outward, WindowId::new(1, 4)),
+                    (target, inward, remembered),
+                ] {
+                    let response = engine.handle_command(
+                        &mut store,
+                        Some(space),
+                        &[source, target],
+                        &frames,
+                        LayoutCommand::MoveFocus(direction),
+                    );
+                    assert_eq!(response.focus_window, Some(expected), "{direction:?}");
+                    assert_eq!(engine.focused_window(), Some(expected));
+                }
+                assert_eq!(engine.workspaces[ws].layout_system.draw_tree(layout), before);
+            }
+        }
+    }
+
+    #[test]
     fn move_focus_to_uninitialized_adjacent_space_does_not_panic() {
         let mut window_store = WindowStore::default();
         let mut engine = test_engine();
