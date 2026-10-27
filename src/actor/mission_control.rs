@@ -1,5 +1,7 @@
 use objc2_core_foundation::CGPoint;
-use objc2_core_graphics::CGEventFlags;
+use objc2_core_graphics::{
+    CGEventFlags, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
+};
 use objc2_foundation::MainThreadMarker;
 
 use crate::actor::{self, reactor};
@@ -122,7 +124,7 @@ impl MissionControlActor {
         mtm: MainThreadMarker,
         input_tx: super::input::Sender,
     ) -> Self {
-        if settings.enabled && settings.window_previews {
+        if settings.enabled && settings.window_previews && CGPreflightScreenCaptureAccess() {
             let _ = cgs::PreviewCompositor::prepare();
         }
         Self {
@@ -211,6 +213,10 @@ impl MissionControlActor {
                 if self.session.is_some() {
                     self.close();
                 } else if self.settings.enabled {
+                    if self.settings.window_previews && !CGPreflightScreenCaptureAccess() {
+                        CGRequestScreenCaptureAccess();
+                        return;
+                    }
                     self.generation = self.generation.wrapping_add(1);
                     if self.settings.window_previews {
                         let _ = cgs::PreviewCompositor::prepare();

@@ -1,5 +1,6 @@
 //! Interface preferences. Previews are event-driven native views, never windows.
 use objc2_app_kit::*;
+use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 
 use super::interface_preview::StackPreview;
 use super::*;
@@ -191,6 +192,23 @@ pub(super) fn overview(ui: Ui, model: &Rc<Model>) -> Page {
         |s| &s.settings.ui.mission_control,
         |s| &mut s.settings.ui.mission_control,
     );
+    let permission = Rc::new(Caption::new(&ui, ""));
+    f.sync(&permission, |caption, _| {
+        caption.set_text(screen_recording_status())
+    });
+    let status = Rc::downgrade(&permission);
+    let check = Button::new(&ui, "Check Screen Recording Access…").on_click(move || {
+        if !CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess() {
+            Application::open(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            );
+        }
+        if let Some(status) = status.upgrade() {
+            status.set_text(screen_recording_status());
+        }
+    });
+    let recording = Section::new(&ui, "Screen Recording")
+        .content(VStack::new(&ui).spacing(8.0).push(permission).push(check));
     let transitions = f.fields(
         Section::new(&ui, "Transitions"),
         &["fade_enabled"],
@@ -208,12 +226,21 @@ pub(super) fn overview(ui: Ui, model: &Rc<Model>) -> Page {
     f.finish(
         SettingsPage::new(&ui, "")
             .section(visibility)
+            .section(recording)
             .section(transitions.row(duration))
             .section(Caption::new(
                 &ui,
                 "Changes are saved now and take effect after restarting Rift.",
             )),
     )
+}
+
+fn screen_recording_status() -> &'static str {
+    if CGPreflightScreenCaptureAccess() {
+        "Screen Recording access is granted. Window previews are available."
+    } else {
+        "Window previews require Screen Recording access. Allow Rift in System Settings > Privacy & Security > Screen Recording, then reopen Overview. macOS may require restarting Rift."
+    }
 }
 
 pub(super) fn stack_tabs(ui: Ui, model: &Rc<Model>) -> Page {

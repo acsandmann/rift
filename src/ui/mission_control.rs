@@ -12,7 +12,7 @@ use objc2_app_kit::{NSColor, NSFont, NSPopUpMenuWindowLevel, NSRunningApplicatio
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace, CGContext,
-    CGDisplayBounds, CGImage, CGImageAlphaInfo, CGPreflightScreenCaptureAccess,
+    CGDisplayBounds, CGImage, CGImageAlphaInfo,
 };
 use objc2_foundation::{MainThreadMarker, NSError};
 use objc2_quartz_core::{CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CATextLayer};
@@ -1288,32 +1288,31 @@ impl OverviewSession {
             return;
         }
         let _transaction = LayerTransaction::disabled().flush_on_commit();
-        if enabled {
-            for display in &mut self.displays {
-                if let Some(metal) = cache.as_deref_mut().and_then(|cache| {
-                    cache.take_metal(&display.info, display.bounds, display.scale)
-                }) {
-                    display.metal = Some(metal);
-                    continue;
+        for display in &mut self.displays {
+            if let Some(metal) = cache
+                .as_deref_mut()
+                .and_then(|cache| cache.take_metal(&display.info, display.bounds, display.scale))
+            {
+                display.metal = Some(metal);
+                continue;
+            }
+            let wake = wake.clone();
+            match cgs::PreviewCompositor::new(display.bounds, display.scale, move || {
+                wake.send(crate::actor::mission_control::Event::PumpPreviews);
+            }) {
+                Ok(metal) => {
+                    if let Err(error) = metal.set_level(NSPopUpMenuWindowLevel as i32) {
+                        tracing::warn!(?error, "Metal preview ordering unavailable");
+                    } else {
+                        display.metal = Some(metal);
+                    }
                 }
-                let wake = wake.clone();
-                match cgs::PreviewCompositor::new(display.bounds, display.scale, move || {
-                    wake.send(crate::actor::mission_control::Event::PumpPreviews);
-                }) {
-                    Ok(metal) => {
-                        if let Err(error) = metal.set_level(NSPopUpMenuWindowLevel as i32) {
-                            tracing::warn!(?error, "Metal preview ordering unavailable");
-                        } else {
-                            display.metal = Some(metal);
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(?error, "Metal previews unavailable; using cached previews")
-                    }
+                Err(error) => {
+                    tracing::warn!(?error, "Metal previews unavailable; using cached previews")
                 }
             }
         }
-        self.previews = PreviewSession::open(enabled, generation, wake);
+        self.previews = Some(PreviewSession::new(wake));
         self.request_previews(cache.as_deref());
     }
 
@@ -2025,23 +2024,6 @@ pub(crate) struct PreviewSession {
 }
 
 impl PreviewSession {
-    fn open(
-        enabled: bool,
-        _generation: u64,
-        wake: crate::actor::mission_control::Sender,
-    ) -> Option<Self> {
-        if !enabled {
-            return None;
-        }
-        if !CGPreflightScreenCaptureAccess() {
-            tracing::info!(
-                "Overview previews unavailable: allow Rift in System Settings > Privacy & Security > Screen Recording"
-            );
-            return None;
-        }
-        Some(Self::new(wake))
-    }
-
     fn new(wake: crate::actor::mission_control::Sender) -> Self {
         let (tx, rx) = actor::channel();
         Self {

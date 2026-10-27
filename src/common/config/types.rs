@@ -1094,7 +1094,7 @@ pub struct MissionControlSettings {
     #[setting(label = "Show empty workspaces", enabled_by = "enabled")]
     pub show_empty_workspaces: bool,
     #[serde(default = "yes")]
-    /// Show a preview of each window in Overview.
+    /// Show a preview of each window in Overview. Requires Screen Recording permission.
     #[setting(label = "Window previews", enabled_by = "enabled")]
     pub window_previews: bool,
     #[serde(default)]
