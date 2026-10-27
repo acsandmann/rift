@@ -4221,6 +4221,9 @@ impl Reactor {
                 native
                     .or_else(|| self.assigned_space_for_window_id(*wid))
                     .is_some_and(|space| !self.is_space_active(space))
+                    // Rift parks windows on non-active workspaces just offscreen.
+                    // An app inventory that omits one is not evidence that the window is gone.
+                    || self.hidden_assigned_space_for_window_id(*wid).is_some()
             })
             .collect();
         // A returned native identity protects its previous AX key until rekeying.
