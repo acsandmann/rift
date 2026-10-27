@@ -861,20 +861,41 @@ pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
         space_list_options: 0,
         window_list_options: 0x2,
         query_flags: 0x2,
-        include_tags: SLSWindowTags::DOCUMENT.bits(),
+        include_tags: 0,
         exclude_tags: (SLSWindowTags::ON_ALL_WORKSPACES
             | SLSWindowTags::HIDDEN
             | SLSWindowTags::MINIATURIZED)
             .bits(),
     };
     let query = window_query_run(&filter)?;
-    query.advance()?;
-    let wsid = WindowServerId::new(query.window_id());
+    let id = key_window_in_z_order(std::iter::from_fn(|| {
+        let window = query.advance()?;
+        Some((
+            window.window_id(),
+            window.parent_id(),
+            iterator_window_tags(window.iter),
+            window.level(),
+        ))
+    }))?;
 
     Some(WindowId {
         pid: query.pid(),
-        idx: wsid.as_nonzero()?,
+        idx: NonZeroU32::new(id)?,
     })
+}
+
+/// AppKit orders the key window, or the sheet/popover attached to it, in front of
+/// the process's other normal-level windows; never substitute a sibling behind it.
+/// Elevated panels, menus and tooltips float regardless of focus.
+fn key_window_in_z_order(
+    windows: impl IntoIterator<Item = (u32, u32, SLSWindowTags, i32)>,
+) -> Option<u32> {
+    let (id, parent, tags, _) = windows.into_iter().find(|&(_, parent, tags, level)| {
+        parent != 0 || level == 0 || tags.contains(SLSWindowTags::DOCUMENT)
+    })?;
+    (parent != 0)
+        .then_some(parent)
+        .or_else(|| tags.contains(SLSWindowTags::DOCUMENT).then_some(id))
 }
 
 /// The space on the display currently holding WindowServer focus.
@@ -992,12 +1013,33 @@ pub unsafe fn switch_space(direction: crate::layout_engine::Direction) {
 
 #[cfg(test)]
 mod tests {
-    use super::WindowServerId;
+    use super::{SLSWindowTags, WindowServerId, key_window_in_z_order};
 
     #[test]
     fn zero_window_server_id_is_not_a_window_id() {
         assert!(WindowServerId::new(0).as_nonzero().is_none());
         assert_eq!(WindowServerId::new(42).as_nonzero().map(|id| id.get()), Some(42));
+    }
+
+    #[test]
+    fn key_window_resolves_front_window_without_substituting_a_sibling() {
+        let (doc, none) = (SLSWindowTags::DOCUMENT, SLSWindowTags::empty());
+        let popup = SLSWindowTags::FLOATING | SLSWindowTags::ATTACHED;
+        let cases: [(&[_], _); 5] = [
+            (&[(2, 0, doc, 0), (1, 0, doc, 0)], Some(2)),
+            // Brave permission bubble attached to 1 while sibling 2 is above 1.
+            (&[(3, 1, popup, 0), (2, 0, doc, 0), (1, 0, doc, 0)], Some(1)),
+            (&[(3, 0, none, 3), (1, 0, doc, 0)], Some(1)),
+            (&[(3, 0, popup, 0), (2, 0, doc, 0)], None),
+            (&[(3, 0, none, 101)], None),
+        ];
+        for (windows, expected) in cases {
+            assert_eq!(
+                key_window_in_z_order(windows.iter().copied()),
+                expected,
+                "{windows:?}"
+            );
+        }
     }
 }
 

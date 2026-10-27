@@ -98,6 +98,7 @@ fn actions() -> &'static [(&'static str, WmCommand)] {
                 ),
                 ("Layout · Toggle stack", layout(L::ToggleStack)),
                 ("Layout · Toggle orientation", layout(L::ToggleOrientation)),
+                ("Layout · Balance", layout(L::Balance)),
                 ("Layout · Unjoin windows", layout(L::UnjoinWindows)),
                 ("Layout · Scroll strip", layout(L::ScrollStrip { delta: 100.0 })),
                 ("Layout · Snap strip", layout(L::SnapStrip)),
@@ -156,6 +157,9 @@ fn same_action(a: &WmCommand, b: &WmCommand) -> bool {
     }
 }
 fn action_name(cmd: &WmCommand) -> String {
+    if let WmCommand::Sequence(commands) = cmd {
+        return commands.iter().map(action_name).collect::<Vec<_>>().join(" → ");
+    }
     let title = actions()
         .iter()
         .find(|(_, a)| same_action(a, cmd))

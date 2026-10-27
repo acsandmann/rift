@@ -159,7 +159,7 @@ pub struct WorkspaceSwitchManager {
     pub workspace_switch_generation: u64,
     pub active_workspace_switch: Option<u64>,
     pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
-    pub pending_workspace_mouse_warp: Option<WindowId>,
+    pub pending_focus_mouse_warp: Option<WindowId>,
     pub pending_display_warp: Option<crate::sys::screen::SpaceId>,
 }
 
@@ -552,6 +552,17 @@ impl LayoutManager {
             } else {
                 any_frame_changed |=
                     AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
+            }
+            if let Some(window) = reactor.workspace_switch_manager.pending_focus_mouse_warp
+                && reactor.workspace_switch_manager.pending_display_warp.is_none()
+                && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+                    == LayoutMode::Scrolling
+                && let Some((_, frame)) = layout.iter().find(|(wid, _)| *wid == window)
+            {
+                reactor.workspace_switch_manager.pending_focus_mouse_warp = None;
+                if reactor.screen_for_point(frame.mid()).is_some() {
+                    reactor.warp_mouse(frame.mid());
+                }
             }
         }
 

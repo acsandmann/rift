@@ -1211,8 +1211,12 @@ fn interface_controls(
     assert!(!mode.isEnabled());
 
     settings.router.navigate(Category::Overview);
+    assert!(named::<NSButton>(&root, "Check Screen Recording Access…").is_some());
     toggle("Enabled", true);
     commit(&mut source, pending);
+    toggle("Window previews", false);
+    commit(&mut source, pending);
+    assert!(!source.settings.ui.mission_control.window_previews);
     toggle("Fade transitions", true);
     commit(&mut source, pending);
     let duration = named::<NSSlider>(&root, "Fade duration").unwrap();

@@ -435,6 +435,8 @@ comb1 = "Alt + Shift"
 # Commands
 # Available in [keys] and [binding_modes.*].
 # Unit commands use a string; commands with arguments use an inline table.
+# An array runs several commands in order:
+#   "1" = [{ move_window_to_workspace = 0 }, { binding_mode = "default" }]
 # Workspace/display indices are zero-based.
 # - toggle_space_activated
 # - reload_config
@@ -460,6 +462,7 @@ comb1 = "Alt + Shift"
 # - join_window = "left"|"right"|"up"|"down"
 # - consume_or_expel_window = "left"|"right"|"up"|"down"
 # - toggle_stack / toggle_orientation / unjoin_windows
+# - balance
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
 # - toggle_window_floating = { center = true|false, size = { w = 640, h = 480 }|"smart" }
 #   (center and size are optional)

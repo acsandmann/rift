@@ -1,5 +1,6 @@
 //! Interface preferences. Previews are event-driven native views, never windows.
 use objc2_app_kit::*;
+use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 
 use super::interface_preview::StackPreview;
 use super::*;
@@ -48,22 +49,101 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         layer.setCornerRadius(10.0);
         layer.setMasksToBounds(true);
     }
-    let preview = Section::form(&ui, "").content(bar).footer(Caption::new(
-        &ui,
-        "Example: Development workspace · resize binding mode",
-    ));
+    let preview_caption = Rc::new(Caption::new(&ui, ""));
+    f.sync_when(
+        &preview_caption,
+        |s| s.settings.ui.menu_bar.clone(),
+        |caption, s| {
+            let settings = &s.settings.ui.menu_bar;
+            caption.set_text(if !settings.enabled {
+                "Turn on the indicator to see workspace information in your menu bar."
+            } else if settings.current_display_only {
+                "Live preview · current display · Development is active"
+            } else {
+                "Live preview · two displays separated by a divider"
+            });
+        },
+    );
+    let preview = Section::form(&ui, "").content(bar).footer(preview_caption);
     let visibility = f.fields(
-        Section::new(&ui, "Visibility"),
-        &["enabled", "show_empty", "show_binding_mode"],
+        Section::new(&ui, "Menu bar"),
+        &["enabled", "show_binding_mode"],
         |s| &s.settings.ui.menu_bar,
         |s| &mut s.settings.ui.menu_bar,
     );
-    let appearance = f.fields(
-        Section::new(&ui, "Workspaces"),
-        &["mode", "active_label", "display_style", "show_fullscreen_indicator"],
+    let display = f
+        .field(
+            "current_display_only",
+            |s| &s.settings.ui.menu_bar,
+            |s| &mut s.settings.ui.menu_bar,
+        )
+        .description("Follows the display with the active macOS menu bar.");
+    let mode = f.popup(
+        "Workspaces to show",
+        vec![
+            ("All workspaces", MenuBarDisplayMode::All),
+            ("Active workspace", MenuBarDisplayMode::Active),
+        ],
+        |s| s.settings.ui.menu_bar.mode,
+        |s, value| s.settings.ui.menu_bar.mode = value,
+    );
+    f.enabled(&mode, |s| s.settings.ui.menu_bar.enabled);
+    let empty = f.field(
+        "show_empty",
         |s| &s.settings.ui.menu_bar,
         |s| &mut s.settings.ui.menu_bar,
     );
+    let empty_hint = Rc::new(Caption::new(&ui, ""));
+    f.sync_when(
+        &empty_hint,
+        |s| s.settings.ui.menu_bar.mode,
+        |hint, s| {
+            hint.set_text(if s.settings.ui.menu_bar.mode == MenuBarDisplayMode::All {
+                "The active workspace is always included."
+            } else {
+                "Choose All workspaces to include empty workspaces."
+            });
+        },
+    );
+    let empty = empty.description_view(empty_hint);
+    f.enabled(&empty, |s| {
+        let settings = &s.settings.ui.menu_bar;
+        settings.enabled && settings.mode == MenuBarDisplayMode::All
+    });
+    let workspaces = Section::new(&ui, "Workspaces").row(display).row(mode).row(empty);
+    let style = f
+        .popup(
+            "Show workspaces as",
+            vec![
+                ("Layouts", None),
+                ("Indexes", Some(ActiveWorkspaceLabel::Index)),
+                ("Names", Some(ActiveWorkspaceLabel::Name)),
+            ],
+            |s| {
+                let settings = &s.settings.ui.menu_bar;
+                (settings.display_style == WorkspaceDisplayStyle::Label)
+                    .then_some(settings.active_label)
+            },
+            |s, label| {
+                let settings = &mut s.settings.ui.menu_bar;
+                if let Some(label) = label {
+                    settings.display_style = WorkspaceDisplayStyle::Label;
+                    settings.active_label = label;
+                } else {
+                    settings.display_style = WorkspaceDisplayStyle::Layout;
+                }
+            },
+        )
+        .description("Layouts show window arrangements. Unnamed workspaces use their index.");
+    f.enabled(&style, |s| s.settings.ui.menu_bar.enabled);
+    let fullscreen = f
+        .field(
+            "show_fullscreen_indicator",
+            |s| &s.settings.ui.menu_bar,
+            |s| &mut s.settings.ui.menu_bar,
+        )
+        .description("Adds brackets around fullscreen workspaces in all display styles.");
+    let appearance = Section::new(&ui, "Appearance").row(style).row(fullscreen);
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let weak_model = f.model.clone();
@@ -91,12 +171,15 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         })
         .wide();
     f.finish(
-        SettingsPage::new(&ui, "").section(preview).section(visibility).section(
-            appearance.row(row).footer(Caption::new(
+        SettingsPage::new(&ui, "")
+            .section(preview)
+            .section(visibility)
+            .section(workspaces)
+            .section(appearance)
+            .section(Section::new(&ui, "Custom images").row(row).footer(Caption::new(
                 &ui,
-                "Custom layout images are used by the workspace menu.",
-            )),
-        ),
+                "Used in the menu that opens when you click the indicator. Does not change the menu bar preview.",
+            ))),
     )
 }
 
@@ -109,6 +192,23 @@ pub(super) fn overview(ui: Ui, model: &Rc<Model>) -> Page {
         |s| &s.settings.ui.mission_control,
         |s| &mut s.settings.ui.mission_control,
     );
+    let permission = Rc::new(Caption::new(&ui, ""));
+    f.sync(&permission, |caption, _| {
+        caption.set_text(screen_recording_status())
+    });
+    let status = Rc::downgrade(&permission);
+    let check = Button::new(&ui, "Check Screen Recording Access…").on_click(move || {
+        if !CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess() {
+            Application::open(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            );
+        }
+        if let Some(status) = status.upgrade() {
+            status.set_text(screen_recording_status());
+        }
+    });
+    let recording = Section::new(&ui, "Screen Recording")
+        .content(VStack::new(&ui).spacing(8.0).push(permission).push(check));
     let transitions = f.fields(
         Section::new(&ui, "Transitions"),
         &["fade_enabled"],
@@ -126,12 +226,21 @@ pub(super) fn overview(ui: Ui, model: &Rc<Model>) -> Page {
     f.finish(
         SettingsPage::new(&ui, "")
             .section(visibility)
+            .section(recording)
             .section(transitions.row(duration))
             .section(Caption::new(
                 &ui,
                 "Changes are saved now and take effect after restarting Rift.",
             )),
     )
+}
+
+fn screen_recording_status() -> &'static str {
+    if CGPreflightScreenCaptureAccess() {
+        "Screen Recording access is granted. Window previews are available."
+    } else {
+        "Window previews require Screen Recording access. Allow Rift in System Settings > Privacy & Security > Screen Recording, then reopen Overview. macOS may require restarting Rift."
+    }
 }
 
 pub(super) fn stack_tabs(ui: Ui, model: &Rc<Model>) -> Page {

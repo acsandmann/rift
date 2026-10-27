@@ -44,6 +44,7 @@ pub enum LayoutCommand {
     ConsumeOrExpelWindow(Direction),
     ToggleStack,
     ToggleOrientation,
+    Balance,
     UnjoinWindows,
     ToggleFocusFloating,
     ToggleWindowFloating,
