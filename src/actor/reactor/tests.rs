@@ -811,6 +811,184 @@ fn no_op_workspace_switch_does_not_request_arrangement() {
 }
 
 #[test]
+fn scrolling_focus_warps_to_revealed_window() {
+    for (ratio, animated, enabled) in [
+        (1.0, false, true),
+        (1.0, true, true),
+        (0.5, false, true),
+        (0.5, true, true),
+        (1.0, true, false),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let focused = WindowId::new(1, 2);
+        let target = WindowId::new(1, 1);
+        let mut config = reactor.config.clone();
+        config.settings.layout.scrolling.column_width_ratio = ratio;
+        config.settings.layout.scrolling.animate = Some(animated);
+        config.settings.layout.scrolling.preserve_window_sizes = false;
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(&config.settings.layout);
+        reactor.config = config;
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(focused));
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, focused));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(
+            reactor.window_center_on_known_screen(target).is_none(),
+            ratio == 1.0
+        );
+        let (animation_tx, _animation_rx) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(animation_tx);
+        reactor.config.settings.mouse_follows_focus = enabled;
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        let (input_tx, mut input_rx) = actor::channel();
+        reactor.communication_manager.input_tx = Some(input_tx);
+
+        reactor.handle_test_layout_command(LayoutCommand::MoveFocus(Direction::Left));
+
+        let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
+            panic!("expected focus request");
+        };
+        let (window, warp) = request.focus_window.unwrap();
+        assert_eq!(window, target);
+        let center = CGPoint::new(if ratio == 1.0 { 450.0 } else { 250.0 }, 500.0);
+        let mut warps: Vec<_> = warp.into_iter().collect();
+        while let Ok((_, request)) = input_rx.try_recv() {
+            if let crate::actor::input::Request::Warp(point) = request {
+                warps.push(point);
+            }
+        }
+        assert_eq!(
+            warps,
+            if enabled { vec![center] } else { vec![] },
+            "ratio={ratio}, animated={animated}, enabled={enabled}"
+        );
+        assert!(raise_rx.try_recv().is_err());
+    }
+}
+
+#[test]
+fn ordinary_focus_keeps_warp_in_raise_request() {
+    for mode in [
+        LayoutMode::Traditional,
+        LayoutMode::Bsp,
+        LayoutMode::Stack,
+        LayoutMode::MasterStack,
+        LayoutMode::Floating,
+    ] {
+        for enabled in [true, false] {
+            let (mut apps, mut reactor) = test_context();
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            let space = SpaceId::new(1);
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            make_active_app(
+                &mut apps,
+                &mut reactor,
+                1,
+                make_windows(2),
+                Some(WindowId::new(1, 2)),
+            );
+            reactor.config.settings.mouse_follows_focus = enabled;
+            let (raise_tx, mut raise_rx) = actor::channel();
+            reactor.communication_manager.raise_manager_tx = raise_tx;
+            let (input_tx, mut input_rx) = actor::channel();
+            reactor.communication_manager.input_tx = Some(input_tx);
+            let outcome = reactor.dispatch_test_layout_command(LayoutCommand::NextWindow);
+            let target = outcome.layout_responses[0].0.focus_window.unwrap();
+            let center = reactor.window_center_on_known_screen(target).unwrap();
+
+            reactor.apply_event_outcome(outcome);
+
+            let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap()
+            else {
+                panic!("expected focus request");
+            };
+            assert_eq!(
+                request.focus_window,
+                Some((target, enabled.then_some(center))),
+                "{mode:?}"
+            );
+            assert!(
+                !std::iter::from_fn(|| input_rx.try_recv().ok()).any(|(_, request)| matches!(
+                    request,
+                    input::Request::Warp(_) | input::Request::WarpRelative { .. }
+                ))
+            );
+            assert!(raise_rx.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
+fn cross_display_workspace_focus_keeps_relative_warp() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        for enabled in [true, false] {
+            let (mut apps, mut reactor, left, right) = two_displays(shared_settings());
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            apps.simulate_until_quiet(&mut reactor);
+            let mut source_window = make_window(1);
+            source_window.frame.origin = CGPoint::new(1100., 100.);
+            make_active_app(
+                &mut apps,
+                &mut reactor,
+                2,
+                vec![source_window],
+                Some(WindowId::new(2, 1)),
+            );
+            let source_frame =
+                reactor.state.windows.window(WindowId::new(2, 1)).unwrap().frame_monotonic;
+            assert!(shared_right().contains(source_frame.mid()));
+            let target = WindowId::new(1, 1);
+            let frame = reactor.state.windows.window(target).unwrap().frame_monotonic;
+            reactor.space_state.command_space = Some(right);
+            reactor.config.settings.mouse_follows_focus = enabled;
+            let (input_tx, mut input_rx) = actor::channel();
+            reactor.communication_manager.input_tx = Some(input_tx);
+            let (raise_tx, mut raise_rx) = actor::channel();
+            reactor.communication_manager.raise_manager_tx = raise_tx;
+            let outcome = reactor.dispatch_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+            assert_eq!(outcome.display_switch_warp, Some(left));
+
+            reactor.apply_event_outcome(outcome);
+
+            let warps: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+                .filter_map(|(_, request)| match request {
+                    input::Request::Warp(_) | input::Request::WarpRelative { .. } => Some(request),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                matches!(warps.as_slice(), [input::Request::WarpRelative { from: Some(from), to }]
+                if *from == source_frame && *to == frame),
+                "{mode:?}, enabled={enabled}: {warps:?}"
+            );
+            let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap()
+            else {
+                panic!("expected focus request");
+            };
+            assert_eq!(request.focus_window, Some((target, None)));
+            assert!(raise_rx.try_recv().is_err());
+        }
+    }
+}
+
+#[test]
 fn only_move_node_requests_post_arrange_mouse_warp() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

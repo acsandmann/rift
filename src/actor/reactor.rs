@@ -527,7 +527,7 @@ impl Reactor {
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
                 pending_workspace_switch_origin: None,
-                pending_workspace_mouse_warp: None,
+                pending_focus_mouse_warp: None,
                 pending_display_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
@@ -2988,8 +2988,8 @@ impl Reactor {
             trace!("Workspace switch stabilized with no further frame changes");
         }
 
-        // Execute deferred mouse warp after workspace switch completes
-        let focused = self.workspace_switch_manager.pending_workspace_mouse_warp.take();
+        // Resolve focus requests that did not need arrangement, and relative display warps.
+        let focused = self.workspace_switch_manager.pending_focus_mouse_warp.take();
         if let Some(space) = self.workspace_switch_manager.pending_display_warp.take() {
             // Land at the same spot within the newly focused window that the cursor
             // held in the old one, or the display itself when the workspace is empty.
@@ -5501,13 +5501,17 @@ impl Reactor {
                 .push(wid);
         }
         let focus_window_with_warp = focus_window.map(|wid| {
-            let switching = self.workspace_switch_manager.workspace_switch_state
-                == WorkspaceSwitchState::Active;
             let warp = if self.workspace_switch_manager.pending_display_warp.is_some()
-                || (self.config.settings.mouse_follows_focus && switching)
+                || (self.config.settings.mouse_follows_focus
+                    && (self.workspace_switch_manager.workspace_switch_state
+                        == WorkspaceSwitchState::Active
+                        || self.assigned_space_for_window_id(wid).is_some_and(|space| {
+                            self.layout_manager.layout_engine.active_layout_mode_at(space)
+                                == crate::common::config::LayoutMode::Scrolling
+                        })))
             {
-                // Defer workspace-switch warps until after layout completes.
-                self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
+                // Scrolling resolves against the destination; workspace switches stay deferred.
+                self.workspace_switch_manager.pending_focus_mouse_warp = Some(wid);
                 None
             } else if self.config.settings.mouse_follows_focus {
                 self.window_center_on_known_screen(wid)
