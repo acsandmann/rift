@@ -48,27 +48,101 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         layer.setCornerRadius(10.0);
         layer.setMasksToBounds(true);
     }
-    let preview = Section::form(&ui, "").content(bar).footer(Caption::new(
-        &ui,
-        "Example: Development workspace · resize binding mode",
-    ));
+    let preview_caption = Rc::new(Caption::new(&ui, ""));
+    f.sync_when(
+        &preview_caption,
+        |s| s.settings.ui.menu_bar.clone(),
+        |caption, s| {
+            let settings = &s.settings.ui.menu_bar;
+            caption.set_text(if !settings.enabled {
+                "Turn on the indicator to see workspace information in your menu bar."
+            } else if settings.current_display_only {
+                "Live preview · current display · Development is active"
+            } else {
+                "Live preview · two displays separated by a divider"
+            });
+        },
+    );
+    let preview = Section::form(&ui, "").content(bar).footer(preview_caption);
     let visibility = f.fields(
-        Section::new(&ui, "Visibility"),
-        &["enabled", "show_empty", "show_binding_mode"],
+        Section::new(&ui, "Menu bar"),
+        &["enabled", "show_binding_mode"],
         |s| &s.settings.ui.menu_bar,
         |s| &mut s.settings.ui.menu_bar,
     );
-    let appearance = f.fields(
-        Section::new(&ui, "Workspaces"),
-        &[
-            "mode",
-            "active_label",
-            "display_style",
-            "show_fullscreen_indicator",
+    let display = f
+        .field(
+            "current_display_only",
+            |s| &s.settings.ui.menu_bar,
+            |s| &mut s.settings.ui.menu_bar,
+        )
+        .description("Follows the display with the active macOS menu bar.");
+    let mode = f.popup(
+        "Workspaces to show",
+        vec![
+            ("All workspaces", MenuBarDisplayMode::All),
+            ("Active workspace", MenuBarDisplayMode::Active),
         ],
+        |s| s.settings.ui.menu_bar.mode,
+        |s, value| s.settings.ui.menu_bar.mode = value,
+    );
+    f.enabled(&mode, |s| s.settings.ui.menu_bar.enabled);
+    let empty = f.field(
+        "show_empty",
         |s| &s.settings.ui.menu_bar,
         |s| &mut s.settings.ui.menu_bar,
     );
+    let empty_hint = Rc::new(Caption::new(&ui, ""));
+    f.sync_when(
+        &empty_hint,
+        |s| s.settings.ui.menu_bar.mode,
+        |hint, s| {
+            hint.set_text(if s.settings.ui.menu_bar.mode == MenuBarDisplayMode::All {
+                "The active workspace is always included."
+            } else {
+                "Choose All workspaces to include empty workspaces."
+            });
+        },
+    );
+    let empty = empty.description_view(empty_hint);
+    f.enabled(&empty, |s| {
+        let settings = &s.settings.ui.menu_bar;
+        settings.enabled && settings.mode == MenuBarDisplayMode::All
+    });
+    let workspaces = Section::new(&ui, "Workspaces").row(display).row(mode).row(empty);
+    let style = f
+        .popup(
+            "Show workspaces as",
+            vec![
+                ("Layouts", None),
+                ("Indexes", Some(ActiveWorkspaceLabel::Index)),
+                ("Names", Some(ActiveWorkspaceLabel::Name)),
+            ],
+            |s| {
+                let settings = &s.settings.ui.menu_bar;
+                (settings.display_style == WorkspaceDisplayStyle::Label)
+                    .then_some(settings.active_label)
+            },
+            |s, label| {
+                let settings = &mut s.settings.ui.menu_bar;
+                if let Some(label) = label {
+                    settings.display_style = WorkspaceDisplayStyle::Label;
+                    settings.active_label = label;
+                } else {
+                    settings.display_style = WorkspaceDisplayStyle::Layout;
+                }
+            },
+        )
+        .description("Layouts show window arrangements. Unnamed workspaces use their index.");
+    f.enabled(&style, |s| s.settings.ui.menu_bar.enabled);
+    let fullscreen = f
+        .field(
+            "show_fullscreen_indicator",
+            |s| &s.settings.ui.menu_bar,
+            |s| &mut s.settings.ui.menu_bar,
+        )
+        .description("Adds brackets around fullscreen workspaces in all display styles.");
+    let appearance = Section::new(&ui, "Appearance").row(style).row(fullscreen);
     let message = Rc::new(ValidationMessage::new(&ui));
     let error = Rc::downgrade(&message);
     let weak_model = f.model.clone();
@@ -96,12 +170,15 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         })
         .wide();
     f.finish(
-        SettingsPage::new(&ui, "").section(preview).section(visibility).section(
-            appearance.row(row).footer(Caption::new(
+        SettingsPage::new(&ui, "")
+            .section(preview)
+            .section(visibility)
+            .section(workspaces)
+            .section(appearance)
+            .section(Section::new(&ui, "Custom images").row(row).footer(Caption::new(
                 &ui,
-                "Custom layout images are used by the workspace menu.",
-            )),
-        ),
+                "Used in the menu that opens when you click the indicator. Does not change the menu bar preview.",
+            ))),
     )
 }
 

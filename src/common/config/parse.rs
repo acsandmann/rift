@@ -37,20 +37,8 @@ impl Config {
         }
         for (mode, bindings) in &self.binding_mode_specs {
             for (key, command) in bindings {
-                let mut steps = command.steps().peekable();
-                if steps.peek().is_none() {
-                    issues.push(format!(
-                        "Shortcut `{key}` in keymap `{mode}` has an empty command list"
-                    ));
-                }
-                for step in steps {
-                    if let WmCommand::Wm(WmCmd::BindingMode(target)) = step
-                        && !mode_names.contains(target.as_str())
-                    {
-                        issues.push(format!(
-                            "Binding mode `{mode}` references nonexistent mode `{target}`"
-                        ));
-                    }
+                if let Err(error) = validate_binding_command(command, key, mode, &mode_names) {
+                    issues.push(error.to_string());
                 }
             }
         }
@@ -161,6 +149,7 @@ impl Config {
                 let mut keys = Vec::new();
                 let mode_names: HashSet<String> =
                     binding_sets.iter().map(|(name, _)| name.clone()).collect();
+                let mode_names = mode_names.iter().map(String::as_str).collect();
                 for (mode, bindings) in binding_sets {
                     let mut specs = Vec::with_capacity(bindings.len());
                     let mut assigned = HashSet::default();
@@ -178,20 +167,7 @@ impl Config {
                                 );
                             }
                         }
-                        let mut steps = cmd.steps().peekable();
-                        if steps.peek().is_none() {
-                            bail!("Shortcut `{key}` in keymap `{mode}` has an empty command list");
-                        }
-                        for step in steps {
-                            if let WmCommand::Wm(WmCmd::BindingMode(target)) = step
-                                && target != "default"
-                                && !mode_names.contains(target)
-                            {
-                                bail!(
-                                    "Binding mode `{mode}` references nonexistent mode `{target}`"
-                                );
-                            }
-                        }
+                        validate_binding_command(&cmd, &key, &mode, &mode_names)?;
                         if mode == "default" {
                             keys.push((hotkey, cmd.clone()));
                         }
@@ -279,6 +255,26 @@ impl<'de> Deserialize<'de> for Config {
             virtual_workspaces: config.virtual_workspaces,
         })
     }
+}
+
+fn validate_binding_command(
+    command: &WmCommand,
+    key: &str,
+    mode: &str,
+    mode_names: &HashSet<&str>,
+) -> anyhow::Result<()> {
+    let mut steps = command.steps().peekable();
+    if steps.peek().is_none() {
+        bail!("Shortcut `{key}` in keymap `{mode}` has an empty command list");
+    }
+    for step in steps {
+        if let WmCommand::Wm(WmCmd::BindingMode(target)) = step
+            && !mode_names.contains(target.as_str())
+        {
+            bail!("Binding mode `{mode}` references nonexistent mode `{target}`");
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn migrate_legacy_resize_bindings(document: &mut toml::Value) -> bool {

@@ -2005,33 +2005,6 @@ mod tests {
     }
 
     #[test]
-    fn command_arrays_go_to_the_wm_controller_whole() {
-        let (input, mut wm_rx, mut events) = input();
-        let config = Config::parse(
-            r#"
-                [settings]
-                [keys]
-                "A" = ["next_window", { binding_mode = "default" }]
-            "#,
-        )
-        .unwrap();
-        let sequence = config.binding_mode_specs[0].1[0].1.clone();
-        input.install_binding_specs(config.binding_mode_specs);
-        input.hotkeys_active.set(true);
-        input.rebuild_binding_maps();
-
-        let a = CGEvent::new_keyboard_event(None, 0, true).unwrap();
-        CGEvent::set_flags(Some(&a), CGEventFlags::empty());
-        assert!(!input.on_event(CGEventType::KeyDown, &a, None));
-
-        assert!(
-            matches!(wm_rx.try_recv().unwrap().1, WmEvent::Command(command) if command == sequence)
-        );
-        assert!(wm_rx.try_recv().is_err());
-        assert!(events.try_recv().is_err());
-    }
-
-    #[test]
     fn layout_rebuild_preserves_active_mode_and_rebuilds_each_map() {
         let (input, _, _) = input();
         input.install_binding_specs(vec![

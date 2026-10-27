@@ -429,6 +429,7 @@ struct DisplayOverview {
     animate: bool,
     root: Retained<CALayer>,
     // Field order matters: unbind the surface before releasing its CGS window.
+    metal: Option<cgs::PreviewCompositor>,
     _surface: WindowSurface,
     _window: CgsWindow,
 }
@@ -525,7 +526,25 @@ impl DisplayOverview {
             return None;
         }
         let mut visibility_changed = false;
+        // The already-presented Metal canvas moves in this same CA transaction
+        // as the captions/ribbons. Capture and GPU availability cannot delay it.
         with_disabled_actions(|| {
+            if let Some(metal) = &mut self.metal {
+                if let Err(error) = metal.translate(CGPoint::new(
+                    0.0,
+                    self.projection
+                        .first()
+                        .map(|ws| {
+                            pixel_aligned(rect(0., ws.frame.origin.y + delta, 1., 1.), self.scale)
+                                .origin
+                                .y
+                                - pixel_aligned(ws.frame, self.scale).origin.y
+                        })
+                        .unwrap_or(delta),
+                )) {
+                    tracing::warn!(?error, "Overview preview translation failed");
+                }
+            }
             for (view, ws) in self.views.iter().zip(&mut self.projection) {
                 let previous = ws.frame;
                 ws.frame.origin.y += delta;
@@ -554,6 +573,19 @@ impl DisplayOverview {
             self.workspace_offset,
             &self.offsets,
         );
+        if let Some((old, new)) = self
+            .projection
+            .iter()
+            .find_map(|old| next.iter().find(|new| new.source == old.source).map(|new| (old, new)))
+        {
+            let delta = pixel_aligned(new.frame, self.scale).origin.y
+                - pixel_aligned(old.frame, self.scale).origin.y;
+            if delta != 0.0 {
+                if let Some(metal) = &mut self.metal {
+                    let _ = metal.translate(CGPoint::new(0., delta));
+                }
+            }
+        }
         let same_cards = next.len() == self.projection.len()
             && next.iter().zip(&self.projection).all(|(a, b)| {
                 a.source == b.source
@@ -868,6 +900,13 @@ impl OverviewSession {
             .collect();
         if let Some(cache) = cache {
             cache.prune(snapshot.iter().flat_map(|(_, ws)| ws).flat_map(|ws| &ws.windows));
+            cache.metal.retain(|(info, _, _, _)| {
+                snapshot.iter().any(|(d, _)| {
+                    d.info.display_uuid == info.display_uuid
+                        && d.info.id == info.id
+                        && d.info.space == info.space
+                })
+            });
         }
         for (display, workspaces) in snapshot {
             if workspaces.is_empty() {
@@ -915,6 +954,7 @@ impl OverviewSession {
                 icons: HashMap::default(),
                 animate: false,
                 root,
+                metal: None,
                 _surface: surface,
                 _window: window,
             };
@@ -959,7 +999,7 @@ impl OverviewSession {
             pressed: None,
         };
         session.highlight(None);
-        // Cached/fallback layers are already visible; fresh capture starts on the next run-loop turn.
+        // The actor starts capture immediately after installing this session.
         Some(session)
     }
 
@@ -1061,6 +1101,11 @@ impl OverviewSession {
             };
         }
         self.highlight(None);
+        for display in &mut self.displays {
+            if let Some(metal) = &mut display.metal {
+                metal.refresh_sources();
+            }
+        }
         self.sync_images(cache);
         self.request_previews(cache);
     }
@@ -1237,14 +1282,76 @@ impl OverviewSession {
         generation: u64,
         enabled: bool,
         wake: crate::actor::mission_control::Sender,
-        cache: Option<&PreviewCache>,
+        mut cache: Option<&mut PreviewCache>,
     ) {
         if generation != self.generation || !enabled {
             return;
         }
         let _transaction = LayerTransaction::disabled().flush_on_commit();
+        if enabled {
+            for display in &mut self.displays {
+                if let Some(metal) = cache.as_deref_mut().and_then(|cache| {
+                    cache.take_metal(&display.info, display.bounds, display.scale)
+                }) {
+                    display.metal = Some(metal);
+                    continue;
+                }
+                let wake = wake.clone();
+                match cgs::PreviewCompositor::new(display.bounds, display.scale, move || {
+                    wake.send(crate::actor::mission_control::Event::PumpPreviews);
+                }) {
+                    Ok(metal) => {
+                        if let Err(error) = metal.set_level(NSPopUpMenuWindowLevel as i32) {
+                            tracing::warn!(?error, "Metal preview ordering unavailable");
+                        } else {
+                            display.metal = Some(metal);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "Metal previews unavailable; using cached previews")
+                    }
+                }
+            }
+        }
         self.previews = PreviewSession::open(enabled, generation, wake);
-        self.request_previews(cache);
+        self.request_previews(cache.as_deref());
+    }
+
+    pub(crate) fn retain_previews(&mut self, cache: &mut Option<PreviewCache>) {
+        // Keep the active display last so it survives a tight closed-cache budget.
+        for n in 1..=self.displays.len() {
+            let index = (self.active + n) % self.displays.len();
+            let display = &mut self.displays[index];
+            let Some(mut metal) = display.metal.take() else {
+                continue;
+            };
+            if let Err(error) = metal.hide() {
+                tracing::warn!(?error, "Metal preview retirement failed");
+                continue;
+            }
+            let cache = cache.get_or_insert_with(PreviewCache::default);
+            cache
+                .metal
+                .retain(|(info, _, _, _)| info.display_uuid != display.info.display_uuid);
+            // Three BGRA drawables at physical display resolution. This is a
+            // conservative reservation, separate from cgs's thumbnail cache.
+            let bytes = |bounds: CGRect, scale: f64| -> usize {
+                let row = ((bounds.size.width * scale).ceil() as usize * 4 + 255) & !255;
+                row * (bounds.size.height * scale).ceil() as usize * 3
+            };
+            let required = bytes(display.bounds, display.scale);
+            let budget = 256 * 1024 * 1024;
+            if required > budget {
+                continue;
+            }
+            let mut used: usize =
+                cache.metal.iter().map(|(_, bounds, scale, _)| bytes(*bounds, *scale)).sum();
+            while used + required > budget {
+                let (_, bounds, scale, _) = cache.metal.remove(0);
+                used -= bytes(bounds, scale);
+            }
+            cache.metal.push((display.info.clone(), display.bounds, display.scale, metal));
+        }
     }
 
     fn pointer_target(&self, point: CGPoint) -> Option<(usize, Selection)> {
@@ -1366,11 +1473,13 @@ impl OverviewSession {
             }
             Input::PointerDrag(point) => {
                 self.move_drag(point);
+                self.sync_metal();
                 return None;
             }
             Input::PointerUp(point) => {
                 self.move_drag(point);
                 let drag = self.end_drag();
+                self.sync_metal();
                 self.update_hover(point);
                 let pressed = self.pressed.take();
                 if let Some(drag) = drag.filter(|drag| drag.started) {
@@ -1512,6 +1621,7 @@ impl OverviewSession {
         if old != (self.active, self.selection) || (reprojected && !only_translated) {
             self.highlight(Some(old));
         }
+        self.sync_metal();
         if activate {
             let d = &self.displays[self.active];
             let sys_id = self
@@ -1530,7 +1640,168 @@ impl OverviewSession {
         None
     }
 
+    fn sync_metal(&mut self) {
+        for display in &mut self.displays {
+            let Some(metal) = &mut display.metal else {
+                continue;
+            };
+            let mut scene = Vec::new();
+            let accent = NSColor::controlAccentColor()
+                .colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace());
+            let border = accent
+                .map(|c| {
+                    [
+                        c.redComponent() as f32,
+                        c.greenComponent() as f32,
+                        c.blueComponent() as f32,
+                        1.,
+                    ]
+                })
+                .unwrap_or([0.2, 0.5, 1., 1.]);
+            let viewport = rect(0., 0., display.bounds.size.width, display.bounds.size.height);
+            for ws in &display.projection {
+                let ribbon = pixel_aligned(ws.frame, display.scale);
+                for w in &ws.windows {
+                    let data = &display.workspaces[ws.source].windows[w.source];
+                    if !card_visible(display.bounds.size, ws.frame, w.frame)
+                        || self
+                            .drag
+                            .as_ref()
+                            .is_some_and(|drag| drag.started && drag.window == data.id)
+                    {
+                        continue;
+                    }
+                    let Some(sys_id) = data.info.sys_id else {
+                        continue;
+                    };
+                    let card = pixel_aligned(w.frame, display.scale);
+                    let mut frame = pixel_aligned(preview_frame(card.size), display.scale);
+                    frame.origin.x += ribbon.origin.x + card.origin.x;
+                    frame.origin.y += ribbon.origin.y + card.origin.y;
+                    let mut p = cgs::Preview::window(sys_id.as_u32(), data.id.pid, frame);
+                    p.corner_radius = CORNER as f32;
+                    p.border_width = if self.hovered == Some(data.id) {
+                        1.5
+                    } else {
+                        0.
+                    };
+                    p.border_color = border;
+                    let left = ribbon.origin.x.max(viewport.origin.x);
+                    let top = ribbon.origin.y.max(viewport.origin.y);
+                    let right = ribbon.max().x.min(viewport.max().x);
+                    let bottom = ribbon.max().y.min(viewport.max().y);
+                    p.clip = Some(rect(left, top, (right - left).max(0.), (bottom - top).max(0.)));
+                    p.priority = if self.selection.window == Some(data.id) {
+                        2
+                    } else if display.workspaces[ws.source].is_active {
+                        1
+                    } else {
+                        0
+                    };
+                    p.resolution = if self.selection.window == Some(data.id) {
+                        // Match this card's physical pixels, rather than capturing
+                        // a much larger native window merely because it is selected.
+                        cgs::CaptureResolution::Thumbnail {
+                            width: (frame.size.width * display.scale).ceil().max(1.) as usize,
+                            height: (frame.size.height * display.scale).ceil().max(1.) as usize,
+                        }
+                    } else {
+                        let (width, height) = capture_size(frame.size, display.scale);
+                        cgs::CaptureResolution::Thumbnail { width, height }
+                    };
+                    scene.push(p);
+                }
+            }
+            if let Some(drag) = &self.drag {
+                if drag.started && contains(display.bounds, drag.point) {
+                    if let Some(data) = display
+                        .workspaces
+                        .iter()
+                        .flat_map(|w| &w.windows)
+                        .find(|w| w.id == drag.window)
+                    {
+                        if let Some(id) = data.info.sys_id {
+                            let mut frame = drag.preview.frame();
+                            frame.origin.x += drag.card.frame().origin.x;
+                            frame.origin.y += drag.card.frame().origin.y;
+                            let mut p = cgs::Preview::window(id.as_u32(), data.id.pid, frame);
+                            p.corner_radius = CORNER as f32;
+                            p.border_width = 2.5;
+                            p.border_color = border;
+                            p.priority = 3;
+                            scene.push(p);
+                        }
+                    }
+                }
+            }
+            // Register the entire inventory once. The capture pool starts
+            // foreground streams first, then warms hidden sources in spare slots.
+            for data in display.workspaces.iter().flat_map(|ws| &ws.windows) {
+                let Some(id) = data.info.sys_id else { continue };
+                if scene.iter().any(|p| p.window_id == id.as_u32()) {
+                    continue;
+                }
+                let mut p = cgs::Preview::window(id.as_u32(), data.id.pid, rect(0., 0., 1., 1.));
+                p.opacity = 0.;
+                p.mode = cgs::CaptureMode::Snapshot;
+                p.resolution = cgs::CaptureResolution::Thumbnail { width: 640, height: 480 };
+                p.priority = -1;
+                scene.push(p);
+            }
+            let result = metal
+                .set_scene(&scene)
+                .and_then(|()| metal.show())
+                .and_then(|()| metal.render(std::time::Instant::now()).map(|_| ()));
+            if let Err(error) = result {
+                tracing::warn!(?error, "Metal previews failed; using cached previews");
+                display.metal = None;
+            }
+        }
+    }
+
+    pub(crate) fn pump_previews(&mut self, generation: u64, cache: Option<&PreviewCache>) {
+        let mut failed = false;
+        if let Some(previews) = &mut self.previews {
+            previews.pump(generation);
+        }
+        for display in &mut self.displays {
+            if let Some(metal) = &mut display.metal {
+                if let Err(error) = metal.render(std::time::Instant::now()) {
+                    tracing::warn!(?error, "Metal preview rendering failed");
+                    display.metal = None;
+                    failed = true;
+                }
+            }
+        }
+        let source_failed = self.previews.as_ref().is_some_and(|previews| {
+            self.displays.iter().any(|display| {
+                let Some(metal) = &display.metal else { return false };
+                display.projection.iter().any(|ws| {
+                    ws.windows.iter().any(|w| {
+                        let data = &display.workspaces[ws.source].windows[w.source];
+                        previews.schedule.needs(data.id)
+                            && card_visible(display.bounds.size, ws.frame, w.frame)
+                            && data.info.sys_id.is_some_and(|id| {
+                                !metal.has_frame(id.as_u32())
+                                    && matches!(
+                                        metal.source_status(id.as_u32()),
+                                        Some(
+                                            cgs::SourceStatus::Failed(_)
+                                                | cgs::SourceStatus::Stopped
+                                        )
+                                    )
+                            })
+                    })
+                })
+            })
+        });
+        if failed || source_failed {
+            self.request_previews(cache);
+        }
+    }
+
     fn request_previews(&mut self, cache: Option<&PreviewCache>) {
+        self.sync_metal();
         let Some(previews) = &mut self.previews else {
             return;
         };
@@ -1561,6 +1832,15 @@ impl OverviewSession {
                         continue;
                     }
                     if let Some(sys_id) = data.info.sys_id {
+                        if display.metal.as_ref().is_some_and(|metal| {
+                            metal.has_frame(sys_id.as_u32())
+                                || !matches!(
+                                    metal.source_status(sys_id.as_u32()),
+                                    Some(cgs::SourceStatus::Failed(_) | cgs::SourceStatus::Stopped)
+                                )
+                        }) {
+                            continue;
+                        }
                         if visible.len() >= 32 && !visible.contains(&data.id) {
                             continue;
                         }
@@ -1584,10 +1864,7 @@ impl OverviewSession {
             previews.pump(self.generation);
             return;
         }
-        previews
-            .schedule
-            .attempted
-            .retain(|id| visible.contains(id) || previews.schedule.active.contains(id));
+        previews.schedule.retain_visible(&visible, cache);
         previews.visible = visible.clone();
         // Requests already target card size; cap each against the shared pixel budget.
         let per_image_bytes = PREVIEW_BYTES / visible.len().max(1);
@@ -1599,7 +1876,6 @@ impl OverviewSession {
             request.width = (request.width as f64 * factor).floor().max(1.0) as usize;
             request.height = (request.height as f64 * factor).floor().max(1.0) as usize;
         }
-        previews.schedule.pending.retain(|p| visible.contains(&p.id));
         previews
             .schedule
             .pending
@@ -1647,15 +1923,14 @@ impl OverviewSession {
                 if preview_is_current(generation, self.generation, &request, current)
                     && let Some(image) = image
                 {
-                    if previews.visible.contains(&request.id) {
-                        let budget = PREVIEW_BYTES / previews.visible.len().max(1);
-                        if let Some(owned) = owned_preview(&image, budget) {
-                            let cache = cache.get_or_insert_with(PreviewCache::default);
-                            cache.prepare_visible(&previews.visible);
-                            cache.insert(&request, owned);
-                        }
-                    } else {
-                        previews.schedule.attempted.remove(&request.id);
+                    // A capture completing just after its card scrolls away
+                    // is still useful on the return trip. Identity was checked
+                    // above; the shared cache enforces its byte and entry caps.
+                    let budget = PREVIEW_BYTES / previews.visible.len().max(1);
+                    if let Some(owned) = owned_preview(&image, budget) {
+                        let cache = cache.get_or_insert_with(PreviewCache::default);
+                        cache.prepare_visible(&previews.visible);
+                        cache.insert(&request, owned);
                     }
                 }
             }
@@ -1743,6 +2018,7 @@ pub(crate) struct PreviewSession {
     pub(crate) rx: actor::Receiver<PreviewEvent>,
     tx: actor::Sender<PreviewEvent>,
     windows: Option<HashMap<u32, Retained<SCWindow>>>,
+    discovery_pending: bool,
     schedule: PreviewSchedule,
     failed: bool,
     visible: HashSet<WindowId>,
@@ -1751,7 +2027,7 @@ pub(crate) struct PreviewSession {
 impl PreviewSession {
     fn open(
         enabled: bool,
-        generation: u64,
+        _generation: u64,
         wake: crate::actor::mission_control::Sender,
     ) -> Option<Self> {
         if !enabled {
@@ -1763,29 +2039,17 @@ impl PreviewSession {
             );
             return None;
         }
-        Some(Self::new(generation, wake))
+        Some(Self::new(wake))
     }
 
-    fn new(generation: u64, wake: crate::actor::mission_control::Sender) -> Self {
+    fn new(wake: crate::actor::mission_control::Sender) -> Self {
         let (tx, rx) = actor::channel();
-        let callback_tx = tx.clone();
-        let callback = RcBlock::new(move |content: *mut SCShareableContent, _: *mut NSError| {
-            if callback_tx.is_closed() {
-                return;
-            }
-            let content = unsafe { Retained::retain(content) };
-            deliver(callback_tx.clone(), PreviewEvent::Content(generation, content));
-        });
-        unsafe {
-            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
-                true, false, &callback,
-            );
-        }
         Self {
             wake,
             rx,
             tx,
             windows: None,
+            discovery_pending: false,
             schedule: PreviewSchedule::default(),
             failed: false,
             visible: HashSet::default(),
@@ -1795,6 +2059,23 @@ impl PreviewSession {
     pub(crate) fn pump(&mut self, generation: u64) {
         if self.failed {
             return;
+        }
+        if self.windows.is_none() && !self.discovery_pending && !self.schedule.pending.is_empty() {
+            self.discovery_pending = true;
+            let callback_tx = self.tx.clone();
+            let callback =
+                RcBlock::new(move |content: *mut SCShareableContent, _: *mut NSError| {
+                    if callback_tx.is_closed() {
+                        return;
+                    }
+                    let content = unsafe { Retained::retain(content) };
+                    deliver(callback_tx.clone(), PreviewEvent::Content(generation, content));
+                });
+            unsafe {
+                SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                true, false, &callback,
+            );
+            }
         }
         let Some(windows) = &self.windows else {
             return;
@@ -1899,6 +2180,24 @@ impl PreviewSchedule {
         Some(request)
     }
 
+    fn retain_visible(&mut self, visible: &HashSet<WindowId>, cache: Option<&PreviewCache>) {
+        // Cancel work that never started, so a return trip can still refresh
+        // it. Completed cached previews remain attempted for this session;
+        // opening a new Overview creates a fresh schedule and refreshes them.
+        self.pending.retain(|p| {
+            let keep = visible.contains(&p.id);
+            if !keep {
+                self.attempted.remove(&p.id);
+            }
+            keep
+        });
+        self.attempted.retain(|id| {
+            visible.contains(id)
+                || self.active.contains(id)
+                || cache.is_some_and(|cache| cache.entries.iter().any(|entry| entry.id == *id))
+        });
+    }
+
     fn complete(&mut self, id: WindowId) { self.active.remove(&id); }
 }
 fn owner_matches(request: &PreviewRequest, pid: i32, bundle: &str) -> bool {
@@ -1989,8 +2288,33 @@ struct PreviewEntry {
 pub(crate) struct PreviewCache {
     entries: VecDeque<PreviewEntry>,
     bytes: usize,
+    // One paused presentation context per current display. Pixel reuse is
+    // bounded independently inside cgs; no stream remains active here.
+    metal: Vec<(ScreenInfo, CGRect, f64, cgs::PreviewCompositor)>,
 }
 impl PreviewCache {
+    fn take_metal(
+        &mut self,
+        info: &ScreenInfo,
+        bounds: CGRect,
+        scale: f64,
+    ) -> Option<cgs::PreviewCompositor> {
+        // Native Space/display changes must never reuse a surface from the old
+        // Space. A backing-size/scale change also retires its old drawable pool.
+        self.metal.retain(|(key, rect, backing, _)| {
+            key.display_uuid != info.display_uuid
+                || (key.id == info.id
+                    && key.space == info.space
+                    && *rect == bounds
+                    && *backing == scale)
+        });
+        let index = self
+            .metal
+            .iter()
+            .position(|(key, _, _, _)| key.display_uuid == info.display_uuid)?;
+        Some(self.metal.swap_remove(index).3)
+    }
+
     fn bytes(&self) -> usize { self.bytes }
 
     pub(crate) fn close(&mut self) { self.trim(CLOSED_PREVIEW_BYTES); }
@@ -2065,691 +2389,5 @@ impl PreviewCache {
             bundle: request.bundle.clone(),
             image,
         });
-        self.trim(PREVIEW_BYTES);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::server::RuntimeWindowData;
-
-    fn window(id: u32, frame: CGRect, floating: bool) -> RuntimeWindowData {
-        serde_json::from_value(serde_json::json!({
-            "id": {"pid": 123,"idx": id}, "title": "Example", "frame": {
-                "origin": {"x": frame.origin.x,"y": frame.origin.y},
-                "size": {"width": frame.size.width,"height": frame.size.height}
-            }, "is_floating": floating,"is_focused": false,"window_server_id": id,
-            "bundle_id": "org.example"
-        }))
-        .unwrap()
-    }
-    fn workspace(index: usize, windows: Vec<RuntimeWindowData>) -> RuntimeWorkspaceData {
-        RuntimeWorkspaceData {
-            workspace_id: slotmap::KeyData::from_ffi((1u64 << 32) | (index as u64 + 1)).into(),
-            space: crate::sys::screen::SpaceId::new(1),
-            id: index.to_string(),
-            index,
-            name: index.to_string(),
-            layout_mode: "scrolling".into(),
-            is_active: index == 1,
-            display_uuid: None,
-            is_focused: index == 1,
-            window_count: windows.len(),
-            windows,
-        }
-    }
-    fn request(id: u32) -> PreviewRequest {
-        PreviewRequest {
-            id: WindowId::new(123, id),
-            sys_id: WindowServerId::new(id),
-            bundle: Some("org.example".into()),
-            width: 200,
-            height: 100,
-        }
-    }
-
-    fn bitmap(width: usize, height: usize) -> CFRetained<CGImage> {
-        let space = CGColorSpace::new_device_rgb().unwrap();
-        let context = unsafe {
-            CGBitmapContextCreate(
-                std::ptr::null_mut(),
-                width,
-                height,
-                8,
-                width * 4,
-                Some(&space),
-                CGImageAlphaInfo::PremultipliedLast.0,
-            )
-        }
-        .unwrap();
-        CGBitmapContextCreateImage(Some(&context)).unwrap()
-    }
-
-    #[test]
-    fn full_preview_copy_releases_capture_backing_and_enforces_pixel_budget() {
-        let source = bitmap(1024, 768);
-        let source_ref: &CGImage = &source;
-        let source_cf: &CFType = source_ref.as_ref();
-        let baseline = source_cf.retain_count();
-        let owned = owned_preview(&source, 1024 * 768 * 4).unwrap();
-        assert_eq!(CGImage::width(Some(&owned)), 1024);
-        assert_eq!(CGImage::height(Some(&owned)), 768);
-        assert_eq!(source_cf.retain_count(), baseline);
-        let bounded = owned_preview(&source, 512 * 384 * 4).unwrap();
-        assert!(image_bytes(&bounded) <= 512 * 384 * 4);
-        assert_eq!(source_cf.retain_count(), baseline);
-        assert!(owned_preview(&source, 0).is_none());
-    }
-
-    #[test]
-    fn cache_does_not_retain_capture_storage() {
-        let source = bitmap(1024, 768);
-        let source_ref: &CGImage = &source;
-        let source_cf: &objc2_core_foundation::CFType = source_ref.as_ref();
-        let count = source_cf.retain_count();
-        let image = owned_preview(&source, 320 * 240 * 4).unwrap();
-        assert_eq!(CGImage::width(Some(&image)), 320);
-        assert_eq!(CGImage::height(Some(&image)), 240);
-        assert_eq!(image_bytes(&image), 320 * 240 * 4);
-        assert_eq!(source_cf.retain_count(), count);
-        let mut cache = PreviewCache::default();
-        cache.insert(&request(1), image);
-        drop(source);
-        assert_eq!(cache.bytes(), 320 * 240 * 4);
-        assert!(cache.get(&window(1, rect(0.0, 0.0, 100.0, 100.0), false)).is_some());
-    }
-
-    #[test]
-    fn visible_previews_survive_new_captures_and_density_changes() {
-        let mut cache = PreviewCache::default();
-        cache.insert(&request(1), bitmap(1024, 768));
-        cache.insert(&request(2), bitmap(1024, 768));
-        let visible: HashSet<_> = (1..=12).map(|id| request(id).id).collect();
-        for id in 3..=12 {
-            cache.prepare_visible(&visible);
-            cache.insert(&request(id), bitmap(256, 256));
-            for previous in 1..=id {
-                assert!(cache.get(&window(previous, CGRect::ZERO, false)).is_some());
-            }
-            assert!(cache.bytes() <= PREVIEW_BYTES);
-        }
-        // Offscreen images, rather than these displayed images, are evicted first.
-        cache.insert(&request(99), bitmap(1024, 768));
-        cache.prepare_visible(&visible);
-        cache.insert(&request(12), bitmap(256, 256));
-        for id in 1..=12 {
-            assert!(cache.get(&window(id, CGRect::ZERO, false)).is_some());
-        }
-    }
-
-    #[test]
-    fn replacing_and_closing_cache_releases_pixels_and_keeps_accounting_exact() {
-        let mut cache = PreviewCache::default();
-        cache.insert(&request(1), bitmap(1024, 768));
-        cache.insert(&request(1), bitmap(100, 100));
-        assert_eq!(cache.stats(), (1, 40_000));
-        cache.insert(&request(2), bitmap(1024, 768));
-        cache.insert(&request(3), bitmap(1024, 768));
-        cache.close();
-        assert!(cache.bytes() <= CLOSED_PREVIEW_BYTES);
-        assert_eq!(
-            cache.bytes(),
-            cache.entries.iter().map(|e| image_bytes(&e.image)).sum::<usize>()
-        );
-        cache.prune(std::iter::empty());
-        assert_eq!(cache.stats(), (0, 0));
-    }
-
-    #[test]
-    fn projected_drag_scene_uses_logical_geometry_and_excludes_floating_windows() {
-        let mut tiled = window(1, rect(1200.0, 0.0, 200.0, 400.0), false);
-        tiled.layout_frame = Some(rect(200.0, 0.0, 200.0, 400.0));
-        let data = workspace(0, vec![tiled, window(2, rect(200.0, 0.0, 200.0, 400.0), true)]);
-        let projection = project(
-            rect(0.0, 0.0, 1000.0, 800.0),
-            CGSize::new(1000.0, 800.0),
-            &[data],
-            0,
-            0.0,
-            &HashMap::default(),
-        );
-        let ws = &projection[0];
-        assert_eq!(ws.scene.targets.len(), 1);
-        assert_eq!(ws.scene.targets[0].frame, ws.windows[0].frame);
-        let center = ws.scene.targets[0].frame;
-        let center = CGPoint::new(
-            center.origin.x + center.size.width / 2.0,
-            center.origin.y + center.size.height / 2.0,
-        );
-        let target =
-            crate::actor::drag::hit_test_projected(&ws.scene, WindowId::new(123, 99), center)
-                .unwrap();
-        assert_eq!(target.window, WindowId::new(123, 1));
-        assert!(crate::actor::drag::hit_test_projected(&ws.scene, target.window, center).is_none());
-    }
-
-    #[test]
-    fn cache_enforces_byte_and_entry_caps_and_prunes_identity() {
-        let mut cache = PreviewCache::default();
-        for id in 1..65 {
-            cache.insert(&request(id), bitmap(320, 240));
-            assert!(cache.bytes() <= PREVIEW_BYTES);
-            assert!(cache.entries.len() <= 32);
-        }
-        let mut current = window(64, rect(0.0, 0.0, 100.0, 100.0), false);
-        assert!(cache.get(&current).is_some());
-        current.info.sys_id = Some(WindowServerId::new(99));
-        assert!(cache.get(&current).is_none());
-        cache.prune(std::iter::once(&current));
-        assert!(cache.entries.is_empty());
-        assert_eq!(cache.bytes(), 0);
-        for id in 1..65 {
-            cache.insert(&request(id), bitmap(1, 1));
-        }
-        assert_eq!(cache.entries.len(), 32);
-        assert!(cache.entries.iter().all(|e| e.id.idx.get() > 32));
-    }
-
-    #[test]
-    fn capture_resolution_is_bounded_and_preserves_aspect_ratio() {
-        assert_eq!(capture_size(CGSize::new(480.0, 300.0), 2.0), (960, 600));
-        assert_eq!(capture_size(CGSize::new(5000.0, 3750.0), 2.0), (1024, 768));
-        assert_eq!(capture_size(CGSize::new(100.0, 1000.0), 2.0), (77, 768));
-    }
-
-    #[test]
-    fn clipped_cards_outside_viewport_are_not_retained_at_full_quality() {
-        let bounds = CGSize::new(1200.0, 800.0);
-        assert!(!card_visible(
-            bounds,
-            rect(0.0, 900.0, 1200.0, 300.0),
-            rect(0.0, -200.0, 100.0, 500.0)
-        ));
-        assert!(!card_visible(
-            bounds,
-            rect(0.0, 700.0, 1200.0, 300.0),
-            rect(0.0, 150.0, 100.0, 100.0)
-        ));
-        assert!(card_visible(
-            bounds,
-            rect(0.0, 700.0, 1200.0, 300.0),
-            rect(0.0, 0.0, 100.0, 100.0)
-        ));
-    }
-
-    #[test]
-    fn floating_drop_inverse_projection_rebases_and_clamps() {
-        let display = rect(1200.0, -200.0, 1200.0, 800.0);
-        let ribbon = rect(0.0, 300.0, 1200.0, 400.0);
-        let size = CGSize::new(200.0, 100.0);
-        assert_eq!(
-            floating_drop_frame(display, ribbon, size, CGPoint::new(600.0, 200.0), 0.0),
-            rect(1600.0, 100.0, 400.0, 200.0)
-        );
-        assert_eq!(
-            floating_drop_frame(display, ribbon, size, CGPoint::new(-100.0, -100.0), 0.0).origin,
-            display.origin
-        );
-        assert_eq!(
-            floating_drop_frame(display, ribbon, size, CGPoint::new(2000.0, 1000.0), 0.0).origin,
-            CGPoint::new(2000.0, 400.0)
-        );
-    }
-
-    #[test]
-    fn drag_edge_scroll_is_bounded_presentation_state() {
-        assert_eq!(edge_direction(800.0, 20.0), -1.0);
-        assert_eq!(edge_direction(800.0, 400.0), 0.0);
-        assert_eq!(edge_direction(800.0, 790.0), 1.0);
-        assert!((scrolled_workspace_offset(1, 0.0, -80.0, 400.0, 5) - 0.2).abs() < 1e-12);
-        assert_eq!(scrolled_workspace_offset(1, 3.0, -80.0, 400.0, 5), 3.0);
-    }
-
-    #[test]
-    fn strip_pans_columns_that_fit_overlay_but_extend_past_desktop() {
-        let display = rect(0.0, 0.0, 1200.0, 800.0);
-        let ws = workspace(0, vec![
-            window(1, rect(0.0, 0.0, 600.0, 800.0), false),
-            window(2, rect(600.0, 0.0, 600.0, 800.0), false),
-            window(3, rect(1200.0, 0.0, 600.0, 800.0), false),
-        ]);
-        let p = project(
-            display,
-            display.size,
-            std::slice::from_ref(&ws),
-            0,
-            0.0,
-            &HashMap::default(),
-        );
-        assert_eq!(p[0].windows.len(), 3); // All three fit in the physical overlay.
-        let next = scrolled_horizontal_offset(display, display.size, &ws, 0.0, -80.0);
-        assert_eq!(next, 80.0);
-        let end = scrolled_horizontal_offset(display, display.size, &ws, next, -10000.0);
-        assert_eq!(end, 258.0);
-        assert_eq!(
-            scrolled_horizontal_offset(display, display.size, &ws, end, 10000.0),
-            0.0
-        );
-        let mut fitting = ws.clone();
-        fitting.windows.pop();
-        assert_eq!(
-            scrolled_horizontal_offset(display, display.size, &fitting, 0.0, -80.0),
-            0.0
-        );
-    }
-
-    #[test]
-    fn dominant_axis_and_pointer_workspace_pan_are_independent_and_bounded() {
-        assert!(vertical_scroll(CGPoint::new(10.0, -10.0)));
-        assert!(!vertical_scroll(CGPoint::new(-11.0, 10.0)));
-        let display = rect(0.0, 0.0, 1200.0, 800.0);
-        let workspaces: Vec<_> = (0..3)
-            .map(|index| {
-                workspace(index, vec![window(
-                    index as u32 + 1,
-                    rect(2500.0, 0.0, 400.0, 800.0),
-                    false,
-                )])
-            })
-            .collect();
-        let before = format!("{workspaces:?}");
-        let mut offsets = HashMap::from_iter([(0, 25.0), (2, 50.0)]);
-        let projection = project(display, display.size, &workspaces, 1, 0.0, &offsets);
-        let selected = hit(&workspaces, &projection, CGPoint::new(600.0, 400.0)).unwrap();
-        assert_eq!(selected.workspace, 1);
-        let next = scrolled_horizontal_offset(display, display.size, &workspaces[1], 0.0, -5000.0);
-        assert!(next > 0.0);
-        assert_eq!(
-            next,
-            scrolled_horizontal_offset(display, display.size, &workspaces[1], next, -5000.0)
-        );
-        offsets.insert(selected.workspace, next);
-        assert_eq!(offsets[&0], 25.0);
-        assert_eq!(offsets[&2], 50.0);
-        assert_eq!(format!("{workspaces:?}"), before);
-        assert_eq!(
-            scrolled_horizontal_offset(display, display.size, &workspace(0, vec![]), 0.0, 5000.0),
-            0.0
-        );
-    }
-
-    #[test]
-    fn workspace_surface_encloses_visible_cards_and_stays_inside_screen() {
-        let ws = WorkspaceProjection {
-            source: 0,
-            frame: rect(0.0, 200.0, 1200.0, 360.0),
-            scene: Default::default(),
-            windows: vec![
-                WindowProjection {
-                    id: WindowId::new(123, 1),
-                    floating: false,
-                    source: 0,
-                    frame: rect(150.0, 0.0, 300.0, 360.0),
-                },
-                WindowProjection {
-                    id: WindowId::new(123, 2),
-                    floating: false,
-                    source: 1,
-                    frame: rect(600.0, 0.0, 400.0, 360.0),
-                },
-            ],
-        };
-        let bounds = workspace_backdrop(&ws);
-        assert!(bounds.origin.x <= 150.0);
-        assert!(bounds.origin.x + bounds.size.width >= 1000.0);
-        assert!(bounds.origin.x >= 24.0);
-        assert!(bounds.origin.x + bounds.size.width <= 1176.0);
-        assert_eq!(bounds.size.height, 360.0);
-    }
-
-    #[test]
-    fn transparent_preview_gutters_select_workspace_instead_of_window() {
-        let workspaces = vec![workspace(1, vec![window(
-            1,
-            rect(0.0, 0.0, 400.0, 200.0),
-            false,
-        )])];
-        let projection = vec![WorkspaceProjection {
-            source: 0,
-            frame: rect(0.0, 100.0, 1200.0, 360.0),
-            scene: Default::default(),
-            windows: vec![WindowProjection {
-                id: WindowId::new(123, 1),
-                floating: false,
-                source: 0,
-                frame: rect(400.0, 0.0, 400.0, 200.0),
-            }],
-        }];
-        assert_eq!(
-            hit(&workspaces, &projection, CGPoint::new(402.0, 150.0)).unwrap().window,
-            None
-        );
-        assert_eq!(
-            hit(&workspaces, &projection, CGPoint::new(600.0, 150.0)).unwrap().window,
-            Some(WindowId::new(123, 1))
-        );
-    }
-
-    #[test]
-    fn preview_geometry_preserves_aspect_ratio_and_caption_space() {
-        for size in [
-            CGSize::new(600.0, 300.0),
-            CGSize::new(180.0, 500.0),
-            CGSize::new(800.0, 100.0),
-        ] {
-            let image = preview_frame(size);
-            assert!(
-                (image.size.width / image.size.height - size.width / size.height).abs() < 1e-10
-            );
-            assert!(image.origin.x >= 6.0);
-            assert!(image.origin.y + image.size.height + CAPTION <= size.height + 1e-10);
-            assert!((image.origin.x * 2.0 + image.size.width - size.width).abs() < 1e-10);
-        }
-    }
-
-    #[test]
-    fn workspace_and_heading_share_backing_pixel_scroll_alignment() {
-        let frame = rect(0.0, 123.27, 1200.0, 360.0);
-        for scale in [1.0, 2.0] {
-            let aligned = pixel_aligned(frame, scale);
-            let heading = workspace_heading(
-                &WorkspaceProjection {
-                    source: 0,
-                    frame,
-                    scene: Default::default(),
-                    windows: vec![],
-                },
-                scale,
-            );
-            assert_eq!(heading.origin.y + 26.0, aligned.origin.y);
-            assert_eq!(aligned.origin.y * scale, (frame.origin.y * scale).round());
-        }
-    }
-
-    #[test]
-    fn empty_workspaces_are_hidden_without_renumbering() {
-        let original = vec![
-            workspace(0, vec![]),
-            workspace(3, vec![window(1, rect(0.0, 0.0, 400.0, 300.0), false)]),
-            workspace(7, vec![]),
-        ];
-        let mut filtered = original.clone();
-        filter_workspaces(&mut filtered, false);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].index, 3);
-        let mut included = original;
-        filter_workspaces(&mut included, true);
-        assert_eq!(included.len(), 3);
-        filtered[0].windows.clear();
-        filter_workspaces(&mut filtered, false);
-        assert!(filtered.is_empty());
-    }
-
-    #[test]
-    fn wheel_scrolling_moves_ribbons_smoothly_and_clamps_to_workspace_stack() {
-        let workspaces: Vec<_> = (0..3).map(|i| workspace(i, vec![])).collect();
-        let display = rect(0.0, 0.0, 1200.0, 800.0);
-        let offset = scrolled_workspace_offset(1, 0.0, -100.0, 400.0, 3);
-        assert_eq!(offset, 0.25);
-        let projection = project(
-            display,
-            display.size,
-            &workspaces,
-            1,
-            offset,
-            &HashMap::default(),
-        );
-        assert_eq!(projection[1].frame.origin.y, 120.0);
-        assert_eq!(scrolled_workspace_offset(1, offset, -10000.0, 400.0, 3), 1.0);
-        assert_eq!(scrolled_workspace_offset(1, offset, 10000.0, 400.0, 3), -1.0);
-    }
-
-    #[test]
-    fn ribbons_center_span_width_keep_empty_and_use_expected_stride() {
-        let display = rect(0.0, 0.0, 1200.0, 800.0);
-        let workspaces = vec![
-            workspace(0, vec![]),
-            workspace(1, vec![]),
-            workspace(2, vec![]),
-        ];
-        let projection = project(display, display.size, &workspaces, 1, 0.0, &HashMap::default());
-        assert_eq!(projection.len(), 3);
-        assert_eq!(projection[1].frame, rect(0.0, 220.0, 1200.0, 360.0));
-        assert_eq!(
-            projection[2].frame.origin.y - projection[1].frame.origin.y,
-            400.0
-        );
-        assert!(projection.iter().all(|p| p.frame.size.width == 1200.0 && p.windows.is_empty()));
-        assert_eq!(
-            hit(&workspaces, &projection, CGPoint::new(600.0, 400.0)),
-            Some(Selection { workspace: 1, window: None })
-        );
-    }
-
-    #[test]
-    fn geometry_uses_source_display_and_floating_cards_are_on_top() {
-        let display = rect(1600.0, -100.0, 1200.0, 800.0);
-        let workspaces = vec![workspace(1, vec![
-            window(1, rect(1700.0, 0.0, 400.0, 200.0), true),
-            window(2, rect(1700.0, 0.0, 400.0, 200.0), false),
-        ])];
-        let projection = project(display, display.size, &workspaces, 0, 0.0, &HashMap::default());
-        let cards = &projection[0].windows;
-        assert_eq!(cards[0].source, 1);
-        assert_eq!(cards[1].source, 0);
-        assert_eq!(cards[0].frame, rect(375.0, 45.0, 180.0, 90.0));
-        assert_eq!(
-            hit(&workspaces, &projection, CGPoint::new(460.0, 280.0)),
-            Some(Selection {
-                workspace: 1,
-                window: Some(WindowId::new(123, 1))
-            })
-        );
-        assert!(hit(&workspaces, &projection, CGPoint::new(400.0, 10.0)).is_none());
-    }
-
-    #[test]
-    fn scrolling_clips_windows_and_exposes_them_without_changing_runtime_frames() {
-        let display = rect(0.0, 0.0, 1200.0, 800.0);
-        let workspaces = vec![workspace(1, vec![
-            window(1, rect(-800.0, 0.0, 400.0, 800.0), false),
-            window(2, rect(2500.0, 0.0, 400.0, 800.0), false),
-        ])];
-        let original = workspaces[0].windows[1].info.frame;
-        let projection = project(display, display.size, &workspaces, 0, 0.0, &HashMap::default());
-        assert_eq!(projection[0].windows.len(), 1); // partially clipped left card
-        assert!(projection[0].windows[0].frame.origin.x < 0.0);
-        let offsets = HashMap::from_iter([(1, 800.0)]);
-        let shifted = project(display, display.size, &workspaces, 0, 0.0, &offsets);
-        assert_eq!(shifted[0].windows.len(), 1);
-        assert_eq!(shifted[0].windows[0].source, 1);
-        assert_eq!(workspaces[0].windows[1].info.frame, original);
-    }
-
-    #[test]
-    fn separate_display_dimensions_and_workspace_sets_do_not_mix() {
-        let first = vec![workspace(7, vec![])];
-        let second = vec![workspace(9, vec![])];
-        let a = project(
-            rect(0.0, 0.0, 1200.0, 800.0),
-            CGSize::new(1200.0, 800.0),
-            &first,
-            0,
-            0.0,
-            &HashMap::default(),
-        );
-        let b = project(
-            rect(-900.0, 200.0, 900.0, 600.0),
-            CGSize::new(900.0, 600.0),
-            &second,
-            0,
-            0.0,
-            &HashMap::default(),
-        );
-        assert_eq!(a[0].frame.size.width, 1200.0);
-        assert_eq!(b[0].frame.size.width, 900.0);
-        assert_eq!(hit(&first, &a, CGPoint::new(300.0, 400.0)).unwrap().workspace, 7);
-        assert_eq!(
-            hit(&second, &b, CGPoint::new(300.0, 300.0)).unwrap().workspace,
-            9
-        );
-        let many: Vec<_> = (0..100).map(|i| workspace(i, vec![])).collect();
-        assert!(
-            project(
-                rect(0.0, 0.0, 1200.0, 800.0),
-                CGSize::new(1200.0, 800.0),
-                &many,
-                50,
-                0.0,
-                &HashMap::default()
-            )
-            .len()
-                <= 5
-        );
-    }
-
-    #[test]
-    fn teardown_releases_layer_images_while_old_layers_remain_retained() {
-        objc2::rc::autoreleasepool(|_| {
-            let image = bitmap(640, 480);
-            let image_ref: &CGImage = &image;
-            let cf: &CFType = image_ref.as_ref();
-            let baseline = cf.retain_count();
-            for _ in 0..40 {
-                let root = layer(rect(0.0, 0.0, 1200.0, 800.0), 2.0);
-                let child = layer(rect(0.0, 0.0, 600.0, 400.0), 2.0);
-                set_image(&child, Some(&image));
-                root.addSublayer(&child);
-                let sibling = layer(rect(600.0, 0.0, 600.0, 400.0), 2.0);
-                set_image(&sibling, Some(&image));
-                root.addSublayer(&sibling);
-                assert!(cf.retain_count() > baseline);
-                let _transaction = LayerTransaction::disabled().flush_on_commit();
-                release_layer_tree(&root);
-                assert!(unsafe { child.contents() }.is_none());
-                assert_eq!(cf.retain_count(), baseline);
-            }
-        });
-    }
-
-    #[test]
-    fn late_preview_for_closed_session_is_dropped_before_main_queue_dispatch() {
-        let image = bitmap(640, 480);
-        let image_ref: &CGImage = &image;
-        let cf: &CFType = image_ref.as_ref();
-        let baseline = cf.retain_count();
-        let (tx, rx) = actor::channel();
-        drop(rx);
-        assert!(tx.is_closed());
-        deliver(tx, PreviewEvent::Image(1, request(1), Some(image.clone())));
-        assert_eq!(cf.retain_count(), baseline);
-    }
-
-    #[test]
-    fn dropping_preview_session_releases_queued_images() {
-        use objc2_core_graphics::{
-            CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
-        };
-        let space = CGColorSpace::new_device_rgb().unwrap();
-        let context = unsafe {
-            CGBitmapContextCreate(
-                std::ptr::null_mut(),
-                1,
-                1,
-                8,
-                4,
-                Some(&space),
-                CGImageAlphaInfo::PremultipliedLast.0,
-            )
-        }
-        .unwrap();
-        let image = CGBitmapContextCreateImage(Some(&context)).unwrap();
-        let image_ref: &CGImage = &image;
-        let image_cf: &objc2_core_foundation::CFType = image_ref.as_ref();
-        let count = image_cf.retain_count();
-        let (tx, rx) = actor::channel();
-        let (wake, _wake_rx) = actor::channel();
-        let session = PreviewSession {
-            wake,
-            rx,
-            tx: tx.clone(),
-            windows: None,
-            schedule: PreviewSchedule::default(),
-            failed: false,
-            visible: HashSet::default(),
-        };
-        tx.send(PreviewEvent::Image(1, request(2), Some(image.clone())));
-        assert!(image_cf.retain_count() >= count + 1);
-        drop(session);
-        assert_eq!(image_cf.retain_count(), count);
-        assert!(tx.try_send(PreviewEvent::Content(1, None)).is_err());
-    }
-
-    #[test]
-    fn disabled_previews_never_enter_permission_or_capture_path() {
-        let (wake, _rx) = actor::channel();
-        assert!(PreviewSession::open(false, 1, wake).is_none());
-    }
-
-    #[test]
-    fn capture_limit_survives_closing_and_reopening_sessions() {
-        let jobs = AtomicUsize::new(0);
-        assert!(acquire_capture_slot(&jobs));
-        assert!(acquire_capture_slot(&jobs));
-        // Closing a receiver does not mean its native capture has completed.
-        assert!(!acquire_capture_slot(&jobs));
-        jobs.fetch_sub(1, Ordering::AcqRel);
-        assert!(acquire_capture_slot(&jobs));
-        assert!(!acquire_capture_slot(&jobs));
-        jobs.fetch_sub(2, Ordering::AcqRel);
-        assert_eq!(jobs.load(Ordering::Acquire), 0);
-    }
-
-    #[test]
-    fn scheduling_limits_two_jobs_and_remembers_attempts_for_the_session() {
-        let mut schedule = PreviewSchedule::default();
-        schedule.pending.extend([request(1), request(2), request(3)]);
-        assert_eq!(schedule.next().unwrap().id, WindowId::new(123, 1));
-        schedule.next().unwrap();
-        assert!(schedule.next().is_none());
-        assert_eq!(schedule.active.len(), 2);
-        schedule.complete(WindowId::new(123, 1));
-        assert_eq!(schedule.next().unwrap().id, WindowId::new(123, 3));
-        assert!(!schedule.needs(WindowId::new(123, 1)));
-        assert!(schedule.needs(WindowId::new(123, 4)));
-        // An unstarted card removed when hidden may be queued when newly exposed.
-        assert!(!schedule.attempted.contains(&WindowId::new(123, 4)));
-        schedule.enqueue(request(4));
-        schedule.complete(WindowId::new(123, 2));
-        assert_eq!(schedule.next().unwrap().id, WindowId::new(123, 4));
-    }
-
-    #[test]
-    fn discarded_or_evicted_capture_can_upgrade_on_return() {
-        let mut schedule = PreviewSchedule::default();
-        schedule.enqueue(request(1));
-        let id = schedule.next().unwrap().id;
-        assert!(!schedule.needs(id)); // No duplicate while in flight.
-        schedule.complete(WindowId::new(123, 1));
-        schedule.attempted.remove(&id); // Successful image discarded offscreen.
-        assert!(schedule.needs(id));
-        schedule.enqueue(request(1));
-        assert!(!schedule.needs(id));
-        assert_eq!(schedule.next().unwrap().id, id);
-    }
-
-    #[test]
-    fn stale_generation_and_reused_window_owner_are_rejected() {
-        let request = request(1);
-        let mut current = window(1, rect(0.0, 0.0, 400.0, 200.0), false);
-        assert!(preview_is_current(2, 2, &request, Some(&current)));
-        assert!(!preview_is_current(1, 2, &request, Some(&current)));
-        assert!(!preview_is_current(2, 2, &request, None));
-        current.info.bundle_id = Some("other.app".into());
-        assert!(!preview_is_current(2, 2, &request, Some(&current)));
-        assert!(!owner_matches(&request, 456, "org.example"));
-        assert!(!owner_matches(&request, 123, "other.app"));
-        assert!(owner_matches(&request, 123, "org.example"));
     }
 }
