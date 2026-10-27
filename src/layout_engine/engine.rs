@@ -2712,6 +2712,10 @@ impl LayoutEngine {
                     default_orientation,
                 )
             }
+            LayoutCommand::Balance => {
+                self.workspaces[workspace_id].layout_system.rebalance(layout);
+                EventResponse::default()
+            }
             LayoutCommand::ResizeWindowGrow(_)
             | LayoutCommand::ResizeWindowShrink(_)
             | LayoutCommand::ResizeWindowBy { .. } => {

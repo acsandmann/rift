@@ -98,6 +98,7 @@ fn actions() -> &'static [(&'static str, WmCommand)] {
                 ),
                 ("Layout · Toggle stack", layout(L::ToggleStack)),
                 ("Layout · Toggle orientation", layout(L::ToggleOrientation)),
+                ("Layout · Balance", layout(L::Balance)),
                 ("Layout · Unjoin windows", layout(L::UnjoinWindows)),
                 ("Layout · Scroll strip", layout(L::ScrollStrip { delta: 100.0 })),
                 ("Layout · Snap strip", layout(L::SnapStrip)),

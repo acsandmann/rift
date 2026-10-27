@@ -66,6 +66,7 @@ fn geometry_commands_request_arrangement_without_camera_movement() {
         LayoutCommand::MoveNode(Direction::Left),
         LayoutCommand::ResizeWindowBy { amount: 0.1 },
         LayoutCommand::ToggleOrientation,
+        LayoutCommand::Balance,
         LayoutCommand::JoinWindow(Direction::Right),
         LayoutCommand::CenterSelection,
         LayoutCommand::AdjustMasterRatio(0.1),

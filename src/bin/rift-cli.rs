@@ -331,6 +331,8 @@ enum LayoutCommands {
     ToggleStack,
     /// Global orientation toggle that works consistently across layout modes (and between splits/stacks)
     ToggleOrientation,
+    /// Even out split sizes along each axis (bsp and traditional layouts only)
+    Balance,
     /// Unjoin previously joined windows
     Unjoin,
     /// Toggle floating on the focused selection (tree focus)
@@ -984,6 +986,7 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
         LayoutCommands::ToggleOrientation => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::ToggleOrientation,
         ))),
+        LayoutCommands::Balance => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Balance))),
         LayoutCommands::Unjoin => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows)))
         }
