@@ -4,13 +4,11 @@ use objc2_foundation::MainThreadMarker;
 
 use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
-use crate::sys::dispatch::DispatchExt;
 use crate::sys::timer::Timer;
 use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewCache};
 
 #[derive(Debug)]
 pub enum Event {
-    StartPreviews(u64),
     PumpPreviews,
     ShowAll,
     Dismiss,
@@ -124,6 +122,9 @@ impl MissionControlActor {
         mtm: MainThreadMarker,
         input_tx: super::input::Sender,
     ) -> Self {
+        if settings.enabled && settings.window_previews {
+            let _ = cgs::PreviewCompositor::prepare();
+        }
         Self {
             settings,
             rx,
@@ -181,7 +182,8 @@ impl MissionControlActor {
     }
 
     fn close(&mut self) {
-        if let Some(session) = self.session.take() {
+        if let Some(mut session) = self.session.take() {
+            session.retain_previews(&mut self.cache);
             drop(session);
             if let Some(cache) = &mut self.cache {
                 cache.close();
@@ -201,18 +203,8 @@ impl MissionControlActor {
     fn handle(&mut self, event: Event) {
         match event {
             Event::PumpPreviews => {
-                if let Some(previews) = self.session.as_mut().and_then(|s| s.previews.as_mut()) {
-                    previews.pump(self.generation);
-                }
-            }
-            Event::StartPreviews(generation) => {
-                if let Some(session) = &mut self.session {
-                    session.start_previews(
-                        generation,
-                        self.settings.window_previews,
-                        self.tx.clone(),
-                        self.cache.as_ref(),
-                    );
+                if let Some(session) = self.session.as_mut() {
+                    session.pump_previews(self.generation, self.cache.as_ref());
                 }
             }
             Event::ShowAll => {
@@ -220,6 +212,9 @@ impl MissionControlActor {
                     self.close();
                 } else if self.settings.enabled {
                     self.generation = self.generation.wrapping_add(1);
+                    if self.settings.window_previews {
+                        let _ = cgs::PreviewCompositor::prepare();
+                    }
                     self.session = OverviewSession::new(
                         &self.reactor,
                         self.mtm,
@@ -227,11 +222,12 @@ impl MissionControlActor {
                         self.generation,
                         &mut self.cache,
                     );
-                    if self.session.is_some() && self.settings.window_previews {
-                        dispatchr::queue::main().after_f_s(
-                            dispatchr::time::Time::NOW,
-                            (self.tx.clone(), self.generation),
-                            |(tx, generation)| tx.send(Event::StartPreviews(generation)),
+                    if let Some(session) = &mut self.session {
+                        session.start_previews(
+                            self.generation,
+                            self.settings.window_previews,
+                            self.tx.clone(),
+                            self.cache.as_mut(),
                         );
                     }
                     self.input_tx.send(super::input::Request::SetMissionControlActive(

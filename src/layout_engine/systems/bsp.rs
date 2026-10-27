@@ -346,32 +346,23 @@ impl BspLayoutSystem {
         }
     }
 
-    fn rebalance_node(&mut self, node: NodeId) -> usize {
+    // Return the number of tiles sharing the parent's axis; perpendicular splits count as one.
+    fn rebalance_node(&mut self, node: NodeId, parent_axis: Orientation) -> usize {
         let Some(&NodeKind::Split { orientation, .. }) = self.kind.get(node) else {
             return 1;
         };
-
         let (Some(first), Some(second)) =
             (node.first_child(&self.tree.map), node.last_child(&self.tree.map))
         else {
             return 1;
         };
-
-        let span = |system: &mut Self, child: NodeId| {
-            let span = system.rebalance_node(child);
-            match system.kind.get(child) {
-                Some(NodeKind::Split { orientation: split, .. }) if *split == orientation => span,
-                _ => 1,
-            }
-        };
-        let first_span = span(self, first);
-        let second_span = span(self, second);
-
+        let first_span = self.rebalance_node(first, orientation);
+        let second_span = self.rebalance_node(second, orientation);
+        let span = first_span + second_span;
         if let Some(NodeKind::Split { ratio, .. }) = self.kind.get_mut(node) {
-            *ratio = (first_span as f32 / (first_span + second_span) as f32).clamp(0.05, 0.95);
+            *ratio = (first_span as f32 / span as f32).clamp(0.05, 0.95);
         }
-
-        first_span + second_span
+        if orientation == parent_axis { span } else { 1 }
     }
 
     fn cleanup_after_removal(&mut self, node: NodeId) -> NodeId {
@@ -2404,7 +2395,7 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn rebalance(&mut self, layout: LayoutId) {
         if let Some(state) = self.layouts.get(layout).copied() {
-            self.rebalance_node(state.root);
+            self.rebalance_node(state.root, Orientation::Horizontal);
         }
     }
 

@@ -7,6 +7,7 @@ build = "build.rs"
 [workspace]
 members = [".", "crates/rift-client", "crates/rift-protocol", "crates/rift-config-derive"]
 resolver = "3"
+exclude = ["cgs"]
 
 [[bin]]
 name = "rift"
@@ -49,13 +50,13 @@ doctest = false
 [features]
 default = []
 timing = ["dep:tracing-timing"]
-experimental = ["custom-event-loop", "disable-axuielement-destroyed"]
+experimental = ["disable-axuielement-destroyed"]
 custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
 disable-axuielement-destroyed = []
 
 [dependencies]
 rift-config-derive = { path = "crates/rift-config-derive" }
-cgs = { version = "0.3.12" }#, path = "cgs" }
+cgs = { version = "0.3.14" }#, path = "cgs" }
 anyhow = { version = "1.0.83", default-features = false }
 ascii_tree = "0.1.1"
 thiserror = { version = "2.0.17", default-features = false }

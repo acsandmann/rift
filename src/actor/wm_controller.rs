@@ -67,6 +67,16 @@ pub enum WmCommand {
     Wm(WmCmd),
     ConfiguredLayout(ConfiguredLayoutCommand),
     ReactorCommand(reactor::Command),
+    Sequence(Vec<WmCommand>),
+}
+
+impl WmCommand {
+    pub fn steps(&self) -> Box<dyn Iterator<Item = &WmCommand> + '_> {
+        match self {
+            WmCommand::Sequence(commands) => Box::new(commands.iter().flat_map(WmCommand::steps)),
+            command => Box::new(std::iter::once(command)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -434,6 +444,11 @@ impl WmController {
             }
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
+            }
+            Command(Sequence(commands)) => {
+                for command in commands {
+                    self.handle_event(Command(command));
+                }
             }
         }
         if refresh_overview && let Some(tx) = &self.mission_control_tx {

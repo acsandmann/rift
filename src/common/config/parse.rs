@@ -5,7 +5,7 @@ use anyhow::bail;
 use serde::Deserialize;
 
 use super::*;
-use crate::actor::wm_controller::WmCommand;
+use crate::actor::wm_controller::{WmCmd, WmCommand};
 use crate::common::collections::HashSet;
 use crate::sys::hotkey::Hotkey;
 
@@ -36,14 +36,9 @@ impl Config {
             issues.push("The default binding mode must be the first mode".to_string());
         }
         for (mode, bindings) in &self.binding_mode_specs {
-            for (_, command) in bindings {
-                if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) =
-                    command
-                    && !mode_names.contains(target.as_str())
-                {
-                    issues.push(format!(
-                        "Binding mode `{mode}` references nonexistent mode `{target}`"
-                    ));
+            for (key, command) in bindings {
+                if let Err(error) = validate_binding_command(command, key, mode, &mode_names) {
+                    issues.push(error.to_string());
                 }
             }
         }
@@ -154,6 +149,7 @@ impl Config {
                 let mut keys = Vec::new();
                 let mode_names: HashSet<String> =
                     binding_sets.iter().map(|(name, _)| name.clone()).collect();
+                let mode_names = mode_names.iter().map(String::as_str).collect();
                 for (mode, bindings) in binding_sets {
                     let mut specs = Vec::with_capacity(bindings.len());
                     let mut assigned = HashSet::default();
@@ -171,14 +167,7 @@ impl Config {
                                 );
                             }
                         }
-                        if let WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(
-                            target,
-                        )) = &cmd
-                            && target != "default"
-                            && !mode_names.contains(target)
-                        {
-                            bail!("Binding mode `{mode}` references nonexistent mode `{target}`");
-                        }
+                        validate_binding_command(&cmd, &key, &mode, &mode_names)?;
                         if mode == "default" {
                             keys.push((hotkey, cmd.clone()));
                         }
@@ -268,6 +257,26 @@ impl<'de> Deserialize<'de> for Config {
     }
 }
 
+fn validate_binding_command(
+    command: &WmCommand,
+    key: &str,
+    mode: &str,
+    mode_names: &HashSet<&str>,
+) -> anyhow::Result<()> {
+    let mut steps = command.steps().peekable();
+    if steps.peek().is_none() {
+        bail!("Shortcut `{key}` in keymap `{mode}` has an empty command list");
+    }
+    for step in steps {
+        if let WmCommand::Wm(WmCmd::BindingMode(target)) = step
+            && !mode_names.contains(target.as_str())
+        {
+            bail!("Binding mode `{mode}` references nonexistent mode `{target}`");
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn migrate_legacy_resize_bindings(document: &mut toml::Value) -> bool {
     let Some(keys) = document.get_mut("keys").and_then(toml::Value::as_table_mut) else {
         return false;
@@ -275,18 +284,29 @@ pub(super) fn migrate_legacy_resize_bindings(document: &mut toml::Value) -> bool
 
     let mut migrated = false;
     for (_, command) in keys.iter_mut() {
-        let legacy_name = match command.as_str() {
-            Some("resize_window_grow") => "resize_window_grow",
-            Some("resize_window_shrink") => "resize_window_shrink",
-            _ => continue,
-        };
-        *command = toml::Value::Table(toml::map::Map::from_iter([(
-            legacy_name.to_string(),
-            toml::Value::String("horizontal".to_string()),
-        )]));
-        migrated = true;
+        migrated |= migrate_legacy_resize_command(command);
     }
     migrated
+}
+
+fn migrate_legacy_resize_command(command: &mut toml::Value) -> bool {
+    if let Some(commands) = command.as_array_mut() {
+        let mut migrated = false;
+        for command in commands {
+            migrated |= migrate_legacy_resize_command(command);
+        }
+        return migrated;
+    }
+    let legacy_name = match command.as_str() {
+        Some("resize_window_grow") => "resize_window_grow",
+        Some("resize_window_shrink") => "resize_window_shrink",
+        _ => return false,
+    };
+    *command = toml::Value::Table(toml::map::Map::from_iter([(
+        legacy_name.to_string(),
+        toml::Value::String("horizontal".to_string()),
+    )]));
+    true
 }
 
 fn migrate_legacy_window_snapping(document: &mut toml::Value) -> bool {

@@ -860,19 +860,23 @@ pub struct MenuBarSettings {
     #[setting(label = "Show binding mode", enabled_by = "enabled")]
     pub show_binding_mode: bool,
     #[serde(default)]
+    /// Only show workspaces from the display currently hosting the active menu bar.
+    #[setting(label = "Only show current display", enabled_by = "enabled")]
+    pub current_display_only: bool,
+    #[serde(default)]
     /// Choose whether to show all workspaces or only the active one.
     #[setting(label = "Workspaces to show", choices, enabled_by = "enabled")]
     pub mode: MenuBarDisplayMode,
     #[serde(default)]
-    /// Choose the label shown for the active workspace.
-    #[setting(label = "Active workspace label", choices, enabled_by = "enabled")]
+    /// Choose workspace numbers or names when using the label display style.
+    #[setting(label = "Workspace labels", choices, enabled_by = "enabled")]
     pub active_label: ActiveWorkspaceLabel,
     #[serde(default)]
     /// Show workspace labels or layout indicators.
     #[setting(label = "Display style", choices, enabled_by = "enabled")]
     pub display_style: WorkspaceDisplayStyle,
     #[serde(default)]
-    /// Wrap workspace labels in brackets when a window is fullscreen.
+    /// Wrap workspace labels or layout indicators in brackets when a window is fullscreen.
     #[setting(label = "Show fullscreen indicator", enabled_by = "enabled")]
     pub show_fullscreen_indicator: bool,
     #[serde(default = "default_layout_folder")]
@@ -898,6 +902,7 @@ impl Default for MenuBarSettings {
             enabled: false,
             show_empty: false,
             show_binding_mode: true,
+            current_display_only: false,
             mode: MenuBarDisplayMode::default(),
             active_label: ActiveWorkspaceLabel::default(),
             display_style: WorkspaceDisplayStyle::default(),
@@ -1920,11 +1925,7 @@ impl ConfigSource {
 
         use crate::actor::reactor::Command;
         use crate::actor::wm_controller::WmCmd;
-        for command in self
-            .keys
-            .values_mut()
-            .chain(self.binding_modes.values_mut().flat_map(|map| map.values_mut()))
-        {
+        fn rewrite(command: &mut WmCommand, old: &str, target: &str) {
             match command {
                 WmCommand::Wm(WmCmd::BindingMode(mode))
                 | WmCommand::ReactorCommand(Command::Reactor(ReactorCommand::BindingMode(mode)))
@@ -1932,8 +1933,18 @@ impl ConfigSource {
                 {
                     target.clone_into(mode)
                 }
+                WmCommand::Sequence(commands) => {
+                    commands.iter_mut().for_each(|command| rewrite(command, old, target))
+                }
                 _ => {}
             }
+        }
+        for command in self
+            .keys
+            .values_mut()
+            .chain(self.binding_modes.values_mut().flat_map(|map| map.values_mut()))
+        {
+            rewrite(command, old, target);
         }
     }
 }
