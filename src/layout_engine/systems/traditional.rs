@@ -2119,7 +2119,10 @@ impl TraditionalLayoutSystem {
                 destination = Destination::Ahead(target);
             } else {
                 let old_root = moving_node.ancestors(map).last().unwrap();
-                if self.tree.data.layout.kind(old_root).orientation() == direction.orientation() {
+                let root_kind = self.tree.data.layout.kind(old_root);
+                // Leaving the edge of a root group splits the window out of it; at the edge
+                // of a same-oriented split there is nowhere further to go.
+                if root_kind.orientation() == direction.orientation() && !root_kind.is_group() {
                     return false;
                 }
                 let new_container_kind = LayoutKind::from(direction.orientation());
@@ -3360,6 +3363,57 @@ mod tests {
         system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
         assert!(!system.move_stack_tab(layout, w(4), w(1)));
         assert_eq!(order(&system), [w(4), w(2), w(3), w(1)]);
+    }
+
+    #[test]
+    fn move_node_at_root_edge_splits_out_of_stack_without_display_neighbor() {
+        for direction in [Direction::Left, Direction::Right] {
+            let mut system = TraditionalLayoutSystem::default();
+            let layout = system.create_layout();
+            let root = system.root(layout);
+            system.tree.data.layout.set_kind(root, LayoutKind::HorizontalStack);
+            for idx in 1..=3 {
+                system.add_window_after_selection(layout, w(idx));
+            }
+            let edge = if direction == Direction::Left {
+                w(1)
+            } else {
+                w(3)
+            };
+            system.select_window(layout, edge);
+            let before = system.draw_tree(layout);
+
+            // A display in that direction takes priority, leaving the layout untouched.
+            assert!(!system.move_selection_with_display_neighbor(layout, direction, true));
+            assert_eq!(system.draw_tree(layout), before);
+
+            assert!(system.move_selection_with_display_neighbor(layout, direction, false));
+            let new_root = system.root(layout);
+            assert_eq!(system.layout(new_root), LayoutKind::Horizontal);
+            let children: Vec<_> = new_root.children(system.map()).collect();
+            let (window, stack) = if direction == Direction::Left {
+                (children[0], children[1])
+            } else {
+                (children[1], children[0])
+            };
+            assert_eq!(children.len(), 2, "{}", system.draw_tree(layout));
+            assert_eq!(system.window_at(window), Some(edge));
+            assert_eq!(stack, root);
+            assert_eq!(system.layout(root), LayoutKind::HorizontalStack);
+            assert_eq!(root.children(system.map()).count(), 2);
+            assert_eq!(system.selected_window(layout), Some(edge));
+        }
+
+        // The edge of a same-oriented split has nowhere further to go.
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        let before = system.draw_tree(layout);
+        assert!(!system.move_selection_with_display_neighbor(layout, Direction::Right, false));
+        assert_eq!(system.draw_tree(layout), before);
     }
 
     struct TestTraditionalLayoutSystem {
