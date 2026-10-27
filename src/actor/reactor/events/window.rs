@@ -149,7 +149,15 @@ pub fn handle_window_deminiaturized(
         }
     }
     let _ = utils::refresh_heuristic(state, wid);
-    state.windows.set_visibility(wid, WindowVisibility::Visible);
+    // Minimizing ordered the window out; restoring orders it back in. Without
+    // native visibility, inventory treats it as an AX-only fallback and skips
+    // it while other windows of the app are visible.
+    match state.windows.record(wid).and_then(|record| record.window_server_id()) {
+        Some(wsid) => {
+            state.windows.mark_window_visible(wsid);
+        }
+        None => state.windows.set_visibility(wid, WindowVisibility::Visible),
+    }
 
     // Minimized AX snapshots can have stale admission metadata. Refresh them
     // even when the cached snapshot cannot currently be admitted.

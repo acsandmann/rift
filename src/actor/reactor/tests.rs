@@ -10513,3 +10513,50 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
         assert!(!has_window_in_layout(&mut reactor, a, shared_left(), windows[0]));
     }
 }
+
+#[test]
+fn deminiaturized_window_is_tiled_back_into_layout() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        for stale_snapshot in [false, true] {
+            let mut apps = Apps::new();
+            let mut reactor = test_reactor();
+            let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+            let space = SpaceId::new(1);
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            apps.make_app_and_settle(&mut reactor, 1, make_windows(3));
+            let restored = WindowId::new(1, 2);
+            reactor.handle_event(Event::WindowMinimized(restored));
+            apps.simulate_until_quiet(&mut reactor);
+            let mut fresh = reactor.state.windows.window(restored).unwrap().info.clone();
+            fresh.is_minimized = false;
+            if stale_snapshot {
+                // Some apps expose a nonstandard AX snapshot while minimized.
+                reactor.state.windows.window_mut(restored).unwrap().info.is_standard = false;
+            }
+
+            reactor.handle_event(Event::WindowDeminiaturized(restored));
+            apps.simulate_until_quiet(&mut reactor);
+            // The requested inventory refresh returns the restored snapshot.
+            reactor.on_windows_discovered_with_app_info(
+                restored.pid,
+                vec![(restored, fresh)],
+                (1..=3).map(|idx| WindowId::new(1, idx)).collect(),
+                None,
+            );
+            apps.simulate_until_quiet(&mut reactor);
+
+            let layout = test_layout(&mut reactor, space, screen);
+            assert_eq!(layout.len(), 3, "{mode:?} stale={stale_snapshot} {layout:?}");
+            for (wid, frame) in layout {
+                assert!(
+                    apps.windows[&wid].frame.same_as(frame),
+                    "{mode:?} stale={stale_snapshot} {wid:?}"
+                );
+            }
+        }
+    }
+}
