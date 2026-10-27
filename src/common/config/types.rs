@@ -1925,11 +1925,7 @@ impl ConfigSource {
 
         use crate::actor::reactor::Command;
         use crate::actor::wm_controller::WmCmd;
-        for command in self
-            .keys
-            .values_mut()
-            .chain(self.binding_modes.values_mut().flat_map(|map| map.values_mut()))
-        {
+        fn rewrite(command: &mut WmCommand, old: &str, target: &str) {
             match command {
                 WmCommand::Wm(WmCmd::BindingMode(mode))
                 | WmCommand::ReactorCommand(Command::Reactor(ReactorCommand::BindingMode(mode)))
@@ -1937,8 +1933,18 @@ impl ConfigSource {
                 {
                     target.clone_into(mode)
                 }
+                WmCommand::Sequence(commands) => {
+                    commands.iter_mut().for_each(|command| rewrite(command, old, target))
+                }
                 _ => {}
             }
+        }
+        for command in self
+            .keys
+            .values_mut()
+            .chain(self.binding_modes.values_mut().flat_map(|map| map.values_mut()))
+        {
+            rewrite(command, old, target);
         }
     }
 }

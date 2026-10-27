@@ -435,6 +435,8 @@ comb1 = "Alt + Shift"
 # Commands
 # Available in [keys] and [binding_modes.*].
 # Unit commands use a string; commands with arguments use an inline table.
+# An array runs several commands in order:
+#   "1" = [{ move_window_to_workspace = 0 }, { binding_mode = "default" }]
 # Workspace/display indices are zero-based.
 # - toggle_space_activated
 # - reload_config
