@@ -6497,6 +6497,38 @@ fn empty_inventory_retires_last_ordered_out_window_without_cached_visibility() {
 }
 
 #[test]
+fn empty_inventory_keeps_window_parked_on_inactive_workspace() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let workspaces = reactor.test_workspace_ids(space);
+    let secondary = workspaces[1];
+    assert!(reactor.assign_test_window_to_workspace(space, wid, secondary));
+
+    // A parked window is hidden and can be reported ordered out. During
+    // lock/unlock the app inventory can transiently come back empty. An empty
+    // inventory must not retire it.
+    reactor.state.windows.mark_window_hidden(wsid);
+    assert!(!reactor.state.windows.is_window_visible(wsid));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert_eq!(
+        reactor.test_workspace_for_window(space, wid),
+        Some(secondary),
+        "an empty app inventory must not retire a window on a non-active workspace"
+    );
+    assert!(
+        reactor.test_workspace_windows(space, secondary).contains(&wid),
+        "the window must stay in its workspace layout"
+    );
+}
+
+#[test]
 fn window_hidden_requests_inventory_and_defers_during_display_churn() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
