@@ -3598,6 +3598,160 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
 }
 
 #[test]
+fn same_app_native_focus_follows_window_to_workspace() {
+    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+        for ax_first in [false, true] {
+            let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+            let space = SpaceId::new(1);
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            let first = WindowId::new(2, 1);
+            let second = WindowId::new(2, 2);
+            apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Index(1),
+                follow: true,
+                window_id: Some(second.idx.get()),
+            });
+            apps.simulate_until_quiet(&mut reactor);
+            reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(second), Quiet::No));
+            reactor.handle_event(Event::ApplicationGloballyActivated(second.pid));
+            reactor.handle_event(Event::WindowServerFocusChanged(second, space));
+            apps.simulate_until_quiet(&mut reactor);
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+                Some(1)
+            );
+
+            // Cmd+` changes native focus and AX main window without activating
+            // the already-frontmost application again. Either event can arrive first.
+            for window in [first, second] {
+                let ax_event = Event::ApplicationMainWindowChanged(2, Some(window), Quiet::No);
+                if ax_first {
+                    reactor.handle_event(ax_event);
+                    reactor.handle_event(Event::WindowServerFocusChanged(window, space));
+                } else {
+                    reactor.handle_event(Event::WindowServerFocusChanged(window, space));
+                    reactor.handle_event(ax_event);
+                }
+                apps.simulate_until_quiet(&mut reactor);
+                assert_eq!(
+                    reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+                    Some(if window == first { 0 } else { 1 }),
+                    "native focus must reveal {window:?} ({mode:?}, ax_first={ax_first})"
+                );
+                assert_eq!(
+                    reactor.layout_manager.layout_engine.focused_window(),
+                    Some(window)
+                );
+                assert!(screen.contains_rect(apps.windows[&window].frame));
+
+                let updates = reactor.layout_update_count;
+                reactor.handle_event(Event::WindowServerFocusChanged(window, space));
+                assert_eq!(
+                    reactor.layout_update_count, updates,
+                    "duplicate focus must not arrange"
+                );
+                assert!(apps.requests().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn same_app_native_focus_respects_auto_switch_guards() {
+    for guard in [
+        "blacklist",
+        "wake",
+        "manual",
+        "auto",
+        "pending",
+        "unmanaged",
+        "disabled",
+        "duplicate",
+    ] {
+        let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+        let space = SpaceId::new(1);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let visible = WindowId::new(2, 1);
+        let hidden = if guard == "duplicate" {
+            visible
+        } else {
+            WindowId::new(2, 2)
+        };
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+        reactor.handle_event(Event::ApplicationGloballyActivated(2));
+        reactor.handle_event(Event::WindowServerFocusChanged(visible, space));
+        apps.simulate_until_quiet(&mut reactor);
+        let workspace = reactor.test_workspace(space, 1);
+        assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+        match guard {
+            "blacklist" => reactor.config.settings.auto_focus_blacklist.push("com.testapp2".into()),
+            "wake" => reactor.handle_event(Event::SystemWoke),
+            "manual" | "auto" => {
+                reactor.workspace_switch_manager.start_workspace_switch(if guard == "manual" {
+                    WorkspaceSwitchOrigin::Manual
+                } else {
+                    WorkspaceSwitchOrigin::Auto
+                });
+                if guard == "manual" {
+                    // The manual guard also covers the interval after the
+                    // native switch completes but before its focus settles.
+                    reactor.workspace_switch_manager.active_workspace_switch = None;
+                }
+            }
+            "pending" => {
+                let wsid = WindowServerId::new(20_003);
+                reactor.handle_event(Event::WindowServerAppeared(
+                    wsid,
+                    space,
+                    SpaceEventKind::User,
+                ));
+                reactor.update_partial_window_server_info(vec![WindowServerInfo {
+                    id: wsid,
+                    pid: 2,
+                    layer: 0,
+                    frame: screen,
+                    min_frame: CGSize::ZERO,
+                    max_frame: CGSize::ZERO,
+                }]);
+                assert!(reactor.state.windows.has_pending_window_for_pid(2));
+            }
+            "unmanaged" => {
+                let window = reactor.state.windows.window_mut(hidden).unwrap();
+                window.is_manageable = false;
+                window.manage_override = Some(false);
+            }
+            "disabled" => reactor.active_spaces.clear(),
+            "duplicate" => {}
+            _ => unreachable!(),
+        }
+        apps.requests();
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+
+        reactor.handle_event(Event::WindowServerFocusChanged(hidden, space));
+
+        assert_eq!(
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+            Some(0),
+            "native focus must respect {guard}"
+        );
+        assert!(
+            raise_rx.try_recv().is_err(),
+            "{guard} must not raise a hidden window"
+        );
+        assert!(
+            apps.requests().is_empty(),
+            "{guard} must not arrange hidden windows"
+        );
+    }
+}
+
+#[test]
 fn native_focus_race_waits_for_new_window_activation() {
     let (mut apps, mut reactor) = test_context();
     let (raise_tx, mut raise_rx) = actor::channel();

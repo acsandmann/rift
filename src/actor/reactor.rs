@@ -1411,6 +1411,7 @@ impl Reactor {
             return Ok(EventOutcome::no_change());
         }
 
+        let previous_native_focus = self.main_window_tracker.window_server_focus();
         let raised_window = self.main_window_tracker.handle_event(&event);
         match event {
             Event::ApplicationLaunched {
@@ -1468,14 +1469,14 @@ impl Reactor {
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
                 if quiet == Quiet::No {
+                    // Use only the app thread's resolved main window; pending
+                    // AX admission can leave the previous main window cached.
                     let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
                         None
                     } else {
                         self.main_window_tracker.app_main_window(pid)
                     };
-                    outcome.absorb(
-                        self.handle_app_activation_workspace_switch(pid, activation_window),
-                    );
+                    outcome.absorb(self.auto_switch_to_window_workspace(activation_window));
                     outcome.focused_window = activation_window;
                 } else {
                     outcome.focused_window = raised_window;
@@ -1519,6 +1520,16 @@ impl Reactor {
                     && self.space_state.screen_by_space(reported_space).is_some()
                 {
                     self.space_state.command_space = Some(reported_space);
+                    // Same-app focus changes have no activation edge. Cross-app
+                    // changes still wait for the app thread's resolved activation.
+                    if previous_native_focus
+                        .is_some_and(|previous| previous.pid == window.pid && previous != window)
+                    {
+                        let outcome = self.auto_switch_to_window_workspace(Some(window));
+                        if !outcome.layout_responses.is_empty() {
+                            return Ok(outcome);
+                        }
+                    }
                 }
                 if self.layout_manager.layout_engine.focused_window() == Some(window) {
                     LayoutManager::refresh_stack_tabs(self, reported_space);
@@ -5177,11 +5188,28 @@ impl Reactor {
         }
     }
 
-    fn handle_app_activation_workspace_switch(
-        &mut self,
-        pid: pid_t,
-        activation_window: Option<WindowId>,
-    ) -> EventOutcome {
+    fn auto_switch_to_window_workspace(&mut self, window: Option<WindowId>) -> EventOutcome {
+        let Some(window) = window.filter(|wid| self.window_is_standard(*wid)) else {
+            return EventOutcome::no_change();
+        };
+        let pid = window.pid;
+        let Some(space) = self.best_space_for_window_id(window) else {
+            return EventOutcome::no_change();
+        };
+        let workspaces = self.layout_manager.layout_engine.workspaces();
+        let Some(workspace) = workspaces.workspace_for_window(&self.state.windows, space, window)
+        else {
+            return EventOutcome::no_change();
+        };
+        if workspaces.active_workspace(space).is_none_or(|active| active == workspace) {
+            return EventOutcome::no_change();
+        }
+        // A newly appearing native window can leave focus temporarily pointing
+        // at the app's old window until AX admission completes.
+        if self.state.windows.has_pending_window_for_pid(pid) {
+            return EventOutcome::no_change();
+        }
+
         if self.suppress_auto_workspace_switch_until_input {
             debug!(
                 pid,
@@ -5226,12 +5254,12 @@ impl Reactor {
         }
 
         let Some(bundle_id_str) =
-            self.app_manager.apps.get(&pid).and_then(|app| app.info.bundle_id.clone())
+            self.app_manager.apps.get(&pid).and_then(|app| app.info.bundle_id.as_ref())
         else {
             return EventOutcome::no_change();
         };
 
-        if self.config.settings.auto_focus_blacklist.contains(&bundle_id_str) {
+        if self.config.settings.auto_focus_blacklist.contains(bundle_id_str) {
             debug!(
                 "App {} is blacklisted for auto-focus workspace switching, ignoring activation",
                 bundle_id_str
@@ -5239,68 +5267,17 @@ impl Reactor {
             return EventOutcome::no_change();
         }
 
-        debug!(
-            "App activation detected: {} (pid: {}), checking for workspace switch",
-            bundle_id_str, pid
+        debug!(?workspace, pid, "Auto-switching to focused window's workspace");
+        self.store_current_floating_positions(space);
+        self.workspace_switch_manager
+            .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
+        let response = self.layout_manager.layout_engine.activate_workspace(
+            &self.state.windows,
+            space,
+            workspace,
+            Some(window),
         );
-
-        // Carbon activation is reconciled by the app thread before this runs,
-        // so a missing main window means there is no authoritative switch
-        // target. Picking an arbitrary window for the process is especially
-        // unsafe for apps whose windows span multiple virtual workspaces.
-        let app_window = activation_window.filter(|wid| self.window_is_standard(*wid));
-
-        let Some(app_window_id) = app_window else {
-            return EventOutcome::no_change();
-        };
-
-        let Some(window_space) = self.best_space_for_window_id(app_window_id) else {
-            return EventOutcome::no_change();
-        };
-
-        self.maybe_auto_switch_to_window_workspace(pid, app_window_id, window_space)
-    }
-
-    fn maybe_auto_switch_to_window_workspace(
-        &mut self,
-        pid: pid_t,
-        app_window_id: WindowId,
-        window_space: SpaceId,
-    ) -> EventOutcome {
-        let Some(window_workspace) = self
-            .layout_manager
-            .layout_engine
-            .workspaces()
-            .workspace_for_window(&self.state.windows, window_space, app_window_id)
-        else {
-            return EventOutcome::no_change();
-        };
-
-        let Some(current_workspace) =
-            self.layout_manager.layout_engine.workspaces().active_workspace(window_space)
-        else {
-            return EventOutcome::no_change();
-        };
-
-        if window_workspace != current_workspace {
-            debug!(
-                ?window_workspace,
-                pid, "Auto-switching to activated app's workspace"
-            );
-            self.store_current_floating_positions(window_space);
-            self.workspace_switch_manager
-                .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
-            let response = self.layout_manager.layout_engine.activate_workspace(
-                &self.state.windows,
-                window_space,
-                window_workspace,
-                Some(app_window_id),
-            );
-            return EventOutcome::layout_changed(false)
-                .with_layout_response(response, Some(window_space));
-        }
-
-        EventOutcome::no_change()
+        EventOutcome::layout_changed(false).with_layout_response(response, Some(space))
     }
 
     fn handle_layout_response(
