@@ -495,6 +495,20 @@ pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool { window_ordered_in(id).unwrap_or(false) }
 
+/// WindowServer's front-to-back order, including parked windows.
+/// Used only when rebuilding a spatial inventory, never during camera motion.
+pub(crate) fn stacking_order() -> Vec<WindowServerId> {
+    let list = get_windows_raw::<CFDictionary<CFString, CFType>>(
+        CGWindowListOption::OptionAll,
+        kCGNullWindowID,
+    );
+    list.iter()
+        .filter_map(|entry| get_num(&entry, unsafe { objc2_core_graphics::kCGWindowNumber }))
+        .filter_map(|id| u32::try_from(id).ok())
+        .map(WindowServerId::new)
+        .collect()
+}
+
 fn get_windows_raw<T: Type>(
     options: CGWindowListOption,
     relative_to_window: CGWindowID,

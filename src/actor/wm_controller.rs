@@ -57,6 +57,12 @@ pub enum WmEvent {
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
+    OverviewChanged,
+    OverviewActivationTarget(
+        crate::actor::app::WindowId,
+        std::time::Instant,
+        Option<objc2_core_foundation::CGRect>,
+    ),
     ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
@@ -260,19 +266,17 @@ impl WmController {
         use self::WmCommand::*;
         use self::WmEvent::*;
 
-        let refresh_overview = matches!(
-            &event,
-            Command(Wm(MoveWindowToWorkspace(_)))
-                | Command(ReactorCommand(_))
-                | Command(ConfiguredLayout(_))
-        );
-        if matches!(&event, SpaceStateUpdated(..))
-            && let Some(tx) = &self.mission_control_tx
-        {
-            tx.send(mission_control::Event::Dismiss);
-        }
-
         match event {
+            OverviewActivationTarget(window, stamp, frame) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::ActivationTarget(window, stamp, frame));
+                }
+            }
+            OverviewChanged => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::RefreshCurrentWorkspace);
+                }
+            }
             SpaceStateUpdated(space_state, converter) => {
                 self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
                 _ = self
@@ -335,6 +339,8 @@ impl WmController {
                 if let Some(tx) = &self.mission_control_tx {
                     tx.send(mission_control::Event::Configure(
                         new_cfg.settings.ui.mission_control.clone(),
+                        new_cfg.virtual_workspaces.mode
+                            == crate::common::config::WorkspaceMode::Global,
                     ));
                 }
                 if !new_cfg.settings.ui.mission_control.enabled {
@@ -450,9 +456,6 @@ impl WmController {
                     self.handle_event(Command(command));
                 }
             }
-        }
-        if refresh_overview && let Some(tx) = &self.mission_control_tx {
-            tx.send(mission_control::Event::RefreshCurrentWorkspace);
         }
     }
 

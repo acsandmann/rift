@@ -79,6 +79,7 @@ use crate::actor::app::{
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery;
 use crate::actor::spaces::ForwardedSpaceState;
+use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
@@ -208,6 +209,8 @@ pub enum Event {
     OverviewSelectWorkspace {
         display: String,
         workspace: crate::model::VirtualWorkspaceId,
+        window: Option<WindowId>,
+        transition: Option<Instant>,
     },
     #[serde(skip)]
     OverviewDrop {
@@ -2018,7 +2021,12 @@ impl Reactor {
                 }
                 return Ok(EventOutcome::no_change());
             }
-            Event::OverviewSelectWorkspace { display, workspace } => {
+            Event::OverviewSelectWorkspace {
+                display,
+                workspace,
+                window,
+                transition,
+            } => {
                 let Some(space) = self
                     .layout_manager
                     .layout_engine
@@ -2040,16 +2048,31 @@ impl Reactor {
                     &self.state.windows,
                     space,
                     workspace,
-                    None,
+                    window,
                 );
-                response.changed = changed;
+                if window.is_some() {
+                    self.layout_manager.layout_engine.commit_workspace_focus(
+                        &mut self.state.windows,
+                        space,
+                        response.focus_window,
+                    );
+                }
+                response.changed = changed || window.is_some();
                 let mut outcome = if changed {
                     self.workspace_switch_manager
                         .start_workspace_switch(WorkspaceSwitchOrigin::Manual);
                     EventOutcome::layout_changed(false).with_arrange_space_scope(Some(space))
+                } else if window.is_some() {
+                    EventOutcome::layout_changed(false).with_arrange_space_scope(Some(space))
                 } else {
                     EventOutcome::focus_changed(None, false)
                 };
+                outcome.overview_activation = window.zip(transition);
+                outcome.arrange.instant = transition.is_some()
+                    && self
+                        .space_state
+                        .screen_by_space(space)
+                        .is_some_and(|s| s.display_uuid == display);
                 // The cursor is already on the overview's display; follow only a
                 // workspace that lives on another one.
                 if self
@@ -2736,6 +2759,14 @@ impl Reactor {
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
     fn apply_event_outcome(&mut self, outcome: EventOutcome) {
+        let overview_notified =
+            outcome.wm_events.iter().any(|e| matches!(e, WmEvent::OverviewChanged));
+        let overview_inventory_changed = outcome.refresh_window_notifications
+            || outcome.broadcast_selection_changed
+            || outcome.focused_window_broadcast.is_some()
+            || outcome.layout_responses.iter().any(|(response, _)| response.changed)
+            || !outcome.discoveries.is_empty()
+            || !outcome.finalize_created_windows.is_empty();
         #[cfg(test)]
         self.event_outcome_phase_trace.push("model");
         if outcome.display_switch_warp.is_some() {
@@ -2883,14 +2914,22 @@ impl Reactor {
             && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
         {
             // Reducers have finished mutating the model; arrange each affected space once.
-            layout_changed = self.update_layout_or_warn(
-                outcome.arrange.is_resize,
-                matches!(
-                    self.workspace_switch_manager.workspace_switch_state,
-                    WorkspaceSwitchState::Active
-                ),
-                outcome.arrange.space_scope,
-            );
+            layout_changed = if outcome.arrange.instant {
+                LayoutManager::update_layout_instant(self, outcome.arrange.space_scope)
+                    .unwrap_or_else(|error| {
+                        warn!(?error, "Covered layout update failed");
+                        false
+                    })
+            } else {
+                self.update_layout_or_warn(
+                    outcome.arrange.is_resize,
+                    matches!(
+                        self.workspace_switch_manager.workspace_switch_state,
+                        WorkspaceSwitchState::Active
+                    ),
+                    outcome.arrange.space_scope,
+                )
+            };
             if let Some(space) = outcome.arrange.secondary_space_scope
                 && outcome.arrange.space_scope.is_some_and(|primary| primary != space)
             {
@@ -2992,6 +3031,20 @@ impl Reactor {
         }
         for line in outcome.stdout_lines {
             println!("{line}");
+        }
+        if let Some((window, stamp)) = outcome.overview_activation {
+            let frame =
+                self.query_window_info(window).map(|w| w.layout_frame.unwrap_or(w.info.frame));
+            if let Some(wm) = &self.communication_manager.wm_sender {
+                wm.send(WmEvent::OverviewActivationTarget(window, stamp, frame));
+            }
+        }
+        if !overview_notified
+            && (overview_inventory_changed || layout_changed)
+            && self.config.settings.ui.mission_control.enabled
+            && let Some(wm) = &self.communication_manager.wm_sender
+        {
+            wm.send(crate::actor::wm_controller::WmEvent::OverviewChanged);
         }
         self.workspace_switch_manager.mark_workspace_switch_inactive();
         if self.workspace_switch_manager.active_workspace_switch.is_some() && !layout_changed {
@@ -3576,6 +3629,9 @@ impl Reactor {
             outcome.absorb(self.advance_workspace_transfers());
             self.maybe_send_menu_update();
             return Ok(outcome);
+        }
+        if self.config.settings.ui.mission_control.enabled {
+            outcome.wm_events.push(WmEvent::OverviewChanged);
         }
         if display_set_changed {
             if let Some(tx) = &self.animation_tx {

@@ -978,10 +978,12 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         is_resize: bool,
         skip_wid: Option<WindowId>,
+        allow_animation: bool,
     ) -> bool {
         reactor.retire_presentations();
         let setting = reactor.layout_manager.layout_engine.layout_specific_animate_settings(space);
-        let animate_camera = !is_resize
+        let animate_camera = allow_animation
+            && !is_resize
             && setting.unwrap_or(reactor.config.settings.animate)
             && !(setting.is_none() && power::is_low_power_mode_enabled());
         let presentation = reactor.present_camera(space, animate_camera, None, skip_wid);

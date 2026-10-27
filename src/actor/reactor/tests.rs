@@ -4483,12 +4483,18 @@ fn workspace_query_exposes_scrolling_order_for_inactive_workspace() {
     // workspace membership/insertion order.
     reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Left));
     apps.simulate_until_quiet(&mut reactor);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, w2));
     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
     apps.simulate_until_quiet(&mut reactor);
 
     let queried = reactor.query_workspaces(Some(space));
     let inactive = &queried[0];
     assert!(!inactive.is_active);
+    assert_eq!(
+        inactive.focused_window,
+        Some(w2),
+        "inactive workspace lost remembered focus"
+    );
     assert_eq!(
         inactive.windows.iter().map(|window| window.id).collect::<Vec<_>>(),
         vec![w1, w3, w2]
@@ -4974,6 +4980,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         &[(left, frame(228.)), (right, frame(1284.))],
         false,
         None,
+        true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
     let wsid = reactor.state.windows.window(right).unwrap().info.sys_id.unwrap();
@@ -5001,6 +5008,7 @@ fn changed_layout_retargets_window_already_at_new_position_during_animation() {
         &[(left, frame(-1056.)), (right, frame(228.))],
         false,
         None,
+        true,
     ));
     manager.handle_message(rx.commands.try_recv().unwrap());
     apps.requests();
@@ -5057,6 +5065,7 @@ fn animated_layout_handles_windows_without_server_ids() {
         &[(WindowId::new(1, 1), target)],
         true,
         None,
+        true,
     ));
 
     let requests = apps.requests();
@@ -7770,6 +7779,8 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         .dispatch_workflow(Event::OverviewSelectWorkspace {
             display: "test-display-1".into(),
             workspace: target.clone(),
+            window: None,
+            transition: None,
         })
         .unwrap();
     let selected = reactor.layout_manager.layout_engine.workspaces().active_workspace(right_space);
@@ -7779,6 +7790,8 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         .dispatch_workflow(Event::OverviewSelectWorkspace {
             display: "test-display-1".into(),
             workspace: target,
+            window: None,
+            transition: None,
         })
         .unwrap();
     assert_eq!(
@@ -7794,6 +7807,8 @@ fn overview_selects_exact_display_workspace_without_back_and_forth() {
         .dispatch_workflow(Event::OverviewSelectWorkspace {
             display: "test-display-1".into(),
             workspace: crate::model::VirtualWorkspaceId::default(),
+            window: None,
+            transition: None,
         })
         .unwrap();
     assert_eq!(
@@ -10559,4 +10574,39 @@ fn deminiaturized_window_is_tiled_back_into_layout() {
             }
         }
     }
+}
+
+#[test]
+fn overview_activation_resolves_scrolled_target_before_native_focus() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let target = WindowId::new(1, 3);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+    let workspace = reactor.test_workspace_ids(space)[0];
+    reactor.handle_event(Event::OverviewSelectWorkspace {
+        display: "test-display-1".into(),
+        workspace,
+        window: Some(target),
+        transition: None,
+    });
+    let frame = reactor
+        .query_window_info(target)
+        .unwrap()
+        .layout_frame
+        .expect("overview must know the final frame before asynchronous native focus");
+    assert!(
+        frame.min().x >= screen.min().x && frame.max().x <= screen.max().x,
+        "activation target is still in the old scrolling viewport: {frame:?}"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(target)
+    );
 }

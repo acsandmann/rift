@@ -1,5 +1,9 @@
 # Metal preview work — 2026-10-27
 
+The later spatial presentation and current validation limits are documented in
+[spatial-overview-validation.md](spatial-overview-validation.md). The ribbon-specific
+architecture below describes the preceding optimization stage.
+
 The screenshot fallback was removed at the user's explicit request. The current
 Mission Control layout and its configuration/CLI/IPC remain unchanged. This work
 adds source/rendering primitives, not the proposed new Mission Control design.

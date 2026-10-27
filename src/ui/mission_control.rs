@@ -1,466 +1,151 @@
-//! Session-owned Overview. Runtime frames are truth; captured images only decorate cards.
+//! Persistent window geometry; only the camera projects it into the overview.
+use std::time::{Duration, Instant};
 
 use cgs::{CgsWindow, LayerTransaction, WindowSurface, release_layer_tree};
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSColor, NSFont, NSPopUpMenuWindowLevel, NSRunningApplication, NSScreen};
-use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_app_kit::{NSColor, NSFont, NSImage, NSRunningApplication, NSScreen, NSWorkspace};
+use objc2_core_foundation::{
+    CFRetained, CFString, CFType, CGAffineTransform, CGPoint, CGRect, CGSize,
+};
 use objc2_core_graphics::{CGColor, CGDisplayBounds, CGImage};
 use objc2_foundation::MainThreadMarker;
-use objc2_quartz_core::{CABasicAnimation, CAFrameRateRange, CALayer, CAMediaTiming, CATextLayer};
+use objc2_quartz_core::{CALayer, CATextLayer};
 
 use crate::actor::app::WindowId;
 use crate::actor::mission_control::Input;
-use crate::actor::reactor::ReactorHandle;
-use crate::common::collections::HashMap;
+use crate::actor::reactor::{OverviewDrop, ReactorHandle};
 use crate::common::config::MissionControlSettings;
 use crate::model::server::{RuntimeWindowData, RuntimeWorkspaceData};
 use crate::sys::screen::{NSScreenExt, ScreenInfo};
-use crate::sys::window_server::WindowServerId;
 
-const GAP: f64 = 40.0;
-const CORNER: f64 = 8.0;
-const CAPTION: f64 = 48.0;
+const MIN_ZOOM: f64 = 0.08;
+const MAX_ZOOM: f64 = 2.0;
+const OVERVIEW_ZOOM: f64 = 0.34;
+const MOTION: f64 = 0.55;
+
+fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+    CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+}
+fn contains(r: CGRect, p: CGPoint) -> bool {
+    p.x >= r.min().x && p.y >= r.min().y && p.x < r.max().x && p.y < r.max().y
+}
+fn intersects(a: CGRect, b: CGRect) -> bool {
+    a.min().x < b.max().x && b.min().x < a.max().x && a.min().y < b.max().y && b.min().y < a.max().y
+}
+fn union(a: CGRect, b: CGRect) -> CGRect {
+    rect(
+        a.min().x.min(b.min().x),
+        a.min().y.min(b.min().y),
+        a.max().x.max(b.max().x) - a.min().x.min(b.min().x),
+        a.max().y.max(b.max().y) - a.min().y.min(b.min().y),
+    )
+}
+
+/// Position is the world coordinate at the viewport's top-left, in logical points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Camera {
+    position: CGPoint,
+    zoom: f64,
+}
+impl Camera {
+    fn project(self, p: CGPoint) -> CGPoint {
+        CGPoint::new(
+            (p.x - self.position.x) * self.zoom,
+            (p.y - self.position.y) * self.zoom,
+        )
+    }
+
+    fn unproject(self, p: CGPoint) -> CGPoint {
+        CGPoint::new(
+            p.x / self.zoom + self.position.x,
+            p.y / self.zoom + self.position.y,
+        )
+    }
+
+    fn frame(self, r: CGRect) -> CGRect {
+        CGRect::new(
+            self.project(r.origin),
+            CGSize::new(r.size.width * self.zoom, r.size.height * self.zoom),
+        )
+    }
+
+    fn zoom_at(&mut self, factor: f64, pivot: CGPoint) {
+        let world = self.unproject(pivot);
+        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.position = CGPoint::new(world.x - pivot.x / self.zoom, world.y - pivot.y / self.zoom);
+    }
+
+    fn fit(frame: CGRect, viewport: CGSize) -> Self {
+        let zoom = ((viewport.width - 112.) / frame.size.width.max(1.))
+            .min((viewport.height - 160.) / frame.size.height.max(1.))
+            .clamp(MIN_ZOOM, 0.75);
+        Self {
+            zoom,
+            position: CGPoint::new(
+                frame.mid().x - viewport.width / (2. * zoom),
+                frame.mid().y - (viewport.height - 32.) / (2. * zoom),
+            ),
+        }
+    }
+
+    fn metal(self) -> cgs::PreviewCamera {
+        cgs::PreviewCamera {
+            scale: self.zoom as f32,
+            translation: [
+                (-self.position.x * self.zoom) as f32,
+                (-self.position.y * self.zoom) as f32,
+            ],
+        }
+    }
+}
+
+struct Motion {
+    from: Camera,
+    to: Camera,
+    start: Instant,
+    duration: f64,
+}
+impl Motion {
+    fn sample(&self, now: Instant) -> (Camera, bool) {
+        let t = (now.duration_since(self.start).as_secs_f64() / self.duration).min(1.);
+        // A bounded exponential settle: monotonic, with a short continuous tail.
+        let t = (1. - (-6. * t).exp()) / (1. - (-6.0_f64).exp());
+        let mix = |a: f64, b: f64| a + (b - a) * t;
+        let zoom = mix(self.from.zoom, self.to.zoom);
+        (
+            Camera {
+                zoom,
+                position: CGPoint::new(
+                    mix(
+                        self.from.position.x * self.from.zoom,
+                        self.to.position.x * self.to.zoom,
+                    ) / zoom,
+                    mix(
+                        self.from.position.y * self.from.zoom,
+                        self.to.position.y * self.to.zoom,
+                    ) / zoom,
+                ),
+            },
+            t >= 1.,
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub workspace: usize,
     pub window: Option<WindowId>,
 }
-
-#[derive(Debug)]
-struct WindowProjection {
-    id: WindowId,
-    floating: bool,
-    source: usize,
-    frame: CGRect,
-}
-#[derive(Debug)]
-struct WorkspaceProjection {
-    source: usize,
-    frame: CGRect,
-    scene: crate::actor::drag::DragScene,
-    windows: Vec<WindowProjection>,
-}
-
-fn preview_frame(size: CGSize) -> CGRect {
-    let available_width = (size.width - 12.0).max(1.0);
-    let available_height = (size.height - CAPTION - 6.0).max(1.0);
-    let ratio =
-        (available_width / size.width.max(1.0)).min(available_height / size.height.max(1.0));
-    let width = size.width.max(1.0) * ratio;
-    let height = size.height.max(1.0) * ratio;
-    rect((size.width - width) / 2.0, 6.0, width, height)
-}
-
-fn pixel_aligned(frame: CGRect, scale: f64) -> CGRect {
-    let snap = |value: f64| (value * scale).round() / scale;
-    rect(
-        snap(frame.origin.x),
-        snap(frame.origin.y),
-        snap(frame.size.width),
-        snap(frame.size.height),
-    )
-}
-
-fn workspace_backdrop(ws: &WorkspaceProjection) -> CGRect {
-    let margin = 24.0_f64.min(ws.frame.size.width / 4.0);
-    let width = (ws.frame.size.width * 0.55).max(360.0).min(ws.frame.size.width - margin * 2.0);
-    let center = ws.frame.size.width / 2.0;
-    let (left, right) = ws.windows.iter().fold(
-        (center - width / 2.0, center + width / 2.0),
-        |(left, right), w| {
-            (
-                left.min(w.frame.origin.x - 16.0),
-                right.max(w.frame.origin.x + w.frame.size.width + 16.0),
-            )
-        },
-    );
-    let left = left.max(margin);
-    let right = right.min(ws.frame.size.width - margin);
-    rect(left, 0.0, (right - left).max(1.0), ws.frame.size.height)
-}
-
-fn workspace_hit_frame(ws: &WorkspaceProjection) -> CGRect {
-    let backdrop = workspace_backdrop(ws);
-    rect(
-        ws.frame.origin.x + backdrop.origin.x,
-        ws.frame.origin.y,
-        backdrop.size.width,
-        ws.frame.size.height,
-    )
-}
-
-fn workspace_heading(ws: &WorkspaceProjection, scale: f64) -> CGRect {
-    let backdrop = workspace_backdrop(ws);
-    pixel_aligned(
-        rect(
-            backdrop.origin.x + 16.0,
-            ws.frame.origin.y - 26.0,
-            (backdrop.size.width - 32.0).max(1.0),
-            20.0,
-        ),
-        scale,
-    )
-}
-
-fn update_heading(heading: &CATextLayer, data: &RuntimeWorkspaceData) {
-    let text = CFString::from_str(&format!(
-        "{}  ·  {} window{}",
-        if data.name.parse::<usize>().is_ok() {
-            format!("Workspace {}", data.name)
-        } else {
-            data.name.clone()
-        },
-        data.windows.len(),
-        if data.windows.len() == 1 { "" } else { "s" }
-    ));
-    unsafe {
-        heading.setString(Some(&*(text.as_ref() as *const AnyObject)));
-    }
-}
-
-fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
-    CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
-}
-fn scrolled_workspace_offset(
-    centered: usize,
-    offset: f64,
-    delta: f64,
-    stride: f64,
-    count: usize,
-) -> f64 {
-    (centered as f64 + offset - delta / stride).clamp(0.0, count.saturating_sub(1) as f64)
-        - centered as f64
-}
-
-fn filter_workspaces(workspaces: &mut Vec<RuntimeWorkspaceData>, show_empty: bool) {
-    if !show_empty {
-        workspaces.retain(|ws| !ws.windows.is_empty());
-    }
-}
-
-fn vertical_scroll(delta: CGPoint) -> bool { delta.y.abs() >= delta.x.abs() }
-
-fn scrolled_horizontal_offset(
-    display: CGRect,
-    overview: CGSize,
-    workspace: &RuntimeWorkspaceData,
-    offset: f64,
-    delta: f64,
-) -> f64 {
-    let scale = ((overview.height - 2.0 * GAP) * 0.5).max(1.0) / display.size.height;
-    let base = (overview.width - display.size.width * scale) / 2.0;
-    let scrolling = workspace.layout_mode == "scrolling";
-    // Navigation is relative to the projected desktop, not the larger overlay.
-    let (left, right) = if scrolling {
-        (base - 12.0, base + display.size.width * scale + 12.0)
-    } else {
-        (12.0, overview.width - 12.0)
-    };
-    let (min, max) = workspace.windows.iter().filter(|w| !scrolling || !w.is_floating).fold(
-        (0.0_f64, 0.0_f64),
-        |(min, max), w| {
-            let frame = w.layout_frame.unwrap_or(w.info.frame);
-            let x = base + (frame.origin.x - display.origin.x) * scale;
-            (min.min(x - left), max.max(x + frame.size.width * scale - right))
-        },
-    );
-    (offset - delta).clamp(min, max)
-}
-
-fn contains(r: CGRect, p: CGPoint) -> bool {
-    p.x >= r.origin.x
-        && p.y >= r.origin.y
-        && p.x < r.origin.x + r.size.width
-        && p.y < r.origin.y + r.size.height
-}
-fn intersects(a: CGRect, b: CGRect) -> bool {
-    a.size.width > 0.0
-        && a.size.height > 0.0
-        && b.size.width > 0.0
-        && b.size.height > 0.0
-        && a.origin.x < b.origin.x + b.size.width
-        && b.origin.x < a.origin.x + a.size.width
-        && a.origin.y < b.origin.y + b.size.height
-        && b.origin.y < a.origin.y + a.size.height
-}
-
-fn card_visible(bounds: CGSize, ribbon: CGRect, card: CGRect) -> bool {
-    let left = (ribbon.origin.x + card.origin.x).max(ribbon.origin.x).max(0.0);
-    let top = (ribbon.origin.y + card.origin.y).max(ribbon.origin.y).max(0.0);
-    let right = (ribbon.origin.x + card.origin.x + card.size.width)
-        .min(ribbon.origin.x + ribbon.size.width)
-        .min(bounds.width);
-    let bottom = (ribbon.origin.y + card.origin.y + card.size.height)
-        .min(ribbon.origin.y + ribbon.size.height)
-        .min(bounds.height);
-    left < right && top < bottom
-}
-
-fn projected_window(
-    display: CGRect,
-    ribbon: CGSize,
-    window: &RuntimeWindowData,
-    offset: f64,
-) -> CGRect {
-    let scale = ribbon.height / display.size.height;
-    let frame = window.layout_frame.unwrap_or(window.info.frame);
-    rect(
-        (ribbon.width - display.size.width * scale) / 2.
-            + (frame.origin.x - display.origin.x) * scale
-            - offset,
-        (frame.origin.y - display.origin.y) * scale,
-        frame.size.width * scale,
-        frame.size.height * scale,
-    )
-}
-
-/// Pure display-relative projection with one stride of vertical overscan.
-fn project(
-    display: CGRect,
-    overview: CGSize,
-    workspaces: &[RuntimeWorkspaceData],
-    centered: usize,
-    workspace_offset: f64,
-    offsets: &HashMap<usize, f64>,
-) -> Vec<WorkspaceProjection> {
-    if display.size.height <= 0.0 || display.size.width <= 0.0 {
-        return Vec::new();
-    }
-    let height = ((overview.height - 2.0 * GAP) * 0.5).max(1.0);
-    let stride = height + GAP;
-    let bounds = rect(0.0, -stride, overview.width, overview.height + stride * 2.0);
-    workspaces
-        .iter()
-        .enumerate()
-        .filter_map(|(source, ws)| {
-            let frame = rect(
-                0.0,
-                overview.height / 2.0
-                    + (source as f64 - centered as f64 - workspace_offset) * stride
-                    - height / 2.0,
-                overview.width,
-                height,
-            );
-            if !intersects(frame, bounds) {
-                return None;
-            }
-            let mut windows: Vec<_> = ws
-                .windows
-                .iter()
-                .enumerate()
-                .filter_map(|(source, window)| {
-                    let projected = projected_window(
-                        display,
-                        frame.size,
-                        window,
-                        offsets.get(&ws.index).copied().unwrap_or(0.),
-                    );
-                    intersects(projected, rect(0.0, 0.0, frame.size.width, frame.size.height))
-                        .then_some(WindowProjection {
-                            id: window.id,
-                            floating: window.is_floating,
-                            source,
-                            frame: projected,
-                        })
-                })
-                .collect();
-            windows.sort_by_key(|w| w.floating);
-            let scene = crate::actor::drag::DragScene {
-                action_override: (ws.layout_mode == "stack")
-                    .then_some(crate::layout_engine::WindowDropAction::Swap),
-                source_neighbors: [false; 4],
-                targets: windows
-                    .iter()
-                    .rev()
-                    .filter_map(|w| {
-                        (!w.floating).then_some(crate::actor::drag::DragSceneTarget {
-                            window: w.id,
-                            space: ws.space,
-                            frame: w.frame,
-                        })
-                    })
-                    .collect(),
-            };
-            Some(WorkspaceProjection { source, frame, scene, windows })
-        })
-        .collect()
-}
-
-fn hit(
-    workspaces: &[RuntimeWorkspaceData],
-    projection: &[WorkspaceProjection],
-    point: CGPoint,
-) -> Option<Selection> {
-    for ws in projection.iter().rev() {
-        if !contains(workspace_hit_frame(ws), point) {
-            continue;
-        }
-        let local = CGPoint::new(point.x - ws.frame.origin.x, point.y - ws.frame.origin.y);
-        let workspace = &workspaces[ws.source];
-        let window = ws
-            .windows
-            .iter()
-            .rev()
-            .find(|w| {
-                let image = preview_frame(w.frame.size);
-                contains(
-                    rect(
-                        w.frame.origin.x + image.origin.x,
-                        w.frame.origin.y + image.origin.y,
-                        image.size.width,
-                        image.size.height + CAPTION,
-                    ),
-                    local,
-                )
-            })
-            .map(|w| w.id);
-        return Some(Selection {
-            workspace: workspace.index,
-            window,
-        });
-    }
-    None
-}
-
 pub(crate) enum OverviewAction {
     Dismiss,
     Activate {
         display: String,
         workspace: crate::model::VirtualWorkspaceId,
         selection: Selection,
-        sys_id: Option<WindowServerId>,
     },
 }
-
-struct WindowCard {
-    id: WindowId,
-    layer: Retained<CALayer>,
-    image: Retained<CALayer>,
-    caption: Retained<CALayer>,
-    title: Retained<CATextLayer>,
-    icon: Option<Retained<CALayer>>,
-}
-impl WindowCard {
-    fn new(
-        data: &RuntimeWindowData,
-        frame: CGRect,
-        scale: f64,
-        icon_contents: Option<&AnyObject>,
-    ) -> Self {
-        let card = layer(frame, scale);
-        let image = layer(CGRect::ZERO, scale);
-        image.setCornerRadius(CORNER);
-        image.setMasksToBounds(true);
-        image.setBorderColor(Some(&NSColor::controlAccentColor().CGColor()));
-        card.addSublayer(&image);
-        let caption = layer(CGRect::ZERO, scale);
-        card.addSublayer(&caption);
-        let icon = icon_contents.map(|contents| {
-            let icon = layer(CGRect::ZERO, scale);
-            unsafe {
-                icon.setContents(Some(contents));
-            }
-            caption.addSublayer(&icon);
-            icon
-        });
-        let title = label(
-            &caption,
-            if data.info.title.is_empty() {
-                data.app_name.as_deref().unwrap_or("Window")
-            } else {
-                &data.info.title
-            },
-            CGRect::ZERO,
-            scale,
-        );
-        unsafe {
-            title.setAlignmentMode(objc2_quartz_core::kCAAlignmentCenter);
-        }
-        title.setOpacity(0.65);
-        let result = Self {
-            id: data.id,
-            layer: card,
-            image,
-            caption,
-            title,
-            icon,
-        };
-        result.set_frame(frame, scale);
-        result
-    }
-
-    fn set_frame(&self, frame: CGRect, scale: f64) {
-        self.layer.setFrame(frame);
-        let image = pixel_aligned(preview_frame(frame.size), scale);
-        self.image.setFrame(image);
-        self.caption
-            .setFrame(rect(image.origin.x, image.max().y, image.size.width, CAPTION));
-        if let Some(icon) = &self.icon {
-            icon.setFrame(rect((image.size.width - 20.0) / 2.0, 4.0, 20.0, 20.0));
-        }
-        self.title.setFrame(rect(0.0, 27.0, image.size.width, 20.0));
-    }
-}
-struct WorkspaceView {
-    index: usize,
-    layer: Retained<CALayer>,
-    heading: Retained<CATextLayer>,
-    empty: Retained<CATextLayer>,
-    backdrop: Retained<CALayer>,
-    cards: Vec<WindowCard>,
-    metal: Option<cgs::PreviewCompositor>,
-    scene: Vec<cgs::Preview>,
-    offset: f64,
-}
-struct DisplayOverview {
-    info: ScreenInfo,
-    bounds: CGRect,
-    scale: f64,
-    workspaces: Vec<RuntimeWorkspaceData>,
-    centered: usize,
-    workspace_offset: f64,
-    offsets: HashMap<usize, f64>,
-    projection: Vec<WorkspaceProjection>,
-    views: Vec<WorkspaceView>,
-    icons: HashMap<i32, Option<Retained<CGImage>>>,
-    animate: bool,
-    root: Retained<CALayer>,
-    // Field order matters: unbind the surface before releasing its CGS window.
-    metal: Option<cgs::PreviewCompositor>,
-    metal_sources: Vec<cgs::PreviewSource>,
-    metal_updates: Vec<cgs::PreviewSource>,
-    metal_dirty: bool,
-    metal_style: Option<(Option<WindowId>, Option<WindowId>)>,
-    metal_border: [f32; 4],
-    _surface: WindowSurface,
-    _window: CgsWindow,
-}
-
-fn preview_source(preview: &cgs::Preview) -> cgs::PreviewSource {
-    let mut source = cgs::PreviewSource::from(preview);
-    source.frame_interval =
-        std::time::Duration::from_secs_f64(1. / if preview.priority >= 2 { 60. } else { 30. });
-    source
-}
-
-fn accent_border() -> [f32; 4] {
-    NSColor::controlAccentColor()
-        .colorUsingColorSpace(&objc2_app_kit::NSColorSpace::sRGBColorSpace())
-        .map(|c| {
-            [
-                c.redComponent() as f32,
-                c.greenComponent() as f32,
-                c.blueComponent() as f32,
-                1.,
-            ]
-        })
-        .unwrap_or([0.2, 0.5, 1., 1.])
-}
-
-// Draw on the fitted image, leaving the caption and transparent card gutters unboxed.
-fn set_preview_border(image: &CALayer, width: f64) { image.setBorderWidth(width); }
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
     CGColor::new_generic_rgb(r, g, b, a)
@@ -471,892 +156,1087 @@ fn layer(frame: CGRect, scale: f64) -> Retained<CALayer> {
     l.setContentsScale(scale);
     l
 }
-fn label(parent: &CALayer, text: &str, frame: CGRect, scale: f64) -> Retained<CATextLayer> {
-    let l = CATextLayer::layer();
-    l.setFrame(frame);
-    l.setContentsScale(scale);
-    let font = NSFont::systemFontOfSize(12.0);
-    unsafe {
-        l.setFont(Some(&*(Retained::as_ptr(&font) as *const CFType)));
-        l.setTruncationMode(objc2_quartz_core::kCATruncationEnd);
-    }
-    l.setFontSize(12.0);
-    l.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 0.86)));
+fn set_text(l: &CATextLayer, text: &str) {
     let text = CFString::from_str(text);
     unsafe {
         l.setString(Some(&*(text.as_ref() as *const AnyObject)));
     }
+}
+fn text(
+    parent: &CALayer,
+    value: &str,
+    frame: CGRect,
+    scale: f64,
+    size: f64,
+) -> Retained<CATextLayer> {
+    let l = CATextLayer::layer();
+    l.setFrame(frame);
+    l.setContentsScale(scale);
+    let font = NSFont::systemFontOfSize(size);
+    unsafe {
+        l.setFont(Some(&*(Retained::as_ptr(&font) as *const CFType)));
+        l.setTruncationMode(objc2_quartz_core::kCATruncationEnd);
+    }
+    l.setFontSize(size);
+    l.setForegroundColor(Some(&color(1., 1., 1., 0.9)));
+    set_text(&l, value);
     parent.addSublayer(&l);
     l
 }
+fn pill(frame: CGRect, scale: f64, radius: f64) -> Retained<CALayer> {
+    let l = layer(frame, scale);
+    l.setCornerRadius(radius);
+    l.setMasksToBounds(true);
+    if let Some(blur) = cgs::backdrop_blur(16.) {
+        blur.setFrame(l.bounds());
+        blur.setAutoresizingMask(
+            objc2_quartz_core::CAAutoresizingMask::LayerWidthSizable
+                | objc2_quartz_core::CAAutoresizingMask::LayerHeightSizable,
+        );
+        l.addSublayer(&blur);
+    }
+    let tint = layer(l.bounds(), scale);
+    tint.setAutoresizingMask(
+        objc2_quartz_core::CAAutoresizingMask::LayerWidthSizable
+            | objc2_quartz_core::CAAutoresizingMask::LayerHeightSizable,
+    );
+    tint.setBackgroundColor(Some(&color(0.12, 0.13, 0.14, 0.72)));
+    l.addSublayer(&tint);
+    l.setBorderWidth(0.5);
+    l.setBorderColor(Some(&color(1., 1., 1., 0.15)));
+    l
+}
+fn symbol(parent: &CALayer, name: &str, x: f64, scale: f64) {
+    let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithHierarchicalColor(
+        &NSColor::colorWithWhite_alpha(0.85, 0.7),
+    );
+    if let Some(image) =
+        cgs::Symbol::header(name).and_then(|i| i.imageWithSymbolConfiguration(&config))
+        && let Some(cg) =
+            unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
+    {
+        let l = layer(rect(x, 11., 13., 13.), scale);
+        image_contents(&l, &cg);
+        parent.addSublayer(&l);
+    }
+}
+fn image_contents(l: &CALayer, image: &CGImage) {
+    unsafe {
+        l.setContents(Some(&*(image as *const CGImage as *const AnyObject)));
+    }
+}
+fn app_icon(pid: i32) -> Option<Retained<CGImage>> {
+    let image = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?.icon()?;
+    unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
+}
 
+fn window_badge(
+    name: &str,
+    icon: Option<&CGImage>,
+    scale: f64,
+) -> (
+    Retained<CALayer>,
+    Retained<CATextLayer>,
+    Retained<CALayer>,
+    Retained<CALayer>,
+    f64,
+) {
+    let width = (name.chars().count() as f64 * 7.5 + 42.).clamp(64., 240.);
+    let badge = pill(rect(0., 0., width, 28.), scale, 14.);
+    badge.setAnchorPoint(CGPoint::ZERO);
+    badge.setZPosition(2.);
+    let first = layer(rect(7., 6., 16., 16.), scale);
+    if let Some(icon) = icon {
+        image_contents(&first, icon);
+    }
+    badge.addSublayer(&first);
+    let second = layer(rect(21., 6., 16., 16.), scale);
+    second.setHidden(true);
+    badge.addSublayer(&second);
+    let title = text(&badge, name, rect(30., 5., width - 36., 20.), scale, 14.);
+    (badge, title, first, second, width)
+}
+
+struct SceneWindow {
+    data: RuntimeWindowData,
+    workspace: crate::model::VirtualWorkspaceId,
+    workspace_index: usize,
+    world: CGRect,
+    // Decorations share the camera but stay sharp and understated at small scales.
+    shadow: Retained<CALayer>,
+    badge: Retained<CALayer>,
+    badge_width: f64,
+    icon: Retained<CALayer>,
+    icon_image: Option<Retained<CGImage>>,
+    extra_icon: Retained<CALayer>,
+    title: Retained<CATextLayer>,
+    label_world: CGRect,
+    label_visible: bool,
+}
+impl SceneWindow {
+    fn new(
+        data: RuntimeWindowData,
+        ws: &RuntimeWorkspaceData,
+        world: CGRect,
+        root: &CALayer,
+        scale: f64,
+        icon: Option<Retained<CGImage>>,
+    ) -> Self {
+        let shadow = layer(CGRect::ZERO, scale);
+        shadow.setCornerRadius(8.);
+        shadow.setBackgroundColor(Some(&color(0.10, 0.105, 0.115, 1.)));
+        shadow.setShadowColor(Some(&color(0., 0., 0., 1.)));
+        shadow.setShadowOpacity(0.28);
+        shadow.setShadowRadius(12.);
+        shadow.setShadowOffset(CGSize::new(0., 4.));
+        shadow.setZPosition(0.5);
+        root.addSublayer(&shadow);
+        let name = data.app_name.as_deref().unwrap_or("Window");
+        let (badge, title, icon_layer, extra_icon, width) =
+            window_badge(name, icon.as_deref(), scale);
+        root.addSublayer(&badge);
+        Self {
+            data,
+            workspace: ws.workspace_id,
+            workspace_index: ws.index,
+            world,
+            shadow,
+            badge,
+            badge_width: width,
+            icon: icon_layer,
+            icon_image: icon,
+            extra_icon,
+            title,
+            label_world: world,
+            label_visible: true,
+        }
+    }
+
+    fn detach(&self) {
+        self.shadow.removeFromSuperlayer();
+        self.badge.removeFromSuperlayer();
+    }
+}
+
+// Translate scrolling workspaces once around remembered focus; camera motion never relayouts them.
+fn workspace_offset(ws: &RuntimeWorkspaceData, info: &ScreenInfo) -> f64 {
+    if ws.layout_mode != "scrolling" {
+        return (info.frame.size.width - ws.display_frame.size.width) / 2.;
+    }
+    ws.focused_window
+        .and_then(|id| ws.windows.iter().find(|w| w.id == id))
+        .map(|w| {
+            let frame = w.layout_frame.unwrap_or(w.info.frame);
+            info.frame.size.width / 2. - (frame.mid().x - ws.display_frame.origin.x)
+        })
+        .unwrap_or(0.)
+}
+
+struct WorkspaceRegion {
+    id: crate::model::VirtualWorkspaceId,
+    origin: CGPoint,
+    label: Retained<CATextLayer>,
+    drops: crate::actor::drag::DragScene,
+}
+impl WorkspaceRegion {
+    fn new(ws: &RuntimeWorkspaceData, origin: CGPoint, root: &CALayer, scale: f64) -> Self {
+        let label = text(root, &ws.name, CGRect::ZERO, scale, 12.);
+        label.setZPosition(3.);
+        label.setOpacity(0.);
+        Self {
+            id: ws.workspace_id,
+            origin,
+            label,
+            drops: Default::default(),
+        }
+    }
+}
+
+struct DisplayOverview {
+    info: ScreenInfo,
+    bounds: CGRect,
+    scale: f64,
+    home_anchor: CGPoint,
+    workspace_height: f64,
+    regions: Vec<WorkspaceRegion>,
+    workspaces: Vec<RuntimeWorkspaceData>,
+    selection: Selection,
+    windows: Vec<SceneWindow>,
+    camera: Camera,
+    home: Camera,
+    motion: Option<Motion>,
+    background: Retained<CALayer>,
+    desktop_snapshot: Option<cgs::DesktopSnapshot>,
+    background_ready: bool,
+    wallpaper_key: Option<String>,
+    root: Retained<CALayer>,
+    controls: Retained<CALayer>,
+    percentage: Retained<CATextLayer>,
+    help: Retained<CATextLayer>,
+    help_index: Option<usize>,
+    last_percentage: i32,
+    metal: Option<cgs::PreviewCompositor>,
+    scene: Vec<cgs::Preview>,
+    sources: Vec<cgs::PreviewSource>,
+    policy_dirty: bool,
+    dragged: Option<WindowId>,
+    applied: Option<(Camera, f32)>,
+    // CAContext must detach before its CGS window is released.
+    _surface: WindowSurface,
+    _window: CgsWindow,
+}
 impl DisplayOverview {
-    fn reveal(&mut self, workspace: usize, window: WindowId) -> bool {
-        let Some(ws) = self.workspaces.iter().find(|ws| ws.index == workspace) else {
-            return false;
-        };
-        let Some(w) = ws.windows.iter().find(|w| w.id == window) else {
-            return false;
-        };
-        let scale =
-            ((self.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) / self.info.frame.size.height;
-        let base = (self.bounds.size.width - self.info.frame.size.width * scale) / 2.0;
-        let frame = w.layout_frame.unwrap_or(w.info.frame);
-        let x = base + (frame.origin.x - self.info.frame.origin.x) * scale;
-        let right = x + frame.size.width * scale;
-        let offset = self.offsets.entry(workspace).or_default();
-        let previous = *offset;
-        let (left_edge, right_edge) = if ws.layout_mode == "scrolling" {
-            (base - 12.0, base + self.info.frame.size.width * scale + 12.0)
+    fn new(
+        info: ScreenInfo,
+        workspaces: Vec<RuntimeWorkspaceData>,
+        mtm: MainThreadMarker,
+    ) -> Option<Self> {
+        let screen =
+            NSScreen::screens(mtm).iter().find(|s| s.get_number().ok() == Some(info.id))?;
+        let full = CGDisplayBounds(info.id.as_u32());
+        let inset = (screen.frame().max().y - screen.visibleFrame().max().y).max(0.);
+        let bounds = rect(
+            full.origin.x,
+            full.origin.y + inset,
+            full.size.width,
+            full.size.height - inset,
+        );
+        let scale = screen.backingScaleFactor();
+        let root = layer(CGRect::new(CGPoint::ZERO, bounds.size), scale);
+        root.setGeometryFlipped(true);
+        root.setMasksToBounds(true);
+        let background = layer(rect(0., -inset, full.size.width, full.size.height), scale);
+        // A native desktop asset, decoded once per overview context; no wallpaper capture stream.
+        let wallpaper_url = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen);
+        let wallpaper_key = wallpaper_url
+            .as_ref()
+            .and_then(|url| url.absoluteString())
+            .map(|url| url.to_string());
+        let mut background_ready = false;
+        if let Some(url) = wallpaper_url
+            && let Some(image) = NSImage::initWithContentsOfURL(NSImage::alloc(), &url)
+            && let Some(image) = unsafe {
+                image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None)
+            }
+        {
+            image_contents(&background, &image);
+            background_ready = true;
+            unsafe {
+                background.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
+            }
         } else {
-            (12.0, self.bounds.size.width - 12.0)
-        };
-        if x - *offset < left_edge {
-            *offset = x - left_edge;
-        } else if right - *offset > right_edge {
-            *offset = right - right_edge;
+            // Native solid-color desktops and unavailable dynamic assets have no file to decode.
+            background.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
         }
-        *offset != previous
-    }
+        background.setOpacity(0.);
+        root.addSublayer(&background);
+        let window = CgsWindow::new_compositor(bounds, 0.).ok()?;
+        window.set_resolution(scale).ok()?;
+        window.set_level(19).ok()?;
+        let surface = WindowSurface::new_scaled(window.id(), root.bounds(), &root, scale).ok()?;
+        let controls = pill(rect(18., bounds.size.height - 138., 270., 35.), scale, 17.5);
 
-    /// Translate existing ribbons without allocating or projecting their window cards.
-    /// Fall back to reconciliation only when a workspace crosses the overscan boundary.
-    fn translate_vertical(&mut self, previous_offset: f64) -> Option<bool> {
-        let height = ((self.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0);
-        let stride = height + GAP;
-        let overscan = rect(
-            0.0,
-            -stride,
-            self.bounds.size.width,
-            self.bounds.size.height + stride * 2.0,
+        controls.setBorderWidth(0.5);
+        controls.setBorderColor(Some(&color(1., 1., 1., 0.15)));
+        controls.setZPosition(3.);
+        controls.setOpacity(0.);
+        root.addSublayer(&controls);
+        symbol(&controls, "minus", 12., scale);
+        let percentage = text(&controls, "34%", rect(42., 9., 40., 18.), scale, 13.);
+        symbol(&controls, "plus", 88., scale);
+        symbol(&controls, "arrow.up.left.and.arrow.down.right", 134., scale);
+        symbol(&controls, "square.grid.2x2", 169., scale);
+        // The final two compact glyphs focus the selected window / return to desktop.
+        symbol(&controls, "rectangle.topthird.inset.filled", 211., scale);
+        symbol(&controls, "macwindow", 242., scale);
+        let help = text(
+            &root,
+            "",
+            rect(18., bounds.size.height - 165., 620., 20.),
+            scale,
+            11.,
         );
-        let delta = (previous_offset - self.workspace_offset) * stride;
-        let included = |source: usize| {
-            let y = self.bounds.size.height / 2.0
-                + (source as f64 - self.centered as f64 - self.workspace_offset) * stride
-                - height / 2.0;
-            intersects(rect(0.0, y, self.bounds.size.width, height), overscan)
+        help.setZPosition(3.);
+        help.setShadowOpacity(0.8);
+        help.setShadowRadius(3.);
+        help.setShadowOffset(CGSize::ZERO);
+        help.setHidden(true);
+        let camera = Camera {
+            position: CGPoint::ZERO,
+            zoom: 1.,
         };
-        if (0..self.workspaces.len())
-            .filter(|&source| included(source))
-            .ne(self.projection.iter().map(|ws| ws.source))
-        {
-            return None;
-        }
-        let mut visibility_changed = false;
-        // The already-presented Metal canvas moves in this same CA transaction
-        // as the captions/ribbons. Capture and GPU availability cannot delay it.
-        {
-            for (view, ws) in self.views.iter().zip(&mut self.projection) {
-                let previous = ws.frame;
-                ws.frame.origin.y += delta;
-                visibility_changed |= ws.windows.iter().any(|w| {
-                    card_visible(self.bounds.size, previous, w.frame)
-                        != card_visible(self.bounds.size, ws.frame, w.frame)
-                });
-                view.layer.setFrame(pixel_aligned(ws.frame, self.scale));
-                let mut heading = view.heading.frame();
-                heading.origin.y =
-                    pixel_aligned(rect(0.0, ws.frame.origin.y - 26.0, 1.0, 20.0), self.scale)
-                        .origin
-                        .y;
-                view.heading.setFrame(heading);
-            }
-        }
-        self.metal_dirty |= visibility_changed;
-        Some(visibility_changed)
-    }
-
-    /// Stable horizontal scrolling only shifts retained geometry and cached pixels.
-    /// Reproject when the set of cards crossing the ribbon clip actually changes.
-    fn translate_horizontal(&mut self, workspace: usize) -> bool {
-        let Some((view, row)) = self
-            .views
-            .iter_mut()
-            .zip(&mut self.projection)
-            .find(|(view, _)| view.index == workspace)
-        else {
-            return false;
+        let origin_workspace = workspaces.iter().position(|w| w.is_active).unwrap_or(0);
+        let home_anchor = CGPoint::new(0., origin_workspace as f64);
+        let workspace_height = workspaces
+            .iter()
+            .map(|ws| ws.display_frame.size.height)
+            .fold(info.frame.size.height, f64::max);
+        let selection = Selection {
+            workspace: workspaces[origin_workspace].index,
+            window: workspaces[origin_workspace].focused_window,
         };
-        let offset = self.offsets.get(&workspace).copied().unwrap_or(0.);
-        let data = &self.workspaces[row.source];
-        let clip = CGRect::new(CGPoint::ZERO, row.frame.size);
-        if data.windows.iter().any(|window| {
-            intersects(
-                projected_window(self.info.frame, row.frame.size, window, offset),
-                clip,
-            ) != row.windows.iter().any(|w| w.id == window.id)
-        }) {
-            return false;
-        }
-        let delta = view.offset - offset;
-        if let Some(canvas) = &mut view.metal {
-            let _ = canvas.translate(CGPoint::new(delta, 0.));
-        }
-        for (card, window) in view.cards.iter().zip(&mut row.windows) {
-            window.frame.origin.x += delta;
-            card.layer.setFrame(window.frame);
-        }
-        for target in &mut row.scene.targets {
-            target.frame.origin.x += delta;
-        }
-        view.offset = offset;
-        true
-    }
-
-    fn reproject(&mut self) {
-        self.metal_dirty = true;
-        let next = project(
-            self.info.frame,
-            self.bounds.size,
-            &self.workspaces,
-            self.centered,
-            self.workspace_offset,
-            &self.offsets,
-        );
-        for view in &mut self.views {
-            let offset = self.offsets.get(&view.index).copied().unwrap_or(0.);
-            let delta = view.offset - offset;
-            if delta != 0. {
-                if let Some(canvas) = &mut view.metal {
-                    let _ = canvas.translate(CGPoint::new(delta, 0.));
-                }
-                view.offset = offset;
-            }
-        }
-        let same_cards = next.len() == self.projection.len()
-            && next.iter().zip(&self.projection).all(|(a, b)| {
-                a.source == b.source
-                    && a.windows.len() == b.windows.len()
-                    && a.windows.iter().zip(&b.windows).all(|(a, b)| a.id == b.id)
-            });
-        if !same_cards {
-            self.rebuild();
-            return;
-        }
-        {
-            for ((view, projected), previous) in self.views.iter().zip(&next).zip(&self.projection)
-            {
-                view.layer.setFrame(pixel_aligned(projected.frame, self.scale));
-                view.heading.setFrame(workspace_heading(projected, self.scale));
-                view.backdrop.setFrame(pixel_aligned(workspace_backdrop(projected), self.scale));
-                for ((card, window), old) in
-                    view.cards.iter().zip(&projected.windows).zip(&previous.windows)
-                {
-                    if window.frame != old.frame {
-                        card.set_frame(window.frame, self.scale);
-                    }
-                }
-            }
-        }
-        self.projection = next;
-    }
-
-    fn rebuild(&mut self) {
-        self.metal_dirty = true;
-        self.projection = project(
-            self.info.frame,
-            self.bounds.size,
-            &self.workspaces,
-            self.centered,
-            self.workspace_offset,
-            &self.offsets,
-        );
-        let mut old_views = std::mem::take(&mut self.views);
-        let mut old_cards: HashMap<_, _> = old_views
-            .iter_mut()
-            .filter(|view| {
-                !self.projection.iter().any(|ws| {
-                    let data = &self.workspaces[ws.source];
-                    view.index == data.index
-                        && view.cards.len() == ws.windows.len()
-                        && view
-                            .cards
-                            .iter()
-                            .zip(&ws.windows)
-                            .all(|(card, w)| card.id == w.id && card.layer.frame() == w.frame)
-                })
-            })
-            .flat_map(|view| {
-                let origin = view.layer.frame().origin;
-                view.cards.drain(..).map(move |card| {
-                    let mut frame = card.layer.frame();
-                    frame.origin.x += origin.x;
-                    frame.origin.y += origin.y;
-                    card.layer.removeFromSuperlayer();
-                    (card.id, (card, frame))
-                })
+        let regions = workspaces
+            .iter()
+            .enumerate()
+            .map(|(slot, ws)| {
+                WorkspaceRegion::new(
+                    ws,
+                    CGPoint::new(
+                        workspace_offset(ws, &info),
+                        (slot as f64 - home_anchor.y) * (workspace_height + 120.),
+                    ),
+                    &root,
+                    scale,
+                )
             })
             .collect();
-        {
-            for ws in &self.projection {
-                let data = &self.workspaces[ws.source];
-                let existing = old_views
-                    .iter()
-                    .position(|view| view.index == data.index)
-                    .map(|pos| old_views.swap_remove(pos));
-                if let Some(view) = existing.as_ref().filter(|view| !view.cards.is_empty()) {
-                    view.layer.setFrame(pixel_aligned(ws.frame, self.scale));
-                    view.heading.setFrame(workspace_heading(ws, self.scale));
-                    view.backdrop.setFrame(pixel_aligned(workspace_backdrop(ws), self.scale));
-                    update_heading(&view.heading, data);
-                    self.views.push(existing.unwrap());
-                    continue;
-                }
-                let (container, heading, empty, backdrop, metal, scene, offset) =
-                    if let Some(view) = existing {
-                        (
-                            view.layer,
-                            view.heading,
-                            view.empty,
-                            view.backdrop,
-                            view.metal,
-                            view.scene,
-                            view.offset,
-                        )
-                    } else {
-                        let container = layer(ws.frame, self.scale);
-                        let backdrop =
-                            layer(pixel_aligned(workspace_backdrop(ws), self.scale), self.scale);
-                        backdrop.setCornerRadius(16.0);
-                        backdrop.setBackgroundColor(Some(&color(1.0, 1.0, 1.0, 0.035)));
-                        container.addSublayer(&backdrop);
-                        let heading = label(
-                            &self.root,
-                            &data.name,
-                            workspace_heading(ws, self.scale),
-                            self.scale,
-                        );
-                        unsafe {
-                            heading.setAlignmentMode(objc2_quartz_core::kCAAlignmentLeft);
-                        }
-                        let font = unsafe {
-                            NSFont::systemFontOfSize_weight(13.0, objc2_app_kit::NSFontWeightMedium)
-                        };
-                        unsafe {
-                            heading.setFont(Some(&*(Retained::as_ptr(&font) as *const CFType)));
-                        }
-                        heading.setFontSize(13.0);
-                        let empty = label(
-                            &container,
-                            "Empty workspace",
-                            rect(
-                                (ws.frame.size.width - 180.0) / 2.0,
-                                ws.frame.size.height / 2.0 - 10.0,
-                                180.0,
-                                20.0,
-                            ),
-                            self.scale,
-                        );
-                        empty.setForegroundColor(Some(&color(0.94, 0.94, 0.97, 0.38)));
-                        (
-                            container,
-                            heading,
-                            empty,
-                            backdrop,
-                            None,
-                            Vec::new(),
-                            self.offsets.get(&data.index).copied().unwrap_or(0.),
-                        )
-                    };
-                container.setFrame(pixel_aligned(ws.frame, self.scale));
-                container.setMasksToBounds(true);
-                empty.setHidden(!data.windows.is_empty());
-                backdrop.setFrame(pixel_aligned(workspace_backdrop(ws), self.scale));
-                update_heading(&heading, data);
-                heading.setFrame(workspace_heading(ws, self.scale));
-                self.root.addSublayer(&container);
-                self.root.addSublayer(&heading);
-                let mut cards = Vec::new();
-                for w in &ws.windows {
-                    let data = &data.windows[w.source];
-                    if let Some((card, previous)) = old_cards.remove(&data.id) {
-                        card.set_frame(w.frame, self.scale);
-                        container.addSublayer(&card.layer);
-                        if self.animate {
-                            let animation = CABasicAnimation::animationWithKeyPath(Some(
-                                &objc2_foundation::NSString::from_str("position"),
-                            ));
-                            let from = CGPoint::new(
-                                previous.origin.x - ws.frame.origin.x + previous.size.width / 2.0,
-                                previous.origin.y - ws.frame.origin.y + previous.size.height / 2.0,
-                            );
-                            unsafe {
-                                animation.setFromValue(Some(
-                                    &*objc2_foundation::NSValue::valueWithPoint(from),
-                                ));
-                            }
-                            animation.setPreferredFrameRateRange(CAFrameRateRange::new(
-                                60.0, 120.0, 120.0,
-                            ));
-                            animation.setDuration(0.16);
-                            card.layer.addAnimation_forKey(&animation, None);
-                            let resize = CABasicAnimation::animationWithKeyPath(Some(
-                                &objc2_foundation::NSString::from_str("bounds"),
-                            ));
-                            unsafe {
-                                resize.setFromValue(Some(
-                                    &*objc2_foundation::NSValue::valueWithRect(rect(
-                                        0.0,
-                                        0.0,
-                                        previous.size.width,
-                                        previous.size.height,
-                                    )),
-                                ));
-                            }
-                            resize.setPreferredFrameRateRange(CAFrameRateRange::new(
-                                60.0, 120.0, 120.0,
-                            ));
-                            resize.setDuration(0.16);
-                            card.layer.addAnimation_forKey(&resize, None);
-                        }
-                        cards.push(card);
-                        continue;
-                    }
-                    let icon = self.icons.entry(data.id.pid).or_insert_with(|| {
-                        let app = NSRunningApplication::runningApplicationWithProcessIdentifier(
-                            data.id.pid,
-                        )?;
-                        let icon = app.icon()?;
-                        unsafe {
-                            icon.CGImageForProposedRect_context_hints(
-                                std::ptr::null_mut(),
-                                None,
-                                None,
-                            )
-                        }
-                    });
-                    let card = unsafe {
-                        WindowCard::new(
-                            data,
-                            w.frame,
-                            self.scale,
-                            icon.as_ref()
-                                .map(|i| &*(i.as_ref() as *const CGImage as *const AnyObject)),
-                        )
-                    };
-                    container.addSublayer(&card.layer);
-                    cards.push(card);
-                }
-                self.views.push(WorkspaceView {
-                    index: data.index,
-                    layer: container,
-                    heading,
-                    empty,
-                    backdrop,
-                    cards,
-                    metal,
-                    scene,
-                    offset,
-                });
+        let mut d = Self {
+            info,
+            bounds,
+            scale,
+            home_anchor,
+            workspace_height,
+            regions,
+            workspaces,
+            selection,
+            windows: Vec::new(),
+            camera,
+            home: camera,
+            motion: None,
+            background,
+            desktop_snapshot: None,
+            background_ready,
+            wallpaper_key,
+            root,
+            controls,
+            percentage,
+            help,
+            help_index: None,
+            last_percentage: 34,
+            metal: None,
+            scene: Vec::new(),
+            sources: Vec::new(),
+            policy_dirty: true,
+            dragged: None,
+            applied: None,
+            _surface: surface,
+            _window: window,
+        };
+        d.reconcile();
+        d.home = d.default_camera();
+        d.camera = d.desktop_camera();
+        d._window.order_above(None).ok()?;
+        Some(d)
+    }
+
+    fn workspace_origin(&self, index: usize) -> CGPoint {
+        self.workspaces
+            .iter()
+            .find(|ws| ws.index == index)
+            .and_then(|ws| self.regions.iter().find(|r| r.id == ws.workspace_id))
+            .map_or(CGPoint::ZERO, |r| r.origin)
+    }
+
+    fn window_origin(&self, ws: &RuntimeWorkspaceData) -> CGPoint {
+        let home = self.workspace_origin(ws.index);
+        CGPoint::new(
+            home.x - ws.display_frame.origin.x,
+            home.y - ws.display_frame.origin.y
+                + (self.workspace_height - ws.display_frame.size.height) / 2.,
+        )
+    }
+
+    fn home_for_slot(&self, slot: usize) -> CGPoint {
+        CGPoint::new(
+            0.,
+            (slot as f64 - self.home_anchor.y) * (self.workspace_height + 120.),
+        )
+    }
+
+    fn reconcile(&mut self) {
+        self.regions.retain(|r| {
+            let keep = self.workspaces.iter().any(|ws| ws.workspace_id == r.id);
+            if !keep {
+                r.label.removeFromSuperlayer();
+            }
+            keep
+        });
+        for ws in &self.workspaces {
+            if !self.regions.iter().any(|r| r.id == ws.workspace_id) {
+                let slot = (0..=self.regions.len())
+                    .find(|&i| !self.regions.iter().any(|r| r.origin.y == self.home_for_slot(i).y))
+                    .unwrap();
+                let mut origin = self.home_for_slot(slot);
+                origin.x = workspace_offset(ws, &self.info);
+                self.regions.push(WorkspaceRegion::new(ws, origin, &self.root, self.scale));
             }
         }
-        for view in old_views {
-            view.layer.removeFromSuperlayer();
-            view.heading.removeFromSuperlayer();
+        let mut old = std::mem::take(&mut self.windows);
+        // Map each workspace's real unparked geometry by a stable translation, never a layout.
+        for ws in &self.workspaces {
+            let home = if ws.layout_mode == "scrolling" {
+                // Native viewport scrolling is a shared translation. Preserve a
+                // stable anchor while real topology/size edits move its neighbors.
+                old.iter()
+                    .filter(|w| w.workspace == ws.workspace_id)
+                    .find_map(|w| {
+                        let data = ws.windows.iter().find(|data| {
+                            data.id == w.data.id && data.layout_position == w.data.layout_position
+                        })?;
+                        let native = data.layout_frame.unwrap_or(data.info.frame);
+                        Some(CGPoint::new(
+                            w.world.origin.x - native.origin.x,
+                            w.world.origin.y - native.origin.y,
+                        ))
+                    })
+                    .unwrap_or_else(|| self.window_origin(ws))
+            } else {
+                self.window_origin(ws)
+            };
+            for data in &ws.windows {
+                if data.info.is_minimized || !data.info.is_standard || data.info.sys_id.is_none() {
+                    continue;
+                }
+                if let Some(i) = old.iter().position(|w| w.data.id == data.id) {
+                    let mut w = old.remove(i);
+                    let native = data.layout_frame.unwrap_or(data.info.frame);
+                    w.world = CGRect::new(
+                        CGPoint::new(native.origin.x + home.x, native.origin.y + home.y),
+                        native.size,
+                    );
+                    w.data = data.clone();
+                    w.workspace = ws.workspace_id;
+                    w.workspace_index = ws.index;
+                    self.windows.push(w);
+                } else {
+                    let native = data.layout_frame.unwrap_or(data.info.frame);
+                    let world = rect(
+                        native.origin.x + home.x,
+                        native.origin.y + home.y,
+                        native.size.width,
+                        native.size.height,
+                    );
+                    let icon = app_icon(data.id.pid);
+                    self.windows.push(SceneWindow::new(
+                        data.clone(),
+                        ws,
+                        world,
+                        &self.root,
+                        self.scale,
+                        icon,
+                    ));
+                }
+            }
         }
-        self.animate = false;
+        for w in old {
+            w.detach();
+        }
+        let order = crate::sys::window_server::stacking_order();
+        self.windows.sort_by_key(|w| {
+            std::cmp::Reverse(
+                order
+                    .iter()
+                    .position(|id| Some(*id) == w.data.info.sys_id)
+                    .unwrap_or(usize::MAX),
+            )
+        });
+        // A workspace's real windows share one unobtrusive group label.
+        for i in 0..self.windows.len() {
+            let id = self.windows[i].workspace;
+            let members: Vec<_> = self
+                .windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| w.workspace == id)
+                .map(|(j, _)| j)
+                .collect();
+            let owner = members
+                .iter()
+                .copied()
+                .min_by(|&a, &b| {
+                    let a = self.windows[a].world.origin;
+                    let b = self.windows[b].world.origin;
+                    a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x))
+                })
+                .unwrap();
+            let count = members.len();
+            let bounds = members.iter().map(|&j| self.windows[j].world).reduce(union).unwrap();
+            let second = members
+                .iter()
+                .copied()
+                .find(|&j| j != i)
+                .and_then(|j| unsafe { self.windows[j].icon.contents() });
+            let w = &mut self.windows[i];
+            unsafe {
+                w.extra_icon.setContents(second.as_deref());
+            }
+            w.extra_icon.setHidden(count < 2);
+            w.label_world = bounds;
+            w.label_visible = i == owner;
+            let title = if count > 1 {
+                format!("{count} windows")
+            } else {
+                w.data.app_name.clone().unwrap_or_else(|| "Window".into())
+            };
+            set_text(&w.title, &title);
+            let leading = if count > 1 { 44. } else { 30. };
+            w.badge_width = (title.chars().count() as f64 * 7.5 + leading + 12.).clamp(64., 240.);
+            w.badge.setBounds(rect(0., 0., w.badge_width, 28.));
+            w.title.setFrame(rect(leading, 5., w.badge_width - leading - 6., 20.));
+        }
+        for region in &mut self.regions {
+            if let Some(ws) = self.workspaces.iter().find(|ws| ws.workspace_id == region.id) {
+                set_text(&region.label, &ws.name);
+                region.drops.action_override = (ws.layout_mode == "stack")
+                    .then_some(crate::layout_engine::WindowDropAction::Swap);
+                region.drops.targets.clear();
+                region.drops.targets.extend(
+                    self.windows
+                        .iter()
+                        .rev()
+                        .filter(|w| w.workspace == region.id && !w.data.is_floating)
+                        .map(|w| crate::actor::drag::DragSceneTarget {
+                            window: w.data.id,
+                            space: ws.space,
+                            frame: w.world,
+                        }),
+                );
+            }
+        }
+        self.rebuild_scene();
+    }
+
+    fn desktop_camera(&self) -> Camera {
+        let workspace = self.workspaces.iter().find(|ws| ws.is_active);
+        let window = workspace.and_then(|ws| {
+            self.windows
+                .iter()
+                .find(|w| Some(w.data.id) == ws.focused_window)
+                .or_else(|| self.windows.iter().find(|w| w.workspace == ws.workspace_id))
+        });
+        let position = window
+            .map(|w| {
+                CGPoint::new(
+                    w.world.origin.x - w.data.info.frame.origin.x + self.bounds.origin.x,
+                    w.world.origin.y - w.data.info.frame.origin.y + self.bounds.origin.y,
+                )
+            })
+            .unwrap_or_else(|| {
+                workspace.map_or(CGPoint::ZERO, |ws| self.workspace_origin(ws.index))
+            });
+        Camera { zoom: 1., position }
+    }
+
+    fn default_camera(&self) -> Camera {
+        let workspace = self.workspaces.iter().find(|w| w.is_active).unwrap_or(&self.workspaces[0]);
+        let origin = self.workspace_origin(workspace.index);
+        Camera {
+            zoom: OVERVIEW_ZOOM,
+            position: CGPoint::new(
+                self.info.frame.size.width / 2. - self.bounds.size.width / (2. * OVERVIEW_ZOOM),
+                origin.y + self.workspace_height / 2.
+                    - self.bounds.size.height / (2. * OVERVIEW_ZOOM),
+            ),
+        }
+    }
+
+    fn fit(&self) -> Camera {
+        self.windows
+            .iter()
+            .map(|w| w.world)
+            .reduce(union)
+            .map(|r| Camera::fit(r, self.bounds.size))
+            .unwrap_or(self.camera)
+    }
+
+    fn rebuild_scene(&mut self) {
+        self.applied = None;
+        self.scene.clear();
+        for w in &self.windows {
+            let mut p =
+                cgs::Preview::window(w.data.info.sys_id.unwrap().as_u32(), w.data.id.pid, w.world);
+            p.corner_radius = 10.;
+            p.opacity = if self.dragged == Some(w.data.id) {
+                0.
+            } else {
+                1.
+            };
+            self.scene.push(p);
+        }
+        if let Some(m) = &mut self.metal {
+            let _ = m.set_visual_scene(&self.scene);
+        }
+        self.policy_dirty = true;
+    }
+
+    fn apply_camera(&mut self, decorations: f32) {
+        if self.applied == Some((self.camera, decorations)) {
+            return;
+        }
+        self.applied = Some((self.camera, decorations));
+        if let Some(m) = &mut self.metal {
+            let _ = m.set_camera(self.camera.metal());
+        }
+        let viewport = CGRect::new(CGPoint::ZERO, self.bounds.size);
+        for region in &self.regions {
+            let y = self.camera.project(region.origin).y;
+            region.label.setFrame(rect(16., y - 22., 160., 18.));
+            region.label.setOpacity(decorations * 0.55);
+        }
+        for w in &self.windows {
+            let frame = self.camera.frame(w.world);
+            let visible = intersects(frame, viewport);
+            w.shadow.setHidden(!visible || self.dragged == Some(w.data.id));
+            w.badge
+                .setHidden(!visible || !w.label_visible || self.dragged == Some(w.data.id));
+            w.shadow.setFrame(frame);
+            w.shadow.setCornerRadius(10. * self.camera.zoom);
+            w.shadow.setShadowRadius(18. * self.camera.zoom);
+            w.shadow.setShadowOffset(CGSize::new(0., 10. * self.camera.zoom));
+            w.shadow.setOpacity(decorations);
+
+            let badge_scale = (self.camera.zoom / 0.34).sqrt().clamp(0.75, 1.1);
+            w.badge.setBounds(rect(0., 0., w.badge_width, 28.));
+            let label = self.camera.frame(w.label_world);
+            w.badge
+                .setPosition(CGPoint::new(label.origin.x, label.origin.y - 38. * badge_scale));
+            w.badge.setAffineTransform(CGAffineTransform {
+                a: badge_scale,
+                b: 0.,
+                c: 0.,
+                d: badge_scale,
+                tx: 0.,
+                ty: 0.,
+            });
+            w.badge.setOpacity(decorations);
+        }
+        let percent = (self.camera.zoom * 100.).round() as i32;
+        if percent != self.last_percentage {
+            set_text(&self.percentage, &format!("{percent}%"));
+            self.last_percentage = percent;
+        }
+        self.controls.setOpacity(decorations);
+    }
+
+    fn animate(&mut self, to: Camera, duration: f64) {
+        self.motion = Some(Motion {
+            from: self.camera,
+            to,
+            start: Instant::now(),
+            duration: duration.max(0.001),
+        });
+        if let Some(m) = &self.metal {
+            m.request_frame();
+        }
+    }
+
+    fn sample(&mut self, now: Instant) {
+        if let Some(motion) = &self.motion {
+            let (camera, done) = motion.sample(now);
+            self.camera = camera;
+            if done {
+                self.motion = None;
+                self.policy_dirty = true;
+            }
+        }
+    }
+
+    fn local(&self, p: CGPoint) -> CGPoint {
+        CGPoint::new(p.x - self.bounds.origin.x, p.y - self.bounds.origin.y)
+    }
+
+    fn hit(&self, p: CGPoint) -> Option<usize> {
+        let world = self.camera.unproject(self.local(p));
+        self.windows.iter().rposition(|w| {
+            let scale = (self.camera.zoom / 0.34).sqrt().clamp(0.75, 1.1);
+            let origin = self.camera.project(w.label_world.origin);
+            contains(w.world, world)
+                || (w.label_visible
+                    && contains(
+                        rect(
+                            origin.x,
+                            origin.y - 38. * scale,
+                            w.badge_width * scale,
+                            28. * scale,
+                        ),
+                        self.local(p),
+                    ))
+        })
+    }
+
+    fn update_sources(&mut self, selected: Option<WindowId>, immediate: bool) {
+        self.update_sources_at(selected, immediate, self.camera);
+    }
+
+    fn update_sources_at(&mut self, selected: Option<WindowId>, immediate: bool, camera: Camera) {
+        if !self.policy_dirty && !immediate {
+            return;
+        }
+        let viewport = CGRect::new(CGPoint::ZERO, self.bounds.size);
+        let inventory_changed = self.sources.len() != self.windows.len()
+            || self.windows.iter().zip(&self.sources).any(|(w, s)| {
+                w.data.info.sys_id.unwrap().as_u32() != s.window_id || w.data.id.pid != s.process_id
+            });
+        self.sources.clear();
+        for w in &self.windows {
+            let projected = camera.frame(w.world);
+            let visible = intersects(projected, viewport) || self.dragged == Some(w.data.id);
+            let important = selected == Some(w.data.id);
+            let zoom = self
+                .motion
+                .as_ref()
+                .filter(|m| intersects(m.to.frame(w.world), viewport))
+                .map_or(camera.zoom, |m| m.to.zoom.max(camera.zoom));
+            let zoom = zoom.min(if visible { 1. } else { 0.20 });
+            let width = (w.world.size.width * zoom * self.scale).ceil().max(1.) as usize;
+            let height = (w.world.size.height * zoom * self.scale).ceil().max(1.) as usize;
+            self.sources.push(cgs::PreviewSource {
+                window_id: w.data.info.sys_id.unwrap().as_u32(),
+                process_id: w.data.id.pid,
+                mode: if visible {
+                    cgs::CaptureMode::Live
+                } else {
+                    cgs::CaptureMode::Snapshot
+                },
+                resolution: cgs::CaptureResolution::Thumbnail { width, height },
+                priority: if important && visible {
+                    3
+                } else if visible {
+                    1
+                } else {
+                    -1
+                },
+                frame_interval: Duration::from_secs_f64(1. / if important { 60. } else { 15. }),
+            });
+        }
+        if let Some(m) = &mut self.metal {
+            let result = if inventory_changed {
+                m.set_sources(&self.sources)
+            } else {
+                m.update_sources(&self.sources)
+            };
+            if let Err(error) = result {
+                tracing::warn!(?error, "Spatial source update failed");
+            }
+        }
+        self.policy_dirty = false;
     }
 }
 
-struct OverviewDrag {
+// Logical scene state survives focus handoffs; capture producers never do.
+struct ViewState {
+    camera: Camera,
+    anchor: CGPoint,
+    workspace: Option<crate::model::VirtualWorkspaceId>,
+    selection: Selection,
+    homes: Vec<(crate::model::VirtualWorkspaceId, CGPoint)>,
+    windows: Vec<(RuntimeWindowData, crate::model::VirtualWorkspaceId, CGRect)>,
+    wallpaper: Option<Retained<AnyObject>>,
+    wallpaper_key: Option<String>,
+}
+#[derive(Default)]
+pub(crate) struct PreviewRenderers {
+    metal: Vec<(ScreenInfo, CGRect, f64, cgs::PreviewCompositor, ViewState)>,
+}
+impl PreviewRenderers {
+    fn take(&mut self, d: &mut DisplayOverview) -> Option<cgs::PreviewCompositor> {
+        self.metal.retain(|(key, bounds, scale, _, _)| {
+            key.display_uuid != d.info.display_uuid
+                || (key.id == d.info.id
+                    && key.space == d.info.space
+                    && *bounds == d.bounds
+                    && *scale == d.scale)
+        });
+        let i = self
+            .metal
+            .iter()
+            .position(|(key, _, _, _, _)| key.display_uuid == d.info.display_uuid)?;
+        let (_, _, _, metal, state) = self.metal.swap_remove(i);
+        if !d.background_ready
+            && state.wallpaper_key == d.wallpaper_key
+            && let Some(image) = state.wallpaper
+        {
+            unsafe {
+                d.background.setContents(Some(&image));
+            }
+            d.background_ready = true;
+        }
+        if state
+            .homes
+            .iter()
+            .map(|(id, _)| *id)
+            .eq(d.workspaces.iter().map(|ws| ws.workspace_id))
+        {
+            d.home_anchor = state.anchor;
+            for region in &mut d.regions {
+                if let Some((_, origin)) = state.homes.iter().find(|(id, _)| *id == region.id) {
+                    region.origin.y = origin.y;
+                }
+            }
+            d.home = state.camera;
+            if state.workspace
+                == d.workspaces.iter().find(|ws| ws.is_active).map(|ws| ws.workspace_id)
+                && d.workspaces.iter().any(|ws| ws.index == state.selection.workspace)
+            {
+                d.selection = state.selection;
+                if !d.windows.iter().any(|w| Some(w.data.id) == d.selection.window) {
+                    d.selection.window = None;
+                }
+            }
+            d.home.position.x =
+                d.info.frame.size.width / 2. - d.bounds.size.width / (2. * d.home.zoom);
+            if state.workspace
+                != d.workspaces.iter().find(|ws| ws.is_active).map(|ws| ws.workspace_id)
+            {
+                let origin = d
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.is_active)
+                    .map_or(CGPoint::ZERO, |ws| d.workspace_origin(ws.index));
+                d.home.position.y =
+                    origin.y + d.workspace_height / 2. - d.bounds.size.height / (2. * d.home.zoom);
+            }
+            for ws in &d.workspaces {
+                let home = d.workspace_origin(ws.index);
+                let origin = d.window_origin(ws);
+                let old = state.windows.iter().find(|(_, id, _)| *id == ws.workspace_id);
+                let shift = old.and_then(|(old, _, _)| {
+                    ws.windows.iter().find(|w| w.id == old.id).map(|current| {
+                        let a = old.layout_frame.unwrap_or(old.info.frame);
+                        let b = current.layout_frame.unwrap_or(current.info.frame);
+                        CGPoint::new(b.origin.x - a.origin.x, b.origin.y - a.origin.y)
+                    })
+                });
+                let unchanged = shift.is_some_and(|shift| {
+                    ws.windows.iter().all(|current| {
+                        state
+                            .windows
+                            .iter()
+                            .find(|(old, id, _)| old.id == current.id && *id == ws.workspace_id)
+                            .is_none_or(|(old, _, _)| {
+                                let a = old.layout_frame.unwrap_or(old.info.frame);
+                                let b = current.layout_frame.unwrap_or(current.info.frame);
+                                old.layout_position == current.layout_position
+                                    && a.size == b.size
+                                    && (b.origin.x - a.origin.x - shift.x).abs() < 1.
+                                    && (b.origin.y - a.origin.y - shift.y).abs() < 1.
+                            })
+                    })
+                });
+                for w in d.windows.iter_mut().filter(|w| w.workspace == ws.workspace_id) {
+                    let native = w.data.layout_frame.unwrap_or(w.data.info.frame);
+                    let old = state.windows.iter().find(|(data, _, _)| data.id == w.data.id);
+                    w.world = if unchanged && let Some((_, _, world)) = old {
+                        let previous = state
+                            .homes
+                            .iter()
+                            .find(|(id, _)| *id == ws.workspace_id)
+                            .map_or(CGPoint::ZERO, |(_, p)| *p);
+                        rect(
+                            world.origin.x + home.x - previous.x,
+                            world.origin.y,
+                            world.size.width,
+                            world.size.height,
+                        )
+                    } else {
+                        rect(
+                            native.origin.x + origin.x,
+                            native.origin.y + origin.y,
+                            native.size.width,
+                            native.size.height,
+                        )
+                    };
+                }
+            }
+            d.reconcile();
+            // Every display starts aligned to its own native desktop, including negative origins.
+            d.camera = d.desktop_camera();
+        }
+        Some(metal)
+    }
+}
+
+fn start_display(
+    d: &mut DisplayOverview,
+    enabled: bool,
+    wake: &crate::actor::mission_control::Sender,
+    mut cache: Option<&mut PreviewRenderers>,
+) {
+    if enabled {
+        d.metal = cache.as_mut().and_then(|c| c.take(d));
+        if !d.background_ready {
+            let tx = wake.clone();
+            d.desktop_snapshot =
+                cgs::DesktopSnapshot::new(d.info.id.as_u32(), d.scale, move || {
+                    tx.send(crate::actor::mission_control::Event::PumpPreviews)
+                })
+                .map_err(|error| tracing::warn!(?error, "Desktop snapshot unavailable"))
+                .ok();
+        }
+        if let Some(m) = &mut d.metal {
+            let _ = m.attach_to(d._window.id(), &d.root);
+        } else {
+            let tx = wake.clone();
+            d.metal = cgs::PreviewCompositor::new_attached(
+                d._window.id(),
+                &d.root,
+                d.bounds,
+                d.scale,
+                move || tx.send(crate::actor::mission_control::Event::PumpPreviews),
+            )
+            .map_err(|error| tracing::warn!(?error, "Spatial renderer unavailable"))
+            .ok();
+        }
+        // Bootstrap at the useful overview resolution. Capturing a full Retina
+        // desktop first can exhaust admission before the entry animation starts.
+        d.update_sources_at(d.selection.window, true, d.home);
+        if let Some(m) = &mut d.metal {
+            if let Err(error) = m
+                .set_visual_scene(&d.scene)
+                .and_then(|()| m.set_camera(d.camera.metal()))
+                .and_then(|()| {
+                    if d.background_ready || d.desktop_snapshot.is_none() {
+                        m.show()
+                    } else {
+                        Ok(())
+                    }
+                })
+            {
+                tracing::warn!(?error, "Spatial renderer startup failed");
+            }
+            tracing::debug!(windows=d.windows.len(),stats=?m.stats(),"Spatial capture started");
+        }
+    }
+    if d.metal.is_none() {
+        d.camera = d.home;
+        d.background.setOpacity(1.);
+        d.apply_camera(1.);
+    }
+}
+
+struct Drag {
     window: WindowId,
-    floating: bool,
-    intent: Option<crate::actor::reactor::OverviewDrop>,
+    display: usize,
     start: CGPoint,
+    anchor: CGPoint,
+    original: CGRect,
+    moved: bool,
+    destination: usize,
+    frame: CGRect,
+    canvas: Option<cgs::PreviewCompositor>,
+    badge: Retained<CALayer>,
+    overlay: Retained<CALayer>,
     point: CGPoint,
-    size: CGSize,
-    started: bool,
-    frame: Option<cgs::PreviewFrame>,
-    card: Retained<CALayer>,
-    preview: Retained<CALayer>,
+    last_tick: Instant,
     indicator: Retained<CALayer>,
 }
-
-fn floating_drop_frame(
-    display: CGRect,
-    ribbon: CGRect,
-    card: CGSize,
-    point: CGPoint,
-    offset: f64,
-) -> CGRect {
-    let scale = ribbon.size.height / display.size.height;
-    let base = (ribbon.size.width - display.size.width * scale) / 2.0;
-    let width = (card.width / scale).min(display.size.width);
-    let height = (card.height / scale).min(display.size.height);
-    let x = (point.x - card.width / 2.0 - base + offset) / scale;
-    let y = (point.y - card.height / 2.0) / scale;
-    rect(
-        display.origin.x + x.clamp(0.0, display.size.width - width),
-        display.origin.y + y.clamp(0.0, display.size.height - height),
-        width,
-        height,
-    )
+// Waiting keeps the real desktop visible until an actual preview has presented.
+// Exiting keeps textures until the reactor has installed a visible, matching real window.
+enum Phase {
+    Waiting(Instant),
+    Entering,
+    Overview,
+    Exiting {
+        window: Option<WindowId>,
+        start: Instant,
+        target_ready: bool,
+    },
 }
-
-fn edge_direction(height: f64, y: f64) -> f64 {
-    if y < 56.0 {
-        -1.0
-    } else if y > height - 56.0 {
-        1.0
-    } else {
-        0.0
-    }
-}
-
 pub struct OverviewSession {
-    show_empty_workspaces: bool,
     displays: Vec<DisplayOverview>,
     active: usize,
     selection: Selection,
     hovered: Option<WindowId>,
-    drag: Option<OverviewDrag>,
-    drop: Option<crate::actor::reactor::OverviewDrop>,
-    pressed: Option<CGPoint>,
+    drag: Option<Drag>,
+    pending_drop: Option<(Drag, Option<cgs::PreviewFrame>)>,
+    pressed: Option<(CGPoint, Camera)>,
+    drop: Option<OverviewDrop>,
+    phase: Phase,
+    show_empty: bool,
+    shared: bool,
+    duration: f64,
+    wake: Option<crate::actor::mission_control::Sender>,
+    previews: bool,
 }
-
 impl Drop for OverviewSession {
     fn drop(&mut self) {
-        let _transaction = LayerTransaction::disabled().flush_on_commit();
-        if let Some(drag) = self.end_drag() {
-            release_layer_tree(&drag.card);
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        for d in &self.displays {
+            release_layer_tree(&d.root);
         }
-        for display in &self.displays {
-            release_layer_tree(&display.root);
-        }
-        // Detach CAContexts and release CGS windows before flushing this teardown.
         self.displays.clear();
     }
 }
-
 impl OverviewSession {
     pub(crate) fn new(
         reactor: &ReactorHandle,
         mtm: MainThreadMarker,
         settings: &MissionControlSettings,
-        cache: &mut Option<PreviewRenderers>,
+        shared: bool,
+        _cache: &mut Option<PreviewRenderers>,
     ) -> Option<Self> {
-        let _transaction = LayerTransaction::disabled().flush_on_commit();
+        let _tx = LayerTransaction::disabled().flush_on_commit();
         let mut displays = Vec::new();
         let mut active = 0;
-        let snapshot: Vec<_> = reactor
-            .query_displays()
-            .into_iter()
-            .filter_map(|display| {
-                let space = display.info.space?;
-                let mut workspaces = reactor.query_workspaces(Some(space));
-                filter_workspaces(&mut workspaces, settings.show_empty_workspaces);
-
-                Some((display, workspaces))
-            })
-            .collect();
-        if let Some(cache) = cache {
-            cache.metal.retain(|(info, _, _, _, _)| {
-                snapshot.iter().any(|(d, _)| {
-                    d.info.display_uuid == info.display_uuid
-                        && d.info.id == info.id
-                        && d.info.space == info.space
-                })
-            });
-        }
-        for (display, workspaces) in snapshot {
+        for d in reactor.query_displays() {
+            if (shared && !d.is_active_context) || d.info.space.is_none() || !d.is_visible_space {
+                continue;
+            }
+            let mut workspaces = reactor.query_workspaces(if shared { None } else { d.info.space });
+            if shared {
+                for ws in &mut workspaces {
+                    ws.is_active &= Some(ws.space) == d.info.space;
+                }
+            }
+            if !settings.show_empty_workspaces {
+                workspaces.retain(|w| !w.windows.is_empty());
+            }
             if workspaces.is_empty() {
                 continue;
             }
-            let centered = workspaces.iter().position(|w| w.is_active).unwrap_or(0);
-            let bounds = CGDisplayBounds(display.info.id.as_u32());
-            let scale = NSScreen::screens(mtm)
-                .iter()
-                .find(|s| s.get_number().ok() == Some(display.info.id))
-                .map(|s| s.backingScaleFactor())
-                .unwrap_or(1.0);
-            let root = layer(rect(0.0, 0.0, bounds.size.width, bounds.size.height), scale);
-            root.setGeometryFlipped(true);
-            root.setMasksToBounds(true);
-            root.setBackgroundColor(Some(&color(0.035, 0.035, 0.045, 0.32)));
-            let result = (|| {
-                let window = CgsWindow::new_compositor(bounds, 0.0)?;
-                window.set_resolution(scale)?;
-                window.set_level(NSPopUpMenuWindowLevel as i32)?;
-                window.set_blur(24, None)?;
-                let surface = WindowSurface::new_scaled(window.id(), root.bounds(), &root, scale)?;
-                Ok::<_, cgs::CgsWindowError>((window, surface))
-            })();
-            let (window, surface) = match result {
-                Ok(r) => r,
-                Err(error) => {
-                    tracing::warn!(?error, "Overview display unavailable");
-                    continue;
+            if let Some(view) = DisplayOverview::new(d.info, workspaces, mtm) {
+                if d.is_active_context {
+                    active = displays.len();
                 }
-            };
-            if display.is_active_context {
-                active = displays.len();
+                displays.push(view);
             }
-            let mut view = DisplayOverview {
-                info: display.info,
-                bounds,
-                scale,
-                workspaces,
-                centered,
-                workspace_offset: 0.0,
-                offsets: HashMap::default(),
-                projection: Vec::new(),
-                views: Vec::new(),
-                icons: HashMap::default(),
-                animate: false,
-                root,
-                metal: None,
-                metal_sources: Vec::new(),
-                metal_updates: Vec::with_capacity(4),
-                metal_dirty: true,
-                metal_style: None,
-                metal_border: accent_border(),
-                _surface: surface,
-                _window: window,
-            };
-            view.rebuild();
-            if let Err(error) = view._window.order_above(None) {
-                tracing::warn!(?error, "Overview ordering failed");
-                continue;
-            }
-            if settings.fade_enabled {
-                let animation = CABasicAnimation::animationWithKeyPath(Some(
-                    &objc2_foundation::NSString::from_str("opacity"),
-                ));
-                unsafe {
-                    animation.setFromValue(Some(&*objc2_foundation::NSNumber::new_f64(0.0)));
-                    animation.setToValue(Some(&*objc2_foundation::NSNumber::new_f64(1.0)));
-                }
-                animation.setPreferredFrameRateRange(CAFrameRateRange::new(60.0, 120.0, 120.0));
-                animation.setDuration(settings.fade_duration_ms.max(0.0) / 1000.0);
-                view.root.addAnimation_forKey(&animation, None);
-            }
-            displays.push(view);
         }
-        if displays.is_empty() {
-            return None;
-        }
-        active = active.min(displays.len() - 1);
-        let ws = &displays[active].workspaces[displays[active].centered];
+        tracing::debug!(displays = displays.len(), "Spatial overview hosts created");
+        let d = displays.get(active)?;
+        let ws = d.workspaces.iter().find(|w| w.is_active).unwrap_or(&d.workspaces[0]);
         let selection = Selection {
             workspace: ws.index,
-            window: ws.windows.iter().find(|w| w.is_focused).map(|w| w.id),
+            window: ws.focused_window,
         };
-        let session = Self {
-            show_empty_workspaces: settings.show_empty_workspaces,
+        Some(Self {
             displays,
             active,
             selection,
             hovered: None,
             drag: None,
-            drop: None,
+            pending_drop: None,
             pressed: None,
-        };
-        session.highlight(None);
-        // The actor starts capture immediately after installing this session.
-        Some(session)
+            drop: None,
+            phase: Phase::Waiting(Instant::now()),
+            wake: None,
+            previews: false,
+            show_empty: settings.show_empty_workspaces,
+            shared,
+            duration: if settings.fade_enabled {
+                settings.fade_duration_ms.max(1.) / 1000.
+            } else {
+                MOTION
+            },
+        })
+    }
+
+    pub(crate) fn input_bounds(&self) -> Vec<CGRect> {
+        self.displays.iter().map(|d| d.bounds).collect()
     }
 
     pub(crate) fn is_empty(&self) -> bool { self.displays.is_empty() }
 
-    pub(crate) fn take_drop(&mut self) -> Option<crate::actor::reactor::OverviewDrop> {
-        self.drop.take()
-    }
-
-    pub(crate) fn edge_active(&self) -> bool {
-        self.drag.as_ref().is_some_and(|drag| {
-            drag.started
-                && self.displays.iter().any(|d| {
-                    contains(d.bounds, drag.point)
-                        && edge_direction(d.bounds.size.height, drag.point.y - d.bounds.origin.y)
-                            != 0.0
-                })
-        })
-    }
-
-    pub(crate) fn edge_tick(&mut self) {
-        let _transaction = LayerTransaction::disabled().flush_on_commit();
-        let Some(point) = self.drag.as_ref().filter(|drag| drag.started).map(|drag| drag.point)
-        else {
-            return;
-        };
-        if let Some(d) = self.displays.iter_mut().find(|d| contains(d.bounds, point)) {
-            let direction = edge_direction(d.bounds.size.height, point.y - d.bounds.origin.y);
-            d.workspace_offset = (d.centered as f64 + d.workspace_offset + direction * 0.2)
-                .clamp(0.0, d.workspaces.len().saturating_sub(1) as f64)
-                - d.centered as f64;
-            d.reproject();
-        }
-        self.move_drag(point);
-        self.sync_metal();
-    }
-
-    pub(crate) fn refresh(&mut self, reactor: &ReactorHandle, moved: Option<WindowId>) {
-        let _transaction = LayerTransaction::disabled().flush_on_commit();
-        self.end_drag();
-        let selected = moved.or(self.selection.window);
-        for (i, d) in self.displays.iter_mut().enumerate() {
-            let centered_id = d.workspaces.get(d.centered).map(|ws| ws.workspace_id);
-            d.workspaces = reactor.query_workspaces(d.info.space);
-            filter_workspaces(&mut d.workspaces, self.show_empty_workspaces);
-
-            if d.workspaces.is_empty() {
-                continue;
-            }
-            d.centered = d
-                .workspaces
-                .iter()
-                .position(|ws| Some(&ws.workspace_id) == centered_id.as_ref())
-                .unwrap_or_else(|| d.centered.min(d.workspaces.len() - 1));
-            d.workspace_offset = (d.centered as f64 + d.workspace_offset)
-                .clamp(0.0, (d.workspaces.len() - 1) as f64)
-                - d.centered as f64;
-            if let Some((pos, ws)) = d
-                .workspaces
-                .iter()
-                .enumerate()
-                .find(|(_, ws)| ws.windows.iter().any(|w| Some(w.id) == selected))
-                && (moved.is_some() || (self.active == i && self.selection.workspace != ws.index))
-            {
-                self.active = i;
-                self.selection = Selection {
-                    workspace: ws.index,
-                    window: selected,
-                };
-                d.centered = pos;
-                d.workspace_offset = 0.0;
-            }
-            if self.active == i
-                && let Some(window) = moved
-            {
-                d.reveal(self.selection.workspace, window);
-            }
-            d.animate = true;
-            d.rebuild();
-        }
-        let active_uuid = self.displays.get(self.active).map(|d| d.info.display_uuid.clone());
-        self.displays.retain(|d| !d.workspaces.is_empty());
-        self.active = self
-            .displays
-            .iter()
-            .position(|d| Some(&d.info.display_uuid) == active_uuid.as_ref())
-            .unwrap_or(0);
-        if let Some(d) = self.displays.get(self.active)
-            && !d.workspaces.iter().any(|ws| ws.index == self.selection.workspace)
-        {
-            self.selection = Selection {
-                workspace: d.workspaces[d.centered].index,
-                window: None,
-            };
-        }
-        self.update_preview_borders();
-        self.highlight(None);
-        for display in &mut self.displays {
-            if let Some(metal) = &mut display.metal {
-                metal.refresh_sources();
-            }
-        }
-        self.sync_metal();
-    }
-
-    fn end_drag(&mut self) -> Option<OverviewDrag> {
-        let drag = self.drag.take()?;
-        drag.card.removeFromSuperlayer();
-        drag.indicator.removeFromSuperlayer();
-        for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
-            if card.id == drag.window {
-                card.layer.setHidden(false);
-            }
-        }
-        if drag.started {
-            for display in &mut self.displays {
-                if let Some(metal) = &mut display.metal {
-                    let _ = metal.set_visual_scene(&[]);
-                    let _ = metal.render(std::time::Instant::now());
-                }
-            }
-        }
-        Some(drag)
-    }
-
-    fn begin_drag(&mut self, point: CGPoint) {
-        self.end_drag();
-        let Some(d) = self.displays.iter().find(|d| contains(d.bounds, point)) else {
-            return;
-        };
-        let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
-        let Some(selected) = hit(&d.workspaces, &d.projection, local) else {
-            return;
-        };
-        let Some(ws) = d.workspaces.iter().find(|ws| ws.index == selected.workspace) else {
-            return;
-        };
-        let Some(data) = ws.windows.iter().find(|w| {
-            Some(w.id) == selected.window
-                && w.info.sys_id.is_some()
-                && w.info.is_standard
-                && !w.info.is_minimized
-        }) else {
-            return;
-        };
-        let Some(view) = d.views.iter().find(|ws| ws.index == selected.workspace) else {
-            return;
-        };
-        let Some(source) = view.cards.iter().find(|c| c.id == data.id) else {
-            return;
-        };
-        let ghost = unsafe {
-            WindowCard::new(
-                data,
-                rect(
-                    0.0,
-                    0.0,
-                    source.layer.frame().size.width,
-                    source.layer.frame().size.height,
-                ),
-                d.scale,
-                source.icon.as_ref().and_then(|icon| icon.contents()).as_deref(),
-            )
-        };
-        set_preview_border(&ghost.image, 2.5);
-        let indicator = layer(CGRect::ZERO, d.scale);
-        indicator.setBackgroundColor(Some(&color(0.35, 0.65, 1.0, 0.8)));
-        indicator.setCornerRadius(2.0);
-        self.drag = Some(OverviewDrag {
-            window: data.id,
-            floating: data.is_floating,
-            intent: None,
-            start: point,
-            point,
-            size: source.layer.frame().size,
-            started: false,
-            frame: d
-                .metal
-                .as_ref()
-                .and_then(|m| data.info.sys_id.and_then(|id| m.captured_frame(id.as_u32()))),
-            card: ghost.layer,
-            preview: ghost.image,
-            indicator,
-        });
-    }
-
-    fn move_drag(&mut self, point: CGPoint) {
-        let Some(drag) = &mut self.drag else { return };
-        let previous = drag.point;
-        let was_started = drag.started;
-        drag.point = point;
-        if !drag.started && (point.x - drag.start.x).hypot(point.y - drag.start.y) < 5.0 {
-            return;
-        }
-        drag.started = true;
-        let same_display = self
-            .displays
-            .iter()
-            .any(|d| contains(d.bounds, previous) && contains(d.bounds, point));
-        if !was_started || !same_display {
-            for d in &mut self.displays {
-                d.metal_dirty = true;
-            }
-        }
-        drag.intent = None;
-        {
-            for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
-                if card.id == drag.window {
-                    card.layer.setHidden(true);
-                }
-            }
-            let Some(d) = self.displays.iter_mut().find(|d| contains(d.bounds, point)) else {
-                drag.card.setHidden(true);
-                drag.indicator.setHidden(true);
-                return;
-            };
-            let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
-            d.root.addSublayer(&drag.indicator);
-            d.root.addSublayer(&drag.card);
-            drag.card.setHidden(false);
-            let old_frame = drag.card.frame();
-            let next_frame = rect(
-                local.x - drag.size.width / 2.0,
-                local.y - drag.size.height / 2.0,
-                drag.size.width,
-                drag.size.height,
-            );
-            if was_started && same_display {
-                if let Some(metal) = &mut d.metal {
-                    let _ = metal.translate(CGPoint::new(
-                        next_frame.origin.x - old_frame.origin.x,
-                        next_frame.origin.y - old_frame.origin.y,
-                    ));
-                }
-            }
-            drag.card.setFrame(next_frame);
-            drag.indicator.setHidden(true);
-            let Some(ws) = d.projection.iter().find(|ws| contains(workspace_hit_frame(ws), local))
-            else {
-                return;
-            };
-            let data = &d.workspaces[ws.source];
-            let mut intent = crate::actor::reactor::OverviewDrop {
-                window: drag.window,
-                workspace: data.workspace_id,
-                target: None,
-                frame: None,
-            };
-            let p = CGPoint::new(local.x, local.y - ws.frame.origin.y);
-            let backdrop = workspace_backdrop(ws);
-            let mut indicator = rect(
-                backdrop.origin.x + 16.0,
-                ws.frame.origin.y + ws.frame.size.height - 4.0,
-                (backdrop.size.width - 32.0).max(1.0),
-                2.0,
-            );
-            if drag.floating {
-                intent.frame = Some(floating_drop_frame(
-                    d.info.frame,
-                    ws.frame,
-                    drag.size,
-                    p,
-                    d.offsets.get(&data.index).copied().unwrap_or(0.0),
-                ));
-                let ghost = drag.card.frame();
-                let image = drag.preview.frame();
-                indicator = rect(
-                    ghost.origin.x + image.origin.x,
-                    ghost.origin.y + image.origin.y + image.size.height + 2.0,
-                    image.size.width,
-                    2.0,
-                );
-            } else if let Some(target) =
-                crate::actor::drag::hit_test_projected(&ws.scene, drag.window, p)
-            {
-                let action = target.action;
-                intent.target = Some((target.window, action));
-                indicator = target.frame;
-                indicator.origin.y += ws.frame.origin.y;
-                match action {
-                    crate::layout_engine::WindowDropAction::Insert(
-                        crate::layout_engine::Direction::Left,
-                    ) => indicator.size.width = 4.0,
-                    crate::layout_engine::WindowDropAction::Insert(
-                        crate::layout_engine::Direction::Right,
-                    ) => {
-                        indicator.origin.x += indicator.size.width - 4.0;
-                        indicator.size.width = 4.0;
-                    }
-                    crate::layout_engine::WindowDropAction::Insert(
-                        crate::layout_engine::Direction::Up,
-                    ) => indicator.size.height = 4.0,
-                    _ => {
-                        indicator.origin.y += indicator.size.height - 4.0;
-                        indicator.size.height = 4.0;
-                    }
-                }
-            }
-            drag.intent = Some(intent);
-            drag.indicator.setFrame(indicator);
-            drag.indicator.setHidden(false);
-        }
-    }
+    pub(crate) fn take_drop(&mut self) -> Option<OverviewDrop> { self.drop.take() }
 
     pub(crate) fn start_previews(
         &mut self,
@@ -1364,178 +1244,475 @@ impl OverviewSession {
         wake: crate::actor::mission_control::Sender,
         mut cache: Option<&mut PreviewRenderers>,
     ) {
-        if !enabled {
-            return;
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        self.activate_display(self.active);
+        self.wake = Some(wake.clone());
+        self.previews = enabled;
+        for d in &mut self.displays {
+            start_display(d, enabled, &wake, cache.as_deref_mut());
         }
-        let _transaction = LayerTransaction::disabled().flush_on_commit();
-        for display in &mut self.displays {
-            if let Some((mut metal, canvases)) = cache
-                .as_deref_mut()
-                .and_then(|cache| cache.take_metal(&display.info, display.bounds, display.scale))
-            {
-                if let Err(error) = metal.attach_to(display._window.id(), &display.root) {
-                    tracing::warn!(?error, "Metal preview reattachment failed");
-                } else {
-                    for (index, mut canvas) in canvases {
-                        if let Some(view) = display.views.iter_mut().find(|v| v.index == index) {
-                            if canvas.attach_to(display._window.id(), &view.layer).is_ok() {
-                                view.metal = Some(canvas);
-                            }
-                        }
-                    }
-                    display.metal = Some(metal);
-                    display.metal_dirty = true;
-                    continue;
-                }
-            }
-            let wake = wake.clone();
-            match cgs::PreviewCompositor::new_attached(
-                display._window.id(),
-                &display.root,
-                display.bounds,
-                display.scale,
-                move || {
-                    wake.send(crate::actor::mission_control::Event::PumpPreviews);
-                },
-            ) {
-                Ok(metal) => {
-                    display.metal = Some(metal);
-                    display.metal_dirty = true;
-                }
-                Err(error) => {
-                    tracing::warn!(?error, "Metal previews unavailable; previews disabled")
-                }
+        self.selection = self.displays[self.active].selection;
+        if self.displays.iter().all(|d| d.metal.is_none() || d.windows.is_empty()) {
+            self.phase = Phase::Overview;
+            for d in &mut self.displays {
+                d.background.setOpacity(1.);
+                d.apply_camera(1.);
             }
         }
-        self.sync_metal();
     }
 
     pub(crate) fn retain_previews(&mut self, cache: &mut Option<PreviewRenderers>) {
-        // Keep the active display last so it survives a tight closed-cache budget.
-        for n in 1..=self.displays.len() {
-            let index = (self.active + n) % self.displays.len();
-            let display = &mut self.displays[index];
-            let canvases: Vec<_> = display
-                .views
-                .iter_mut()
-                .filter_map(|view| {
-                    let mut canvas = view.metal.take()?;
-                    if canvas.hide().is_err() {
-                        return None;
-                    }
-                    Some((view.index, canvas))
-                })
-                .collect();
-            let Some(mut metal) = display.metal.take() else {
-                continue;
-            };
-            if let Err(error) = metal.hide() {
-                tracing::warn!(?error, "Metal preview retirement failed");
-                continue;
-            }
-            let cache = cache.get_or_insert_with(PreviewRenderers::default);
-            cache
-                .metal
-                .retain(|(info, _, _, _, _)| info.display_uuid != display.info.display_uuid);
-            // Bound both the optional drag canvas and retained workspace drawable pools.
-            let required = cached_canvas_bytes(display.bounds, display.scale, canvases.len());
-            let budget = 256 * 1024 * 1024;
-            if required > budget {
-                continue;
-            }
-            let mut used: usize = cache
-                .metal
-                .iter()
-                .map(|(_, bounds, scale, _, canvases)| {
-                    cached_canvas_bytes(*bounds, *scale, canvases.len())
-                })
-                .sum();
-            while used + required > budget {
-                let (_, bounds, scale, _, canvases) = cache.metal.remove(0);
-                used -= cached_canvas_bytes(bounds, scale, canvases.len());
-            }
-            cache.metal.push((
-                display.info.clone(),
-                display.bounds,
-                display.scale,
-                metal,
-                canvases,
-            ));
-        }
-    }
-
-    fn pointer_target(&self, point: CGPoint) -> Option<(usize, Selection)> {
-        self.displays
-            .iter()
-            .enumerate()
-            .find(|(_, d)| contains(d.bounds, point))
-            .and_then(|(i, d)| {
-                let local = CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
-                hit(&d.workspaces, &d.projection, local).map(|selection| (i, selection))
-            })
-    }
-
-    fn update_hover(&mut self, point: CGPoint) -> bool {
-        let hovered = self.pointer_target(point).and_then(|(_, selection)| selection.window);
-        if hovered != self.hovered {
-            let previous = self.hovered;
-            self.hovered = hovered;
-            for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
-                if Some(card.id) == previous || Some(card.id) == hovered {
-                    set_preview_border(
-                        &card.image,
-                        if Some(card.id) == hovered { 1.5 } else { 0. },
-                    );
+        let cache = cache.get_or_insert_with(Default::default);
+        cache.metal.clear();
+        let mut reserved = 0;
+        for d in &mut self.displays {
+            if let Some(mut m) = d.metal.take() {
+                tracing::debug!(display = %d.info.display_uuid, stats = ?m.stats(), diagnostics = ?m.diagnostics(), "Spatial overview closed");
+                let _ = m.hide();
+                let _ = m.set_visual_scene(&[]);
+                let _ = m.set_sources(&[]);
+                reserved +=
+                    (d.bounds.size.width * d.scale * d.bounds.size.height * d.scale * 16.) as usize;
+                if reserved <= 256 * 1024 * 1024 {
+                    let camera = if matches!(self.phase, Phase::Overview) {
+                        d.motion.as_ref().map_or(d.camera, |m| m.to)
+                    } else {
+                        d.home
+                    };
+                    let state = ViewState {
+                        camera,
+                        anchor: d.home_anchor,
+                        workspace: d
+                            .workspaces
+                            .iter()
+                            .find(|ws| ws.is_active)
+                            .map(|ws| ws.workspace_id),
+                        selection: d.selection,
+                        homes: d.regions.iter().map(|r| (r.id, r.origin)).collect(),
+                        windows: d
+                            .windows
+                            .iter()
+                            .map(|w| (w.data.clone(), w.workspace, w.world))
+                            .collect(),
+                        wallpaper: unsafe { d.background.contents() },
+                        wallpaper_key: d.wallpaper_key.clone(),
+                    };
+                    cache.metal.push((d.info.clone(), d.bounds, d.scale, m, state));
                 }
             }
-            return true;
         }
-        false
     }
 
-    fn update_preview_borders(&self) {
-        for card in self.displays.iter().flat_map(|d| &d.views).flat_map(|ws| &ws.cards) {
-            set_preview_border(
-                &card.image,
-                if Some(card.id) == self.hovered {
-                    1.5
+    pub(crate) fn refresh(&mut self, reactor: &ReactorHandle, moved: Option<WindowId>) {
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        let completed =
+            if self.pending_drop.as_ref().is_some_and(|(drag, _)| Some(drag.window) == moved) {
+                self.pending_drop.take().map(|(drag, frame)| {
+                    let id = drag.window;
+                    self.end_drag(drag, false);
+                    (id, frame)
+                })
+            } else {
+                None
+            };
+        if let Some(d) = self.displays.get_mut(self.active) {
+            d.selection = self.selection;
+        }
+        let topology = reactor.query_displays();
+        let same_displays = self.displays.iter().all(|d| {
+            topology.iter().any(|s| {
+                s.is_visible_space
+                    && s.info.id == d.info.id
+                    && s.info.space == d.info.space
+                    && s.info.frame == d.info.frame
+                    && s.info.backing_scale == d.scale
+            })
+        });
+        if !same_displays {
+            self.pressed = None;
+            if let Some(drag) = self.drag.take() {
+                self.end_drag(drag, true);
+            }
+            if let Some((drag, _)) = self.pending_drop.take() {
+                self.end_drag(drag, true);
+            }
+        }
+        let active_uuid = self.displays.get(self.active).map(|d| d.info.display_uuid.clone());
+        self.displays.retain(|d| {
+            topology.iter().any(|s| {
+                s.is_visible_space
+                    && s.info.id == d.info.id
+                    && s.info.space == d.info.space
+                    && s.info.frame == d.info.frame
+                    && s.info.backing_scale == d.scale
+            })
+        });
+        for native in &topology {
+            if (self.shared && Some(&native.info.display_uuid) != active_uuid.as_ref())
+                || native.info.space.is_none()
+                || !native.is_visible_space
+                || self.displays.iter().any(|d| d.info.id == native.info.id)
+            {
+                continue;
+            }
+            let mut workspaces =
+                reactor.query_workspaces(if self.shared { None } else { native.info.space });
+            if self.shared {
+                for ws in &mut workspaces {
+                    ws.is_active &= Some(ws.space) == native.info.space;
+                }
+            }
+            if !self.show_empty {
+                workspaces.retain(|w| !w.windows.is_empty());
+            }
+            if workspaces.is_empty() {
+                continue;
+            }
+            if let Some(mut d) = DisplayOverview::new(
+                native.info.clone(),
+                workspaces,
+                MainThreadMarker::new().unwrap(),
+            ) {
+                if let Some(wake) = &self.wake {
+                    start_display(&mut d, self.previews, wake, None);
+                }
+                d.camera = d.home;
+                d.background.setOpacity(1.);
+                d.apply_camera(1.);
+                self.displays.push(d);
+            }
+        }
+        self.active = self
+            .displays
+            .iter()
+            .position(|d| Some(&d.info.display_uuid) == active_uuid.as_ref())
+            .unwrap_or(0);
+        self.selection = self.displays.get(self.active).map_or(self.selection, |d| d.selection);
+        for d in &mut self.displays {
+            d.workspaces = reactor.query_workspaces(if self.shared { None } else { d.info.space });
+            if self.shared {
+                for ws in &mut d.workspaces {
+                    ws.is_active &= Some(ws.space) == d.info.space;
+                }
+            }
+            if !self.show_empty {
+                d.workspaces.retain(|w| !w.windows.is_empty());
+            }
+            let empty = d.windows.is_empty();
+            if let Some(workspace) = moved
+                .and_then(|id| d.workspaces.iter().find(|ws| ws.windows.iter().any(|w| w.id == id)))
+            {
+                let home = d.window_origin(workspace);
+                for window in &workspace.windows {
+                    if let Some(w) = d.windows.iter_mut().find(|w| w.data.id == window.id) {
+                        let native = window.layout_frame.unwrap_or(window.info.frame);
+                        w.world.origin =
+                            CGPoint::new(native.origin.x + home.x, native.origin.y + home.y);
+                    }
+                }
+            }
+            d.reconcile();
+            if let Some(w) = d.windows.iter().find(|w| Some(w.data.id) == d.selection.window) {
+                d.selection.workspace = w.workspace_index;
+            } else if !d.workspaces.iter().any(|ws| ws.index == d.selection.workspace) {
+                if let Some(ws) =
+                    d.workspaces.iter().find(|ws| ws.is_active).or(d.workspaces.first())
+                {
+                    d.selection = Selection {
+                        workspace: ws.index,
+                        window: ws.focused_window,
+                    };
+                }
+            } else if !d.windows.iter().any(|w| Some(w.data.id) == d.selection.window) {
+                d.selection.window = d
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.index == d.selection.workspace)
+                    .and_then(|ws| ws.focused_window);
+            }
+            if empty && !d.windows.is_empty() {
+                d.home = d.default_camera();
+                d.animate(d.home, self.duration);
+            }
+            d.apply_camera(
+                if matches!(self.phase, Phase::Waiting(_) | Phase::Exiting { .. }) {
+                    0.
                 } else {
-                    0.0
+                    1.
                 },
             );
+            d.update_sources(d.selection.window, true);
+        }
+        if self.drag.as_ref().is_some_and(|drag| {
+            !self.displays[drag.display].windows.iter().any(|w| w.data.id == drag.window)
+                || self.displays.iter().any(|d| d.workspaces.is_empty())
+        }) && let Some(drag) = self.drag.take()
+        {
+            self.end_drag(drag, true);
+        }
+        if let Some((id, Some(frame))) = completed {
+            for d in &mut self.displays {
+                if d.windows.iter().any(|w| w.data.id == id)
+                    && let Some(m) = &mut d.metal
+                {
+                    m.reuse_frame(&frame);
+                }
+            }
+        }
+        self.displays.retain(|d| !d.workspaces.is_empty());
+        self.active = self
+            .displays
+            .iter()
+            .position(|d| Some(&d.info.display_uuid) == active_uuid.as_ref())
+            .unwrap_or(0);
+        let Some(d) = self.displays.get(self.active) else {
+            return;
+        };
+        self.selection = d.selection;
+        self.change_selection(self.selection);
+        self.activate_display(self.active);
+        if !self
+            .displays
+            .iter()
+            .flat_map(|d| &d.windows)
+            .any(|w| Some(w.data.id) == self.selection.window)
+        {
+            self.selection.window = None;
         }
     }
 
-    fn highlight(&self, previous: Option<(usize, Selection)>) {
+    pub(crate) fn needs_handoff(&self) -> bool {
+        self.displays
+            .get(self.active)
+            .and_then(|d| d.metal.as_ref())
+            .is_some_and(|m| m.is_visible() && m.stats().presented_frames > 0)
+    }
+
+    fn activate(&mut self, dismiss: bool) -> Option<OverviewAction> {
+        let d = &mut self.displays[self.active];
+        let chosen = if dismiss {
+            d.windows.iter().find(|w| {
+                w.data.is_focused
+                    && d.workspaces.iter().any(|ws| ws.workspace_id == w.workspace && ws.is_active)
+            })
+        } else {
+            self.selection.window.and_then(|id| d.windows.iter().find(|w| w.data.id == id))
+        };
+        let workspace = d.workspaces.iter().find(|ws| {
+            if dismiss {
+                ws.is_active
+            } else {
+                ws.index == self.selection.workspace
+            }
+        });
+        let remote =
+            workspace.is_some_and(|ws| ws.display_uuid.as_deref() != Some(&d.info.display_uuid));
+        let target = if dismiss || remote {
+            d.desktop_camera()
+        } else {
+            Camera {
+                zoom: 1.,
+                position: workspace.map_or(CGPoint::ZERO, |ws| d.workspace_origin(ws.index)),
+            }
+        };
+        let action = if !dismiss {
+            chosen
+                .map(|w| OverviewAction::Activate {
+                    display: d.info.display_uuid.clone(),
+                    workspace: w.workspace,
+                    selection: Selection {
+                        workspace: w.workspace_index,
+                        window: Some(w.data.id),
+                    },
+                })
+                .or_else(|| {
+                    workspace.map(|ws| OverviewAction::Activate {
+                        display: d.info.display_uuid.clone(),
+                        workspace: ws.workspace_id,
+                        selection: Selection {
+                            workspace: ws.index,
+                            window: None,
+                        },
+                    })
+                })
+        } else {
+            None
+        };
+        if !matches!(self.phase, Phase::Exiting { .. }) {
+            d.home = d.motion.as_ref().map_or(d.camera, |m| m.to);
+        }
+        if !self.needs_handoff() {
+            return action.or(Some(OverviewAction::Dismiss));
+        }
+        let window = if dismiss { None } else { self.selection.window };
+        let now = Instant::now();
+        for d in &mut self.displays {
+            d.sample(now);
+            d.motion = None;
+        }
+        self.phase = Phase::Exiting {
+            window,
+            start: now,
+            target_ready: window.is_none(),
+        };
+        if window.is_none() {
+            self.animate_exit(target);
+        } else if let Some(m) = &self.displays[self.active].metal {
+            m.request_frame();
+        }
+        action
+    }
+
+    pub(crate) fn activation_stamp(&self) -> Option<Instant> {
+        if let Phase::Exiting { start, .. } = self.phase {
+            Some(start)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn activation_target(
+        &mut self,
+        window: WindowId,
+        stamp: Instant,
+        frame: Option<CGRect>,
+    ) {
+        if !matches!(self.phase, Phase::Exiting { window: Some(w), start, target_ready: false } if w == window && start == stamp)
         {
-            for (display, selection, width) in previous
-                .into_iter()
-                .map(|(d, s)| (d, s, 0.5))
-                .chain(std::iter::once((self.active, self.selection, 2.0)))
-            {
-                if let Some(ws) =
-                    self.displays[display].views.iter().find(|w| w.index == selection.workspace)
-                {
-                    ws.backdrop.setBackgroundColor(Some(&color(
-                        1.0,
-                        1.0,
-                        1.0,
-                        if width > 0.5 { 0.065 } else { 0.035 },
-                    )));
-                    ws.heading.setForegroundColor(Some(&color(
-                        1.0,
-                        1.0,
-                        1.0,
-                        if width > 0.5 { 0.95 } else { 0.55 },
-                    )));
-                    if let Some(id) = selection.window
-                        && let Some(card) = ws.cards.iter().find(|c| c.id == id)
-                    {
-                        let selected = width > 0.5;
-                        card.title.setOpacity(if selected { 1.0 } else { 0.65 });
-                        if let Some(icon) = &card.icon {
-                            icon.setOpacity(if selected { 1.0 } else { 0.82 });
-                        }
+            return;
+        }
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        let d = &self.displays[self.active];
+        let target = d
+            .windows
+            .iter()
+            .find(|w| w.data.id == window)
+            .and_then(|w| {
+                let ws = d.workspaces.iter().find(|ws| ws.workspace_id == w.workspace)?;
+                let frame = frame?;
+                (ws.display_uuid.as_deref() == Some(&d.info.display_uuid)).then(|| Camera {
+                    zoom: 1.,
+                    position: CGPoint::new(
+                        w.world.origin.x - frame.origin.x + d.bounds.origin.x,
+                        w.world.origin.y - frame.origin.y + d.bounds.origin.y,
+                    ),
+                })
+            })
+            .unwrap_or_else(|| d.desktop_camera());
+        if let Phase::Exiting { target_ready, window, .. } = &mut self.phase {
+            *target_ready = true;
+            if frame.is_none() {
+                *window = None;
+            }
+        }
+        self.animate_exit(target);
+    }
+
+    fn animate_exit(&mut self, target: Camera) {
+        let now = Instant::now();
+        for (i, d) in self.displays.iter_mut().enumerate() {
+            d.animate(
+                if i == self.active {
+                    target
+                } else {
+                    d.desktop_camera()
+                },
+                self.duration.min(0.28),
+            );
+            d.motion.as_mut().unwrap().start = now;
+            d.policy_dirty = true;
+            d.update_sources(d.selection.window, true);
+        }
+    }
+
+    fn interrupt(&mut self) {
+        let now = Instant::now();
+        for d in &mut self.displays {
+            d.sample(now);
+            d.motion = None;
+            d.background.setOpacity(1.);
+        }
+        self.phase = Phase::Overview;
+    }
+
+    fn select(&mut self, index: usize) {
+        let d = &mut self.displays[self.active];
+        let w = &d.windows[index];
+        let selection = Selection {
+            workspace: w.workspace_index,
+            window: Some(w.data.id),
+        };
+        let viewport = CGRect::new(CGPoint::ZERO, d.bounds.size);
+        if !contains(viewport, d.camera.project(w.world.mid())) {
+            let mut target = d.camera;
+            target.position = CGPoint::new(
+                w.world.mid().x - d.bounds.size.width / (2. * target.zoom),
+                w.world.mid().y - d.bounds.size.height / (2. * target.zoom),
+            );
+            d.animate(target, self.duration);
+        }
+        d.policy_dirty = true;
+        self.change_selection(selection);
+    }
+
+    // Zoom is one overview operation; workspace scrolling and ownership remain per display.
+    fn zoom_view(&mut self, target: Camera, duration: Option<f64>) {
+        let now = Instant::now();
+        for (i, d) in self.displays.iter_mut().enumerate() {
+            let mut camera = d.camera;
+            if i == self.active {
+                camera = target;
+            } else {
+                camera.zoom_at(
+                    target.zoom / camera.zoom,
+                    CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.),
+                );
+            }
+            if let Some(duration) = duration {
+                d.animate(camera, duration);
+                d.motion.as_mut().unwrap().start = now;
+            } else {
+                d.camera = camera;
+            }
+            d.policy_dirty = true;
+            d.apply_camera(1.);
+            if let Some(m) = &d.metal {
+                m.request_frame();
+            }
+        }
+    }
+
+    fn activate_display(&mut self, index: usize) {
+        if self.active != index {
+            self.displays[self.active].selection = self.selection;
+            self.active = index;
+            self.selection = self.displays[index].selection;
+        }
+        for (i, d) in self.displays.iter().enumerate() {
+            d.controls.setHidden(i != self.active);
+            if i != self.active {
+                d.help.setHidden(true);
+            }
+        }
+    }
+
+    fn change_selection(&mut self, selection: Selection) {
+        let previous = self.selection.window;
+        self.selection = selection;
+        self.displays[self.active].selection = selection;
+        let selected = selection.window;
+        for d in &mut self.displays {
+            for (w, p) in d.windows.iter().zip(&mut d.scene) {
+                if Some(w.data.id) == previous || Some(w.data.id) == selected {
+                    p.border_width =
+                        if Some(w.data.id) == selected || Some(w.data.id) == self.hovered {
+                            2.
+                        } else {
+                            0.
+                        };
+                    p.border_color = [0.25; 4];
+                    if let Some(m) = &mut d.metal {
+                        let _ = m.set_preview_style(p.window_id, p.border_width, p.border_color);
                     }
                 }
             }
@@ -1543,524 +1720,796 @@ impl OverviewSession {
     }
 
     pub(crate) fn input(&mut self, input: Input) -> Option<OverviewAction> {
-        // Most sampled motion stays in the same card: no layer writes or compositor flush.
-        if let Input::Move(point) = &input {
-            if self.drag.is_some() {
-                return None;
-            }
-            let target = self.pointer_target(*point);
-            let hovered = target.and_then(|(_, selection)| selection.window);
-            if hovered == self.hovered
-                && target.is_none_or(|target| target == (self.active, self.selection))
-            {
-                return None;
-            }
-        }
-        if let Input::PointerDrag(point) = &input
-            && let Some(drag) = &mut self.drag
-            && !drag.started
-            && (point.x - drag.start.x).hypot(point.y - drag.start.y) < 5.0
-        {
-            drag.point = *point;
-            return None;
-        }
-        let _transaction = LayerTransaction::disabled().flush_on_commit();
-        let pointer = match &input {
-            Input::Move(point)
-            | Input::Click(point)
-            | Input::PointerDown(point)
-            | Input::PointerUp(point)
-            | Input::Scroll { point, .. } => Some(*point),
-            _ => None,
-        };
-        if self.drag.is_none()
-            && let Some(point) = pointer
-        {
-            self.update_hover(point);
-        }
-        match input {
-            Input::PointerDown(point) => {
-                self.pressed = Some(point);
-                self.begin_drag(point);
-                return None;
-            }
-            Input::PointerDrag(point) => {
-                self.move_drag(point);
-                self.sync_metal();
-                return None;
-            }
-            Input::PointerUp(point) => {
-                self.move_drag(point);
-                let drag = self.end_drag();
-                for d in &mut self.displays {
-                    d.metal_dirty = true;
-                }
-                self.sync_metal();
-                self.update_hover(point);
-                let pressed = self.pressed.take();
-                if let Some(drag) = drag.filter(|drag| drag.started) {
-                    self.drop = drag.intent;
-                    return None;
-                }
-                if pressed.is_some() {
-                    return self.input(Input::Click(point));
-                }
-                return None;
-            }
-            Input::Move(_) if self.drag.is_some() => return None,
-            _ => {}
-        }
         if self.displays.is_empty() {
+            return Some(OverviewAction::Dismiss);
+        }
+        if matches!(self.phase, Phase::Exiting { .. }) && matches!(input, Input::Move(_)) {
             return None;
         }
-        let old = (self.active, self.selection);
-        let mut reprojected = false;
-        let mut only_translated = false;
-        let activate = matches!(input, Input::Activate | Input::Click(_));
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        if matches!(input, Input::Dismiss) {
+            if let Some(drag) = self.drag.take() {
+                self.end_drag(drag, true);
+                return None;
+            }
+            return self.activate(true);
+        }
+        if matches!(
+            input,
+            Input::Zoom { .. } | Input::Magnify { .. } | Input::Scroll { .. }
+        ) {
+            self.pressed = None;
+            if let Some(drag) = self.drag.take() {
+                self.end_drag(drag, true);
+            }
+        }
+        if matches!(input, Input::Activate) {
+            return self.activate(false);
+        }
+        if !matches!(input, Input::Move(_)) {
+            self.interrupt();
+        }
         match input {
-            Input::Move(point) | Input::Click(point) => {
-                let target = self.pointer_target(point);
-                let Some((i, selection)) = target else {
-                    self.sync_metal();
-                    return activate.then_some(OverviewAction::Dismiss);
-                };
-                self.active = i;
-                self.selection = selection;
-            }
-            Input::Scroll { point, delta } => {
-                let i = self.displays.iter().position(|d| contains(d.bounds, point))?;
-                self.active = i;
-                let d = &mut self.displays[i];
-                if delta.x == 0.0 && delta.y == 0.0 {
-                    return None;
+            Input::Scroll { point, delta } | Input::Zoom { point, delta } => {
+                if let Some(i) = self.displays.iter().position(|d| contains(d.bounds, point)) {
+                    self.activate_display(i);
                 }
-                let mut translated = false;
-                if vertical_scroll(delta) {
-                    let stride = ((d.bounds.size.height - 2.0 * GAP) * 0.5).max(1.0) + GAP;
-                    let previous = d.workspace_offset;
-                    d.workspace_offset = scrolled_workspace_offset(
-                        d.centered,
-                        d.workspace_offset,
-                        delta.y,
-                        stride,
-                        d.workspaces.len(),
-                    );
-                    reprojected = d.workspace_offset != previous;
-                    if reprojected && d.translate_vertical(previous).is_some() {
-                        translated = true;
-                    }
-                    let selected = (d.centered as f64 + d.workspace_offset).round() as usize;
-                    self.selection = Selection {
-                        workspace: d.workspaces[selected].index,
-                        window: None,
-                    };
-                } else {
-                    let local =
-                        CGPoint::new(point.x - d.bounds.origin.x, point.y - d.bounds.origin.y);
-                    let target = hit(&d.workspaces, &d.projection, local)?;
-                    let ws = d.workspaces.iter().find(|w| w.index == target.workspace)?;
-                    let offset = d.offsets.entry(ws.index).or_default();
-                    let previous = *offset;
-                    *offset = scrolled_horizontal_offset(
-                        d.info.frame,
-                        d.bounds.size,
-                        ws,
-                        *offset,
-                        delta.x,
-                    );
-                    reprojected = *offset != previous;
-                    self.selection = target;
-                    if reprojected {
-                        translated = d.translate_horizontal(target.workspace);
-                    }
-                }
-                if reprojected {
-                    only_translated = translated;
-                    if !translated {
-                        d.reproject();
-                    }
-                }
-                if let Some(point) = self.drag.as_ref().map(|drag| drag.point) {
-                    self.move_drag(point);
-                }
-            }
-            Input::Up | Input::Down => {
                 let d = &mut self.displays[self.active];
-                let pos = d
-                    .workspaces
-                    .iter()
-                    .position(|w| w.index == self.selection.workspace)
-                    .unwrap_or(d.centered);
-                d.centered = if matches!(input, Input::Up) {
-                    pos.saturating_sub(1)
+                if matches!(input, Input::Zoom { .. }) {
+                    let mut target = d.camera;
+                    target.zoom_at((delta.y * 0.008).exp(), d.local(point));
+                    self.zoom_view(target, None);
                 } else {
-                    (pos + 1).min(d.workspaces.len() - 1)
-                };
-                d.workspace_offset = 0.0;
-                self.selection = Selection {
-                    workspace: d.workspaces[d.centered].index,
-                    window: None,
-                };
-                d.reproject();
-                reprojected = true;
+                    d.camera.position.x -= delta.x / d.camera.zoom;
+                    d.camera.position.y -= delta.y / d.camera.zoom;
+                    d.policy_dirty = true;
+                }
             }
-            Input::Left | Input::Right | Input::Cycle(_) => {
+            Input::ZoomStep(step) => {
                 let d = &mut self.displays[self.active];
-                let ws = d.workspaces.iter().find(|w| w.index == self.selection.workspace)?;
-                if !ws.windows.is_empty() {
-                    let forward = matches!(input, Input::Right | Input::Cycle(true));
-                    let pos = ws.windows.iter().position(|w| Some(w.id) == self.selection.window);
-                    let next = match pos {
-                        Some(p) if forward => (p + 1) % ws.windows.len(),
-                        Some(p) => (p + ws.windows.len() - 1) % ws.windows.len(),
-                        None if forward => 0,
-                        None => ws.windows.len() - 1,
-                    };
-                    let w = &ws.windows[next];
-                    self.selection.window = Some(w.id);
-                    if d.reveal(self.selection.workspace, w.id) {
-                        d.reproject();
-                        reprojected = true;
+                let pivot = self
+                    .selection
+                    .window
+                    .and_then(|id| d.windows.iter().find(|w| w.data.id == id))
+                    .map(|w| d.camera.project(w.world.mid()))
+                    .unwrap_or(CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.));
+                let mut target = d.camera;
+                target.zoom_at(
+                    if step == 0 {
+                        1. / target.zoom
+                    } else {
+                        1.2_f64.powi(step as i32)
+                    },
+                    pivot,
+                );
+                self.zoom_view(target, Some(0.18));
+            }
+            Input::Magnify { point, factor } => {
+                if let Some(i) = self.displays.iter().position(|d| contains(d.bounds, point)) {
+                    self.activate_display(i);
+                }
+                let d = &mut self.displays[self.active];
+                let mut target = d.camera;
+                target.zoom_at(factor, d.local(point));
+                self.zoom_view(target, None);
+            }
+            Input::Move(point) => {
+                if self.drag.is_none()
+                    && let Some(i) = self.displays.iter().position(|d| contains(d.bounds, point))
+                {
+                    self.activate_display(i);
+                }
+                for d in &mut self.displays {
+                    let p = d.local(point);
+                    let index = contains(d.controls.frame(), p).then(|| {
+                        let x = p.x - d.controls.frame().origin.x;
+                        if x < 36. {
+                            0
+                        } else if x < 82. {
+                            1
+                        } else if x < 112. {
+                            2
+                        } else if x < 162. {
+                            3
+                        } else if x < 204. {
+                            4
+                        } else if x < 237. {
+                            5
+                        } else {
+                            6
+                        }
+                    });
+                    if index != d.help_index {
+                        if let Some(i) = index {
+                            set_text(
+                                &d.help,
+                                [
+                                    "Zoom out · ⌘− · Pinch to zoom",
+                                    "Actual size · ⌘0",
+                                    "Zoom in · ⌘+ · Pinch to zoom",
+                                    "Fit workspace · ↑↓ switch workspace",
+                                    "Fit all workspaces · Scroll to explore",
+                                    "Open selected window · Return · ←→ select",
+                                    "Return to desktop · Escape",
+                                ][i],
+                            );
+                        }
+                        d.help.setHidden(index.is_none());
+                        d.help_index = index;
                     }
                 }
-            }
-            _ => {}
-        }
-        if self.drag.is_none()
-            && let Some(point) = pointer
-        {
-            self.update_hover(point);
-        }
-        if reprojected && !only_translated {
-            self.update_preview_borders();
-        }
-        if old != (self.active, self.selection) || (reprojected && !only_translated) {
-            self.highlight(Some(old));
-        }
-        self.sync_metal();
-        if activate {
-            let d = &self.displays[self.active];
-            let sys_id = self
-                .selection
-                .window
-                .and_then(|id| d.workspaces.iter().flat_map(|w| &w.windows).find(|w| w.id == id))
-                .and_then(|w| w.info.sys_id);
-            let workspace = d.workspaces.iter().find(|ws| ws.index == self.selection.workspace)?;
-            return Some(OverviewAction::Activate {
-                display: d.info.display_uuid.clone(),
-                workspace: workspace.workspace_id,
-                selection: self.selection,
-                sys_id,
-            });
-        }
-        None
-    }
-
-    fn sync_metal(&mut self) {
-        let drag_source = self.drag.as_ref().and_then(|drag| {
-            self.displays
-                .iter()
-                .flat_map(|d| &d.workspaces)
-                .flat_map(|ws| &ws.windows)
-                .find(|w| w.id == drag.window)
-                .and_then(|w| w.info.sys_id.map(|id| (id, w.id.pid)))
-        });
-        for display in &mut self.displays {
-            let Some(metal) = &mut display.metal else { continue };
-            // Coalesce geometry changes until this display has a drawable. The
-            // projection may change repeatedly between callbacks; build only its latest state.
-            let ticking =
-                display.views.iter().any(|v| v.metal.as_ref().is_some_and(|m| m.is_visible()));
-            let ready = metal.has_display_update()
-                || display
-                    .views
+                let hovered = self
+                    .displays
                     .iter()
-                    .any(|v| v.metal.as_ref().is_some_and(|m| m.has_display_update()));
-            if display.metal_dirty && display.metal_style.is_some() && ticking && !ready {
-                for view in &display.views {
-                    if let Some(canvas) = &view.metal {
-                        canvas.request_frame();
-                    }
-                }
-                continue;
-            }
-            let style = (self.hovered, self.selection.window);
-            if !display.metal_dirty {
-                if display.metal_style != Some(style) {
-                    let selected = self.selection.window.and_then(|id| {
-                        display
-                            .workspaces
-                            .iter()
-                            .flat_map(|ws| &ws.windows)
-                            .find(|w| w.id == id)
-                            .and_then(|w| w.info.sys_id)
-                    });
-                    let hovered = self.hovered.and_then(|id| {
-                        display
-                            .workspaces
-                            .iter()
-                            .flat_map(|ws| &ws.windows)
-                            .find(|w| w.id == id)
-                            .and_then(|w| w.info.sys_id)
-                    });
-                    let previous = display.metal_style.unwrap_or((None, None));
-                    let mut affected = [None; 4];
-                    for (slot, id) in
-                        affected.iter_mut().zip([previous.0, previous.1, style.0, style.1])
-                    {
-                        *slot = id.and_then(|id| {
-                            display
-                                .workspaces
-                                .iter()
-                                .flat_map(|ws| &ws.windows)
-                                .find(|w| w.id == id)
-                                .and_then(|w| w.info.sys_id)
-                        });
-                    }
-                    display.metal_updates.clear();
-                    // Only the old/new hover and selection entries can change.
-                    for (view, row) in display.views.iter_mut().zip(&display.projection) {
-                        for p in &mut view.scene {
-                            if !affected.iter().flatten().any(|id| id.as_u32() == p.window_id) {
-                                continue;
-                            }
-                            p.border_width = if hovered.is_some_and(|id| id.as_u32() == p.window_id)
+                    .find(|d| contains(d.bounds, point))
+                    .and_then(|d| d.hit(point).map(|i| d.windows[i].data.id));
+                if hovered != self.hovered {
+                    for d in &mut self.displays {
+                        for (w, p) in d.windows.iter().zip(&d.scene) {
+                            if (Some(w.data.id) == hovered || Some(w.data.id) == self.hovered)
+                                && let Some(m) = &mut d.metal
                             {
-                                1.5
-                            } else {
-                                0.
-                            };
-                            p.priority = if selected.is_some_and(|id| id.as_u32() == p.window_id) {
-                                2
-                            } else if p.mode == cgs::CaptureMode::Snapshot {
-                                -1
-                            } else {
-                                i32::from(display.workspaces[row.source].is_active)
-                            };
-                            let (width, height) = if p.priority == 2 {
-                                (
-                                    (p.frame.size.width * display.scale).ceil().max(1.) as usize,
-                                    (p.frame.size.height * display.scale).ceil().max(1.) as usize,
-                                )
-                            } else {
-                                capture_size(p.frame.size, display.scale)
-                            };
-                            p.resolution = cgs::CaptureResolution::Thumbnail { width, height };
-                            display.metal_updates.push(preview_source(p));
-                            if let Some(canvas) = &mut view.metal {
-                                let _ = canvas.set_preview_style(
+                                let _ = m.set_preview_style(
                                     p.window_id,
-                                    p.border_width,
-                                    p.border_color,
+                                    if hovered == Some(w.data.id)
+                                        || self.selection.window == Some(w.data.id)
+                                    {
+                                        2.
+                                    } else {
+                                        0.
+                                    },
+                                    [0.25, 0.25, 0.25, 0.25],
                                 );
                             }
                         }
                     }
-                    if display.metal_style.is_none_or(|(_, selection)| selection != style.1) {
-                        let _ = metal.update_sources(&display.metal_updates);
-                    }
-                    display.metal_style = Some(style);
+                    self.hovered = hovered;
                 }
-                continue;
             }
-            display.metal_dirty = false;
-            display.metal_style = Some(style);
-            let sources = &mut display.metal_sources;
-            sources.clear();
-            let mut drag_preview = None;
-            let border = display.metal_border;
-            let viewport = rect(0., 0., display.bounds.size.width, display.bounds.size.height);
-            for (view, ws) in display.views.iter_mut().zip(&display.projection) {
-                view.scene.clear();
-                let row_visible = intersects(ws.frame, viewport);
-                if !row_visible {
-                    if let Some(canvas) = &mut view.metal {
-                        let _ = canvas.hide();
-                    }
-                    continue;
+            Input::PointerDown(point) => {
+                if self.pending_drop.is_some() {
+                    return None;
                 }
-                for w in &ws.windows {
-                    let data = &display.workspaces[ws.source].windows[w.source];
-                    if self.drag.as_ref().is_some_and(|d| d.started && d.window == data.id) {
-                        continue;
+                self.pressed = None;
+                if let Some(i) = self.displays.iter().position(|d| contains(d.bounds, point)) {
+                    self.activate_display(i);
+                    let d = &self.displays[i];
+                    if contains(d.controls.frame(), d.local(point)) {
+                        return None;
                     }
-                    let Some(id) = data.info.sys_id else { continue };
-                    let card = pixel_aligned(w.frame, display.scale);
-                    let mut frame = pixel_aligned(preview_frame(card.size), display.scale);
-                    frame.origin.x += card.origin.x;
-                    frame.origin.y += card.origin.y;
-                    let mut p = cgs::Preview::window(id.as_u32(), data.id.pid, frame);
-                    p.corner_radius = CORNER as f32;
-                    p.border_width = if self.hovered == Some(data.id) {
-                        1.5
+                    if let Some(j) = d.hit(point) {
+                        let w = &d.windows[j];
+                        self.drag = Some(Drag {
+                            window: w.data.id,
+                            display: i,
+                            start: point,
+                            anchor: d.camera.unproject(d.local(point)),
+                            original: w.world,
+                            moved: false,
+                            destination: i,
+                            frame: d.camera.frame(w.world),
+                            canvas: None,
+                            badge: window_badge(
+                                w.data.app_name.as_deref().unwrap_or("Window"),
+                                w.icon_image.as_deref(),
+                                d.scale,
+                            )
+                            .0,
+                            overlay: {
+                                let l = layer(CGRect::new(CGPoint::ZERO, d.bounds.size), d.scale);
+                                l.setZPosition(4.);
+                                l
+                            },
+                            point,
+                            last_tick: Instant::now(),
+                            indicator: {
+                                let l = layer(CGRect::ZERO, d.scale);
+                                l.setZPosition(3.);
+                                l.setBorderWidth(1.5);
+                                l.setBorderColor(Some(&color(1., 1., 1., 0.55)));
+                                l.setBackgroundColor(Some(&color(1., 1., 1., 0.05)));
+                                l.setHidden(true);
+                                l
+                            },
+                        });
+                        self.change_selection(Selection {
+                            workspace: w.workspace_index,
+                            window: Some(w.data.id),
+                        });
                     } else {
-                        0.
-                    };
-                    p.border_color = border;
-                    p.priority = if self.selection.window == Some(data.id) {
-                        2
-                    } else {
-                        i32::from(display.workspaces[ws.source].is_active)
-                    };
-                    let (width, height) = if p.priority == 2 {
-                        (
-                            (frame.size.width * display.scale).ceil().max(1.) as usize,
-                            (frame.size.height * display.scale).ceil().max(1.) as usize,
-                        )
-                    } else {
-                        capture_size(frame.size, display.scale)
-                    };
-                    p.resolution = cgs::CaptureResolution::Thumbnail { width, height };
-                    if !card_visible(display.bounds.size, ws.frame, w.frame) {
-                        p.mode = cgs::CaptureMode::Snapshot;
-                        p.priority = -1;
-                    }
-                    sources.push(preview_source(&p));
-                    view.scene.push(p);
-                }
-                if view.metal.is_none() {
-                    match metal.new_canvas(
-                        display._window.id(),
-                        &view.layer,
-                        CGRect::new(CGPoint::ZERO, ws.frame.size),
-                        display.scale,
-                    ) {
-                        Ok(canvas) => view.metal = Some(canvas),
-                        Err(error) => {
-                            tracing::warn!(?error, "Workspace preview canvas unavailable")
-                        }
-                    }
-                }
-                if let Some(canvas) = &mut view.metal {
-                    if !canvas.is_visible() {
-                        let _ = canvas.attach_to(display._window.id(), &view.layer);
-                    }
-                    let result = canvas.set_visual_scene(&view.scene).and_then(|()| canvas.show());
-                    if let Err(error) = result {
-                        tracing::warn!(?error, "Workspace preview scene failed");
+                        self.pressed = Some((point, d.camera));
                     }
                 }
             }
-            if let Some(drag) = &self.drag {
-                if drag.started && contains(display.bounds, drag.point) {
-                    if let Some((id, pid)) = drag_source {
-                        let mut frame = drag.preview.frame();
-                        frame.origin.x += drag.card.frame().origin.x;
-                        frame.origin.y += drag.card.frame().origin.y;
-                        let mut p = cgs::Preview::window(id.as_u32(), pid, frame);
-                        p.corner_radius = CORNER as f32;
-                        p.border_width = 2.5;
-                        p.border_color = border;
-                        p.priority = 3;
-                        p.resolution = cgs::CaptureResolution::Thumbnail {
-                            width: (frame.size.width * display.scale).ceil().max(1.) as usize,
-                            height: (frame.size.height * display.scale).ceil().max(1.) as usize,
+            Input::BeginPan(point) => {
+                if let Some(drag) = self.drag.take() {
+                    self.end_drag(drag, true);
+                }
+                if let Some(i) = self.displays.iter().position(|d| contains(d.bounds, point)) {
+                    self.activate_display(i);
+                }
+                self.pressed = Some((point, self.displays[self.active].camera));
+            }
+            Input::EndPan(point) => {
+                self.pan_to(point);
+                self.pressed = None;
+            }
+            Input::Pan(point) | Input::PointerDrag(point) => {
+                if self.drag.is_some() {
+                    self.move_drag(point);
+                } else {
+                    self.pan_to(point);
+                }
+            }
+            Input::PointerUp(point) | Input::Click(point) => {
+                if self.pressed.is_some() {
+                    self.pan_to(point);
+                    self.pressed = None;
+                } else if let Some(drag) = self.drag.take().filter(|d| d.moved) {
+                    self.drop = self.drop_target(&drag, point).map(|(intent, _)| intent);
+                    if self.drop.is_some() {
+                        let frame = self.displays[drag.display]
+                            .windows
+                            .iter()
+                            .find(|w| w.data.id == drag.window)
+                            .and_then(|w| {
+                                self.displays[drag.display]
+                                    .metal
+                                    .as_ref()?
+                                    .captured_frame(w.data.info.sys_id?.as_u32())
+                            });
+                        drag.indicator.removeFromSuperlayer();
+                        self.pending_drop = Some((drag, frame));
+                    } else {
+                        self.end_drag(drag, true);
+                    }
+                } else {
+                    let d = &mut self.displays[self.active];
+                    let p = d.local(point);
+                    if contains(d.controls.frame(), p) {
+                        let x = p.x - d.controls.frame().origin.x;
+                        let pivot =
+                            CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.);
+                        let (target, duration) = if x < 112. {
+                            let mut target = d.camera;
+                            target.zoom_at(
+                                if x < 36. {
+                                    1. / 1.2
+                                } else if x < 82. {
+                                    1. / target.zoom
+                                } else {
+                                    1.2
+                                },
+                                pivot,
+                            );
+                            (target, 0.18)
+                        } else if x < 162. {
+                            let ws = d
+                                .workspaces
+                                .iter()
+                                .find(|ws| ws.index == self.selection.workspace)
+                                .unwrap_or(&d.workspaces[0]);
+                            let frame = d
+                                .windows
+                                .iter()
+                                .filter(|w| w.workspace == ws.workspace_id)
+                                .map(|w| w.world)
+                                .reduce(union)
+                                .unwrap_or(CGRect::new(
+                                    d.workspace_origin(ws.index),
+                                    d.info.frame.size,
+                                ));
+                            (Camera::fit(frame, d.bounds.size), self.duration)
+                        } else if x < 204. {
+                            (d.fit(), self.duration)
+                        } else if x < 237. {
+                            return self.activate(false);
+                        } else {
+                            return self.activate(true);
                         };
-                        if let Some(frame) = &drag.frame {
-                            metal.reuse_frame(frame);
-                        }
-                        sources.push(preview_source(&p));
-                        drag_preview = Some(p);
+                        self.zoom_view(target, Some(duration));
+                    } else if let Some(i) = d.hit(point) {
+                        self.select(i);
+                        return self.activate(false);
                     }
                 }
             }
-            // Capture hidden identities once in spare capacity; they are not render quads.
-            for data in display.workspaces.iter().flat_map(|ws| &ws.windows) {
-                let Some(id) = data.info.sys_id else { continue };
-                if sources.iter().any(|p| p.window_id == id.as_u32()) {
-                    continue;
+            Input::Up | Input::Down => {
+                let d = &mut self.displays[self.active];
+                let current = d
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.index == self.selection.workspace)
+                    .unwrap_or(0);
+                let next = if matches!(input, Input::Up) {
+                    current.saturating_sub(1)
+                } else {
+                    (current + 1).min(d.workspaces.len() - 1)
+                };
+                let ws = &d.workspaces[next];
+                let selection = Selection {
+                    workspace: ws.index,
+                    window: ws.focused_window,
+                };
+                let mut target = d.camera;
+                target.position.y = d.workspace_origin(ws.index).y + d.workspace_height / 2.
+                    - d.bounds.size.height / (2. * target.zoom);
+                d.animate(target, self.duration);
+                d.policy_dirty = true;
+                self.change_selection(selection);
+            }
+            Input::Left | Input::Right | Input::Cycle(_) => {
+                let d = &self.displays[self.active];
+                let ws = d.workspaces.iter().find(|ws| ws.index == self.selection.workspace)?;
+                if ws.windows.is_empty() {
+                    return None;
                 }
-                sources.push(cgs::PreviewSource {
-                    window_id: id.as_u32(),
-                    process_id: data.id.pid,
-                    mode: cgs::CaptureMode::Snapshot,
-                    resolution: cgs::CaptureResolution::Thumbnail { width: 640, height: 480 },
-                    priority: -1,
-                    frame_interval: std::time::Duration::from_secs_f64(1. / 30.),
+                let current = ws.windows.iter().position(|w| Some(w.id) == self.selection.window);
+                let forward = matches!(input, Input::Right | Input::Cycle(true));
+                let next = match current {
+                    Some(i) if forward => (i + 1) % ws.windows.len(),
+                    Some(i) => (i + ws.windows.len() - 1) % ws.windows.len(),
+                    None => 0,
+                };
+                if let Some(i) = d.windows.iter().position(|w| w.data.id == ws.windows[next].id) {
+                    self.select(i);
+                }
+            }
+            _ => {}
+        }
+        if matches!(input, Input::Scroll { .. } | Input::Pan(_))
+            || (matches!(input, Input::PointerDrag(_)) && self.drag.is_none())
+        {
+            let d = &self.displays[self.active];
+            let center = d
+                .camera
+                .unproject(CGPoint::new(d.bounds.size.width / 2., d.bounds.size.height / 2.));
+            if let Some(ws) = d.workspaces.iter().min_by(|a, b| {
+                let distance = |ws: &RuntimeWorkspaceData| {
+                    (d.workspace_origin(ws.index).y + d.workspace_height / 2. - center.y).abs()
+                };
+                distance(a).total_cmp(&distance(b))
+            }) && ws.index != self.selection.workspace
+            {
+                self.change_selection(Selection {
+                    workspace: ws.index,
+                    window: ws.focused_window,
                 });
             }
-            let result = metal
-                .set_sources(sources)
-                .and_then(|()| {
-                    metal.set_visual_scene(
-                        drag_preview.as_ref().map(std::slice::from_ref).unwrap_or(&[]),
-                    )
-                })
-                .and_then(|()| metal.show());
-            if let Err(error) = result {
-                tracing::warn!(?error, "Metal previews failed; previews disabled");
-                display.metal = None;
+        }
+        if !matches!(input, Input::Move(_) | Input::PointerDown(_))
+            && !(matches!(input, Input::PointerDrag(_)) && self.drag.is_some())
+        {
+            let d = &mut self.displays[self.active];
+            d.apply_camera(1.);
+            if let Some(m) = &d.metal {
+                m.request_frame();
             }
         }
+        None
+    }
+
+    fn pan_to(&mut self, point: CGPoint) {
+        if let Some((start, camera)) = self.pressed {
+            let d = &mut self.displays[self.active];
+            d.camera = Camera {
+                zoom: camera.zoom,
+                position: CGPoint::new(
+                    camera.position.x - (point.x - start.x) / camera.zoom,
+                    camera.position.y - (point.y - start.y) / camera.zoom,
+                ),
+            };
+            d.policy_dirty = true;
+        }
+    }
+
+    fn move_drag(&mut self, point: CGPoint) {
+        let Some(mut drag) = self.drag.take() else {
+            return;
+        };
+        if !drag.moved && (point.x - drag.start.x).hypot(point.y - drag.start.y) < 4. {
+            self.drag = Some(drag);
+            return;
+        }
+        drag.point = point;
+        let destination = self
+            .displays
+            .iter()
+            .position(|d| contains(d.bounds, point))
+            .unwrap_or(drag.destination);
+        let d = &self.displays[destination];
+        let zoom = d.camera.zoom;
+        let frame = rect(
+            point.x - d.bounds.origin.x - (drag.anchor.x - drag.original.origin.x) * zoom,
+            point.y - d.bounds.origin.y - (drag.anchor.y - drag.original.origin.y) * zoom,
+            drag.original.size.width * zoom,
+            drag.original.size.height * zoom,
+        );
+        if !drag.moved || destination != drag.destination {
+            drag.canvas = None;
+            drag.overlay.setFrame(CGRect::new(CGPoint::ZERO, d.bounds.size));
+            d.root.addSublayer(&drag.overlay);
+            if let Some(owner) = &self.displays[drag.display].metal {
+                drag.canvas =
+                    owner.new_canvas(d._window.id(), &drag.overlay, d.bounds, d.scale).ok();
+                if let Some(canvas) = &mut drag.canvas {
+                    if let Some(w) = self.displays[drag.display]
+                        .windows
+                        .iter()
+                        .find(|w| w.data.id == drag.window)
+                    {
+                        let mut p = cgs::Preview::window(
+                            w.data.info.sys_id.unwrap().as_u32(),
+                            w.data.id.pid,
+                            frame,
+                        );
+                        p.corner_radius = (10. * zoom) as f32;
+                        let _ = canvas.set_visual_scene(&[p]).and_then(|()| canvas.show());
+                    }
+                }
+            }
+            drag.overlay.addSublayer(&drag.badge);
+            let source = &mut self.displays[drag.display];
+            source.dragged = Some(drag.window);
+            source.rebuild_scene();
+        } else if let Some(canvas) = &mut drag.canvas {
+            let _ = canvas.translate(CGPoint::new(
+                frame.origin.x - drag.frame.origin.x,
+                frame.origin.y - drag.frame.origin.y,
+            ));
+        }
+        if let Some((intent, marker)) = self.drop_target(&drag, point) {
+            self.displays[destination].root.addSublayer(&drag.indicator);
+            drag.indicator.setFrame(marker);
+            drag.indicator.setHidden(false);
+            if let Some(region) =
+                self.displays[destination].regions.iter().find(|r| r.id == intent.workspace)
+            {
+                region.label.setOpacity(1.);
+            }
+        } else {
+            drag.indicator.setHidden(true);
+        }
+        drag.moved = true;
+        drag.destination = destination;
+        drag.frame = frame;
+        drag.badge.setPosition(CGPoint::new(frame.origin.x, frame.origin.y - 30.));
+        drag.badge.setHidden(false);
+        self.drag = Some(drag);
+    }
+
+    fn end_drag(&mut self, mut drag: Drag, _cancel: bool) {
+        drag.indicator.removeFromSuperlayer();
+        drag.overlay.removeFromSuperlayer();
+        if let Some(canvas) = &mut drag.canvas {
+            let _ = canvas.hide();
+        }
+        if let Some(d) = self.displays.get_mut(drag.display) {
+            d.dragged = None;
+            d.reconcile();
+            d.apply_camera(1.);
+        }
+    }
+
+    pub(crate) fn toggle(&mut self) {
+        if matches!(self.phase, Phase::Exiting { .. }) {
+            self.interrupt();
+            for d in &mut self.displays {
+                d.animate(d.home, self.duration);
+            }
+            self.phase = Phase::Entering;
+        } else {
+            self.activate(true);
+        }
+    }
+
+    fn drop_target(&self, drag: &Drag, point: CGPoint) -> Option<(OverviewDrop, CGRect)> {
+        let Some(destination) = self.displays.iter().position(|d| contains(d.bounds, point)) else {
+            return None;
+        };
+        let d = &self.displays[destination];
+        let world = d.camera.unproject(d.local(point));
+        let ws = d.workspaces.iter().min_by(|a, b| {
+            let distance = |ws: &RuntimeWorkspaceData| {
+                let p = d.workspace_origin(ws.index);
+                (world.y - p.y - d.workspace_height / 2.).abs()
+            };
+            distance(a).total_cmp(&distance(b))
+        });
+        let Some(ws) = ws else {
+            return None;
+        };
+        let source = &self.displays[drag.display];
+        let Some(w) = source.windows.iter().find(|w| w.data.id == drag.window) else {
+            return None;
+        };
+        let region = d.regions.iter().find(|r| r.id == ws.workspace_id)?;
+        let target = crate::actor::drag::hit_test_projected(&region.drops, drag.window, world);
+        let action = target.map(|t| (t.window, t.action));
+        let marker = target.map_or(
+            rect(
+                d.camera.position.x,
+                region.origin.y,
+                d.bounds.size.width / d.camera.zoom,
+                d.info.frame.size.height,
+            ),
+            |t| {
+                let mut frame = t.frame;
+                let line = 2. / d.camera.zoom;
+                match t.action {
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Left,
+                    ) => frame.size.width = line,
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Right,
+                    ) => {
+                        frame.origin.x += frame.size.width - line;
+                        frame.size.width = line;
+                    }
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Up,
+                    ) => frame.size.height = line,
+                    crate::layout_engine::WindowDropAction::Insert(
+                        crate::layout_engine::Direction::Down,
+                    ) => {
+                        frame.origin.y += frame.size.height - line;
+                        frame.size.height = line;
+                    }
+                    _ => {}
+                }
+                frame
+            },
+        );
+        Some((
+            OverviewDrop {
+                window: drag.window,
+                workspace: ws.workspace_id,
+                target: if w.data.is_floating { None } else { action },
+                frame: w.data.is_floating.then(|| {
+                    rect(
+                        world.x - d.window_origin(ws).x - (drag.anchor.x - drag.original.origin.x),
+                        world.y - d.window_origin(ws).y - (drag.anchor.y - drag.original.origin.y),
+                        drag.original.size.width,
+                        drag.original.size.height,
+                    )
+                }),
+            },
+            d.camera.frame(marker),
+        ))
     }
 
     pub(crate) fn pump_previews(&mut self) {
-        self.sync_metal();
-        for display in &mut self.displays {
-            if let Some(metal) = &mut display.metal {
-                if let Err(error) = metal.render(std::time::Instant::now()) {
-                    tracing::warn!(?error, "Metal preview rendering failed");
-                    display.metal = None;
-                }
-            }
-            for view in &mut display.views {
-                if let Some(canvas) = &mut view.metal {
-                    if let Err(error) = canvas.render(std::time::Instant::now()) {
-                        tracing::warn!(?error, "Workspace preview rendering failed");
-                        view.metal = None;
-                    }
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        let now = Instant::now();
+        if let Phase::Waiting(start) = self.phase {
+            let ready = self.displays.iter().all(|d| {
+                d.windows.is_empty()
+                    || d.metal.as_ref().is_none_or(|m| {
+                        m.stats().presented_frames > 0
+                            && d.windows.iter().any(|w| {
+                                intersects(
+                                    d.camera.frame(w.world),
+                                    CGRect::new(CGPoint::ZERO, d.bounds.size),
+                                ) && m.has_frame(w.data.info.sys_id.unwrap().as_u32())
+                            })
+                    })
+            });
+            if (ready && self.displays.iter().all(|d| d.background_ready))
+                || now.duration_since(start) > Duration::from_secs(2)
+            {
+                self.phase = Phase::Entering;
+                for d in &mut self.displays {
+                    d.animate(d.home, self.duration);
+                    d.motion.as_mut().unwrap().start = now;
+                    d.background.setOpacity(1.);
                 }
             }
         }
+        let decorations = match self.phase {
+            Phase::Waiting(_) => 0.,
+            Phase::Exiting { target_ready: true, .. } => 0.,
+            _ => 1.,
+        };
+        if let Some(drag) = &mut self.drag
+            && drag.moved
+        {
+            let d = &mut self.displays[drag.destination];
+            let y = d.local(drag.point).y;
+            let edge = 64.;
+            let velocity = if !contains(d.bounds, drag.point) {
+                0.
+            } else if y < edge {
+                -((edge - y) / edge).clamp(0., 1.)
+            } else {
+                ((y - d.bounds.size.height + edge) / edge).clamp(0., 1.)
+            };
+            let elapsed = now.duration_since(drag.last_tick).as_secs_f64().min(0.05);
+            drag.last_tick = now;
+            if velocity != 0. {
+                d.camera.position.y += velocity * 700. * elapsed / d.camera.zoom;
+                d.policy_dirty = true;
+                d.apply_camera(decorations);
+                if let Some(m) = &d.metal {
+                    m.request_frame();
+                }
+                let point = drag.point;
+                self.move_drag(point);
+            }
+        }
+        if let Some(drag) = &mut self.drag
+            && let Some(canvas) = &mut drag.canvas
+        {
+            let _ = canvas.render(now);
+        }
+        if let Some((drag, _)) = &mut self.pending_drop
+            && let Some(canvas) = &mut drag.canvas
+        {
+            let _ = canvas.render(now);
+        }
+        for d in &mut self.displays {
+            if let Some(snapshot) = &d.desktop_snapshot {
+                match snapshot.take_image() {
+                    Ok(Some(image)) => {
+                        image_contents(&d.background, &image);
+                        d.background_ready = true;
+                        d.desktop_snapshot = None;
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "Desktop background unavailable");
+                        d.desktop_snapshot = None;
+                    }
+                    _ => {}
+                }
+            }
+            if d.metal.as_ref().is_none_or(|m| m.has_display_update()) {
+                d.sample(now);
+            }
+            d.apply_camera(decorations);
+            d.update_sources(d.selection.window, false);
+            if let Some(m) = &mut d.metal {
+                if !m.is_visible() && (d.background_ready || d.desktop_snapshot.is_none()) {
+                    let _ = m.show();
+                }
+                if let Err(e) = m.render(now) {
+                    tracing::warn!(?e, "Spatial overview rendering failed");
+                }
+                if d.motion.is_some()
+                    || matches!(self.phase, Phase::Waiting(_) | Phase::Exiting { .. })
+                {
+                    m.request_frame();
+                }
+            }
+        }
+        if let Some(drag) = &self.drag
+            && drag.moved
+        {
+            drag.badge
+                .setPosition(CGPoint::new(drag.frame.origin.x, drag.frame.origin.y - 30.));
+            drag.badge.setHidden(false);
+        }
+        if matches!(self.phase, Phase::Entering) && self.displays.iter().all(|d| d.motion.is_none())
+        {
+            self.phase = Phase::Overview;
+        }
+    }
+
+    pub(crate) fn handoff_ready(&mut self) -> bool {
+        let Phase::Exiting { window, start, target_ready } = self.phase else {
+            return false;
+        };
+        if start.elapsed() > Duration::from_secs(2) {
+            return true;
+        }
+        if !target_ready || self.displays.iter().any(|d| d.motion.is_some()) {
+            return false;
+        }
+        let d = &self.displays[self.active];
+        let aligned = window.is_none_or(|id| {
+            let Some(w) = d.windows.iter().find(|w| w.data.id == id) else {
+                return true;
+            };
+            let Some(sys_id) = w.data.info.sys_id else {
+                return false;
+            };
+            let Some(native) = crate::sys::window_server::get_window(sys_id) else {
+                return false;
+            };
+            if native.pid != id.pid || !crate::sys::window_server::window_is_ordered_in(sys_id) {
+                return false;
+            }
+            let Some(ws) = d.workspaces.iter().find(|ws| ws.workspace_id == w.workspace) else {
+                return true;
+            };
+            if ws.display_uuid.as_deref() != Some(&d.info.display_uuid) {
+                return intersects(native.frame, ws.display_frame);
+            }
+            let preview = d.camera.frame(w.world);
+            let tolerance = 1.;
+            (preview.origin.x + d.bounds.origin.x - native.frame.origin.x).abs() <= tolerance
+                && (preview.origin.y + d.bounds.origin.y - native.frame.origin.y).abs() <= tolerance
+                && (preview.size.width - native.frame.size.width).abs() <= tolerance
+                && (preview.size.height - native.frame.size.height).abs() <= tolerance
+        });
+        aligned && d.metal.as_ref().is_none_or(|m| m.is_presented())
     }
 }
 
-fn capture_size(size: CGSize, backing: f64) -> (usize, usize) {
-    let width = (size.width * backing).max(1.0);
-    let height = (size.height * backing).max(1.0);
-    let scale = (1024.0 / width).min(768.0 / height).min(1.0);
-    ((width * scale).ceil() as usize, (height * scale).ceil() as usize)
-}
-fn cached_canvas_bytes(bounds: CGRect, scale: f64, canvases: usize) -> usize {
-    let row = ((bounds.size.width * scale).ceil() as usize * 4 + 255) & !255;
-    // Each workspace is at most half a display high; reserve a full display
-    // for the optional drag canvas, which allocates drawables only on first use.
-    row * (bounds.size.height * scale).ceil() as usize * 3 * (2 + canvases) / 2
-}
-
-#[derive(Default)]
-pub(crate) struct PreviewRenderers {
-    // One paused presentation context per current display. Pixel reuse is
-    // bounded independently inside cgs; no stream remains active here.
-    metal: Vec<(
-        ScreenInfo,
-        CGRect,
-        f64,
-        cgs::PreviewCompositor,
-        Vec<(usize, cgs::PreviewCompositor)>,
-    )>,
-}
-impl PreviewRenderers {
-    fn take_metal(
-        &mut self,
-        info: &ScreenInfo,
-        bounds: CGRect,
-        scale: f64,
-    ) -> Option<(cgs::PreviewCompositor, Vec<(usize, cgs::PreviewCompositor)>)> {
-        // Native Space/display changes must never reuse a surface from the old
-        // Space. A backing-size/scale change also retires its old drawable pool.
-        self.metal.retain(|(key, rect, backing, _, _)| {
-            key.display_uuid != info.display_uuid
-                || (key.id == info.id
-                    && key.space == info.space
-                    && *rect == bounds
-                    && *backing == scale)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn zoom_keeps_pointer_world_position_and_picking_consistent() {
+        let mut c = Camera {
+            position: CGPoint::new(-100., 50.),
+            zoom: 0.5,
+        };
+        c.zoom_at(2., CGPoint::new(200., 100.));
+        assert_eq!(c, Camera {
+            position: CGPoint::new(100., 150.),
+            zoom: 1.
         });
-        let index = self
-            .metal
-            .iter()
-            .position(|(key, _, _, _, _)| key.display_uuid == info.display_uuid)?;
-        let (_, _, _, owner, canvases) = self.metal.swap_remove(index);
-        Some((owner, canvases))
+        assert_eq!(c.unproject(CGPoint::new(200., 100.)), CGPoint::new(300., 250.));
+        assert!(contains(
+            rect(280., 230., 40., 40.),
+            c.unproject(CGPoint::new(200., 100.))
+        ));
+        let motion = Motion {
+            from: Camera {
+                position: CGPoint::new(-100., 50.),
+                zoom: 0.5,
+            },
+            to: c,
+            start: Instant::now(),
+            duration: 0.3,
+        };
+        for ms in [25, 125, 250] {
+            let camera = motion.sample(motion.start + Duration::from_millis(ms)).0;
+            let point = camera.project(CGPoint::new(300., 250.));
+            assert!(
+                (point.x - 200.).abs() < 1e-9 && (point.y - 100.).abs() < 1e-9,
+                "animated zoom moved its pivot: {point:?}"
+            );
+        }
+        c.zoom_at(0.5, CGPoint::new(200., 100.));
+        assert_eq!(c, Camera {
+            position: CGPoint::new(-100., 50.),
+            zoom: 0.5
+        });
+    }
+    #[test]
+    fn camera_fit_preserves_world_aspect_and_leaves_controls_clear() {
+        let c = Camera::fit(rect(-600., 200., 2400., 1600.), CGSize::new(1200., 900.));
+        let r = c.frame(rect(-600., 200., 2400., 1600.));
+        assert!(r.min().x >= 55.999 && r.max().x <= 1144.001);
+        assert!(r.min().y >= 47.999 && r.max().y <= 820.001);
+        assert!((r.size.width / r.size.height - 1.5).abs() < 1e-9);
+    }
+    #[test]
+    fn interrupted_motion_starts_from_current_camera_without_overshoot() {
+        let start = Instant::now();
+        let first = Motion {
+            from: Camera {
+                position: CGPoint::ZERO,
+                zoom: 1.,
+            },
+            to: Camera {
+                position: CGPoint::new(800., 400.),
+                zoom: 0.2,
+            },
+            start,
+            duration: 0.3,
+        };
+        let (middle, done) = first.sample(start + Duration::from_millis(120));
+        assert!(!done && middle.zoom > 0.2 && middle.zoom < 1.);
+        let reverse = Motion {
+            from: middle,
+            to: first.from,
+            start: start + Duration::from_millis(120),
+            duration: 0.3,
+        };
+        assert_eq!(reverse.sample(reverse.start).0, middle);
+        let (end, done) = reverse.sample(reverse.start + Duration::from_millis(300));
+        assert!(done);
+        assert_eq!(end, first.from);
     }
 }

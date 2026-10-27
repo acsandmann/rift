@@ -10,6 +10,7 @@ use crate::actor::app::WindowId;
 use crate::actor::menu_bar;
 use crate::actor::reactor::{Event, Reactor, Sender};
 use crate::common::collections::{HashMap, HashSet};
+use crate::layout_engine::systems::LayoutSystem;
 use crate::model::server::{
     RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData, protocol_rect,
 };
@@ -513,8 +514,26 @@ impl Reactor {
                 .layout_mode()
                 .to_string();
 
+            let workspace = &self.layout_manager.layout_engine.workspaces()[*workspace_id];
+            let belongs = |id: &WindowId| windows.iter().any(|w| w.id == *id);
+            let focused_window = is_active
+                .then(|| self.main_window())
+                .flatten()
+                .filter(belongs)
+                .or_else(|| workspace.last_focused().filter(belongs))
+                .or_else(|| {
+                    workspace.active_layout().and_then(|layout| {
+                        workspace.layout_system.selected_window(layout).filter(belongs)
+                    })
+                })
+                .or_else(|| windows.first().map(|w| w.id));
             workspaces.push(RuntimeWorkspaceData {
                 workspace_id: *workspace_id,
+                focused_window,
+                display_frame: self
+                    .space_state
+                    .screen_by_space(space)
+                    .map_or(CGRect::ZERO, |s| s.frame),
                 space,
                 id: format!("{:?}", workspace_id),
                 name: workspace_name.to_string(),
@@ -684,7 +703,23 @@ impl Reactor {
     }
 
     pub fn query_window_info(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
-        self.create_window_data(window_id)
+        let mut data = self.create_window_data(window_id)?;
+        if let Some(workspace) = self.state.windows.workspace_for_window(window_id) {
+            let engine = &self.layout_manager.layout_engine;
+            let ws = &engine.workspaces()[workspace];
+            if let crate::layout_engine::systems::LayoutSystemKind::Scrolling(system) =
+                &ws.layout_system
+                && let Some(layout) = engine.workspaces().active_layout(ws.space, workspace)
+                && let Some((camera, frames)) = system.presentation(layout)
+                && let Some((_, frame, fixed)) =
+                    frames.into_iter().find(|(id, _, _)| *id == window_id)
+            {
+                let scale =
+                    self.space_state.screen_by_space(ws.space).map_or(1., |s| s.backing_scale);
+                data.layout_frame = Some(camera.target_frame(frame, fixed, scale));
+            }
+        }
+        Some(data)
     }
 
     pub fn query_applications(&self) -> Vec<ApplicationData> {

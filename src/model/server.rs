@@ -16,6 +16,9 @@ use crate::sys::window_server::WindowServerId;
 #[derive(Debug, Clone)]
 pub struct RuntimeWorkspaceData {
     pub workspace_id: crate::model::VirtualWorkspaceId,
+    /// Remembered focus within this workspace, including inactive workspaces.
+    pub focused_window: Option<WindowId>,
+    pub display_frame: objc2_core_foundation::CGRect,
     pub space: SpaceId,
     pub id: String,
     pub index: usize,

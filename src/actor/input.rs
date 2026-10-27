@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use objc2_app_kit::{NSEvent, NSEventType};
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
@@ -55,7 +56,7 @@ pub enum Request {
     /// Complete gesture routes for visible spaces with Rift management enabled.
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
     SetLowPowerMode(bool),
-    SetMissionControlActive(bool),
+    SetMissionControlActive(bool, Vec<CGRect>),
     ReleaseMissionControl,
 }
 
@@ -65,6 +66,8 @@ pub struct Input {
     state: RefCell<State>,
     event_mask: Cell<CGEventMask>,
     mission_control_active: Cell<bool>,
+    mission_control_bounds: RefCell<Vec<CGRect>>,
+    overview_buttons: Cell<u8>,
     mouse_move_last_timestamp: Cell<Option<u64>>,
     mouse_move_min_interval_ticks: Cell<u64>,
     mouse_location: Cell<CGPoint>,
@@ -205,7 +208,7 @@ impl Input {
             mask |= (1u64 << CGEventType::LeftMouseDragged.0)
                 | (1u64 << CGEventType::RightMouseDragged.0);
         }
-        if state.gesture_settings.enabled() {
+        if state.gesture_settings.enabled() || self.mission_control_active.get() {
             mask |= gesture::EVENT_MASK;
         }
         mask
@@ -317,6 +320,8 @@ impl Input {
             state: RefCell::new(state),
             event_mask: Cell::new(0),
             mission_control_active: Cell::new(false),
+            mission_control_bounds: RefCell::new(Vec::new()),
+            overview_buttons: Cell::new(0),
             mouse_move_last_timestamp: Cell::new(None),
             mouse_move_min_interval_ticks: Cell::new(mouse_move_min_interval_ticks),
             mouse_location: Cell::new(CGPoint::new(0.0, 0.0)),
@@ -425,7 +430,7 @@ impl Input {
             Request::SetEventProcessing(enabled) => {
                 *enabled != self.state.borrow().event_processing_enabled
             }
-            Request::SetMissionControlActive(active) => {
+            Request::SetMissionControlActive(active, _) => {
                 *active != self.mission_control_active.get()
             }
             Request::ConfigUpdated(_) | Request::ReleaseMissionControl => true,
@@ -442,9 +447,18 @@ impl Input {
             Request::ReleaseMissionControl => {
                 self.mission_control_tx.borrow_mut().take();
                 self.mission_control_active.set(false);
+                self.mission_control_bounds.borrow_mut().clear();
+                self.overview_buttons.set(0);
                 should_rebuild_mask = true;
             }
-            Request::SetMissionControlActive(active) => {
+            Request::SetMissionControlActive(active, bounds) => {
+                if *self.mission_control_bounds.borrow() != bounds {
+                    self.overview_buttons.set(0);
+                }
+                *self.mission_control_bounds.borrow_mut() = bounds;
+                if !active {
+                    self.overview_buttons.set(0);
+                }
                 self.mission_control_active.set(active);
                 self.reset_mouse_move_sample_gate();
                 if active && state.hide_count > 0 {
@@ -659,15 +673,93 @@ impl Input {
         self.refresh_disable_hotkey_state(&mut self.state.borrow_mut());
     }
 
+    fn overview_contains(&self, point: CGPoint) -> bool {
+        self.mission_control_bounds.borrow().iter().any(|r| {
+            point.x >= r.min().x
+                && point.y >= r.min().y
+                && point.x < r.max().x
+                && point.y < r.max().y
+        })
+    }
+
     fn on_event(
         &self,
         event_type: CGEventType,
         event: &CGEvent,
         proxy: Option<CGEventTapProxy>,
     ) -> bool {
+        if self.mission_control_active.get()
+            && matches!(
+                event_type,
+                CGEventType::LeftMouseDown
+                    | CGEventType::LeftMouseUp
+                    | CGEventType::LeftMouseDragged
+                    | CGEventType::RightMouseDown
+                    | CGEventType::RightMouseUp
+                    | CGEventType::RightMouseDragged
+                    | CGEventType::MouseMoved
+                    | CGEventType::ScrollWheel
+            )
+        {
+            let point = CGEvent::location(Some(event));
+            let inside = self.overview_contains(point);
+            let (down, up) = match event_type {
+                CGEventType::LeftMouseDown => (1, 0),
+                CGEventType::RightMouseDown => (2, 0),
+                CGEventType::LeftMouseUp => (0, 1),
+                CGEventType::RightMouseUp => (0, 2),
+                _ => (0, 0),
+            };
+            let captured = self.overview_buttons.get() != 0
+                && matches!(
+                    event_type,
+                    CGEventType::LeftMouseDragged
+                        | CGEventType::RightMouseDragged
+                        | CGEventType::LeftMouseUp
+                        | CGEventType::RightMouseUp
+                );
+            if !inside && !captured {
+                if down != 0 {
+                    self.send_overview(super::mission_control::Event::Dismiss);
+                } else if event_type == CGEventType::MouseMoved {
+                    self.send_overview(super::mission_control::Event::Input(
+                        super::mission_control::Input::Move(point),
+                    ));
+                }
+                return true;
+            }
+            self.overview_buttons.set((self.overview_buttons.get() | down) & !up);
+        }
         match event_type {
             ty if ty.0 == gesture::CGS_EVENT_GESTURE || ty.0 == gesture::CGS_EVENT_DOCK_CONTROL => {
-                self.native_gesture_forward(ty, event, proxy)
+                if self.mission_control_active.get() {
+                    if !self.overview_contains(CGEvent::location(Some(event))) {
+                        return true;
+                    }
+                    if ty.0 == gesture::CGS_EVENT_GESTURE
+                        && let Some(native) = NSEvent::eventWithCGEvent(event)
+                    {
+                        let point = CGEvent::location(Some(event));
+                        let input = match native.r#type() {
+                            NSEventType::Magnify => {
+                                let factor = 1. + native.magnification();
+                                (factor.is_finite() && factor > 0.).then_some(
+                                    super::mission_control::Input::Magnify { point, factor },
+                                )
+                            }
+                            NSEventType::SmartMagnify => {
+                                Some(super::mission_control::Input::Click(point))
+                            }
+                            _ => None,
+                        };
+                        if let Some(input) = input {
+                            self.send_overview(super::mission_control::Event::Input(input));
+                        }
+                    }
+                    false
+                } else {
+                    self.native_gesture_forward(ty, event, proxy)
+                }
             }
             CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged => {
                 if event::is_rift_synthetic_event(event) {
@@ -682,8 +774,26 @@ impl Input {
                         keycode,
                         CGEvent::flags(Some(event)),
                     ) {
-                        self.send_overview(super::mission_control::Event::Input(input));
-                        return false;
+                        let configured_zoom =
+                            matches!(input, super::mission_control::Input::ZoomStep(_))
+                                && key_code_from_event(event).is_some_and(|key_code| {
+                                    let state = self.state.borrow();
+                                    let hotkey = Hotkey::new(
+                                        modifiers_from_flags_with_keys(
+                                            CGEvent::flags(Some(event)),
+                                            &state.pressed_keys,
+                                        ),
+                                        key_code,
+                                    );
+                                    self.hotkeys
+                                        .borrow()
+                                        .get(self.active_mode.get())
+                                        .is_some_and(|bindings| bindings.contains_key(&hotkey))
+                                });
+                        if !configured_zoom {
+                            self.send_overview(super::mission_control::Event::Input(input));
+                            return false;
+                        }
                     }
                 }
                 self.handle_keyboard_event(event_type, event, &mut self.state.borrow_mut())
@@ -706,18 +816,22 @@ impl Input {
                         16.0,
                     )
                 };
-                self.send_overview(super::mission_control::Event::Input(
-                    super::mission_control::Input::Scroll {
-                        point: CGEvent::location(Some(event)),
-                        delta: overview_scroll_delta(
-                            CGPoint::new(
-                                CGEvent::integer_value_field(Some(event), x) as f64 * scale,
-                                CGEvent::integer_value_field(Some(event), y) as f64 * scale,
-                            ),
-                            CGEvent::flags(Some(event)),
-                        ),
-                    },
-                ));
+                let flags = CGEvent::flags(Some(event));
+                let point = CGEvent::location(Some(event));
+                let delta = overview_scroll_delta(
+                    CGPoint::new(
+                        CGEvent::double_value_field(Some(event), x) * scale,
+                        CGEvent::double_value_field(Some(event), y) * scale,
+                    ),
+                    flags,
+                );
+                let input =
+                    if flags.intersects(CGEventFlags::MaskCommand | CGEventFlags::MaskControl) {
+                        super::mission_control::Input::Zoom { point, delta }
+                    } else {
+                        super::mission_control::Input::Scroll { point, delta }
+                    };
+                self.send_overview(super::mission_control::Event::Input(input));
                 false
             }
             CGEventType::ScrollWheel => self.native_gesture_forward(event_type, event, proxy),
@@ -734,16 +848,7 @@ impl Input {
                 }
                 if self.mission_control_active.get() {
                     self.send_overview(super::mission_control::Event::Input(
-                        super::mission_control::Input::Scroll {
-                            point: CGEvent::location(Some(event)),
-                            delta: CGPoint::new(
-                                CGEvent::integer_value_field(
-                                    Some(event),
-                                    CGEventField::MouseEventDeltaX,
-                                ) as f64,
-                                0.0,
-                            ),
-                        },
+                        super::mission_control::Input::Pan(CGEvent::location(Some(event))),
                     ));
                     CGEvent::set_type(Some(event), CGEventType::MouseMoved);
                     return true;
@@ -777,6 +882,9 @@ impl Input {
                     return false;
                 }
                 if self.mission_control_active.get() {
+                    self.send_overview(super::mission_control::Event::Input(
+                        super::mission_control::Input::BeginPan(CGEvent::location(Some(event))),
+                    ));
                     return false;
                 }
                 let button = if event_type == CGEventType::LeftMouseDown {
@@ -814,6 +922,9 @@ impl Input {
                     return false;
                 }
                 if self.mission_control_active.get() {
+                    self.send_overview(super::mission_control::Event::Input(
+                        super::mission_control::Input::EndPan(CGEvent::location(Some(event))),
+                    ));
                     return false;
                 }
                 let button = if event_type == CGEventType::LeftMouseUp {
@@ -1698,6 +1809,9 @@ mod tests {
             CGEventType::RightMouseDragged,
             CGEventType::RightMouseUp,
         ] {
+            if ty != CGEventType::RightMouseDown {
+                CGEvent::set_location(Some(&event), CGPoint::new(1200., 40.));
+            }
             assert_eq!(
                 input.on_event(ty, &event, None),
                 ty == CGEventType::RightMouseDragged
@@ -1706,16 +1820,22 @@ mod tests {
                 assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::MouseMoved);
             }
         }
-        let (
-            _,
-            super::super::mission_control::Event::Input(
-                super::super::mission_control::Input::Scroll { delta, .. },
-            ),
-        ) = rx.try_recv().unwrap()
-        else {
-            panic!("horizontal Overview pan")
-        };
-        assert_eq!(delta, CGPoint::new(25.0, 0.0));
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        for expected in [0, 1, 2] {
+            let OverviewEvent::Input(input) = rx.try_recv().unwrap().1 else {
+                panic!("pan input");
+            };
+            let point = match (expected, input) {
+                (0, OverviewInput::BeginPan(p))
+                | (1, OverviewInput::Pan(p))
+                | (2, OverviewInput::EndPan(p)) => p,
+                other => panic!("pan lost its native phase: {other:?}"),
+            };
+            // Native pointer position, rather than the unrelated raw device delta.
+            assert_eq!(point, CGPoint::new(if expected == 0 { 30. } else { 1200. }, 40.));
+        }
+        // Releasing outside the host ends capture; subsequent scrolling belongs to that desktop.
+        assert!(input.on_event(CGEventType::ScrollWheel, &event, None));
         assert!(rx.try_recv().is_err());
         assert!(native_rx.try_recv().is_err());
         assert!(wm_rx.try_recv().is_err());
@@ -1779,6 +1899,14 @@ mod tests {
         };
         assert_eq!(point, CGPoint::new(30.0, 40.0));
         assert_eq!(delta, CGPoint::new(12.0, -60.0));
+        for flags in [CGEventFlags::MaskCommand, CGEventFlags::MaskControl] {
+            CGEvent::set_flags(Some(&event), flags);
+            assert!(!input.on_event(CGEventType::ScrollWheel, &event, None));
+            assert!(
+                matches!(rx.try_recv().unwrap().1,super::super::mission_control::Event::Input(super::super::mission_control::Input::Zoom{point,delta}) if point==CGPoint::new(30.,40.) && delta==CGPoint::new(12.,-60.))
+            );
+        }
+        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         input.mission_control_active.set(false);
         assert!(input.on_event(CGEventType::ScrollWheel, &event, None));
         assert!(rx.try_recv().is_err());
@@ -1811,18 +1939,19 @@ mod tests {
         config.settings.focus_follows_mouse = false;
         config.settings.focus_follows_mouse_disable_hotkey = None;
         config.settings.mouse_hides_on_focus = false;
-        (
-            Input::new(
-                config,
-                events_tx,
-                requests_rx,
-                wm_tx,
-                Some(mc_tx),
-                Arc::default(),
-            ),
-            wm_rx,
-            events_rx,
-        )
+        let input = Input::new(
+            config,
+            events_tx,
+            requests_rx,
+            wm_tx,
+            Some(mc_tx),
+            Arc::default(),
+        );
+        input.mission_control_bounds.borrow_mut().push(CGRect::new(
+            CGPoint::ZERO,
+            objc2_core_foundation::CGSize::new(1000., 1000.),
+        ));
+        (input, wm_rx, events_rx)
     }
 
     #[test]

@@ -1,4 +1,6 @@
-use objc2_core_foundation::CGPoint;
+use std::time::Instant;
+
+use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGEventFlags, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
 };
@@ -6,7 +8,6 @@ use objc2_foundation::MainThreadMarker;
 
 use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
-use crate::sys::timer::Timer;
 use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewRenderers};
 
 #[derive(Debug)]
@@ -15,7 +16,9 @@ pub enum Event {
     ShowAll,
     Dismiss,
     RefreshCurrentWorkspace,
-    Configure(MissionControlSettings),
+    DropFinished(super::app::WindowId, bool),
+    ActivationTarget(super::app::WindowId, Instant, Option<CGRect>),
+    Configure(MissionControlSettings, bool),
     Input(Input),
 }
 
@@ -28,17 +31,31 @@ pub enum Input {
     Up,
     Down,
     Activate,
+    ZoomStep(i8),
     Cycle(bool),
     Click(CGPoint),
     PointerDown(CGPoint),
     PointerDrag(CGPoint),
     PointerUp(CGPoint),
     Move(CGPoint),
+    BeginPan(CGPoint),
+    Pan(CGPoint),
+    EndPan(CGPoint),
     Scroll { point: CGPoint, delta: CGPoint },
+    Zoom { point: CGPoint, delta: CGPoint },
+    Magnify { point: CGPoint, factor: f64 },
 }
 
 impl Input {
     pub(crate) fn from_keycode(keycode: u16, flags: CGEventFlags) -> Option<Self> {
+        if !flags.intersects(CGEventFlags::MaskControl | CGEventFlags::MaskAlternate) {
+            match keycode {
+                24 => return Some(Self::ZoomStep(1)),
+                27 => return Some(Self::ZoomStep(-1)),
+                29 => return Some(Self::ZoomStep(0)),
+                _ => {}
+            }
+        }
         if flags.intersects(
             CGEventFlags::MaskCommand | CGEventFlags::MaskControl | CGEventFlags::MaskAlternate,
         ) {
@@ -63,8 +80,10 @@ impl Input {
 /// Collapse queued motion without crossing clicks, direction changes, or display targets.
 fn merge_motion(event: &mut Event, next: Event) -> Result<(), Event> {
     match (event, next) {
+        (Event::RefreshCurrentWorkspace, Event::RefreshCurrentWorkspace) => Ok(()),
         (Event::Input(Input::Move(point)), Event::Input(Input::Move(next)))
-        | (Event::Input(Input::PointerDrag(point)), Event::Input(Input::PointerDrag(next))) => {
+        | (Event::Input(Input::PointerDrag(point)), Event::Input(Input::PointerDrag(next)))
+        | (Event::Input(Input::Pan(point)), Event::Input(Input::Pan(next))) => {
             *point = next;
             Ok(())
         }
@@ -83,6 +102,31 @@ fn merge_motion(event: &mut Event, next: Event) -> Result<(), Event> {
             delta.y += next_delta.y;
             Ok(())
         }
+        (
+            Event::Input(Input::Zoom { point, delta }),
+            Event::Input(Input::Zoom {
+                point: next_point,
+                delta: next_delta,
+            }),
+        ) if *point == next_point
+            && (delta.y.abs() >= delta.x.abs()) == (next_delta.y.abs() >= next_delta.x.abs())
+            && delta.x * next_delta.x >= 0.0
+            && delta.y * next_delta.y >= 0.0 =>
+        {
+            delta.x += next_delta.x;
+            delta.y += next_delta.y;
+            Ok(())
+        }
+        (
+            Event::Input(Input::Magnify { point, factor }),
+            Event::Input(Input::Magnify {
+                point: next_point,
+                factor: next_factor,
+            }),
+        ) if *point == next_point && (*factor - 1.) * (next_factor - 1.) >= 0. => {
+            *factor *= next_factor;
+            Ok(())
+        }
         (_, next) => Err(next),
     }
 }
@@ -94,17 +138,9 @@ pub fn channel_if_enabled(settings: &MissionControlSettings) -> Option<(Sender, 
     settings.enabled.then(actor::channel)
 }
 
-/// Keep one run-loop timer across input events; dropping it invalidates the native timer.
-fn update_edge_timer(timer: &mut Option<Timer>, active: bool) {
-    if active {
-        timer.get_or_insert_with(|| Timer::sleep(std::time::Duration::from_millis(150)));
-    } else {
-        *timer = None;
-    }
-}
-
 pub struct MissionControlActor {
     settings: MissionControlSettings,
+    shared: bool,
     rx: Receiver,
     tx: Sender,
     cache: Option<PreviewRenderers>,
@@ -117,6 +153,7 @@ pub struct MissionControlActor {
 impl MissionControlActor {
     pub fn new(
         settings: MissionControlSettings,
+        shared: bool,
         rx: Receiver,
         tx: Sender,
         reactor: reactor::ReactorHandle,
@@ -128,6 +165,7 @@ impl MissionControlActor {
         }
         Self {
             settings,
+            shared,
             rx,
             tx,
             cache: None,
@@ -139,21 +177,14 @@ impl MissionControlActor {
     }
 
     pub async fn run(mut self) {
-        let mut edge_timer = None;
         let mut pending_event = None;
         loop {
-            let edge_active = self.session.as_ref().is_some_and(OverviewSession::edge_active);
-            update_edge_timer(&mut edge_timer, edge_active);
             tokio::select! {
-                _ = async { if let Some(timer) = &mut edge_timer { timer.await } else { std::future::pending().await } } => {
-                    edge_timer = None;
-                    if let Some(session) = &mut self.session { session.edge_tick(); }
-                }
                 event = async {
                     if pending_event.is_some() { pending_event.take() } else { self.rx.recv().await }
                 } => {
                     let Some((span, mut event)) = event else { break };
-                    if matches!(event, Event::Input(Input::Scroll { .. } | Input::Move(_) | Input::PointerDrag(_))) {
+                    if matches!(event, Event::RefreshCurrentWorkspace | Event::Input(Input::Scroll { .. } | Input::Zoom { .. } | Input::Magnify { .. } | Input::Move(_) | Input::PointerDrag(_) | Input::Pan(_))) {
                         for _ in 0..32 {
                             let Ok((next_span, next)) = self.rx.try_recv() else { break };
                             if let Err(next) = merge_motion(&mut event, next) {
@@ -176,19 +207,48 @@ impl MissionControlActor {
             session.retain_previews(&mut self.cache);
             drop(session);
         }
-        self.input_tx.send(super::input::Request::SetMissionControlActive(false));
+        self.input_tx
+            .send(super::input::Request::SetMissionControlActive(false, Vec::new()));
     }
 
     fn handle(&mut self, event: Event) {
+        if !matches!(event, Event::PumpPreviews | Event::Input(Input::Move(_))) {
+            tracing::debug!(?event, "Overview event");
+        }
         match event {
             Event::PumpPreviews => {
                 if let Some(session) = self.session.as_mut() {
                     session.pump_previews();
+                    if session.handoff_ready() {
+                        self.close();
+                    }
+                }
+            }
+            Event::ActivationTarget(window, stamp, frame) => {
+                if let Some(session) = &mut self.session {
+                    session.activation_target(window, stamp, frame);
+                }
+            }
+            Event::DropFinished(window, changed) => {
+                tracing::debug!(?window, changed, "Overview drop completed");
+                if let Some(session) = &mut self.session {
+                    session.refresh(&self.reactor, Some(window));
                 }
             }
             Event::ShowAll => {
+                tracing::debug!(
+                    open = self.session.is_some(),
+                    enabled = self.settings.enabled,
+                    previews = self.settings.window_previews,
+                    permission = CGPreflightScreenCaptureAccess(),
+                    "Overview toggle"
+                );
                 if self.session.is_some() {
-                    self.close();
+                    if self.session.as_ref().is_some_and(OverviewSession::needs_handoff) {
+                        self.session.as_mut().unwrap().toggle();
+                    } else {
+                        self.close();
+                    }
                 } else if self.settings.enabled {
                     if self.settings.window_previews && !CGPreflightScreenCaptureAccess() {
                         CGRequestScreenCaptureAccess();
@@ -201,6 +261,7 @@ impl MissionControlActor {
                         &self.reactor,
                         self.mtm,
                         &self.settings,
+                        self.shared,
                         &mut self.cache,
                     );
                     if let Some(session) = &mut self.session {
@@ -212,56 +273,60 @@ impl MissionControlActor {
                     }
                     self.input_tx.send(super::input::Request::SetMissionControlActive(
                         self.session.is_some(),
+                        self.session.as_ref().map_or_else(Vec::new, OverviewSession::input_bounds),
                     ));
                 }
             }
-            Event::Dismiss => self.close(),
+            Event::Dismiss => self.handle(Event::Input(Input::Dismiss)),
             Event::RefreshCurrentWorkspace => {
                 if let Some(session) = &mut self.session {
                     session.refresh(&self.reactor, None);
+                    self.input_tx.send(super::input::Request::SetMissionControlActive(
+                        !session.is_empty(),
+                        session.input_bounds(),
+                    ));
                 }
                 if self.session.as_ref().is_some_and(OverviewSession::is_empty) {
                     self.close();
                 }
             }
-            Event::Configure(settings) => {
+            Event::Configure(settings, shared) => {
                 self.close();
                 if !settings.enabled || !settings.window_previews {
                     self.cache = None;
                 }
                 self.settings = settings;
+                self.shared = shared;
             }
-            Event::Input(Input::Dismiss) => self.close(),
+
             Event::Input(input) => {
                 let action = self.session.as_mut().and_then(|session| session.input(input));
                 if let Some(intent) = self.session.as_mut().and_then(OverviewSession::take_drop) {
                     let window = intent.window;
                     let (reply, rx) = std::sync::mpsc::sync_channel(1);
                     self.reactor.send(reactor::Event::OverviewDrop { intent, reply });
-                    let changed = rx.recv().unwrap_or(false);
-                    if let Some(session) = &mut self.session {
-                        session.refresh(&self.reactor, changed.then_some(window));
-                    }
+                    let tx = self.tx.clone();
+                    // Reactor application remains asynchronous; never wait on the input owner.
+                    std::thread::spawn(move || {
+                        let changed = rx.recv().unwrap_or(false);
+                        tx.send(Event::DropFinished(window, changed));
+                    });
                 }
                 if matches!(action, Some(OverviewAction::Dismiss)) {
                     self.close();
-                } else if let Some(OverviewAction::Activate {
-                    display,
-                    workspace,
-                    selection,
-                    sys_id,
-                }) = action
+                } else if let Some(OverviewAction::Activate { display, workspace, selection }) =
+                    action
                 {
-                    self.close();
-                    self.reactor
-                        .send(reactor::Event::OverviewSelectWorkspace { display, workspace });
-                    if let Some(window_id) = selection.window {
-                        self.reactor.send(reactor::Event::Command(reactor::Command::Reactor(
-                            reactor::ReactorCommand::FocusWindow {
-                                window_id: window_id.into(),
-                                window_server_id: sys_id.map(Into::into),
-                            },
-                        )));
+                    let transition =
+                        self.session.as_ref().and_then(OverviewSession::activation_stamp);
+                    self.reactor.send(reactor::Event::OverviewSelectWorkspace {
+                        display,
+                        workspace,
+                        window: selection.window,
+                        transition,
+                    });
+                    if transition.is_none() {
+                        self.close();
                     }
                 }
             }
@@ -272,39 +337,6 @@ impl MissionControlActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn edge_timer_runs_without_tokio_and_input_does_not_restart_it() {
-        // Ordinary test + Rift executor: no Tokio runtime is created or entered.
-        crate::sys::executor::Executor::run(async {
-            let mut timer = None;
-            let mut input_events = 0;
-            loop {
-                update_edge_timer(&mut timer, true);
-                tokio::select! {
-                    _ = timer.as_mut().unwrap() => break,
-                    _ = Timer::sleep(std::time::Duration::from_millis(10)) => {
-                        input_events += 1;
-                        assert!(input_events < 40, "input must not postpone the edge tick");
-                    }
-                }
-            }
-            assert!(input_events > 0);
-            update_edge_timer(&mut timer, false);
-            assert!(timer.is_none());
-        });
-    }
-
-    #[test]
-    fn inactive_edge_scrolling_has_no_timer() {
-        let mut timer = None;
-        update_edge_timer(&mut timer, false);
-        assert!(timer.is_none());
-        update_edge_timer(&mut timer, true);
-        assert!(timer.is_some());
-        update_edge_timer(&mut timer, false);
-        assert!(timer.is_none());
-    }
 
     #[test]
     fn disabled_settings_do_not_create_a_channel() {
@@ -318,6 +350,29 @@ mod tests {
 
     #[test]
     fn queued_scroll_preserves_distance_and_input_boundaries() {
+        let mut refresh = Event::RefreshCurrentWorkspace;
+        assert!(merge_motion(&mut refresh, Event::RefreshCurrentWorkspace).is_ok());
+        assert!(merge_motion(&mut refresh, Event::Dismiss).is_err());
+        let pivot = CGPoint::new(120., 90.);
+        let mut pinch = Event::Input(Input::Magnify { point: pivot, factor: 1.1 });
+        assert!(
+            merge_motion(
+                &mut pinch,
+                Event::Input(Input::Magnify { point: pivot, factor: 1.2 })
+            )
+            .is_ok()
+        );
+        assert!(
+            matches!(pinch, Event::Input(Input::Magnify { factor, .. }) if (factor - 1.32).abs() < 1e-12)
+        );
+        assert!(
+            merge_motion(
+                &mut pinch,
+                Event::Input(Input::Magnify { point: pivot, factor: 0.9 })
+            )
+            .is_err()
+        );
+
         let point = CGPoint::new(40.0, 50.0);
         let scroll = |y| {
             Event::Input(Input::Scroll {

@@ -375,7 +375,18 @@ impl LayoutManager {
             return Ok(false);
         }
         let layout_result = Self::calculate_layout(reactor, space_scope);
-        Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
+        Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch, false)
+    }
+
+    pub fn update_layout_instant(
+        reactor: &mut Reactor,
+        space_scope: Option<SpaceId>,
+    ) -> Result<bool, crate::model::reactor::ReactorError> {
+        if reactor.refreshes_blocked() {
+            return Ok(false);
+        }
+        let layout = Self::calculate_layout(reactor, space_scope);
+        Self::apply_layout(reactor, layout, false, false, true)
     }
 
     fn calculate_layout(reactor: &mut Reactor, space_scope: Option<SpaceId>) -> LayoutResult {
@@ -447,6 +458,7 @@ impl LayoutManager {
         layout_result: LayoutResult,
         is_resize: bool,
         is_workspace_switch: bool,
+        instant: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
@@ -543,15 +555,20 @@ impl LayoutManager {
                 }
             }
 
-            if is_workspace_switch {
+            if instant {
+                any_frame_changed |= AnimationManager::animate_layout(
+                    reactor, space, &layout, is_resize, skip_wid, false,
+                );
+            } else if is_workspace_switch {
                 any_frame_changed |=
                     AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
                 any_frame_changed |=
                     AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
             } else {
-                any_frame_changed |=
-                    AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
+                any_frame_changed |= AnimationManager::animate_layout(
+                    reactor, space, &layout, is_resize, skip_wid, true,
+                );
             }
             if let Some(window) = reactor.workspace_switch_manager.pending_focus_mouse_warp
                 && reactor.workspace_switch_manager.pending_display_warp.is_none()

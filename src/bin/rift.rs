@@ -362,6 +362,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let mission_control = mc_channel.map(|(tx, rx)| {
         MissionControlActor::new(
             config.settings.ui.mission_control.clone(),
+            config.virtual_workspaces.mode == rift_wm::common::config::WorkspaceMode::Global,
             rx,
             tx,
             reactor.clone(),
