@@ -7,7 +7,7 @@ use objc2_foundation::MainThreadMarker;
 use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
 use crate::sys::timer::Timer;
-use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewCache};
+use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewRenderers};
 
 #[derive(Debug)]
 pub enum Event {
@@ -107,10 +107,9 @@ pub struct MissionControlActor {
     settings: MissionControlSettings,
     rx: Receiver,
     tx: Sender,
-    cache: Option<PreviewCache>,
+    cache: Option<PreviewRenderers>,
     reactor: reactor::ReactorHandle,
     session: Option<OverviewSession>,
-    generation: u64,
     mtm: MainThreadMarker,
     input_tx: super::input::Sender,
 }
@@ -134,7 +133,6 @@ impl MissionControlActor {
             cache: None,
             reactor,
             session: None,
-            generation: 0,
             mtm,
             input_tx,
         }
@@ -149,7 +147,7 @@ impl MissionControlActor {
             tokio::select! {
                 _ = async { if let Some(timer) = &mut edge_timer { timer.await } else { std::future::pending().await } } => {
                     edge_timer = None;
-                    if let Some(session) = &mut self.session { session.edge_tick(self.cache.as_ref()); }
+                    if let Some(session) = &mut self.session { session.edge_tick(); }
                 }
                 event = async {
                     if pending_event.is_some() { pending_event.take() } else { self.rx.recv().await }
@@ -168,16 +166,6 @@ impl MissionControlActor {
                     self.handle(event);
                     if !self.settings.enabled { break; }
                 }
-                result = async {
-                    if let Some(previews) = self.session.as_mut().and_then(|s| s.previews.as_mut()) {
-                        previews.rx.recv().await
-                    } else { std::future::pending().await }
-                } => {
-                    if let Some((_, result)) = result {
-                        let current = result.window_id().and_then(|id| self.reactor.query_window_info(id));
-                        if let Some(session) = &mut self.session { session.preview_ready(result, current.as_ref(), &mut self.cache); }
-                    }
-                }
             }
         }
         self.close();
@@ -187,17 +175,6 @@ impl MissionControlActor {
         if let Some(mut session) = self.session.take() {
             session.retain_previews(&mut self.cache);
             drop(session);
-            if let Some(cache) = &mut self.cache {
-                cache.close();
-            }
-            let (cache_preview_count, cache_preview_bytes) =
-                self.cache.as_ref().map(PreviewCache::stats).unwrap_or_default();
-            tracing::debug!(
-                cache_preview_count,
-                cache_preview_bytes,
-                outstanding_captures = crate::ui::mission_control::outstanding_preview_captures(),
-                "Overview closed"
-            );
         }
         self.input_tx.send(super::input::Request::SetMissionControlActive(false));
     }
@@ -206,7 +183,7 @@ impl MissionControlActor {
         match event {
             Event::PumpPreviews => {
                 if let Some(session) = self.session.as_mut() {
-                    session.pump_previews(self.generation, self.cache.as_ref());
+                    session.pump_previews();
                 }
             }
             Event::ShowAll => {
@@ -217,7 +194,6 @@ impl MissionControlActor {
                         CGRequestScreenCaptureAccess();
                         return;
                     }
-                    self.generation = self.generation.wrapping_add(1);
                     if self.settings.window_previews {
                         let _ = cgs::PreviewCompositor::prepare();
                     }
@@ -225,12 +201,10 @@ impl MissionControlActor {
                         &self.reactor,
                         self.mtm,
                         &self.settings,
-                        self.generation,
                         &mut self.cache,
                     );
                     if let Some(session) = &mut self.session {
                         session.start_previews(
-                            self.generation,
                             self.settings.window_previews,
                             self.tx.clone(),
                             self.cache.as_mut(),
@@ -244,7 +218,7 @@ impl MissionControlActor {
             Event::Dismiss => self.close(),
             Event::RefreshCurrentWorkspace => {
                 if let Some(session) = &mut self.session {
-                    session.refresh(&self.reactor, self.cache.as_ref(), None);
+                    session.refresh(&self.reactor, None);
                 }
                 if self.session.as_ref().is_some_and(OverviewSession::is_empty) {
                     self.close();
@@ -259,21 +233,14 @@ impl MissionControlActor {
             }
             Event::Input(Input::Dismiss) => self.close(),
             Event::Input(input) => {
-                let action = self
-                    .session
-                    .as_mut()
-                    .and_then(|session| session.input(input, self.cache.as_ref()));
+                let action = self.session.as_mut().and_then(|session| session.input(input));
                 if let Some(intent) = self.session.as_mut().and_then(OverviewSession::take_drop) {
                     let window = intent.window;
                     let (reply, rx) = std::sync::mpsc::sync_channel(1);
                     self.reactor.send(reactor::Event::OverviewDrop { intent, reply });
                     let changed = rx.recv().unwrap_or(false);
                     if let Some(session) = &mut self.session {
-                        session.refresh(
-                            &self.reactor,
-                            self.cache.as_ref(),
-                            changed.then_some(window),
-                        );
+                        session.refresh(&self.reactor, changed.then_some(window));
                     }
                 }
                 if matches!(action, Some(OverviewAction::Dismiss)) {
