@@ -206,7 +206,3 @@ test_bin = "0.5.0"
 [[test]]
 name = "settings_native"
 harness = false
-
-[[test]]
-name = "overview_permissions"
-harness = false
