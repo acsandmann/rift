@@ -285,6 +285,11 @@ impl StackLine {
             group.ordered_anchor.set(None);
             return;
         }
+        if group.info.tabs.len() <= 1 {
+            group.bar.hide_animated();
+            group.ordered_anchor.set(None);
+            return;
+        }
         let settings = &self.config.settings.ui.stack_line;
         group.bar.set_select_on_hover(settings.hover.selects_on_hover());
         let edge = match (

@@ -2886,11 +2886,10 @@ impl Layout {
         }
 
         if children.len() == 1 {
-            let reserve = stack_line.on_axis(kind, horizontal);
             return (
-                mins[0] + reserve,
-                fixed_parts[0].map(|value| value + reserve),
-                max_parts[0].map(|value| value + reserve),
+                mins[0],
+                fixed_parts[0],
+                max_parts[0],
                 grows.first().copied().unwrap_or(true),
             );
         }
@@ -3258,7 +3257,11 @@ fn stack_layout_result(
     stack_line: crate::common::config::StackLineReserve,
 ) -> StackLayoutResult {
     StackLayoutResult::new(
-        stack_line.inset(rect, is_horizontal),
+        if child_count > 1 {
+            stack_line.inset(rect, is_horizontal)
+        } else {
+            rect
+        },
         child_count,
         stack_offset,
         is_horizontal,
@@ -5237,7 +5240,7 @@ mod tests {
     }
 
     #[test]
-    fn single_child_stack_reserves_stack_line_on_cross_axis() {
+    fn single_child_stack_does_not_reserve_stack_line() {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
         let root = system.root(layout);
@@ -5286,11 +5289,11 @@ mod tests {
         let sibling_frame = frames.get(&sibling).copied().expect("sibling frame");
         assert!(
             stacked_frame.size.height >= 299.0,
-            "single-child stacks should reserve stack-line thickness before satisfying fixed heights"
+            "the fixed window should retain its requested height"
         );
         assert!(
-            sibling_frame.size.height <= 281.0,
-            "the sibling split should not steal the stack-line reservation from a one-window stack"
+            sibling_frame.size.height >= 299.0,
+            "a one-window stack should leave no space for a hidden bar"
         );
     }
 
