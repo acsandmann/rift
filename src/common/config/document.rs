@@ -323,6 +323,23 @@ fn patch(
                 } else {
                     array.set_trailing("\n");
                 }
+                // Without a trailing comma the newline before `]` is stored as the last
+                // element's suffix. Once that element is cloned into a non-final slot,
+                // the separator would land on its own line, and if it stays final it
+                // would duplicate the array's own trailing newline.
+                let last = array.len() - 1;
+                let trailing_newline = array.trailing().as_str().is_some_and(|t| t.contains('\n'));
+                for (index, element) in array.iter_mut().enumerate() {
+                    let blank_line_suffix =
+                        element.decor().suffix().and_then(|suffix| suffix.as_str()).is_some_and(
+                            |suffix| {
+                                suffix.contains('\n') && suffix.chars().all(char::is_whitespace)
+                            },
+                        );
+                    if blank_line_suffix && (index < last || trailing_newline) {
+                        element.decor_mut().set_suffix("");
+                    }
+                }
             }
         }
         if let Some(old) = table.get(actual).and_then(Item::as_value) {

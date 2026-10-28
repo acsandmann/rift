@@ -867,3 +867,54 @@ fn workspace_names_reject_explicit_and_generated_collisions() {
         );
     }
 }
+
+#[test]
+fn app_rule_commas_stay_on_the_preceding_line() {
+    let mut base = ConfigDocument::default();
+    base.update(|source| {
+        for id in ["a", "b", "c"] {
+            source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
+                app_id: Some(format!("com.example.{id}")),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                ..Default::default()
+            });
+        }
+    })
+    .unwrap();
+    let mut document = ConfigDocument::parse(&base.to_string().replace("\n\t{", "\n  {")).unwrap();
+    let check = |document: &ConfigDocument, expected: usize| {
+        let text = document.to_string();
+        assert!(
+            !text.lines().any(|line| line.trim_start().starts_with(',')),
+            "{text}"
+        );
+        let start = text.rfind("\napp_rules = [").unwrap();
+        let end = start + text[start..].find("\n]").unwrap();
+        assert!(!text[start..end].contains("\n\n"), "{text}");
+        assert_eq!(
+            Config::parse(&text).unwrap().virtual_workspaces.app_rules.len(),
+            expected
+        );
+    };
+    document
+        .update(|source| {
+            source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
+                app_id: Some("com.example.d".into()),
+                ..Default::default()
+            })
+        })
+        .unwrap();
+    check(&document, 4);
+    document
+        .update(|source| source.virtual_workspaces.app_rules[1].floating = true)
+        .unwrap();
+    check(&document, 4);
+    document
+        .update(|source| drop(source.virtual_workspaces.app_rules.remove(0)))
+        .unwrap();
+    check(&document, 3);
+    document
+        .update(|source| drop(source.virtual_workspaces.app_rules.pop()))
+        .unwrap();
+    check(&document, 2);
+}
