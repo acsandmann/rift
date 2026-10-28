@@ -375,12 +375,20 @@ impl LayoutManager {
             return Ok(false);
         }
         let layout_result = Self::calculate_layout(reactor, space_scope);
-        Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch, false)
+        Self::apply_layout(
+            reactor,
+            layout_result,
+            is_resize,
+            is_workspace_switch,
+            false,
+            false,
+        )
     }
 
     pub fn update_layout_instant(
         reactor: &mut Reactor,
         space_scope: Option<SpaceId>,
+        force_frames: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         if reactor.refreshes_blocked() {
             return Ok(false);
@@ -401,7 +409,7 @@ impl LayoutManager {
             }
         }
         let layout = Self::calculate_layout(reactor, space_scope);
-        Self::apply_layout(reactor, layout, false, false, true)
+        Self::apply_layout(reactor, layout, false, false, true, force_frames)
     }
 
     fn calculate_layout(reactor: &mut Reactor, space_scope: Option<SpaceId>) -> LayoutResult {
@@ -474,6 +482,7 @@ impl LayoutManager {
         is_resize: bool,
         is_workspace_switch: bool,
         instant: bool,
+        force_frames: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
@@ -570,7 +579,10 @@ impl LayoutManager {
                 }
             }
 
-            if instant {
+            if force_frames {
+                any_frame_changed |=
+                    AnimationManager::reapply_layout(reactor, space, &layout, skip_wid);
+            } else if instant {
                 any_frame_changed |=
                     AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
             } else if is_workspace_switch {

@@ -2949,12 +2949,16 @@ impl Reactor {
             && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
         {
             // Reducers have finished mutating the model; arrange each affected space once.
-            layout_changed = if outcome.arrange.instant {
-                LayoutManager::update_layout_instant(self, outcome.arrange.space_scope)
-                    .unwrap_or_else(|error| {
-                        warn!(?error, "Covered layout update failed");
-                        false
-                    })
+            layout_changed = if outcome.arrange.instant || outcome.arrange.force_frames {
+                LayoutManager::update_layout_instant(
+                    self,
+                    outcome.arrange.space_scope,
+                    outcome.arrange.force_frames,
+                )
+                .unwrap_or_else(|error| {
+                    warn!(?error, "Covered layout update failed");
+                    false
+                })
             } else {
                 self.update_layout_or_warn(
                     outcome.arrange.is_resize,
@@ -3707,6 +3711,14 @@ impl Reactor {
 
         self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
         let previous_screens = std::mem::replace(&mut self.space_state.screens, screens);
+        // macOS may resize windows without AX notifications during display changes.
+        // Reapply the complete layout even when cached frames still match.
+        outcome.arrange.force_frames = display_set_changed
+            || previous_screens.iter().map(|s| (&s.display_uuid, s.frame)).ne(self
+                .space_state
+                .screens
+                .iter()
+                .map(|s| (&s.display_uuid, s.frame)));
         if invalidates_pending_targets {
             self.clear_pending_hidden_window_targets();
         }

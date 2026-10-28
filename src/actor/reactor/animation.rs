@@ -1110,7 +1110,7 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, false)
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, false, false)
     }
 
     /// Apply the position-only layout used while switching virtual workspaces.
@@ -1124,7 +1124,17 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
-        Self::instant_layout_inner(reactor, space, layout, skip_wid, true)
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, true, false)
+    }
+
+    /// Restore native geometry after a display change invalidated cached frames.
+    pub fn reapply_layout(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        skip_wid: Option<WindowId>,
+    ) -> bool {
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, false, true)
     }
 
     fn instant_layout_inner(
@@ -1133,6 +1143,7 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
         position_only: bool,
+        force_frames: bool,
     ) -> bool {
         reactor.cancel_window_presentations(layout.iter().map(|(wid, _)| *wid).collect());
         let mut per_app: HashMap<pid_t, _> = HashMap::default();
@@ -1151,10 +1162,11 @@ impl AnimationManager {
             };
             let target_frame = target_frame.round();
             let current_frame = window.frame_monotonic;
-            if target_frame.same_as(current_frame) {
+            if !force_frames && target_frame.same_as(current_frame) {
                 continue;
             }
-            if let Some(wsid) = window.info.sys_id
+            if !force_frames
+                && let Some(wsid) = window.info.sys_id
                 && reactor
                     .transaction_manager
                     .get_target_frame(wsid)
@@ -1171,7 +1183,7 @@ impl AnimationManager {
                 "Instant workspace positioning"
             );
 
-            let size_unchanged = current_frame.size.same_as(target_frame.size);
+            let size_unchanged = !force_frames && current_frame.size.same_as(target_frame.size);
             window.frame_monotonic = target_frame;
             let (frames, positions, first_wsid) =
                 per_app.entry(wid.pid).or_insert_with(|| (Vec::new(), Vec::new(), None));

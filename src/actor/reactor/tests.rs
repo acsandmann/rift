@@ -10777,3 +10777,40 @@ fn overview_activation_resolves_scrolled_target_before_native_focus() {
         assert!(empty_target.window.is_none() && empty_target.frames.is_empty());
     }
 }
+
+#[test]
+fn display_refresh_reapplies_frames_when_macos_resized_windows_without_notification() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1039.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(5));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let expected: Vec<_> = apps.windows.iter().map(|(&wid, window)| (wid, window.frame)).collect();
+    assert!(
+        expected.iter().any(|(_, frame)| frame.origin.x >= screen.size.width
+            || frame.origin.x + frame.size.width <= 0.)
+    );
+    // macOS can resize windows during hotplug without a usable AX notification.
+    // Keep both Rift's observed frame and its transaction cache unchanged.
+    for window in apps.windows.values_mut() {
+        window.frame.size.height = 1065.;
+    }
+    let mut snapshot =
+        forwarded_space_state(make_screen_snapshots(vec![screen], vec![Some(space)]));
+    snapshot.display_set_changed = true;
+    snapshot.should_force_refresh_layout = true;
+    snapshot.membership_complete = false;
+    reactor.handle_event(Event::SpaceStateChanged(snapshot));
+    apps.simulate_until_quiet(&mut reactor);
+    for (wid, frame) in expected {
+        assert!(
+            apps.windows[&wid].frame.same_as(frame),
+            "stale frame for {wid:?}: {:?}",
+            apps.windows[&wid].frame
+        );
+    }
+}

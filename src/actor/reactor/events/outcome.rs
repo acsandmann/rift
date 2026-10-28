@@ -104,6 +104,8 @@ pub(crate) struct ArrangeRequest {
     pub(crate) is_resize: bool,
     /// The renderer covers this layout transition and owns its visible animation.
     pub(crate) instant: bool,
+    /// Reapply full frames after external geometry changes, bypassing cached targets.
+    pub(crate) force_frames: bool,
     pub(crate) window_was_destroyed: bool,
     pub(crate) space_scope: Option<SpaceId>,
     pub(crate) secondary_space_scope: Option<SpaceId>,
@@ -173,6 +175,7 @@ impl EventOutcome {
             self.arrange.passes = 1;
             self.arrange.is_resize |= other.arrange.is_resize;
             self.arrange.instant |= other.arrange.instant;
+            self.arrange.force_frames |= other.arrange.force_frames;
             self.arrange.window_was_destroyed |= other.arrange.window_was_destroyed;
         }
         self.focused_window = other.focused_window.or(self.focused_window);
@@ -188,6 +191,7 @@ impl EventOutcome {
                 passes: 1,
                 is_resize,
                 instant: false,
+                force_frames: false,
                 window_was_destroyed: false,
                 space_scope: None,
                 secondary_space_scope: None,
