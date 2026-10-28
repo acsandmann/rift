@@ -179,6 +179,8 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "cgs"
 version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b8740d47a229605f8c7a96d41515c487bd8ca949b488b466ab60b9b94682a84"
 dependencies = [
  "block2",
  "dispatch2",

@@ -24,7 +24,6 @@ use crate::sys::window_server::WindowServerId;
 pub struct LayoutCommandPayload {
     pub command: LayoutCommand,
     pub command_space: Option<SpaceId>,
-    pub(crate) navigation: crate::model::virtual_workspace::NavigationScope,
     pub visible_spaces: Vec<SpaceId>,
     pub visible_space_frames: HashMap<SpaceId, objc2_core_foundation::CGRect>,
     pub post_arrange_mouse_warp: Option<WindowId>,
@@ -39,7 +38,6 @@ pub fn handle_command_layout(
     let LayoutCommandPayload {
         command: cmd,
         command_space,
-        navigation,
         visible_spaces,
         visible_space_frames,
         post_arrange_mouse_warp,
@@ -96,7 +94,6 @@ pub fn handle_command_layout(
                     crate::model::virtual_workspace::WorkspaceContext {
                         space,
                         visible: &visible_spaces,
-                        navigation,
                     },
                     &cmd,
                 )

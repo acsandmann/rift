@@ -1319,6 +1319,33 @@ impl Reactor {
         self.drag_manager.sync_motion_gate();
     }
 
+    fn dispatch_layout_command(
+        &mut self,
+        command: layout::LayoutCommand,
+        command_space: Option<SpaceId>,
+    ) -> anyhow::Result<EventOutcome> {
+        let post_arrange_mouse_warp =
+            self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
+        let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
+        let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
+        let outcome = command_workflow::handle_command_layout(
+            &mut self.state,
+            &mut self.layout_manager,
+            &mut self.workspace_switch_manager,
+            command_workflow::LayoutCommandPayload {
+                command,
+                command_space,
+                visible_spaces,
+                visible_space_frames,
+                post_arrange_mouse_warp,
+            },
+        )?;
+        if is_move_node {
+            self.follow_focused_window_to_its_display(command_space);
+        }
+        Ok(outcome)
+    }
+
     fn dispatch_workflow(&mut self, mut event: Event) -> anyhow::Result<EventOutcome> {
         if let Event::AppActorExited(pid, handle) = &event {
             if !self.app_manager.apps.get(pid).is_some_and(|app| app.handle.same_actor(handle)) {
@@ -2554,28 +2581,7 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Layout(command)) => {
-                let post_arrange_mouse_warp =
-                    self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
-                let command_space = self.command_context_space();
-                let is_move_node = matches!(command, layout::LayoutCommand::MoveNode(_));
-                let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
-                let outcome = command_workflow::handle_command_layout(
-                    &mut self.state,
-                    &mut self.layout_manager,
-                    &mut self.workspace_switch_manager,
-                    command_workflow::LayoutCommandPayload {
-                        navigation: Default::default(),
-                        command,
-                        command_space,
-                        visible_spaces,
-                        visible_space_frames,
-                        post_arrange_mouse_warp,
-                    },
-                )?;
-                if is_move_node {
-                    self.follow_focused_window_to_its_display(command_space);
-                }
-                return Ok(outcome);
+                return self.dispatch_layout_command(command, self.command_context_space());
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
                 selector,
@@ -5251,11 +5257,7 @@ impl Reactor {
                     &mut self.state,
                     &mut self.layout_manager,
                     *wid,
-                    crate::model::virtual_workspace::WorkspaceContext {
-                        space,
-                        visible: &visible,
-                        navigation: Default::default(),
-                    },
+                    crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible },
                     Some(&app_info),
                     reapply_effects,
                 );

@@ -347,11 +347,8 @@ impl Reactor {
     ) -> Vec<(usize, VirtualWorkspaceId)> {
         let visible: Vec<_> = self.iter_active_spaces().collect();
         let store = self.layout_manager.layout_engine.workspaces();
-        let context = crate::model::virtual_workspace::WorkspaceContext {
-            space,
-            visible: &visible,
-            navigation: Default::default(),
-        };
+        let context =
+            crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible };
         let view = store.workspace_view(context);
         view.filter(|(_, id)| owner.is_none_or(|owner| store[*id].space == owner))
             .collect()
@@ -695,11 +692,7 @@ impl Reactor {
             index.or_else(|| store.workspace_index(space, store.active_workspace(space)?))?;
         let visible: Vec<_> = self.iter_active_spaces().collect();
         store.resolve_workspace(
-            crate::model::virtual_workspace::WorkspaceContext {
-                space,
-                visible: &visible,
-                navigation: Default::default(),
-            },
+            crate::model::virtual_workspace::WorkspaceContext { space, visible: &visible },
             &crate::common::config::WorkspaceSelector::Index(index),
         )
     }

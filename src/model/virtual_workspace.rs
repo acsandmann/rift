@@ -23,29 +23,15 @@ new_key_type! {
     pub struct VirtualWorkspaceId;
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum NavigationScope {
-    #[default]
-    Local,
-    GlobalVisible,
-}
-
 /// Resolution consumes accepted Reactor topology, never the full native inventory.
 #[derive(Clone, Copy)]
 pub(crate) struct WorkspaceContext<'a> {
     pub space: SpaceId,
     pub visible: &'a [SpaceId],
-    pub navigation: NavigationScope,
 }
 
 impl From<SpaceId> for WorkspaceContext<'_> {
-    fn from(space: SpaceId) -> Self {
-        Self {
-            space,
-            visible: &[],
-            navigation: NavigationScope::Local,
-        }
-    }
+    fn from(space: SpaceId) -> Self { Self { space, visible: &[] } }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1188,18 +1174,9 @@ impl WorkspaceStore {
         dir: Direction,
     ) -> Option<VirtualWorkspaceId> {
         let context = context.into();
-        let own = [context.space];
-        let visible = if context.visible.is_empty() {
-            &own[..]
-        } else {
-            context.visible
-        };
-        let context = WorkspaceContext { visible, ..context };
         let eligible = |id| {
             self.eligible(context, id)
-                && ((self.settings.mode == WorkspaceMode::Global
-                    && context.navigation == NavigationScope::GlobalVisible)
-                    || self[id].space == context.space)
+                && (self.settings.mode == WorkspaceMode::Global || self[id].space == context.space)
         };
         if !self.workspaces.contains_key(current) || !eligible(current) {
             return None;
@@ -1738,31 +1715,28 @@ mod tests {
     }
 
     #[test]
-    fn navigation_scope_wrap_empty_and_dormant_policy_matrix() {
+    fn workspace_mode_wrap_empty_and_dormant_policy_matrix() {
         let (a, b, dormant) = (SpaceId::new(101), SpaceId::new(201), SpaceId::new(301));
-        // mode, scope, visible displays, current index, direction, skip empty, no wrap, target
+        // mode, visible displays, current index, direction, skip empty, no wrap, target
         use Direction::{Left, Right};
-        use NavigationScope::{GlobalVisible, Local};
         use WorkspaceMode::{Global, PerDisplay};
         #[rustfmt::skip]
         let cases = [
-            (PerDisplay,  Local,         true,  0, Right, false, false, Some(1)),
-            (PerDisplay,  Local,         true,  1, Left,  false, false, Some(0)),
-            (PerDisplay,  GlobalVisible, true,  1, Right, false, false, Some(0)),
-            (Global,      Local,         true,  1, Right, false, false, Some(0)),
-            (Global,      GlobalVisible, false, 1, Right, false, false, Some(0)),
-            (Global,      GlobalVisible, true,  1, Right, false, false, Some(2)),
-            (Global,      GlobalVisible, true,  0, Left,  false, false, Some(3)),
-            (Global,      GlobalVisible, true,  3, Right, false, false, Some(0)),
-            (Global,      GlobalVisible, true,  3, Right, false, true,  None),
-            (Global,      GlobalVisible, true,  0, Left,  false, true,  None),
-            (Global,      GlobalVisible, true,  0, Right, true,  false, Some(3)),
-            (Global,      GlobalVisible, true,  0, Right, true,  true,  Some(3)),
-            (Global,      GlobalVisible, true,  3, Right, true,  true,  None),
-            (Global,      GlobalVisible, false, 0, Right, true,  false, None),
+            (PerDisplay,  true,  0, Right, false, false, Some(1)),
+            (PerDisplay,  true,  1, Left,  false, false, Some(0)),
+            (PerDisplay,  true,  1, Right, false, false, Some(0)),
+            (Global,      false, 1, Right, false, false, Some(0)),
+            (Global,      true,  1, Right, false, false, Some(2)),
+            (Global,      true,  0, Left,  false, false, Some(3)),
+            (Global,      true,  3, Right, false, false, Some(0)),
+            (Global,      true,  3, Right, false, true,  None),
+            (Global,      true,  0, Left,  false, true,  None),
+            (Global,      true,  0, Right, true,  false, Some(3)),
+            (Global,      true,  0, Right, true,  true,  Some(3)),
+            (Global,      true,  3, Right, true,  true,  None),
+            (Global,      false, 0, Right, true,  false, None),
         ];
-        for (mode, navigation, both, current, direction, skip, prevent_wrapping, expected) in cases
-        {
+        for (mode, both, current, direction, skip, prevent_wrapping, expected) in cases {
             let settings = VirtualWorkspaceSettings {
                 mode,
                 default_workspace_count: 2,
@@ -1784,12 +1758,11 @@ mod tests {
             let context = WorkspaceContext {
                 space: a,
                 visible: if both { &[a, b] } else { &[a] },
-                navigation,
             };
             assert_eq!(
                 store.step_workspace(&windows, context, ids[current], Some(skip), direction),
                 expected.map(|index| ids[index]),
-                "{mode:?} {navigation:?} {current} {direction:?}"
+                "{mode:?} {current} {direction:?}"
             );
         }
     }
@@ -1885,11 +1858,7 @@ mod tests {
         store.ensure_visible_spaces(&[a, b], |_| None);
         let ids: Vec<_> = store.catalog().collect();
         assert!(!store.rename_workspace(b, ids[1], store[ids[0]].name.clone()));
-        let context = WorkspaceContext {
-            space: a,
-            visible: &[a, b],
-            navigation: NavigationScope::GlobalVisible,
-        };
+        let context = WorkspaceContext { space: a, visible: &[a, b] };
         assert_eq!(
             store.resolve_workspace(context, &WorkspaceSelector::Name(store[ids[0]].name.clone())),
             Some(WorkspaceTarget { id: ids[0], space: a })

@@ -1,7 +1,7 @@
 //! Paced consumption of cumulative physical motion; no layout preparation here.
 use std::time::{Duration, Instant};
 
-use super::{Reactor, command_workflow};
+use super::Reactor;
 use crate::actor::gesture::{Context, Control, Lifecycle, Motion};
 use crate::layout_engine::{
     EventResponse, LayoutCommand, LayoutId, LayoutSystem, LayoutSystemKind, VirtualWorkspaceId,
@@ -310,36 +310,14 @@ impl Reactor {
         next: bool,
         haptic: Option<crate::common::config::HapticPattern>,
     ) -> bool {
-        let (visible_spaces, visible_space_frames) = self.visible_spaces_for_layout(false);
-        let navigation = if visible_spaces.len() > 1 {
-            crate::model::virtual_workspace::NavigationScope::GlobalVisible
-        } else {
-            crate::model::virtual_workspace::NavigationScope::Local
-        };
-        let space = if navigation == crate::model::virtual_workspace::NavigationScope::GlobalVisible
-            && self.layout_manager.layout_engine.workspaces().settings.mode
-                == crate::common::config::WorkspaceMode::Global
-        {
-            self.command_context_space().unwrap_or(space)
-        } else {
-            space
-        };
-        let result = command_workflow::handle_command_layout(
-            &mut self.state,
-            &mut self.layout_manager,
-            &mut self.workspace_switch_manager,
-            command_workflow::LayoutCommandPayload {
-                command: if next {
-                    LayoutCommand::NextWorkspace(skip_empty)
-                } else {
-                    LayoutCommand::PrevWorkspace(skip_empty)
-                },
-                command_space: Some(space),
-                navigation,
-                visible_spaces,
-                visible_space_frames,
-                post_arrange_mouse_warp: None,
+        let space = self.command_context_space().unwrap_or(space);
+        let result = self.dispatch_layout_command(
+            if next {
+                LayoutCommand::NextWorkspace(skip_empty)
+            } else {
+                LayoutCommand::PrevWorkspace(skip_empty)
             },
+            Some(space),
         );
         let Ok(outcome) = result else { return false };
         // A global target visible on another display only moves focus there.

@@ -3186,7 +3186,6 @@ impl LayoutEngine {
                             WorkspaceContext {
                                 space: op_space,
                                 visible: context.visible,
-                                navigation: Default::default(),
                             },
                             current_workspace_id,
                             None,
@@ -3199,7 +3198,6 @@ impl LayoutEngine {
                             WorkspaceContext {
                                 space: op_space,
                                 visible: context.visible,
-                                navigation: Default::default(),
                             },
                             current_workspace_id,
                             None,

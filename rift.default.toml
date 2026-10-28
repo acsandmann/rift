@@ -289,7 +289,8 @@ preview = true
 # - per_display (default): each display has its own workspaces, numbered from 1. Like macOS
 #   Spaces, each desktop on a display has its own set.
 # - global: workspaces are numbered across all displays. Each one stays on a single display and
-#   is never mirrored; selecting it focuses that display.
+#   is never mirrored; selecting it focuses that display. Next/previous commands and swipes
+#   navigate across visible displays in global mode, and stay local in per_display mode.
 mode = "per_display"
 # Virtual workspaces
 # - enabled: if false, rift behaves like a simple tiling WM with a single space

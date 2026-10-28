@@ -288,7 +288,6 @@ pub(crate) fn emit_layout_events(
                 crate::model::virtual_workspace::WorkspaceContext {
                     space,
                     visible: &active_spaces,
-                    navigation: Default::default(),
                 },
                 app_info.as_ref(),
                 false,

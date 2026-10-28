@@ -9571,17 +9571,49 @@ fn shared_display_returning_on_new_desktop_restores_its_workspaces() {
 }
 
 #[test]
-fn shared_next_workspace_commands_remain_display_local() {
-    let (_, mut reactor, a, b) = two_displays(shared_settings());
-    let ids: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
-    for (command, expected) in [
-        (LayoutCommand::NextWorkspace(None), ids[1]),
-        (LayoutCommand::PrevWorkspace(None), ids[0]),
-    ] {
-        reactor.handle_test_layout_command(command);
-        let ws = reactor.layout_manager.layout_engine.workspaces();
-        assert_eq!(ws.active_workspace(a), Some(expected));
-        assert_eq!(ws.active_workspace(b), Some(ids[2]));
+fn workspace_commands_follow_workspace_mode() {
+    use crate::common::config::WorkspaceMode::{Global, PerDisplay};
+    for mode in [Global, PerDisplay] {
+        let mut settings = shared_settings();
+        settings.mode = mode;
+        settings.default_workspace_count = if mode == Global { 4 } else { 2 };
+        let (_, mut reactor, a, b) = two_displays(settings);
+        let ids: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
+        reactor
+            .layout_manager
+            .layout_engine
+            .workspaces_mut()
+            .set_active_workspace(a, ids[1]);
+        reactor.space_state.command_space = Some(a);
+        let outcome = reactor.dispatch_test_layout_command(LayoutCommand::NextWorkspace(None));
+        if mode == Global {
+            assert_eq!(outcome.display_switch_warp, Some(b));
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(a),
+                Some(ids[1])
+            );
+        } else {
+            assert_eq!(outcome.display_switch_warp, None);
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(a),
+                Some(ids[0])
+            );
+        }
+        reactor.space_state.command_space = Some(b);
+        let outcome = reactor.dispatch_test_layout_command(LayoutCommand::PrevWorkspace(None));
+        if mode == Global {
+            assert_eq!(outcome.display_switch_warp, Some(a));
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(b),
+                Some(ids[2])
+            );
+        } else {
+            assert_eq!(outcome.display_switch_warp, None);
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(b),
+                Some(ids[3])
+            );
+        }
     }
 }
 
