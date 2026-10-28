@@ -17,7 +17,7 @@ use objc2_quartz_core::{CALayer, CATextLayer};
 
 use crate::actor::app::WindowId;
 use crate::actor::mission_control::Input;
-use crate::actor::reactor::{OverviewDrop, ReactorHandle};
+use crate::actor::reactor::{OverviewDrop, OverviewTarget, ReactorHandle};
 use crate::common::config::MissionControlSettings;
 use crate::model::server::{RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData};
 use crate::sys::screen::{NSScreenExt, ScreenInfo};
@@ -26,6 +26,7 @@ const MIN_ZOOM: f64 = 0.08;
 const MAX_ZOOM: f64 = 2.0;
 const OVERVIEW_ZOOM: f64 = 0.34;
 const MOTION: f64 = 0.55;
+const EXIT_MOTION: f64 = 0.28;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
@@ -93,17 +94,27 @@ impl Camera {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MotionCurve {
+    Settle,
+    Smooth,
+}
+
 struct Motion {
     from: Camera,
     to: Camera,
     start: Instant,
     duration: f64,
+    curve: MotionCurve,
 }
 impl Motion {
     fn sample(&self, now: Instant) -> (Camera, bool) {
         let t = (now.duration_since(self.start).as_secs_f64() / self.duration).min(1.);
-        // A bounded exponential settle: monotonic, with a short continuous tail.
-        let t = (1. - (-6. * t).exp()) / (1. - (-6.0_f64).exp());
+        // Entry settles quickly; focus accelerates into the window without a first-frame jump.
+        let t = match self.curve {
+            MotionCurve::Settle => (1. - (-6. * t).exp()) / (1. - (-6.0_f64).exp()),
+            MotionCurve::Smooth => t * t * (3. - 2. * t),
+        };
         let mix = |a: f64, b: f64| a + (b - a) * t;
         let zoom = mix(self.from.zoom, self.to.zoom);
         (
@@ -319,6 +330,20 @@ impl SceneWindow {
     }
 
     fn detach(&self) { self.shadow.removeFromSuperlayer(); }
+
+    fn apply_geometry(&self) {
+        let bounds = CGRect::new(CGPoint::ZERO, self.world.size);
+        if self.preview.layer().bounds() != bounds {
+            let path = unsafe { CGPath::with_rounded_rect(bounds, 10., 10., std::ptr::null()) };
+            self.shadow.setShadowPath(Some(&path));
+            self.preview.layer().setFrame(bounds);
+        }
+        self.shadow.setFrame(self.world);
+        self.shadow.setCornerRadius(10.);
+        self.shadow.setShadowRadius(18.);
+        self.shadow.setShadowOffset(CGSize::new(0., 10.));
+        self.preview.layer().setCornerRadius(10.);
+    }
 }
 
 // Translate scrolling workspaces once around remembered focus; camera motion never relayouts them.
@@ -875,15 +900,7 @@ impl DisplayOverview {
                 w.shadow.setShadowOpacity(0.28 * decorations);
             }
             if geometry {
-                w.shadow.setFrame(w.world);
-                w.shadow.setCornerRadius(10.);
-                w.shadow.setShadowRadius(18.);
-                w.shadow.setShadowOffset(CGSize::new(0., 10.));
-                let bounds = CGRect::new(CGPoint::ZERO, w.world.size);
-                let path = unsafe { CGPath::with_rounded_rect(bounds, 10., 10., std::ptr::null()) };
-                w.shadow.setShadowPath(Some(&path));
-                w.preview.layer().setFrame(bounds);
-                w.preview.layer().setCornerRadius(10.);
+                w.apply_geometry();
             }
         }
         self.update_focus_ring(decorations);
@@ -924,6 +941,7 @@ impl DisplayOverview {
             to,
             start: Instant::now(),
             duration: duration.max(0.001),
+            curve: MotionCurve::Settle,
         });
         self.request_camera_frame();
     }
@@ -1233,13 +1251,21 @@ struct Drag {
 // Exiting keeps textures until the reactor has installed a visible, matching real window.
 enum Phase {
     Waiting(Instant),
-    Entering,
+    Entering(Instant),
     Overview,
     Exiting {
         window: Option<WindowId>,
         start: Instant,
         target_ready: bool,
     },
+}
+
+struct ExitScene {
+    target: OverviewTarget,
+    geometry: Vec<(WindowId, CGRect, CGRect)>,
+    outgoing: Vec<WindowId>,
+    start: Instant,
+    duration: f64,
 }
 pub struct OverviewSession {
     displays: Vec<DisplayOverview>,
@@ -1250,9 +1276,11 @@ pub struct OverviewSession {
     pressed: Option<(CGPoint, Camera)>,
     drop: Option<OverviewDrop>,
     phase: Phase,
+    exit: Option<ExitScene>,
     show_empty: bool,
     shared: bool,
     duration: f64,
+    fade_duration: f64,
     wake: Option<crate::actor::mission_control::Sender>,
     previews: bool,
 }
@@ -1316,14 +1344,21 @@ impl OverviewSession {
             pressed: None,
             drop: None,
             phase: Phase::Waiting(Instant::now()),
+            exit: None,
             wake: None,
             previews: false,
             show_empty: settings.show_empty_workspaces,
             shared,
+            // The legacy fade setting controls chrome, independently of camera travel.
             duration: if settings.fade_enabled {
                 settings.fade_duration_ms.max(1.) / 1000.
             } else {
                 MOTION
+            },
+            fade_duration: if settings.fade_enabled {
+                settings.fade_duration_ms.max(1.) / 1000.
+            } else {
+                0.
             },
         })
     }
@@ -1409,6 +1444,21 @@ impl OverviewSession {
         moved: Option<WindowId>,
     ) {
         let active_uuid = self.displays.get(self.active).map(|d| d.info.display_uuid.clone());
+        // Workspace activation changes the live model behind us. Keep the visible
+        // scene stable until the handoff; topology changes must still tear down hosts.
+        if matches!(self.phase, Phase::Exiting { .. })
+            && self.displays.iter().all(|d| {
+                topology.iter().any(|s| {
+                    s.is_visible_space
+                        && s.info.id == d.info.id
+                        && s.info.space == d.info.space
+                        && s.info.frame == d.info.frame
+                        && s.info.backing_scale == d.scale
+                })
+            })
+        {
+            return;
+        }
         let contexts = topology
             .iter()
             .filter(|s| {
@@ -1702,13 +1752,10 @@ impl OverviewSession {
         self.phase = Phase::Exiting {
             window,
             start: now,
-            target_ready: window.is_none(),
+            target_ready: dismiss,
         };
-        if window.is_none() {
-            self.animate_exit(target);
-        } else if let Some(clock) = &self.displays[self.active].clock {
-            clock.set_paused(false);
-        }
+        // Focus/AX work runs behind the animation, never ahead of its first frame.
+        self.animate_exit(target);
         action
     }
 
@@ -1720,13 +1767,9 @@ impl OverviewSession {
         }
     }
 
-    pub(crate) fn activation_target(
-        &mut self,
-        window: WindowId,
-        stamp: Instant,
-        frame: Option<CGRect>,
-    ) {
-        if !matches!(self.phase, Phase::Exiting { window: Some(w), start, target_ready: false } if w == window && start == stamp)
+    pub(crate) fn activation_target(&mut self, prepared: OverviewTarget) {
+        if !matches!(self.phase, Phase::Exiting { window, start, target_ready: false }
+            if window == prepared.window && start == prepared.stamp)
         {
             return;
         }
@@ -1735,10 +1778,10 @@ impl OverviewSession {
         let target = d
             .windows
             .iter()
-            .find(|w| w.data.id == window)
+            .find(|w| Some(w.data.id) == prepared.window)
             .and_then(|w| {
                 let ws = d.workspaces.iter().find(|ws| ws.workspace_id == w.workspace)?;
-                let frame = frame?;
+                let frame = prepared.frames.iter().find(|(id, _)| *id == w.data.id)?.1;
                 (ws.display_uuid.as_deref() == Some(&d.info.display_uuid)).then(|| Camera {
                     zoom: 1.,
                     position: CGPoint::new(
@@ -1747,14 +1790,62 @@ impl OverviewSession {
                     ),
                 })
             })
-            .unwrap_or_else(|| d.desktop_camera());
+            .unwrap_or_else(|| d.motion.as_ref().map_or(d.camera, |m| m.to));
         if let Phase::Exiting { target_ready, window, .. } = &mut self.phase {
             *target_ready = true;
-            if frame.is_none() {
+            if prepared.window.is_some_and(|id| !prepared.frames.iter().any(|(w, _)| *w == id)) {
                 *window = None;
             }
         }
-        self.animate_exit(target);
+        let now = Instant::now();
+        let remaining = (EXIT_MOTION - now.duration_since(prepared.stamp).as_secs_f64()).max(0.08);
+        let d = &mut self.displays[self.active];
+        if d.motion.as_ref().map_or(d.camera, |m| m.to) != target {
+            // Correct from the currently displayed position, without restarting the whole exit.
+            d.sample(now);
+            d.animate(target, remaining);
+            d.motion.as_mut().unwrap().curve = MotionCurve::Smooth;
+            d.policy_dirty = true;
+        }
+        let local_workspace = d
+            .workspaces
+            .iter()
+            .find(|ws| ws.workspace_id == prepared.workspace)
+            .is_some_and(|ws| ws.display_uuid.as_deref() == Some(&d.info.display_uuid));
+        let geometry = prepared
+            .frames
+            .iter()
+            .filter(|_| local_workspace)
+            .filter_map(|&(id, frame)| {
+                let w = d.windows.iter().find(|w| w.data.id == id)?;
+                let local = CGPoint::new(
+                    frame.origin.x - d.bounds.origin.x,
+                    frame.origin.y - d.bounds.origin.y,
+                );
+                let to = CGRect::new(target.unproject(local), frame.size);
+                Some((id, w.world, to))
+            })
+            .collect();
+        let outgoing = d
+            .windows
+            .iter()
+            .filter(|w| {
+                w.workspace != prepared.workspace
+                    && d.workspaces.iter().any(|ws| {
+                        ws.workspace_id == w.workspace
+                            && ws.is_active
+                            && ws.display_uuid.as_deref() == Some(&d.info.display_uuid)
+                    })
+            })
+            .map(|w| w.data.id)
+            .collect();
+        self.exit = Some(ExitScene {
+            target: prepared,
+            geometry,
+            outgoing,
+            start: now,
+            duration: remaining,
+        });
     }
 
     fn animate_exit(&mut self, target: Camera) {
@@ -1766,11 +1857,12 @@ impl OverviewSession {
                 } else {
                     d.desktop_camera()
                 },
-                self.duration.min(0.28),
+                EXIT_MOTION,
             );
-            d.motion.as_mut().unwrap().start = now;
+            let motion = d.motion.as_mut().unwrap();
+            motion.start = now;
+            motion.curve = MotionCurve::Smooth;
             d.policy_dirty = true;
-            d.update_sources(d.selection.window, true);
         }
     }
 
@@ -1780,6 +1872,9 @@ impl OverviewSession {
             return;
         }
         if matches!(self.phase, Phase::Exiting { .. }) {
+            if let Some(wake) = &self.wake {
+                wake.send(crate::actor::mission_control::Event::RefreshCurrentWorkspace);
+            }
             for d in &self.displays {
                 if let Some(w) = d.windows.iter().find(|w| Some(w.data.id) == self.selection.window)
                 {
@@ -1788,6 +1883,7 @@ impl OverviewSession {
             }
         }
         let now = Instant::now();
+        self.exit = None;
         for d in &mut self.displays {
             d.sample(now);
             d.motion = None;
@@ -2365,9 +2461,9 @@ impl OverviewSession {
         if matches!(self.phase, Phase::Exiting { .. }) {
             self.interrupt();
             for d in &mut self.displays {
-                d.animate(d.home, self.duration);
+                d.animate(d.home, MOTION);
             }
-            self.phase = Phase::Entering;
+            self.phase = Phase::Entering(Instant::now());
         } else {
             self.activate(true);
         }
@@ -2471,9 +2567,9 @@ impl OverviewSession {
             if (ready && self.displays.iter().all(|d| d.background_ready))
                 || now.duration_since(start) > Duration::from_secs(2)
             {
-                self.phase = Phase::Entering;
+                self.phase = Phase::Entering(now);
                 for d in &mut self.displays {
-                    d.animate(d.home, self.duration);
+                    d.animate(d.home, MOTION);
                     d.motion.as_mut().unwrap().start = now;
                     d.background.setOpacity(1.);
                 }
@@ -2481,7 +2577,14 @@ impl OverviewSession {
         }
         let decorations = match self.phase {
             Phase::Waiting(_) => 0.,
-            Phase::Exiting { target_ready: true, .. } => 0.,
+            Phase::Entering(start) if self.fade_duration > 0. => {
+                (now.duration_since(start).as_secs_f64() / self.fade_duration).min(1.) as f32
+            }
+            Phase::Exiting { start, .. } => {
+                1. - (now.duration_since(start).as_secs_f64()
+                    / self.fade_duration.min(0.12).max(0.001))
+                .min(1.) as f32
+            }
             _ => 1.,
         };
         let drag_frame =
@@ -2527,7 +2630,7 @@ impl OverviewSession {
                 canvas.set_frame(&frame);
             }
         }
-        for d in &mut self.displays {
+        for (display, d) in self.displays.iter_mut().enumerate() {
             if let Some(snapshot) = &d.desktop_snapshot {
                 match snapshot.take_image() {
                     Ok(Some(image)) => {
@@ -2546,10 +2649,32 @@ impl OverviewSession {
             if let Some((_, target)) = tick {
                 d.sample(target.max(now));
             }
+            if display == self.active
+                && tick.is_some()
+                && let Some(exit) = &self.exit
+            {
+                let sample = tick.map_or(now, |(_, target)| target.max(now));
+                let t = (sample.duration_since(exit.start).as_secs_f64() / exit.duration).min(1.);
+                let t = t * t * (3. - 2. * t);
+                for &(id, from, to) in &exit.geometry {
+                    if let Some(w) = d.windows.iter_mut().find(|w| w.data.id == id) {
+                        let mix = |a: f64, b: f64| a + (b - a) * t;
+                        w.world = rect(
+                            mix(from.origin.x, to.origin.x),
+                            mix(from.origin.y, to.origin.y),
+                            mix(from.size.width, to.size.width),
+                            mix(from.size.height, to.size.height),
+                        );
+                        w.apply_geometry();
+                    }
+                }
+            }
             if tick.is_some() || d.applied.is_none() {
                 d.apply_camera(decorations);
             }
-            d.update_sources(d.selection.window, false);
+            if !matches!(self.phase, Phase::Exiting { .. }) {
+                d.update_sources(d.selection.window, false);
+            }
             if let Some(m) = &mut d.captures {
                 if !m.is_visible() && (d.background_ready || d.desktop_snapshot.is_none()) {
                     let _ = m.show();
@@ -2558,7 +2683,9 @@ impl OverviewSession {
                     tracing::warn!(?e, "Spatial capture update failed");
                 }
                 for w in &mut d.windows {
-                    if let Some(frame) = m.captured_frame(w.data.info.sys_id.unwrap().as_u32()) {
+                    if !matches!(self.phase, Phase::Exiting { .. })
+                        && let Some(frame) = m.captured_frame(w.data.info.sys_id.unwrap().as_u32())
+                    {
                         if w.preview.set_frame(&frame) {
                             w.shadow.setOpacity(1.);
                         }
@@ -2587,7 +2714,8 @@ impl OverviewSession {
                 .setPosition(CGPoint::new(drag.frame.origin.x, drag.frame.origin.y - 30.));
             drag.badge.setHidden(false);
         }
-        if matches!(self.phase, Phase::Entering) && self.displays.iter().all(|d| d.motion.is_none())
+        if matches!(self.phase, Phase::Entering(_))
+            && self.displays.iter().all(|d| d.motion.is_none())
         {
             self.phase = Phase::Overview;
         }
@@ -2604,6 +2732,61 @@ impl OverviewSession {
             return false;
         }
         let d = &self.displays[self.active];
+        if let Some(exit) = &self.exit {
+            if exit.start.elapsed().as_secs_f64() < exit.duration {
+                return false;
+            }
+            // A focused window alone is insufficient: its neighbours may still be
+            // moving out of parking positions on other app threads.
+            for &(id, frame) in &exit.target.frames {
+                let visible = d
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.workspace_id == exit.target.workspace)
+                    .is_some_and(|ws| intersects(frame, ws.display_frame));
+                if !visible {
+                    continue;
+                }
+                let Some(w) = d.windows.iter().find(|w| w.data.id == id) else {
+                    continue;
+                };
+                let Some(sys_id) = w.data.info.sys_id else {
+                    return false;
+                };
+                let Some(native) = crate::sys::window_server::get_window(sys_id) else {
+                    continue;
+                };
+                if native.pid != id.pid {
+                    continue;
+                }
+                if !crate::sys::window_server::window_is_ordered_in(sys_id)
+                    || (native.frame.origin.x - frame.origin.x).abs() > 1.
+                    || (native.frame.origin.y - frame.origin.y).abs() > 1.
+                    || (native.frame.size.width - frame.size.width).abs() > 1.
+                    || (native.frame.size.height - frame.size.height).abs() > 1.
+                {
+                    return false;
+                }
+            }
+            for &id in &exit.outgoing {
+                let native = d
+                    .windows
+                    .iter()
+                    .find(|w| w.data.id == id)
+                    .and_then(|w| w.data.info.sys_id)
+                    .filter(|&id| crate::sys::window_server::window_is_ordered_in(id))
+                    .and_then(crate::sys::window_server::get_window);
+                if let Some(native) = native.filter(|w| w.pid == id.pid) {
+                    let width = native.frame.max().x.min(d.bounds.max().x)
+                        - native.frame.min().x.max(d.bounds.min().x);
+                    let height = native.frame.max().y.min(d.bounds.max().y)
+                        - native.frame.min().y.max(d.bounds.min().y);
+                    if width > 1. && height > 1. {
+                        return false;
+                    }
+                }
+            }
+        }
         let aligned = window.is_none_or(|id| {
             let Some(w) = d.windows.iter().find(|w| w.data.id == id) else {
                 return true;
@@ -2661,6 +2844,7 @@ mod tests {
             to: c,
             start: Instant::now(),
             duration: 0.3,
+            curve: MotionCurve::Settle,
         };
         for ms in [25, 125, 250] {
             let camera = motion.sample(motion.start + Duration::from_millis(ms)).0;
@@ -2698,6 +2882,7 @@ mod tests {
             },
             start,
             duration: 0.3,
+            curve: MotionCurve::Settle,
         };
         let (middle, done) = first.sample(start + Duration::from_millis(120));
         assert!(!done && middle.zoom > 0.2 && middle.zoom < 1.);
@@ -2706,8 +2891,14 @@ mod tests {
             to: first.from,
             start: start + Duration::from_millis(120),
             duration: 0.3,
+            curve: MotionCurve::Smooth,
         };
         assert_eq!(reverse.sample(reverse.start).0, middle);
+        let early = reverse.sample(reverse.start + Duration::from_millis(75)).0;
+        assert!(
+            (early.zoom - middle.zoom) / (first.from.zoom - middle.zoom) < 0.25,
+            "focus zoom should accelerate rather than jump most of the way on its first frames"
+        );
         let (end, done) = reverse.sample(reverse.start + Duration::from_millis(300));
         assert!(done);
         assert_eq!(end, first.from);

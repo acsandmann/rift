@@ -1,6 +1,4 @@
-use std::time::Instant;
-
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGEventFlags, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
 };
@@ -23,7 +21,7 @@ pub enum Event {
     Dismiss,
     RefreshCurrentWorkspace,
     DropFinished(super::app::WindowId, bool),
-    ActivationTarget(super::app::WindowId, Instant, Option<CGRect>),
+    ActivationTarget(reactor::OverviewTarget),
     Configure(MissionControlSettings, bool),
     Input(Input),
 }
@@ -266,9 +264,9 @@ impl MissionControlActor {
                     }
                 }
             }
-            Event::ActivationTarget(window, stamp, frame) => {
+            Event::ActivationTarget(target) => {
                 if let Some(session) = &mut self.session {
-                    session.activation_target(window, stamp, frame);
+                    session.activation_target(target);
                 }
             }
             Event::DropFinished(window, changed) => {

@@ -200,6 +200,15 @@ pub enum SpaceEventKind {
     Fullscreen,
 }
 
+/// Destination geometry is prepared by the reactor while the overview covers the desktop.
+#[derive(Debug)]
+pub struct OverviewTarget {
+    pub(crate) workspace: crate::model::VirtualWorkspaceId,
+    pub(crate) window: Option<WindowId>,
+    pub(crate) stamp: Instant,
+    pub(crate) frames: Vec<(WindowId, CGRect)>,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
@@ -2043,6 +2052,9 @@ impl Reactor {
                 let changed =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
                         != Some(workspace);
+                if transition.is_some() {
+                    self.stop_camera(space);
+                }
                 self.store_current_floating_positions(space);
                 let mut response = self.layout_manager.layout_engine.activate_workspace(
                     &self.state.windows,
@@ -2067,12 +2079,8 @@ impl Reactor {
                 } else {
                     EventOutcome::focus_changed(None, false)
                 };
-                outcome.overview_activation = window.zip(transition);
-                outcome.arrange.instant = transition.is_some()
-                    && self
-                        .space_state
-                        .screen_by_space(space)
-                        .is_some_and(|s| s.display_uuid == display);
+                outcome.overview_activation = transition.map(|stamp| (workspace, window, stamp));
+                outcome.arrange.instant = transition.is_some();
                 // The cursor is already on the overview's display; follow only a
                 // workspace that lives on another one.
                 if self
@@ -3053,11 +3061,25 @@ impl Reactor {
         for line in outcome.stdout_lines {
             println!("{line}");
         }
-        if let Some((window, stamp)) = outcome.overview_activation {
-            let frame =
-                self.query_window_info(window).map(|w| w.layout_frame.unwrap_or(w.info.frame));
+        if let Some((workspace, window, stamp)) = outcome.overview_activation {
+            let frames = self
+                .state
+                .windows
+                .workspace_windows(workspace)
+                .into_iter()
+                .filter_map(|id| {
+                    let state = self.state.windows.window(id)?;
+                    (state.is_admitted() && !state.info.is_minimized && state.info.is_standard)
+                        .then_some((id, state.frame_monotonic))
+                })
+                .collect();
             if let Some(wm) = &self.communication_manager.wm_sender {
-                wm.send(WmEvent::OverviewActivationTarget(window, stamp, frame));
+                wm.send(WmEvent::OverviewActivationTarget(OverviewTarget {
+                    workspace,
+                    window,
+                    stamp,
+                    frames,
+                }));
             }
         }
         if !overview_notified

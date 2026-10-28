@@ -386,6 +386,21 @@ impl LayoutManager {
             return Ok(false);
         }
         let layout = Self::calculate_layout(reactor, space_scope);
+        // Finish the logical scrolling viewport here, without queueing a second
+        // animation behind the overview's own transition.
+        for &(space, _) in &layout {
+            let engine = &mut reactor.layout_manager.layout_engine;
+            if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
+                && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
+                    &mut engine.workspaces_mut().workspaces[workspace].layout_system
+                && let Some((mut camera, _)) = system.presentation(layout)
+            {
+                camera.finish();
+                system
+                    .commit_presented_viewport(layout, &camera.snapshot(std::time::Instant::now()));
+            }
+        }
+        let layout = Self::calculate_layout(reactor, space_scope);
         Self::apply_layout(reactor, layout, false, false, true)
     }
 
@@ -556,9 +571,8 @@ impl LayoutManager {
             }
 
             if instant {
-                any_frame_changed |= AnimationManager::animate_layout(
-                    reactor, space, &layout, is_resize, skip_wid, false,
-                );
+                any_frame_changed |=
+                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
             } else if is_workspace_switch {
                 any_frame_changed |=
                     AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);

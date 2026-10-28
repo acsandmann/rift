@@ -63,7 +63,8 @@ pub(crate) struct EventOutcome {
     pub(crate) switch_native_space: Option<Direction>,
     pub(crate) wm_commands: Vec<WmCmd>,
     pub(crate) wm_events: Vec<WmEvent>,
-    pub(crate) overview_activation: Option<(WindowId, Instant)>,
+    pub(crate) overview_activation:
+        Option<(crate::model::VirtualWorkspaceId, Option<WindowId>, Instant)>,
     pub(crate) app_requests: Vec<(pid_t, Request)>,
     pub(crate) window_inventory_requests: Vec<pid_t>,
     pub(crate) topology_reassignments: Vec<TopologyReassignment>,

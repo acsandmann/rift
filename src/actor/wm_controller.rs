@@ -58,11 +58,7 @@ pub enum WmEvent {
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
     OverviewChanged,
-    OverviewActivationTarget(
-        crate::actor::app::WindowId,
-        std::time::Instant,
-        Option<objc2_core_foundation::CGRect>,
-    ),
+    OverviewActivationTarget(reactor::OverviewTarget),
     ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
@@ -267,9 +263,9 @@ impl WmController {
         use self::WmEvent::*;
 
         match event {
-            OverviewActivationTarget(window, stamp, frame) => {
+            OverviewActivationTarget(target) => {
                 if let Some(tx) = &self.mission_control_tx {
-                    tx.send(mission_control::Event::ActivationTarget(window, stamp, frame));
+                    tx.send(mission_control::Event::ActivationTarget(target));
                 }
             }
             OverviewChanged => {

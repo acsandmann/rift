@@ -10610,65 +10610,138 @@ fn deminiaturized_window_is_tiled_back_into_layout() {
 
 #[test]
 fn overview_activation_resolves_scrolled_target_before_native_focus() {
-    let (mut apps, mut reactor) = test_context();
-    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
-    let space = SpaceId::new(1);
-    let target = WindowId::new(1, 3);
-    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
-    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
-        workspace: None,
-        mode: LayoutMode::Scrolling,
-    });
-    apps.simulate_until_quiet(&mut reactor);
-    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
-    let workspace = reactor.test_workspace_ids(space)[0];
-    let (raise_tx, mut raise_rx) = actor::channel();
-    reactor.communication_manager.raise_manager_tx = raise_tx;
-    reactor.state.windows.mark_window_hidden(reactor.test_window_server_id(target));
-    reactor.handle_event(Event::OverviewSelectWorkspace {
-        display: "test-display-1".into(),
-        workspace,
-        window: Some(target),
-        transition: None,
-    });
-    let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
-        panic!("overview activation must request native focus");
-    };
-    assert_eq!(
-        request.focus_window.map(|(window, _)| window),
-        Some(target),
-        "stale native visibility must not replace the explicitly selected window"
-    );
-    let (reply, mut snapshots) = actor::channel();
-    reactor.handle_loop_event(Event::Query(query::QueryRequest::Overview {
-        shared: true,
-        generation: 7,
-        moved: Some(target),
-        reply,
-    }));
-    let (
-        _,
-        crate::actor::mission_control::Event::Snapshot {
-            generation, moved, workspaces, ..
-        },
-    ) = snapshots.try_recv().unwrap()
-    else {
-        panic!("overview metadata must arrive through its asynchronous reply");
-    };
-    assert_eq!((generation, moved), (7, Some(target)));
-    let frame = workspaces
-        .iter()
-        .flat_map(|ws| &ws.windows)
-        .find(|w| w.id == target)
-        .unwrap()
-        .layout_frame
-        .expect("overview must know the final frame before asynchronous native focus");
-    assert!(
-        frame.min().x >= screen.min().x && frame.max().x <= screen.max().x,
-        "activation target is still in the old scrolling viewport: {frame:?}"
-    );
-    assert_eq!(
-        reactor.layout_manager.layout_engine.focused_window(),
-        Some(target)
-    );
+    for switch_workspace in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let target = WindowId::new(1, 3);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+        let mut config = reactor.config.clone();
+        config.settings.layout.scrolling.column_width_ratio = 1.;
+        config.settings.layout.scrolling.preserve_window_sizes = false;
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(&config.settings.layout);
+        reactor.config = config;
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+        reactor.update_layout_or_warn(false, false, Some(space));
+        apps.simulate_until_quiet(&mut reactor);
+        if switch_workspace {
+            reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Index(1),
+                follow: false,
+                window_id: Some(3),
+            });
+            apps.simulate_until_quiet(&mut reactor);
+        }
+        let workspace = reactor.test_workspace_ids(space)[usize::from(switch_workspace)];
+        apps.requests();
+        // Deliberately leave the ordinary presenter busy. A covered handoff must
+        // dispatch the final native placements without waiting for its next tick.
+        let (animation_tx, animation_rx) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(animation_tx);
+        let (wm_tx, mut wm_rx) = actor::channel();
+        reactor.communication_manager.wm_sender = Some(wm_tx);
+        let stamp = Instant::now();
+        let display = reactor.space_state.screen_by_space(space).unwrap().display_uuid.clone();
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        reactor.state.windows.mark_window_hidden(reactor.test_window_server_id(target));
+        reactor.handle_event(Event::OverviewSelectWorkspace {
+            display: display.clone(),
+            workspace,
+            window: Some(target),
+            transition: Some(stamp),
+        });
+        let requests = apps.requests();
+        assert!(requests.iter().any(|request| matches!(request,
+        Request::SetWindowFrames(frames, _, _, _, _) if frames.iter().any(|(id, _)| *id == target)
+    )), "workspace must be placed behind the overview, not left on the presentation queue: {requests:?}");
+        assert!(
+            animation_rx.commands.try_iter().all(|message| !matches!(
+                message,
+                super::animation::Message::Camera(_)
+                    | super::animation::Message::Replace(_)
+                    | super::animation::Message::SkipToEnd(_)
+            )),
+            "the overview must own the only visible transition"
+        );
+        let prepared = std::iter::from_fn(|| wm_rx.try_recv().ok())
+            .find_map(|(_, e)| match e {
+                WmEvent::OverviewActivationTarget(target) => Some(target),
+                _ => None,
+            })
+            .expect("workspace preparation must reply before revealing native windows");
+        assert_eq!(
+            (prepared.workspace, prepared.window, prepared.stamp),
+            (workspace, Some(target), stamp)
+        );
+        assert_eq!(prepared.frames.len(), if switch_workspace { 1 } else { 3 });
+        let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
+            panic!("overview activation must request native focus");
+        };
+        assert_eq!(
+            request.focus_window.map(|(window, _)| window),
+            Some(target),
+            "stale native visibility must not replace the explicitly selected window"
+        );
+        let (reply, mut snapshots) = actor::channel();
+        reactor.handle_loop_event(Event::Query(query::QueryRequest::Overview {
+            shared: true,
+            generation: 7,
+            moved: Some(target),
+            reply,
+        }));
+        let (
+            _,
+            crate::actor::mission_control::Event::Snapshot {
+                generation, moved, workspaces, ..
+            },
+        ) = snapshots.try_recv().unwrap()
+        else {
+            panic!("overview metadata must arrive through its asynchronous reply");
+        };
+        assert_eq!((generation, moved), (7, Some(target)));
+        let frame = workspaces
+            .iter()
+            .flat_map(|ws| &ws.windows)
+            .find(|w| w.id == target)
+            .map(|w| w.layout_frame.unwrap_or(w.info.frame))
+            .expect("overview must know the final frame before asynchronous native focus");
+        assert!(
+            frame.min().x >= screen.min().x && frame.max().x <= screen.max().x,
+            "activation target is still in the old scrolling viewport: {frame:?}"
+        );
+        assert!(
+            prepared.frames.iter().any(|&(id, f)| id == target && f.same_as(frame)),
+            "prepared native placement and overview destination must agree"
+        );
+        assert_eq!(
+            reactor.layout_manager.layout_engine.focused_window(),
+            Some(target)
+        );
+        // Empty workspaces require the same preparation acknowledgement, even
+        // though no selected window can provide one.
+        let empty = reactor.test_workspace_ids(space)[2];
+        reactor.handle_event(Event::OverviewSelectWorkspace {
+            display,
+            workspace: empty,
+            window: None,
+            transition: Some(stamp),
+        });
+        let empty_target = std::iter::from_fn(|| wm_rx.try_recv().ok())
+            .find_map(|(_, e)| match e {
+                WmEvent::OverviewActivationTarget(target) => Some(target),
+                _ => None,
+            })
+            .expect("empty workspaces must acknowledge preparation too");
+        assert_eq!(empty_target.workspace, empty);
+        assert!(empty_target.window.is_none() && empty_target.frames.is_empty());
+    }
 }
