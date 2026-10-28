@@ -25,7 +25,6 @@ use crate::sys::screen::{NSScreenExt, ScreenInfo};
 const MIN_ZOOM: f64 = 0.08;
 const MAX_ZOOM: f64 = 2.0;
 const OVERVIEW_ZOOM: f64 = 0.34;
-const MOTION: f64 = 0.55;
 const EXIT_MOTION: f64 = 0.28;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
@@ -97,6 +96,7 @@ impl Camera {
 #[derive(Clone, Copy)]
 enum MotionCurve {
     Settle,
+    Enter,
     Smooth,
 }
 
@@ -113,6 +113,8 @@ impl Motion {
         // Entry settles quickly; focus accelerates into the window without a first-frame jump.
         let t = match self.curve {
             MotionCurve::Settle => (1. - (-6. * t).exp()) / (1. - (-6.0_f64).exp()),
+            // A direct initial response with a zero-velocity landing, without bounce.
+            MotionCurve::Enter => 1. - (1. - t).powi(3),
             MotionCurve::Smooth => t * t * (3. - 2. * t),
         };
         let mix = |a: f64, b: f64| a + (b - a) * t;
@@ -1349,12 +1351,7 @@ impl OverviewSession {
             previews: false,
             show_empty: settings.show_empty_workspaces,
             shared,
-            // The legacy fade setting controls chrome, independently of camera travel.
-            duration: if settings.fade_enabled {
-                settings.fade_duration_ms.max(1.) / 1000.
-            } else {
-                MOTION
-            },
+            duration: settings.fade_duration_ms.max(1.) / 1000.,
             fade_duration: if settings.fade_enabled {
                 settings.fade_duration_ms.max(1.) / 1000.
             } else {
@@ -2461,7 +2458,8 @@ impl OverviewSession {
         if matches!(self.phase, Phase::Exiting { .. }) {
             self.interrupt();
             for d in &mut self.displays {
-                d.animate(d.home, MOTION);
+                d.animate(d.home, self.duration);
+                d.motion.as_mut().unwrap().curve = MotionCurve::Enter;
             }
             self.phase = Phase::Entering(Instant::now());
         } else {
@@ -2569,8 +2567,10 @@ impl OverviewSession {
             {
                 self.phase = Phase::Entering(now);
                 for d in &mut self.displays {
-                    d.animate(d.home, MOTION);
-                    d.motion.as_mut().unwrap().start = now;
+                    d.animate(d.home, self.duration);
+                    let motion = d.motion.as_mut().unwrap();
+                    motion.start = now;
+                    motion.curve = MotionCurve::Enter;
                     d.background.setOpacity(1.);
                 }
             }
@@ -2882,8 +2882,14 @@ mod tests {
             },
             start,
             duration: 0.3,
-            curve: MotionCurve::Settle,
+            curve: MotionCurve::Enter,
         };
+        let quarter = first.sample(start + Duration::from_millis(75)).0;
+        let progress = (quarter.zoom - first.from.zoom) / (first.to.zoom - first.from.zoom);
+        assert!(
+            (0.4..0.65).contains(&progress),
+            "entry must ease out without an initial lurch"
+        );
         let (middle, done) = first.sample(start + Duration::from_millis(120));
         assert!(!done && middle.zoom > 0.2 && middle.zoom < 1.);
         let reverse = Motion {

@@ -1102,12 +1102,12 @@ pub struct MissionControlSettings {
     #[setting(label = "Enabled", order = 0)]
     pub enabled: bool,
     #[serde(default)]
-    /// Fade Overview in and out.
+    /// Fade Overview labels and decorations in and out.
     #[setting(label = "Fade transitions", enabled_by = "enabled")]
     pub fade_enabled: bool,
     #[serde(default = "default_mission_control_fade_duration_ms")]
-    /// Duration of the Overview fade animation, in milliseconds.
-    #[setting(label = "Fade duration", unit = "ms", enabled_by = "enabled")]
+    /// Duration of Overview entry and camera navigation, in milliseconds.
+    #[setting(label = "Animation duration", unit = "ms", enabled_by = "enabled")]
     pub fade_duration_ms: f64,
 }
 
