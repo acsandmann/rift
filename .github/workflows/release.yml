@@ -3,13 +3,6 @@ name: release
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag to rebuild
-        required: true
-        default: v0.7.0
-        type: string
 
 permissions:
   contents: write
@@ -18,17 +11,23 @@ concurrency:
   group: rift-release-publish
   cancel-in-progress: false
 
+env:
+  CARGO_TERM_COLOR: always
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  ASSET_BASENAME: rift-universal-macos
+  TAP_REPO: acsandmann/homebrew-tap
+  TAP_FILE_PATH: Formula/rift.rb
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  RELEASE_REPOSITORY: ${{ github.repository }}
+
 jobs:
-  build-and-publish:
+  build:
+    name: Build (${{ matrix.target }})
     runs-on: macos-26
-    env:
-      CARGO_TERM_COLOR: always
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      ASSET_BASENAME: rift-universal-macos
-      TAP_REPO: acsandmann/homebrew-tap
-      TAP_FILE_PATH: Formula/rift.rb
-      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
-      RELEASE_REPOSITORY: ${{ github.repository }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
 
     steps:
       - name: Checkout source at release tag
@@ -51,10 +50,10 @@ jobs:
             exit 1
           fi
 
-      - name: Install Rust and targets
+      - name: Install Rust and target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - name: Verify build toolchain
         run: |
@@ -64,25 +63,68 @@ jobs:
           rustup target list --installed
           sw_vers
 
-      - name: Build release for both architectures
+      - name: Build release
         run: |
           set -euxo pipefail
-          cargo build --release --locked --package rift-wm --bin rift --bin rift-cli --target aarch64-apple-darwin
-          cargo build --release --locked --package rift-wm --bin rift --bin rift-cli --target x86_64-apple-darwin
+          cargo build --release --locked --package rift-wm \
+            --bin rift --bin rift-cli --target "${{ matrix.target }}"
+
+      - name: Bundle architecture binaries
+        run: |
+          set -euxo pipefail
+          mkdir -p artifacts
+          tar -C "target/${{ matrix.target }}/release" \
+            -czf "artifacts/${{ matrix.target }}.tar.gz" rift rift-cli
+
+      - name: Upload architecture binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: rift-${{ matrix.target }}
+          path: artifacts/${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  publish:
+    name: Package and publish universal release
+    needs: build
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout source at release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download architecture binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rift-*-apple-darwin
+          path: artifacts
+          merge-multiple: true
 
       - name: Create universal binaries
         run: |
           set -euxo pipefail
           mkdir -p dist
+          for arch in aarch64-apple-darwin x86_64-apple-darwin; do
+            test -s "artifacts/${arch}.tar.gz"
+            mkdir -p "slices/${arch}"
+            tar -xzf "artifacts/${arch}.tar.gz" -C "slices/${arch}"
+          done
           lipo -create \
-            target/aarch64-apple-darwin/release/rift \
-            target/x86_64-apple-darwin/release/rift \
+            slices/aarch64-apple-darwin/rift \
+            slices/x86_64-apple-darwin/rift \
             -output dist/rift
           lipo -create \
-            target/aarch64-apple-darwin/release/rift-cli \
-            target/x86_64-apple-darwin/release/rift-cli \
+            slices/aarch64-apple-darwin/rift-cli \
+            slices/x86_64-apple-darwin/rift-cli \
             -output dist/rift-cli
           strip -x dist/rift dist/rift-cli
+          chmod +x dist/rift dist/rift-cli
+          lipo -verify_arch arm64 x86_64 dist/rift
+          lipo -verify_arch arm64 x86_64 dist/rift-cli
 
       - name: Package tarball
         id: pkg
