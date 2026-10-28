@@ -1856,6 +1856,7 @@ mod tests {
             0,
         )
         .unwrap();
+        CGEvent::set_location(Some(&event), CGPoint::new(30., 40.));
         CGEvent::set_flags(Some(&event), CGEventFlags::MaskShift);
         assert!(!input.on_event(CGEventType::ScrollWheel, &event, None));
         assert!(

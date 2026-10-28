@@ -94,6 +94,21 @@ pub struct ReactorQueryHandle {
 }
 
 impl ReactorQueryHandle {
+    pub(crate) fn overview_snapshot(
+        &self,
+        shared: bool,
+        generation: u64,
+        moved: Option<WindowId>,
+        reply: crate::actor::mission_control::Sender,
+    ) {
+        self.tx.send(Event::Query(QueryRequest::Overview {
+            shared,
+            generation,
+            moved,
+            reply,
+        }));
+    }
+
     pub(super) fn new(tx: Sender) -> Self { Self { tx } }
 
     fn send_query<T>(
@@ -163,6 +178,12 @@ impl ReactorQueryHandle {
 
 #[derive(Debug)]
 pub enum QueryRequest {
+    Overview {
+        shared: bool,
+        generation: u64,
+        moved: Option<WindowId>,
+        reply: crate::actor::mission_control::Sender,
+    },
     Workspaces {
         space_id: Option<SpaceId>,
         resp: SyncSender<Vec<RuntimeWorkspaceData>>,
@@ -197,6 +218,32 @@ pub enum QueryRequest {
 impl Reactor {
     pub(super) fn handle_query_request(&mut self, req: QueryRequest) {
         match req {
+            QueryRequest::Overview {
+                shared,
+                generation,
+                moved,
+                reply,
+            } => {
+                // Reading overview metadata must not commit native presentations:
+                // that can notify the overview again and create a refresh loop.
+                let displays = self.query_displays();
+                let workspaces = if shared {
+                    self.query_workspaces(None)
+                } else {
+                    displays
+                        .iter()
+                        .filter(|d| d.is_visible_space)
+                        .filter_map(|d| d.info.space)
+                        .flat_map(|space| self.query_workspaces(Some(space)))
+                        .collect()
+                };
+                reply.send(crate::actor::mission_control::Event::Snapshot {
+                    generation,
+                    moved,
+                    displays,
+                    workspaces,
+                });
+            }
             QueryRequest::Workspaces { space_id, resp } => {
                 let _ = resp.send(self.query_workspaces(space_id));
             }

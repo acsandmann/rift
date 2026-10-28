@@ -12,7 +12,7 @@ use objc2::rc::Retained;
 use objc2::{AnyThread, DeclaredClass, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
-use objc2_quartz_core::CADisplayLink;
+use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
 use parking_lot::Mutex;
 
 use super::dispatch::DispatchExt;
@@ -42,7 +42,8 @@ impl LatestTick {
 }
 
 struct State {
-    wake: Sender<()>,
+    wake: Box<dyn Fn() + Send + Sync>,
+    pending: AtomicBool,
     latest: Mutex<LatestTick>,
     cancelled: AtomicBool,
     paused: AtomicBool,
@@ -66,7 +67,7 @@ define_class! {
             let target_timestamp = link.targetTimestamp();
             if state.paused.load(Ordering::Acquire) { return; }
             state.latest.lock().publish(timestamp, target_timestamp);
-            let _ = state.wake.try_send(());
+            if !state.pending.swap(true, Ordering::AcqRel) { (state.wake)(); }
         }
     }
 }
@@ -79,17 +80,32 @@ pub struct DisplayLink {
 
 impl DisplayLink {
     pub fn for_display(display: u32, wake: Sender<()>) -> Self {
+        Self::create(
+            display,
+            move || {
+                let _ = wake.try_send(());
+            },
+            false,
+        )
+    }
+
+    pub fn for_display_callback(display: u32, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::create(display, wake, true)
+    }
+
+    fn create(display: u32, wake: impl Fn() + Send + Sync + 'static, high_refresh: bool) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let state = Arc::new(State {
-            wake,
+            wake: Box::new(wake),
+            pending: AtomicBool::new(false),
             latest: Mutex::default(),
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
         });
         queue::main().after_f_s(
             Time::NOW,
-            (id, display, state.clone()),
-            |(id, display, state)| {
+            (id, display, state.clone(), high_refresh),
+            |(id, display, state, high_refresh)| {
                 if state.cancelled.load(Ordering::Acquire) {
                     return;
                 }
@@ -109,6 +125,14 @@ impl DisplayLink {
                 let target: Retained<DisplayLinkTarget> = unsafe { msg_send![super(target), init] };
                 // The target is retained by the link. It does not retain the link in return.
                 let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
+                if high_refresh {
+                    let fps = screen.maximumFramesPerSecond() as f32;
+                    link.setPreferredFrameRateRange(CAFrameRateRange::new(
+                        30_f32.min(fps),
+                        fps,
+                        fps,
+                    ));
+                }
                 link.setPaused(paused);
                 unsafe {
                     link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
@@ -126,6 +150,7 @@ impl DisplayLink {
             return;
         }
         self.state.latest.lock().take();
+        self.state.pending.store(false, Ordering::Release);
         let state = self.state.clone();
         queue::main().after_f_s(Time::NOW, (self.id, state), |(id, state)| {
             LINKS.with(|links| {
@@ -136,7 +161,10 @@ impl DisplayLink {
         });
     }
 
+    pub fn has_update(&self) -> bool { self.state.pending.load(Ordering::Acquire) }
+
     pub fn latest(&self) -> Option<(DisplayTick, Instant)> {
+        self.state.pending.store(false, Ordering::Release);
         let tick = self.state.latest.lock().take()?;
         let now = Instant::now();
         let delta = tick.target_timestamp - objc2_quartz_core::CACurrentMediaTime();

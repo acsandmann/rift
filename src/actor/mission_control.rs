@@ -8,10 +8,16 @@ use objc2_foundation::MainThreadMarker;
 
 use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
-use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewRenderers};
+use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewCache};
 
 #[derive(Debug)]
 pub enum Event {
+    Snapshot {
+        generation: u64,
+        moved: Option<super::app::WindowId>,
+        displays: Vec<crate::model::server::RuntimeDisplayData>,
+        workspaces: Vec<crate::model::server::RuntimeWorkspaceData>,
+    },
     PumpPreviews,
     ShowAll,
     Dismiss,
@@ -143,11 +149,14 @@ pub struct MissionControlActor {
     shared: bool,
     rx: Receiver,
     tx: Sender,
-    cache: Option<PreviewRenderers>,
+    cache: Option<PreviewCache>,
     reactor: reactor::ReactorHandle,
     session: Option<OverviewSession>,
+    generation: u64,
+    refresh_pending: bool,
     mtm: MainThreadMarker,
     input_tx: super::input::Sender,
+    stack_line_tx: super::stack_line::Sender,
 }
 
 impl MissionControlActor {
@@ -159,6 +168,7 @@ impl MissionControlActor {
         reactor: reactor::ReactorHandle,
         mtm: MainThreadMarker,
         input_tx: super::input::Sender,
+        stack_line_tx: super::stack_line::Sender,
     ) -> Self {
         if settings.enabled && settings.window_previews && CGPreflightScreenCaptureAccess() {
             let _ = cgs::PreviewCompositor::prepare();
@@ -171,8 +181,11 @@ impl MissionControlActor {
             cache: None,
             reactor,
             session: None,
+            generation: 0,
+            refresh_pending: false,
             mtm,
             input_tx,
+            stack_line_tx,
         }
     }
 
@@ -203,19 +216,48 @@ impl MissionControlActor {
     }
 
     fn close(&mut self) {
+        self.generation += 1;
+        self.refresh_pending = false;
         if let Some(mut session) = self.session.take() {
             session.retain_previews(&mut self.cache);
             drop(session);
         }
         self.input_tx
             .send(super::input::Request::SetMissionControlActive(false, Vec::new()));
+        self.stack_line_tx.send(super::stack_line::Event::OverviewBounds(Vec::new()));
     }
 
     fn handle(&mut self, event: Event) {
-        if !matches!(event, Event::PumpPreviews | Event::Input(Input::Move(_))) {
+        if !matches!(
+            event,
+            Event::PumpPreviews | Event::Snapshot { .. } | Event::Input(Input::Move(_))
+        ) {
             tracing::debug!(?event, "Overview event");
         }
         match event {
+            Event::Snapshot {
+                generation,
+                moved,
+                displays,
+                workspaces,
+            } => {
+                if generation != self.generation {
+                    return;
+                }
+                self.refresh_pending = false;
+                if let Some(session) = &mut self.session {
+                    session.refresh(&displays, &workspaces, moved);
+                    self.stack_line_tx
+                        .send(super::stack_line::Event::OverviewBounds(session.input_bounds()));
+                    self.input_tx.send(super::input::Request::SetMissionControlActive(
+                        !session.is_empty(),
+                        session.input_bounds(),
+                    ));
+                }
+                if self.session.as_ref().is_some_and(OverviewSession::is_empty) {
+                    self.close();
+                }
+            }
             Event::PumpPreviews => {
                 if let Some(session) = self.session.as_mut() {
                     session.pump_previews();
@@ -231,9 +273,7 @@ impl MissionControlActor {
             }
             Event::DropFinished(window, changed) => {
                 tracing::debug!(?window, changed, "Overview drop completed");
-                if let Some(session) = &mut self.session {
-                    session.refresh(&self.reactor, Some(window));
-                }
+                self.request_refresh(Some(window));
             }
             Event::ShowAll => {
                 tracing::debug!(
@@ -275,20 +315,14 @@ impl MissionControlActor {
                         self.session.is_some(),
                         self.session.as_ref().map_or_else(Vec::new, OverviewSession::input_bounds),
                     ));
+                    self.stack_line_tx.send(super::stack_line::Event::OverviewBounds(
+                        self.session.as_ref().map_or_else(Vec::new, OverviewSession::input_bounds),
+                    ));
                 }
             }
             Event::Dismiss => self.handle(Event::Input(Input::Dismiss)),
             Event::RefreshCurrentWorkspace => {
-                if let Some(session) = &mut self.session {
-                    session.refresh(&self.reactor, None);
-                    self.input_tx.send(super::input::Request::SetMissionControlActive(
-                        !session.is_empty(),
-                        session.input_bounds(),
-                    ));
-                }
-                if self.session.as_ref().is_some_and(OverviewSession::is_empty) {
-                    self.close();
-                }
+                self.request_refresh(None);
             }
             Event::Configure(settings, shared) => {
                 self.close();
@@ -330,6 +364,14 @@ impl MissionControlActor {
                     }
                 }
             }
+        }
+    }
+
+    fn request_refresh(&mut self, moved: Option<super::app::WindowId>) {
+        if self.session.is_some() && (!self.refresh_pending || moved.is_some()) {
+            self.refresh_pending = true;
+            self.reactor
+                .overview_snapshot(self.shared, self.generation, moved, self.tx.clone());
         }
     }
 }

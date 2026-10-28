@@ -23,6 +23,15 @@ overflow-checks = true
 split-debuginfo = "unpacked"
 panic = "unwind"
 
+# Keep native dispatch fast during ordinary cargo run. Signature validation walks
+# Objective-C metadata on every message; application debug assertions stay enabled.
+[profile.dev.package.objc2]
+opt-level = 2
+debug-assertions = false
+
+[profile.dev.package.cgs]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 debug = 1
@@ -56,7 +65,7 @@ disable-axuielement-destroyed = []
 
 [dependencies]
 rift-config-derive = { path = "crates/rift-config-derive" }
-cgs = { version = "0.3.16", git = "https://github.com/acsandmann/cgs", rev = "b4f5b60d54b68bd56184aeb88b7e6deda7d13049" }
+cgs = { version = "0.3.17" }#, path = "cgs" }
 anyhow = { version = "1.0.83", default-features = false }
 ascii_tree = "0.1.1"
 thiserror = { version = "2.0.17", default-features = false }

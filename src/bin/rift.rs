@@ -368,6 +368,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             reactor.clone(),
             mtm,
             input_tx.clone(),
+            stack_line_tx.clone(),
         )
     });
     let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);

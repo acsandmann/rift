@@ -10622,14 +10622,44 @@ fn overview_activation_resolves_scrolled_target_before_native_focus() {
     apps.simulate_until_quiet(&mut reactor);
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
     let workspace = reactor.test_workspace_ids(space)[0];
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.state.windows.mark_window_hidden(reactor.test_window_server_id(target));
     reactor.handle_event(Event::OverviewSelectWorkspace {
         display: "test-display-1".into(),
         workspace,
         window: Some(target),
         transition: None,
     });
-    let frame = reactor
-        .query_window_info(target)
+    let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
+        panic!("overview activation must request native focus");
+    };
+    assert_eq!(
+        request.focus_window.map(|(window, _)| window),
+        Some(target),
+        "stale native visibility must not replace the explicitly selected window"
+    );
+    let (reply, mut snapshots) = actor::channel();
+    reactor.handle_loop_event(Event::Query(query::QueryRequest::Overview {
+        shared: true,
+        generation: 7,
+        moved: Some(target),
+        reply,
+    }));
+    let (
+        _,
+        crate::actor::mission_control::Event::Snapshot {
+            generation, moved, workspaces, ..
+        },
+    ) = snapshots.try_recv().unwrap()
+    else {
+        panic!("overview metadata must arrive through its asynchronous reply");
+    };
+    assert_eq!((generation, moved), (7, Some(target)));
+    let frame = workspaces
+        .iter()
+        .flat_map(|ws| &ws.windows)
+        .find(|w| w.id == target)
         .unwrap()
         .layout_frame
         .expect("overview must know the final frame before asynchronous native focus");

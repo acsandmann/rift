@@ -60,6 +60,7 @@ struct NativeGroup {
 
 #[derive(Debug)]
 pub enum Event {
+    OverviewBounds(Vec<CGRect>),
     TabAction(GroupId, u64, WindowId, cgs::TabBarAction),
     /// A tab was dragged onto `target`'s slot. The bar already shows the new order.
     TabMoved(GroupId, u64, WindowId, WindowId),
@@ -88,6 +89,7 @@ pub struct StackLine {
     tx: Sender,
     reactor_tx: reactor::Sender,
     coordinate_converter: CoordinateConverter,
+    overview_bounds: Vec<CGRect>,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -114,6 +116,7 @@ impl StackLine {
             mtm,
             reactor_tx,
             coordinate_converter,
+            overview_bounds: Vec::new(),
         }
     }
 
@@ -138,6 +141,15 @@ impl StackLine {
             return;
         }
         match event {
+            Event::OverviewBounds(bounds) => {
+                if self.overview_bounds == bounds {
+                    return;
+                }
+                self.overview_bounds = bounds;
+                for group in self.native_groups.values() {
+                    self.place(group, false);
+                }
+            }
             Event::TabAction(id, generation, window, action) => {
                 self.handle_tab_action(id, generation, window, action);
             }
@@ -260,6 +272,19 @@ impl StackLine {
     }
 
     fn place(&self, group: &NativeGroup, reorder: bool) {
+        // Covered bars keep their model current but do no native presentation work.
+        if self.overview_bounds.iter().any(|b| {
+            b.min().x < group.info.frame.max().x
+                && b.max().x > group.info.frame.min().x
+                && b.min().y < group.info.frame.max().y
+                && b.max().y > group.info.frame.min().y
+        }) {
+            if group.bar.is_visible() {
+                group.bar.hide();
+            }
+            group.ordered_anchor.set(None);
+            return;
+        }
         let settings = &self.config.settings.ui.stack_line;
         group.bar.set_select_on_hover(settings.hover.selects_on_hover());
         let edge = match (

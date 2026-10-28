@@ -2082,6 +2082,27 @@ impl Reactor {
                 {
                     outcome.display_switch_warp = Some(space);
                 }
+                if let Some(window) = window.filter(|&window| response.focus_window == Some(window))
+                {
+                    // Explicit overview picks use the same focus path as the CLI.
+                    // Workspace fallback focus can reject a parked window using
+                    // stale native visibility and silently refocus its neighbour.
+                    outcome.absorb(command_workflow::handle_command_reactor_focus_window(
+                        &self.state,
+                        &self.app_manager,
+                        command_workflow::FocusWindowPayload {
+                            window_id: window,
+                            window_server_id: self
+                                .state
+                                .windows
+                                .window(window)
+                                .and_then(|w| w.info.sys_id),
+                            resolved_space: Some(space),
+                            space_is_active: true,
+                        },
+                    )?);
+                    return Ok(outcome);
+                }
                 return Ok(outcome.with_layout_response(response, Some(space)));
             }
             Event::OverviewDrop { intent, reply } => {
