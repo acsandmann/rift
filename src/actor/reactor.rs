@@ -3739,15 +3739,7 @@ impl Reactor {
             }
         }
         for (previous_space, space) in space_remaps {
-            if let Some(frame) = self.last_screen_frames.remove(&previous_space) {
-                self.last_screen_frames.insert(space, frame);
-            }
-            self.space_activation_policy.on_space_remapped(previous_space, space);
-            self.layout_manager.layout_engine.remap_space(
-                &mut self.state.windows,
-                previous_space,
-                space,
-            );
+            self.remap_space(previous_space, space);
         }
         for screen in &self.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
@@ -3798,6 +3790,7 @@ impl Reactor {
                 &invalidated_spaces,
             ));
         }
+        outcome.absorb(self.return_evicted_windows(&previous_screens));
         // Transfers already fitted their frames; refit only workspaces whose native
         // desktop stayed put while its display geometry changed.
         for (workspace, space, source, target) in refits {
@@ -3859,6 +3852,72 @@ impl Reactor {
                 .filter_map(|screen| Some((screen.space?, screen.frame))),
         );
         Ok(outcome)
+    }
+
+    fn remap_space(&mut self, previous_space: SpaceId, space: SpaceId) {
+        if let Some(frame) = self.last_screen_frames.remove(&previous_space) {
+            self.last_screen_frames.insert(space, frame);
+        }
+        self.space_activation_policy.on_space_remapped(previous_space, space);
+        self.layout_manager.layout_engine.remap_space(
+            &mut self.state.windows,
+            previous_space,
+            space,
+        );
+    }
+
+    /// A returning display takes back the windows its departure moved away. macOS only
+    /// does this itself for windows that have not moved since, and the departure re-tiled them.
+    fn return_evicted_windows(&mut self, previous_screens: &[ScreenInfo]) -> EventOutcome {
+        let mut outcome = EventOutcome::no_change();
+        let returned: Vec<_> = self
+            .space_state
+            .screens
+            .iter()
+            .filter(|screen| {
+                !previous_screens.iter().any(|old| old.display_uuid == screen.display_uuid)
+            })
+            .filter_map(|screen| {
+                let space = screen.space.filter(|space| self.active_spaces.contains(space))?;
+                Some((space, screen.display_uuid_opt()?.to_owned()))
+            })
+            .collect();
+        for (space, display) in returned {
+            let windows = self
+                .layout_manager
+                .layout_engine
+                .evicted_from_display(&self.state.windows, &display);
+            // The display can come back on a new desktop without the snapshot pairing it with
+            // the one it lost. Its workspaces, and the arrangements saved in them, follow it.
+            let mut departed: Vec<_> = windows
+                .iter()
+                .map(|&(_, departed)| departed)
+                .filter(|&departed| {
+                    departed != space
+                        && !self
+                            .space_state
+                            .display_space_ids
+                            .values()
+                            .any(|spaces| spaces.contains(&departed))
+                })
+                .collect();
+            departed.sort_unstable();
+            departed.dedup();
+            if let [departed] = departed[..] {
+                self.remap_space(departed, space);
+            }
+            for (window, _) in windows {
+                let source_frame = self
+                    .assigned_space_for_window_id(window)
+                    .and_then(|source| self.space_state.screen_by_space(source))
+                    .map(|screen| screen.frame);
+                // Reassignment consumes the eviction and restores the workspace position;
+                // the transfer moves the window there and holds off native reconciliation.
+                self.reassign_window_to_authoritative_space(window, space, false);
+                outcome.absorb(self.request_window_transfer(window, space, source_frame));
+            }
+        }
+        outcome
     }
 
     /// Global-mode visibility is derived here from the accepted snapshot and activation policy.

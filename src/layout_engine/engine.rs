@@ -203,6 +203,8 @@ pub struct LayoutEngine {
 #[derive(Debug)]
 struct EvictedWindow {
     display: String,
+    /// The desktop the window left. A display can return on a new one.
+    space: SpaceId,
     ordinal: usize,
     /// The assignment the departure gave the window. If the window has since been placed
     /// anywhere else, the user (or another change) decided and the record no longer applies.
@@ -1417,7 +1419,13 @@ impl LayoutEngine {
             return;
         };
         let display = display.to_owned();
-        self.evicted.insert(wid, EvictedWindow { display, ordinal, landed });
+        let space = self.workspaces[from].space;
+        self.evicted.insert(wid, EvictedWindow {
+            display,
+            space,
+            ordinal,
+            landed,
+        });
     }
 
     /// The workspace position `wid` was evicted from, if the display now showing `space` is the
@@ -1441,6 +1449,23 @@ impl LayoutEngine {
     /// Consume recovery only after native reassignment has succeeded, including a fallback.
     pub(crate) fn take_eviction(&mut self, wid: WindowId) -> Option<usize> {
         self.evicted.remove(&wid).map(|record| record.ordinal)
+    }
+
+    /// Windows a departure of `display` moved away that nothing has placed elsewhere since,
+    /// with the desktop each one left.
+    pub(crate) fn evicted_from_display(
+        &self,
+        windows: &WindowStore,
+        display: &str,
+    ) -> Vec<(WindowId, SpaceId)> {
+        self.evicted
+            .iter()
+            .filter(|(wid, record)| {
+                record.display == display
+                    && windows.workspace_for_window(**wid) == Some(record.landed)
+            })
+            .map(|(&wid, record)| (wid, record.space))
+            .collect()
     }
 
     fn restore_native_layout(
