@@ -3,6 +3,17 @@ name: release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild and publish (e.g. v0.7.2)
+        required: true
+        type: string
+      trigger_docs:
+        description: Also trigger the documentation build
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -123,8 +134,11 @@ jobs:
             -output dist/rift-cli
           strip -x dist/rift dist/rift-cli
           chmod +x dist/rift dist/rift-cli
-          lipo -verify_arch arm64 x86_64 dist/rift
-          lipo -verify_arch arm64 x86_64 dist/rift-cli
+          for bin in dist/rift dist/rift-cli; do
+            for arch in arm64 x86_64; do
+              lipo "$bin" -verify_arch "$arch"
+            done
+          done
 
       - name: Package tarball
         id: pkg
@@ -227,7 +241,7 @@ jobs:
           git -C tap push origin HEAD
 
       - name: Trigger documentation build
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || inputs.trigger_docs
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
