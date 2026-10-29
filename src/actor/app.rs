@@ -817,20 +817,31 @@ fn write_frame(
     writes: FrameWrites,
 ) -> Result<FrameWrites, AxError> {
     // Moving before growing avoids clamping at a screen edge; shrinking first
-    // avoids it in the opposite direction.
+    // avoids it in the opposite direction. A frame that grows on one axis and
+    // shrinks on the other needs both: still oversized on arrival, the window
+    // is clamped against the destination's edge and keeps that origin (#598).
     let grows = target.size.width > current.size.width + 0.5
         || target.size.height > current.size.height + 0.5;
+    let shrinks = target.size.width < current.size.width - 0.5
+        || target.size.height < current.size.height - 0.5;
     let mut unresponsive = false;
     let mut failed_with = |result: Result<(), AxError>| {
         unresponsive |= matches!(result, Err(AxError::Ax(AXError::CannotComplete)));
         result.is_err()
     };
     let mut failed = FrameWrites::default();
+    if writes.position && writes.size && grows && shrinks {
+        let shrunk = CGSize::new(
+            target.size.width.min(current.size.width),
+            target.size.height.min(current.size.height),
+        );
+        failed.size = failed_with(elem.set_size(shrunk));
+    }
     if writes.position && grows {
         failed.position = failed_with(elem.set_position(target.origin));
     }
     if writes.size {
-        failed.size = failed_with(elem.set_size(target.size));
+        failed.size |= failed_with(elem.set_size(target.size));
     }
     if writes.position && !grows {
         failed.position = failed_with(elem.set_position(target.origin));
@@ -2747,6 +2758,9 @@ mod frame_tests {
     struct FakeWindow {
         frame: Cell<CGRect>,
         min_size: CGSize,
+        // Like WindowServer, keeps the bottom edge on this display by moving
+        // the window up, but never above the display's top.
+        display: Option<CGRect>,
         rejects_position: bool,
         unresponsive: bool,
         calls: RefCell<Vec<&'static str>>,
@@ -2769,7 +2783,7 @@ mod frame_tests {
             if self.rejects_position {
                 return Err(AxError::Ax(AXError::Failure));
             }
-            self.frame.set(CGRect::new(origin, self.frame.get().size));
+            self.place(CGRect::new(origin, self.frame.get().size));
             Ok(())
         }
 
@@ -2782,8 +2796,20 @@ mod frame_tests {
                 size.width.max(self.min_size.width),
                 size.height.max(self.min_size.height),
             );
-            self.frame.set(CGRect::new(self.frame.get().origin, size));
+            self.place(CGRect::new(self.frame.get().origin, size));
             Ok(())
+        }
+    }
+
+    impl FakeWindow {
+        fn place(&self, mut frame: CGRect) {
+            if let Some(display) = self.display {
+                let bottom = display.origin.y + display.size.height;
+                if frame.origin.y + frame.size.height > bottom {
+                    frame.origin.y = (bottom - frame.size.height).max(display.origin.y);
+                }
+            }
+            self.frame.set(frame);
         }
     }
 
@@ -2887,6 +2913,18 @@ mod frame_tests {
         let target = rect(10.0, 20.0, 300.0, 200.0);
         assert_eq!(reconcile(&window, target).unwrap(), target);
         assert_eq!(*window.calls.borrow(), ["position", "size", "frame"]);
+    }
+
+    #[test]
+    fn mixed_resize_shrinks_before_moving_onto_a_shorter_display() {
+        let window = FakeWindow {
+            frame: Cell::new(rect(736.0, 38.0, 729.0, 913.0)),
+            display: Some(rect(1470.0, 136.0, 1180.0, 820.0)),
+            ..Default::default()
+        };
+        let target = rect(1475.0, 171.0, 1170.0, 780.0);
+        assert_eq!(reconcile(&window, target).unwrap(), target);
+        assert_eq!(*window.calls.borrow(), ["size", "position", "size", "frame"]);
     }
 
     #[test]
