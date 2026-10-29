@@ -7,7 +7,7 @@
 // https://github.com/NUIKit/CGSInternal/blob/c4f6f559d624dc1cfc2bf24c8c19dbf653317fcf/CGSEvent.h#L21
 use std::ffi::c_void;
 
-use cgs::G_CONNECTION;
+use cgs::compositor::G_CONNECTION;
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
 use tracing::{debug, trace, warn};

@@ -169,7 +169,7 @@ impl MissionControlActor {
         stack_line_tx: super::stack_line::Sender,
     ) -> Self {
         if settings.enabled && settings.window_previews && CGPreflightScreenCaptureAccess() {
-            let _ = cgs::PreviewCompositor::prepare();
+            let _ = cgs::compositor::preview::PreviewCompositor::prepare();
         }
         Self {
             settings,
@@ -293,7 +293,7 @@ impl MissionControlActor {
                         return;
                     }
                     if self.settings.window_previews {
-                        let _ = cgs::PreviewCompositor::prepare();
+                        let _ = cgs::compositor::preview::PreviewCompositor::prepare();
                     }
                     self.session = OverviewSession::new(
                         &self.reactor,

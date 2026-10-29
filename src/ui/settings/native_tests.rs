@@ -1,3 +1,9 @@
+use cgs::controls::SheetActions;
+use cgs::layout::VStack;
+use cgs::settings::Section;
+use cgs::text::SectionTitle;
+use cgs::view::NativeView;
+use cgs::{CGPoint, CGRect, CGSize, Insets, Ui};
 use objc2::Message;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{
@@ -1778,7 +1784,7 @@ pub fn render(
             .push(SectionTitle::new(&ui, "Workspace 2"))
             .push(page.view.clone())
             .push(SheetActions::new(&ui));
-        let sheet = cgs::Window::new(&ui).title("Workspace 2").content(content);
+        let sheet = cgs::window::Window::new(&ui).title("Workspace 2").content(content);
         let sheet_window = sheet.ns_window();
         sheet_window.setAppearance(window.appearance().as_deref());
         let view = sheet_window.contentView().unwrap();

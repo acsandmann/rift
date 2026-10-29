@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cgs::G_CONNECTION;
+use cgs::compositor::{G_CONNECTION, main_connection};
 use nix::libc::{RTLD_DEFAULT, dlsym};
 use objc2_app_kit::NSWindowLevel;
 use objc2_application_services::AXError;
@@ -1004,7 +1004,7 @@ pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> 
 }
 
 pub fn allow_hide_mouse() -> Result<(), CGError> {
-    let cid = cgs::main_connection();
+    let cid = main_connection();
     let property = CFString::from_str("SetsCursorInBackground");
     let value = CFBoolean::retain(unsafe { kCFBooleanTrue.unwrap_unchecked() });
 

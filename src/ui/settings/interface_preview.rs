@@ -1,4 +1,8 @@
 //! Embed the shipping cgs tab component; only the example window chrome is drawn here.
+use cgs::image::Image;
+use cgs::tabs::{TabBar, TabBarAction, TabBarEdge, TabBarItem};
+use cgs::view::NativeView;
+use cgs::{CGPoint, CGRect, CGSize, Ui};
 use objc2::{AnyThread, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::*;
 use objc2_foundation::{NSAttributedString, NSDictionary, NSString};

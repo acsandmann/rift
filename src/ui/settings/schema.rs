@@ -1,5 +1,12 @@
 //! Native controls generated from config metadata, using the same ConfigActor
 //! submission and sheet draft ownership as handcrafted Settings controls.
+use cgs::app::Application;
+use cgs::controls::{NumberField, NumberSlider, Popup, Slider, Switch};
+use cgs::input::TextField;
+use cgs::settings::{Section, SettingsRow, ValidationMessage};
+use cgs::tabs::TabSelector;
+use cgs::view::NativeView;
+
 use super::*;
 use crate::common::config::{ConfigField, ConfigSchema, FieldKind, FieldValue};
 

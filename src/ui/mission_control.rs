@@ -1,7 +1,7 @@
 //! Persistent window geometry; only the camera projects it into the overview.
 use std::time::{Duration, Instant};
 
-use cgs::{CgsWindow, LayerTransaction, WindowSurface, release_layer_tree};
+use cgs::compositor::{CgsWindow, LayerTransaction, WindowSurface, release_layer_tree};
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -192,7 +192,7 @@ fn pill(frame: CGRect, scale: f64, radius: f64) -> Retained<CALayer> {
     let l = layer(frame, scale);
     l.setCornerRadius(radius);
     l.setMasksToBounds(true);
-    if let Some(blur) = cgs::backdrop_blur(16.) {
+    if let Some(blur) = cgs::compositor::backdrop_blur(16.) {
         blur.setFrame(l.bounds());
         blur.setAutoresizingMask(
             objc2_quartz_core::CAAutoresizingMask::LayerWidthSizable
@@ -216,7 +216,7 @@ fn symbol(parent: &CALayer, name: &str, x: f64, scale: f64) {
         &NSColor::colorWithWhite_alpha(0.85, 0.7),
     );
     if let Some(image) =
-        cgs::Symbol::header(name).and_then(|i| i.imageWithSymbolConfiguration(&config))
+        cgs::image::Symbol::header(name).and_then(|i| i.imageWithSymbolConfiguration(&config))
         && let Some(cg) =
             unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
     {
@@ -296,7 +296,7 @@ struct SceneWindow {
     world: CGRect,
     // Decorations share the camera but stay sharp and understated at small scales.
     shadow: Retained<CALayer>,
-    preview: cgs::PreviewLayer,
+    preview: cgs::compositor::preview::PreviewLayer,
     icon_image: Option<Retained<CGImage>>,
 }
 impl SceneWindow {
@@ -317,7 +317,7 @@ impl SceneWindow {
         shadow.setShadowOffset(CGSize::new(0., 4.));
         shadow.setZPosition(0.5);
         root.addSublayer(&shadow);
-        let preview = cgs::PreviewLayer::new();
+        let preview = cgs::compositor::preview::PreviewLayer::new();
         preview.layer().setMasksToBounds(true);
         shadow.addSublayer(preview.layer());
         Self {
@@ -454,7 +454,7 @@ struct DisplayOverview {
     home: Camera,
     motion: Option<Motion>,
     background: Retained<CALayer>,
-    desktop_snapshot: Option<cgs::DesktopSnapshot>,
+    desktop_snapshot: Option<cgs::compositor::preview::DesktopSnapshot>,
     background_ready: bool,
     wallpaper_key: Option<String>,
     root: Retained<CALayer>,
@@ -465,10 +465,10 @@ struct DisplayOverview {
     help: Retained<CATextLayer>,
     help_index: Option<usize>,
     last_percentage: i32,
-    captures: Option<cgs::PreviewCompositor>,
+    captures: Option<cgs::compositor::preview::PreviewCompositor>,
     clock: Option<crate::sys::display_link::DisplayLink>,
     camera_input: Instant,
-    sources: Vec<cgs::PreviewSource>,
+    sources: Vec<cgs::compositor::preview::PreviewSource>,
     policy_dirty: bool,
     dragged: Option<WindowId>,
     applied: Option<(Camera, f32)>,
@@ -1001,15 +1001,18 @@ impl DisplayOverview {
             let zoom = zoom.min(if visible { 1. } else { 0.20 });
             let width = (w.world.size.width * zoom * self.scale).ceil().max(1.) as usize;
             let height = (w.world.size.height * zoom * self.scale).ceil().max(1.) as usize;
-            self.sources.push(cgs::PreviewSource {
+            self.sources.push(cgs::compositor::preview::PreviewSource {
                 window_id: w.data.info.sys_id.unwrap().as_u32(),
                 process_id: w.data.id.pid,
                 mode: if visible {
-                    cgs::CaptureMode::Live
+                    cgs::compositor::preview::CaptureMode::Live
                 } else {
-                    cgs::CaptureMode::Snapshot
+                    cgs::compositor::preview::CaptureMode::Snapshot
                 },
-                resolution: cgs::CaptureResolution::Thumbnail { width, height },
+                resolution: cgs::compositor::preview::CaptureResolution::Thumbnail {
+                    width,
+                    height,
+                },
                 priority: if important && visible {
                     3
                 } else if visible {
@@ -1053,10 +1056,19 @@ struct ViewState {
 }
 #[derive(Default)]
 pub(crate) struct PreviewCache {
-    captures: Vec<(ScreenInfo, CGRect, f64, cgs::PreviewCompositor, ViewState)>,
+    captures: Vec<(
+        ScreenInfo,
+        CGRect,
+        f64,
+        cgs::compositor::preview::PreviewCompositor,
+        ViewState,
+    )>,
 }
 impl PreviewCache {
-    fn take(&mut self, d: &mut DisplayOverview) -> Option<cgs::PreviewCompositor> {
+    fn take(
+        &mut self,
+        d: &mut DisplayOverview,
+    ) -> Option<cgs::compositor::preview::PreviewCompositor> {
         self.captures.retain(|(key, bounds, scale, _, _)| {
             key.display_uuid != d.info.display_uuid
                 || (key.id == d.info.id
@@ -1188,18 +1200,19 @@ fn start_display(
         d.captures = cache.as_mut().and_then(|c| c.take(d));
         if !d.background_ready {
             let tx = wake.clone();
-            d.desktop_snapshot =
-                cgs::DesktopSnapshot::new(d.info.id.as_u32(), d.scale, move || {
-                    tx.send(crate::actor::mission_control::Event::PumpPreviews)
-                })
-                .map_err(|error| tracing::warn!(?error, "Desktop snapshot unavailable"))
-                .ok();
+            d.desktop_snapshot = cgs::compositor::preview::DesktopSnapshot::new(
+                d.info.id.as_u32(),
+                d.scale,
+                move || tx.send(crate::actor::mission_control::Event::PumpPreviews),
+            )
+            .map_err(|error| tracing::warn!(?error, "Desktop snapshot unavailable"))
+            .ok();
         }
         if let Some(m) = &mut d.captures {
             let _ = m.attach_to(d._window.id(), &d.root);
         } else {
             let tx = wake.clone();
-            d.captures = cgs::PreviewCompositor::new_attached(
+            d.captures = cgs::compositor::preview::PreviewCompositor::new_attached(
                 d._window.id(),
                 &d.root,
                 d.bounds,
@@ -1242,7 +1255,7 @@ struct Drag {
     pending: bool,
     destination: usize,
     frame: CGRect,
-    canvas: Option<cgs::PreviewLayer>,
+    canvas: Option<cgs::compositor::preview::PreviewLayer>,
     badge: Retained<CALayer>,
     overlay: Retained<CALayer>,
     point: CGPoint,
@@ -1274,7 +1287,7 @@ pub struct OverviewSession {
     active: usize,
     selection: Selection,
     drag: Option<Drag>,
-    pending_drop: Option<(Drag, Option<cgs::PreviewFrame>)>,
+    pending_drop: Option<(Drag, Option<cgs::compositor::preview::PreviewFrame>)>,
     pressed: Option<(CGPoint, Camera)>,
     drop: Option<OverviewDrop>,
     phase: Phase,
@@ -2398,7 +2411,7 @@ impl OverviewSession {
             drag.canvas = None;
             drag.overlay.setFrame(CGRect::new(CGPoint::ZERO, d.bounds.size));
             d.root.addSublayer(&drag.overlay);
-            let mut canvas = cgs::PreviewLayer::new();
+            let mut canvas = cgs::compositor::preview::PreviewLayer::new();
             if let Some(owner) = &self.displays[drag.display].captures
                 && let Some(w) =
                     self.displays[drag.display].windows.iter().find(|w| w.data.id == drag.window)

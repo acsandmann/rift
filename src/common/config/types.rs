@@ -954,7 +954,7 @@ impl Default for StackLineSettings {
     }
 }
 
-fn default_stack_line_thickness() -> f64 { cgs::TabBar::HEIGHT }
+fn default_stack_line_thickness() -> f64 { cgs::tabs::TabBar::HEIGHT }
 
 impl StackLineSettings {
     /// The native tab bar is unusable below this thickness.

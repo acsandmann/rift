@@ -356,7 +356,7 @@ impl Menu {
     }
 
     fn open_path_or_url(target: impl AsRef<Path>) {
-        cgs::Application::open(&target.as_ref().to_string_lossy());
+        cgs::app::Application::open(&target.as_ref().to_string_lossy());
     }
 
     fn reload_config(&self) {

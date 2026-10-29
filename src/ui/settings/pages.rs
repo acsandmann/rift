@@ -1,3 +1,18 @@
+use cgs::app::Application;
+use cgs::collection::SettingsList;
+use cgs::controls::{
+    Button, ChipEdit, LayoutPreview, NumberField, Popup, PreviewAnimation, PreviewWindow,
+    ValueChips,
+};
+use cgs::image::{ImageView, Symbol};
+use cgs::input::{KeyRecorder, ModifierRecorder, Modifiers};
+use cgs::layout::{Disclosure, GroupBox, HStack, Spacer, VStack};
+use cgs::settings::{Section, SettingsPage, SettingsRow, ValidationMessage};
+use cgs::style::Font;
+use cgs::tabs::TabSelector;
+use cgs::text::{Caption, Label, SubsectionTitle};
+use cgs::view::{Metrics, NativeControl, NativeView, WeakView};
+use cgs::{CGPoint, CGRect, CGSize, Insets, Ui};
 use objc2_app_kit::NSAccessibility;
 
 use super::*;
@@ -131,23 +146,25 @@ fn about_identity(ui: &Ui) -> VStack {
             &objc2_app_kit::NSFont::systemFontOfSize_weight(28.0, unsafe {
                 objc2_app_kit::NSFontWeightSemibold
             }),
-            &cgs::Color::label(),
+            &cgs::style::Color::label(),
         ))
         .push(centered(
             &format!("Version {}", env!("CARGO_PKG_VERSION")),
             &Font::caption(),
-            &cgs::Color::secondary_label(),
+            &cgs::style::Color::secondary_label(),
         ))
         .keep(preview)
 }
 
 fn about_updates(ui: &Ui, env: &Rc<Env>) -> Section {
-    let status = Rc::new(Label::new(ui, "Not checked yet").wrapping().color(&cgs::Color::label()));
+    let status =
+        Rc::new(Label::new(ui, "Not checked yet").wrapping().color(&cgs::style::Color::label()));
     status.accessibility_label("Update status");
     let icon = Rc::new(ImageView::symbol(ui, "arrow.triangle.2.circlepath").unwrap());
     icon.width(16.0);
     icon.height(16.0);
-    icon.ns_image_view().setContentTintColor(Some(&cgs::Color::secondary_label()));
+    icon.ns_image_view()
+        .setContentTintColor(Some(&cgs::style::Color::secondary_label()));
     icon.ns_view().setAccessibilityElement(false);
     let check = Button::new(ui, "Check for Updates…");
     check.accessibility_label("Check for Updates…");
@@ -159,12 +176,13 @@ fn about_updates(ui: &Ui, env: &Rc<Env>) -> Section {
         let Some(env) = weak_env.upgrade() else { return };
         if let Some(status) = weak_status.upgrade() {
             status.set_text("Checking for updates…");
-            status.ns_text_field().setTextColor(Some(&cgs::Color::label()));
+            status.ns_text_field().setTextColor(Some(&cgs::style::Color::label()));
         }
         if let Some(icon) = weak_icon.upgrade() {
             icon.ns_image_view()
                 .setImage(Symbol::named("arrow.triangle.2.circlepath").as_deref());
-            icon.ns_image_view().setContentTintColor(Some(&cgs::Color::secondary_label()));
+            icon.ns_image_view()
+                .setContentTintColor(Some(&cgs::style::Color::secondary_label()));
         }
         weak_button.set_enabled(false);
         let (status, icon, button) = (weak_status.clone(), weak_icon.clone(), weak_button.clone());
@@ -175,12 +193,12 @@ fn about_updates(ui: &Ui, env: &Rc<Env>) -> Section {
                     Ok(updates::Release::Current) => (
                         "Rift is up to date.".to_owned(),
                         "checkmark.circle",
-                        cgs::Color::secondary_label(),
+                        cgs::style::Color::secondary_label(),
                     ),
                     Ok(updates::Release::Available(version)) => (
                         format!("Version {version} is available."),
                         "arrow.down.circle",
-                        cgs::Color::control_accent(),
+                        cgs::style::Color::control_accent(),
                     ),
                     Err(error) => (
                         error,
@@ -259,7 +277,7 @@ fn about(ui: Ui, env: &Rc<Env>) -> SettingsPage {
     let caption = |text: &str| {
         Label::new(&ui, text)
             .font(&Font::caption())
-            .color(&cgs::Color::secondary_label())
+            .color(&cgs::style::Color::secondary_label())
     };
     let heart = ImageView::symbol(&ui, "heart.fill").unwrap();
     heart.width(11.0);

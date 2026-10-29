@@ -10,7 +10,8 @@ use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 
 use block2::RcBlock;
-use cgs::{Alert, Ui};
+use cgs::Ui;
+use cgs::window::Alert;
 use dispatchr::time::Time;
 use objc2::MainThreadMarker;
 use objc2::rc::autoreleasepool;

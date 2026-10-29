@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::ptr::{self, NonNull};
 
-use cgs::G_CONNECTION;
+use cgs::compositor::G_CONNECTION;
 use objc2_application_services::{AXError, AXUIElement as RawAXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFData, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, ConcreteType,

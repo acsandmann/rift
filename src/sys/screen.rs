@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use cgs::G_CONNECTION;
+use cgs::compositor::{G_CONNECTION, main_connection};
 use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
@@ -183,7 +183,7 @@ impl<S: System> ScreenCache<S> {
                 .iter()
                 .map(|screen| unsafe {
                     CGSManagedDisplayGetCurrentSpace(
-                        cgs::main_connection(),
+                        main_connection(),
                         CFRetained::<objc2_core_foundation::CFString>::as_ptr(screen).as_ptr(),
                     )
                 })
@@ -277,7 +277,7 @@ impl<S: System> ScreenCache<S> {
             .iter()
             .map(|screen| unsafe {
                 CGSManagedDisplayGetCurrentSpace(
-                    cgs::main_connection(),
+                    main_connection(),
                     CFRetained::<objc2_core_foundation::CFString>::as_ptr(screen).as_ptr(),
                 )
             })
@@ -551,7 +551,7 @@ impl System for Actual {
                     screen.cg_id
                 );
             }
-            let managed = CGSCopyBestManagedDisplayForRect(cgs::main_connection(), screen.bounds);
+            let managed = CGSCopyBestManagedDisplayForRect(main_connection(), screen.bounds);
             if let Some(managed) = NonNull::new(managed) {
                 CFRetained::from_raw(managed)
             } else {
@@ -644,7 +644,7 @@ pub fn active_menu_bar_display_uuid() -> Option<String> {
     Some(
         unsafe {
             CFRetained::<CFString>::from_raw(NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(
-                cgs::main_connection(),
+                main_connection(),
             ))?)
         }
         .to_string(),
@@ -665,14 +665,14 @@ pub fn set_active_menu_bar_display_uuid(display_uuid: &str) -> bool {
         let uuid = CFString::from_str(display_uuid);
         let ptr = CFRetained::as_ptr(&uuid).as_ptr();
         let result = crate::sys::cg_ok(unsafe {
-            super::skylight::SLSSetActiveMenuBarDisplayIdentifier(cgs::main_connection(), ptr, ptr)
+            super::skylight::SLSSetActiveMenuBarDisplayIdentifier(main_connection(), ptr, ptr)
         });
         if let Err(error) = result {
             warn!(?error, display_uuid, "Failed to activate menu-bar display");
             return false;
         }
         let active = unsafe {
-            NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(cgs::main_connection()))
+            NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(main_connection()))
                 .map(|ptr| CFRetained::<CFString>::from_raw(ptr))
         };
         let confirmed = active.as_deref().is_some_and(|active| active == &*uuid);
@@ -696,7 +696,7 @@ pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
     let uuid = CFString::from_str(display_uuid);
     let id = unsafe {
         CGSManagedDisplayGetCurrentSpace(
-            cgs::main_connection(),
+            main_connection(),
             CFRetained::<CFString>::as_ptr(&uuid).as_ptr(),
         )
     };
@@ -709,7 +709,7 @@ pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
 }
 
 pub fn displays_have_separate_spaces() -> bool {
-    unsafe { SLSGetSpaceManagementMode(cgs::main_connection()) == 1 }
+    unsafe { SLSGetSpaceManagementMode(main_connection()) == 1 }
 }
 
 /// Utilities for querying the current system configuration. For diagnostic purposes only.
@@ -719,33 +719,31 @@ pub mod diagnostic {
 
     use super::*;
 
-    pub fn cur_space() -> SpaceId { SpaceId(unsafe { CGSGetActiveSpace(cgs::main_connection()) }) }
+    pub fn cur_space() -> SpaceId { SpaceId(unsafe { CGSGetActiveSpace(main_connection()) }) }
 
     pub fn visible_spaces() -> CFRetained<CFArray<SpaceId>> {
         unsafe {
-            let arr = CGSCopySpaces(cgs::main_connection(), CGSSpaceMask::ALL_VISIBLE_SPACES);
+            let arr = CGSCopySpaces(main_connection(), CGSSpaceMask::ALL_VISIBLE_SPACES);
             CFRetained::from_raw(NonNull::new_unchecked(arr))
         }
     }
 
     pub fn all_spaces() -> CFRetained<CFArray<SpaceId>> {
         unsafe {
-            let arr = CGSCopySpaces(cgs::main_connection(), CGSSpaceMask::ALL_SPACES);
+            let arr = CGSCopySpaces(main_connection(), CGSSpaceMask::ALL_SPACES);
             CFRetained::from_raw(NonNull::new_unchecked(arr))
         }
     }
 
     pub fn managed_displays() -> CFRetained<CFArray> {
         unsafe {
-            CFRetained::from_raw(NonNull::new_unchecked(CGSCopyManagedDisplays(
-                cgs::main_connection(),
-            )))
+            CFRetained::from_raw(NonNull::new_unchecked(CGSCopyManagedDisplays(main_connection())))
         }
     }
 
     pub fn managed_display_spaces() -> Retained<NSArray> {
         unsafe {
-            Retained::from_raw(CGSCopyManagedDisplaySpaces(cgs::main_connection()))
+            Retained::from_raw(CGSCopyManagedDisplaySpaces(main_connection()))
                 .expect("CGSCopyManagedDisplaySpaces returned null")
         }
     }
@@ -772,7 +770,7 @@ pub fn order_visible_spaces_by_position(
 pub fn managed_display_space_ids() -> HashMap<String, Vec<SpaceId>> {
     let mut out: HashMap<String, Vec<SpaceId>> = HashMap::default();
     unsafe {
-        let raw = CGSCopyManagedDisplaySpaces(cgs::main_connection());
+        let raw = CGSCopyManagedDisplaySpaces(main_connection());
         if raw.is_null() {
             return out;
         }

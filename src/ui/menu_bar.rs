@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use cgs::{Canvas, Menu, MenuItem, OpenPanel, SavePanel, StatusItem, Ui};
+use cgs::Ui;
+use cgs::drawing::Canvas;
+use cgs::menu::{Menu, MenuItem, StatusItem};
+use cgs::window::{OpenPanel, SavePanel};
 use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -1754,7 +1757,7 @@ impl MenuBarPreview {
 
     pub fn width(&self) -> f64 { self.view.layout.borrow().size.width }
 }
-impl cgs::NativeView for MenuBarPreview {
+impl cgs::view::NativeView for MenuBarPreview {
     fn ns_view(&self) -> &NSView { self.view.canvas.ns_view() }
 }
 

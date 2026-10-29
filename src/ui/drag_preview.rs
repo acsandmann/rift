@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use cgs::{
+use cgs::compositor::{
     CgsWindow, CgsWindowError, WindowSurface, WindowTransaction, backdrop_blur,
     with_disabled_actions,
 };

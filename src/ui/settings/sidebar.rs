@@ -1,5 +1,7 @@
 //! Settings destinations and navigation behavior.
-use cgs::*;
+use cgs::Ui;
+use cgs::settings::{SettingsBadge, SettingsDestination, SettingsNavigation};
+use cgs::view::NativeView;
 use objc2_app_kit::NSView;
 
 use super::{CATEGORIES, Category};

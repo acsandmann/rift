@@ -48,7 +48,7 @@ impl GroupInfo {
 type GroupId = (SpaceId, NodeId);
 
 struct NativeGroup {
-    bar: cgs::TabBar,
+    bar: cgs::tabs::TabBar,
     info: GroupInfo,
     /// The windows the bar currently shows, so a click resolves against what was clicked.
     shown: Rc<RefCell<Vec<WindowId>>>,
@@ -61,7 +61,7 @@ struct NativeGroup {
 #[derive(Debug)]
 pub enum Event {
     OverviewBounds(Vec<CGRect>),
-    TabAction(GroupId, u64, WindowId, cgs::TabBarAction),
+    TabAction(GroupId, u64, WindowId, cgs::tabs::TabBarAction),
     /// A tab was dragged onto `target`'s slot. The bar already shows the new order.
     TabMoved(GroupId, u64, WindowId, WindowId),
     TitleChanged(WindowId, String),
@@ -83,7 +83,7 @@ pub struct StackLine {
     mtm: MainThreadMarker,
     native_groups: HashMap<GroupId, NativeGroup>,
     next_generation: u64,
-    icons: HashMap<i32, (String, Option<cgs::Image>)>,
+    icons: HashMap<i32, (String, Option<cgs::image::Image>)>,
     live_groups: HashSet<GroupId>,
     live_pids: HashSet<i32>,
     tx: Sender,
@@ -297,10 +297,10 @@ impl StackLine {
             settings.horiz_placement,
             settings.vert_placement,
         ) {
-            (true, HorizontalPlacement::Top, _) => cgs::TabBarEdge::Top,
-            (true, HorizontalPlacement::Bottom, _) => cgs::TabBarEdge::Bottom,
-            (false, _, VerticalPlacement::Left) => cgs::TabBarEdge::Left,
-            (false, _, VerticalPlacement::Right) => cgs::TabBarEdge::Right,
+            (true, HorizontalPlacement::Top, _) => cgs::tabs::TabBarEdge::Top,
+            (true, HorizontalPlacement::Bottom, _) => cgs::tabs::TabBarEdge::Bottom,
+            (false, _, VerticalPlacement::Left) => cgs::tabs::TabBarEdge::Left,
+            (false, _, VerticalPlacement::Right) => cgs::tabs::TabBarEdge::Right,
         };
         group.bar.set_edge(edge);
         let frame = self
@@ -339,7 +339,7 @@ impl StackLine {
         id: GroupId,
         generation: u64,
         window: WindowId,
-        action: cgs::TabBarAction,
+        action: cgs::tabs::TabBarAction,
     ) {
         let Some(group) = self.native_groups.get(&id) else {
             return;
@@ -396,10 +396,10 @@ impl StackLine {
             let (name, icon) = self.icons.entry(tab.window_id.pid).or_insert_with(|| {
                 let app = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(tab.window_id.pid);
                 let name = app.as_ref().and_then(|a| a.localizedName()).map(|s| s.to_string()).unwrap_or_default();
-                let icon = app.and_then(|a| a.icon()).or_else(|| tab.bundle_id.as_deref().and_then(cgs::Application::icon_for_bundle));
+                let icon = app.and_then(|a| a.icon()).or_else(|| tab.bundle_id.as_deref().and_then(cgs::app::Application::icon_for_bundle));
                 (name, icon)
             });
-            cgs::TabBarItem { title: if tab.title.is_empty() { name.clone() } else { tab.title.clone() }, icon: icon.clone() }
+            cgs::tabs::TabBarItem { title: if tab.title.is_empty() { name.clone() } else { tab.title.clone() }, icon: icon.clone() }
         }).collect();
         {
             let mut shown = group.shown.borrow_mut();
@@ -433,13 +433,13 @@ impl StackLine {
             let tx = self.tx.clone();
             let shown = Rc::new(RefCell::new(Vec::new()));
             let clicked = shown.clone();
-            let bar = cgs::TabBar::new(&ui).on_action(move |action| match action {
-                cgs::TabBarAction::Select(i) | cgs::TabBarAction::Close(i) => {
+            let bar = cgs::tabs::TabBar::new(&ui).on_action(move |action| match action {
+                cgs::tabs::TabBarAction::Select(i) | cgs::tabs::TabBarAction::Close(i) => {
                     if let Some(&window) = clicked.borrow().get(i) {
                         tx.send(Event::TabAction(node, generation, window, action));
                     }
                 }
-                cgs::TabBarAction::Move { from, to } => {
+                cgs::tabs::TabBarAction::Move { from, to } => {
                     let mut shown = clicked.borrow_mut();
                     let Some(&target) = shown.get(to).filter(|_| from < shown.len()) else {
                         return;
@@ -473,21 +473,21 @@ impl StackLine {
 fn tab_command(
     tabs: &[TabInfo],
     window: WindowId,
-    action: cgs::TabBarAction,
+    action: cgs::tabs::TabBarAction,
 ) -> Option<ReactorCommand> {
     let tab = tabs.iter().find(|tab| tab.window_id == window)?;
     let command = match action {
-        cgs::TabBarAction::Select(_) => ReactorCommand::FocusWindow {
+        cgs::tabs::TabBarAction::Select(_) => ReactorCommand::FocusWindow {
             window_id: tab.window_id.into(),
             window_server_id: tab.window_server_id.map(|id| id.as_u32()),
         },
-        cgs::TabBarAction::Close(_) => {
+        cgs::tabs::TabBarAction::Close(_) => {
             let id = tab.window_server_id?;
             ReactorCommand::CloseWindow {
                 window_server_id: Some(id.as_u32()),
             }
         }
-        cgs::TabBarAction::Move { .. } => return None,
+        cgs::tabs::TabBarAction::Move { .. } => return None,
     };
     Some(command)
 }
@@ -537,16 +537,16 @@ mod tests {
             },
         ];
         assert!(matches!(
-            tab_command(&tabs, second, cgs::TabBarAction::Close(1)),
+            tab_command(&tabs, second, cgs::tabs::TabBarAction::Close(1)),
             Some(ReactorCommand::CloseWindow { window_server_id: Some(20) })
         ));
         tabs.remove(0);
         assert!(
-            matches!(tab_command(&tabs, second, cgs::TabBarAction::Select(0)), Some(ReactorCommand::FocusWindow { window_id, window_server_id: Some(20) }) if window_id == second.into())
+            matches!(tab_command(&tabs, second, cgs::tabs::TabBarAction::Select(0)), Some(ReactorCommand::FocusWindow { window_id, window_server_id: Some(20) }) if window_id == second.into())
         );
         tabs[0].window_server_id = None;
-        assert!(tab_command(&tabs, second, cgs::TabBarAction::Close(0)).is_none());
-        assert!(tab_command(&tabs, first, cgs::TabBarAction::Select(0)).is_none());
+        assert!(tab_command(&tabs, second, cgs::tabs::TabBarAction::Close(0)).is_none());
+        assert!(tab_command(&tabs, first, cgs::tabs::TabBarAction::Select(0)).is_none());
     }
 
     #[test]

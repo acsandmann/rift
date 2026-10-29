@@ -1,4 +1,13 @@
 //! Interface preferences. Previews are event-driven native views, never windows.
+use cgs::app::Application;
+use cgs::controls::{Button, NumberSlider, PathField};
+use cgs::drawing::VisualEffect;
+use cgs::layout::{HStack, Spacer, VStack};
+use cgs::settings::{Section, SettingsPage, ValidationMessage};
+use cgs::style::Font;
+use cgs::text::{Caption, Label};
+use cgs::view::NativeView;
+use cgs::{Insets, Ui};
 use objc2_app_kit::*;
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 

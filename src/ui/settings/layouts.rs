@@ -1,6 +1,16 @@
 //! Layout configuration and independent, lazy shared-settings disclosures.
 use std::cell::OnceCell;
 
+use cgs::controls::{HelpButton, LayoutTile, Popup, PreviewAnimation, PreviewWindow};
+use cgs::image::ImageView;
+use cgs::layout::{Disclosure, Divider, GroupBox, HStack, Spacer, VStack};
+use cgs::menu::{Menu, MenuItem, WeakMenuItem};
+use cgs::settings::{Section, SettingsPage, ValidationMessage};
+use cgs::style::Font;
+use cgs::text::{Caption, Label, Link, SecondaryLabel, SectionTitle, WrappingLabel};
+use cgs::view::{NativeView, PageHost, View};
+use cgs::window::{Alert, HelpPopover};
+use cgs::{CGPoint, CGRect, CGSize, Insets, Ui};
 use objc2::Message;
 use objc2_app_kit::NSAccessibility;
 
@@ -156,7 +166,7 @@ impl Inspector {
                             right: 12.0,
                         }),
                     )
-                    .header_insets(cgs::uniform_insets(12.0))
+                    .header_insets(cgs::layout::uniform_insets(12.0))
                     .compact()
                     .trailing_indicator(&ui)
                     .summary(&ui)
@@ -196,13 +206,21 @@ impl Inspector {
                 .push(disclosures[1].clone());
             let root = form.finish(
                 SettingsPage::new(&ui, "")
-                    .section(GroupBox::with_insets(&ui, editor, cgs::uniform_insets(12.0)))
+                    .section(GroupBox::with_insets(
+                        &ui,
+                        editor,
+                        cgs::layout::uniform_insets(12.0),
+                    ))
                     .section(
                         Section::new(&ui, "Shared settings")
                             .description(
                                 "Every layout uses these, unless a layout or display sets its own.",
                             )
-                            .content(GroupBox::with_insets(&ui, shared, cgs::uniform_insets(0.0))),
+                            .content(GroupBox::with_insets(
+                                &ui,
+                                shared,
+                                cgs::layout::uniform_insets(0.0),
+                            )),
                     )
                     .section(HStack::new(&ui).push(Spacer::new(&ui)).push(layout_help(&ui))),
             );
