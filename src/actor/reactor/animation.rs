@@ -264,6 +264,7 @@ impl PresentedWindow {
                 } else {
                     self.from.size
                 };
+                let frame = contain_transition_frame(self.from, self.to, frame);
                 (frame, set_size, FrameSource::Ordinary, set_size)
             }
             Sample::Viewport {
@@ -1519,6 +1520,35 @@ fn interpolate_frame(a: CGRect, b: CGRect, s: f64) -> CGRect {
             height: blend(a.size.height, b.size.height, s),
         },
     }
+}
+
+/// Size switches in one step while the origin eases, so a window growing
+/// toward a far edge (or shrinking away from one) can momentarily extend past
+/// both endpoints and off the screen. AX clamps that write and the following
+/// position-only frames jump back. Keeping each frame inside the union of the
+/// endpoints keeps it on screen whenever both endpoints are.
+fn contain_transition_frame(from: CGRect, to: CGRect, mut frame: CGRect) -> CGRect {
+    let contain = |origin: f64, len: f64, a: f64, a_len: f64, b: f64, b_len: f64| {
+        let max = (a + a_len).max(b + b_len) - len;
+        origin.min(max).max(a.min(b))
+    };
+    frame.origin.x = contain(
+        frame.origin.x,
+        frame.size.width,
+        from.origin.x,
+        from.size.width,
+        to.origin.x,
+        to.size.width,
+    );
+    frame.origin.y = contain(
+        frame.origin.y,
+        frame.size.height,
+        from.origin.y,
+        from.size.height,
+        to.origin.y,
+        to.size.height,
+    );
+    frame
 }
 
 fn ease(t: f64) -> f64 {
