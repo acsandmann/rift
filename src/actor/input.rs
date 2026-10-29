@@ -933,9 +933,9 @@ impl Input {
                     crate::actor::drag::MouseButton::Right
                 };
                 let captured = self.state.borrow().captured_button == Some(button);
-                if self.state.borrow().mouse_features_enabled {
-                    self.events_tx.send(Event::MouseUp(button));
-                }
+                // Native AX moves/resizes acquire drag state even with drag/drop disabled.
+                // Always deliver releases so that state cannot keep layout writes blocked.
+                self.events_tx.send(Event::MouseUp(button));
                 if captured {
                     self.state.borrow_mut().captured_button = None;
                 }
@@ -2185,29 +2185,36 @@ mod tests {
     }
 
     #[test]
-    fn releases_are_always_forwarded_when_mouse_features_are_enabled() {
-        let (input, _, mut events_rx) = input();
-        input.state.borrow_mut().mouse_features_enabled = false;
-        let event = CGEvent::new_mouse_event(
-            None,
-            CGEventType::LeftMouseUp,
-            CGPoint::new(20.0, 30.0),
-            objc2_core_graphics::CGMouseButton::Left,
-        )
-        .unwrap();
-        assert!(input.on_event(CGEventType::LeftMouseUp, &event, None));
-        assert!(events_rx.try_recv().is_err());
-        input.state.borrow_mut().mouse_features_enabled = true;
-        assert!(input.on_event(CGEventType::LeftMouseUp, &event, None));
-        assert!(matches!(
-            events_rx.try_recv().unwrap().1,
-            Event::MouseUp(crate::actor::drag::MouseButton::Left)
-        ));
-        assert!(input.on_event(CGEventType::LeftMouseUp, &event, None));
-        assert!(matches!(
-            events_rx.try_recv().unwrap().1,
-            Event::MouseUp(crate::actor::drag::MouseButton::Left)
-        ));
+    fn releases_reach_reactor_with_drag_drop_disabled() {
+        for enabled in [false, true] {
+            for (event_type, cg_button, button) in [
+                (
+                    CGEventType::LeftMouseUp,
+                    objc2_core_graphics::CGMouseButton::Left,
+                    crate::actor::drag::MouseButton::Left,
+                ),
+                (
+                    CGEventType::RightMouseUp,
+                    objc2_core_graphics::CGMouseButton::Right,
+                    crate::actor::drag::MouseButton::Right,
+                ),
+            ] {
+                let (input, _, mut events_rx) = input();
+                input.state.borrow_mut().mouse_features_enabled = enabled;
+                input.state.borrow_mut().event_processing_enabled = true;
+                // Native AX moves/resizes can acquire a drag regardless of drag_drop.enabled.
+                input.native_motion_active.store(true, Ordering::Release);
+                assert_ne!(input.desired_event_mask() & (1u64 << event_type.0), 0);
+                let event =
+                    CGEvent::new_mouse_event(None, event_type, CGPoint::new(20.0, 30.0), cg_button)
+                        .unwrap();
+                assert!(input.on_event(event_type, &event, None));
+                assert!(matches!(
+                    events_rx.try_recv().unwrap().1,
+                    Event::MouseUp(released) if released == button
+                ));
+            }
+        }
     }
 
     #[test]
