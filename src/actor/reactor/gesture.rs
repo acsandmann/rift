@@ -428,7 +428,7 @@ mod tests {
         );
         let mut cfg = Config::default();
         cfg.settings.layout.scrolling.gestures.enabled = true;
-        cfg.settings.layout.scrolling.gestures.animate = Some(false);
+        cfg.settings.layout.scrolling.animate = Some(false);
         cfg.settings.layout.scrolling.gestures.invert_horizontal = invert;
         cfg.settings.layout.scrolling.gestures.propagate_to_workspace_swipe = propagate;
         cfg.settings.layout.scrolling.gestures.workspace_switch_threshold = threshold;
@@ -441,7 +441,7 @@ mod tests {
         let settings = Settings::new(config);
         let c = Control::new(config);
         c.configure(settings, true, Vec::new());
-        let context = Context::new(
+        let mut context = Context::new(
             1,
             0,
             space,
@@ -453,6 +453,8 @@ mod tests {
             Duration::ZERO,
         )
         .unwrap();
+        // The test reactor's layout engine is built separately from this fixture.
+        context.action.animate = config.settings.layout.scrolling.animate;
         let motion = c.clone();
         r.gesture_event(Lifecycle::Begin {
             context: context.clone(),
@@ -483,7 +485,7 @@ mod tests {
         assert!(r.layout_manager.layout_engine.workspaces_mut().set_active_workspace(a, ids[1]));
         let mut config = Config::default();
         config.settings.layout.scrolling.gestures.enabled = true;
-        config.settings.layout.scrolling.gestures.animate = Some(false);
+        config.settings.layout.scrolling.animate = Some(false);
         config.settings.gestures.haptics_enabled = false;
         config.settings.gestures.skip_empty = false;
         let (context, _, _) = begin(&mut r, &config, a);
@@ -532,7 +534,7 @@ mod tests {
             assert!(workspace.is_some());
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
-            config.settings.layout.scrolling.gestures.animate = Some(false);
+            config.settings.layout.scrolling.animate = Some(false);
             config.settings.gestures.haptics_enabled = false;
             config.settings.gestures.skip_empty = false;
             let (context, _, _) = begin(&mut r, &config, space);
@@ -647,7 +649,7 @@ mod tests {
 
             let mut config = Config::default();
             config.settings.layout.scrolling.gestures.enabled = true;
-            config.settings.layout.scrolling.gestures.animate = Some(false);
+            config.settings.layout.scrolling.animate = Some(false);
 
             let (_, _, motion) = begin(&mut r, &config, space);
             for (total_x, time) in [(20.0, 10), (40.0, 20)] {

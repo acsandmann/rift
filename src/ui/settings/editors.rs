@@ -1140,6 +1140,17 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
     ));
     let app_name = Rc::new(RefCell::new(None::<String>));
     let selected_name = app_name.clone();
+    // Optional matchers let a second rule for the same app coexist with an existing bare one.
+    let title_input = Rc::new(TextField::new(&ui).placeholder("Window title contains"));
+    let role_input = Rc::new(TextField::new(&ui).placeholder("Accessibility role, e.g. AXWindow"));
+    let matchers = Rc::new(Disclosure::new(
+        &ui,
+        "Only match specific windows",
+        VStack::new(&ui).spacing(8.0).push(title_input.clone()).push(role_input.clone()),
+    ));
+    let weak_matchers = Rc::downgrade(&matchers);
+    let weak_title = Rc::downgrade(&title_input);
+    let weak_role = Rc::downgrade(&role_input);
     let weak_model = Rc::downgrade(model);
     let weak_input = Rc::downgrade(&input);
     cancel.set_primary_title("Add Rule");
@@ -1148,6 +1159,14 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
             return;
         };
         let value = input.get_value();
+        let optional = |field: &Weak<TextField>| {
+            field
+                .upgrade()
+                .map(|field| field.get_value().trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let title_substring = optional(&weak_title);
+        let ax_role = optional(&weak_role);
         let name = if value.trim().is_empty() {
             selected_name.borrow().clone()
         } else {
@@ -1171,6 +1190,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         };
         let weak = Rc::downgrade(&model);
         let message = input_error.clone();
+        let matchers = weak_matchers.clone();
         let next = edit_rule.clone();
         let _ = model.env.requests.send(Request {
             control: None,
@@ -1178,6 +1198,8 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
                 source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
                     app_id: (!value.trim().is_empty()).then(|| value.trim().to_string()),
                     app_name: name,
+                    title_substring,
+                    ax_role,
                     ..Default::default()
                 });
                 Ok(())
@@ -1201,6 +1223,12 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
                             }
                         }
                         Err(error) => {
+                            // A duplicate is resolved by narrowing the new rule, so reveal the matchers.
+                            if error.starts_with("Duplicate app_")
+                                && let Some(matchers) = matchers.upgrade()
+                            {
+                                matchers.set_expanded(true);
+                            }
                             if let Some(message) = message.upgrade() {
                                 message.set_validation(&Validation::Error(error));
                             }
@@ -1239,6 +1267,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
         ))
         .push(picker)
         .push(Disclosure::new(&ui, "Enter a bundle identifier manually", input))
+        .push(matchers)
         .push(validation)
         .push(cancel);
     // The sheet fits its content; give the application list room to read.

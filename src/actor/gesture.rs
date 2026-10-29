@@ -71,7 +71,7 @@ impl Settings {
                 scrolling: true,
                 propagate: s.propagate_to_workspace_swipe,
                 boundary_threshold: s.workspace_switch_threshold.max(0.0),
-                animate: s.animate,
+                animate: None,
             }),
         }
     }

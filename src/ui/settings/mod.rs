@@ -647,22 +647,7 @@ fn sidebar_pane(ui: Ui, router: &Rc<Router>, sidebar: Rc<SettingsSidebar>) -> Vi
                 open(entry);
             }
         });
-    search.control_size(objc2_app_kit::NSControlSize::Large);
-    search.height(28.0);
-    let pane = VStack::new(&ui)
-        .spacing(4.0)
-        .push(
-            HStack::new(&ui)
-                .insets(Insets {
-                    top: 6.0,
-                    left: 10.0,
-                    bottom: 0.0,
-                    right: 10.0,
-                })
-                .push(search),
-        )
-        .push(content);
-    View::new(&ui).safe_area_content(pane)
+    settings_sidebar_pane(&ui, search, content)
 }
 
 type SliderRange = Rc<dyn Fn(&ConfigSource) -> (f64, f64)>;

@@ -35,6 +35,53 @@ impl FormBuilder {
         get: fn(&ConfigSource) -> &T,
         set: fn(&mut ConfigSource) -> &mut T,
     ) -> Option<SettingsRow> {
+        let symbols: Option<&'static [Option<&'static str>]> = match field.key {
+            "horiz_placement" => Some(&[
+                Some("rectangle.topthird.inset.filled"),
+                Some("rectangle.bottomthird.inset.filled"),
+            ]),
+            "vert_placement" => Some(&[
+                Some("rectangle.leadingthird.inset.filled"),
+                Some("rectangle.trailingthird.inset.filled"),
+            ]),
+            "alignment" => Some(&[]),
+            // These two menu-bar choices are short, mutually exclusive alternatives.
+            "mode"
+                if std::any::TypeId::of::<T>()
+                    == std::any::TypeId::of::<crate::common::config::MenuBarSettings>() =>
+            {
+                Some(&[Some("square.grid.2x2"), Some("square")])
+            }
+            "active_label"
+                if std::any::TypeId::of::<T>()
+                    == std::any::TypeId::of::<crate::common::config::MenuBarSettings>() =>
+            {
+                Some(&[Some("number"), Some("textformat")])
+            }
+            _ => None,
+        };
+        self.schema_field_with_segments(field, get, set, symbols)
+    }
+
+    /// Render a schema choice as a segmented control, with optional symbols per choice.
+    #[allow(dead_code)]
+    pub(super) fn schema_segmented_field<T: ConfigSchema>(
+        &mut self,
+        field: &'static ConfigField<T>,
+        get: fn(&ConfigSource) -> &T,
+        set: fn(&mut ConfigSource) -> &mut T,
+        symbols: &'static [Option<&'static str>],
+    ) -> Option<SettingsRow> {
+        self.schema_field_with_segments(field, get, set, Some(symbols))
+    }
+
+    fn schema_field_with_segments<T: ConfigSchema>(
+        &mut self,
+        field: &'static ConfigField<T>,
+        get: fn(&ConfigSource) -> &T,
+        set: fn(&mut ConfigSource) -> &mut T,
+        symbols: Option<&'static [Option<&'static str>]>,
+    ) -> Option<SettingsRow> {
         let read = field.read?;
         let write = field.write?;
         let message = Rc::new(ValidationMessage::new(&self.ui));
@@ -168,23 +215,46 @@ impl FormBuilder {
                 Box::new(input)
             }
             FieldKind::Choice(choices) => {
-                let input = Rc::new(
-                    Popup::new(&self.ui).on_change(move |index| commit(FieldValue::Choice(index))),
-                );
-                input.set_items(choices.iter().map(|choice| choice.0));
-                if let FieldValue::Choice(index) = read(get(defaults())) {
-                    input.set_item_badge(index, Some("Default"));
+                if let Some(symbols) = symbols {
+                    let segments: Vec<_> = choices
+                        .iter()
+                        .enumerate()
+                        .map(|(index, choice)| (choice.0, symbols.get(index).copied().flatten()))
+                        .collect();
+                    let input = Rc::new(
+                        TabSelector::choices(&self.ui, &segments)
+                            .on_change(move |index| commit(FieldValue::Choice(index))),
+                    );
+                    self.sync_when(
+                        &input,
+                        move |source| read(get(source)),
+                        move |input, source| {
+                            if let FieldValue::Choice(value) = read(get(source)) {
+                                input.set_selected(value);
+                            }
+                        },
+                    );
+                    Box::new(input)
+                } else {
+                    let input = Rc::new(
+                        Popup::new(&self.ui)
+                            .on_change(move |index| commit(FieldValue::Choice(index))),
+                    );
+                    input.set_items(choices.iter().map(|choice| choice.0));
+                    if let FieldValue::Choice(index) = read(get(defaults())) {
+                        input.set_item_badge(index, Some("Default"));
+                    }
+                    self.sync_when(
+                        &input,
+                        move |source| read(get(source)),
+                        move |input, source| {
+                            if let FieldValue::Choice(value) = read(get(source)) {
+                                input.set_selected(value);
+                            }
+                        },
+                    );
+                    Box::new(input)
                 }
-                self.sync_when(
-                    &input,
-                    move |source| read(get(source)),
-                    move |input, source| {
-                        if let FieldValue::Choice(value) = read(get(source)) {
-                            input.set_selected(value);
-                        }
-                    },
-                );
-                Box::new(input)
             }
             FieldKind::Custom => return None,
         };
@@ -202,7 +272,26 @@ impl FormBuilder {
         field: &'static ConfigField<T>,
         get: fn(&ConfigSource) -> &T,
     ) -> SettingsRow {
-        let row = if self.tooltips {
+        let kind = std::any::TypeId::of::<T>();
+        let redundant = (kind == std::any::TypeId::of::<crate::common::config::Settings>()
+            && matches!(
+                field.key,
+                "animate"
+                    | "default_disable"
+                    | "mouse_follows_focus"
+                    | "mouse_hides_on_focus"
+                    | "focus_follows_mouse"
+                    | "hot_reload"
+            ))
+            || (kind == std::any::TypeId::of::<crate::common::config::VirtualWorkspaceSettings>()
+                && field.key == "reapply_app_rules_on_title_change")
+            || (kind == std::any::TypeId::of::<crate::common::config::GestureSettings>()
+                && matches!(field.key, "invert_horizontal_swipe" | "skip_empty" | "fingers"))
+            || (kind == std::any::TypeId::of::<crate::common::config::ScrollingGestureSettings>()
+                && matches!(field.key, "invert_horizontal" | "fingers"));
+        let row = if redundant {
+            row
+        } else if self.tooltips {
             row.tooltip(field.help)
         } else {
             row.help(field.help)

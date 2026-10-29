@@ -1416,10 +1416,9 @@ pub struct ScrollingGestureSettings {
     #[serde(default)]
     #[setting(order = 0)]
     pub enabled: bool,
-    /// Animate gesture release independently of structural layout animations.
-    /// When omitted, inherit the scrolling layout/global animation setting.
-    #[serde(default)]
-    #[setting(label = "Animate gestures", custom, order = 4)]
+    /// Legacy value accepted for compatibility; scrolling animation controls gesture release.
+    #[serde(default, skip_serializing)]
+    #[setting(ignore)]
     pub animate: Option<bool>,
     /// Invert horizontal direction (swap left/right)
     #[serde(default)]

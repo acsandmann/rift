@@ -27,7 +27,6 @@ fn insertion() -> Vec<(&'static str, WindowInsertionPoint)> {
         ("End of layout", WindowInsertionPoint::EndOfTree),
     ]
 }
-fn bool_choices() -> Vec<(&'static str, bool)> { vec![("Enabled", true), ("Disabled", false)] }
 fn arrangement() -> Vec<(&'static str, Orientation)> {
     vec![
         ("Horizontal", Orientation::Horizontal),
@@ -492,7 +491,7 @@ pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
     simple.set_hidden(custom);
     detailed.set_hidden(!custom);
     let (weak_simple, weak_detailed) = (Rc::downgrade(&simple), Rc::downgrade(&detailed));
-    let mode = SegmentedControl::new(&ui, &["Simple", "Custom"]).on_change(move |index| {
+    let mode = TabSelector::new(&ui, &["Simple", "Custom"]).on_change(move |index| {
         if let (Some(simple), Some(detailed)) = (weak_simple.upgrade(), weak_detailed.upgrade()) {
             simple.set_hidden(index != 0);
             detailed.set_hidden(index == 0);
@@ -909,22 +908,11 @@ fn input(ui: Ui, model: &Rc<Model>) -> Page {
         .description("These gestures navigate the Scrolling layout strip.");
     let mut tuning = Section::new(&ui, "");
     for field in ScrollingGestureSettings::fields() {
-        let row = if field.key == "animate" {
-            let row = f.inherited_popup(
-                field.title,
-                bool_choices(),
-                |s| s.settings.layout.scrolling.gestures.animate,
-                |s| s.settings.layout.scrolling.animate.unwrap_or(true),
-                |s, v| s.settings.layout.scrolling.gestures.animate = v,
-            );
-            Some(f.schema_metadata(row, field, |s| &s.settings.layout.scrolling.gestures))
-        } else {
-            f.schema_field(
-                field,
-                |s| &s.settings.layout.scrolling.gestures,
-                |s| &mut s.settings.layout.scrolling.gestures,
-            )
-        };
+        let row = f.schema_field(
+            field,
+            |s| &s.settings.layout.scrolling.gestures,
+            |s| &mut s.settings.layout.scrolling.gestures,
+        );
         if let Some(row) = row {
             if matches!(field.key, "vertical_tolerance" | "workspace_switch_threshold") {
                 tuning = tuning.row(row);
