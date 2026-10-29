@@ -10112,6 +10112,112 @@ fn native_return_preserves_normal_restoration_and_missing_ordinal_fallback() {
 }
 
 #[test]
+fn returning_display_takes_back_its_evicted_windows() {
+    let mut settings = shared_settings();
+    settings.mode = crate::common::config::WorkspaceMode::PerDisplay;
+    settings.default_workspace_count = 6;
+    let (_, mut reactor, original, landing_space) = two_displays(settings);
+    let window = WindowId::new(1, 1);
+    let remembered = reactor.test_workspace_ids(original)[2];
+    assert!(reactor.assign_test_window_to_workspace(original, window, remembered));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(original, window));
+    reactor.reassign_window_to_authoritative_space(window, landing_space, true);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(landing_space));
+
+    // macOS does not move the window back, so the display's return alone must.
+    let returned = reactor.space_state.screen_by_space(original).unwrap().display_uuid.clone();
+    let before: Vec<_> = reactor
+        .space_state
+        .screens
+        .iter()
+        .filter(|screen| screen.display_uuid != returned)
+        .cloned()
+        .collect();
+    reactor.return_evicted_windows(&before);
+
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(window),
+        Some(remembered)
+    );
+    assert_eq!(
+        reactor
+            .state
+            .windows
+            .record(window)
+            .unwrap()
+            .pending_transfer()
+            .map(|op| op.requested_space),
+        Some(original)
+    );
+    assert_eq!(reactor.layout_manager.layout_engine.take_eviction(window), None);
+}
+
+#[test]
+fn returning_display_restores_the_evicted_arrangement() {
+    // macOS may hand the returning display its old desktop or a new one.
+    for returned in [SpaceId::new(1), SpaceId::new(3)] {
+        let mut settings = shared_settings();
+        settings.mode = crate::common::config::WorkspaceMode::PerDisplay;
+        let mut reactor = test_reactor_with_workspace_settings(&settings);
+        reactor.config.virtual_workspaces = settings;
+        let (original, landing) = (SpaceId::new(1), SpaceId::new(2));
+        reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+            Some(original),
+            Some(landing),
+        ]));
+        let mut apps = Apps::new();
+        make_active_app(
+            &mut apps,
+            &mut reactor,
+            1,
+            make_windows(2),
+            Some(WindowId::new(1, 1)),
+        );
+        apps.simulate_until_quiet(&mut reactor);
+        let windows = [WindowId::new(1, 1), WindowId::new(1, 2)];
+        for window in windows {
+            assert_eq!(reactor.assigned_space_for_window_id(window), Some(original));
+        }
+        reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.1 });
+        apps.simulate_until_quiet(&mut reactor);
+        let arranged = test_layout(&mut reactor, original, shared_left());
+        assert_ne!(arranged[0].1.size.width, arranged[1].1.size.width);
+
+        let mut remaining = make_screen_snapshots(vec![shared_right()], vec![Some(landing)]);
+        remaining[0].display_uuid = "test-display-1".into();
+        reactor.handle_event(space_state_event_from_screens(remaining));
+        let snapshot: Vec<_> = windows
+            .iter()
+            .map(|&window| (reactor.test_window_server_id(window), Some(landing)))
+            .collect();
+        reactor.reconcile_windows_in_authoritative_active_snapshot(&snapshot, &[original]);
+        apps.simulate_until_quiet(&mut reactor);
+        for window in windows {
+            assert_eq!(reactor.assigned_space_for_window_id(window), Some(landing));
+        }
+
+        reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+            Some(returned),
+            Some(landing),
+        ]));
+        apps.simulate_until_quiet(&mut reactor);
+
+        for window in windows {
+            assert_eq!(
+                reactor.assigned_space_for_window_id(window),
+                Some(returned),
+                "{returned:?}"
+            );
+        }
+        assert_eq!(
+            test_layout(&mut reactor, returned, shared_left()),
+            arranged,
+            "{returned:?}"
+        );
+    }
+}
+
+#[test]
 fn commands_follow_a_window_move_node_carried_to_another_display() {
     let (mut apps, mut reactor, a, b) = two_displays(Default::default());
     let window = WindowId::new(1, 1);
