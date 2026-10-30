@@ -3970,6 +3970,92 @@ fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
 }
 
 #[test]
+fn scrolling_instant_layout_corner_parks_only_on_single_display() {
+    for single_display in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.));
+        let space = SpaceId::new(1);
+        let mut screens = vec![screen];
+        let mut spaces = vec![Some(space)];
+        if !single_display {
+            screens.push(CGRect::new(CGPoint::new(0., -800.), screen.size));
+            spaces.push(Some(SpaceId::new(2)));
+        }
+        reactor.handle_event(space_state_event(screens, spaces));
+        apps.make_app_and_settle(&mut reactor, 1, make_windows(5));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+        apps.simulate_until_quiet(&mut reactor);
+        assert!(reactor.animation_tx.is_none());
+        let mut offscreen = 0;
+        for (wid, frame) in test_layout(&mut reactor, space, screen) {
+            if frame.max().x <= screen.origin.x || frame.origin.x >= screen.max().x {
+                offscreen += 1;
+            }
+            let expected = if single_display {
+                crate::layout_engine::systems::scrolling::park_offscreen_at_corner(frame, screen)
+            } else {
+                frame
+            };
+            assert_eq!(
+                reactor.state.windows.window(wid).unwrap().frame_monotonic,
+                expected
+            );
+        }
+        assert!(offscreen > 0, "fixture must exercise offscreen columns");
+    }
+}
+
+#[test]
+fn corrected_corner_windows_skip_layout_transition_but_floating_windows_do_not() {
+    for floating in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::new(0., 32.), CGSize::new(1512., 950.));
+        let space = SpaceId::new(1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+        let wid = WindowId::new(1, 1);
+        if floating {
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+            reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+            apps.simulate_until_quiet(&mut reactor);
+        }
+        let (tx, rx) = super::animation::AnimationSender::channel();
+        reactor.animation_tx = Some(tx);
+        reactor.config.settings.animate = true;
+        let target = CGRect::new(CGPoint::new(20., 42.), CGSize::new(700., 900.));
+        reactor.state.windows.window_mut(wid).unwrap().frame_monotonic =
+            CGRect::new(CGPoint::new(-565., 950.), CGSize::new(994., 932.));
+        apps.requests();
+        assert!(super::animation::AnimationManager::animate_layout(
+            &mut reactor,
+            space,
+            &[(wid, target)],
+            false,
+            None,
+        ));
+        let mut manager = super::animation::AnimationManager::new();
+        while let Ok(message) = rx.commands.try_recv() {
+            manager.handle_message(message);
+        }
+        let requests = apps.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .any(|r| matches!(r, Request::BeginWindowAnimation(id) if *id == wid)),
+            floating,
+        );
+        assert_eq!(
+            requests.iter().any(|r| matches!(r, Request::SetWindowFrames(frames, ..)
+                if frames.iter().any(|(id, frame)| *id == wid && *frame == target))),
+            !floating,
+        );
+    }
+}
+
+#[test]
 fn dock_activation_does_not_reposition_visible_scrolling_window() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(600., 600.));
