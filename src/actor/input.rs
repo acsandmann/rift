@@ -17,7 +17,6 @@ use objc2_core_graphics::{
 use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
-use crate::actor;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
@@ -32,6 +31,7 @@ use crate::sys::hotkey::{
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::timer::Timer;
 use crate::sys::{gesture, power, window_server};
+use crate::{actor, common::config::MissionControlKeySettings};
 
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 16_000_000; // 16ms ~= 62 Hz
 const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 32_000_000; // 32ms ~= 31 Hz
@@ -88,6 +88,7 @@ pub struct Input {
     hotkeys_active: Cell<bool>,
     wm_sender: wm_controller::Sender,
     mission_control_tx: RefCell<Option<super::mission_control::Sender>>,
+    mission_control_keys: RefCell<MissionControlKeySettings>,
 }
 
 impl Drop for Input {
@@ -314,6 +315,7 @@ impl Input {
         state.gesture_settings = super::gesture::Settings::new(&config);
         let gesture_control = super::gesture::Control::new(&config);
         let mouse_move_min_interval_ticks = mouse_move_sampling_profile(state.low_power_mode);
+        let mission_control_keys = config.settings.ui.mission_control.keys.clone().expanded();
         let input = Input {
             events_tx,
             requests_rx: Some(requests_rx),
@@ -342,6 +344,7 @@ impl Input {
             hotkeys_active: Cell::new(false),
             wm_sender,
             mission_control_tx: RefCell::new(mission_control_tx),
+            mission_control_keys: RefCell::new(mission_control_keys),
         };
         input.install_binding_specs(config.binding_mode_specs);
         input
@@ -600,6 +603,8 @@ impl Input {
                         state.show_mouse();
                     }
                 }
+                *self.mission_control_keys.borrow_mut() =
+                    new_config.settings.ui.mission_control.keys.expanded();
                 should_rebuild_mask = true;
             }
             Request::LayoutModesChanged(modes) => {
@@ -658,7 +663,9 @@ impl Input {
     }
 
     #[inline]
-    fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
+    fn reset_mouse_move_sample_gate(&self) {
+        self.mouse_move_last_timestamp.set(None);
+    }
 
     fn reconcile_after_tap_reenabled(&self) {
         let mut state = self.state.borrow_mut();
@@ -766,23 +773,38 @@ impl Input {
                     return true;
                 }
                 if event_type == CGEventType::KeyDown && self.mission_control_active.get() {
-                    let keycode = CGEvent::integer_value_field(
-                        Some(event),
-                        CGEventField::KeyboardEventKeycode,
-                    ) as u16;
-                    if let Some(input) = super::mission_control::Input::from_keycode(
-                        keycode,
-                        CGEvent::flags(Some(event)),
-                    ) {
+                    let flags = CGEvent::flags(Some(event));
+                    // If the user has any mission control keys set up we must try and find if the
+                    // received event matches one of them
+                    let configured_input = key_code_from_event(event).and_then(|key_code| {
+                        let state = self.state.borrow();
+                        let hotkey = Hotkey::new(
+                            modifiers_from_flags_with_keys(flags, &state.pressed_keys),
+                            key_code,
+                        );
+
+                        super::mission_control::Input::from_hotkey(
+                            &hotkey,
+                            &self.mission_control_keys.borrow(),
+                        )
+                    });
+
+                    // If configured input is SOME we use that
+                    if let Some(input) = configured_input.or_else(|| {
+                        let keycode = CGEvent::integer_value_field(
+                            Some(event),
+                            CGEventField::KeyboardEventKeycode,
+                        ) as u16;
+
+                        // otherwise default to default hardcoded mission control values
+                        super::mission_control::Input::from_keycode(keycode, flags)
+                    }) {
                         let configured_zoom =
                             matches!(input, super::mission_control::Input::ZoomStep(_))
                                 && key_code_from_event(event).is_some_and(|key_code| {
                                     let state = self.state.borrow();
                                     let hotkey = Hotkey::new(
-                                        modifiers_from_flags_with_keys(
-                                            CGEvent::flags(Some(event)),
-                                            &state.pressed_keys,
-                                        ),
+                                        modifiers_from_flags_with_keys(flags, &state.pressed_keys),
                                         key_code,
                                     );
                                     self.hotkeys
@@ -1285,9 +1307,13 @@ impl State {
         }
     }
 
-    fn note_key_down(&mut self, key_code: KeyCode) { self.pressed_keys.insert(key_code); }
+    fn note_key_down(&mut self, key_code: KeyCode) {
+        self.pressed_keys.insert(key_code);
+    }
 
-    fn note_key_up(&mut self, key_code: KeyCode) { self.pressed_keys.remove(&key_code); }
+    fn note_key_up(&mut self, key_code: KeyCode) {
+        self.pressed_keys.remove(&key_code);
+    }
 
     fn note_flags_changed(&mut self, key_code: KeyCode) {
         if !is_modifier_key(key_code) {
@@ -2022,14 +2048,10 @@ mod tests {
         let (input, mut wm_rx, _) = input();
         input.hotkeys_active.set(true);
         input.rebuild_binding_maps();
-        input
-            .hotkeys
-            .borrow_mut()
-            .get_mut(0)
-            .unwrap()
-            .insert(Hotkey::new(Modifiers::empty(), KeyCode::KeyA), vec![
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            ]);
+        input.hotkeys.borrow_mut().get_mut(0).unwrap().insert(
+            Hotkey::new(Modifiers::empty(), KeyCode::KeyA),
+            vec![WmCommand::Wm(wm_controller::WmCmd::ReloadConfig)],
+        );
         let event = CGEvent::new_keyboard_event(None, 0, true).unwrap();
         CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         assert!(!input.on_event(CGEventType::KeyDown, &event, None));
@@ -2112,10 +2134,13 @@ mod tests {
     fn normal_command_after_binding_mode_transition_still_runs() {
         let (input, mut wm_rx, _) = input();
         input.install_binding_specs(vec![
-            ("default".into(), vec![(
-                "A".into(),
-                WmCommand::Wm(wm_controller::WmCmd::BindingMode("other".into())),
-            )]),
+            (
+                "default".into(),
+                vec![(
+                    "A".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::BindingMode("other".into())),
+                )],
+            ),
             ("other".into(), vec![]),
         ]);
         input.hotkeys_active.set(true);
@@ -2138,14 +2163,20 @@ mod tests {
     fn layout_rebuild_preserves_active_mode_and_rebuilds_each_map() {
         let (input, _, _) = input();
         input.install_binding_specs(vec![
-            ("default".into(), vec![(
-                "Ctrl + A".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
-            ("other".into(), vec![(
-                "Ctrl + B".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
+            (
+                "default".into(),
+                vec![(
+                    "Ctrl + A".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
+            (
+                "other".into(),
+                vec![(
+                    "Ctrl + B".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
         ]);
         input.hotkeys_active.set(true);
         input.active_mode.set(1);
@@ -2160,14 +2191,20 @@ mod tests {
     fn generic_modifiers_expand_inside_each_mode_and_replacement_resets_to_default() {
         let (input, _, _) = input();
         let specs = vec![
-            ("default".into(), vec![(
-                "Ctrl + A".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
-            ("other".into(), vec![(
-                "Alt + B".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
+            (
+                "default".into(),
+                vec![(
+                    "Ctrl + A".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
+            (
+                "other".into(),
+                vec![(
+                    "Alt + B".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
         ];
         input.install_binding_specs(specs.clone());
         input.hotkeys_active.set(true);

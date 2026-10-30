@@ -4,9 +4,12 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::MainThreadMarker;
 
-use crate::actor::{self, reactor};
-use crate::common::config::MissionControlSettings;
 use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewCache};
+use crate::{
+    actor::{self, reactor},
+    common::config::MissionControlKeySettings,
+};
+use crate::{common::config::MissionControlSettings, sys::event::Hotkey};
 
 #[derive(Debug)]
 pub enum Event {
@@ -78,6 +81,23 @@ impl Input {
             48 => Self::Cycle(!flags.contains(CGEventFlags::MaskShift)),
             _ => return None,
         })
+    }
+
+    pub(crate) fn from_hotkey(
+        hotkey: &Hotkey,
+        key_settings: &MissionControlKeySettings,
+    ) -> Option<Self> {
+        if key_settings.left.contains(hotkey) {
+            Some(Self::Left)
+        } else if key_settings.down.contains(hotkey) {
+            Some(Self::Down)
+        } else if key_settings.up.contains(hotkey) {
+            Some(Self::Up)
+        } else if key_settings.right.contains(hotkey) {
+            Some(Self::Right)
+        } else {
+            None
+        }
     }
 }
 
