@@ -855,12 +855,13 @@ impl LayoutEngine {
             .filter(|wid| window_store.workspace_for_window(*wid) == Some(workspace_id));
 
         if let Some(wid) = focus_window {
+            let same_window = self.focused_window == Some(wid);
             self.focused_window = Some(wid);
             self.workspaces.set_last_focused_window(space, workspace_id, Some(wid));
             if self.floating.is_floating(wid) {
                 self.floating.set_last_focus(Some(wid));
             } else if let Some(layout) = self.workspaces.active_layout(space, workspace_id) {
-                let _ = self.workspaces[workspace_id].layout_system.select_window(layout, wid);
+                self.select_focused_window(workspace_id, layout, wid, same_window);
             }
         } else {
             self.focused_window = None;
@@ -990,6 +991,27 @@ impl LayoutEngine {
         );
     }
 
+    /// Select the focused window, but keep a container selection (e.g. after ascend)
+    /// when focus is merely re-reported for the same window inside it, so a following
+    /// move_node moves the whole container. Focus moving to another window always
+    /// selects that window. Returns whether the selection changed.
+    fn select_focused_window(
+        &mut self,
+        ws_id: VirtualWorkspaceId,
+        layout: LayoutId,
+        wid: WindowId,
+        same_window: bool,
+    ) -> bool {
+        let system = &mut self.workspaces[ws_id].layout_system;
+        let keep = same_window && system.windows_under_selection(layout).contains(&wid);
+        if keep {
+            return false;
+        }
+        let changed = system.selected_window(layout) != Some(wid);
+        let _ = system.select_window(layout, wid);
+        changed
+    }
+
     fn apply_focus_response(
         &mut self,
         _window_store: &mut WindowStore,
@@ -999,11 +1021,12 @@ impl LayoutEngine {
         response: &EventResponse,
     ) {
         if let Some(wid) = response.focus_window {
+            let same_window = self.focused_window == Some(wid);
             self.focused_window = Some(wid);
             if self.floating.is_floating(wid) {
                 self.floating.set_last_focus(Some(wid));
             } else {
-                let _ = self.workspaces[ws_id].layout_system.select_window(layout, wid);
+                self.select_focused_window(ws_id, layout, wid, same_window);
                 self.workspaces.set_last_focused_window(space, ws_id, Some(wid));
             }
         }
@@ -2182,10 +2205,10 @@ impl LayoutEngine {
                         );
                         return EventResponse::default();
                     }
+                    let same_window = self.focused_window == Some(wid);
                     self.focused_window = Some(wid);
                     let selection_changed =
-                        self.workspaces[ws_id].layout_system.selected_window(layout) != Some(wid);
-                    let _ = self.workspaces[ws_id].layout_system.select_window(layout, wid);
+                        self.select_focused_window(ws_id, layout, wid, same_window);
                     self.workspaces.set_last_focused_window(space, ws_id, Some(wid));
                     return EventResponse {
                         changed: selection_changed
@@ -6364,6 +6387,118 @@ mod tests {
         assert_eq!(
             engine.workspaces().workspace_for_window(&window_store, space, wid),
             Some(target_workspace)
+        );
+    }
+
+    /// Three windows; 1 and 2 joined into a stack: `[stack(1, 2) | 3]`, window 1 focused.
+    fn stacked_pair_beside_window() -> (LayoutEngine, WindowStore, SpaceId, CGRect) {
+        let mut engine = LayoutEngine::new(
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+            None,
+        );
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(92);
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
+        let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, screen.size));
+        for index in 1..=3 {
+            let _ = engine.handle_event(
+                &mut store,
+                LayoutEvent::WindowAdded(space, WindowId::new(1, index)),
+            );
+        }
+        let _ = engine.handle_event(
+            &mut store,
+            LayoutEvent::WindowFocused(space, WindowId::new(1, 1)),
+        );
+        for command in [
+            LayoutCommand::JoinWindow(Direction::Right),
+            LayoutCommand::ToggleStack,
+        ] {
+            let _ = engine.handle_command(
+                &mut store,
+                Some(space),
+                &[space],
+                &HashMap::default(),
+                command,
+            );
+        }
+        (engine, store, space, screen)
+    }
+
+    fn frame_x(engine: &mut LayoutEngine, space: SpaceId, screen: CGRect, wid: WindowId) -> f64 {
+        engine
+            .calculate_layout(space, screen, &Default::default(), Default::default())
+            .into_iter()
+            .find(|(w, _)| *w == wid)
+            .map(|(_, frame)| frame.origin.x)
+            .unwrap()
+    }
+
+    #[test]
+    fn move_node_after_ascend_moves_whole_stack_despite_focus_echo() {
+        let (mut engine, mut store, space, screen) = stacked_pair_beside_window();
+        let (w1, w2, w3) = (WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3));
+        assert!(frame_x(&mut engine, space, screen, w1) < frame_x(&mut engine, space, screen, w3));
+
+        let mut command = |engine: &mut LayoutEngine, command| {
+            engine.handle_command(&mut store, Some(space), &[space], &HashMap::default(), command)
+        };
+        let _ = command(&mut engine, LayoutCommand::Ascend);
+        // Raising the selection re-reports focus for the same window; that must not
+        // collapse the container selection back to the window.
+        let _ = engine.handle_event(&mut store, LayoutEvent::WindowFocused(space, w1));
+        let _ = engine.handle_command(
+            &mut store,
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::MoveNode(Direction::Right),
+        );
+
+        let x1 = frame_x(&mut engine, space, screen, w1);
+        assert_eq!(
+            x1,
+            frame_x(&mut engine, space, screen, w2),
+            "stack stays together"
+        );
+        assert!(
+            frame_x(&mut engine, space, screen, w3) < x1,
+            "stack moved past window 3"
+        );
+    }
+
+    #[test]
+    fn focusing_another_window_after_ascend_selects_that_window() {
+        let (mut engine, mut store, space, _) = stacked_pair_beside_window();
+        let w3 = WindowId::new(1, 3);
+        // Ascend to the root so window 3 is inside the selected container too.
+        for _ in 0..3 {
+            let _ = engine.handle_command(
+                &mut store,
+                Some(space),
+                &[space],
+                &HashMap::default(),
+                LayoutCommand::Ascend,
+            );
+        }
+        let _ = engine.handle_event(&mut store, LayoutEvent::WindowFocused(space, w3));
+        assert_eq!(engine.selected_window(space), Some(w3));
+    }
+
+    #[test]
+    fn move_focus_starts_from_focused_window_when_selection_is_root() {
+        let (mut engine, mut store, space, _) = stacked_pair_beside_window();
+        let mut command = |engine: &mut LayoutEngine, command| {
+            engine.handle_command(&mut store, Some(space), &[space], &HashMap::default(), command)
+        };
+        for _ in 0..3 {
+            let _ = command(&mut engine, LayoutCommand::Ascend);
+        }
+        let response = command(&mut engine, LayoutCommand::MoveFocus(Direction::Right));
+        assert!(
+            response.focus_window.is_some(),
+            "focus must not be stuck at the root"
         );
     }
 }

@@ -179,6 +179,10 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     /// Members sharing the stack/group that directly contains `window`.
     fn stack_members(&self, _layout: LayoutId, _window: WindowId) -> Vec<WindowId> { Vec::new() }
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
+    /// Every window in the selected subtree, including hidden stack members.
+    fn windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.visible_windows_under_selection(layout)
+    }
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
     fn descend_selection(&mut self, layout: LayoutId) -> bool;
     fn move_focus(
@@ -337,6 +341,9 @@ macro_rules! delegate_traditional_layout_system {
         }
         fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_under_selection(layout)
+        }
+        fn windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
+            self.inner.windows_under_selection(layout)
         }
         fn ascend_selection(&mut self, layout: LayoutId) -> bool {
             self.inner.ascend_selection(layout)
