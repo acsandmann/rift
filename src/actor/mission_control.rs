@@ -399,6 +399,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mission_control_configured_hotkeys_route_to_directions() {
+        let keys: MissionControlKeySettings = toml::from_str(
+            r#"
+            left = ["H", "A"]
+            down = ["J"]
+            up = ["K"]
+            right = ["L"]
+            "#,
+        )
+        .unwrap();
+        let keys = keys.expanded();
+
+        for spec in ["H", "A"] {
+            assert!(matches!(
+                Input::from_hotkey(&spec.parse().unwrap(), &keys),
+                Some(Input::Left)
+            ));
+        }
+        assert!(matches!(
+            Input::from_hotkey(&"J".parse().unwrap(), &keys),
+            Some(Input::Down)
+        ));
+        assert!(matches!(
+            Input::from_hotkey(&"K".parse().unwrap(), &keys),
+            Some(Input::Up)
+        ));
+        assert!(matches!(
+            Input::from_hotkey(&"L".parse().unwrap(), &keys),
+            Some(Input::Right)
+        ));
+        for spec in ["Z", "Shift + H", "Ctrl + H"] {
+            assert!(
+                Input::from_hotkey(&spec.parse().unwrap(), &keys).is_none(),
+                "{spec}"
+            );
+        }
+        assert!(
+            Input::from_hotkey(&"H".parse().unwrap(), &MissionControlKeySettings::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mission_control_expanded_modifiers_accept_either_side_but_reject_extra_modifiers() {
+        use crate::sys::hotkey::{KeyCode, Modifiers};
+
+        let keys: MissionControlKeySettings = toml::from_str(r#"left = ["Alt + H"]"#).unwrap();
+        let expanded = keys.expanded();
+        // Expansion prepares a separate runtime copy without changing the source settings.
+        assert_eq!(keys.left, vec!["Alt + H".parse().unwrap()]);
+        assert_eq!(expanded.left.len(), 3);
+        for modifiers in [Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT, Modifiers::ALT] {
+            let hotkey = Hotkey::new(modifiers, KeyCode::KeyH);
+            assert!(matches!(
+                Input::from_hotkey(&hotkey, &expanded),
+                Some(Input::Left)
+            ));
+        }
+        for spec in ["H", "Ctrl + AltLeft + H", "Shift + AltRight + H"] {
+            assert!(
+                Input::from_hotkey(&spec.parse().unwrap(), &expanded).is_none(),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn mission_control_expanded_side_specific_modifiers_stay_side_specific() {
+        let keys: MissionControlKeySettings = toml::from_str(r#"left = ["AltLeft + H"]"#).unwrap();
+        let expanded = keys.expanded();
+        assert_eq!(expanded.left.len(), 1);
+        assert!(matches!(
+            Input::from_hotkey(&"AltLeft + H".parse().unwrap(), &expanded),
+            Some(Input::Left)
+        ));
+        for spec in ["AltRight + H", "Alt + H"] {
+            assert!(
+                Input::from_hotkey(&spec.parse().unwrap(), &expanded).is_none(),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
     fn disabled_settings_do_not_create_a_channel() {
         assert!(channel_if_enabled(&MissionControlSettings::default()).is_none());
         assert!(!MissionControlSettings::default().window_previews);

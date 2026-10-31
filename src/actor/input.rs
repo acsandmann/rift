@@ -1956,6 +1956,12 @@ mod tests {
     }
 
     fn input() -> (Input, actor::Receiver<WmEvent>, actor::Receiver<Event>) {
+        input_with_mission_control_keys(MissionControlKeySettings::default())
+    }
+
+    fn input_with_mission_control_keys(
+        keys: MissionControlKeySettings,
+    ) -> (Input, actor::Receiver<WmEvent>, actor::Receiver<Event>) {
         let (events_tx, events_rx) = actor::channel();
         let (_, requests_rx) = actor::channel();
         let (wm_tx, wm_rx) = actor::channel();
@@ -1966,6 +1972,7 @@ mod tests {
         config.settings.focus_follows_mouse = false;
         config.settings.focus_follows_mouse_disable_hotkey = None;
         config.settings.mouse_hides_on_focus = false;
+        config.settings.ui.mission_control.keys = keys;
         let input = Input::new(
             config,
             events_tx,
@@ -1979,6 +1986,117 @@ mod tests {
             objc2_core_foundation::CGSize::new(1000., 1000.),
         ));
         (input, wm_rx, events_rx)
+    }
+
+    #[test]
+    fn mission_control_configured_events_are_consumed_only_while_active() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+
+        let keys = toml::from_str(r#"left = ["H", "Alt + H"]"#).unwrap();
+        let (input, mut wm_rx, mut reactor_rx) = input_with_mission_control_keys(keys);
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        // Native keycode 4 is H. Build real CGEvents to exercise the event-to-Hotkey path.
+        let event = CGEvent::new_keyboard_event(None, 4, true).unwrap();
+        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+
+        assert!(input.on_event(CGEventType::KeyDown, &event, None));
+        assert!(rx.try_recv().is_err());
+
+        input.mission_control_active.set(true);
+        for flags in [CGEventFlags::empty(), CGEventFlags::MaskAlternate] {
+            CGEvent::set_flags(Some(&event), flags);
+            assert!(!input.on_event(CGEventType::KeyDown, &event, None));
+            assert!(matches!(
+                rx.try_recv().unwrap().1,
+                OverviewEvent::Input(OverviewInput::Left)
+            ));
+        }
+        // An extra modifier must not accidentally match the plain H binding.
+        CGEvent::set_flags(Some(&event), CGEventFlags::MaskControl);
+        assert!(input.on_event(CGEventType::KeyDown, &event, None));
+        assert!(rx.try_recv().is_err());
+        assert!(wm_rx.try_recv().is_err());
+        assert!(reactor_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mission_control_empty_bindings_preserve_builtin_event_routes() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+
+        let (input, _, _) = input();
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        input.mission_control_active.set(true);
+        for code in [123, 124, 125, 126, 53, 36, 48, 24] {
+            let event = CGEvent::new_keyboard_event(None, code, true).unwrap();
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+            assert!(
+                !input.on_event(CGEventType::KeyDown, &event, None),
+                "keycode {code}"
+            );
+            let OverviewEvent::Input(action) = rx.try_recv().unwrap().1 else {
+                panic!("expected overview input for keycode {code}");
+            };
+            assert!(matches!(
+                (code, action),
+                (123, OverviewInput::Left)
+                    | (124, OverviewInput::Right)
+                    | (125, OverviewInput::Down)
+                    | (126, OverviewInput::Up)
+                    | (53, OverviewInput::Dismiss)
+                    | (36, OverviewInput::Activate)
+                    | (48, OverviewInput::Cycle(true))
+                    | (24, OverviewInput::ZoomStep(1))
+            ));
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mission_control_config_reload_replaces_and_expands_bindings() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+
+        let keys = toml::from_str(r#"left = ["H"]"#).unwrap();
+        let (input, _, _) = input_with_mission_control_keys(keys);
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        let old_event = CGEvent::new_keyboard_event(None, 4, true).unwrap();
+        CGEvent::set_flags(Some(&old_event), CGEventFlags::empty());
+        input.mission_control_active.set(true);
+        assert!(!input.on_event(CGEventType::KeyDown, &old_event, None));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            OverviewEvent::Input(OverviewInput::Left)
+        ));
+
+        // Reload while inactive, with all native input features disabled, so this test
+        // does not need to install a system event tap or request Accessibility access.
+        input.mission_control_active.set(false);
+        let mut config = Config::default();
+        config.settings.gestures.enabled = false;
+        config.settings.layout.scrolling.gestures.enabled = false;
+        config.settings.focus_follows_mouse = false;
+        config.settings.focus_follows_mouse_disable_hotkey = None;
+        config.settings.mouse_hides_on_focus = false;
+        config.settings.drag_drop.enabled = false;
+        config.settings.horizontal_mouse_warp = None;
+        config.settings.ui.mission_control.keys = toml::from_str(r#"right = ["Alt + L"]"#).unwrap();
+        let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        input.on_request(Request::ConfigUpdated(config), &recovery_tx);
+        assert!(input.tap.borrow().is_none());
+
+        input.mission_control_active.set(true);
+        assert!(input.on_event(CGEventType::KeyDown, &old_event, None));
+        assert!(rx.try_recv().is_err());
+        let new_event = CGEvent::new_keyboard_event(None, 37, true).unwrap();
+        CGEvent::set_flags(Some(&new_event), CGEventFlags::MaskAlternate);
+        assert!(!input.on_event(CGEventType::KeyDown, &new_event, None));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            OverviewEvent::Input(OverviewInput::Right)
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

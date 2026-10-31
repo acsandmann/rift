@@ -11,6 +11,46 @@ use crate::layout_engine::{LayoutCommand, ResizeOrientation};
 use crate::sys::hotkey::Modifiers;
 
 #[test]
+fn mission_control_keys_are_optional_in_existing_configs() {
+    let config = Config::parse(
+        "[settings.ui.mission_control]\nenabled = true\nwindow_previews = false\n[keys]",
+    )
+    .unwrap();
+    assert_eq!(
+        config.settings.ui.mission_control.keys,
+        MissionControlKeySettings::default()
+    );
+}
+
+#[test]
+fn mission_control_keys_allow_partial_configuration_and_reject_invalid_keys() {
+    let config = Config::parse(
+        r#"
+        [settings.ui.mission_control.keys]
+        left = ["H", "Left"]
+        [keys]
+        "#,
+    )
+    .unwrap();
+    let keys = config.settings.ui.mission_control.keys;
+    assert_eq!(keys.left, vec!["H".parse().unwrap(), "Left".parse().unwrap()]);
+    assert!(keys.down.is_empty());
+    assert!(keys.up.is_empty());
+    assert!(keys.right.is_empty());
+
+    assert!(
+        Config::parse(
+            r#"
+        [settings.ui.mission_control.keys]
+        left = ["NotARealKey"]
+        [keys]
+        "#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn scrolling_display_widths_merge_and_validate() {
     let settings: ScrollingLayoutSettings = toml::from_str(
         r#"
