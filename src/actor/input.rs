@@ -17,8 +17,8 @@ use objc2_core_graphics::{
 use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
-use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
+use crate::actor::{mission_control::MissionControlKeyBindings, spaces::ForwardedSpaceState};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
     BindingModeSpecs, Config, DragDropSettings, HorizontalMouseWarp, MouseAction, MouseModifier,
@@ -31,7 +31,7 @@ use crate::sys::hotkey::{
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::timer::Timer;
 use crate::sys::{gesture, power, window_server};
-use crate::{actor, common::config::MissionControlKeySettings};
+use crate::{actor, common::config::MissionControlKeySpecs};
 
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 16_000_000; // 16ms ~= 62 Hz
 const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 32_000_000; // 32ms ~= 31 Hz
@@ -88,7 +88,8 @@ pub struct Input {
     hotkeys_active: Cell<bool>,
     wm_sender: wm_controller::Sender,
     mission_control_tx: RefCell<Option<super::mission_control::Sender>>,
-    mission_control_keys: RefCell<MissionControlKeySettings>,
+    mission_control_specs: RefCell<MissionControlKeySpecs>,
+    mission_control_keys: RefCell<MissionControlKeyBindings>,
 }
 
 impl Drop for Input {
@@ -315,7 +316,8 @@ impl Input {
         state.gesture_settings = super::gesture::Settings::new(&config);
         let gesture_control = super::gesture::Control::new(&config);
         let mouse_move_min_interval_ticks = mouse_move_sampling_profile(state.low_power_mode);
-        let mission_control_keys = config.settings.ui.mission_control.keys.clone().expanded();
+        let mission_control_specs = config.settings.ui.mission_control.keys.clone();
+        let mission_control_keys = MissionControlKeyBindings::from_specs(&mission_control_specs);
         let input = Input {
             events_tx,
             requests_rx: Some(requests_rx),
@@ -344,6 +346,7 @@ impl Input {
             hotkeys_active: Cell::new(false),
             wm_sender,
             mission_control_tx: RefCell::new(mission_control_tx),
+            mission_control_specs: RefCell::new(mission_control_specs),
             mission_control_keys: RefCell::new(mission_control_keys),
         };
         input.install_binding_specs(config.binding_mode_specs);
@@ -542,6 +545,7 @@ impl Input {
             }
             Request::SetBindingMode(target) => self.transition_binding_mode(&target),
             Request::KeyboardLayoutChanged => {
+                self.rebuild_mission_control_bindings();
                 if self.hotkeys_active.get() {
                     self.rebuild_binding_maps();
                     should_rebuild_mask = true;
@@ -603,8 +607,9 @@ impl Input {
                         state.show_mouse();
                     }
                 }
-                *self.mission_control_keys.borrow_mut() =
-                    new_config.settings.ui.mission_control.keys.expanded();
+                *self.mission_control_specs.borrow_mut() =
+                    new_config.settings.ui.mission_control.keys;
+                self.rebuild_mission_control_bindings();
                 should_rebuild_mask = true;
             }
             Request::LayoutModesChanged(modes) => {
@@ -1199,6 +1204,11 @@ impl Input {
         }
         trace!("Updated hotkey maps for current keyboard layout: {}", maps.len());
         *self.hotkeys.borrow_mut() = maps;
+    }
+
+    fn rebuild_mission_control_bindings(&self) {
+        *self.mission_control_keys.borrow_mut() =
+            MissionControlKeyBindings::from_specs(&self.mission_control_specs.borrow());
     }
 }
 
@@ -1956,11 +1966,11 @@ mod tests {
     }
 
     fn input() -> (Input, actor::Receiver<WmEvent>, actor::Receiver<Event>) {
-        input_with_mission_control_keys(MissionControlKeySettings::default())
+        input_with_mission_control_keys(MissionControlKeySpecs::default())
     }
 
     fn input_with_mission_control_keys(
-        keys: MissionControlKeySettings,
+        keys: MissionControlKeySpecs,
     ) -> (Input, actor::Receiver<WmEvent>, actor::Receiver<Event>) {
         let (events_tx, events_rx) = actor::channel();
         let (_, requests_rx) = actor::channel();

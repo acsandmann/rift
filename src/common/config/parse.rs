@@ -141,6 +141,22 @@ impl Config {
                     bail!("`default` is reserved and cannot be defined in [binding_modes]");
                 }
 
+                let mission_control_keys = &c.settings.ui.mission_control.keys;
+                for (direction, specs) in [
+                    ("left", &mission_control_keys.left),
+                    ("down", &mission_control_keys.down),
+                    ("up", &mission_control_keys.up),
+                    ("right", &mission_control_keys.right),
+                ] {
+                    for spec in specs {
+                        if let Err(error) = Hotkey::from_str(spec) {
+                            bail!(
+                                "Invalid hotkey `{spec}` in settings.ui.mission_control.keys.{direction}: {error}"
+                            );
+                        }
+                    }
+                }
+
                 let mut binding_sets: Vec<_> = c.binding_modes.into_iter().collect();
                 binding_sets.sort_by(|a, b| a.0.cmp(&b.0));
                 binding_sets.insert(0, ("default".to_string(), c.keys));

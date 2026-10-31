@@ -1119,16 +1119,16 @@ pub struct MissionControlSettings {
     pub fade_duration_ms: f64,
     #[serde(default)]
     #[setting(ignore)]
-    pub keys: MissionControlKeySettings,
+    pub keys: MissionControlKeySpecs,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(default, deny_unknown_fields)]
-pub struct MissionControlKeySettings {
-    pub left: Vec<Hotkey>,
-    pub down: Vec<Hotkey>,
-    pub up: Vec<Hotkey>,
-    pub right: Vec<Hotkey>,
+pub struct MissionControlKeySpecs {
+    pub left: Vec<String>,
+    pub down: Vec<String>,
+    pub up: Vec<String>,
+    pub right: Vec<String>,
 }
 
 fn default_mission_control_fade_duration_ms() -> f64 {
@@ -2005,31 +2005,5 @@ impl ConfigSource {
         {
             rewrite(command, old, target);
         }
-    }
-}
-
-impl MissionControlKeySettings {
-    /// Builds and returns a version of the mission control key settings with expanded modifiers
-    /// that allow trivial comparison at runtime
-    pub fn expanded(&self) -> Self {
-        Self {
-            left: Self::expand_bindings(&self.left),
-            down: Self::expand_bindings(&self.down),
-            up: Self::expand_bindings(&self.up),
-            right: Self::expand_bindings(&self.right),
-        }
-    }
-
-    fn expand_bindings(bindings: &[Hotkey]) -> Vec<Hotkey> {
-        bindings
-            .iter()
-            .flat_map(|binding| {
-                binding
-                    .modifiers
-                    .expand_to_specific()
-                    .into_iter()
-                    .map(move |modifiers| Hotkey::new(modifiers, binding.key_code))
-            })
-            .collect()
     }
 }
