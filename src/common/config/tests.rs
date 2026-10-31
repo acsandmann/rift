@@ -33,7 +33,7 @@ fn mission_control_keys_allow_partial_configuration_and_reject_invalid_keys() {
     )
     .unwrap();
     let keys = config.settings.ui.mission_control.keys;
-    assert_eq!(keys.left, vec!["H".parse().unwrap(), "Left".parse().unwrap()]);
+    assert_eq!(keys.left, vec!["H", "Left"]);
     assert!(keys.down.is_empty());
     assert!(keys.up.is_empty());
     assert!(keys.right.is_empty());

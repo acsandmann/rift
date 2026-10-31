@@ -453,7 +453,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let keys = keys.expanded();
+        let keys = MissionControlKeyBindings::from_specs(&keys);
 
         for spec in ["H", "A"] {
             assert!(matches!(
@@ -480,7 +480,11 @@ mod tests {
             );
         }
         assert!(
-            Input::from_hotkey(&"H".parse().unwrap(), &MissionControlKeySpecs::default()).is_none()
+            Input::from_hotkey(
+                &"H".parse().unwrap(),
+                &MissionControlKeyBindings::from_specs(&MissionControlKeySpecs::default())
+            )
+            .is_none()
         );
     }
 
@@ -489,9 +493,9 @@ mod tests {
         use crate::sys::hotkey::{KeyCode, Modifiers};
 
         let keys: MissionControlKeySpecs = toml::from_str(r#"left = ["Alt + H"]"#).unwrap();
-        let expanded = keys.expanded();
+        let expanded = MissionControlKeyBindings::from_specs(&keys);
         // Expansion prepares a separate runtime copy without changing the source settings.
-        assert_eq!(keys.left, vec!["Alt + H".parse().unwrap()]);
+        assert_eq!(keys.left, vec!["Alt + H"]);
         assert_eq!(expanded.left.len(), 3);
         for modifiers in [Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT, Modifiers::ALT] {
             let hotkey = Hotkey::new(modifiers, KeyCode::KeyH);
@@ -511,7 +515,7 @@ mod tests {
     #[test]
     fn mission_control_expanded_side_specific_modifiers_stay_side_specific() {
         let keys: MissionControlKeySpecs = toml::from_str(r#"left = ["AltLeft + H"]"#).unwrap();
-        let expanded = keys.expanded();
+        let expanded = MissionControlKeyBindings::from_specs(&keys);
         assert_eq!(expanded.left.len(), 1);
         assert!(matches!(
             Input::from_hotkey(&"AltLeft + H".parse().unwrap(), &expanded),

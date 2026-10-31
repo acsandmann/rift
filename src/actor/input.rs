@@ -2110,6 +2110,135 @@ mod tests {
     }
 
     #[test]
+    fn mission_control_layout_changes_preserve_direction_for_configured_characters() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        use crate::sys::hotkey::with_test_keymap;
+
+        with_test_keymap(|set_key| {
+            // Dedicated characters avoid changing mappings used by parallel tests.
+            let characters = ["¤", "µ", "ø", "æ"];
+            let layouts = [
+                [
+                    (KeyCode::KeyH, 4),
+                    (KeyCode::KeyJ, 38),
+                    (KeyCode::KeyK, 40),
+                    (KeyCode::KeyL, 37),
+                ],
+                [
+                    (KeyCode::KeyA, 0),
+                    (KeyCode::KeyS, 1),
+                    (KeyCode::KeyD, 2),
+                    (KeyCode::KeyF, 3),
+                ],
+            ];
+            for (character, (key, _)) in characters.iter().zip(layouts[0]) {
+                set_key(character, key);
+            }
+            let specs: MissionControlKeySpecs = toml::from_str(
+                r#"
+                left = ["¤", "Alt + ¤"]
+                down = ["µ", "Alt + µ"]
+                up = ["ø", "Alt + ø"]
+                right = ["æ", "Alt + æ"]
+                "#,
+            )
+            .unwrap();
+            let (input, mut wm_rx, mut reactor_rx) = input_with_mission_control_keys(specs.clone());
+            let (tx, mut rx) = actor::channel();
+            *input.mission_control_tx.borrow_mut() = Some(tx);
+            let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            assert!(!input.hotkeys_active.get());
+
+            // Switch A -> B -> A. Each character must retain its semantic direction,
+            // despite changing physical keycodes, with or without a generic modifier.
+            for layout_index in [0, 1, 0] {
+                input.mission_control_active.set(false);
+                for (character, (key, _)) in characters.iter().zip(layouts[layout_index]) {
+                    set_key(character, key);
+                }
+                input.on_request(Request::KeyboardLayoutChanged, &recovery_tx);
+                input.mission_control_active.set(true);
+                assert_eq!(*input.mission_control_specs.borrow(), specs);
+                for (direction, (_, code)) in layouts[layout_index].iter().enumerate() {
+                    for flags in [CGEventFlags::empty(), CGEventFlags::MaskAlternate] {
+                        let event = CGEvent::new_keyboard_event(None, *code, true).unwrap();
+                        CGEvent::set_flags(Some(&event), flags);
+                        assert!(!input.on_event(CGEventType::KeyDown, &event, None));
+                        let OverviewEvent::Input(action) = rx.try_recv().unwrap().1 else {
+                            panic!("expected directional input");
+                        };
+                        assert!(matches!(
+                            (direction, action),
+                            (0, OverviewInput::Left)
+                                | (1, OverviewInput::Down)
+                                | (2, OverviewInput::Up)
+                                | (3, OverviewInput::Right)
+                        ));
+                    }
+                }
+                // No stale bindings should remain at the previous layout's positions.
+                for (_, code) in layouts[1 - layout_index] {
+                    let event = CGEvent::new_keyboard_event(None, code, true).unwrap();
+                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                    assert!(input.on_event(CGEventType::KeyDown, &event, None));
+                }
+                assert!(rx.try_recv().is_err());
+            }
+            assert!(input.tap.borrow().is_none());
+            assert!(wm_rx.try_recv().is_err());
+            assert!(reactor_rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn mission_control_layout_change_after_reload_uses_latest_specs() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        use crate::sys::hotkey::with_test_keymap;
+
+        with_test_keymap(|set_key| {
+            set_key("¤", KeyCode::KeyH);
+            let specs = toml::from_str(r#"left = ["¤"]"#).unwrap();
+            let (input, _, _) = input_with_mission_control_keys(specs);
+            let (tx, mut rx) = actor::channel();
+            *input.mission_control_tx.borrow_mut() = Some(tx);
+
+            let mut config = Config::default();
+            config.settings.gestures.enabled = false;
+            config.settings.layout.scrolling.gestures.enabled = false;
+            config.settings.focus_follows_mouse = false;
+            config.settings.focus_follows_mouse_disable_hotkey = None;
+            config.settings.mouse_hides_on_focus = false;
+            config.settings.drag_drop.enabled = false;
+            config.settings.horizontal_mouse_warp = None;
+            let latest_specs: MissionControlKeySpecs =
+                toml::from_str(r#"right = ["Alt + ¤"]"#).unwrap();
+            config.settings.ui.mission_control.keys = latest_specs.clone();
+            let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            input.on_request(Request::ConfigUpdated(config), &recovery_tx);
+            assert_eq!(*input.mission_control_specs.borrow(), latest_specs);
+            assert!(input.tap.borrow().is_none());
+
+            set_key("¤", KeyCode::KeyJ);
+            input.on_request(Request::KeyboardLayoutChanged, &recovery_tx);
+            input.mission_control_active.set(true);
+            let event = CGEvent::new_keyboard_event(None, 38, true).unwrap();
+            CGEvent::set_flags(Some(&event), CGEventFlags::MaskAlternate);
+            assert!(!input.on_event(CGEventType::KeyDown, &event, None));
+            assert!(matches!(
+                rx.try_recv().unwrap().1,
+                OverviewEvent::Input(OverviewInput::Right)
+            ));
+            // Neither the old direction nor the old physical key should be restored.
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+            assert!(input.on_event(CGEventType::KeyDown, &event, None));
+            let old_event = CGEvent::new_keyboard_event(None, 4, true).unwrap();
+            CGEvent::set_flags(Some(&old_event), CGEventFlags::MaskAlternate);
+            assert!(input.on_event(CGEventType::KeyDown, &old_event, None));
+            assert!(rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
     fn mask_tracks_mouse_feature_enablement() {
         let (input, _, _) = input();
         assert!(input.hotkeys.borrow().is_empty());
