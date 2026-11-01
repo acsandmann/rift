@@ -205,6 +205,16 @@ async fn open(
             let _ = closed.send(Message::Closed);
         },
     );
+    settings.set_shortcut_capture(move |recording| {
+        if recording && !NSApplication::sharedApplication(mtm).isActive() {
+            return Err("Activate Settings before recording a shortcut".into());
+        }
+        RiftMachClient::connect()
+            .and_then(|client| client.set_shortcut_recording(std::process::id() as i32, recording))
+            .map_err(|error| {
+                format!("Cannot safely record keys while Rift is unavailable: {error}")
+            })
+    });
     super::timing::finish(construction, "Settings::new");
     if let Some(startup) = startup {
         let updated = std::cell::Cell::new(false);

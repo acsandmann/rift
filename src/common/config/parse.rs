@@ -77,6 +77,19 @@ impl Config {
         key.to_string()
     }
 
+    /// A binding key as the runtime reads it, after modifier combinations expand.
+    pub(crate) fn binding_hotkey(
+        key: &str,
+        combinations: &std::collections::BTreeMap<String, String>,
+    ) -> Option<(String, Hotkey)> {
+        let key = Self::normalize_hotkey_string(&Self::expand_modifier_combinations(
+            key,
+            combinations,
+        ));
+        let hotkey = Hotkey::from_str(&key).ok()?;
+        Some((key, hotkey))
+    }
+
     fn levenshtein(a: &str, b: &str) -> usize {
         let b: Vec<_> = b.chars().collect();
         let mut row: Vec<_> = (0..=b.len()).collect();
@@ -154,10 +167,9 @@ impl Config {
                     let mut specs = Vec::with_capacity(bindings.len());
                     let mut assigned = HashSet::default();
                     for (key, cmd) in bindings {
-                        let expanded_key =
-                            Self::expand_modifier_combinations(&key, &c.modifier_combinations);
-                        let normalized_key = Self::normalize_hotkey_string(&expanded_key);
-                        let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
+                        let Some((normalized_key, hotkey)) =
+                            Self::binding_hotkey(&key, &c.modifier_combinations)
+                        else {
                             bail!("Could not parse hotkey `{key}` in binding mode `{mode}`");
                         };
                         for modifiers in hotkey.modifiers.expand_to_specific() {

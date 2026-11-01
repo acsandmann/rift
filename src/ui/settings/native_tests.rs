@@ -38,6 +38,15 @@ fn named<T: objc2::DowncastTarget + 'static>(view: &NSView, title: &str) -> Opti
     {
         return Some(value.retain());
     }
+    if let Some(table) = view.downcast_ref::<NSTableView>() {
+        for row in 0..table.numberOfRows() {
+            if let Some(cell) = table.viewAtColumn_row_makeIfNecessary(0, row, true) {
+                if let Some(value) = named(&cell, title) {
+                    return Some(value);
+                }
+            }
+        }
+    }
     view.subviews().iter().find_map(|child| named(&child, title))
 }
 fn navigation_row(table: &NSTableView, title: &str) -> usize {
@@ -780,50 +789,7 @@ pub fn run(ui: Ui) {
                 "draft slider edits do not persist before Done"
             );
         });
-        // Filtering must not change which command the selected visible row edits.
-        autoreleasepool(|_| {
-            use rift_protocol::LayoutCommand;
-
-            use crate::actor::reactor::Command;
-            use crate::actor::wm_controller::WmCommand;
-            let mut source = settings.router.model.source.borrow().as_ref().clone();
-            source.keys.insert(
-                "Alt+a".into(),
-                WmCommand::ReactorCommand(Command::Layout(LayoutCommand::ToggleWindowFloating)),
-            );
-            source.keys.insert(
-                "Alt+f".into(),
-                WmCommand::ReactorCommand(Command::Layout(LayoutCommand::ToggleFullscreen)),
-            );
-            settings.router.model.replace_source(source);
-            let page = commands::keyboard(ui, &settings.router.model);
-            page.synchronize(&settings.router.model);
-            settings.window.toolbar().set_page_controls(&ui, page.header.as_deref());
-            let search = toolbar
-                .items()
-                .iter()
-                .find_map(|item| item.downcast::<objc2_app_kit::NSSearchToolbarItem>().ok())
-                .unwrap()
-                .searchField();
-            change_text(&search, "fullscreen");
-            let table = find::<NSTableView>(page.view.ns_view()).unwrap();
-            assert_eq!(table.numberOfRows(), 1);
-            table.selectRowIndexes_byExtendingSelection(
-                &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
-                false,
-            );
-            assert!(unsafe { table.sendAction_to(table.action(), table.target().as_deref()) });
-            let window =
-                settings.router.model.sheet.borrow().as_ref().unwrap().ns_window().retain();
-            let action = find::<NSPopUpButton>(&window.contentView().unwrap()).unwrap();
-            assert_eq!(
-                action.titleOfSelectedItem().unwrap().to_string(),
-                "Window · Fullscreen"
-            );
-            settings.router.model.close_sheet();
-            settings.window.toolbar().set_page_controls(&ui, None);
-            assert!(pending.try_recv().is_err());
-        });
+        autoreleasepool(|_| keyboard_controls(ui, &settings, &mut pending));
         // The primary Spacing page edits global values and preserves individual display overrides.
         autoreleasepool(|_| {
             use crate::sys::screen::NSScreenExt;
@@ -1173,6 +1139,544 @@ pub fn run(ui: Ui) {
             .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.05))
     });
     assert!(host.load().is_none(), "closing must release the page host");
+}
+
+/// Exercises the real edit boundary for the keyboard manager, with no running daemon.
+fn keyboard_controls(
+    ui: Ui,
+    settings: &Settings,
+    pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>,
+) {
+    use rift_protocol::{Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R};
+
+    use crate::actor::reactor::Command;
+    use crate::actor::wm_controller::{WmCmd, WmCommand};
+    let focus = |direction| WmCommand::ReactorCommand(Command::Layout(L::MoveFocus(direction)));
+    let balance = WmCommand::ReactorCommand(Command::Layout(L::Balance));
+    let mut source = settings.model().source.borrow().as_ref().clone();
+    source.keys.clear();
+    source.keys.insert("Alt + H".into(), focus(Direction::Left));
+    source.keys.insert("Alt + L".into(), focus(Direction::Right));
+    source.keys.insert(
+        "Alt + F".into(),
+        WmCommand::ReactorCommand(Command::Layout(L::ToggleFullscreen)),
+    );
+    source.binding_modes.insert("move".into(), Default::default());
+    settings.router.model.replace_source(source);
+    let capturing = Rc::new(Cell::new(false));
+    let available = Rc::new(Cell::new(true));
+    let (active, ready) = (capturing.clone(), available.clone());
+    settings.set_shortcut_capture(move |recording| {
+        if recording && !ready.get() {
+            return Err("Recording is unavailable".into());
+        }
+        active.set(recording);
+        Ok(())
+    });
+    let page = commands::keyboard(ui, &settings.router.model);
+    page.synchronize(settings.model());
+    let root = page.view.ns_view();
+    let shown = |name: &str| named::<NSButton>(root, &format!("Shortcut for {name}"));
+    let click = |button: &NSButton| {
+        let table = find::<NSTableView>(root).unwrap();
+        for row in 0..table.numberOfRows() {
+            if table.viewAtColumn_row_makeIfNecessary(0, row, true)
+                .is_some_and(|cell| button.isDescendantOf(&cell))
+            {
+                table.scrollRowToVisible(row);
+                root.layoutSubtreeIfNeeded();
+                break;
+            }
+        }
+        assert!(unsafe { button.sendAction_to(button.action(), button.target().as_deref()) })
+    };
+    let press = |button: &NSButton, code: u16, key: &str, flags| {
+        let key = objc2_foundation::NSString::from_str(key);
+        button.keyDown(&objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            objc2_app_kit::NSEventType::KeyDown, CGPoint::ZERO, flags, 0.0, 0, None, &key, &key, false, code,
+        ).unwrap());
+    };
+    let apply = |pending: &mut tokio::sync::mpsc::UnboundedReceiver<Request>| {
+        let request = pending.try_recv().expect("a shortcut edit");
+        let Action::Edit(edit) = request.action else {
+            panic!("shortcut edit")
+        };
+        let mut source = settings.model().source.borrow().as_ref().clone();
+        edit(&mut source).unwrap();
+        settings.router.model.replace_source(source.clone());
+        (request.finish)(Ok(()));
+        page.synchronize(settings.model());
+        source
+    };
+    let option = objc2_app_kit::NSEventModifierFlags::Option;
+    let none = objc2_app_kit::NSEventModifierFlags::empty();
+    assert!(
+        action(root, "Shortcut for Focus window Left").is_none(),
+        "the page must defer row controls until AppKit requests their cells"
+    );
+    // Grouping is visual only: both independent recorders remain available.
+    fn action_label(button: &NSButton) -> String {
+        let mut view = unsafe { button.superview() };
+        while let Some(parent) = view {
+            if parent.downcast_ref::<objc2_app_kit::NSTableCellView>().is_some() {
+                return find::<objc2_app_kit::NSTextField>(&parent).unwrap().stringValue().to_string();
+            }
+            view = unsafe { parent.superview() };
+        }
+        panic!("shortcut must belong to a native list cell")
+    }
+    assert_eq!(action_label(&shown("Focus window Left").unwrap()), "Focus window");
+    assert_eq!(action_label(&shown("Focus window Right").unwrap()), "");
+    assert!(shown("Balance").is_none(), "Assigned is the quiet default");
+    assert!(
+        action(root, "Shortcut for Balance").is_none(),
+        "opening Assigned must not allocate hidden catalog rows"
+    );
+    assert!(
+        action(root, "Clear shortcut").is_none(),
+        "idle rows must not allocate recording-only buttons"
+    );
+    let _host = cgs::window::Window::new(&ui).content(page.view.clone());
+    _host.ns_window().setContentSize(CGSize::new(700.0, 600.0));
+    _host.show();
+    root.layoutSubtreeIfNeeded();
+    fn options<T: objc2::DowncastTarget + 'static>(ui: Ui, label: &str) -> Retained<T> {
+        NSApplication::sharedApplication(ui.mtm()).windows().iter()
+            .filter_map(|window| window.contentView())
+            .find_map(|view| named::<T>(&view, label))
+            .unwrap_or_else(|| panic!("missing contextual option {label}"))
+    }
+    settings.window.toolbar().set_page_controls(&ui, page.header.as_deref());
+    let header = settings
+        .window
+        .toolbar()
+        .ns_toolbar()
+        .items()
+        .iter()
+        .find(|item| item.itemIdentifier().to_string() == "cgs.page-filter")
+        .unwrap()
+        .view()
+        .unwrap();
+    let visibility = named::<NSSegmentedControl>(root, "Shortcut visibility").unwrap();
+    visibility.setSelectedSegment(1);
+    assert!(unsafe {
+        visibility.sendAction_to(visibility.action(), visibility.target().as_deref())
+    });
+    assert!(shown("Balance").is_some());
+    settings.window.toolbar().set_page_controls(&ui, page.header.as_deref());
+    let search = named::<objc2_app_kit::NSSearchField>(root, "Filter shortcuts").unwrap();
+    let table = find::<NSTableView>(root).unwrap();
+    let scroll = table.enclosingScrollView().unwrap();
+    let search_rect = search.convertRect_toView(search.bounds(), Some(root));
+    let scroll_rect = scroll.convertRect_toView(scroll.bounds(), Some(root));
+    assert_eq!(scroll_rect.origin.x, 0.0, "the native scroll edge must reach the pane's left edge");
+    assert_eq!(scroll_rect.size.width, root.bounds().size.width,
+        "the native scroll edge must span the full pane, with padding inside the rows");
+    assert!(scroll_rect.origin.y < search_rect.origin.y + search_rect.size.height
+        && scroll_rect.origin.y + scroll_rect.size.height > search_rect.origin.y,
+        "the list must extend behind search for the native scroll-edge blur");
+    let first = table.convertRect_toView(table.rectOfRow(0), Some(root));
+    let clear = if root.isFlipped() {
+        first.origin.y >= search_rect.origin.y + search_rect.size.height
+    } else {
+        first.origin.y + first.size.height <= search_rect.origin.y
+    };
+    assert!(clear, "the first section must start below search at the scroll origin");
+    let position = scroll.contentView().bounds().origin;
+    scroll.contentView().scrollToPoint(CGPoint::new(0.0, 240.0));
+    scroll.reflectScrolledClipView(&scroll.contentView());
+    root.layoutSubtreeIfNeeded();
+    assert!(scroll.contentView().bounds().origin.y > 100.0);
+    assert_eq!(search.convertRect_toView(search.bounds(), Some(root)), search_rect,
+        "search must stay fixed while bindings scroll beneath it");
+    scroll.contentView().scrollToPoint(position);
+    scroll.reflectScrolledClipView(&scroll.contentView());
+    for query in ["alt+h", "option + h", "⌥H"] {
+        change_text(&search, query);
+        assert!(shown("Focus window Left").is_some(), "{query}");
+        assert!(shown("Focus window Right").is_none(), "{query}");
+    }
+    change_text(&search, "right");
+    assert!(shown("Focus window Left").is_none());
+    assert_eq!(action_label(&shown("Focus window Right").unwrap()), "Focus window");
+    change_text(&search, "");
+    assert_eq!(action_label(&shown("Focus window Right").unwrap()), "");
+    available.set(false);
+    let left = shown("Focus window Left").unwrap();
+    click(&left);
+    assert_eq!(left.title().to_string(), "⌥H");
+    assert!(!capturing.get());
+    assert!(named::<objc2_app_kit::NSTextField>(root, "Recording is unavailable").is_some());
+    available.set(true);
+    let mut ancestor = unsafe { left.superview() };
+    let menu = loop {
+        let view = ancestor.expect("binding context menu");
+        if let Some(menu) = view.menu() { break menu; }
+        ancestor = unsafe { view.superview() };
+    };
+    assert_eq!(menu.itemAtIndex(0).unwrap().title().to_string(), "Change Shortcut…");
+    menu.performActionForItemAtIndex(0);
+    assert!(capturing.get());
+    press(&left, 53, "\u{1b}", none);
+    assert!(!capturing.get());
+    assert!(pending.try_recv().is_err());
+    let free = shown("Balance").unwrap();
+    click(&free);
+    assert!(capturing.get());
+    press(&free, 4, "h", option);
+    assert!(pending.try_recv().is_err());
+    let explanation = "⌥H is used by Focus window Left. Your existing shortcuts have not changed.";
+    assert!(named::<objc2_app_kit::NSTextField>(root, explanation).is_some());
+    // Escape abandons the pending replacement as well as the recorded keys.
+    press(&free, 53, "\u{1b}", none);
+    assert!(named::<NSButton>(root, "Replace Existing").is_none());
+    assert!(pending.try_recv().is_err());
+    click(&free);
+    press(&free, 4, "h", option);
+    click(&named::<NSButton>(root, "Choose Different").unwrap());
+    let stable_right = shown("Focus window Right").unwrap();
+    press(&free, 11, "b", option);
+    assert!(!capturing.get());
+    let edited = apply(pending);
+    assert_eq!(edited.keys["Alt + B"], balance);
+    assert_eq!(edited.keys["Alt + H"], focus(Direction::Left));
+    assert!(
+        std::ptr::eq(&*stable_right, &*shown("Focus window Right").unwrap()),
+        "unrelated rows survive a committed edit"
+    );
+    // Replacement is a single edit and does not discard unrelated bindings.
+    let existing_balance = shown("Balance").unwrap();
+    click(&existing_balance);
+    press(&existing_balance, 4, "h", option);
+    click(&named::<NSButton>(root, "Replace Existing").unwrap());
+    let edited = apply(pending);
+    assert_eq!(edited.keys["Alt + H"], balance);
+    assert!(!edited.keys.contains_key("Alt + B"));
+    assert_eq!(edited.keys["Alt + L"], focus(Direction::Right));
+    // Modified Backspace records a combination rather than clearing the binding.
+    let right = shown("Focus window Right").unwrap();
+    click(&right);
+    press(&right, 51, "\u{7f}", option);
+    let edited = apply(pending);
+    assert_eq!(edited.keys["Alt + Backspace"], focus(Direction::Right));
+    assert!(!edited.keys.contains_key("Alt + L"));
+    click(&shown("Focus window Right").unwrap());
+    click(&named::<NSButton>(root, "Cancel recording and restore previous shortcut").unwrap());
+    assert!(!capturing.get());
+    assert!(pending.try_recv().is_err());
+    assert_eq!(shown("Focus window Right").unwrap().title().to_string(), "⌥⌫");
+    // A failed clear restores the displayed shortcut and leaves the source untouched.
+    let right = shown("Focus window Right").unwrap();
+    click(&right);
+    press(&right, 51, "\u{7f}", none);
+    let failed = pending.try_recv().unwrap();
+    (failed.finish)(Err("Disk is full".into()));
+    assert_eq!(right.title().to_string(), "⌥⌫");
+    assert!(settings.model().source.borrow().keys.contains_key("Alt + Backspace"));
+    click(&right);
+    press(&right, 53, "\u{1b}", none);
+    assert!(!capturing.get());
+    assert!(pending.try_recv().is_err());
+    click(&right);
+    click(&named::<NSButton>(root, "Clear shortcut").unwrap());
+    let edited = apply(pending);
+    assert!(!edited.keys.contains_key("Alt + Backspace"));
+    // Mutually exclusive modes can reuse the same combination.
+    visibility.setSelectedSegment(0);
+    assert!(unsafe {
+        visibility.sendAction_to(visibility.action(), visibility.target().as_deref())
+    });
+    let keymaps = named::<NSPopUpButton>(&header, "Shortcut Set Actions").unwrap()
+        .menu().unwrap().itemArray().iter().find_map(|item| item.submenu()).unwrap();
+    assert_eq!(keymaps.itemAtIndex(0).unwrap().state(), 1);
+    keymaps.performActionForItemAtIndex(1);
+    assert_eq!(keymaps.itemAtIndex(0).unwrap().state(), 0);
+    assert_eq!(keymaps.itemAtIndex(1).unwrap().state(), 1);
+    assert!(named::<NSButton>(root, "Browse Actions").is_some());
+    assert!(named::<NSButton>(root, "Use Default Shortcuts…").is_none());
+    click(&named::<NSButton>(root, "Browse Actions").unwrap());
+    assert_eq!(visibility.selectedSegment(), 1);
+    assert!(
+        pending.try_recv().is_err(),
+        "browsing must not install any bindings"
+    );
+    let free = shown("Balance").unwrap();
+    click(&free);
+    press(&free, 4, "h", option);
+    let edited = apply(pending);
+    assert_eq!(edited.binding_modes["move"]["Alt + H"], balance);
+    assert_eq!(edited.keys["Alt + H"], balance);
+    keymaps.performActionForItemAtIndex(0);
+    assert_eq!(keymaps.itemAtIndex(0).unwrap().state(), 1);
+    // Existing extended command arguments are exposed inline and round-trip losslessly.
+    let advanced = WmCommand::ReactorCommand(Command::Reactor(R::MoveWindowToDisplay {
+        selector: DisplaySelector::Direction(Direction::Left),
+        window_id: Some(123),
+    }));
+    let mut source = settings.model().source.borrow().as_ref().clone();
+    source.keys.insert("Alt + D".into(), advanced.clone());
+    settings.router.model.replace_source(source);
+    page.synchronize(settings.model());
+    click(&named::<NSButton>(root, "Edit Move window to display options").unwrap());
+    assert!(
+        settings.model().sheet.borrow().is_none(),
+        "existing command options edit contextually without a sheet"
+    );
+    let field = options::<objc2_app_kit::NSTextField>(ui, "System window ID");
+    assert_eq!(field.stringValue().to_string(), "123");
+    choose(&options::<NSPopUpButton>(ui, "Display"), 1);
+    let edited = apply(pending);
+    assert_eq!(
+        edited.keys["Alt + D"],
+        WmCommand::ReactorCommand(Command::Reactor(R::MoveWindowToDisplay {
+            selector: DisplaySelector::Direction(Direction::Right),
+            window_id: Some(123)
+        }))
+    );
+    // Multi-parameter drafts preserve both choices when recorded directly from All Actions.
+    click(&named::<NSButton>(root, "Edit Toggle floating options").unwrap());
+    choose(&options::<NSPopUpButton>(ui, "Floating placement"), 1);
+    choose(&options::<NSPopUpButton>(ui, "Floating size"), 1);
+    let floating = shown("Toggle floating").unwrap();
+    click(&floating);
+    press(&floating, 5, "g", option);
+    let edited = apply(pending);
+    assert_eq!(
+        edited.keys["Alt + G"],
+        WmCommand::ConfiguredLayout(
+            crate::actor::wm_controller::ConfiguredLayoutCommand::ToggleWindowFloating(
+                rift_protocol::ToggleWindowFloatingOptions {
+                    center: true,
+                    size: Some(rift_protocol::FloatingWindowSize::Preset(
+                        rift_protocol::FloatingWindowSizePreset::Smart
+                    ))
+                }
+            )
+        )
+    );
+    // A single numeric argument edits directly in the row and is included when recorded.
+    let amount = named::<objc2_app_kit::NSTextField>(root, "Resize window by 10").unwrap();
+    change_text(&amount, "25");
+    let resize = shown("Resize window by 10").unwrap();
+    click(&resize);
+    press(&resize, 28, "8", option);
+    let edited = apply(pending);
+    assert_eq!(edited.keys["Alt + 8"], WmCommand::ReactorCommand(Command::Layout(
+        L::ResizeWindowBy { amount: 25.0 }
+    )));
+    // Catalog search never changes a selection to a different action at the same index.
+    click(&named::<NSButton>(&header, "Add Shortcut…").unwrap());
+    let catalog = settings
+        .model()
+        .sheet
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .ns_window()
+        .contentView()
+        .unwrap();
+    let action_search = named::<objc2_app_kit::NSSearchField>(&catalog, "Search actions").unwrap();
+    let table = named::<NSTableView>(&catalog, "Available shortcut actions").unwrap();
+    change_text(&action_search, "workspace");
+    table.selectRowIndexes_byExtendingSelection(
+        &objc2_foundation::NSIndexSet::indexSetWithIndex(navigation_row(
+            &table,
+            "Switch to workspace",
+        )),
+        false,
+    );
+    change_text(&action_search, "no such action");
+    assert_eq!(table.selectedRow(), -1);
+    assert!(!named::<NSButton>(&catalog, "Continue").unwrap().isEnabled());
+    change_text(&action_search, "workspace");
+    table.selectRowIndexes_byExtendingSelection(
+        &objc2_foundation::NSIndexSet::indexSetWithIndex(navigation_row(
+            &table,
+            "Switch to workspace",
+        )),
+        false,
+    );
+    click(&named::<NSButton>(&catalog, "Continue").unwrap());
+    let editor = settings
+        .model()
+        .sheet
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .ns_window()
+        .contentView()
+        .unwrap();
+    assert_eq!(
+        named::<NSPopUpButton>(&editor, "Action")
+            .unwrap()
+            .titleOfSelectedItem()
+            .unwrap()
+            .to_string(),
+        "Switch to workspace"
+    );
+    assert!(named::<NSButton>(&editor, "Add").is_none());
+    choose(&named::<NSPopUpButton>(&editor, "Options").unwrap(), 2);
+    let recorder = named::<NSButton>(&editor, "Record shortcut").unwrap();
+    click(&recorder);
+    press(&recorder, 25, "9", option);
+    let edited = apply(pending);
+    assert_eq!(
+        edited.keys["Alt + 9"],
+        WmCommand::Wm(WmCmd::SwitchToWorkspace(
+            crate::common::config::WorkspaceSelector::Index(2)
+        ))
+    );
+    assert!(
+        settings.model().sheet.borrow().is_none(),
+        "recording completes the add without Save"
+    );
+    // Structured commands edit identifiers directly; raw configuration is not the default UI.
+    click(&named::<NSButton>(&header, "Add Shortcut…").unwrap());
+    let catalog = settings.model().sheet.borrow().as_ref().unwrap().ns_window().contentView().unwrap();
+    change_text(&named::<objc2_app_kit::NSSearchField>(&catalog, "Search actions").unwrap(), "Focus specific window");
+    click(&named::<NSButton>(&catalog, "Continue").unwrap());
+    let editor = settings.model().sheet.borrow().as_ref().unwrap().ns_window().contentView().unwrap();
+    let pid = named::<objc2_app_kit::NSTextField>(&editor, "Process ID")
+        .expect("Focus specific window must expose a Process ID field");
+    change_text(&pid, "invalid");
+    change_text(&named::<objc2_app_kit::NSTextField>(&editor, "Window index").unwrap(), "7");
+    assert!(named::<objc2_app_kit::NSTextField>(&editor, "Enter a valid value for Process ID.").is_some(),
+        "editing another field must not clear an unresolved identifier error");
+    change_text(&pid, "345");
+    let system_id = named::<objc2_app_kit::NSTextField>(&editor, "System window ID").unwrap();
+    change_text(&system_id, "1234");
+    change_text(&system_id, "");
+    change_text(&system_id, "42");
+    assert!(pending.try_recv().is_err(), "editing a new command only updates its draft");
+    let recorder = named::<NSButton>(&editor, "Record shortcut").unwrap();
+    click(&recorder);
+    press(&recorder, 25, "9", option | objc2_app_kit::NSEventModifierFlags::Control);
+    let edited = apply(pending);
+    assert!(edited.keys.values().any(|command| *command == WmCommand::ReactorCommand(Command::Reactor(
+        R::FocusWindow { window_id: rift_protocol::WindowId { pid: 345, idx: 7 }, window_server_id: Some(42) }
+    ))), "recording must retain every field of the structured command");
+    // Hover-only duplication preserves the originating command, while labels don't reveal it.
+    fn action(view: &NSView, title: &str) -> Option<Retained<NSButton>> {
+        if let Some(button) = view.downcast_ref::<NSButton>()
+            && button.accessibilityLabel().is_some_and(|label| label.to_string() == title)
+        {
+            return Some(button.retain());
+        }
+        view.subviews().iter().find_map(|view| action(&view, title))
+    }
+    fn table_action(view: &NSView, title: &str) -> Option<Retained<NSButton>> {
+        if let Some(table) = view.downcast_ref::<NSTableView>() {
+            for row in 0..table.numberOfRows() {
+                if let Some(cell) = table.viewAtColumn_row_makeIfNecessary(0, row, true) {
+                    if let Some(button) = action(&cell, title) {
+                        return Some(button);
+                    }
+                }
+            }
+        }
+        view.subviews().iter().find_map(|child| table_action(&child, title))
+    }
+    let extra = action(root, "Add another Balance shortcut")
+        .or_else(|| table_action(root, "Add another Balance shortcut"))
+        .unwrap();
+    assert!(extra.isHidden());
+    let slot = unsafe { extra.superview() }.unwrap();
+    let controls = unsafe { slot.superview() }.unwrap();
+    let hover = unsafe { controls.superview() }.unwrap();
+    let event = unsafe { objc2_app_kit::NSEvent::enterExitEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_trackingNumber_userData(
+        objc2_app_kit::NSEventType::MouseEntered, CGPoint::ZERO, none, 0.0, 0, None, 0, 0, std::ptr::null_mut(),
+    ) }.unwrap();
+    unsafe { hover.superview() }.unwrap().mouseEntered(&event);
+    assert!(extra.isHidden());
+    hover.mouseEntered(&event);
+    assert!(!extra.isHidden());
+    click(&extra);
+    let editor = settings
+        .model()
+        .sheet
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .ns_window()
+        .contentView()
+        .unwrap();
+    assert_eq!(
+        named::<NSPopUpButton>(&editor, "Action")
+            .unwrap()
+            .titleOfSelectedItem()
+            .unwrap()
+            .to_string(),
+        "Balance"
+    );
+    click(&named::<NSButton>(&editor, "Cancel").unwrap());
+    hover.mouseExited(&event);
+    assert!(extra.isHidden());
+    root.setFrameSize(CGSize::new(cgs::view::Metrics::DETAIL_MIN_WIDTH, 600.0));
+    root.layoutSubtreeIfNeeded();
+    assert!(
+        find::<objc2_app_kit::NSScrollView>(root)
+            .unwrap()
+            .documentView()
+            .unwrap()
+            .frame()
+            .size
+            .width
+            <= cgs::view::Metrics::DETAIL_MIN_WIDTH
+    );
+    assert!(pending.try_recv().is_err());
+    let mut empty = settings.model().source.borrow().as_ref().clone();
+    empty.keys.clear();
+    settings.router.model.replace_source(empty);
+    page.synchronize(settings.model());
+    visibility.setSelectedSegment(0);
+    assert!(unsafe {
+        visibility.sendAction_to(visibility.action(), visibility.target().as_deref())
+    });
+    assert!(named::<NSButton>(root, "Browse Actions").is_some());
+    assert!(named::<NSButton>(root, "Use Default Shortcuts…").is_some());
+    assert!(settings.model().source.borrow().keys.is_empty());
+    assert!(pending.try_recv().is_err());
+    // Two bindings with identical parameters remain independently editable/removable.
+    let mut duplicates = settings.model().source.borrow().as_ref().clone();
+    duplicates.keys.insert("Alt + H".into(), focus(Direction::Left));
+    duplicates.keys.insert("Alt + J".into(), focus(Direction::Left));
+    duplicates.keys.insert("Alt + L".into(), focus(Direction::Right));
+    settings.router.model.replace_source(duplicates);
+    page.synchronize(settings.model());
+    let table = find::<NSTableView>(root).unwrap();
+    let left_fields: Vec<_> = (0..table.numberOfRows())
+        .filter_map(|row| table.viewAtColumn_row_makeIfNecessary(0, row, true))
+        .filter_map(|cell| named::<NSButton>(&cell, "Shortcut for Focus window Left"))
+        .collect();
+    assert_eq!(left_fields.len(), 2);
+    assert_eq!(action_label(&left_fields[0]), "Focus window");
+    assert_eq!(action_label(&left_fields[1]), "");
+    choose(&named::<NSPopUpButton>(root, "Focus window Left").unwrap(), 1);
+    let edited = apply(pending);
+    assert_eq!(edited.keys["Alt + H"], focus(Direction::Right));
+    assert_eq!(edited.keys["Alt + J"], focus(Direction::Left));
+    click(&left_fields[1]);
+    press(&left_fields[1], 51, "\u{7f}", none);
+    let edited = apply(pending);
+    assert!(!edited.keys.contains_key("Alt + J"));
+    assert_eq!(edited.keys["Alt + H"], focus(Direction::Right));
+    assert_eq!(edited.keys["Alt + L"], focus(Direction::Right));
+    settings.window.toolbar().set_page_controls(&ui, None);
+    settings.router.model.env.shortcut_capture.borrow_mut().take();
+}
+
+pub fn run_keyboard(ui: Ui) {
+    let (requests, mut pending) = tokio::sync::mpsc::unbounded_channel();
+    let settings = Settings::new(
+        ui,
+        source(),
+        "/tmp/native-keyboard-test.toml".into(),
+        vec![],
+        vec![],
+        requests,
+        || {},
+    );
+    keyboard_controls(ui, &settings, &mut pending);
 }
 
 /// Exercises the native controls at the edit boundary: each destination must still
@@ -1625,6 +2129,11 @@ pub fn render(
     use objc2_foundation::{NSDictionary, NSString};
     let (requests, _pending) = tokio::sync::mpsc::unbounded_channel();
     let mut snapshot = source();
+    if page == Some(Category::Keyboard.index()) && scope == Some(35) {
+        snapshot.keys.clear();
+        snapshot.binding_modes.clear();
+        snapshot.modifier_combinations.clear();
+    }
     if page == Some(Category::MenuBar.index()) {
         snapshot.settings.ui.menu_bar.enabled = true;
         snapshot.settings.ui.menu_bar.show_empty = true;
@@ -1649,6 +2158,10 @@ pub fn render(
     }
     if page == Some(Category::MenuBar.index()) && scope == Some(12) {
         snapshot.settings.ui.menu_bar.enabled = false;
+    }
+    if page == Some(Category::Keyboard.index()) && scope != Some(35) {
+        snapshot.keys = defaults().keys.clone();
+        snapshot.modifier_combinations = defaults().modifier_combinations.clone();
     }
     if page == Some(Category::Overview.index()) && scope == Some(13) {
         snapshot.settings.ui.mission_control.enabled = true;
@@ -1852,6 +2365,93 @@ pub fn render(
             .runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.35));
         content.layoutSubtreeIfNeeded();
     }
+    if scope == Some(36) {
+        let pages = settings.router.pages.borrow();
+        let root = pages[settings.router.current().index()].as_ref().unwrap().view.ns_view();
+        let scroll = find::<objc2_app_kit::NSScrollView>(root).unwrap();
+        let clip = scroll.contentView();
+        let mut bounds = clip.bounds();
+        bounds.origin.y += 240.0;
+        clip.scrollToPoint(clip.constrainBoundsRect(bounds).origin);
+        scroll.reflectScrolledClipView(&clip);
+        content.layoutSubtreeIfNeeded();
+    }
+    // Keyboard recording, catalog, key search, add editor and inline options.
+    if page == Some(Category::Keyboard.index()) && matches!(scope, Some(30..=34 | 37 | 38)) {
+        let header = settings
+            .window
+            .toolbar()
+            .ns_toolbar()
+            .items()
+            .iter()
+            .find(|item| item.itemIdentifier().to_string() == "cgs.page-filter")
+            .unwrap()
+            .view()
+            .unwrap();
+        let click = |title: &str| {
+            let button = named::<NSButton>(&content, title).unwrap();
+            assert!(unsafe { button.sendAction_to(button.action(), button.target().as_deref()) });
+        };
+        match scope {
+            Some(30) => click("Shortcut for Move window Left"),
+            Some(31) | Some(33) => {
+                named::<NSPopUpButton>(&header, "Shortcut Set Actions")
+                    .unwrap()
+                    .menu()
+                    .unwrap()
+                    .performActionForItemAtIndex(1);
+                if scope == Some(33) {
+                    let catalog = settings
+                        .model()
+                        .sheet
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .ns_window()
+                        .contentView()
+                        .unwrap();
+                    let table = find::<NSTableView>(&catalog).unwrap();
+                    table.selectRowIndexes_byExtendingSelection(
+                        &objc2_foundation::NSIndexSet::indexSetWithIndex(navigation_row(
+                            &table,
+                            "Toggle floating",
+                        )),
+                        false,
+                    );
+                    let next = named::<NSButton>(&catalog, "Continue").unwrap();
+                    assert!(unsafe { next.sendAction_to(next.action(), next.target().as_deref()) });
+                }
+            }
+            Some(34 | 37 | 38) => {
+                window.orderFront(None);
+                if scope == Some(38) {
+                    let search = named::<objc2_app_kit::NSSearchField>(&content, "Filter shortcuts").unwrap();
+                    change_text(&search, "Run command");
+                    content.layoutSubtreeIfNeeded();
+                }
+                click(if scope == Some(38) {
+                    "Edit Run command options"
+                } else {
+                    "Edit Toggle floating options"
+                });
+                if scope == Some(37) {
+                    let size = NSApplication::sharedApplication(ui.mtm()).windows().iter()
+                        .filter_map(|window| window.contentView())
+                        .find_map(|view| named::<NSPopUpButton>(&view, "Floating size"))
+                        .unwrap();
+                    choose(&size, 2);
+                }
+            },
+            _ => {
+                let search = named::<objc2_app_kit::NSSearchField>(&content, "Filter shortcuts").unwrap();
+                change_text(&search, "alt+h");
+            }
+        }
+        for _ in 0..3 {
+            invalidate_layout(&content);
+            content.layoutSubtreeIfNeeded();
+        }
+    }
     let card = match scope {
         Some(7) => Some("Spacing"),
         Some(8) => Some("Display overrides"),
@@ -1865,7 +2465,31 @@ pub fn render(
         None
     };
     // Include native window chrome without ordering the window on screen.
-    let frame = unsafe { content.superview() }.unwrap_or(content);
+    let frame = if page == Some(Category::Keyboard.index()) && matches!(scope, Some(34 | 37 | 38)) {
+        let popup = NSApplication::sharedApplication(ui.mtm()).windows().iter()
+            .filter_map(|window| window.contentView())
+            .find(|view| if scope == Some(38) {
+                named::<objc2_app_kit::NSTextField>(view, "Parameter").is_some()
+            } else {
+                named::<NSPopUpButton>(view, "Floating placement").is_some()
+            })
+            .expect("native options popover");
+        unsafe { popup.superview() }.unwrap_or(popup)
+    } else if page == Some(Category::Keyboard.index()) && matches!(scope, Some(31 | 33)) {
+        let view = settings
+            .model()
+            .sheet
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .ns_window()
+            .contentView()
+            .unwrap();
+        view.layoutSubtreeIfNeeded();
+        unsafe { view.superview() }.unwrap_or(view)
+    } else {
+        unsafe { content.superview() }.unwrap_or(content)
+    };
     frame.layoutSubtreeIfNeeded();
     let capture = |view: &NSView, rect: CGRect, path: &str| {
         let bitmap = view.bitmapImageRepForCachingDisplayInRect(rect).unwrap();
@@ -1887,5 +2511,18 @@ pub fn render(
             &format!("{path}.spacing.png"),
         );
     }
-    assert!(!window.isVisible(), "rendering never presents a test window");
+    // Keep a native fixture available briefly for live compositor/blur inspection.
+    if std::env::args().any(|arg| arg == "--inspect") {
+        settings.show();
+        objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(
+            &objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(45.0),
+        );
+        window.orderOut(None);
+    }
+    // Sheets and popovers require an ordered parent; dismiss it after capture.
+    if page == Some(Category::Keyboard.index()) && matches!(scope, Some(31 | 33 | 34 | 37 | 38)) {
+        settings.model().close_sheet();
+        window.orderOut(None);
+    }
+    assert!(!window.isVisible(), "rendering leaves no test window visible");
 }

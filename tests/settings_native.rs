@@ -39,6 +39,9 @@ fn main() {
             }),
             &args[index + 1],
         );
+    } else if args.iter().any(|arg| arg == "--keyboard") {
+        objc2::rc::autoreleasepool(|_| settings::native_tests::run_keyboard(ui));
+        println!("Keyboard manager native controls, recording, conflicts and catalog passed");
     } else if args.iter().any(|arg| arg == "--lifecycle") {
         // PROFILING ONLY: repeatedly creates and closes Settings windows.
         // Keep disabled during normal UI development and test runs. Uncomment only

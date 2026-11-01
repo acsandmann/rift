@@ -2048,7 +2048,7 @@ pub(super) fn field_group(ui: &Ui, unit: &str, fields: Vec<(&str, Rc<NumberField
             .alignment(objc2_app_kit::NSLayoutAttribute::FirstBaseline),
         |row, (name, field)| {
             let value = field.unit_field(ui, unit);
-            value.width(56.0);
+            field.width(cgs::view::Metrics::VALUE_FIELD_WIDTH);
             row.push(
                 VStack::new(ui)
                     .spacing(3.0)

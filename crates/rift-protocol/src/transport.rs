@@ -43,6 +43,12 @@ pub enum RiftRequest {
     GetApplications,
     GetMetrics,
     GetBindingMode,
+    /// Temporarily pass keys through to a foreground shortcut recorder. Ending is
+    /// conditional on the owning PID, so another Settings process cannot release it.
+    SetShortcutRecording {
+        pid: i32,
+        recording: bool,
+    },
     GetConfig,
     /// The editable configuration source and its revision.
     GetSettingsSource,

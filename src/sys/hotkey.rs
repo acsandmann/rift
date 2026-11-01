@@ -800,6 +800,13 @@ pub struct Hotkey {
 
 impl Hotkey {
     pub fn new(modifiers: Modifiers, key_code: KeyCode) -> Self { Self { modifiers, key_code } }
+
+    /// Whether some keypress triggers both, such as `Alt + H` and `AltLeft + H`.
+    pub fn overlaps(&self, other: &Hotkey) -> bool {
+        let specific = self.modifiers.expand_to_specific();
+        self.key_code == other.key_code
+            && other.modifiers.expand_to_specific().iter().any(|m| specific.contains(m))
+    }
 }
 
 impl fmt::Display for Hotkey {

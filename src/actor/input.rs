@@ -4,10 +4,10 @@ use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
-use objc2_app_kit::{NSEvent, NSEventType};
+use objc2_app_kit::{NSEvent, NSEventType, NSWorkspace};
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
@@ -58,6 +58,27 @@ pub enum Request {
     SetLowPowerMode(bool),
     SetMissionControlActive(bool, Vec<CGRect>),
     ReleaseMissionControl,
+}
+
+// The IPC acknowledgement is sent only after this store. The input tap therefore
+// sees the lease before Settings starts accepting a recorded key. Only foreground
+// keys bypass bindings; a crashed or background recorder cannot disable hotkeys.
+static SHORTCUT_RECORDER: AtomicI32 = AtomicI32::new(0);
+
+pub(crate) fn set_shortcut_recording(pid: i32, recording: bool) {
+    if recording && pid > 0 {
+        SHORTCUT_RECORDER.store(pid, Ordering::Release);
+    } else {
+        let _ = SHORTCUT_RECORDER.compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+fn shortcut_recorder_is_frontmost() -> bool {
+    let pid = SHORTCUT_RECORDER.load(Ordering::Acquire);
+    pid > 0
+        && NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .is_some_and(|app| app.processIdentifier() == pid)
 }
 
 pub struct Input {
@@ -763,6 +784,12 @@ impl Input {
             }
             CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged => {
                 if event::is_rift_synthetic_event(event) {
+                    return true;
+                }
+                if shortcut_recorder_is_frontmost() {
+                    self.state
+                        .borrow_mut()
+                        .reconcile_after_event_tap_reenabled(CGEvent::flags(Some(event)));
                     return true;
                 }
                 if event_type == CGEventType::KeyDown && self.mission_control_active.get() {

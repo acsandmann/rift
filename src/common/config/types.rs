@@ -1888,6 +1888,92 @@ impl ConfigSource {
         }
     }
 
+    /// The hotkey a binding key triggers, with this source's modifier combinations.
+    pub fn hotkey(&self, key: &str) -> Option<Hotkey> {
+        Config::binding_hotkey(key, &self.modifier_combinations).map(|(_, hotkey)| hotkey)
+    }
+
+    /// The binding in `mode`, other than `except`, that the keys of `key` would also trigger.
+    pub fn conflicting_binding(
+        &self,
+        mode: &str,
+        key: &str,
+        except: Option<&str>,
+    ) -> Option<(&String, &WmCommand)> {
+        let hotkey = self.hotkey(key)?;
+        self.keymap(mode)?.iter().find(|(other, _)| {
+            Some(other.as_str()) != except
+                && self.hotkey(other).is_some_and(|other| other.overlaps(&hotkey))
+        })
+    }
+
+    /// Binds `key` in `mode`, replacing the binding at `old`. Never overwrites another
+    /// shortcut, and fails if `old` no longer holds `expected`, such as after a reload.
+    pub fn bind(
+        &mut self,
+        mode: &str,
+        old: Option<(&str, &WmCommand)>,
+        key: String,
+        command: WmCommand,
+    ) -> Result<(), String> {
+        if self.hotkey(&key).is_none() {
+            return Err(format!("“{key}” is not a valid shortcut"));
+        }
+        if let Some((other, _)) = self.conflicting_binding(mode, &key, old.map(|(old, _)| old)) {
+            return Err(format!("“{other}” already uses this shortcut"));
+        }
+        let bindings = self.keymap_mut(mode)?;
+        if let Some((old, expected)) = old {
+            if bindings.get(old) != Some(expected) {
+                return Err("This shortcut changed elsewhere; try again".into());
+            }
+            bindings.remove(old);
+        }
+        bindings.insert(key, command);
+        Ok(())
+    }
+
+    /// Replace exactly the conflicts the user reviewed, as one source transaction.
+    /// Validate the entire snapshot before touching any binding, including `old`.
+    pub fn bind_replacing(
+        &mut self,
+        mode: &str,
+        old: Option<(&str, &WmCommand)>,
+        key: String,
+        command: WmCommand,
+        expected_conflicts: &[(String, WmCommand)],
+    ) -> Result<(), String> {
+        let hotkey = self.hotkey(&key).ok_or_else(|| format!("“{key}” is not a valid shortcut"))?;
+        let bindings = self.keymap(mode).ok_or("Shortcut mode no longer exists")?;
+        if let Some((old, expected)) = old {
+            if bindings.get(old) != Some(expected) {
+                return Err("This shortcut changed elsewhere; try again".into());
+            }
+        }
+        let conflicts: Vec<_> = bindings
+            .iter()
+            .filter(|(other, _)| {
+                Some(other.as_str()) != old.map(|(old, _)| old)
+                    && self.hotkey(other).is_some_and(|other| other.overlaps(&hotkey))
+            })
+            .map(|(key, command)| (key.clone(), command.clone()))
+            .collect();
+        if conflicts != expected_conflicts {
+            return Err(
+                "The conflicting shortcuts changed elsewhere. Record the keys again.".into(),
+            );
+        }
+        let bindings = self.keymap_mut(mode)?;
+        for (key, _) in expected_conflicts {
+            bindings.remove(key);
+        }
+        if let Some((old, _)) = old {
+            bindings.remove(old);
+        }
+        bindings.insert(key, command);
+        Ok(())
+    }
+
     fn check_keymap_name(&self, name: &str, old: Option<&str>) -> Result<(), String> {
         if name.is_empty()
             || name == "default"

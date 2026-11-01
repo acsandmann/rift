@@ -475,7 +475,7 @@ pub(super) fn layout_spacing(ui: Ui, model: &Rc<Model>) -> Page {
             move |source, value| set_spacing_gap(source, None, outer, None, value),
         );
         let value = input.unit_field(&ui, "pt");
-        value.width(Metrics::VALUE_FIELD_WIDTH);
+        input.min_width(Metrics::VALUE_FIELD_WIDTH);
         // The bezel hosts the field’s view; keep its Rust owner with the row.
         let control = HStack::new(&ui).spacing(8.0).push(slider.unwrap()).push(value).keep(input);
         simple = simple.row(f.row(title, control, message));
@@ -749,7 +749,7 @@ fn aspect_ratio(f: &mut FormBuilder) -> SettingsRow {
     mode.accessibility_label("Single window aspect ratio");
     mode.set_item_badge(0, Some("Default"));
     let value = field.unit_field(&ui, ": 1");
-    value.width(Metrics::VALUE_FIELD_WIDTH);
+    field.min_width(Metrics::VALUE_FIELD_WIDTH);
     let custom = Rc::new(
         HStack::new(&ui)
             .spacing(8.0)

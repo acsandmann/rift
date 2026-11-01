@@ -240,3 +240,142 @@ fn expand_choices(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     })
 }
+
+/// Command discovery metadata lives with the enum, rather than a second UI inventory.
+/// Payloads use Default unless a useful sample is supplied; aliases opt out explicitly.
+#[proc_macro_derive(CommandCatalog, attributes(command))]
+pub fn command_catalog(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let result = (|| -> syn::Result<proc_macro2::TokenStream> {
+        let Data::Enum(data) = &input.data else {
+            return Err(syn::Error::new_spanned(&input, "CommandCatalog requires an enum"));
+        };
+        let mut default_group = 6usize;
+        let mut defaults = std::collections::HashMap::<String, syn::Expr>::new();
+        for attr in input.attrs.iter().filter(|a| a.path().is_ident("command")) {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("group") {
+                    default_group = meta.value()?.parse::<syn::LitInt>()?.base10_parse()?;
+                } else if meta.path.is_ident("defaults") {
+                    meta.parse_nested_meta(|field| {
+                        let name = field.path.get_ident().ok_or_else(|| field.error("expected a type name"))?.to_string();
+                        defaults.insert(name, field.value()?.parse::<LitStr>()?.parse()?);
+                        Ok(())
+                    })?;
+                } else { return Err(meta.error("unknown catalog attribute")); }
+                Ok(())
+            })?;
+        }
+        let default_value = |field: &syn::Field| {
+            let ty = &field.ty;
+            defaults.get(&quote!(#ty).to_string()).map(|expr| quote!(#expr))
+                .unwrap_or_else(|| quote!(Default::default()))
+        };
+        let mut entries = Vec::new();
+        let mut arguments = Vec::new();
+        let mut argument_updates = Vec::new();
+        let mut identities = Vec::new();
+        let mut schemas = Vec::new();
+        for (index, variant) in data.variants.iter().enumerate() {
+            let mut title = label(&variant.ident.to_string()).to_lowercase();
+            if let Some(first) = title.get_mut(..1) { first.make_ascii_uppercase(); }
+            let mut group = default_group;
+            let mut order = index;
+            let mut sample: Option<syn::Expr> = None;
+            let mut skip = false;
+            let mut alias = variant.ident.to_string();
+            for attr in variant.attrs.iter().filter(|a| a.path().is_ident("command")) {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("skip") { skip = true; }
+                    else if meta.path.is_ident("label") { title = meta.value()?.parse::<LitStr>()?.value(); }
+                    else if meta.path.is_ident("group") { group = meta.value()?.parse::<syn::LitInt>()?.base10_parse()?; }
+                    else if meta.path.is_ident("order") { order = meta.value()?.parse::<syn::LitInt>()?.base10_parse()?; }
+                    else if meta.path.is_ident("alias") { alias = meta.value()?.parse::<LitStr>()?.value(); }
+                    else if meta.path.is_ident("sample") { sample = Some(meta.value()?.parse::<LitStr>()?.parse()?); }
+                    else { return Err(meta.error("unknown command attribute")); }
+                    Ok(())
+                })?;
+            }
+            let name = &variant.ident;
+            let identity = match &variant.fields {
+                Fields::Unit => quote!(Self::#name),
+                Fields::Named(_) => quote!(Self::#name { .. }),
+                Fields::Unnamed(_) => quote!(Self::#name(..)),
+            };
+            identities.push(quote!(#identity => #alias));
+            let fields = variant.fields.iter().enumerate().map(|(index, field)| {
+                let name = field.ident.as_ref().map(ToString::to_string).unwrap_or_else(|| index.to_string());
+                let ty = &field.ty;
+                let ty = quote!(#ty).to_string();
+                quote!((#name, #ty))
+            });
+            schemas.push(quote!(#identity => &[#(#fields),*]));
+            let kinds = [("Direction", "Direction"), ("ResizeOrientation", "Orientation"),
+                ("WorkspaceSelector", "Workspace"), ("usize", "WorkspaceIndex"),
+                ("DisplaySelector", "Display"), ("LayoutMode", "Layout"),
+                ("String", "Keymap"), ("f64", "Number"), ("i32", "Integer")];
+            let selected = variant.fields.iter().enumerate().find_map(|(i, field)| {
+                let Type::Path(ty) = &field.ty else { return None };
+                kinds.iter().find(|(ty_name, _)| ty.path.is_ident(ty_name))
+                    .map(|(_, kind)| (i, field, *kind))
+            }).or_else(|| {
+                let field = variant.fields.iter().next()?;
+                (variant.fields.len() == 1 && matches!(&field.ty, Type::Path(ty) if ty.path.is_ident("bool")))
+                    .then_some((0, field, "Backwards"))
+            });
+            if let Some((index, _, kind)) = selected {
+                let kind = syn::Ident::new(kind, name.span());
+                let bindings: Vec<_> = (0..variant.fields.len()).map(|i| quote::format_ident!("field_{i}")).collect();
+                let value = &bindings[index];
+                let pattern = match &variant.fields {
+                    Fields::Named(fields) => {
+                        let names = fields.named.iter().map(|field| &field.ident);
+                        quote!(Self::#name { #(#names: #bindings),* })
+                    }
+                    _ => quote!(Self::#name(#(#bindings),*)),
+                };
+                let guards = variant.fields.iter().enumerate().filter(|(i, _)| *i != index)
+                    .map(|(i, field)| { let binding = &bindings[i]; let ty = &field.ty; quote!(#binding == &<#ty>::default()) });
+                arguments.push(quote!(#pattern => Some((::rift_protocol::CommandArgument::#kind(#value.clone()), true #(&& #guards)*))));
+                argument_updates.push(quote!((#pattern, ::rift_protocol::CommandArgument::#kind(value)) => { *#value = value; }));
+            }
+            if skip { continue; }
+            let sample = sample.map(|expr| quote!(#expr)).unwrap_or_else(|| match &variant.fields {
+                Fields::Unit => quote!(Self::#name),
+                Fields::Unnamed(fields) => {
+                    let values = fields.unnamed.iter().map(&default_value);
+                    quote!(Self::#name(#(#values),*))
+                }
+                Fields::Named(fields) => {
+                    let names = fields.named.iter().map(|field| &field.ident);
+                    let values = fields.named.iter().map(&default_value);
+                    quote!(Self::#name { #(#names: #values),* })
+                }
+            });
+            entries.push(quote!((#group, #title, #order, #sample)));
+        }
+        let name = &input.ident;
+        Ok(quote! {
+            impl #name {
+                pub fn command_kind(&self) -> &'static str {
+                    match self { #(#identities),* }
+                }
+                pub fn command_fields(&self) -> &'static [(&'static str, &'static str)] {
+                    match self { #(#schemas),* }
+                }
+                pub fn command_argument(&self) -> Option<(::rift_protocol::CommandArgument, bool)> {
+                    match self { #(#arguments,)* _ => None }
+                }
+                pub fn with_command_argument(&self, value: ::rift_protocol::CommandArgument) -> Option<Self> {
+                    let mut command = self.clone();
+                    match (&mut command, value) { #(#argument_updates,)* _ => return None }
+                    Some(command)
+                }
+                pub fn command_catalog() -> Vec<(usize, &'static str, usize, Self)> {
+                    vec![#(#entries),*]
+                }
+            }
+        })
+    })();
+    result.unwrap_or_else(syn::Error::into_compile_error).into()
+}

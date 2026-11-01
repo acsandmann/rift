@@ -163,6 +163,10 @@ impl IpcRequestHandler {
                 self.dispatch_config_request(request, header);
                 return;
             }
+            RiftRequest::SetShortcutRecording { pid, recording } => {
+                crate::actor::input::set_shortcut_recording(pid, recording);
+                encode_success(())
+            }
             RiftRequest::InitializeSettings => {
                 // Register first: every change after this point is either represented
                 // by the actor's snapshot or queued on the client's subscription port.
@@ -335,6 +339,9 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         }
 
         RiftRequest::GetBindingMode => encode_success(&reactor.binding_mode),
+        RiftRequest::SetShortcutRecording { .. } => {
+            unreachable!("recording leases bypass the reactor")
+        }
 
         RiftRequest::GetMetrics => encode_success(reactor.query_metrics()),
 

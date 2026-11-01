@@ -285,6 +285,11 @@ impl RiftMachClient {
         }
     }
 
+    /// Synchronously acknowledge capture before the UI accepts a recorded keystroke.
+    pub fn set_shortcut_recording(&self, pid: i32, recording: bool) -> Result<(), ClientError> {
+        self.request(RiftRequest::SetShortcutRecording { pid, recording })
+    }
+
     fn request<T: DeserializeOwned>(&self, request: RiftRequest) -> Result<T, ClientError> {
         match self.send_typed_request(&request)? {
             RiftResponse::Success { data } => Ok(data),
