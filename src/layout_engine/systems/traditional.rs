@@ -1374,34 +1374,29 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
 
         let selection = self.selection(layout);
-        let parent_a = node_a.parent(self.map()).unwrap();
-        let parent_b = node_b.parent(self.map()).unwrap();
-        let sizes: Vec<_> = [parent_a, parent_b]
-            .into_iter()
-            .flat_map(|parent| parent.children(self.map()))
-            .map(|node| (node, self.tree.data.layout.info[node].size))
-            .collect();
-
-        // Keep both slots occupied while moving the nodes so observers cannot
-        // collapse either parent halfway through the swap.
-        let placeholder = self.tree.mk_node().insert_before(node_a);
-        node_a.detach(&mut self.tree).insert_before(node_b).finish();
-        node_b.detach(&mut self.tree).insert_before(placeholder).finish();
-        placeholder.detach(&mut self.tree).remove();
-
-        for (node, size) in sizes {
-            let destination = if node == node_a {
-                node_b
-            } else if node == node_b {
-                node_a
-            } else {
-                node
-            };
-            self.tree.data.layout.info[destination].size = size;
+        // Exchange the occupants of the slots without restructuring the tree.
+        // Reparenting a leaf can collapse a single-child container mid-swap.
+        let index = &mut self.tree.data.window;
+        index.windows.insert(node_a, b);
+        index.windows.insert(node_b, a);
+        for (wid, from, to) in [(a, node_a, node_b), (b, node_b, node_a)] {
+            let info = index
+                .window_nodes
+                .get_mut(&wid)
+                .unwrap()
+                .0
+                .iter_mut()
+                .find(|info| info.layout == layout && info.node == from)
+                .unwrap();
+            info.node = to;
         }
-        self.tree.data.layout.recompute_total(&self.tree.map, parent_a);
-        self.tree.data.layout.recompute_total(&self.tree.map, parent_b);
-        self.select(selection);
+        self.select(if selection == node_a {
+            node_b
+        } else if selection == node_b {
+            node_a
+        } else {
+            selection
+        });
 
         true
     }
