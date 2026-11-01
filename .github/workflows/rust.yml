@@ -17,7 +17,7 @@ env:
 
 jobs:
   format:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -27,7 +27,7 @@ jobs:
         run: cargo +nightly fmt --all --check --verbose
 
   test:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
