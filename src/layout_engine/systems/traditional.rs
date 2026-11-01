@@ -1373,39 +1373,35 @@ impl LayoutSystem for TraditionalLayoutSystem {
             return false;
         }
 
-        let wa = self.tree.data.window.at(node_a);
-        let wb = self.tree.data.window.at(node_b);
+        let selection = self.selection(layout);
+        let parent_a = node_a.parent(self.map()).unwrap();
+        let parent_b = node_b.parent(self.map()).unwrap();
+        let sizes: Vec<_> = [parent_a, parent_b]
+            .into_iter()
+            .flat_map(|parent| parent.children(self.map()))
+            .map(|node| (node, self.tree.data.layout.info[node].size))
+            .collect();
 
-        match (wa, wb) {
-            (None, None) => return false,
-            _ => {
-                if let Some(w) = wa {
-                    self.tree.data.window.windows.insert(node_b, w);
-                } else {
-                    self.tree.data.window.windows.remove(node_b);
-                }
-                if let Some(w) = wb {
-                    self.tree.data.window.windows.insert(node_a, w);
-                } else {
-                    self.tree.data.window.windows.remove(node_a);
-                }
-            }
-        }
+        // Keep both slots occupied while moving the nodes so observers cannot
+        // collapse either parent halfway through the swap.
+        let placeholder = self.tree.mk_node().insert_before(node_a);
+        node_a.detach(&mut self.tree).insert_before(node_b).finish();
+        node_b.detach(&mut self.tree).insert_before(placeholder).finish();
+        placeholder.detach(&mut self.tree).remove();
 
-        if let Some(infos) = self.tree.data.window.window_nodes.get_mut(&a) {
-            for info in &mut infos.0 {
-                if info.layout == layout {
-                    info.node = node_b;
-                }
-            }
+        for (node, size) in sizes {
+            let destination = if node == node_a {
+                node_b
+            } else if node == node_b {
+                node_a
+            } else {
+                node
+            };
+            self.tree.data.layout.info[destination].size = size;
         }
-        if let Some(infos) = self.tree.data.window.window_nodes.get_mut(&b) {
-            for info in &mut infos.0 {
-                if info.layout == layout {
-                    info.node = node_a;
-                }
-            }
-        }
+        self.tree.data.layout.recompute_total(&self.tree.map, parent_a);
+        self.tree.data.layout.recompute_total(&self.tree.map, parent_b);
+        self.select(selection);
 
         true
     }
@@ -3359,6 +3355,23 @@ mod tests {
         assert_eq!(system.selected_window(layout), Some(w(3)));
         assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(3)));
+    }
+
+    #[test]
+    fn swap_windows_keeps_focus_on_the_moved_window() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.set_layout(root, LayoutKind::Horizontal);
+        for idx in 1..=3 {
+            system.add_window_under(layout, root, w(idx));
+        }
+        system.select_window(layout, w(1));
+        assert!(system.swap_windows(layout, w(1), w(2)));
+        assert_eq!(system.selected_window(layout), Some(w(1)));
+        assert_eq!(system.move_focus(layout, Direction::Right).0, Some(w(3)));
+        assert_eq!(system.move_focus(layout, Direction::Left).0, Some(w(1)));
+        assert_eq!(system.move_focus(layout, Direction::Left).0, Some(w(2)));
     }
 
     #[test]
