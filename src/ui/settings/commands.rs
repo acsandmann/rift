@@ -1,3 +1,4 @@
+use cgs::Ui;
 use cgs::collection::{EditableList, Table};
 use cgs::controls::{Button, Popup, SheetActions};
 use cgs::input::{
@@ -5,15 +6,14 @@ use cgs::input::{
 };
 use cgs::layout::{HStack, VStack};
 use cgs::menu::{Menu, MenuItem};
-use cgs::settings::{SettingsRow, ValidationMessage, ShortcutPresentation as Style};
+use cgs::settings::{SettingsRow, ShortcutPresentation as Style, ValidationMessage};
 use cgs::text::{Label, SecondaryLabel};
 use cgs::view::NativeView;
 use cgs::window::{Popover, Sheet};
-use cgs::Ui;
 use objc2::Message;
 use rift_protocol::{
-    CommandArgument as Arg,
-    Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R, ResizeOrientation,
+    CommandArgument as Arg, Direction, DisplaySelector, LayoutCommand as L, ReactorCommand as R,
+    ResizeOrientation,
 };
 
 use super::*;
@@ -39,9 +39,7 @@ const SECTIONS: [&str; 7] = [
 ];
 const OTHER: usize = 6;
 
-fn inline_message(ui: &Ui) -> Rc<ValidationMessage> {
-    Style::validation(ui)
-}
+fn inline_message(ui: &Ui) -> Rc<ValidationMessage> { Style::validation(ui) }
 
 fn key_glyph(key: &str) -> &str {
     match key {
@@ -144,9 +142,7 @@ type Setter = Rc<dyn Fn(WmCommand)>;
 
 /// Keep content at its natural width, but below the priority at which it would set the
 /// window's minimum width, so rows shrink with the window instead.
-fn compressible(view: &impl NativeView) {
-    Style::flexible(view);
-}
+fn compressible(view: &impl NativeView) { Style::flexible(view); }
 
 #[derive(Clone, PartialEq, Eq)]
 enum Id {
@@ -189,7 +185,9 @@ impl RowControls {
         self.divider.set_hidden(row.divider_hidden.get());
         self.name.set_text(if row.starts_action.get() {
             template(&row.command).map_or("Custom command", |i| actions()[i].1)
-        } else { "" });
+        } else {
+            ""
+        });
         self.view.set_card_edges(row.first.get(), row.last.get());
     }
 }
@@ -322,11 +320,15 @@ impl Shortcuts {
                 }
             }
         });
-        let Some(control) = parameters(self.ui, &model, &command, unbound, set, error)
-        else { return };
-        let content = Style::popover(&self.ui,
-            template(&command).map_or("Command options", |i| actions()[i].1), control,
-            raw_parameters(&command) || matches!(command, WmCommand::Wm(WmCmd::Exec(_))));
+        let Some(control) = parameters(self.ui, &model, &command, unbound, set, error) else {
+            return;
+        };
+        let content = Style::popover(
+            &self.ui,
+            template(&command).map_or("Command options", |i| actions()[i].1),
+            control,
+            raw_parameters(&command) || matches!(command, WmCommand::Wm(WmCmd::Exec(_))),
+        );
         let popover = Popover::new(&self.ui, content);
         popover.show(&anchor.retain());
         *self.popover.borrow_mut() = Some(popover);
@@ -493,9 +495,7 @@ impl Shortcuts {
                     }),
                 );
             });
-            panel.add(
-                Style::actions(&page.ui, choose, replace),
-            );
+            panel.add(Style::actions(&page.ui, choose, replace));
             panel.set_hidden(false);
             Some(message)
         };
@@ -612,7 +612,10 @@ impl Shortcuts {
             None
         };
         let option_button = parameter.as_ref().and_then(|control| {
-            control.ns_view().downcast_ref::<objc2_app_kit::NSButton>().map(objc2::rc::Weak::new)
+            control
+                .ns_view()
+                .downcast_ref::<objc2_app_kit::NSButton>()
+                .map(objc2::rc::Weak::new)
         });
         let conflicts = Rc::new(Style::conflicts(&ui));
         conflicts.set_hidden(true);
@@ -627,21 +630,30 @@ impl Shortcuts {
         );
         recorder.accessibility_label(&format!("Shortcut for {title}"));
         let page = Rc::downgrade(self);
-        let another =
-            Button::new(&ui, "").symbol("plus").borderless().on_click(move || {
-                if let Some(page) = page.upgrade() {
-                    page.open_editor(draft.borrow().clone());
-                }
-            });
+        let another = Button::new(&ui, "").symbol("plus").borderless().on_click(move || {
+            if let Some(page) = page.upgrade() {
+                page.open_editor(draft.borrow().clone());
+            }
+        });
         another.accessibility_label(&format!("Add another {action_name} shortcut"));
         another.ns_view().setToolTip(Some(&objc2_foundation::NSString::from_str(
             "Add another shortcut for this action",
         )));
         if simple_parameter(&command) {
-            if let Some(parameter) = parameter.as_ref() { parameter.accessibility_label(&title); }
+            if let Some(parameter) = parameter.as_ref() {
+                parameter.accessibility_label(&title);
+            }
         }
-        let presentation = cgs::settings::ShortcutRow::new(&ui, name.clone(), parameter, &recorder, another,
-            parameter_message, message.clone(), conflicts.clone());
+        let presentation = cgs::settings::ShortcutRow::new(
+            &ui,
+            name.clone(),
+            parameter,
+            &recorder,
+            another,
+            parameter_message,
+            message.clone(),
+            conflicts.clone(),
+        );
         let (page, copy) = (Rc::downgrade(self), command.clone());
         let duplicate = MenuItem::new(&ui, "Duplicate Shortcut…").on_click(move || {
             if let Some(page) = page.upgrade() {
@@ -649,18 +661,27 @@ impl Shortcuts {
             }
         });
         let (page, input) = (Rc::downgrade(self), Rc::downgrade(&recorder));
-        let change = MenuItem::new(&ui, if key.is_some() { "Change Shortcut…" } else { "Record Shortcut…" })
-            .on_click(move || {
-                if let (Some(page), Some(input)) = (page.upgrade(), input.upgrade()) {
-                    page.close_inspector();
-                    input.begin_recording();
-                }
-            });
+        let change = MenuItem::new(
+            &ui,
+            if key.is_some() {
+                "Change Shortcut…"
+            } else {
+                "Record Shortcut…"
+            },
+        )
+        .on_click(move || {
+            if let (Some(page), Some(input)) = (page.upgrade(), input.upgrade()) {
+                page.close_inspector();
+                input.begin_recording();
+            }
+        });
         let menu = Menu::new(&ui).item(change).item(duplicate);
         if let Some(button) = option_button {
             menu.add(MenuItem::new(&ui, "Edit Options…").on_click(move || {
                 if let Some(button) = button.load() {
-                    unsafe { button.performClick(None); }
+                    unsafe {
+                        button.performClick(None);
+                    }
                 }
             }));
         }
@@ -875,13 +896,14 @@ impl Shortcuts {
                     items.push(ShortcutItem::Binding(row.clone()));
                 }
                 let starts_action = previous.is_none_or(|previous| {
-                    !same_action(&previous.command, &row.command)
-                        && previous.command != row.command
+                    !same_action(&previous.command, &row.command) && previous.command != row.command
                 });
                 row.first.set(visible && empty);
                 row.starts_action.set(starts_action);
                 row.divider_hidden.set(!visible || empty || !starts_action);
-                if visible { previous = Some(row); }
+                if visible {
+                    previous = Some(row);
+                }
                 empty &= !visible;
             }
             any |= !empty;
@@ -921,16 +943,29 @@ impl Shortcuts {
         let Some(model) = self.model.upgrade() else { return };
         self.close_inspector();
         let ui = self.ui;
-        let actions = actions().iter().map(|(group, title, command)| cgs::settings::PickerAction {
-            group: SECTIONS[*group].into(), title: (*title).into(),
-            keywords: search_query(&summary(command, defaults(), &[])),
-        }).collect();
+        let actions = actions()
+            .iter()
+            .map(|(group, title, command)| cgs::settings::PickerAction {
+                group: SECTIONS[*group].into(),
+                title: (*title).into(),
+                keywords: search_query(&summary(command, defaults(), &[])),
+            })
+            .collect();
         let (page, cancelled) = (Rc::downgrade(self), Rc::downgrade(self));
-        let picker = Rc::new(cgs::settings::ActionPicker::new(&ui, actions, move |index| {
-            if let Some(page) = page.upgrade() { page.open_editor(self::actions()[index].2.clone()); }
-        }, move || {
-            if let Some(page) = cancelled.upgrade() { page.close_editor(); }
-        }));
+        let picker = Rc::new(cgs::settings::ActionPicker::new(
+            &ui,
+            actions,
+            move |index| {
+                if let Some(page) = page.upgrade() {
+                    page.open_editor(self::actions()[index].2.clone());
+                }
+            },
+            move || {
+                if let Some(page) = cancelled.upgrade() {
+                    page.close_editor();
+                }
+            },
+        ));
         self.close_editor();
         show_sheet(ui, &model, "Add Shortcut", picker.clone());
         picker.focus_search();
@@ -962,7 +997,9 @@ impl Shortcuts {
             let set: Setter = Rc::new(move |command| {
                 *changed.borrow_mut() = command;
                 if let Some(model) = resize.upgrade() {
-                    if let Some(sheet) = model.sheet.borrow().as_ref() { sheet.fit_content(); }
+                    if let Some(sheet) = model.sheet.borrow().as_ref() {
+                        sheet.fit_content();
+                    }
                 }
             });
             if let Some(control) = parameters(ui, &model, &command, true, set, error.clone()) {
@@ -1020,8 +1057,10 @@ impl Shortcuts {
                     page.close_editor();
                 }
             });
-        let feedback = cgs::settings::ShortcutEditor::feedback(&ui, parameter_error, message, conflicts);
-        let content = cgs::settings::ShortcutEditor::new(&ui, picker, params, &recorder, feedback, cancel);
+        let feedback =
+            cgs::settings::ShortcutEditor::feedback(&ui, parameter_error, message, conflicts);
+        let content =
+            cgs::settings::ShortcutEditor::new(&ui, picker, params, &recorder, feedback, cancel);
         self.close_editor();
         show_sheet(ui, &model, "New Shortcut", content);
     }
@@ -1088,7 +1127,8 @@ impl Shortcuts {
         };
         let content = Style::sheet(&self.ui)
             .push(Style::description(&self.ui, text))
-            .push(message).push(Style::actions(&self.ui, cancel, confirm));
+            .push(message)
+            .push(Style::actions(&self.ui, cancel, confirm));
         show_sheet(
             self.ui,
             &model,
@@ -1120,15 +1160,22 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                     return Box::new(Label::new(&ui, "")) as Box<dyn NativeView>;
                 };
                 match item {
-                    ShortcutItem::Section(index) => Box::new(Style::section(&ui, SECTIONS[*index])) as Box<dyn NativeView>,
+                    ShortcutItem::Section(index) => {
+                        Box::new(Style::section(&ui, SECTIONS[*index])) as Box<dyn NativeView>
+                    }
                     ShortcutItem::Binding(row) => page.realize(row).map_or_else(
                         || Box::new(Label::new(&ui, "")) as Box<dyn NativeView>,
                         |controls| {
                             Box::new(controls.cell.ns_view().retain()) as Box<dyn NativeView>
                         },
                     ),
-                    ShortcutItem::Welcome => Box::new(page.welcome.ns_view().retain()) as Box<dyn NativeView>,
-                    ShortcutItem::Empty => Box::new(Style::pane_item(&ui, page.empty.ns_view().retain())) as Box<dyn NativeView>,
+                    ShortcutItem::Welcome => {
+                        Box::new(page.welcome.ns_view().retain()) as Box<dyn NativeView>
+                    }
+                    ShortcutItem::Empty => {
+                        Box::new(Style::pane_item(&ui, page.empty.ns_view().retain()))
+                            as Box<dyn NativeView>
+                    }
                     ShortcutItem::Advanced => page.advanced.borrow().as_ref().map_or_else(
                         || Box::new(Label::new(&ui, "")) as Box<dyn NativeView>,
                         |view| Box::new(view.ns_view().retain()) as Box<dyn NativeView>,
@@ -1240,7 +1287,10 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
         let mode = weak.upgrade().map_or_else(|| "default".into(), |page| page.mode());
         let custom = mode != "default";
         if let Some(item) = keymap_label.load() {
-            item.setTitle(&objc2_foundation::NSString::from_str(&format!("Keymap: {}", keymap_title(&mode))));
+            item.setTitle(&objc2_foundation::NSString::from_str(&format!(
+                "Keymap: {}",
+                keymap_title(&mode)
+            )));
         }
         if let Some(item) = reset_item.load() {
             item.setTitle(&objc2_foundation::NSString::from_str(if custom {
@@ -1270,8 +1320,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
     });
     add.accessibility_label("Add Shortcut…");
     let weak = Rc::downgrade(&page);
-    let view = Rc::new(
-        cgs::tabs::TabSelector::new(&ui, &["Assigned", "All"]).on_change(move |index| {
+    let view = Rc::new(cgs::tabs::TabSelector::new(&ui, &["Assigned", "All"]).on_change(
+        move |index| {
             if let Some(page) = weak.upgrade() {
                 page.all_actions.set(index == 1);
                 if index == 1 {
@@ -1282,8 +1332,8 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
                     page.filter();
                 }
             }
-        }),
-    );
+        },
+    ));
     view.set_selected(0);
     view.accessibility_label("Shortcut visibility");
     view.tooltip("Show assigned shortcuts or all available actions");
@@ -1316,10 +1366,19 @@ pub(super) fn keyboard(ui: Ui, model: &Rc<Model>) -> Page {
             page.reset_mode();
         }
     });
-    page.welcome.add(Style::welcome(&ui, first, browse, defaults, page.welcome_defaults.clone()));
+    page.welcome.add(Style::welcome(
+        &ui,
+        first,
+        browse,
+        defaults,
+        page.welcome_defaults.clone(),
+    ));
     let combinations = modifier_combinations(&mut f, model);
-    *page.advanced.borrow_mut() = Some(Rc::new(Style::advanced(&ui,
-        "Advanced: reusable modifier combinations", combinations)));
+    *page.advanced.borrow_mut() = Some(Rc::new(Style::advanced(
+        &ui,
+        "Advanced: reusable modifier combinations",
+        combinations,
+    )));
     let body = Style::body(&ui, table);
     let mut result = f.finish(cgs::settings::ScrollHeader::new(&ui, filters, body));
     result.header = Some(toolbar);

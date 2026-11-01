@@ -10,22 +10,32 @@ pub(super) fn wm(cmd: WmCmd) -> WmCommand { WmCommand::Wm(cmd) }
 pub(super) fn actions() -> &'static [(usize, &'static str, WmCommand)] {
     static ACTIONS: std::sync::LazyLock<Vec<(usize, &'static str, WmCommand)>> =
         std::sync::LazyLock::new(|| {
-            let mut actions: Vec<_> = L::command_catalog().into_iter()
-                .map(|(group, label, order, command)| (group, label, order, layout(command)))
-                .chain(R::command_catalog().into_iter()
-                    .map(|(group, label, order, command)| (group, label, order, reactor(command))))
-                .chain(WmCmd::command_catalog().into_iter()
-                    .map(|(group, label, order, command)| (group, label, order, wm(command))))
-                .collect();
+            let mut actions: Vec<_> =
+                L::command_catalog()
+                    .into_iter()
+                    .map(|(group, label, order, command)| (group, label, order, layout(command)))
+                    .chain(R::command_catalog().into_iter().map(
+                        |(group, label, order, command)| (group, label, order, reactor(command)),
+                    ))
+                    .chain(
+                        WmCmd::command_catalog().into_iter().map(
+                            |(group, label, order, command)| (group, label, order, wm(command)),
+                        ),
+                    )
+                    .collect();
             actions.sort_by_key(|(group, _, order, _)| (*group, *order));
-            let mut actions: Vec<_> = actions.into_iter()
-                .map(|(group, label, _, command)| (group, label, command)).collect();
+            let mut actions: Vec<_> = actions
+                .into_iter()
+                .map(|(group, label, _, command)| (group, label, command))
+                .collect();
             actions.push((OTHER, "Custom command", WmCommand::Sequence(Vec::new())));
             actions
         });
     &ACTIONS
 }
-pub(super) fn floating_options(cmd: &WmCommand) -> Option<rift_protocol::ToggleWindowFloatingOptions> {
+pub(super) fn floating_options(
+    cmd: &WmCommand,
+) -> Option<rift_protocol::ToggleWindowFloatingOptions> {
     match cmd {
         WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::ToggleWindowFloating(options))
         | WmCommand::ReactorCommand(Command::Layout(L::ToggleWindowFloatingWithOptions(options))) => {
@@ -44,8 +54,12 @@ pub(super) fn same_action(a: &WmCommand, b: &WmCommand) -> bool {
             WmCommand::Wm(command) => command.command_kind(),
             WmCommand::ReactorCommand(Command::Layout(command)) => command.command_kind(),
             WmCommand::ReactorCommand(Command::Reactor(command)) => command.command_kind(),
-            WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::ToggleWindowFloating(_)) => "ToggleWindowFloating",
-            WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth) => "SwitchPresetColumnWidth",
+            WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::ToggleWindowFloating(_)) => {
+                "ToggleWindowFloating"
+            }
+            WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth) => {
+                "SwitchPresetColumnWidth"
+            }
             _ => return None,
         })
     }
@@ -78,7 +92,11 @@ pub(super) fn parse_toml(text: &str) -> Result<WmCommand, String> {
 }
 
 /// Names the parameter of `cmd` shown after its action title; `None` without parameters.
-pub(super) fn argument(cmd: &WmCommand, s: &ConfigSource, displays: &[ScreenInfo]) -> Option<String> {
+pub(super) fn argument(
+    cmd: &WmCommand,
+    s: &ConfigSource,
+    displays: &[ScreenInfo],
+) -> Option<String> {
     use WmCommand::ReactorCommand as RC;
     if let Some(options) = floating_options(cmd) {
         let mut parts = Vec::new();
@@ -93,7 +111,12 @@ pub(super) fn argument(cmd: &WmCommand, s: &ConfigSource, displays: &[ScreenInfo
         }
         return Some(parts.join(", "));
     }
-    if matches!(cmd, WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth)) { return None; }
+    if matches!(
+        cmd,
+        WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth)
+    ) {
+        return None;
+    }
     if let Some((value, _)) = command_argument(cmd) {
         return Some(match value {
             Arg::Direction(d) => format!("{d:?}"),
@@ -106,12 +129,19 @@ pub(super) fn argument(cmd: &WmCommand, s: &ConfigSource, displays: &[ScreenInfo
             Arg::Display(target) => display_name(&target, displays),
             Arg::WorkspaceIndex(i) => s.virtual_workspaces.workspace_name(i),
             Arg::Workspace(WorkspaceSelector::Name(name)) => name,
-            Arg::Workspace(WorkspaceSelector::Index(i)) => s.virtual_workspaces.workspace_names.get(i)
-                .filter(|name| !name.is_empty()).cloned().unwrap_or((i + 1).to_string()),
+            Arg::Workspace(WorkspaceSelector::Index(i)) => s
+                .virtual_workspaces
+                .workspace_names
+                .get(i)
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or((i + 1).to_string()),
             Arg::Layout(mode) => {
                 let label = super::pages::layout_title(mode);
                 match cmd {
-                    RC(Command::Layout(L::SetWorkspaceLayout { workspace: Some(i), .. })) => format!("{label} on {}", s.virtual_workspaces.workspace_name(*i)),
+                    RC(Command::Layout(L::SetWorkspaceLayout { workspace: Some(i), .. })) => {
+                        format!("{label} on {}", s.virtual_workspaces.workspace_name(*i))
+                    }
                     _ => label.into(),
                 }
             }
@@ -222,7 +252,14 @@ pub(super) fn directions(display: bool) -> Vec<(String, DisplaySelector)> {
             }
         };
         let name = if display {
-            format!("{name} {}current display", if matches!(d, Direction::Left | Direction::Right) { "of " } else { "" })
+            format!(
+                "{name} {}current display",
+                if matches!(d, Direction::Left | Direction::Right) {
+                    "of "
+                } else {
+                    ""
+                }
+            )
         } else {
             name.into()
         };
@@ -257,18 +294,27 @@ pub(super) fn command_argument(command: &WmCommand) -> Option<(Arg, bool)> {
         WmCommand::Wm(command) => command.command_argument(),
         WmCommand::ReactorCommand(Command::Layout(command)) => command.command_argument(),
         WmCommand::ReactorCommand(Command::Reactor(command)) => command.command_argument(),
-        WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth) => Some((Arg::Backwards(false), true)),
+        WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth) => {
+            Some((Arg::Backwards(false), true))
+        }
         _ => None,
     }
 }
 pub(super) fn with_argument(command: &WmCommand, value: Arg) -> WmCommand {
     match command {
         WmCommand::Wm(command) => command.with_command_argument(value).map(wm),
-        WmCommand::ReactorCommand(Command::Layout(command)) => command.with_command_argument(value).map(layout),
-        WmCommand::ReactorCommand(Command::Reactor(command)) => command.with_command_argument(value).map(reactor),
-        WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth) => return with_argument(&layout(L::SwitchPresetColumnWidth { backwards: false }), value),
+        WmCommand::ReactorCommand(Command::Layout(command)) => {
+            command.with_command_argument(value).map(layout)
+        }
+        WmCommand::ReactorCommand(Command::Reactor(command)) => {
+            command.with_command_argument(value).map(reactor)
+        }
+        WmCommand::ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth) => {
+            return with_argument(&layout(L::SwitchPresetColumnWidth { backwards: false }), value);
+        }
         _ => None,
-    }.expect("a generated argument must match its command field")
+    }
+    .expect("a generated argument must match its command field")
 }
 pub(super) fn simple_parameter(cmd: &WmCommand) -> bool {
     command_argument(cmd).is_some_and(|(_, simple)| simple)
@@ -278,10 +324,7 @@ pub(super) fn raw_parameters(cmd: &WmCommand) -> bool {
     has_parameters(cmd)
         && !(simple_parameter(cmd)
             || floating_options(cmd).is_some()
-            || matches!(
-                cmd,
-                WmCommand::Wm(WmCmd::Exec(ExecCmd::String(_)))
-            )
+            || matches!(cmd, WmCommand::Wm(WmCmd::Exec(ExecCmd::String(_))))
             || matches!(cmd, WmCommand::Wm(WmCmd::Exec(ExecCmd::Array(args))) if shell_script(args).is_some()))
 }
 
@@ -365,19 +408,40 @@ pub(super) fn parameters(
 ) -> Option<Box<dyn NativeView>> {
     let s = model.source.borrow();
     if let Some((argument @ (Arg::Number(_) | Arg::Integer(_)), _)) = command_argument(cmd) {
-        let (value, integer) = match argument { Arg::Number(v) => (v, false), Arg::Integer(v) => (v as f64, true), _ => unreachable!() };
+        let (value, integer) = match argument {
+            Arg::Number(v) => (v, false),
+            Arg::Integer(v) => (v as f64, true),
+            _ => unreachable!(),
+        };
         let field = Style::number_field(&ui, value, integer);
         let (command, set) = (cmd.clone(), set.clone());
-        let apply = move |v| set(with_argument(&command, if integer { Arg::Integer(v as i32) } else { Arg::Number(v) }));
-        let field = if draft { field.on_edit(apply) } else { field.on_change(apply) };
+        let apply = move |v| {
+            set(with_argument(
+                &command,
+                if integer {
+                    Arg::Integer(v as i32)
+                } else {
+                    Arg::Number(v)
+                },
+            ))
+        };
+        let field = if draft {
+            field.on_edit(apply)
+        } else {
+            field.on_change(apply)
+        };
         field.accessibility_label("Parameter");
         compressible(&field);
         return Some(Box::new(field));
     }
     let text =
         |value: &str, placeholder: &str, make: Box<dyn Fn(String) -> Result<WmCommand, String>>| {
-            let field = Style::text_field(&ui, value, placeholder,
-                raw_parameters(cmd) || matches!(cmd, WmCommand::Wm(WmCmd::Exec(_))));
+            let field = Style::text_field(
+                &ui,
+                value,
+                placeholder,
+                raw_parameters(cmd) || matches!(cmd, WmCommand::Wm(WmCmd::Exec(_))),
+            );
             let (set, error) = (set.clone(), error.clone());
             let apply = move |text: String| {
                 let command = make(text);
@@ -397,13 +461,28 @@ pub(super) fn parameters(
     let option_row = |label: &str, control: Box<dyn NativeView>| Style::option(&ui, label, control);
     let control = match cmd.clone() {
         cmd if raw_parameters(&cmd) => {
-            if let Some(form) = structured::editor(ui, model, &cmd, draft, set.clone(), error.clone()) { return Some(form); }
-            let value = if cmd == WmCommand::Sequence(Vec::new()) { String::new() } else { toml_text(&cmd) };
-            Box::new(cgs::settings::AdvancedCommandEditor::new(&ui, &value, draft, move |value| {
-                let command = parse_toml(&value);
-                report(&error, &command.as_ref().map(|_| ()).map_err(Clone::clone));
-                if let Ok(command) = command { set(command); }
-            })) as Box<dyn NativeView>
+            if let Some(form) =
+                structured::editor(ui, model, &cmd, draft, set.clone(), error.clone())
+            {
+                return Some(form);
+            }
+            let value = if cmd == WmCommand::Sequence(Vec::new()) {
+                String::new()
+            } else {
+                toml_text(&cmd)
+            };
+            Box::new(cgs::settings::AdvancedCommandEditor::new(
+                &ui,
+                &value,
+                draft,
+                move |value| {
+                    let command = parse_toml(&value);
+                    report(&error, &command.as_ref().map(|_| ()).map_err(Clone::clone));
+                    if let Ok(command) = command {
+                        set(command);
+                    }
+                },
+            )) as Box<dyn NativeView>
         }
         cmd if floating_options(&cmd).is_some() => {
             let options = floating_options(&cmd).unwrap();
@@ -487,48 +566,92 @@ pub(super) fn parameters(
                 &size_set,
             );
             size.accessibility_label("Floating size");
-            Box::new(Style::options(&ui, option_row("Position", center), option_row("Size", size), dimensions_row)) as Box<dyn NativeView>
+            Box::new(Style::options(
+                &ui,
+                option_row("Position", center),
+                option_row("Size", size),
+                dimensions_row,
+            )) as Box<dyn NativeView>
         }
 
         command if command_argument(&command).is_some() => {
             let (current, _) = command_argument(&command).unwrap();
             let mut items: Vec<(String, Arg)> = match &current {
-                Arg::Direction(_) => directions(false).into_iter().map(|(label, target)| {
-                    let DisplaySelector::Direction(d) = target else { unreachable!() };
-                    (label, Arg::Direction(d))
-                }).collect(),
-                Arg::Orientation(_) => [ResizeOrientation::Smart, ResizeOrientation::Horizontal, ResizeOrientation::Vertical]
-                    .into_iter().map(|o| (format!("{o:?}"), Arg::Orientation(o))).collect(),
-                Arg::Layout(_) => super::pages::layouts().iter().map(|(name, mode)| (name.to_string(), Arg::Layout(*mode))).collect(),
-                Arg::Backwards(_) => vec![("Next".into(), Arg::Backwards(false)), ("Previous".into(), Arg::Backwards(true))],
-                Arg::Keymap(_) => std::iter::once("default").chain(s.binding_modes.keys().map(String::as_str))
-                    .map(|name| (keymap_title(name).into(), Arg::Keymap(name.into()))).collect(),
-                Arg::Workspace(_) | Arg::WorkspaceIndex(_) => (0..s.virtual_workspaces.default_workspace_count).map(|i| {
-                    let name = s.virtual_workspaces.workspace_name(i);
-                    let value = match &current {
-                        Arg::Workspace(WorkspaceSelector::Name(_)) => Arg::Workspace(WorkspaceSelector::Name(name.clone())),
-                        Arg::Workspace(_) => Arg::Workspace(WorkspaceSelector::Index(i)),
-                        _ => Arg::WorkspaceIndex(i),
-                    };
-                    (format!("{} · {name}", i + 1), value)
-                }).collect(),
-                Arg::Display(_) => directions(true).into_iter().map(|(name, target)| (name, Arg::Display(target)))
+                Arg::Direction(_) => directions(false)
+                    .into_iter()
+                    .map(|(label, target)| {
+                        let DisplaySelector::Direction(d) = target else {
+                            unreachable!()
+                        };
+                        (label, Arg::Direction(d))
+                    })
+                    .collect(),
+                Arg::Orientation(_) => [
+                    ResizeOrientation::Smart,
+                    ResizeOrientation::Horizontal,
+                    ResizeOrientation::Vertical,
+                ]
+                .into_iter()
+                .map(|o| (format!("{o:?}"), Arg::Orientation(o)))
+                .collect(),
+                Arg::Layout(_) => super::pages::layouts()
+                    .iter()
+                    .map(|(name, mode)| (name.to_string(), Arg::Layout(*mode)))
+                    .collect(),
+                Arg::Backwards(_) => vec![
+                    ("Next".into(), Arg::Backwards(false)),
+                    ("Previous".into(), Arg::Backwards(true)),
+                ],
+                Arg::Keymap(_) => std::iter::once("default")
+                    .chain(s.binding_modes.keys().map(String::as_str))
+                    .map(|name| (keymap_title(name).into(), Arg::Keymap(name.into())))
+                    .collect(),
+                Arg::Workspace(_) | Arg::WorkspaceIndex(_) => {
+                    (0..s.virtual_workspaces.default_workspace_count)
+                        .map(|i| {
+                            let name = s.virtual_workspaces.workspace_name(i);
+                            let value = match &current {
+                                Arg::Workspace(WorkspaceSelector::Name(_)) => {
+                                    Arg::Workspace(WorkspaceSelector::Name(name.clone()))
+                                }
+                                Arg::Workspace(_) => Arg::Workspace(WorkspaceSelector::Index(i)),
+                                _ => Arg::WorkspaceIndex(i),
+                            };
+                            (format!("{} · {name}", i + 1), value)
+                        })
+                        .collect()
+                }
+                Arg::Display(_) => directions(true)
+                    .into_iter()
+                    .map(|(name, target)| (name, Arg::Display(target)))
                     .chain(model.env.displays.borrow().iter().map(|display| {
                         let target = DisplaySelector::Uuid(display.display_uuid.clone());
-                        (format!("Display · {}", display_name(&target, &[display.clone()])), Arg::Display(target))
-                    })).collect(),
+                        (
+                            format!("Display · {}", display_name(&target, &[display.clone()])),
+                            Arg::Display(target),
+                        )
+                    }))
+                    .collect(),
                 _ => unreachable!(),
             };
             if !items.iter().any(|(_, value)| *value == current) {
                 let label = match &current {
                     Arg::Workspace(WorkspaceSelector::Name(name)) => name.clone(),
-                    Arg::Workspace(WorkspaceSelector::Index(i)) | Arg::WorkspaceIndex(i) => format!("Workspace {}", i + 1),
+                    Arg::Workspace(WorkspaceSelector::Index(i)) | Arg::WorkspaceIndex(i) => {
+                        format!("Workspace {}", i + 1)
+                    }
                     Arg::Display(target) => display_name(target, &model.env.displays.borrow()),
                     _ => "Current".into(),
                 };
                 items.push((label, current.clone()));
             }
-            choice(ui, items, current, move |value| with_argument(&command, value), &set)
+            choice(
+                ui,
+                items,
+                current,
+                move |value| with_argument(&command, value),
+                &set,
+            )
         }
         WmCommand::Wm(WmCmd::Exec(ExecCmd::String(command))) => text(
             &command,
@@ -568,4 +691,3 @@ pub(super) fn parameters(
     compressible(&control);
     Some(control)
 }
-

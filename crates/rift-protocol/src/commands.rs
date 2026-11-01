@@ -48,7 +48,14 @@ pub struct ToggleWindowFloatingOptions {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, rift_config_derive::CommandCatalog)]
 #[serde(rename_all = "snake_case")]
-#[command(group = 0, defaults(Direction = "Direction::Left", ResizeOrientation = "ResizeOrientation::Smart", LayoutMode = "LayoutMode::Traditional"))]
+#[command(
+    group = 0,
+    defaults(
+        Direction = "Direction::Left",
+        ResizeOrientation = "ResizeOrientation::Smart",
+        LayoutMode = "LayoutMode::Traditional"
+    )
+)]
 pub enum LayoutCommand {
     #[command(group = 1, label = "Focus next window", order = 13)]
     NextWindow,
@@ -89,13 +96,14 @@ pub enum LayoutCommand {
     #[command(label = "Shrink window", order = 8)]
     ResizeWindowShrink(ResizeOrientation),
     #[command(order = 9, sample = "Self::ResizeWindowBy { amount: 10.0 }")]
-    ResizeWindowBy {
-        amount: f64,
-    },
-    #[command(group = 4, label = "Scroll strip by", order = 22, sample = "Self::ScrollStrip { delta: 100.0 }")]
-    ScrollStrip {
-        delta: f64,
-    },
+    ResizeWindowBy { amount: f64 },
+    #[command(
+        group = 4,
+        label = "Scroll strip by",
+        order = 22,
+        sample = "Self::ScrollStrip { delta: 100.0 }"
+    )]
+    ScrollStrip { delta: f64 },
     #[command(group = 4, order = 23)]
     SnapStrip,
     #[command(group = 4, label = "Cycle preset width", order = 24)]
@@ -126,30 +134,48 @@ pub enum LayoutCommand {
     CreateWorkspace,
     #[command(skip)]
     SwitchToLastWorkspace,
-    #[command(label = "Swap specific windows", order = 51, sample = "Self::SwapWindows(WindowId { pid: 0, idx: 1 }, WindowId { pid: 0, idx: 2 })")]
+    #[command(
+        label = "Swap specific windows",
+        order = 51,
+        sample = "Self::SwapWindows(WindowId { pid: 0, idx: 1 }, WindowId { pid: 0, idx: 2 })"
+    )]
     SwapWindows(WindowId, WindowId),
     /// Move `window`'s tab to where `target`'s tab sits in their shared stack,
     /// shifting the tabs between them toward the vacated slot.
-    #[command(label = "Move a stack tab", order = 52, sample = "Self::MoveStackTab { window: WindowId { pid: 0, idx: 1 }, target: WindowId { pid: 0, idx: 2 } }")]
-    MoveStackTab {
-        window: WindowId,
-        target: WindowId,
-    },
-    #[command(group = 4, label = "Adjust master ratio by", order = 25, sample = "Self::AdjustMasterRatio(0.05)")]
+    #[command(
+        label = "Move a stack tab",
+        order = 52,
+        sample = "Self::MoveStackTab { window: WindowId { pid: 0, idx: 1 }, target: WindowId { pid: 0, idx: 2 } }"
+    )]
+    MoveStackTab { window: WindowId, target: WindowId },
+    #[command(
+        group = 4,
+        label = "Adjust master ratio by",
+        order = 25,
+        sample = "Self::AdjustMasterRatio(0.05)"
+    )]
     AdjustMasterRatio(f64),
-    #[command(group = 4, label = "Adjust master count by", order = 26, sample = "Self::AdjustMasterCount { delta: 1 }")]
-    AdjustMasterCount {
-        delta: i32,
-    },
+    #[command(
+        group = 4,
+        label = "Adjust master count by",
+        order = 26,
+        sample = "Self::AdjustMasterCount { delta: 1 }"
+    )]
+    AdjustMasterCount { delta: i32 },
     #[command(group = 4, order = 27)]
     PromoteToMaster,
     #[command(group = 4, label = "Swap master and stack", order = 28)]
     SwapMasterStack,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, rift_config_derive::CommandCatalog)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, rift_config_derive::CommandCatalog,
+)]
 #[serde(rename_all = "snake_case")]
-#[command(defaults(Direction = "Direction::Left", DisplaySelector = "DisplaySelector::Direction(Direction::Left)"))]
+#[command(defaults(
+    Direction = "Direction::Left",
+    DisplaySelector = "DisplaySelector::Direction(Direction::Left)"
+))]
 pub enum ReactorCommand {
     #[command(label = "Open Settings", order = 47)]
     OpenSettings,
@@ -159,13 +185,21 @@ pub enum ReactorCommand {
     Debug,
     #[command(label = "Serialize state", order = 49)]
     Serialize,
-    #[command(group = 4, label = "Save layout to file", order = 54, sample = "Self::SaveLayout { path: std::path::PathBuf::new() }")]
-    SaveLayout {
-        path: PathBuf,
-    },
+    #[command(
+        group = 4,
+        label = "Save layout to file",
+        order = 54,
+        sample = "Self::SaveLayout { path: std::path::PathBuf::new() }"
+    )]
+    SaveLayout { path: PathBuf },
     #[command(order = 50)]
     SaveAndExit,
-    #[command(group = 4, label = "Restore layout from file", order = 55, sample = "Self::RestoreLayout { path: std::path::PathBuf::new(), scope: RestoreScope::Workspace, source: RestoreSource::SavedActiveSpace }")]
+    #[command(
+        group = 4,
+        label = "Restore layout from file",
+        order = 55,
+        sample = "Self::RestoreLayout { path: std::path::PathBuf::new(), scope: RestoreScope::Workspace, source: RestoreSource::SavedActiveSpace }"
+    )]
     RestoreLayout {
         path: PathBuf,
         scope: RestoreScope,
@@ -176,7 +210,12 @@ pub enum ReactorCommand {
     SwitchSpace(Direction),
     #[command(skip)]
     ToggleSpaceActivated,
-    #[command(group = 1, label = "Focus specific window", order = 53, sample = "Self::FocusWindow { window_id: WindowId { pid: 0, idx: 1 }, window_server_id: None }")]
+    #[command(
+        group = 1,
+        label = "Focus specific window",
+        order = 53,
+        sample = "Self::FocusWindow { window_id: WindowId { pid: 0, idx: 1 }, window_server_id: None }"
+    )]
     FocusWindow {
         window_id: WindowId,
         window_server_id: Option<u32>,
@@ -192,9 +231,7 @@ pub enum ReactorCommand {
     #[command(group = 3, order = 35)]
     FocusDisplay(DisplaySelector),
     #[command(skip)]
-    CloseWindow {
-        window_server_id: Option<u32>,
-    },
+    CloseWindow { window_server_id: Option<u32> },
     #[command(group = 3, order = 36)]
     MoveWindowToDisplay {
         selector: DisplaySelector,

@@ -88,25 +88,50 @@ pub enum ConfiguredLayoutCommand {
     SwitchPresetColumnWidth,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, strum_macros::VariantNames, rift_config_derive::CommandCatalog)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    strum_macros::VariantNames,
+    rift_config_derive::CommandCatalog,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WmCmd {
     #[command(group = 2, label = "Toggle tiling", order = 40)]
     ToggleSpaceActivated,
-    #[command(label = "Run command", order = 45, sample = "Self::Exec(ExecCmd::String(String::new()))")]
+    #[command(
+        label = "Run command",
+        order = 45,
+        sample = "Self::Exec(ExecCmd::String(String::new()))"
+    )]
     Exec(ExecCmd),
     #[command(order = 46)]
     ReloadConfig,
-    #[command(label = "Switch to keymap", order = 44, sample = "Self::BindingMode(\"default\".into())")]
+    #[command(
+        label = "Switch to keymap",
+        order = 44,
+        sample = "Self::BindingMode(\"default\".into())"
+    )]
     BindingMode(String),
 
     #[command(group = 2, order = 31)]
     NextWorkspace,
     #[command(group = 2, label = "Previous workspace", order = 32)]
     PrevWorkspace,
-    #[command(group = 2, order = 29, sample = "Self::SwitchToWorkspace(WorkspaceSelector::Index(0))")]
+    #[command(
+        group = 2,
+        order = 29,
+        sample = "Self::SwitchToWorkspace(WorkspaceSelector::Index(0))"
+    )]
     SwitchToWorkspace(WorkspaceSelector),
-    #[command(group = 2, order = 30, sample = "Self::MoveWindowToWorkspace(WorkspaceSelector::Index(0))")]
+    #[command(
+        group = 2,
+        order = 30,
+        sample = "Self::MoveWindowToWorkspace(WorkspaceSelector::Index(0))"
+    )]
     MoveWindowToWorkspace(WorkspaceSelector),
     #[command(group = 2, order = 34)]
     CreateWorkspace,

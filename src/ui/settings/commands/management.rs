@@ -184,4 +184,3 @@ pub(super) fn modifier_combinations(f: &mut FormBuilder, model: &Rc<Model>) -> V
         .push(HStack::new(&ui).push(name).push(recorder).push(add))
         .push(message)
 }
-

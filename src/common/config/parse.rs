@@ -82,10 +82,8 @@ impl Config {
         key: &str,
         combinations: &std::collections::BTreeMap<String, String>,
     ) -> Option<(String, Hotkey)> {
-        let key = Self::normalize_hotkey_string(&Self::expand_modifier_combinations(
-            key,
-            combinations,
-        ));
+        let key =
+            Self::normalize_hotkey_string(&Self::expand_modifier_combinations(key, combinations));
         let hotkey = Hotkey::from_str(&key).ok()?;
         Some((key, hotkey))
     }

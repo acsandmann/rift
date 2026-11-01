@@ -926,7 +926,9 @@ fn binding_edits_never_overwrite_overlapping_shortcuts() {
     let toggle = source.keys["Alt + Z"].clone();
     // `comb1` expands to the same keys as an explicit binding.
     let combination = source.modifier_combinations["comb1"].clone();
-    let (key, command) = source.conflicting_binding("default", &format!("{combination} + H"), None).unwrap();
+    let (key, command) = source
+        .conflicting_binding("default", &format!("{combination} + H"), None)
+        .unwrap();
     assert_eq!((key.as_str(), command), ("comb1 + H", &source.keys["comb1 + H"]));
     // Left/right-specific modifiers overlap their family.
     assert!(source.conflicting_binding("default", "AltLeft + H", None).is_some());
@@ -937,17 +939,34 @@ fn binding_edits_never_overwrite_overlapping_shortcuts() {
     assert!(taken.unwrap_err().contains("Alt + H"));
     assert!(source.bind("default", None, "Alt + Nope".into(), toggle.clone()).is_err());
     // A rebinding whose original changed elsewhere fails instead of clobbering it.
-    let stale = source.bind("default", Some(("Alt + H", &toggle)), "Alt + B".into(), toggle.clone());
+    let stale = source.bind(
+        "default",
+        Some(("Alt + H", &toggle)),
+        "Alt + B".into(),
+        toggle.clone(),
+    );
     assert!(stale.is_err());
     assert_eq!(source.keys, before);
 
     source
-        .bind("default", Some(("Alt + H", &focus_left)), "Alt + B".into(), focus_left.clone())
+        .bind(
+            "default",
+            Some(("Alt + H", &focus_left)),
+            "Alt + B".into(),
+            focus_left.clone(),
+        )
         .unwrap();
     assert!(!source.keys.contains_key("Alt + H"));
     assert_eq!(source.keys["Alt + B"], focus_left);
     // Keeping the key while changing parameters replaces the command in place.
-    source.bind("default", Some(("Alt + B", &focus_left)), "Alt + B".into(), toggle.clone()).unwrap();
+    source
+        .bind(
+            "default",
+            Some(("Alt + B", &focus_left)),
+            "Alt + B".into(),
+            toggle.clone(),
+        )
+        .unwrap();
     assert_eq!(source.keys["Alt + B"], toggle);
 
     // Edits through the document keep the rest of the file untouched.
@@ -955,8 +974,13 @@ fn binding_edits_never_overwrite_overlapping_shortcuts() {
     let text = document.to_string();
     let edited = document
         .edited_from(document.source().unwrap(), |s| {
-            s.bind("default", Some(("Alt + H", &focus_left)), "Alt + B".into(), focus_left.clone())
-                .map_err(anyhow::Error::msg)
+            s.bind(
+                "default",
+                Some(("Alt + H", &focus_left)),
+                "Alt + B".into(),
+                focus_left.clone(),
+            )
+            .map_err(anyhow::Error::msg)
         })
         .unwrap()
         .document
