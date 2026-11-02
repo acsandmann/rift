@@ -772,6 +772,7 @@ pub fn space_window_list_for_connection(
 }
 
 /// None means the native query failed, not that the Space contains no windows.
+#[cfg_attr(test, allow(unreachable_code))]
 pub fn try_space_window_list_for_connection(
     spaces: &[u64],
     owner: u32,
@@ -794,10 +795,17 @@ pub fn try_space_window_list_for_connection(
         return Some(override_ids);
     }
 
+    // Tests use Space ids such as 1 and 2, which are real Spaces on a desktop:
+    // asking the window server lists the machine's own windows, and synthetic
+    // windows missing from that list are taken as hidden.
     #[cfg(test)]
-    if let Some(override_ids) = TEST_SPACE_WINDOW_LIST_OVERRIDE.with(|ids| ids.borrow().clone()) {
+    {
         let _ = (spaces, owner, include_minimized);
-        return Some(override_ids);
+        return Some(
+            TEST_SPACE_WINDOW_LIST_OVERRIDE
+                .with(|ids| ids.borrow().clone())
+                .unwrap_or_default(),
+        );
     }
 
     let cf_space_array = cf_array_from_u64s(spaces);
