@@ -242,7 +242,7 @@ pub(crate) fn emit_layout_events(
         .iter_visible_window_server_ids()
         .filter_map(|wsid| state.windows.tracked_window_id(wsid))
         .filter(|wid| wid.pid == pid)
-        .filter(|wid| state.windows.window(*wid).is_some_and(WindowState::can_reconcile_admission))
+        .filter(|wid| state.windows.can_reconcile_admission(*wid))
         .collect();
     let has_visible_window_server_windows = !visible.is_empty();
 
@@ -253,9 +253,7 @@ pub(crate) fn emit_layout_events(
             .filter(|wid| wid.pid == pid)
             .map(|wid| (wid, false)),
     ) {
-        if included.contains(&wid)
-            || !state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
-        {
+        if included.contains(&wid) || !state.windows.can_reconcile_admission(wid) {
             continue;
         }
         // AX fallback must not resurrect an omitted window via geometry when native
@@ -298,7 +296,7 @@ pub(crate) fn emit_layout_events(
             let Some(effects) = effects else {
                 continue;
             };
-            let Some(window) = state.windows.window(wid).filter(|window| window.is_admitted())
+            let Some(window) = state.windows.window(wid).filter(|_| state.windows.is_admitted(wid))
             else {
                 continue;
             };

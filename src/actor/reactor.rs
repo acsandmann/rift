@@ -5,6 +5,7 @@
 //! changes by sending requests out to the other actors in the system.
 
 mod animation;
+mod claims;
 mod events;
 mod gesture;
 pub(crate) use crate::layout_engine::WorkspaceDropRequest as OverviewDrop;
@@ -386,6 +387,8 @@ pub enum Event {
 
     #[serde(skip)]
     InstallIpc(crate::ipc::InstallRequest),
+    #[serde(skip)]
+    ReleaseClaims(crate::ipc::ReleaseClaims),
 
     BindingModeChanged {
         mode: String,
@@ -1040,6 +1043,7 @@ impl Reactor {
     fn handle_thread_event(reactor: &Rc<RefCell<Reactor>>, event: Event) {
         match event {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
+            Event::ReleaseClaims(release) => release.apply(&mut reactor.borrow_mut()),
             Event::MouseFocusPending(publisher) => {
                 if reactor.borrow().viewport_gesture.as_ref().is_some_and(|s| !s.released) {
                     publisher.take_latest();
@@ -1293,9 +1297,16 @@ impl Reactor {
     fn handle_event_inner(&mut self, event: Event) {
         let may_make_ready = matches!(&event, Event::SpaceStateChanged(_));
         let previously_focused_window = self.main_window();
+        let claim_suppressed_ffm =
+            self.state.windows.suppresses_focus_follows_mouse(previously_focused_window);
         match self.dispatch_workflow(event) {
             Ok(mut outcome) => {
                 let focused_window = self.main_window();
+                if claim_suppressed_ffm
+                    != self.state.windows.suppresses_focus_follows_mouse(focused_window)
+                {
+                    outcome = outcome.with_focus_follows_mouse_refresh();
+                }
                 if focused_window != previously_focused_window
                     && let Some(focused_window) = focused_window
                 {
@@ -2014,7 +2025,7 @@ impl Reactor {
                 let session_id = self.drag_manager.actor.await_modifier(button, point, action);
                 let source = self.window_id_under_cursor().and_then(|window| {
                     let state = self.state.windows.window(window)?;
-                    state.is_admitted().then_some((
+                    self.state.windows.is_admitted(window).then_some((
                         window,
                         state.frame_monotonic,
                         state.info.sys_id,
@@ -2150,7 +2161,9 @@ impl Reactor {
                     .get(intent.workspace)
                     .map(|ws| ws.space);
                 let valid = self.state.windows.window(intent.window).is_some_and(|window| {
-                    window.is_admitted() && window.info.is_standard && !window.info.is_minimized
+                    self.state.windows.is_admitted(intent.window)
+                        && window.info.is_standard
+                        && !window.info.is_minimized
                 }) && source.zip(destination).is_some_and(|(source, destination)| {
                     [
                         self.layout_manager.layout_engine.workspaces()[source].space,
@@ -2858,7 +2871,7 @@ impl Reactor {
                 {
                     self.process_windows_for_app_rules(vec![window], app_info, false);
                 }
-                if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
+                if self.state.windows.is_admitted(window) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
                     self.place_new_window_on_pointer_display(window, space);
                 }
@@ -3191,7 +3204,8 @@ impl Reactor {
 
     fn create_window_data(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         let window_state = self.state.windows.window(window_id)?;
-        if !window_state.is_admitted() {
+        let externally_managed = self.state.windows.is_claimed(window_id);
+        if !window_state.is_admitted() && !externally_managed {
             return None;
         }
         let app = self.app_manager.apps.get(&window_id.pid)?;
@@ -3203,6 +3217,7 @@ impl Reactor {
             layout_frame: None,
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
+            externally_managed,
             is_focused: self.main_window() == Some(window_id),
             layout_position: None,
             app_name,
@@ -4609,6 +4624,10 @@ impl Reactor {
         space: SpaceId,
         preserve_workspace_ordinal: bool,
     ) {
+        // A claim holds the destination; release replays this reconciliation.
+        if self.state.windows.is_claimed(wid) {
+            return;
+        }
         if !self.state.windows.reconcile_admission(wid) {
             self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             return;
@@ -4891,9 +4910,7 @@ impl Reactor {
         }
     }
 
-    fn window_is_standard(&self, id: WindowId) -> bool {
-        self.state.windows.window(id).is_some_and(WindowState::is_admitted)
-    }
+    fn window_is_standard(&self, id: WindowId) -> bool { self.state.windows.is_admitted(id) }
 
     pub(crate) fn visible_spaces_for_layout(
         &self,
@@ -5119,7 +5136,9 @@ impl Reactor {
             return false;
         };
 
-        if !window.is_admitted() && !self.layout_manager.layout_engine.is_window_floating(wid) {
+        if self.state.windows.is_claimed(wid)
+            || (!window.is_admitted() && !self.layout_manager.layout_engine.is_window_floating(wid))
+        {
             trace!(
                 ?wid,
                 "Skipping mouse focus for a window outside admission policy"
@@ -5227,10 +5246,7 @@ impl Reactor {
 
         let mut windows_by_space: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
         for &wid in &window_ids {
-            let Some(state) = self.state.windows.window(wid) else {
-                continue;
-            };
-            if !state.can_reconcile_admission() {
+            if !self.state.windows.can_reconcile_admission(wid) {
                 continue;
             }
             let Some(space) = self
@@ -5642,8 +5658,8 @@ impl Reactor {
 
     fn activation_from_unmanageable_window(&self, pid: pid_t) -> Option<WindowServerId> {
         let (wsid, wid) = self.tracked_window_under_cursor()?;
-        let window = self.state.windows.window(wid)?;
-        (wid.pid == pid && !window.is_admitted()).then_some(wsid)
+        self.state.windows.window(wid)?;
+        (wid.pid == pid && !self.state.windows.is_admitted(wid)).then_some(wsid)
     }
 
     fn focus_untracked_window_under_cursor(&mut self) -> bool {
@@ -5873,7 +5889,8 @@ impl Reactor {
     fn update_focus_follows_mouse_state(&mut self) {
         let should_enable = self.config.settings.focus_follows_mouse
             && matches!(self.menu_manager.menu_state, MenuState::Closed)
-            && !self.is_mission_control_active();
+            && !self.is_mission_control_active()
+            && !self.state.windows.suppresses_focus_follows_mouse(self.main_window());
         self.set_focus_follows_mouse_enabled(should_enable);
     }
 

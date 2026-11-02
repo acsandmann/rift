@@ -95,11 +95,7 @@ pub(crate) fn apply_window_retirement(
     if let Some(wsid) = wsid {
         transactions.remove_for_window(wsid);
     }
-    let drag_changed = drag.actor.window_removed(wid);
-    drag.sync_preview();
-    if drag_changed && drag.externally_controlled_window == Some(wid) {
-        drag.externally_controlled_window = None;
-    }
+    drag.forget_window(wid);
     EventOutcome::window_membership_changed(true, false)
         .with_arrange_passes(0)
         .with_layout_event(LayoutEvent::WindowRemoved(wid))
@@ -299,6 +295,15 @@ pub fn handle_window_frame_changed(
     }
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
+    }
+    // The external owner has geometry authority; keep only native facts current.
+    if state.windows.is_claimed(wid) {
+        if old_space != new_space
+            && let (Some(server), Some(space)) = (server_id, new_space)
+        {
+            state.windows.observe_native_space(server, space, true);
+        }
+        return Ok(EventOutcome::no_change());
     }
     // An adjusted acknowledgement of our own frame write is not a new native drag.
     if matches!(

@@ -271,7 +271,7 @@ impl RiftMachClient {
                     .saturating_duration_since(std::time::Instant::now())
                     .as_millis()
                     .min(u32::MAX.into()) as u32;
-                payload = unsafe { receive_message(reply_port.name, Some(timeout))? };
+                payload = unsafe { receive_message(reply_port.name, Some(timeout))?.1 };
                 continue;
             }
             return match parse_json_payload::<RiftResponse<T>>(&payload, "response")? {
@@ -285,6 +285,15 @@ impl RiftMachClient {
         }
     }
 
+    /// Opens a session for claiming windows from Rift. Claims end when they are
+    /// released or when the session is dropped (including process exit).
+    pub fn window_management_session(&self) -> Result<WindowManagementSession, ClientError> {
+        Ok(WindowManagementSession {
+            reply_port: ReplyPort::allocate(MACH_PORT_QLIMIT_LARGE)?,
+            sequence: 0,
+        })
+    }
+
     /// Synchronously acknowledge capture before the UI accepts a recorded keystroke.
     pub fn set_shortcut_recording(&self, pid: i32, recording: bool) -> Result<(), ClientError> {
         self.request(RiftRequest::SetShortcutRecording { pid, recording })
@@ -293,6 +302,54 @@ impl RiftMachClient {
     fn request<T: DeserializeOwned>(&self, request: RiftRequest) -> Result<T, ClientError> {
         match self.send_typed_request(&request)? {
             RiftResponse::Success { data } => Ok(data),
+            RiftResponse::Error { error } => Err(ClientError::Server(error)),
+            _ => Err(ClientError::UnknownResponse),
+        }
+    }
+}
+
+/// A persistent Mach receive right that identifies its owner's window claims.
+/// Dropping it ends every claim it holds.
+#[derive(Debug)]
+pub struct WindowManagementSession {
+    reply_port: ReplyPort,
+    sequence: u32,
+}
+
+impl WindowManagementSession {
+    /// Excludes a window from Rift's management until it is released.
+    pub fn claim_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
+        self.claim_window_with_flags(window_id, WindowClaimFlags::default())
+    }
+
+    /// Claims a window, or updates the flags of a claim this session holds.
+    pub fn claim_window_with_flags(
+        &mut self,
+        window_id: WindowId,
+        flags: WindowClaimFlags,
+    ) -> Result<(), ClientError> {
+        self.request(RiftRequest::ClaimWindow { window_id, flags })
+    }
+
+    /// Returns a claimed window to Rift. Releasing an unclaimed window succeeds.
+    pub fn release_window(&mut self, window_id: WindowId) -> Result<(), ClientError> {
+        self.request(RiftRequest::ReleaseWindow { window_id })
+    }
+
+    /// Claim and release are idempotent, so a request may be retried after a
+    /// timeout. Replies carry the request id; a late reply to an abandoned
+    /// request is discarded instead of being taken for the current one.
+    fn request(&mut self, request: RiftRequest) -> Result<(), ClientError> {
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        let id = self.sequence as i32;
+        let payload = serde_json::to_vec(&request).map_err(ClientError::Encode)?;
+        let port = self.reply_port.name;
+        let response = unsafe {
+            let first = send_request_with_id(&payload, Some((port, id)))?;
+            receive_reply(port, id, first)?
+        };
+        match parse_json_payload::<RiftResponse>(&response, "response")? {
+            RiftResponse::Success { .. } => Ok(()),
             RiftResponse::Error { error } => Err(ClientError::Server(error)),
             _ => Err(ClientError::UnknownResponse),
         }
@@ -322,7 +379,7 @@ impl RiftMachSubscription {
         let pending = self.pending.lock().expect("subscription pending events").pop_front();
         let payload = match pending {
             Some(payload) => payload,
-            None => unsafe { receive_message(self.reply_port.name, None)? },
+            None => unsafe { receive_message(self.reply_port.name, None)?.1 },
         };
         parse_json_payload(&payload, "event")
     }
@@ -546,24 +603,33 @@ unsafe fn send_request(
     payload: &[u8],
     subscription_port: Option<MachPort>,
 ) -> Result<Vec<u8>, ClientError> {
+    let reply = subscription_port.map(|port| (port, port as i32));
+    Ok(unsafe { send_request_with_id(payload, reply)? }.1)
+}
+
+/// Sends on a persistent `(port, id)` reply destination, or a one-shot port.
+unsafe fn send_request_with_id(
+    payload: &[u8],
+    persistent: Option<(MachPort, i32)>,
+) -> Result<(i32, Vec<u8>), ClientError> {
     if payload.len() > MAX_MESSAGE_SIZE {
         return Err(ClientError::MessageTooLarge);
     }
 
     let service_port = unsafe { find_service_with_retry()? };
     let owned_reply_port;
-    let reply_port = match subscription_port {
-        Some(port) => port,
+    let (reply_port, id) = match persistent {
+        Some(reply) => reply,
         None => {
             owned_reply_port = ReplyPort::allocate(1)?;
-            owned_reply_port.name
+            (owned_reply_port.name, owned_reply_port.name as i32)
         }
     };
 
     let header = MachMessageHeader {
         bits: message_bits(
             MACH_MSG_TYPE_COPY_SEND,
-            if subscription_port.is_some() {
+            if persistent.is_some() {
                 MACH_MSG_TYPE_COPY_SEND
             } else {
                 MACH_MSG_TYPE_MAKE_SEND
@@ -573,7 +639,7 @@ unsafe fn send_request(
         remote_port: service_port.name,
         local_port: reply_port,
         voucher_port: 0,
-        id: reply_port as i32,
+        id,
     };
     let mut storage = MaybeUninit::<InlineMessage>::uninit();
     let header_ptr = unsafe { prepare_inline_send(&mut storage, header, payload) };
@@ -600,10 +666,11 @@ unsafe fn send_request(
     unsafe { receive_message(reply_port, Some(REQUEST_TIMEOUT_MS)) }
 }
 
+/// Returns the message id (echoed from the request by replies) and payload.
 unsafe fn receive_message(
     reply_port: MachPort,
     timeout: Option<u32>,
-) -> Result<Vec<u8>, ClientError> {
+) -> Result<(i32, Vec<u8>), ClientError> {
     // The kernel initializes the received header, payload, and trailer. Leave
     // the maximum-sized backing storage untouched until then.
     let mut buffer = MaybeUninit::<ReceiveBuffer>::uninit();
@@ -640,7 +707,25 @@ unsafe fn receive_message(
     }
     let data = unsafe { addr_of_mut!((*buffer_ptr).message.data) }.cast::<u8>();
     let payload = unsafe { std::slice::from_raw_parts(data, payload_len) }.to_vec();
+    let id = unsafe { (*header_ptr).id };
     unsafe { mach_msg_destroy(header_ptr) };
+    Ok((id, payload))
+}
+
+/// Receives until the reply to request `id`, discarding replies to abandoned requests.
+unsafe fn receive_reply(
+    port: MachPort,
+    id: i32,
+    (mut reply_id, mut payload): (i32, Vec<u8>),
+) -> Result<Vec<u8>, ClientError> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(REQUEST_TIMEOUT_MS.into());
+    while reply_id != id {
+        let timeout = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .as_millis()
+            .min(u32::MAX.into()) as u32;
+        (reply_id, payload) = unsafe { receive_message(port, Some(timeout))? };
+    }
     Ok(payload)
 }
 
@@ -673,6 +758,39 @@ mod tests {
 
             let data = addr_of_mut!((*storage.as_mut_ptr()).data).cast::<u8>();
             assert_eq!(std::slice::from_raw_parts(data, 8), b"hello\0\0\0");
+        }
+    }
+
+    #[test]
+    fn session_replies_are_matched_to_their_request() {
+        let session = RiftMachClient.window_management_session().unwrap();
+        let port = session.reply_port.name;
+        let deliver = |id: i32, payload: &[u8]| unsafe {
+            let header = MachMessageHeader {
+                bits: message_bits(MACH_MSG_TYPE_MAKE_SEND, 0),
+                size: 0,
+                remote_port: port,
+                local_port: 0,
+                voucher_port: 0,
+                id,
+            };
+            let mut storage = MaybeUninit::<InlineMessage>::uninit();
+            let message = prepare_inline_send(&mut storage, header, payload);
+            assert_eq!(
+                mach_msg(message, MACH_SEND_MSG, (*message).size, 0, 0, 0, 0),
+                KERN_SUCCESS
+            );
+        };
+        // A reply to a timed-out request arrives before the current one.
+        deliver(1, b"late\0");
+        deliver(2, b"current\0");
+        deliver(1, b"later\0");
+        unsafe {
+            let first = receive_message(port, Some(0)).unwrap();
+            assert_eq!(receive_reply(port, 2, first).unwrap(), b"current\0");
+            let first = receive_message(port, Some(0)).unwrap();
+            deliver(3, b"next\0");
+            assert_eq!(receive_reply(port, 3, first).unwrap(), b"next\0\0\0\0");
         }
     }
 

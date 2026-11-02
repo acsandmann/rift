@@ -1,3 +1,5 @@
+use rift_protocol::WindowClaimFlags;
+
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
@@ -42,6 +44,29 @@ pub struct WindowRecord {
     pending_transfer: Option<PendingWindowTransfer>,
     rule_floating: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
+    claim: Option<WindowClaim>,
+}
+
+/// The Mach client port (session) holding external claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClaimOwner(pub u32);
+
+/// Temporary exclusion of a tracked window from Rift management.
+///
+/// The claim holds the window's workspace assignment outside the workspace
+/// index, so enumeration, hiding, rebuilds and projection never see a claimed
+/// window while native identity, visibility and fullscreen tracking continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowClaim {
+    pub owner: ClaimOwner,
+    pub flags: WindowClaimFlags,
+    /// The id the owner claimed; release accepts it across AX identity changes.
+    original: WindowId,
+    workspace: Option<VirtualWorkspaceId>,
+}
+
+impl WindowClaim {
+    pub fn workspace(&self) -> Option<VirtualWorkspaceId> { self.workspace }
 }
 
 /// Only retained while display projection differs from the user's geometry.
@@ -141,6 +166,7 @@ pub struct WindowStore {
     native_fullscreen_records_by_original_window: HashMap<WindowId, NativeFullscreenRecord>,
     native_fullscreen_original_window_by_current_window: HashMap<WindowId, WindowId>,
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
+    claims: HashMap<ClaimOwner, Vec<WindowId>>,
 }
 
 /// Restored native lifecycle facts; placement and actor effects remain external.
@@ -198,6 +224,97 @@ impl WindowStore {
         }
     }
 
+    /// Rift manages a window when native admission passes and no external owner holds it.
+    pub(crate) fn is_admitted(&self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|record| {
+            record.claim.is_none() && record.state.as_ref().is_some_and(WindowState::is_admitted)
+        })
+    }
+
+    /// Rules and admission are reconciled only for windows Rift may manage.
+    pub(crate) fn can_reconcile_admission(&self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|record| {
+            record.claim.is_none()
+                && record.state.as_ref().is_some_and(WindowState::can_reconcile_admission)
+        })
+    }
+
+    pub fn claim(&self, wid: WindowId) -> Option<WindowClaim> {
+        self.record(wid).and_then(|record| record.claim)
+    }
+
+    pub fn is_claimed(&self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|record| record.claim.is_some())
+    }
+
+    pub fn claimed_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.claims.values().flatten().copied()
+    }
+
+    pub fn owner_claims(&self, owner: ClaimOwner) -> &[WindowId] {
+        self.claims.get(&owner).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn suppresses_focus_follows_mouse(&self, wid: Option<WindowId>) -> bool {
+        !self.claims.is_empty()
+            && wid.and_then(|wid| self.claim(wid)).is_some_and(|claim| {
+                claim.flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
+            })
+    }
+
+    /// A tracked window, or the original id of one of `owner`'s claimed windows.
+    pub fn resolve_claim_target(&self, owner: ClaimOwner, wid: WindowId) -> Option<WindowId> {
+        if self.contains_window(wid) {
+            return Some(wid);
+        }
+        self.owner_claims(owner)
+            .iter()
+            .copied()
+            .find(|current| self.claim(*current).is_some_and(|claim| claim.original == wid))
+    }
+
+    /// Claim a tracked window, holding its assignment until release.
+    pub fn insert_claim(&mut self, wid: WindowId, owner: ClaimOwner, flags: WindowClaimFlags) {
+        debug_assert!(self.contains_window(wid) && !self.is_claimed(wid));
+        let workspace = self.take_assignment(wid);
+        self.windows.get_mut(&wid).unwrap().claim = Some(WindowClaim {
+            owner,
+            flags,
+            original: wid,
+            workspace,
+        });
+        self.claims.entry(owner).or_default().push(wid);
+    }
+
+    pub fn set_claim_flags(&mut self, wid: WindowId, flags: WindowClaimFlags) {
+        if let Some(claim) = self.windows.get_mut(&wid).and_then(|record| record.claim.as_mut()) {
+            claim.flags = flags;
+        }
+    }
+
+    /// End a claim. The caller restores the returned assignment if it is still valid.
+    pub fn remove_claim(&mut self, wid: WindowId) -> Option<WindowClaim> {
+        let claim = self.windows.get_mut(&wid)?.claim.take()?;
+        self.unindex_claim(claim.owner, wid);
+        self.prune_window_record(wid);
+        Some(claim)
+    }
+
+    fn unindex_claim(&mut self, owner: ClaimOwner, wid: WindowId) {
+        if let Some(windows) = self.claims.get_mut(&owner) {
+            windows.retain(|window| *window != wid);
+            if windows.is_empty() {
+                self.claims.remove(&owner);
+            }
+        }
+    }
+
+    fn take_assignment(&mut self, wid: WindowId) -> Option<VirtualWorkspaceId> {
+        let assignment = self.windows.get_mut(&wid)?.workspace.take()?;
+        self.remove_window_from_workspace_index(wid, assignment);
+        Some(assignment)
+    }
+
     /// Admission failure clears ownership except while native identity is recovering.
     pub(crate) fn reconcile_admission(&mut self, wid: WindowId) -> bool {
         let admitted = self.window(wid).is_some_and(WindowState::is_admitted);
@@ -208,10 +325,11 @@ impl WindowStore {
     }
 
     pub(crate) fn is_visible_admitted(&self, wid: WindowId) -> bool {
-        self.record(wid).is_some_and(|record| {
-            record.state.as_ref().is_some_and(WindowState::is_admitted)
-                && record.window_server_id.is_some_and(|wsid| self.is_window_visible(wsid))
-        })
+        self.is_admitted(wid)
+            && self
+                .record(wid)
+                .and_then(WindowRecord::window_server_id)
+                .is_some_and(|wsid| self.is_window_visible(wsid))
     }
 
     /// Restore identity for native presence or a return to the recorded user Space.
@@ -238,7 +356,7 @@ impl WindowStore {
         ]
         .into_iter()
         .flatten()
-        .find(|wid| self.window(*wid).is_some_and(WindowState::is_admitted));
+        .find(|wid| self.is_admitted(*wid));
         let removed_window = window
             .filter(|wid| *wid != original)
             .and_then(|_| self.remove_window_assignment(original))
@@ -702,6 +820,7 @@ impl WindowStore {
                 && record.window_server_id.is_none()
                 && record.workspace.is_none()
                 && !record.rule_floating
+                && record.claim.is_none()
         });
         if should_remove {
             self.windows.remove(&window_id);
@@ -1126,6 +1245,10 @@ impl WindowStore {
         window_id: WindowId,
         assignment: VirtualWorkspaceId,
     ) -> Option<VirtualWorkspaceId> {
+        // A claimed window never enters the index; any placement updates its destination.
+        if let Some(claim) = self.windows.get_mut(&window_id).and_then(|r| r.claim.as_mut()) {
+            return claim.workspace.replace(assignment);
+        }
         let old = self.windows.get(&window_id).and_then(|record| record.workspace);
         if old == Some(assignment) {
             return old;
@@ -1168,7 +1291,8 @@ impl WindowStore {
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
         let old = self.windows.get_mut(&window_id).and_then(|record| {
             record.pending_transfer = None;
-            record.workspace.take()
+            let claimed = record.claim.as_mut().and_then(|claim| claim.workspace.take());
+            claimed.or_else(|| record.workspace.take())
         });
         if let Some(old_assignment) = old {
             self.remove_window_from_workspace_index(window_id, old_assignment);
@@ -1223,6 +1347,19 @@ impl WindowStore {
             source.pending_transfer = None;
             source.floating_display_geometry = None;
         }
+        if let Some(claim) = self.windows.get_mut(&from).and_then(|r| r.claim.take()) {
+            self.unindex_claim(claim.owner, from);
+            if !self.is_claimed(to) {
+                self.windows.get_mut(&to).unwrap().claim = Some(claim);
+                self.claims.entry(claim.owner).or_default().push(to);
+            }
+        }
+        // A replacement admitted before its predecessor was recognized yields to the claim.
+        if self.is_claimed(to) {
+            let replacement = self.take_assignment(to);
+            let claim = self.windows.get_mut(&to).and_then(|r| r.claim.as_mut()).unwrap();
+            claim.workspace = claim.workspace.or(replacement);
+        }
 
         if let Some(original_window_id) = self.native_fullscreen_original_window(from)
             && let Some(mut record) =
@@ -1265,6 +1402,9 @@ impl WindowStore {
         let Some(record) = self.windows.remove(&window_id) else {
             return None;
         };
+        if let Some(claim) = record.claim {
+            self.unindex_claim(claim.owner, window_id);
+        }
         if let Some(assignment) = record.workspace {
             self.remove_window_from_workspace_index(window_id, assignment);
         }
@@ -1337,6 +1477,13 @@ impl WindowStore {
         for record in self.native_fullscreen_records_by_original_window.values_mut() {
             if record.workspace == Some(old) {
                 record.workspace = replacement;
+            }
+        }
+        for wid in self.claims.values().flatten() {
+            if let Some(claim) = self.windows.get_mut(wid).and_then(|r| r.claim.as_mut())
+                && claim.workspace == Some(old)
+            {
+                claim.workspace = replacement;
             }
         }
     }
@@ -1547,6 +1694,14 @@ impl WindowStore {
                     self.workspace_windows.get(&workspace).is_some_and(|ids| ids.contains(&wid));
                 debug_assert!(indexed);
             }
+            if let Some(claim) = record.claim {
+                debug_assert!(record.workspace.is_none());
+                debug_assert!(self.owner_claims(claim.owner).contains(&wid));
+            }
+        }
+        for (&owner, ids) in &self.claims {
+            debug_assert!(!ids.is_empty());
+            debug_assert!(ids.iter().all(|wid| self.claim(*wid).is_some_and(|c| c.owner == owner)));
         }
         for (&pid, ids) in &self.app_windows {
             debug_assert!(ids.iter().all(|wid| wid.pid == pid && self.windows.contains_key(wid)));
@@ -1686,6 +1841,85 @@ mod tests {
 
         assert_eq!(window_store.window_server_space(wsid), None);
         assert!(window_store.iter_window_server_ids().next().is_none());
+    }
+
+    fn admitted(wid: WindowId, wsid: WindowServerId) -> WindowState {
+        let mut state = WindowState::from(crate::sys::app::WindowInfo {
+            has_native_tabs: false,
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: format!("{wid:?}"),
+            frame: objc2_core_foundation::CGRect::ZERO,
+            sys_id: Some(wsid),
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        });
+        state.is_manageable = true;
+        state
+    }
+
+    #[test]
+    fn claims_hold_assignment_outside_the_index_and_follow_identity() {
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(10);
+        let mut workspaces = WorkspaceStore::new();
+        let [home, moved, replaced] = ["Home", "Moved", "Replaced"]
+            .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
+        let (owner, other) = (ClaimOwner(7), ClaimOwner(8));
+        let (wid, rekeyed, sibling) =
+            (WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3));
+        store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
+        store.insert_window(sibling, admitted(sibling, WindowServerId::new(3)));
+        store.assign_window_to_workspace(wid, home);
+        store.assign_window_to_workspace(sibling, home);
+
+        store.insert_claim(wid, owner, WindowClaimFlags::empty());
+        assert!(!store.is_admitted(wid) && !store.can_reconcile_admission(wid));
+        assert!(
+            store.window(wid).unwrap().is_admitted(),
+            "native admission is untouched"
+        );
+        assert_eq!(store.workspace_for_window(wid), None);
+        assert_eq!(store.workspace_windows(home), vec![sibling]);
+        assert_eq!(store.iter_workspace_assignments().count(), 1);
+        // Placement while claimed only updates the destination.
+        assert_eq!(store.assign_window_to_workspace(wid, moved), Some(home));
+        assert!(store.workspace_windows(moved).is_empty());
+        store.remap_workspace(moved, Some(replaced));
+        assert_eq!(store.claim(wid).unwrap().workspace(), Some(replaced));
+        store.debug_assert_invariants();
+
+        // An AX rekey carries the claim; a replacement assignment folds into it.
+        store.insert_window(rekeyed, admitted(rekeyed, WindowServerId::new(2)));
+        store.assign_window_to_workspace(rekeyed, home);
+        assert_eq!(
+            store.reconcile_ax_identity(rekeyed, Some(WindowServerId::new(1))),
+            Some(wid)
+        );
+        assert_eq!(store.owner_claims(owner), &[rekeyed]);
+        assert_eq!(store.claim(rekeyed).unwrap().workspace(), Some(replaced));
+        assert_eq!(store.workspace_windows(home), vec![sibling]);
+        assert_eq!(store.resolve_claim_target(owner, wid), Some(rekeyed));
+        assert_eq!(store.resolve_claim_target(other, wid), None);
+        store.debug_assert_invariants();
+
+        let claim = store.remove_claim(rekeyed).unwrap();
+        assert_eq!((claim.owner, claim.workspace()), (owner, Some(replaced)));
+        assert!(store.is_admitted(rekeyed) && store.owner_claims(owner).is_empty());
+
+        // Destruction and admission-failure cleanup both reach the claim.
+        store.insert_claim(sibling, other, WindowClaimFlags::empty());
+        assert_eq!(store.remove_window_assignment(sibling), Some(home));
+        assert_eq!(store.claim(sibling).unwrap().workspace(), None);
+        store.remove_window(sibling);
+        assert!(store.owner_claims(other).is_empty() && store.claimed_windows().next().is_none());
+        store.debug_assert_invariants();
     }
 
     #[test]

@@ -1916,6 +1916,19 @@ impl LayoutEngine {
         app_rule_outcome: &mut AppRuleOutcome,
     ) -> EventResponse {
         debug!(?event);
+        // An externally claimed window never rejoins a projection, whichever path observed it.
+        if let LayoutEvent::WindowAdded(_, wid)
+        | LayoutEvent::WindowObserved(
+            _,
+            ResolvedWindow {
+                info: WindowLayoutInfo { window_id: wid, .. },
+                ..
+            },
+        ) = &event
+            && window_store.is_claimed(*wid)
+        {
+            return EventResponse::default();
+        }
         match event {
             LayoutEvent::SpaceExposed(space, size) => {
                 self.debug_tree(space);

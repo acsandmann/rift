@@ -17,7 +17,8 @@ pub use rift_client::{ClientError as RiftMachClientError, RiftMachClient, RiftMa
 
 use crate::actor::config as config_actor;
 use crate::actor::reactor::{self, Event};
-use crate::ipc::subscriptions::SharedServerState;
+use crate::ipc::subscriptions::{PortLease, SharedServerState};
+use crate::model::window_store::ClaimOwner;
 use crate::sys::mach::{
     OwnedMachReply, is_mach_server_registered, mach_msg_header_t, mach_server_install,
     send_mach_reply,
@@ -35,7 +36,28 @@ const MAX_RESPONSE_SIZE: usize = 262_144;
 
 pub struct InstallRequest {
     config_tx: config_actor::Sender,
+    reactor_tx: reactor::Sender,
     response: std::sync::mpsc::SyncSender<Result<SharedServerState, String>>,
+}
+
+/// A dead client's claims, released on the reactor's own turn if it was busy.
+pub struct ReleaseClaims {
+    port: ClientPort,
+    server_state: SharedServerState,
+}
+
+impl std::fmt::Debug for ReleaseClaims {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReleaseClaims({})", self.port)
+    }
+}
+
+impl ReleaseClaims {
+    /// The claims lease outlives the claims, so the port name cannot be reused before this.
+    pub(crate) fn apply(self, reactor: &mut reactor::Reactor) {
+        reactor.release_claims(ClaimOwner(self.port));
+        self.server_state.set_lease(self.port, PortLease::Claims, false);
+    }
 }
 
 impl std::fmt::Debug for InstallRequest {
@@ -55,13 +77,21 @@ pub fn run_mach_server(
     }
     let (response, result) = sync_channel(1);
     reactor
-        .try_send(Event::InstallIpc(InstallRequest { config_tx, response }))
+        .try_send(Event::InstallIpc(InstallRequest {
+            config_tx,
+            reactor_tx: reactor.sender(),
+            response,
+        }))
         .map_err(|_| "Reactor is unavailable".to_string())?;
     result.recv().map_err(|_| "Reactor stopped while installing IPC".to_string())?
 }
 
 pub(crate) fn install_mach_server(reactor: Rc<RefCell<reactor::Reactor>>, request: InstallRequest) {
-    let InstallRequest { config_tx, response } = request;
+    let InstallRequest {
+        config_tx,
+        reactor_tx,
+        response,
+    } = request;
     let result = (|| {
         if is_mach_server_registered() {
             return Err(
@@ -85,11 +115,12 @@ pub(crate) fn install_mach_server(reactor: Rc<RefCell<reactor::Reactor>>, reques
             })
             .map_err(|error| format!("Failed to spawn IPC config worker: {error}"))?;
 
-        let handler = Box::new(IpcRequestHandler::new(
+        let handler = Box::new(IpcRequestHandler {
             reactor,
-            server_state.clone(),
+            reactor_tx,
+            server_state: server_state.clone(),
             config_jobs,
-        ));
+        });
         let context = Box::into_raw(handler);
         if !unsafe {
             mach_server_install(
@@ -111,20 +142,36 @@ struct IpcRequestHandler {
     // CFMachPort invokes this handler on the reactor's own CFRunLoop thread.
     // RefCell enforces local borrow exclusivity without a mutex or state mirror.
     reactor: Rc<RefCell<reactor::Reactor>>,
+    reactor_tx: reactor::Sender,
     server_state: SharedServerState,
     config_jobs: ConfigJobSender<ConfigJob>,
 }
 
 impl IpcRequestHandler {
-    fn new(
-        reactor: Rc<RefCell<reactor::Reactor>>,
-        server_state: SharedServerState,
-        config_jobs: ConfigJobSender<ConfigJob>,
-    ) -> Self {
-        Self {
-            reactor,
-            server_state,
-            config_jobs,
+    /// Claims last as long as the client's port: its lease follows the owner's claim set.
+    fn update_claims(
+        &self,
+        port: ClientPort,
+        acquire: bool,
+        change: impl FnOnce(&mut reactor::Reactor, ClaimOwner) -> Result<(), &'static str>,
+        data: serde_json::Value,
+    ) -> Vec<u8> {
+        let Ok(mut reactor) = self.reactor.try_borrow_mut() else {
+            return encode_error(serde_json::json!({ "message": "Reactor is busy" }));
+        };
+        if acquire && !self.server_state.set_lease(port, PortLease::Claims, true) {
+            return encode_error(serde_json::json!({
+                "message": "Failed to monitor management port"
+            }));
+        }
+        let owner = ClaimOwner(port);
+        let result = change(&mut reactor, owner);
+        if reactor.state.windows.owner_claims(owner).is_empty() {
+            self.server_state.set_lease(port, PortLease::Claims, false);
+        }
+        match result {
+            Ok(()) => encode_success(data),
+            Err(message) => encode_error(serde_json::json!({ "message": message })),
         }
     }
 
@@ -209,6 +256,18 @@ impl IpcRequestHandler {
             RiftRequest::ListCliSubscriptions => {
                 encode_success(self.server_state.list_cli_subscriptions())
             }
+            RiftRequest::ClaimWindow { window_id, flags } => self.update_claims(
+                client_port,
+                true,
+                |reactor, owner| reactor.claim_window(window_id_from(window_id)?, owner, flags),
+                serde_json::json!({ "claimed": window_id }),
+            ),
+            RiftRequest::ReleaseWindow { window_id } => self.update_claims(
+                client_port,
+                false,
+                |reactor, owner| reactor.release_window(window_id_from(window_id)?, owner),
+                serde_json::json!({ "released": window_id }),
+            ),
             request => match self.reactor.try_borrow_mut() {
                 Ok(mut reactor) => encode_reactor_response(&mut reactor, request),
                 Err(_) => encode_error(serde_json::json!({ "message": "Reactor is busy" })),
@@ -290,8 +349,7 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         }
 
         RiftRequest::GetWindowInfo { window_id } => {
-            let window_id = crate::actor::app::WindowId::new(window_id.pid, window_id.idx);
-            match reactor.query_window_info(window_id) {
+            match window_id_from(window_id).ok().and_then(|id| reactor.query_window_info(id)) {
                 Some(window) => encode_success(rift_protocol::WindowData::from(window)),
                 None => encode_error(serde_json::json!({ "message": "Window not found" })),
             }
@@ -368,6 +426,14 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         },
         _ => encode_error(serde_json::json!({ "message": "Unsupported request" })),
     }
+}
+
+fn window_id_from(
+    id: rift_protocol::WindowId,
+) -> Result<crate::actor::app::WindowId, &'static str> {
+    std::num::NonZeroU32::new(id.idx)
+        .map(|idx| crate::actor::app::WindowId { pid: id.pid, idx })
+        .ok_or("Window not found")
 }
 
 fn query_space_for_display(
@@ -506,6 +572,14 @@ unsafe extern "C" fn handle_mach_client_disconnect_c(
 
     let handler = unsafe { &*(context as *const IpcRequestHandler) };
     handler.server_state.remove_client(client_port);
+    let release = ReleaseClaims {
+        port: client_port,
+        server_state: handler.server_state.clone(),
+    };
+    match handler.reactor.try_borrow_mut() {
+        Ok(mut reactor) => release.apply(&mut reactor),
+        Err(_) => handler.reactor_tx.send(Event::ReleaseClaims(release)),
+    }
 }
 
 fn send_error_response(header: &mut mach_msg_header_t, message: &str) {

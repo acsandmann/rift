@@ -61,6 +61,35 @@ which dims unfocused windows and updates them as Rift events arrive:
 cargo run -p rift-client --example dimmer
 ```
 
+## Claim windows
+
+A `WindowManagementSession` lets a companion app take windows out of Rift's
+management (for example, a scratchpad). Rift stops tiling, placing, animating,
+and dragging a claimed window, and keeps its workspace, floating state, and
+layout slot for when it is released:
+
+```rust
+use rift_client::{RiftMachClient, WindowClaimFlags, WindowId};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = RiftMachClient::connect()?;
+    let mut session = client.window_management_session()?;
+    let window = WindowId { pid: 1234, idx: 56 };
+    session.claim_window_with_flags(window, WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)?;
+    // ... manage the window ...
+    session.release_window(window)?;
+    Ok(())
+}
+```
+
+Claims end when they are released or when the session is dropped, including
+when the process exits. Claiming is idempotent and updates the flags of a
+claim the session already holds. `release_window` accepts the id that was
+claimed even if macOS later gives the window a new identity. Claimed windows
+report `externally_managed: true` in window queries.
+`SUPPRESS_FOCUS_FOLLOWS_MOUSE` pauses focus follows mouse only while the
+claimed window is focused.
+
 Set `RIFT_BS_NAME` to use a non-default Rift bootstrap service (for example,
 when running multiple instances).
 

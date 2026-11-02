@@ -814,13 +814,14 @@ pub unsafe fn mach_unwatch_send_right(port: mach_port_t) {
     }
 
     let mut previous = MACH_PORT_NULL;
+    // MIG rejects a null disposition; a null port with MOVE_SEND_ONCE cancels.
     let _ = mach_port_request_notification(
         mach_task_self(),
         port,
         MACH_NOTIFY_DEAD_NAME,
         0,
         MACH_PORT_NULL,
-        0,
+        MACH_MSG_TYPE_MOVE_SEND_ONCE as c_int,
         &mut previous,
     );
     if previous != MACH_PORT_NULL {
@@ -1271,6 +1272,8 @@ extern "C" fn mach_message_callback(
                 if let Some(handler) = mach_server.dead_name_handler {
                     handler(mach_server.context, notification.port);
                 }
+                // The notification carries its own dead-name reference; leases hold theirs.
+                let _ = mach_port_deallocate(mach_task_self(), notification.port);
             }
             let _ = mach_msg_destroy(message as *mut mach_msg_header_t);
             return;
@@ -1561,6 +1564,45 @@ pub unsafe fn mach_server_run(context: *mut c_void, handler: mach_handler) -> bo
     );
     CFRunLoopRun();
     true
+}
+
+/// Real-port helpers for exercising notification lifetimes in tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Route dead-name requests to `port`, as the installed IPC server does.
+    pub(crate) fn set_notify_port(port: mach_port_t) {
+        IPC_SERVER_PORT.store(port, Ordering::Release);
+    }
+
+    /// Destroying a receive right kills every send right to its port.
+    pub(crate) unsafe fn destroy_receive_right(port: mach_port_t) {
+        let _ = mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+    }
+
+    /// Receive every queued notification, returning `(msgh_id, notified name)`.
+    pub(crate) unsafe fn drain(port: mach_port_t) -> Vec<(mach_msg_id_t, mach_port_name_t)> {
+        let mut received = Vec::new();
+        loop {
+            let mut buffer = [0u64; 64];
+            let header = buffer.as_mut_ptr().cast::<mach_msg_header_t>();
+            let options = MACH_RCV_MSG | MACH_RCV_TIMEOUT;
+            if mach_msg(header, options, 0, size_of_val(&buffer) as u32, port, 10, 0)
+                != MACH_MSG_SUCCESS
+            {
+                return received;
+            }
+            // Port-name notifications carry the name after the header and NDR record.
+            let name = *buffer
+                .as_ptr()
+                .cast::<u8>()
+                .add(size_of::<mach_msg_header_t>() + 8)
+                .cast::<u32>();
+            received.push(((*header).msgh_id, name));
+            let _ = mach_msg_destroy(header);
+        }
+    }
 }
 
 #[cfg(test)]

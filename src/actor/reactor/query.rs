@@ -719,9 +719,16 @@ impl Reactor {
                 .workspaces()
                 .windows_in_active_workspace(&self.state.windows, space);
             let logical_positions = self.logical_window_positions_for(Some(space), None);
+            // Claimed windows hold no workspace; report them where they natively are.
+            let claimed = self
+                .state
+                .windows
+                .claimed_windows()
+                .filter(|wid| self.best_space_for_window_id(*wid) == Some(space));
 
             let mut windows: Vec<RuntimeWindowData> = active_windows
                 .into_iter()
+                .chain(claimed)
                 .filter_map(|wid| {
                     let mut wd = self.create_window_data(wid)?;
                     if !wd.is_floating {
