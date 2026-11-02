@@ -522,11 +522,26 @@ fn merging_two_claimed_identities_keeps_the_recognized_owner() {
     assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
     assert!(reactor.state.windows.owner_claims(OTHER).is_empty());
     assert!(!tiled(&mut reactor, space).contains(&replacement));
-    assert_eq!(reactor.release_window(replacement, OTHER), Err(OWNED_ELSEWHERE));
+    reactor.state.windows.debug_assert_invariants();
 
-    assert_eq!(reactor.release_window(wid(1), OWNER), Ok(()));
+    // The displaced session's requests fail rather than act on a window it no longer holds.
+    assert_eq!(reactor.release_window(replacement, OTHER), Err(OWNED_ELSEWHERE));
+    for flags in [NONE, SUPPRESS] {
+        assert_eq!(
+            reactor.claim_window(replacement, OTHER, flags),
+            Err(OWNED_ELSEWHERE)
+        );
+    }
+    // Its disconnect touches nothing; the surviving owner's returns the window.
+    assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OTHER)), 0);
+    assert_eq!(reactor.state.windows.claim(replacement).unwrap().owner, OWNER);
+    assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 1);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
+    reactor.state.windows.debug_assert_invariants();
+
+    // The window is free again for either session.
+    assert_eq!(reactor.claim_window(replacement, OTHER, NONE), Ok(()));
     reactor.state.windows.debug_assert_invariants();
 }
 
@@ -575,4 +590,93 @@ fn window_queries_place_claimed_windows_from_cached_spaces_only() {
         NativeFullscreenTransition::Suspended,
     );
     assert_eq!(listed_on(&reactor), [false, false]);
+}
+
+#[test]
+fn rekeying_a_claimed_window_schedules_no_rift_work() {
+    let (mut apps, mut reactor, space) = settled(2);
+    reactor.claim_window(wid(1), OWNER, SUPPRESS).unwrap();
+    apps.simulate_until_quiet(&mut reactor);
+    let frames = apps.windows.clone();
+    let replacement = wid(7);
+    let info = reactor.state.windows.window(wid(1)).unwrap().info.clone();
+
+    let window_server_queries = window_server::window_space_query_count();
+    let arrangements = layout_updates(&mut reactor, |r| {
+        r.handle_event(Event::WindowCreated(replacement, info, None, None))
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(arrangements, 0);
+    assert_eq!(window_server::window_space_query_count(), window_server_queries);
+    assert!(apps.requests().is_empty());
+    assert_eq!(apps.windows, frames);
+    let claim = reactor.state.windows.claim(replacement).unwrap();
+    assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
+    assert!(!tiled(&mut reactor, space).contains(&replacement));
+
+    // Release restores normal eligibility for the new identity.
+    reactor.release_window(wid(1), OWNER).unwrap();
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
+    reactor.state.windows.debug_assert_invariants();
+}
+
+#[test]
+fn discovering_an_owner_moved_claimed_window_arranges_nothing() {
+    let (mut apps, mut reactor, _space) = settled(2);
+    reactor.claim_window(wid(1), OWNER, NONE).unwrap();
+    apps.simulate_until_quiet(&mut reactor);
+    let mut info = reactor.state.windows.window(wid(1)).unwrap().info.clone();
+    // Inventory reports the owner's moves, first under the same id, then a new AX identity.
+    for (window, previous) in [(wid(1), wid(1)), (wid(7), wid(1))] {
+        info.frame.origin.x += 40.;
+        let visible = vec![window, wid(2)];
+        let arrangements = layout_updates(&mut reactor, |r| {
+            r.discover_test_windows(1, vec![(window, info.clone())], visible)
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(arrangements, 0, "{previous:?} -> {window:?}");
+        assert!(apps.requests().is_empty());
+        assert_eq!(reactor.state.windows.claim(window).unwrap().owner, OWNER);
+        assert!(
+            reactor
+                .state
+                .windows
+                .window(window)
+                .unwrap()
+                .frame_monotonic
+                .same_as(info.frame)
+        );
+    }
+}
+
+#[test]
+fn release_arranges_each_affected_space_once_through_the_visible_path() {
+    let (mut reactor, a, _, space1, space2, frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let (b, c) = (WindowId::new(a.pid, 2), WindowId::new(a.pid, 3));
+    let mut frame2 = frame;
+    frame2.origin.x += screen2.origin.x;
+    reactor.add_test_window(b, WindowServerId::new(122), Some(space1), frame);
+    reactor.add_test_window(c, WindowServerId::new(123), Some(space2), frame2);
+    for (window, space) in [(a, space1), (b, space1), (c, space2)] {
+        let workspace = reactor.test_workspace(space, 0);
+        assert!(reactor.assign_test_window_to_workspace(space, window, workspace));
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space, window));
+        reactor.claim_window(window, OWNER, NONE).unwrap();
+        assert!(!reactor.test_active_workspace_windows(space).contains(&window));
+    }
+
+    // Each window returns through WindowAdded, which only updates membership.
+    assert_eq!(
+        layout_updates(&mut reactor, |r| r.release_window(c, OWNER).unwrap()),
+        1
+    );
+    assert!(reactor.state.windows.is_visible_admitted(c));
+    reactor.claim_window(c, OWNER, NONE).unwrap();
+    assert_eq!(layout_updates(&mut reactor, |r| r.release_claims(OWNER)), 2);
+    for (window, space) in [(a, space1), (b, space1), (c, space2)] {
+        assert!(reactor.test_active_workspace_windows(space).contains(&window));
+    }
+    reactor.state.windows.debug_assert_invariants();
 }

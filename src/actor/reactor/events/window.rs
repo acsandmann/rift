@@ -54,11 +54,11 @@ pub fn handle_window_created(
     state.windows.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
 
-    // Excluded windows only need lifecycle notifications; app-rule admission arranges itself.
-    let window = state.windows.window(wid);
+    // Excluded and claimed windows only need lifecycle notifications; app-rule admission
+    // arranges itself.
     let outcome = EventOutcome::window_membership_changed(false, true)
-        .with_arrange_passes(window.is_some_and(WindowState::is_admitted).into());
-    Ok(if window.is_some_and(WindowState::can_reconcile_admission) {
+        .with_arrange_passes(state.windows.is_admitted(wid).into());
+    Ok(if state.windows.can_reconcile_admission(wid) {
         outcome.with_created_window_finalization(wid)
     } else {
         outcome

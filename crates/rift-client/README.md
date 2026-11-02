@@ -85,8 +85,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Claims end when they are released or when the session is dropped, including
 when the process exits. Claiming is idempotent and updates the flags of a
 claim the session already holds. `release_window` accepts the id that was
-claimed even if macOS later gives the window a new identity. Claimed windows
-report `externally_managed: true` in window queries.
+claimed even if macOS later gives the window a new identity. If macOS reveals
+that two claimed ids are one window, the claim on its original identity
+survives, and requests from the session whose claim ended fail with "Window
+owned by another external manager". Claimed windows report
+`externally_managed: true` in window queries.
 `SUPPRESS_FOCUS_FOLLOWS_MOUSE` pauses focus follows mouse only while the
 claimed window is focused.
 

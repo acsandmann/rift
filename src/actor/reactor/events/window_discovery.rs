@@ -27,6 +27,7 @@ fn sync_existing_window_state(
     let rift_owns_geometry =
         info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
     let needs_arrange;
+    let claimed = state.windows.is_claimed(wid);
     if let Some(existing) = state.windows.window_mut(wid) {
         let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
         let geometry_changed =
@@ -34,7 +35,8 @@ fn sync_existing_window_state(
         let constraints_changed = existing.info.is_resizable != info.is_resizable
             || existing.info.min_size != info.min_size
             || existing.info.max_size != info.max_size;
-        needs_arrange = geometry_changed || constraints_changed;
+        // A claimed window's owner has geometry authority.
+        needs_arrange = (geometry_changed || constraints_changed) && !claimed;
         if !rift_owns_geometry && valid_frame {
             existing.frame_monotonic = info.frame;
         }
