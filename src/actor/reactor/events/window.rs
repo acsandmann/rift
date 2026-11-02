@@ -299,9 +299,12 @@ pub fn handle_window_frame_changed(
     // The external owner has geometry authority; keep only native facts current.
     if state.windows.is_claimed(wid) {
         if old_space != new_space
-            && let (Some(server), Some(space)) = (server_id, new_space)
+            && let Some(server) = server_id
         {
-            state.windows.observe_native_space(server, space, true);
+            match new_space {
+                Some(space) => _ = state.windows.observe_native_space(server, space, true),
+                None => state.windows.set_window_server_space(server, None),
+            }
         }
         return Ok(EventOutcome::no_change());
     }

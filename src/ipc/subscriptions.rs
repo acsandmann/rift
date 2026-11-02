@@ -349,6 +349,11 @@ mod tests {
             assert!(state.set_lease(client, PortLease::Claims, claims));
             client
         };
+        // Once every lease is gone, dropping the test's own reference frees the name.
+        let freed = |client| unsafe {
+            assert!(mach_release_send_right(client));
+            test_support::is_unused(client)
+        };
 
         // Dropping every subscription keeps the claims' watch.
         let client = subscribed(true);
@@ -358,6 +363,7 @@ mod tests {
         assert_eq!(notices(), [(DEAD_NAME, client)]);
         state.remove_client(client);
         state.set_lease(client, PortLease::Claims, false);
+        assert!(freed(client));
 
         // Death while used both ways: one notice; claims outlive subscriptions.
         let client = subscribed(true);
@@ -365,16 +371,39 @@ mod tests {
         assert_eq!(notices(), [(DEAD_NAME, client)]);
         state.remove_client(client);
         assert!(state.leases.lock().contains_key(&client));
+        assert!(!unsafe { test_support::is_unused(client) });
         state.set_lease(client, PortLease::Claims, false);
+        assert!(freed(client));
+
+        // A full receive queue is not a disconnect: the dispatch worker keeps both leases.
+        let client = subscribed(true);
+        let event = CString::new("{}").unwrap();
+        while unsafe { mach_try_send_message(client, event.as_ptr(), 3) } {}
+        let (batches, worker) = bounded(1);
+        let batch = DispatchBatch {
+            event_json: "{}".into(),
+            targets: vec![client],
+        };
+        batches.send(batch).unwrap();
+        drop(batches);
+        ServerState::run_event_dispatch_worker(worker);
+        assert!(state.subscriptions_by_client.contains_key(&client));
+        assert_eq!(state.leases.lock()[&client], 3);
+        assert!(notices().is_empty());
+        state.remove_client(client);
+        state.set_lease(client, PortLease::Claims, false);
+        unsafe { test_support::destroy_receive_right(client) };
+        assert!(freed(client));
 
         // With no lease left the watch is cancelled.
         let client = subscribed(false);
         state.unsubscribe_client(client, "a".into());
         state.unsubscribe_client(client, "b".into());
         unsafe { test_support::destroy_receive_right(client) };
-        // Only the cancelled request's send-once notice remains.
+        // Only the cancelled requests' send-once notices remain.
         assert!(notices().iter().all(|(id, _)| *id != DEAD_NAME));
         assert!(state.leases.lock().is_empty());
+        assert!(freed(client));
         test_support::set_notify_port(0);
     }
 }

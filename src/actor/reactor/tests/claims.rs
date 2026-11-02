@@ -4,6 +4,8 @@ use test_log::test;
 use super::*;
 use crate::model::window_store::ClaimOwner;
 
+const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
+
 const OWNER: ClaimOwner = ClaimOwner(101);
 const OTHER: ClaimOwner = ClaimOwner(202);
 const NONE: WindowClaimFlags = WindowClaimFlags::empty();
@@ -466,4 +468,111 @@ fn unclaimed_windows_do_not_refresh_focus_policy_on_focus_changes() {
     reactor.handle_event(Event::WindowServerFocusChanged(other, space));
     reactor.handle_event(Event::WindowServerFocusChanged(window, space));
     assert!(ffm_updates(&mut rx).is_empty());
+}
+
+#[test]
+fn original_id_reused_by_another_window_still_reaches_the_owners_claim() {
+    let (mut apps, mut reactor, space) = settled(2);
+    reactor.claim_window(wid(1), OWNER, NONE).unwrap();
+    let replacement = wid(7);
+    let info = reactor.state.windows.window(wid(1)).unwrap().info.clone();
+    reactor.discover_test_windows(1, vec![(replacement, info)], vec![replacement, wid(2)]);
+    // macOS hands the retired id to an unrelated window, which another session claims.
+    let visible = vec![replacement, wid(1), wid(2)];
+    reactor.discover_test_windows(1, vec![(wid(1), make_window(9))], visible);
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(reactor.state.windows.contains_window(wid(1)));
+    reactor.claim_window(wid(1), OTHER, NONE).unwrap();
+
+    // The owner's id still means its own window, never the newcomer.
+    reactor.claim_window(wid(1), OWNER, SUPPRESS).unwrap();
+    assert_eq!(reactor.state.windows.claim(replacement).unwrap().flags, SUPPRESS);
+    assert_eq!(reactor.release_window(wid(1), OWNER), Ok(()));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(!reactor.state.windows.is_claimed(replacement));
+    assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
+    let other = reactor.state.windows.claim(wid(1)).unwrap();
+    assert_eq!((other.owner, other.flags), (OTHER, NONE));
+
+    // With the owner's claim gone the id names the newcomer, which only its owner may release.
+    for session in [OWNER, ClaimOwner(303)] {
+        assert_eq!(reactor.release_window(wid(1), session), Err(OWNED_ELSEWHERE));
+    }
+    assert_eq!(reactor.release_window(wid(1), OTHER), Ok(()));
+    reactor.state.windows.debug_assert_invariants();
+}
+
+#[test]
+fn merging_two_claimed_identities_keeps_the_recognized_owner() {
+    let (mut apps, mut reactor, space) = settled(2);
+    reactor.claim_window(wid(1), OWNER, SUPPRESS).unwrap();
+    // The replacement is seen before its native identity, and claimed by another session.
+    let replacement = wid(7);
+    let mut info = reactor.state.windows.window(wid(1)).unwrap().info.clone();
+    let wsid = info.sys_id.take();
+    let visible = vec![wid(1), replacement, wid(2)];
+    reactor.discover_test_windows(1, vec![(replacement, info.clone())], visible);
+    reactor.claim_window(replacement, OTHER, NONE).unwrap();
+
+    info.sys_id = wsid;
+    reactor.discover_test_windows(1, vec![(replacement, info)], vec![replacement, wid(2)]);
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(!reactor.state.windows.contains_window(wid(1)));
+    let claim = reactor.state.windows.claim(replacement).unwrap();
+    assert_eq!((claim.owner, claim.flags), (OWNER, SUPPRESS));
+    assert!(reactor.state.windows.owner_claims(OTHER).is_empty());
+    assert!(!tiled(&mut reactor, space).contains(&replacement));
+    assert_eq!(reactor.release_window(replacement, OTHER), Err(OWNED_ELSEWHERE));
+
+    assert_eq!(reactor.release_window(wid(1), OWNER), Ok(()));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
+    reactor.state.windows.debug_assert_invariants();
+}
+
+#[test]
+fn window_queries_place_claimed_windows_from_cached_spaces_only() {
+    let (mut reactor, wid, wsid, space1, space2, frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.claim_window(wid, OWNER, NONE).unwrap();
+    let listed_on = |reactor: &Reactor| {
+        let before = window_server::window_space_query_count();
+        let spaces = [space1, space2].map(|space| {
+            reactor
+                .query_windows(Some(space))
+                .iter()
+                .any(|w| w.id == wid && w.externally_managed)
+        });
+        assert_eq!(
+            window_server::window_space_query_count(),
+            before,
+            "no WindowServer queries"
+        );
+        spaces
+    };
+    assert_eq!(listed_on(&reactor), [true, false]);
+
+    // The owner moves it to the other display, then off every display.
+    let mut moved = frame;
+    for (x, listed) in [
+        (screen2.origin.x + 100., [false, true]),
+        (-5000., [true, false]),
+    ] {
+        moved.origin.x = x;
+        let event = Event::WindowFrameChanged(wid, moved, None, Requested(false), None);
+        reactor.handle_event(event);
+        // With no native Space known, the saved workspace's Space reports it.
+        assert_eq!(listed_on(&reactor), listed, "x = {x}");
+    }
+
+    // Suspended in native fullscreen it is on no user Space, like any other window.
+    reactor.state.windows.suspend_window_to_native_fullscreen(
+        wid,
+        Some(wsid),
+        Some(space1),
+        SpaceId::new(0x400000001),
+        NativeFullscreenTransition::Suspended,
+    );
+    assert_eq!(listed_on(&reactor), [false, false]);
 }

@@ -90,6 +90,12 @@ report `externally_managed: true` in window queries.
 `SUPPRESS_FOCUS_FOLLOWS_MOUSE` pauses focus follows mouse only while the
 claimed window is focused.
 
+The [owner example](examples/owner.rs) claims one window until it is stopped:
+
+```sh
+cargo run -p rift-client --example owner -- --window-id 1234:1
+```
+
 Set `RIFT_BS_NAME` to use a non-default Rift bootstrap service (for example,
 when running multiple instances).
 

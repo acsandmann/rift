@@ -53,6 +53,7 @@ const MACH_MSG_SUCCESS: kern_return_t = 0;
 
 pub const MACH_SEND_MSG: u32 = 0x0000_0001;
 const MACH_SEND_TIMEOUT: mach_msg_option_t = 0x0000_0010;
+const MACH_SEND_TIMED_OUT: kern_return_t = 0x1000_0004;
 pub const MACH_RCV_MSG: u32 = 0x0000_0002;
 const MACH_RCV_TIMEOUT: mach_msg_option_t = 0x0000_0100;
 
@@ -67,6 +68,7 @@ const CONNECTION_SERVER_PORT_RECV_SIZE: u32 = 0x48;
 
 const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
 const MACH_MSG_TYPE_MOVE_SEND_ONCE: u32 = 18;
+const MACH_MSG_TYPE_PORT_SEND_ONCE: u32 = MACH_MSG_TYPE_MOVE_SEND_ONCE;
 const MACH_MSG_TYPE_MAKE_SEND_ONCE: u32 = 21;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
@@ -1027,6 +1029,17 @@ pub unsafe fn mach_send_message(
     true
 }
 
+/// Sends unless the destination queue is full. A timed-out send returns the message's
+/// rights to this task, including its copied destination reference; destroy them. (These
+/// messages carry no reply right, which `mach_msg_destroy` would not release.)
+unsafe fn send_without_blocking(header: *mut mach_msg_header_t, size: u32) -> kern_return_t {
+    let result = mach_msg(header, MACH_SEND_MSG | MACH_SEND_TIMEOUT, size, 0, 0, 0, 0);
+    if result == MACH_SEND_TIMED_OUT {
+        let _ = mach_msg_destroy(header);
+    }
+    result
+}
+
 pub unsafe fn mach_try_send_message(port: mach_port_t, message: *const c_char, len: u32) -> bool {
     if message.is_null() || port == 0 || len > MAX_MESSAGE_SIZE {
         error!(
@@ -1048,15 +1061,7 @@ pub unsafe fn mach_try_send_message(port: mach_port_t, message: *const c_char, l
     let header_ptr = prepare_inline_send(&mut storage, header, message.cast(), len);
     let send_size = (*header_ptr).msgh_size;
 
-    let send_result = mach_msg(
-        header_ptr,
-        MACH_SEND_MSG | MACH_SEND_TIMEOUT,
-        send_size,
-        0,
-        0,
-        0,
-        0,
-    );
+    let send_result = send_without_blocking(header_ptr, send_size);
 
     if send_result != MACH_MSG_SUCCESS {
         debug!(
@@ -1245,6 +1250,26 @@ impl Default for mach_server {
     }
 }
 
+#[repr(C)]
+struct DeadNameNotification {
+    header: mach_msg_header_t,
+    ndr: ndr_record_t,
+    port: mach_port_name_t,
+}
+
+/// The name in a kernel dead-name notification, which only arrives through a send-once
+/// right our notification requests created and carries no reply port. Client requests
+/// can use any `msgh_id` but always arrive through a send right with a reply port.
+unsafe fn dead_name_notification(message: *const mach_msg_header_t) -> Option<mach_port_name_t> {
+    let header = core::ptr::read_unaligned(message);
+    let is_notification = header.msgh_id == MACH_NOTIFY_DEAD_NAME
+        && header.msgh_remote_port == MACH_PORT_NULL
+        && header.msgh_bits & MACH_MSGH_BITS_COMPLEX == 0
+        && MACH_MSGH_BITS_LOCAL(header.msgh_bits) == MACH_MSG_TYPE_PORT_SEND_ONCE
+        && header.msgh_size as usize == size_of::<DeadNameNotification>();
+    is_notification.then(|| core::ptr::read_unaligned(message.cast::<DeadNameNotification>()).port)
+}
+
 extern "C" fn mach_message_callback(
     _port: CFMachPortRef,
     message: *mut c_void,
@@ -1258,28 +1283,19 @@ extern "C" fn mach_message_callback(
         let mach_server = &mut *(context as *mut mach_server);
         let header_val = core::ptr::read_unaligned(message as *const mach_msg_header_t);
 
-        if header_val.msgh_id == MACH_NOTIFY_DEAD_NAME {
-            #[repr(C)]
-            struct DeadNameNotification {
-                header: mach_msg_header_t,
-                ndr: ndr_record_t,
-                port: mach_port_name_t,
+        if let Some(name) = dead_name_notification(message.cast()) {
+            if let Some(handler) = mach_server.dead_name_handler {
+                handler(mach_server.context, name);
             }
-
-            if header_val.msgh_size as usize >= size_of::<DeadNameNotification>() {
-                let notification =
-                    core::ptr::read_unaligned(message as *const DeadNameNotification);
-                if let Some(handler) = mach_server.dead_name_handler {
-                    handler(mach_server.context, notification.port);
-                }
-                // The notification carries its own dead-name reference; leases hold theirs.
-                let _ = mach_port_deallocate(mach_task_self(), notification.port);
-            }
+            // The notification carries its own dead-name reference; leases hold theirs.
+            let _ = mach_port_deallocate(mach_task_self(), name);
             let _ = mach_msg_destroy(message as *mut mach_msg_header_t);
             return;
         }
         let header_ptr = &header_val as *const mach_msg_header_t as *mut mach_msg_header_t;
+        // Without a reply port this is not a request (e.g. a send-once notice).
         if header_val.msgh_remote_port == 0 {
+            let _ = mach_msg_destroy(message as *mut mach_msg_header_t);
             return;
         }
 
@@ -1468,17 +1484,9 @@ pub unsafe fn send_mach_reply(
     let header_ptr = prepare_inline_send(&mut storage, header, response_data.cast(), response_len);
     let send_size = (*header_ptr).msgh_size;
 
-    let result = mach_msg(
-        header_ptr,
-        // Never let an abandoned/full client reply port block the Mach server
-        // or an asynchronous reply worker indefinitely.
-        MACH_SEND_MSG | MACH_SEND_TIMEOUT,
-        send_size,
-        0,
-        0,
-        0,
-        0,
-    );
+    // Never let an abandoned/full client reply port block the Mach server
+    // or an asynchronous reply worker indefinitely.
+    let result = send_without_blocking(header_ptr, send_size);
 
     if result != MACH_MSG_SUCCESS {
         // Port inspection is diagnostic-only and relatively expensive. Keep
@@ -1581,7 +1589,8 @@ pub(crate) mod test_support {
         let _ = mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
     }
 
-    /// Receive every queued notification, returning `(msgh_id, notified name)`.
+    /// Receive every queued notification, returning `(msgh_id, notified name)`. Like the
+    /// server, drops the reference a dead-name notification carries.
     pub(crate) unsafe fn drain(port: mach_port_t) -> Vec<(mach_msg_id_t, mach_port_name_t)> {
         let mut received = Vec::new();
         loop {
@@ -1593,6 +1602,9 @@ pub(crate) mod test_support {
             {
                 return received;
             }
+            if let Some(name) = dead_name_notification(header) {
+                let _ = mach_port_deallocate(mach_task_self(), name);
+            }
             // Port-name notifications carry the name after the header and NDR record.
             let name = *buffer
                 .as_ptr()
@@ -1602,6 +1614,12 @@ pub(crate) mod test_support {
             received.push(((*header).msgh_id, name));
             let _ = mach_msg_destroy(header);
         }
+    }
+
+    /// Whether this task holds no right or reference under `name`.
+    pub(crate) unsafe fn is_unused(name: mach_port_name_t) -> bool {
+        let mut port_type = 0;
+        mach_port_type(mach_task_self(), name, &mut port_type) != KERN_SUCCESS
     }
 }
 
@@ -1672,6 +1690,98 @@ mod tests {
 
             drop(destination);
             mach_deallocate_reply_port(reply_port);
+        }
+    }
+
+    #[test]
+    fn dead_name_notifications_are_told_apart_from_requests_with_their_id() {
+        #[derive(Default)]
+        struct Seen {
+            requests: Vec<mach_msg_id_t>,
+            dead: Vec<mach_port_t>,
+        }
+        unsafe extern "C" fn on_request(
+            context: *mut c_void,
+            _: *mut c_char,
+            _: u32,
+            header: *mut mach_msg_header_t,
+        ) {
+            (*context.cast::<Seen>()).requests.push((*header).msgh_id);
+        }
+        unsafe extern "C" fn on_dead_name(context: *mut c_void, port: mach_port_t) {
+            (*context.cast::<Seen>()).dead.push(port);
+        }
+
+        unsafe {
+            let task = mach_task_self();
+            let server_port = mach_allocate_reply_port().unwrap();
+            let reply = mach_allocate_reply_port().unwrap();
+            let client = mach_allocate_reply_port().unwrap();
+            let mut previous = MACH_PORT_NULL;
+            assert_eq!(
+                mach_port_request_notification(
+                    task,
+                    client,
+                    MACH_NOTIFY_DEAD_NAME,
+                    1,
+                    server_port,
+                    MACH_MSG_TYPE_MAKE_SEND_ONCE as c_int,
+                    &mut previous,
+                ),
+                KERN_SUCCESS
+            );
+
+            // Requests numbered 72 whose bodies mimic a notification naming `client`.
+            let mut body = [0u8; 12];
+            body[8..].copy_from_slice(&client.to_ne_bytes());
+            for reply_port in [reply, MACH_PORT_NULL] {
+                let local = if reply_port == MACH_PORT_NULL {
+                    0
+                } else {
+                    MACH_MSG_TYPE_MAKE_SEND
+                };
+                let header = mach_msg_header_t {
+                    msgh_bits: MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, local),
+                    msgh_size: 0,
+                    msgh_remote_port: server_port,
+                    msgh_local_port: reply_port,
+                    msgh_voucher_port: 0,
+                    msgh_id: MACH_NOTIFY_DEAD_NAME,
+                };
+                let mut storage = MaybeUninit::<mach_message_t>::uninit();
+                let message = prepare_inline_send(&mut storage, header, body.as_ptr(), 12);
+                assert_eq!(
+                    mach_msg(message, MACH_SEND_MSG, (*message).msgh_size, 0, 0, 0, 0),
+                    MACH_MSG_SUCCESS
+                );
+            }
+            // Destroying the receive right makes the kernel send the real notification.
+            let _ = mach_port_mod_refs(task, client, MACH_PORT_RIGHT_RECEIVE, -1);
+
+            let mut seen = Seen::default();
+            let mut server = mach_server {
+                handler: Some(on_request),
+                dead_name_handler: Some(on_dead_name),
+                context: (&raw mut seen).cast(),
+                ..Default::default()
+            };
+            let mut buffer = [0u64; 128];
+            let header = buffer.as_mut_ptr().cast::<mach_msg_header_t>();
+            let options = MACH_RCV_MSG | MACH_RCV_TIMEOUT;
+            while mach_msg(header, options, 0, 1024, server_port, 10, 0) == MACH_MSG_SUCCESS {
+                mach_message_callback(null(), header.cast(), 0, (&raw mut server).cast());
+            }
+
+            // Only the request with a reply port is dispatched; only the kernel's message
+            // ends the client.
+            assert_eq!(seen.requests, [MACH_NOTIFY_DEAD_NAME]);
+            assert_eq!(seen.dead, [client]);
+            // The notification's reference was dropped: releasing ours frees the name.
+            assert!(mach_release_send_right(client));
+            let mut port_type = 0;
+            assert_ne!(mach_port_type(task, client, &mut port_type), KERN_SUCCESS);
+            mach_deallocate_reply_port(reply);
+            mach_deallocate_reply_port(server_port);
         }
     }
 }

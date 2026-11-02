@@ -262,15 +262,18 @@ impl WindowStore {
             })
     }
 
-    /// A tracked window, or the original id of one of `owner`'s claimed windows.
+    /// The window `owner` means by `wid`: its own claim by current, then original, id (an
+    /// id reused after a rekey still reaches the claim), otherwise the window tracked as `wid`.
     pub fn resolve_claim_target(&self, owner: ClaimOwner, wid: WindowId) -> Option<WindowId> {
-        if self.contains_window(wid) {
+        let owned = self.owner_claims(owner);
+        if owned.contains(&wid) {
             return Some(wid);
         }
-        self.owner_claims(owner)
+        let original = owned
             .iter()
             .copied()
-            .find(|current| self.claim(*current).is_some_and(|claim| claim.original == wid))
+            .find(|current| self.claim(*current).is_some_and(|claim| claim.original == wid));
+        original.or_else(|| self.contains_window(wid).then_some(wid))
     }
 
     /// Claim a tracked window, holding its assignment until release.
@@ -1347,12 +1350,24 @@ impl WindowStore {
             source.pending_transfer = None;
             source.floating_display_geometry = None;
         }
-        if let Some(claim) = self.windows.get_mut(&from).and_then(|r| r.claim.take()) {
+        if let Some(mut claim) = self.windows.get_mut(&from).and_then(|r| r.claim.take()) {
             self.unindex_claim(claim.owner, from);
-            if !self.is_claimed(to) {
-                self.windows.get_mut(&to).unwrap().claim = Some(claim);
-                self.claims.entry(claim.owner).or_default().push(to);
+            // The recognized identity's claim wins. A claim taken on the provisional
+            // replacement ends; its owner's requests then resolve to the surviving claim.
+            if let Some(displaced) = self.windows.get_mut(&to).and_then(|r| r.claim.take()) {
+                self.unindex_claim(displaced.owner, to);
+                claim.workspace = claim.workspace.or(displaced.workspace);
+                if displaced.owner != claim.owner {
+                    tracing::warn!(
+                        ?from,
+                        ?to,
+                        ?displaced,
+                        "Identity merge ended a conflicting claim"
+                    );
+                }
             }
+            self.windows.get_mut(&to).unwrap().claim = Some(claim);
+            self.claims.entry(claim.owner).or_default().push(to);
         }
         // A replacement admitted before its predecessor was recognized yields to the claim.
         if self.is_claimed(to) {
@@ -1919,6 +1934,82 @@ mod tests {
         assert_eq!(store.claim(sibling).unwrap().workspace(), None);
         store.remove_window(sibling);
         assert!(store.owner_claims(other).is_empty() && store.claimed_windows().next().is_none());
+        store.debug_assert_invariants();
+    }
+
+    #[test]
+    fn claims_survive_id_reuse_and_merged_identities() {
+        let mut store = WindowStore::default();
+        let space = SpaceId::new(10);
+        let mut workspaces = WorkspaceStore::new();
+        let [home, provisional] = ["Home", "Provisional"]
+            .map(|name| workspaces.create_workspace(space, Some(name.into())).unwrap());
+        let (a, b, c) = (ClaimOwner(1), ClaimOwner(2), ClaimOwner(3));
+        let id = |idx| WindowId::new(1, idx);
+        let wsid = WindowServerId::new;
+        let add = |store: &mut WindowStore, idx: u32, server: u32, workspace| {
+            store.insert_window(id(idx), admitted(id(idx), wsid(server)));
+            store.assign_window_to_workspace(id(idx), workspace);
+        };
+        let flags = WindowClaimFlags::empty();
+
+        // A's window is rekeyed and its old id reused by an unrelated window B claims.
+        add(&mut store, 1, 1, home);
+        store.insert_claim(id(1), a, flags);
+        add(&mut store, 2, 2, provisional);
+        store.reconcile_ax_identity(id(2), Some(wsid(1)));
+        add(&mut store, 1, 9, home);
+        assert_eq!(store.resolve_claim_target(a, id(1)), Some(id(2)));
+        assert_eq!(store.resolve_claim_target(c, id(1)), Some(id(1)));
+        store.insert_claim(id(1), b, flags);
+        assert_eq!(store.resolve_claim_target(a, id(1)), Some(id(2)));
+        assert_eq!(store.resolve_claim_target(b, id(1)), Some(id(1)));
+        assert_eq!(store.resolve_claim_target(a, id(2)), Some(id(2)));
+        assert_eq!(store.claim(id(2)).unwrap().workspace(), Some(home));
+        store.debug_assert_invariants();
+
+        // Both identities of one window claimed by different owners: the recognized
+        // identity's claim survives with its original id and workspace; the other ends.
+        add(&mut store, 3, 3, provisional);
+        store.insert_claim(id(3), a, flags);
+        store.reconcile_ax_identity(id(3), Some(wsid(9)));
+        let merged = store.claim(id(3)).unwrap();
+        assert_eq!((merged.owner, merged.workspace()), (b, Some(home)));
+        assert_eq!(store.owner_claims(a), &[id(2)]);
+        assert_eq!(store.owner_claims(b), &[id(3)]);
+        assert_eq!(store.resolve_claim_target(b, id(1)), Some(id(3)));
+        assert_eq!(
+            store.resolve_claim_target(a, id(3)),
+            Some(id(3)),
+            "B's, so rejected"
+        );
+        store.debug_assert_invariants();
+
+        // The same owner on both identities keeps one claim reachable by either id.
+        add(&mut store, 4, 4, provisional);
+        store.insert_claim(id(4), a, WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE);
+        store.reconcile_ax_identity(id(4), Some(wsid(1)));
+        assert_eq!(store.owner_claims(a), &[id(4)]);
+        assert_eq!(store.claim(id(4)).unwrap().flags, flags);
+        for requested in [id(1), id(4)] {
+            assert_eq!(store.resolve_claim_target(a, requested), Some(id(4)));
+        }
+        assert_eq!(
+            store.resolve_claim_target(a, id(2)),
+            None,
+            "retired, never claimed"
+        );
+        store.debug_assert_invariants();
+
+        // A deleted workspace leaves claims to be rehomed on release.
+        store.remap_workspace(home, None);
+        assert_eq!(store.claim(id(3)).unwrap().workspace(), None);
+        assert_eq!(store.claim(id(4)).unwrap().workspace(), None);
+
+        // Destruction ends a claim and its original-id mapping.
+        store.remove_window(id(3));
+        assert!(store.owner_claims(b).is_empty());
+        assert_eq!(store.resolve_claim_target(b, id(1)), None);
         store.debug_assert_invariants();
     }
 

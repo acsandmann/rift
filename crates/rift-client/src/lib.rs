@@ -34,9 +34,13 @@ const MACH_SEND_MSG: MachMessageOption = 0x0000_0001;
 const MACH_RCV_MSG: MachMessageOption = 0x0000_0002;
 const MACH_SEND_TIMEOUT: MachMessageOption = 0x0000_0010;
 const MACH_RCV_TIMEOUT: MachMessageOption = 0x0000_0100;
+const MACH_SEND_TIMED_OUT: KernReturn = 0x1000_0004;
 const MACH_RCV_TIMED_OUT: KernReturn = 0x1000_4003;
 // The config worker can wait five seconds for disk I/O; leave time for its error reply.
-const REQUEST_TIMEOUT_MS: u32 = 10_000;
+const REQUEST_TIMEOUT_MS: u32 = if cfg!(test) { 500 } else { 10_000 };
+/// Session request ids carry this bit so that, even after the sequence wraps, they stay
+/// clear of the small ids Mach reserves for kernel notifications (64-77) and MIG.
+const SESSION_REQUEST_ID_TAG: u32 = 0x4000_0000;
 const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
 const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
@@ -49,6 +53,8 @@ const TASK_BOOTSTRAP_PORT: c_int = 4;
 pub enum ClientError {
     #[error("Rift's Mach service is not registered")]
     ServiceUnavailable,
+    #[error("Rift request timed out after 10 seconds")]
+    RequestTimedOut,
     #[error("invalid Mach service name")]
     InvalidServiceName,
     #[error("Mach operation {operation} failed with code {code}")]
@@ -262,10 +268,7 @@ impl RiftMachClient {
             if value.get("type").is_some() {
                 pending.push_back(payload);
                 if std::time::Instant::now() >= deadline {
-                    return Err(ClientError::Mach {
-                        operation: "subscription initialization",
-                        code: MACH_RCV_TIMED_OUT,
-                    });
+                    return Err(ClientError::RequestTimedOut);
                 }
                 let timeout = deadline
                     .saturating_duration_since(std::time::Instant::now())
@@ -340,8 +343,7 @@ impl WindowManagementSession {
     /// timeout. Replies carry the request id; a late reply to an abandoned
     /// request is discarded instead of being taken for the current one.
     fn request(&mut self, request: RiftRequest) -> Result<(), ClientError> {
-        self.sequence = self.sequence.wrapping_add(1).max(1);
-        let id = self.sequence as i32;
+        let id = self.next_request_id();
         let payload = serde_json::to_vec(&request).map_err(ClientError::Encode)?;
         let port = self.reply_port.name;
         let response = unsafe {
@@ -353,6 +355,13 @@ impl WindowManagementSession {
             RiftResponse::Error { error } => Err(ClientError::Server(error)),
             _ => Err(ClientError::UnknownResponse),
         }
+    }
+}
+
+impl WindowManagementSession {
+    fn next_request_id(&mut self) -> i32 {
+        self.sequence = self.sequence.wrapping_add(1);
+        (self.sequence | SESSION_REQUEST_ID_TAG) as i32
     }
 }
 
@@ -582,6 +591,7 @@ unsafe fn lookup_service(name: &CStr) -> Result<MachPort, ClientError> {
 
     let mut service_port = 0;
     let result = unsafe { bootstrap_look_up(bootstrap_port, name.as_ptr(), &mut service_port) };
+    let _ = unsafe { mach_port_deallocate(mach_task_self(), bootstrap_port) };
     if result != KERN_SUCCESS {
         return Err(ClientError::ServiceUnavailable);
     }
@@ -589,6 +599,11 @@ unsafe fn lookup_service(name: &CStr) -> Result<MachPort, ClientError> {
 }
 
 unsafe fn find_service_with_retry() -> Result<ServicePort, ClientError> {
+    #[cfg(test)]
+    if let port @ 1.. = tests::SERVICE.get() {
+        unsafe { mach_port_mod_refs(mach_task_self(), port, tests::MACH_PORT_RIGHT_SEND, 1) };
+        return Ok(ServicePort::new(port));
+    }
     let name = service_name()?;
     for attempt in 0..5 {
         if let Ok(port) = unsafe { lookup_service(&name) } {
@@ -656,6 +671,15 @@ unsafe fn send_request_with_id(
             0,
         )
     };
+    if result == MACH_SEND_TIMED_OUT {
+        // The kernel returns an unsent message's rights: mach_msg_destroy releases the
+        // destination (remote) right but not the reply (local) right.
+        unsafe {
+            let _ = mach_port_deallocate(mach_task_self(), (*header_ptr).local_port);
+            mach_msg_destroy(header_ptr);
+        }
+        return Err(ClientError::RequestTimedOut);
+    }
     if result != KERN_SUCCESS {
         return Err(ClientError::Mach {
             operation: "mach_msg(send)",
@@ -692,6 +716,9 @@ unsafe fn receive_message(
             0,
         )
     };
+    if result == MACH_RCV_TIMED_OUT {
+        return Err(ClientError::RequestTimedOut);
+    }
     if result != KERN_SUCCESS {
         return Err(ClientError::Mach {
             operation: "mach_msg(receive)",
@@ -761,35 +788,202 @@ mod tests {
         }
     }
 
-    #[test]
-    fn session_replies_are_matched_to_their_request() {
-        let session = RiftMachClient.window_management_session().unwrap();
-        let port = session.reply_port.name;
-        let deliver = |id: i32, payload: &[u8]| unsafe {
-            let header = MachMessageHeader {
-                bits: message_bits(MACH_MSG_TYPE_MAKE_SEND, 0),
-                size: 0,
-                remote_port: port,
-                local_port: 0,
-                voucher_port: 0,
-                id,
-            };
-            let mut storage = MaybeUninit::<InlineMessage>::uninit();
+    pub(super) const MACH_PORT_RIGHT_SEND: c_int = 0;
+    const OK: &[u8] = b"{\"data\":null}\0";
+
+    thread_local! {
+        /// Requests from this thread go to this port instead of Rift's bootstrap service.
+        pub(super) static SERVICE: std::cell::Cell<MachPort> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Sends a message to `port` as a Rift reply would.
+    fn deliver(port: MachPort, id: i32, payload: &[u8]) {
+        let header = MachMessageHeader {
+            bits: message_bits(MACH_MSG_TYPE_COPY_SEND, 0),
+            size: 0,
+            remote_port: port,
+            local_port: 0,
+            voucher_port: 0,
+            id,
+        };
+        let mut storage = MaybeUninit::<InlineMessage>::uninit();
+        unsafe {
             let message = prepare_inline_send(&mut storage, header, payload);
             assert_eq!(
                 mach_msg(message, MACH_SEND_MSG, (*message).size, 0, 0, 0, 0),
                 KERN_SUCCESS
             );
+        }
+    }
+
+    /// Serves `count` requests on a fake Rift service port for this thread's clients.
+    fn serve(
+        count: usize,
+        mut respond: impl FnMut(i32, MachPort, RiftRequest) + Send + 'static,
+    ) -> (ReplyPort, thread::JoinHandle<()>) {
+        let service = ReplyPort::allocate(MACH_PORT_QLIMIT_LARGE).unwrap();
+        let port = service.name;
+        SERVICE.set(port);
+        let server = thread::spawn(move || {
+            for _ in 0..count {
+                let mut buffer = [0u64; 512];
+                let header = buffer.as_mut_ptr().cast::<MachMessageHeader>();
+                let options = MACH_RCV_MSG | MACH_RCV_TIMEOUT;
+                let size = size_of_val(&buffer) as u32;
+                assert_eq!(
+                    unsafe { mach_msg(header, options, 0, size, port, 2_000, 0) },
+                    KERN_SUCCESS
+                );
+                let (id, reply, len) =
+                    unsafe { ((*header).id, (*header).remote_port, (*header).size) };
+                let body = unsafe {
+                    std::slice::from_raw_parts(
+                        header.add(1).cast::<u8>(),
+                        len as usize - size_of::<MachMessageHeader>(),
+                    )
+                };
+                let json = body.split(|&byte| byte == 0).next().unwrap();
+                respond(id, reply, serde_json::from_slice(json).unwrap());
+                unsafe { mach_msg_destroy(header) };
+            }
+        });
+        (service, server)
+    }
+
+    #[test]
+    fn window_claim_api_matches_pr_519() {
+        type Session = WindowManagementSession;
+        let _: fn(&RiftMachClient) -> Result<Session, ClientError> =
+            RiftMachClient::window_management_session;
+        let _: fn(&mut Session, WindowId) -> Result<(), ClientError> = Session::claim_window;
+        let _: fn(&mut Session, WindowId, WindowClaimFlags) -> Result<(), ClientError> =
+            Session::claim_window_with_flags;
+        let _: fn(&mut Session, WindowId) -> Result<(), ClientError> = Session::release_window;
+        let flags: WindowClaimFlags = WindowClaimFlags::empty()
+            | WindowClaimFlags::from_bits_retain(WindowClaimFlags::default().bits());
+        assert!(
+            flags.is_supported() && !flags.contains(WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)
+        );
+        assert!(matches!(
+            ClientError::RequestTimedOut,
+            ClientError::RequestTimedOut
+        ));
+        let _ = |window: WindowData| window.externally_managed;
+    }
+
+    #[test]
+    fn session_request_ids_never_collide_with_notification_ids() {
+        let mut session = RiftMachClient.window_management_session().unwrap();
+        for sequence in [
+            0,
+            63,
+            71,
+            72,
+            77,
+            0x3FFF_FFBF,
+            0x7FFF_FFFF,
+            0xBFFF_FFFF,
+            u32::MAX - 1,
+        ] {
+            session.sequence = sequence;
+            let id = session.next_request_id() as u32;
+            assert!(id >= SESSION_REQUEST_ID_TAG, "sequence {sequence} -> id {id:#x}");
+        }
+        // Wrapping continues with distinct ids.
+        session.sequence = u32::MAX - 1;
+        let ids = [(); 3].map(|_| session.next_request_id());
+        assert_eq!(ids, [
+            -1,
+            SESSION_REQUEST_ID_TAG as i32,
+            SESSION_REQUEST_ID_TAG as i32 + 1
+        ]);
+    }
+
+    #[test]
+    fn one_session_serves_hundreds_of_requests_across_wraparound() {
+        const REQUESTS: usize = 300;
+        let (_service, server) = serve(REQUESTS, |id, reply, request| {
+            // A server that recognized notifications by id alone would drop this request.
+            assert!(
+                !(64..=77).contains(&id),
+                "request id {id} is a Mach notification id"
+            );
+            assert!(matches!(
+                request,
+                RiftRequest::ClaimWindow { .. } | RiftRequest::ReleaseWindow { .. }
+            ));
+            deliver(reply, id, OK);
+        });
+        let mut session = RiftMachClient.window_management_session().unwrap();
+        session.sequence = u32::MAX - (REQUESTS / 2) as u32;
+        let window = WindowId { pid: 1, idx: 1 };
+        for _ in 0..REQUESTS / 2 {
+            session.claim_window(window).unwrap();
+            session.release_window(window).unwrap();
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn late_reply_after_timeout_is_not_taken_for_the_next_request() {
+        let mut abandoned = None;
+        let (_service, server) = serve(2, move |id, reply, _| {
+            // Answer the first request only after the client has given up on it.
+            if let Some(late) = abandoned.replace(id) {
+                deliver(reply, late, b"{\"error\":{\"message\":\"stale\"}}\0");
+                deliver(reply, id, OK);
+            }
+        });
+        let mut session = RiftMachClient.window_management_session().unwrap();
+        let window = WindowId { pid: 1, idx: 1 };
+        assert!(matches!(
+            session.claim_window(window),
+            Err(ClientError::RequestTimedOut)
+        ));
+        session.claim_window(window).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn full_service_queue_times_out_without_leaking_rights() {
+        unsafe extern "C" {
+            fn mach_port_get_refs(
+                task: MachPort,
+                name: MachPort,
+                right: c_int,
+                refs: *mut u32,
+            ) -> KernReturn;
+        }
+        let refs = |name| {
+            let mut refs = 0;
+            unsafe { mach_port_get_refs(mach_task_self(), name, MACH_PORT_RIGHT_SEND, &mut refs) };
+            refs
         };
+        let service = ReplyPort::allocate(1).unwrap();
+        SERVICE.set(service.name);
+        deliver(service.name, 0, OK);
+        let mut session = RiftMachClient.window_management_session().unwrap();
+        let before = (refs(service.name), refs(session.reply_port.name));
+        assert!(matches!(
+            session.claim_window(WindowId { pid: 1, idx: 1 }),
+            Err(ClientError::RequestTimedOut)
+        ));
+        assert_eq!((refs(service.name), refs(session.reply_port.name)), before);
+    }
+
+    #[test]
+    fn session_replies_are_matched_to_their_request() {
+        let session = RiftMachClient.window_management_session().unwrap();
+        let port = session.reply_port.name;
         // A reply to a timed-out request arrives before the current one.
-        deliver(1, b"late\0");
-        deliver(2, b"current\0");
-        deliver(1, b"later\0");
+        deliver(port, 1, b"late\0");
+        deliver(port, 2, b"current\0");
+        deliver(port, 1, b"later\0");
         unsafe {
             let first = receive_message(port, Some(0)).unwrap();
             assert_eq!(receive_reply(port, 2, first).unwrap(), b"current\0");
             let first = receive_message(port, Some(0)).unwrap();
-            deliver(3, b"next\0");
+            deliver(port, 3, b"next\0");
             assert_eq!(receive_reply(port, 3, first).unwrap(), b"next\0\0\0\0");
         }
     }
