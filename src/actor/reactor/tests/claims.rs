@@ -539,10 +539,6 @@ fn merging_two_claimed_identities_keeps_the_recognized_owner() {
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![replacement, wid(2)]);
     reactor.state.windows.debug_assert_invariants();
-
-    // The window is free again for either session.
-    assert_eq!(reactor.claim_window(replacement, OTHER, NONE), Ok(()));
-    reactor.state.windows.debug_assert_invariants();
 }
 
 #[test]

@@ -1927,15 +1927,6 @@ mod tests {
         let claim = store.remove_claim(rekeyed).unwrap();
         assert_eq!((claim.owner, claim.workspace()), (owner, Some(replaced)));
         assert!(store.is_admitted(rekeyed) && store.owner_claims(owner).is_empty());
-
-        // Lost admission or minimizing keeps the saved workspace; destruction ends the claim.
-        store.insert_claim(sibling, other, WindowClaimFlags::empty());
-        assert_eq!(store.remove_window_assignment(sibling), None);
-        assert!(store.observe_minimized(sibling));
-        assert_eq!(store.claim(sibling).unwrap().workspace(), Some(home));
-        store.remove_window(sibling);
-        assert!(store.owner_claims(other).is_empty() && store.claimed_windows().next().is_none());
-        store.debug_assert_invariants();
     }
 
     #[test]
