@@ -30,6 +30,16 @@ pub struct ServerState {
     subscriptions_by_event: Arc<DashMap<String, Vec<ClientPort>>>,
     cli_subscriptions: Arc<Mutex<HashMap<String, Vec<CliSubscription>>>>,
     event_dispatch_tx: Sender<DispatchBatch>,
+    /// Independent reasons to keep each client's send right and its one dead-name watch.
+    leases: Mutex<HashMap<ClientPort, u8>>,
+}
+
+/// A use of a client port that must end when the client's receive right dies.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub enum PortLease {
+    Subscriptions = 1,
+    Claims = 2,
 }
 
 /// Subscription state is internally synchronized by `DashMap`, `Mutex`, and
@@ -51,23 +61,49 @@ impl ServerState {
         let subscriptions_by_event = Arc::new(DashMap::new());
         let cli_subscriptions = Arc::new(Mutex::new(HashMap::default()));
         let (event_dispatch_tx, event_dispatch_rx) = bounded(EVENT_DISPATCH_QUEUE_CAPACITY);
-
-        let worker_subscriptions_by_client = Arc::clone(&subscriptions_by_client);
-        let worker_subscriptions_by_event = Arc::clone(&subscriptions_by_event);
-        thread::spawn(move || {
-            Self::run_event_dispatch_worker(
-                event_dispatch_rx,
-                worker_subscriptions_by_client,
-                worker_subscriptions_by_event,
-            );
-        });
+        thread::spawn(move || Self::run_event_dispatch_worker(event_dispatch_rx));
 
         Self {
             subscriptions_by_client,
             subscriptions_by_event,
             cli_subscriptions,
             event_dispatch_tx,
+            leases: Mutex::default(),
         }
+    }
+
+    /// Hold or drop one lease. The first lease retains the send right and requests the
+    /// port's dead-name notification; the last one cancels the request and releases it.
+    pub fn set_lease(&self, port: ClientPort, lease: PortLease, held: bool) -> bool {
+        let mut leases = self.leases.lock();
+        let old = leases.get(&port).copied().unwrap_or(0);
+        let new = if held {
+            old | lease as u8
+        } else {
+            old & !(lease as u8)
+        };
+        if old == 0 && new != 0 {
+            if !unsafe { mach_retain_send_right(port) } {
+                return false;
+            }
+            if !unsafe { mach_watch_send_right(port) } {
+                let _ = unsafe { mach_release_send_right(port) };
+                return false;
+            }
+        } else if old != 0 && new == 0 {
+            unsafe { mach_unwatch_send_right(port) };
+            let _ = unsafe { mach_release_send_right(port) };
+        }
+        if new == 0 {
+            leases.remove(&port);
+        } else {
+            leases.insert(port, new);
+        }
+        true
+    }
+
+    pub fn holds_lease(&self, port: ClientPort, lease: PortLease) -> bool {
+        self.leases.lock().get(&port).is_some_and(|held| held & lease as u8 != 0)
     }
 
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) -> bool {
@@ -83,12 +119,7 @@ impl ServerState {
                 }
             }
             Entry::Vacant(entry) => {
-                if !unsafe { mach_retain_send_right(client_port) } {
-                    warn!("Failed to retain send right for client {}", client_port);
-                    return false;
-                }
-                if !unsafe { mach_watch_send_right(client_port) } {
-                    let _ = unsafe { mach_release_send_right(client_port) };
+                if !self.set_lease(client_port, PortLease::Subscriptions, true) {
                     warn!("Failed to watch client {} for disconnection", client_port);
                     return false;
                 }
@@ -138,7 +169,7 @@ impl ServerState {
         }
 
         if removed_client_entry {
-            let _ = unsafe { mach_release_send_right(client_port) };
+            self.set_lease(client_port, PortLease::Subscriptions, false);
         }
     }
 
@@ -250,37 +281,39 @@ impl ServerState {
         }
     }
 
-    fn send_event_to_client(client_port: ClientPort, c_message: &CString) -> bool {
+    fn send_event_to_client(client_port: ClientPort, c_message: &CString) {
         let bytes = c_message.as_bytes_with_nul();
-        unsafe {
-            let result = mach_try_send_message(
+        let sent = unsafe {
+            mach_try_send_message(
                 client_port,
                 c_message.as_ptr() as *const c_char,
                 bytes.len() as u32,
-            );
-            if !result {
-                warn!("Failed to send event to client {}", client_port);
-                return false;
-            } else {
-                debug!("Successfully sent event to client {}", client_port);
-                return true;
-            }
+            )
+        };
+        if sent {
+            debug!("Successfully sent event to client {}", client_port);
+        } else {
+            warn!("Failed to send event to client {}", client_port);
         }
     }
 
+    /// The client's port died: drop its subscriptions and their lease.
     pub fn remove_client(&self, client_port: ClientPort) {
-        Self::remove_client_from_maps(
-            client_port,
-            &self.subscriptions_by_client,
-            &self.subscriptions_by_event,
-        );
+        if let Some((_, events)) = self.subscriptions_by_client.remove(&client_port) {
+            for event in events {
+                if let Some(mut entry) = self.subscriptions_by_event.get_mut(&event) {
+                    entry.retain(|c| c != &client_port);
+                    if entry.is_empty() {
+                        drop(entry);
+                        self.subscriptions_by_event.remove(&event);
+                    }
+                }
+            }
+            self.set_lease(client_port, PortLease::Subscriptions, false);
+        }
     }
 
-    fn run_event_dispatch_worker(
-        event_dispatch_rx: crossbeam_channel::Receiver<DispatchBatch>,
-        subscriptions_by_client: Arc<DashMap<ClientPort, Vec<String>>>,
-        subscriptions_by_event: Arc<DashMap<String, Vec<ClientPort>>>,
-    ) {
+    fn run_event_dispatch_worker(event_dispatch_rx: crossbeam_channel::Receiver<DispatchBatch>) {
         while let Ok(batch) = event_dispatch_rx.recv() {
             let c_message = match CString::new(batch.event_json) {
                 Ok(message) => message,
@@ -290,35 +323,99 @@ impl ServerState {
                 }
             };
 
+            // A full or slow receive queue is not a disconnect; only the
+            // dead-name notification ends a client's subscriptions.
             for client_port in batch.targets {
-                if !Self::send_event_to_client(client_port, &c_message) {
-                    Self::remove_client_from_maps(
-                        client_port,
-                        &subscriptions_by_client,
-                        &subscriptions_by_event,
-                    );
-                }
+                Self::send_event_to_client(client_port, &c_message);
             }
         }
     }
+}
 
-    fn remove_client_from_maps(
-        client_port: ClientPort,
-        subscriptions_by_client: &DashMap<ClientPort, Vec<String>>,
-        subscriptions_by_event: &DashMap<String, Vec<ClientPort>>,
-    ) {
-        if let Some((_k, events)) = subscriptions_by_client.remove(&client_port) {
-            for event in events {
-                if let Some(mut entry) = subscriptions_by_event.get_mut(&event) {
-                    entry.retain(|c| c != &client_port);
-                    if entry.is_empty() {
-                        drop(entry);
-                        subscriptions_by_event.remove(&event);
-                    }
-                }
-            }
-            unsafe { mach_unwatch_send_right(client_port) };
-            let _ = unsafe { mach_release_send_right(client_port) };
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sys::mach::{mach_allocate_reply_port, test_support};
+
+    const DEAD_NAME: i32 = 72;
+
+    #[test]
+    fn subscriptions_and_claims_share_one_dead_name_watch() {
+        let notify = unsafe { mach_allocate_reply_port() }.unwrap();
+        test_support::set_notify_port(notify);
+        let state = ServerState::new();
+        let notices = || unsafe { test_support::drain(notify) };
+        let subscribed = |claims: bool| {
+            let client = unsafe { mach_allocate_reply_port() }.unwrap();
+            assert!(state.subscribe_client(client, "a".into()));
+            assert!(state.subscribe_client(client, "b".into()));
+            assert!(state.set_lease(client, PortLease::Claims, claims));
+            assert!(state.set_lease(client, PortLease::Claims, claims));
+            client
+        };
+        // Once every lease is gone, dropping the test's own reference frees the name.
+        let freed = |client| unsafe {
+            assert!(mach_release_send_right(client));
+            test_support::is_unused(client)
+        };
+
+        // Dropping every subscription keeps the claims' watch.
+        let client = subscribed(true);
+        state.unsubscribe_client(client, "a".into());
+        state.unsubscribe_client(client, "b".into());
+        unsafe { test_support::destroy_receive_right(client) };
+        assert_eq!(notices(), [(DEAD_NAME, client)]);
+        state.remove_client(client);
+        state.set_lease(client, PortLease::Claims, false);
+        assert!(freed(client));
+
+        // Death while used both ways: one notice; claims outlive subscriptions.
+        let client = subscribed(true);
+        unsafe { test_support::destroy_receive_right(client) };
+        assert_eq!(notices(), [(DEAD_NAME, client)]);
+        state.remove_client(client);
+        assert!(state.holds_lease(client, PortLease::Claims));
+        assert!(!unsafe { test_support::is_unused(client) });
+        state.set_lease(client, PortLease::Claims, false);
+        assert!(freed(client));
+
+        // A subscription-only client's death leaves no claims lease, so no reactor work.
+        let client = subscribed(false);
+        unsafe { test_support::destroy_receive_right(client) };
+        assert_eq!(notices(), [(DEAD_NAME, client)]);
+        state.remove_client(client);
+        assert!(!state.holds_lease(client, PortLease::Claims));
+        assert!(freed(client));
+
+        // A full receive queue is not a disconnect: the dispatch worker keeps both leases.
+        let client = subscribed(true);
+        let event = CString::new("{}").unwrap();
+        while unsafe { mach_try_send_message(client, event.as_ptr(), 3) } {}
+        let (batches, worker) = bounded(1);
+        let batch = DispatchBatch {
+            event_json: "{}".into(),
+            targets: vec![client],
+        };
+        batches.send(batch).unwrap();
+        drop(batches);
+        ServerState::run_event_dispatch_worker(worker);
+        assert!(state.subscriptions_by_client.contains_key(&client));
+        assert_eq!(state.leases.lock()[&client], 3);
+        assert!(notices().is_empty());
+        state.remove_client(client);
+        state.set_lease(client, PortLease::Claims, false);
+        unsafe { test_support::destroy_receive_right(client) };
+        assert!(freed(client));
+
+        // With no lease left the watch is cancelled.
+        let client = subscribed(false);
+        state.unsubscribe_client(client, "a".into());
+        state.unsubscribe_client(client, "b".into());
+        unsafe { test_support::destroy_receive_right(client) };
+        // Only the cancelled requests' send-once notices remain.
+        assert!(notices().iter().all(|(id, _)| *id != DEAD_NAME));
+        assert!(state.leases.lock().is_empty());
+        assert!(freed(client));
+        test_support::set_notify_port(0);
     }
 }

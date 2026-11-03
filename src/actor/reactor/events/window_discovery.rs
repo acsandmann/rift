@@ -27,6 +27,7 @@ fn sync_existing_window_state(
     let rift_owns_geometry =
         info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
     let needs_arrange;
+    let claimed = state.windows.is_claimed(wid);
     if let Some(existing) = state.windows.window_mut(wid) {
         let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
         let geometry_changed =
@@ -34,7 +35,8 @@ fn sync_existing_window_state(
         let constraints_changed = existing.info.is_resizable != info.is_resizable
             || existing.info.min_size != info.min_size
             || existing.info.max_size != info.max_size;
-        needs_arrange = geometry_changed || constraints_changed;
+        // A claimed window's owner has geometry authority.
+        needs_arrange = (geometry_changed || constraints_changed) && !claimed;
         if !rift_owns_geometry && valid_frame {
             existing.frame_monotonic = info.frame;
         }
@@ -242,7 +244,7 @@ pub(crate) fn emit_layout_events(
         .iter_visible_window_server_ids()
         .filter_map(|wsid| state.windows.tracked_window_id(wsid))
         .filter(|wid| wid.pid == pid)
-        .filter(|wid| state.windows.window(*wid).is_some_and(WindowState::can_reconcile_admission))
+        .filter(|wid| state.windows.can_reconcile_admission(*wid))
         .collect();
     let has_visible_window_server_windows = !visible.is_empty();
 
@@ -253,9 +255,7 @@ pub(crate) fn emit_layout_events(
             .filter(|wid| wid.pid == pid)
             .map(|wid| (wid, false)),
     ) {
-        if included.contains(&wid)
-            || !state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission)
-        {
+        if included.contains(&wid) || !state.windows.can_reconcile_admission(wid) {
             continue;
         }
         // AX fallback must not resurrect an omitted window via geometry when native
@@ -298,7 +298,7 @@ pub(crate) fn emit_layout_events(
             let Some(effects) = effects else {
                 continue;
             };
-            let Some(window) = state.windows.window(wid).filter(|window| window.is_admitted())
+            let Some(window) = state.windows.window(wid).filter(|_| state.windows.is_admitted(wid))
             else {
                 continue;
             };

@@ -54,11 +54,11 @@ pub fn handle_window_created(
     state.windows.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
 
-    // Excluded windows only need lifecycle notifications; app-rule admission arranges itself.
-    let window = state.windows.window(wid);
+    // Excluded and claimed windows only need lifecycle notifications; app-rule admission
+    // arranges itself.
     let outcome = EventOutcome::window_membership_changed(false, true)
-        .with_arrange_passes(window.is_some_and(WindowState::is_admitted).into());
-    Ok(if window.is_some_and(WindowState::can_reconcile_admission) {
+        .with_arrange_passes(state.windows.is_admitted(wid).into());
+    Ok(if state.windows.can_reconcile_admission(wid) {
         outcome.with_created_window_finalization(wid)
     } else {
         outcome
@@ -95,11 +95,7 @@ pub(crate) fn apply_window_retirement(
     if let Some(wsid) = wsid {
         transactions.remove_for_window(wsid);
     }
-    let drag_changed = drag.actor.window_removed(wid);
-    drag.sync_preview();
-    if drag_changed && drag.externally_controlled_window == Some(wid) {
-        drag.externally_controlled_window = None;
-    }
+    drag.forget_window(wid);
     EventOutcome::window_membership_changed(true, false)
         .with_arrange_passes(0)
         .with_layout_event(LayoutEvent::WindowRemoved(wid))
@@ -162,9 +158,10 @@ pub fn handle_window_deminiaturized(
     // Minimized AX snapshots can have stale admission metadata. Refresh them
     // even when the cached snapshot cannot currently be admitted.
     let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
-    if active_space.is_some() {
+    if active_space.is_some() && !state.windows.is_claimed(wid) {
         // Minimizing clears workspace membership; reconcile app rules before
         // projecting the restored window, just as for a newly created window.
+        // A claimed window keeps its saved workspace and returns on release.
         outcome = outcome.with_created_window_finalization(wid);
     }
     Ok(outcome)
@@ -299,6 +296,18 @@ pub fn handle_window_frame_changed(
     }
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
+    }
+    // The external owner has geometry authority; keep only native facts current.
+    if state.windows.is_claimed(wid) {
+        if old_space != new_space
+            && let Some(server) = server_id
+        {
+            match new_space {
+                Some(space) => _ = state.windows.observe_native_space(server, space, true),
+                None => state.windows.set_window_server_space(server, None),
+            }
+        }
+        return Ok(EventOutcome::no_change());
     }
     // An adjusted acknowledgement of our own frame write is not a new native drag.
     if matches!(

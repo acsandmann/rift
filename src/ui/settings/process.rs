@@ -636,7 +636,9 @@ fn runtime(client: &RiftMachClient) -> Result<Runtime, ClientError> {
 /// A user-facing message, or `Err` when the daemon itself is unreachable.
 fn recoverable(error: ClientError) -> Result<String, String> {
     match error {
-        ClientError::ServiceUnavailable | ClientError::Mach { .. } => Err(error.to_string()),
+        ClientError::ServiceUnavailable
+        | ClientError::RequestTimedOut
+        | ClientError::Mach { .. } => Err(error.to_string()),
         ClientError::MessageTooLarge => Ok("The configuration is too large for Settings to \
                                             send. Edit the configuration file directly."
             .into()),

@@ -63,6 +63,15 @@ impl DragManager {
         self.native_motion_active.store(active, Ordering::Release);
     }
 
+    /// A window leaving Rift's control can no longer be dragged by it.
+    pub fn forget_window(&mut self, wid: WindowId) {
+        if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
+            self.externally_controlled_window = None;
+        }
+        self.sync_motion_gate();
+        self.sync_preview();
+    }
+
     pub fn reset(&mut self) {
         self.actor.cancel();
         self.sync_motion_gate();

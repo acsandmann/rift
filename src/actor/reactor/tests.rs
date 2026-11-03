@@ -10814,3 +10814,5 @@ fn display_refresh_reapplies_frames_when_macos_resized_windows_without_notificat
         );
     }
 }
+
+mod claims;

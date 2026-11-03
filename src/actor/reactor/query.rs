@@ -709,6 +709,20 @@ impl Reactor {
             .unwrap_or_default()
     }
 
+    /// Claimed windows hold no workspace; report them on their last observed native Space,
+    /// else their saved workspace's, without asking WindowServer. Like other windows, one
+    /// suspended in native fullscreen is on no user Space.
+    fn claimed_window_space(&self, wid: WindowId) -> Option<SpaceId> {
+        let windows = &self.state.windows;
+        if windows.native_fullscreen_record_for_window(wid).is_some() {
+            return None;
+        }
+        windows.native_space(wid).or_else(|| {
+            let workspace = windows.claim(wid)?.workspace()?;
+            self.layout_manager.layout_engine.workspaces().workspace_space(workspace)
+        })
+    }
+
     pub fn query_windows(&self, space_id: Option<SpaceId>) -> Vec<RuntimeWindowData> {
         let target_space = space_id.or_else(|| self.default_query_space());
 
@@ -719,9 +733,15 @@ impl Reactor {
                 .workspaces()
                 .windows_in_active_workspace(&self.state.windows, space);
             let logical_positions = self.logical_window_positions_for(Some(space), None);
+            let claimed = self
+                .state
+                .windows
+                .claimed_windows()
+                .filter(|wid| self.claimed_window_space(*wid) == Some(space));
 
             let mut windows: Vec<RuntimeWindowData> = active_windows
                 .into_iter()
+                .chain(claimed)
                 .filter_map(|wid| {
                     let mut wd = self.create_window_data(wid)?;
                     if !wd.is_floating {
