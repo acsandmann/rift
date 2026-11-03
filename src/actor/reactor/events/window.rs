@@ -158,9 +158,10 @@ pub fn handle_window_deminiaturized(
     // Minimized AX snapshots can have stale admission metadata. Refresh them
     // even when the cached snapshot cannot currently be admitted.
     let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
-    if active_space.is_some() {
+    if active_space.is_some() && !state.windows.is_claimed(wid) {
         // Minimizing clears workspace membership; reconcile app rules before
         // projecting the restored window, just as for a newly created window.
+        // A claimed window keeps its saved workspace and returns on release.
         outcome = outcome.with_created_window_finalization(wid);
     }
     Ok(outcome)

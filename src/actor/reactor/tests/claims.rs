@@ -680,3 +680,92 @@ fn release_arranges_each_affected_space_once_through_the_visible_path() {
     }
     reactor.state.windows.debug_assert_invariants();
 }
+
+/// Minimize/restore, then losing and regaining native admission through window-server
+/// info and through inventory, all while claimed.
+fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: WindowId) {
+    let queries = window_server::window_space_query_count();
+    let arrangements = layout_updates(reactor, |r| {
+        r.handle_event(Event::WindowMinimized(window));
+        r.handle_event(Event::WindowDeminiaturized(window));
+    });
+    // Only the restore event's own Space lookup, as for any minimized window.
+    assert_eq!(
+        (arrangements, window_server::window_space_query_count() - queries),
+        (0, 1)
+    );
+    let mut info = reactor.state.windows.window(window).unwrap().info.clone();
+    info.is_minimized = false;
+    let visible: Vec<_> = reactor.state.windows.window_ids_for_pid(window.pid).collect();
+    reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());
+
+    let wsid = info.sys_id.unwrap();
+    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
+    let server_info = |layer| WindowServerInfo {
+        id: wsid,
+        pid: window.pid,
+        layer,
+        frame,
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    };
+    reactor.update_partial_window_server_info(vec![server_info(3)]);
+    assert!(!reactor.state.windows.window(window).unwrap().is_admitted());
+    reactor.update_partial_window_server_info(vec![server_info(0)]);
+    for standard in [false, true] {
+        info.is_standard = standard;
+        reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());
+    }
+    assert!(reactor.state.windows.window(window).unwrap().is_admitted());
+    assert!(reactor.state.windows.is_claimed(window));
+}
+
+#[test]
+fn claimed_tiled_window_keeps_its_slot_through_minimize_and_admission_changes() {
+    let (mut apps, mut reactor, space) = settled(3);
+    let workspace = reactor.state.windows.workspace_for_window(wid(2)).unwrap();
+    let before = tiled(&mut reactor, space);
+    reactor.claim_window(wid(2), OWNER, NONE).unwrap();
+    apps.simulate_until_quiet(&mut reactor);
+
+    minimize_and_lose_admission_while_claimed(&mut reactor, wid(2));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
+    assert_eq!(
+        reactor.state.windows.claim(wid(2)).unwrap().workspace(),
+        Some(workspace)
+    );
+
+    reactor.release_window(wid(2), OWNER).unwrap();
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(tiled(&mut reactor, space), before);
+    reactor.state.windows.debug_assert_invariants();
+}
+
+#[test]
+fn claimed_floating_window_stays_floating_through_minimize_and_admission_changes() {
+    let (mut reactor, window, space, _, floating_frame) = reactor_with_floating_window();
+    let workspace = reactor.state.windows.workspace_for_window(window).unwrap();
+    reactor.claim_window(window, OWNER, NONE).unwrap();
+
+    minimize_and_lose_admission_while_claimed(&mut reactor, window);
+    let engine = &reactor.layout_manager.layout_engine;
+    assert!(engine.is_window_floating(window));
+    assert_eq!(
+        engine.get_floating_position(workspace, window),
+        Some(floating_frame)
+    );
+    assert_eq!(
+        reactor.state.windows.claim(window).unwrap().workspace(),
+        Some(workspace)
+    );
+
+    reactor.release_window(window, OWNER).unwrap();
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
+    assert_eq!(
+        reactor.state.windows.workspace_for_window(window),
+        Some(workspace)
+    );
+    assert!(reactor.test_active_workspace_windows(space).contains(&window));
+    reactor.state.windows.debug_assert_invariants();
+}

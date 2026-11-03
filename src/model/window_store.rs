@@ -1292,10 +1292,10 @@ impl WindowStore {
     }
 
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
+        // A claim keeps its saved workspace until release; only workspace removal clears it.
         let old = self.windows.get_mut(&window_id).and_then(|record| {
             record.pending_transfer = None;
-            let claimed = record.claim.as_mut().and_then(|claim| claim.workspace.take());
-            claimed.or_else(|| record.workspace.take())
+            record.workspace.take()
         });
         if let Some(old_assignment) = old {
             self.remove_window_from_workspace_index(window_id, old_assignment);
@@ -1928,10 +1928,11 @@ mod tests {
         assert_eq!((claim.owner, claim.workspace()), (owner, Some(replaced)));
         assert!(store.is_admitted(rekeyed) && store.owner_claims(owner).is_empty());
 
-        // Destruction and admission-failure cleanup both reach the claim.
+        // Lost admission or minimizing keeps the saved workspace; destruction ends the claim.
         store.insert_claim(sibling, other, WindowClaimFlags::empty());
-        assert_eq!(store.remove_window_assignment(sibling), Some(home));
-        assert_eq!(store.claim(sibling).unwrap().workspace(), None);
+        assert_eq!(store.remove_window_assignment(sibling), None);
+        assert!(store.observe_minimized(sibling));
+        assert_eq!(store.claim(sibling).unwrap().workspace(), Some(home));
         store.remove_window(sibling);
         assert!(store.owner_claims(other).is_empty() && store.claimed_windows().next().is_none());
         store.debug_assert_invariants();

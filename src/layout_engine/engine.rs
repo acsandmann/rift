@@ -1916,8 +1916,12 @@ impl LayoutEngine {
         app_rule_outcome: &mut AppRuleOutcome,
     ) -> EventResponse {
         debug!(?event);
-        // An externally claimed window never rejoins a projection, whichever path observed it.
+        // An externally claimed window has left every projection and never rejoins one,
+        // whichever path observed it. Its floating state and saved slot wait for release,
+        // so a removal (minimize, lost admission) has nothing to do; destruction ends the
+        // claim first.
         if let LayoutEvent::WindowAdded(_, wid)
+        | LayoutEvent::WindowRemoved(wid)
         | LayoutEvent::WindowObserved(
             _,
             ResolvedWindow {
