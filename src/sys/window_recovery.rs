@@ -19,28 +19,33 @@ pub fn start() -> io::Result<Child> {
         .arg(std::process::id().to_string())
         // Terminal signals must reach the daemon without killing its recovery child.
         .process_group(0)
-        .stdin(Stdio::null())
+        // The daemon keeps this pipe open for its lifetime. EOF also works if
+        // it dies before the helper has finished starting.
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
     let mut ready = [0];
-    child.stdout.take().unwrap().read_exact(&mut ready)?;
+    if let Err(error) = child.stdout.take().unwrap().read_exact(&mut ready) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     Ok(child)
 }
 
-pub fn run(pid: i32) -> io::Result<()> {
-    let (exited, exit) = std::sync::mpsc::channel();
-    super::dispatch::on_proc_exit(pid, move || {
-        let _ = exited.send(());
-    });
+pub fn run(_pid: i32) -> io::Result<()> {
     // A newline flushes stdout. Keep Rust's default ignored SIGPIPE in this
     // child: a daemon killed during setup can close the pipe before this write.
     let _ = io::stdout().write_all(b"\n");
-    // GCD delivers the process-exit event on its own queue. No run loop,
-    // periodic wakeups, or window inventories are needed while Rift is alive.
-    // The parent may have exited before the dispatch source was registered.
-    if std::os::unix::process::parent_id() == pid as u32 {
-        exit.recv().map_err(io::Error::other)?;
-    }
+    // The parent never writes; the pipe closes even on a crash or SIGKILL.
+    io::copy(&mut io::stdin(), &mut io::sink())?;
+    // AX timeouts apply to individual requests, not the entire scan, and an
+    // OS call can still get stuck. Do not leave an orphaned helper forever.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        eprintln!("window recovery timed out after 60 seconds");
+        std::process::exit(1);
+    });
     objc2::rc::autoreleasepool(|_| recover(MainThreadMarker::new().unwrap()));
     Ok(())
 }
