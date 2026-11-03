@@ -152,18 +152,12 @@ impl IpcRequestHandler {
     fn update_claims(
         &self,
         port: ClientPort,
-        acquire: bool,
         change: impl FnOnce(&mut reactor::Reactor, ClaimOwner) -> Result<(), &'static str>,
         data: serde_json::Value,
     ) -> Vec<u8> {
         let Ok(mut reactor) = self.reactor.try_borrow_mut() else {
             return encode_error(serde_json::json!({ "message": "Reactor is busy" }));
         };
-        if acquire && !self.server_state.set_lease(port, PortLease::Claims, true) {
-            return encode_error(serde_json::json!({
-                "message": "Failed to monitor management port"
-            }));
-        }
         let owner = ClaimOwner(port);
         let result = change(&mut reactor, owner);
         if reactor.state.windows.owner_claims(owner).is_empty() {
@@ -258,13 +252,17 @@ impl IpcRequestHandler {
             }
             RiftRequest::ClaimWindow { window_id, flags } => self.update_claims(
                 client_port,
-                true,
-                |reactor, owner| reactor.claim_window(window_id_from(window_id)?, owner, flags),
+                |reactor, owner| {
+                    // A claim may only exist while its owner's port is watched.
+                    if !self.server_state.set_lease(client_port, PortLease::Claims, true) {
+                        return Err("Failed to monitor management port");
+                    }
+                    reactor.claim_window(window_id_from(window_id)?, owner, flags)
+                },
                 serde_json::json!({ "claimed": window_id }),
             ),
             RiftRequest::ReleaseWindow { window_id } => self.update_claims(
                 client_port,
-                false,
                 |reactor, owner| reactor.release_window(window_id_from(window_id)?, owner),
                 serde_json::json!({ "released": window_id }),
             ),
@@ -572,6 +570,10 @@ unsafe extern "C" fn handle_mach_client_disconnect_c(
 
     let handler = unsafe { &*(context as *const IpcRequestHandler) };
     handler.server_state.remove_client(client_port);
+    // Subscription-only clients never claimed anything; leave the reactor alone.
+    if !handler.server_state.holds_lease(client_port, PortLease::Claims) {
+        return;
+    }
     let release = ReleaseClaims {
         port: client_port,
         server_state: handler.server_state.clone(),

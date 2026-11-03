@@ -102,6 +102,10 @@ impl ServerState {
         true
     }
 
+    pub fn holds_lease(&self, port: ClientPort, lease: PortLease) -> bool {
+        self.leases.lock().get(&port).is_some_and(|held| held & lease as u8 != 0)
+    }
+
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) -> bool {
         info!("Client {} subscribing to event: {}", client_port, event);
         let mut added = false;
@@ -370,9 +374,17 @@ mod tests {
         unsafe { test_support::destroy_receive_right(client) };
         assert_eq!(notices(), [(DEAD_NAME, client)]);
         state.remove_client(client);
-        assert!(state.leases.lock().contains_key(&client));
+        assert!(state.holds_lease(client, PortLease::Claims));
         assert!(!unsafe { test_support::is_unused(client) });
         state.set_lease(client, PortLease::Claims, false);
+        assert!(freed(client));
+
+        // A subscription-only client's death leaves no claims lease, so no reactor work.
+        let client = subscribed(false);
+        unsafe { test_support::destroy_receive_right(client) };
+        assert_eq!(notices(), [(DEAD_NAME, client)]);
+        state.remove_client(client);
+        assert!(!state.holds_lease(client, PortLease::Claims));
         assert!(freed(client));
 
         // A full receive queue is not a disconnect: the dispatch worker keeps both leases.

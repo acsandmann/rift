@@ -356,9 +356,7 @@ impl WindowManagementSession {
             _ => Err(ClientError::UnknownResponse),
         }
     }
-}
 
-impl WindowManagementSession {
     fn next_request_id(&mut self) -> i32 {
         self.sequence = self.sequence.wrapping_add(1);
         (self.sequence | SESSION_REQUEST_ID_TAG) as i32

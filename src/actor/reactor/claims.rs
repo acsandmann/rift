@@ -77,7 +77,9 @@ impl Reactor {
     /// The owner's session ended: return all of its windows, arranging each space once.
     pub(crate) fn release_claims(&mut self, owner: ClaimOwner) {
         let windows = self.state.windows.owner_claims(owner).to_vec();
-        self.release_claims_of(windows);
+        if !windows.is_empty() {
+            self.release_claims_of(windows);
+        }
     }
 
     fn release_claims_of(&mut self, windows: impl IntoIterator<Item = WindowId>) {
