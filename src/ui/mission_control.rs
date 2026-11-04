@@ -36,6 +36,12 @@ fn contains(r: CGRect, p: CGPoint) -> bool {
 fn intersects(a: CGRect, b: CGRect) -> bool {
     a.min().x < b.max().x && b.min().x < a.max().x && a.min().y < b.max().y && b.min().y < a.max().y
 }
+/// More of `a` than a parked window's sliver lies on `display`.
+fn shows_on(a: CGRect, display: CGRect) -> bool {
+    let width = a.max().x.min(display.max().x) - a.min().x.max(display.min().x);
+    let height = a.max().y.min(display.max().y) - a.min().y.max(display.min().y);
+    width > 1. && height > 1.
+}
 fn union(a: CGRect, b: CGRect) -> CGRect {
     rect(
         a.min().x.min(b.min().x),
@@ -2756,7 +2762,7 @@ impl OverviewSession {
                     .workspaces
                     .iter()
                     .find(|ws| ws.workspace_id == exit.target.workspace)
-                    .is_some_and(|ws| intersects(frame, ws.display_frame));
+                    .is_some_and(|ws| shows_on(frame, ws.display_frame));
                 if !visible {
                     continue;
                 }
@@ -2789,14 +2795,8 @@ impl OverviewSession {
                     .and_then(|w| w.data.info.sys_id)
                     .filter(|&id| crate::sys::window_server::window_is_ordered_in(id))
                     .and_then(crate::sys::window_server::get_window);
-                if let Some(native) = native.filter(|w| w.pid == id.pid) {
-                    let width = native.frame.max().x.min(d.bounds.max().x)
-                        - native.frame.min().x.max(d.bounds.min().x);
-                    let height = native.frame.max().y.min(d.bounds.max().y)
-                        - native.frame.min().y.max(d.bounds.min().y);
-                    if width > 1. && height > 1. {
-                        return false;
-                    }
+                if native.is_some_and(|w| w.pid == id.pid && shows_on(w.frame, d.bounds)) {
+                    return false;
                 }
             }
         }

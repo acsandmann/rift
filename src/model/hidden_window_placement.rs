@@ -14,20 +14,42 @@ impl HideCorner {
             Self::BottomRight => Self::BottomLeft,
         }
     }
+
+    fn side(self) -> HideSide {
+        match self {
+            Self::BottomLeft => HideSide::Left,
+            Self::BottomRight => HideSide::Right,
+        }
+    }
 }
 
-/// Pure geometry used to place inactive-workspace windows just offscreen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HideSide {
+    Left,
+    Right,
+}
+
+/// Pure geometry used to place windows just offscreen: windows of inactive
+/// workspaces, and scrolling columns outside the viewport.
 pub struct HiddenWindowPlacement;
 
 impl HiddenWindowPlacement {
     const REVEAL_PX: f64 = 1.0;
     const VISIBLE_THRESHOLD_PX: f64 = 3.0;
 
+    /// The x of a window `width` wide parked just past `side` of `screen`. It
+    /// keeps a sliver on the screen: macOS moves a window that touches no
+    /// display into another display's Space and pulls it back 40pt onto a
+    /// screen.
+    pub fn parked_x(screen: CGRect, width: f64, side: HideSide) -> f64 {
+        match side {
+            HideSide::Left => screen.origin.x - width + Self::REVEAL_PX,
+            HideSide::Right => screen.max().x - Self::REVEAL_PX,
+        }
+    }
+
     fn rect_for_corner(screen: CGRect, window: CGRect, corner: HideCorner) -> CGRect {
-        let x = match corner {
-            HideCorner::BottomLeft => screen.origin.x - window.size.width + Self::REVEAL_PX,
-            HideCorner::BottomRight => screen.max().x - Self::REVEAL_PX,
-        };
+        let x = Self::parked_x(screen, window.size.width, corner.side());
         CGRect::new(CGPoint::new(x, screen.max().y - Self::REVEAL_PX), window.size)
     }
 

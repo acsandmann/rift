@@ -1915,8 +1915,8 @@ mod tests {
         manager.retire();
         assert!(manager.motions.is_empty());
 
-        // The completed animation parked the first window at -1000. macOS
-        // reports it 40 points farther right. A click in the selected window
+        // The completed animation parked the first window at -999. macOS
+        // reports it 39 points farther right. A click in the selected window
         // must not turn that native correction into a new viewport position.
         let native = vec![
             (hidden, rect(-960.0, 0.0, 1000.0, 800.0)),

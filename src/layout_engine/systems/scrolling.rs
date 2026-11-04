@@ -21,6 +21,7 @@ use crate::layout_engine::systems::{
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAction};
+use crate::model::hidden_window_placement::{HiddenWindowPlacement, HideSide};
 use crate::sys::geometry::Round;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,10 +354,15 @@ fn translate_frame(
 ) -> CGRect {
     frame.origin.x += tiling.origin.x - offset;
     if park {
-        if frame.max().x <= tiling.origin.x {
-            frame.origin.x = screen.origin.x - frame.size.width;
+        let side = if frame.max().x <= tiling.origin.x {
+            Some(HideSide::Left)
         } else if frame.origin.x >= tiling.max().x {
-            frame.origin.x = screen.max().x;
+            Some(HideSide::Right)
+        } else {
+            None
+        };
+        if let Some(side) = side {
+            frame.origin.x = HiddenWindowPlacement::parked_x(screen, frame.size.width, side);
         }
     }
     frame
@@ -3001,9 +3007,39 @@ pub(crate) mod tests {
         }
         assert_eq!(logical[3].1.origin.x, logical[4].1.origin.x);
         assert!((logical[4].1.origin.y - logical[3].1.max().y - 11.0).abs() <= 1.0);
-        assert_eq!(native[3].1.origin.x, f.screen.max().x);
+        assert_eq!(
+            native[3].1.origin.x,
+            HiddenWindowPlacement::parked_x(f.screen, native[3].1.size.width, HideSide::Right)
+        );
         assert!(logical[3].1.origin.x > native[3].1.origin.x);
         assert_eq!(presented_frames(&f.system, f.layout).collect::<Vec<_>>(), native);
+    }
+
+    #[test]
+    fn parked_columns_keep_a_sliver_on_their_own_screen() {
+        // A display below another, like a laptop under an external display. A
+        // column touching no display would be moved into the other's Space.
+        let mut f = Fixture::new(5);
+        f.screen.origin = CGPoint::new(623.0, 1726.0);
+        for _ in 0..3 {
+            f.focus(Direction::Right);
+        }
+        f.prepare();
+        let screen = f.screen;
+        let parked: Vec<_> = f
+            .system
+            .calculate_frames(f.layout, screen, &f.constraints, &f.gaps, true)
+            .into_iter()
+            .filter(|&(_, frame)| HiddenWindowPlacement::is_hidden(screen, frame, &[]))
+            .collect();
+        let windows: Vec<_> = parked.iter().map(|&(wid, _)| wid).collect();
+        assert_eq!(windows, [wid(1), wid(2), wid(5)]);
+        for (wid, frame) in parked {
+            assert!(
+                frame.max().x > screen.origin.x && frame.origin.x < screen.max().x,
+                "{wid:?} at {frame:?} must touch its screen"
+            );
+        }
     }
 
     #[test]
