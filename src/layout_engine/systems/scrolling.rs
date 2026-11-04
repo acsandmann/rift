@@ -1779,7 +1779,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         &mut self,
         layout: LayoutId,
         wid: WindowId,
-        _old_frame: CGRect,
+        old_frame: CGRect,
         new_frame: CGRect,
         screen: CGRect,
         gaps: &GapSettings,
@@ -1790,14 +1790,23 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some((col, row)) = state.locate(wid) else {
             return;
         };
+        let width_changed = (new_frame.size.width - old_frame.size.width).abs() > 0.5;
+        let height_changed = (new_frame.size.height - old_frame.size.height).abs() > 0.5;
+        if !width_changed && !height_changed {
+            return;
+        }
         let tiling = compute_tiling_area(screen, gaps);
         state.mutate(&self.settings, |state| {
-            state.columns[col].width = ColumnWidth::Proportion(clamp_ratio(
-                width_ratio(tiling.size.width, gaps.inner.horizontal, new_frame.size.width),
-                &self.settings,
-            ));
+            // Display moves can resize only the height. Keep the requested width
+            // (including preserved pixel widths) unless the width actually changed.
+            if width_changed {
+                state.columns[col].width = ColumnWidth::Proportion(clamp_ratio(
+                    width_ratio(tiling.size.width, gaps.inner.horizontal, new_frame.size.width),
+                    &self.settings,
+                ));
+            }
             let column = &mut state.columns[col];
-            if column.windows.len() > 1 {
+            if height_changed && column.windows.len() > 1 {
                 let total = (tiling.size.height
                     - gaps.inner.vertical * column.windows.len().saturating_sub(1) as f64)
                     .max(1.0);
