@@ -3283,6 +3283,60 @@ fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
 }
 
 #[test]
+fn app_rescue_after_clamped_hide_is_hidden_again() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let workspaces = reactor.test_workspace_ids(space);
+    assert!(reactor.set_test_active_workspace(space, workspaces[1]));
+    assert!(reactor.assign_test_window_to_workspace(space, wid, workspaces[0]));
+    let _ = apps.requests();
+    assert!(reactor.update_layout_or_warn(false, true, None));
+    let hidden_target = reactor.transaction_manager.get_target_frame(wsid).unwrap();
+    let txid = reactor.transaction_manager.get_last_sent_txid(wsid);
+    let _ = apps.requests();
+    let clamped = CGRect::new(
+        CGPoint::new(hidden_target.origin.x, hidden_target.origin.y - 41.),
+        hidden_target.size,
+    );
+    let outcome = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            clamped,
+            Some(txid),
+            Requested(true),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert_eq!(outcome.arrange.passes, 0, "clamping must not cause a retry loop");
+    reactor.apply_event_outcome(outcome);
+    assert!(apps.requests().is_empty());
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        CGRect::new(CGPoint::new(10., 48.), hidden_target.size),
+        Some(txid),
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|req| matches!(req,
+            Request::SetWindowFrames(frames, _, _, _, _)
+                if frames.iter().any(|(id, frame)| *id == wid && frame.same_as(hidden_target))
+        )),
+        "an app moving its parked window back on screen must trigger another hide: {requests:?}"
+    );
+    assert_eq!(
+        reactor.test_workspace_for_window(space, wid),
+        Some(workspaces[0])
+    );
+}
+
+#[test]
 fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

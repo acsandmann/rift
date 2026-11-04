@@ -1839,6 +1839,23 @@ impl Reactor {
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 let mission_control_active = self.is_mission_control_active();
                 let mut effective_mouse_state = mouse_state;
+                // A delayed move from an app can invalidate a parked frame even when
+                // WindowServer reports Rift's transaction id. Drop the stale hide
+                // target so the next layout can re-park the window.
+                if !mission_control_active
+                    && !requested.0
+                    && mouse_state != Some(MouseState::Down)
+                    && let Some(window) = self.state.windows.window(wid)
+                    && let Some(wsid) = window.info.sys_id
+                    && self.hidden_assigned_space_for_window_id(wid).is_some()
+                    && last_seen == Some(self.transaction_manager.get_last_sent_txid(wsid))
+                    && self
+                        .transaction_manager
+                        .get_target_frame(wsid)
+                        .is_some_and(|target| !new_frame.same_as(target))
+                {
+                    self.transaction_manager.clear_target_for_window(wsid);
+                }
                 if matches!(
                     window_workflow::classify_window_frame_change(
                         &mut self.state,
