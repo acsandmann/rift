@@ -356,5 +356,18 @@ pub(super) fn parse_config_file(buf: &str) -> Result<ConfigSource, toml::de::Err
     migrate_legacy_resize_bindings(&mut document);
     migrate_legacy_window_snapping(&mut document);
     migrate_legacy_stack_line(&mut document);
-    document.try_into()
+    let explicit_workspace_names = document
+        .get("virtual_workspaces")
+        .and_then(|workspaces| workspaces.get("workspace_names"))
+        .is_some();
+    let mut source: ConfigSource = document.try_into()?;
+    // Built-in names follow the configured count. Explicit lists must still be
+    // validated as written, including lists identical to the built-in defaults.
+    if !explicit_workspace_names {
+        source
+            .virtual_workspaces
+            .workspace_names
+            .truncate(source.virtual_workspaces.default_workspace_count);
+    }
+    Ok(source)
 }
