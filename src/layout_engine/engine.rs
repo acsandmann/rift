@@ -2935,11 +2935,13 @@ impl LayoutEngine {
                 }
             }
 
-            let floating_positions =
-                self.floating_positions.workspace_positions(active_workspace_id);
-            for (window_id, stored_position) in floating_positions {
+            // Look up this workspace's frames directly. Scanning the entire
+            // floating-position store makes every switch depend on windows in
+            // unrelated workspaces (and displays).
+            for window_id in window_store.workspace_windows(active_workspace_id) {
                 if self.floating.is_floating(window_id)
-                    && window_store.workspace_for_window(window_id) == Some(active_workspace_id)
+                    && let Some(stored_position) =
+                        self.floating_positions.get(active_workspace_id, window_id)
                 {
                     ensure_visible_floating(
                         self,
@@ -2991,19 +2993,22 @@ impl LayoutEngine {
         for wid in hidden_windows {
             let original_frame = get_window_frame(wid);
 
-            if self.floating.is_floating(wid) {
-                if let Some(workspace_id) =
-                    self.workspaces().workspace_for_window(&window_store, space, wid)
-                {
-                    ensure_visible_floating(
-                        self,
-                        &mut positions,
-                        workspace_id,
-                        wid,
-                        original_frame,
-                        true,
-                    );
-                }
+            if self.floating.is_floating(wid)
+                && let Some(workspace_id) =
+                    self.workspaces().workspace_for_window(window_store, space, wid)
+                && self.floating_positions.get(workspace_id, wid).is_none()
+            {
+                // Only initialize a missing restore frame. The temporary visible
+                // position is overwritten by parking below, so computing it for
+                // an already-saved window does no useful work on each switch.
+                ensure_visible_floating(
+                    self,
+                    &mut positions,
+                    workspace_id,
+                    wid,
+                    original_frame,
+                    true,
+                );
             }
 
             let original_size =

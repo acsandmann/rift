@@ -500,6 +500,13 @@ impl LayoutManager {
 
         let active_space = reactor.workspace_command_space();
         for (space, layout) in layout_result {
+            // Start native workspace moves before collecting stack tabs and building
+            // IPC events. App actors can perform AX work while we publish the UI.
+            let switch_dispatched = is_workspace_switch && !instant && !force_frames;
+            if switch_dispatched {
+                any_frame_changed |=
+                    AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
+            }
             if let Some(screen) = reactor.space_state.screen_by_space(space) {
                 let screen_frame = screen.frame;
                 let display_uuid = screen.display_uuid_owned();
@@ -594,9 +601,8 @@ impl LayoutManager {
             } else if instant {
                 any_frame_changed |=
                     AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
-            } else if is_workspace_switch {
-                any_frame_changed |=
-                    AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
+            } else if switch_dispatched {
+                // Already submitted before UI publication above.
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
                 any_frame_changed |=
                     AnimationManager::instant_layout(reactor, space, &layout, skip_wid);

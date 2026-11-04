@@ -63,24 +63,26 @@ impl HiddenWindowPlacement {
         bottom
             .into_iter()
             .chain(side)
-            .min_by(|a, b| overlap(a).total_cmp(&overlap(b)))
+            // Score each candidate once; a comparator otherwise rescans all
+            // displays for the current best candidate on every comparison.
+            .map(|candidate| (candidate, overlap(&candidate)))
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(candidate, _)| candidate)
             .unwrap_or(window)
     }
 
     pub fn is_hidden(screen: CGRect, window: CGRect, other_screens: &[CGRect]) -> bool {
-        [HideCorner::BottomLeft, HideCorner::BottomRight]
-            .into_iter()
-            .any(|corner| Self::calculate(screen, window, corner, other_screens) == window)
-            || {
-                let visible_width = (window.max().x.min(screen.max().x)
-                    - window.origin.x.max(screen.origin.x))
-                .max(0.0);
-                let visible_height = (window.max().y.min(screen.max().y)
-                    - window.origin.y.max(screen.origin.y))
-                .max(0.0);
-                visible_width <= Self::VISIBLE_THRESHOLD_PX
-                    || visible_height <= Self::VISIBLE_THRESHOLD_PX
-            }
+        // Most parked windows expose at most a pixel. Check that inexpensive
+        // case before evaluating parking candidates against every other display.
+        let visible_width =
+            (window.max().x.min(screen.max().x) - window.origin.x.max(screen.origin.x)).max(0.0);
+        let visible_height =
+            (window.max().y.min(screen.max().y) - window.origin.y.max(screen.origin.y)).max(0.0);
+        visible_width <= Self::VISIBLE_THRESHOLD_PX
+            || visible_height <= Self::VISIBLE_THRESHOLD_PX
+            || [HideCorner::BottomLeft, HideCorner::BottomRight]
+                .into_iter()
+                .any(|corner| Self::calculate(screen, window, corner, other_screens) == window)
     }
 }
 
