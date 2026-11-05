@@ -3550,7 +3550,7 @@ impl LayoutEngine {
         let Some(id) = self.workspaces.active_workspace(source_space) else {
             return EventResponse::default();
         };
-        if self.workspaces.settings.mode == crate::common::config::WorkspaceMode::PerDisplay {
+        if self.workspaces.effective_mode() == crate::common::config::WorkspaceMode::PerDisplay {
             if source_space == target_space {
                 return EventResponse::default();
             }

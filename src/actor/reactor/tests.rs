@@ -9396,7 +9396,10 @@ fn shared_display_departure_restores_only_the_recorded_native_context() {
     reactor.handle_event(screens(b));
     reactor.handle_event(space_state_event(vec![shared_left()], vec![Some(a)]));
     assert_eq!(reactor.layout_manager.layout_engine.workspaces()[id].space, a);
-    assert_eq!(reactor.test_workspace_ids(other), dormant);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().workspace_ids(other),
+        dormant
+    );
     reactor.handle_event(space_state_event_with(
         vec![shared_left(), shared_right()],
         vec![Some(a), Some(other)],
@@ -10337,6 +10340,67 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
     reactor.handle_event(Event::ConfigUpdated(config));
     let workspace = &reactor.layout_manager.layout_engine.workspaces()[id];
     assert_eq!((workspace.space, workspace.rule_overridden), (b, false));
+}
+
+#[test]
+fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces() {
+    let mut settings = shared_settings();
+    settings.default_workspace_count = 1;
+    settings.workspace_names = vec!["Code".into()];
+    settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        workspace: WorkspaceSelector::Name("Code".into()),
+        layout: None,
+        display: Some(vec!["test-display-1".into()]),
+    }];
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    reactor.config.virtual_workspaces = settings;
+    let (a, b, external) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
+    let single = |space| {
+        space_state_event_with(vec![shared_left()], vec![Some(space)], |state| {
+            state
+                .display_space_ids
+                .insert("test-display-0".into(), vec![a, b]);
+        })
+    };
+    reactor.handle_event(single(a));
+    let original = reactor.test_workspace_ids(a)[0];
+    reactor.handle_event(single(b));
+    let independent = reactor.test_workspace_ids(b)[0];
+    reactor.handle_event(single(a));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces()[independent].name,
+        "Code"
+    );
+    let connect = || {
+        space_state_event_with(
+            vec![shared_left(), shared_right()],
+            vec![Some(a), Some(external)],
+            |state| {
+                state
+                    .display_space_ids
+                    .insert("test-display-0".into(), vec![a, b]);
+            },
+        )
+    };
+    // A duplicate snapshot must not move the now-disambiguated workspace later.
+    for _ in 0..2 {
+        reactor.handle_event(connect());
+        let workspaces = reactor.layout_manager.layout_engine.workspaces();
+        assert_eq!(
+            workspaces[independent].space, b,
+            "the other native Space stays isolated"
+        );
+        assert_eq!(
+            workspaces[original].space, external,
+            "the named pin still applies"
+        );
+        assert_ne!(workspaces[independent].name, workspaces[original].name);
+        assert_eq!(
+            workspaces.catalog().count(),
+            2,
+            "connecting must preserve identities"
+        );
+    }
 }
 
 #[test]

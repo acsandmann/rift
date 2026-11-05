@@ -62,7 +62,7 @@ fn fresh(
     let mut engine = LayoutEngine::new(settings, &LayoutSettings::default(), None);
     let mut store = WindowStore::default();
     let all: Vec<_> = spaces.iter().map(|(space, _)| *space).collect();
-    engine.workspaces.ensure_visible_spaces(&all, |_| None);
+    engine.workspaces.ensure_visible_spaces(&all, all.len(), |_| None);
     for (space, display) in spaces {
         let size = CGSize::new(1200.0, 800.0);
         let _ = engine.handle_event(&mut store, LayoutEvent::SpaceExposed(*space, size));
@@ -947,8 +947,8 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     // A shared catalog needs no display evidence, and a moved window is matched only once: left
     // to meet its neighbor's slot again, it would take it from the same-titled window.
     let file = session(&shared, &[(a, "gone", &[w1])]);
-    let (mut engine, mut store) = fresh(&shared, &[(c, "new")]);
-    let report = restore_on(&mut engine, &mut store, &file, displays, c, source, &[c]);
+    let (mut engine, mut store) = fresh(&shared, &[(c, "new"), (d, "second")]);
+    let report = restore_on(&mut engine, &mut store, &file, displays, c, source, &[c, d]);
     assert_eq!(report.unwrap().matched, 0);
     assert!(!in_any_tree(&engine, w1) && engine.persistence.pending.is_empty());
 
@@ -1096,4 +1096,34 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     [w1, w2].iter().for_each(|w| open(&mut engine, &mut store, id, *w));
     engine.transfer_persistent_window_identity(w1, win(70, 1));
     assert_eq!(tree(&engine, id), [win(70, 1), w2]);
+}
+
+#[test]
+fn global_single_display_restore_stays_in_the_windows_native_space() {
+    let settings = VirtualWorkspaceSettings {
+        mode: WorkspaceMode::Global,
+        ..Default::default()
+    };
+    let (a, b) = (SpaceId::new(801), SpaceId::new(802));
+    let window = win(80, 1);
+    let file = session(&settings, &[(a, "display", &[window])]);
+    for current in [a, b] {
+        let (mut engine, mut store) = boot(&settings, &file);
+        resolve(
+            &mut engine,
+            &mut store,
+            &[(current, "display")],
+            &[("display", &[a, b])],
+        );
+        engine
+            .workspaces
+            .ensure_visible_spaces(&[current], 1, |_| None);
+        let target = ws(&engine, current, 0);
+        open(&mut engine, &mut store, target, window);
+        assert_eq!(
+            observe(&mut engine, &mut store, current, window, &evidence(window)),
+            current == a
+        );
+        assert_eq!(store.workspace_for_window(window), Some(target));
+    }
 }

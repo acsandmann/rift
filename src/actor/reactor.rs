@@ -3812,6 +3812,10 @@ impl Reactor {
         self.space_activation_policy
             .on_spaces_updated(activation_config, &self.space_state.screens);
         let previously_active = self.set_active_spaces_from_snapshot(&authoritative_spaces);
+        self.layout_manager
+            .layout_engine
+            .workspaces_mut()
+            .update_display_count(self.space_state.screens.len());
         let engine = &self.layout_manager.layout_engine;
         let mut refits = Vec::new();
         for screen in &self.space_state.screens {
@@ -4940,7 +4944,7 @@ impl Reactor {
         self.layout_manager
             .layout_engine
             .workspaces_mut()
-            .ensure_visible_spaces(&spaces, rule_space);
+            .ensure_visible_spaces(&spaces, screens.len(), rule_space);
         for space in spaces {
             self.expose_space_if_known(space);
         }

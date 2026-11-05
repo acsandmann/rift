@@ -36,7 +36,7 @@ impl PersistedLayout {
             }
         }
         // A shared catalog pairs by position, so only its active workspaces depend on these pairs.
-        if pairs.is_empty() && engine.workspaces.settings.mode != WorkspaceMode::Global {
+        if pairs.is_empty() && engine.workspaces.effective_mode() != WorkspaceMode::Global {
             anyhow::bail!("saved layout has no entry for any connected display");
         }
         Ok(pairs)
@@ -162,7 +162,7 @@ impl LayoutEngine {
         let mut snapshot = PersistedLayout::read(&path)?;
         let pairs = snapshot.space_pairs(self, request, visible_spaces)?;
         let mappings = if request.scope == RestoreScope::Displays
-            && self.workspaces.settings.mode == WorkspaceMode::Global
+            && self.workspaces.effective_mode() == WorkspaceMode::Global
         {
             snapshot.catalog_mappings(self)?
         } else {
