@@ -237,6 +237,38 @@ pub(crate) fn emit_layout_events(
         return outcome;
     }
 
+    // Minimized windows still match saved membership. Match before the app's
+    // discovery-completed event prunes truly missing identities; admission and
+    // geometry remain suspended until a positive return.
+    let minimized: Vec<_> = state
+        .windows
+        .window_ids_for_pid(pid)
+        .filter(|wid| {
+            !state.windows.is_claimed(*wid)
+                && state.windows.window(*wid).is_some_and(|w| w.info.is_minimized)
+        })
+        .collect();
+    for wid in minimized {
+        let Some(space) =
+            window_spaces.get(&wid).and_then(|(native, discovery)| native.or(*discovery))
+        else {
+            continue;
+        };
+        let (_, removal) = assign_window(
+            state,
+            layout,
+            wid,
+            crate::model::virtual_workspace::WorkspaceContext { space, visible: &active_spaces },
+            app_info.as_ref(),
+            false,
+        );
+        if let Some(event) = removal {
+            outcome = outcome.with_layout_event(event);
+        } else if state.windows.workspace_for_window(wid).is_some() {
+            outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(wid));
+        }
+    }
+
     let mut app_windows: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
     let mut included: HashSet<WindowId> = HashSet::default();
     let visible: Vec<_> = state

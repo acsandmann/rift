@@ -163,8 +163,7 @@ pub fn handle_window_server_destroyed(
             crate::model::window_store::NativeDeparture::Hidden { window, remove_projection } => {
                 if let Some(wid) = window {
                     if remove_projection {
-                        outcome = outcome
-                            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                        outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(wid));
                     }
                     outcome = outcome.with_app_request(wid.pid, Request::WindowMaybeDestroyed(wid));
                 }
@@ -247,8 +246,7 @@ pub fn handle_window_server_appeared(
                         last_known_user_space,
                         owner_pid,
                     ) {
-                        outcome = outcome
-                            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                        outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(wid));
                     }
                     if tracked_window_id.is_none()
                         && let Some(pid) = owner_pid

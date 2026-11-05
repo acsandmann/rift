@@ -4,9 +4,11 @@ use slotmap::Key;
 use tracing::warn;
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::WindowInsertionPoint;
-use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
+use crate::layout_engine::systems::constraints::{
+    AxisConstraints, ConstraintCache, solve_axis_lengths,
+};
 use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
 };
@@ -18,6 +20,8 @@ use crate::sys::geometry::Round;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct TraditionalLayoutSystem {
+    #[serde(skip)]
+    inactive: HashSet<WindowId>,
     pub(crate) tree: Tree<Components>,
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
     #[serde(skip, default)]
@@ -29,6 +33,7 @@ pub struct TraditionalLayoutSystem {
 impl Default for TraditionalLayoutSystem {
     fn default() -> Self {
         Self {
+            inactive: Default::default(),
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
@@ -40,6 +45,7 @@ impl Default for TraditionalLayoutSystem {
 impl TraditionalLayoutSystem {
     pub fn new(window_insertion_point: WindowInsertionPoint, equalize_nodes: bool) -> Self {
         Self {
+            inactive: Default::default(),
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
             window_insertion_point,
@@ -53,9 +59,21 @@ impl TraditionalLayoutSystem {
 
     pub fn set_equalize_nodes(&mut self, value: bool) { self.equalize_nodes = value; }
 
+    fn participating_nodes(&self, root: NodeId) -> HashSet<NodeId> {
+        let mut active = HashSet::default();
+        for node in root.traverse_postorder(self.map()) {
+            if self.window_at(node).is_some_and(|w| !self.inactive.contains(&w))
+                || node.children(self.map()).any(|child| active.contains(&child))
+            {
+                active.insert(node);
+            }
+        }
+        active
+    }
+
     fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
         if let Some(wid) = self.tree.data.window.at(node) {
-            return Some((node, wid));
+            return (!self.inactive.contains(&wid)).then_some((node, wid));
         }
 
         let children: Vec<_> = node.children(self.map()).collect();
@@ -63,19 +81,20 @@ impl TraditionalLayoutSystem {
             return None;
         }
 
-        if let Some(selected) = self
+        let selected = self
             .tree
             .data
             .selection
             .local_selection(self.map(), node)
-            .or_else(|| self.tree.data.selection.last_selection(self.map(), node))
-        {
-            if let Some(target) = self.find_best_focus_target(selected) {
-                return Some(target);
-            }
+            .or_else(|| self.tree.data.selection.last_selection(self.map(), node));
+        if let Some(target) = selected.and_then(|child| self.find_best_focus_target(child)) {
+            return Some(target);
         }
 
         for &child in &children {
+            if Some(child) == selected {
+                continue;
+            }
             if let Some(target) = self.find_best_focus_target(child) {
                 return Some(target);
             }
@@ -142,7 +161,13 @@ impl TraditionalLayoutSystem {
     pub(crate) fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
 
     pub(crate) fn selection(&self, layout: LayoutId) -> NodeId {
-        self.tree.data.selection.current_selection(self.root(layout))
+        let selection = self.tree.data.selection.current_selection(self.root(layout));
+        if !self.inactive.is_empty() && self.find_best_focus_target(selection).is_none() {
+            return self
+                .find_best_focus_target(self.root(layout))
+                .map_or(self.root(layout), |(node, _)| node);
+        }
+        selection
     }
 
     pub(crate) fn map(&self) -> &NodeMap { &self.tree.map }
@@ -326,8 +351,32 @@ impl TraditionalLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
+        let map = &self.tree.map;
+        let window = &self.tree.data.window;
+        let mut prepared = ConstraintCache::default();
+        for child in node.traverse_postorder(map) {
+            if window.at(child).is_some_and(|w| !self.inactive.contains(&w))
+                || child.children(map).any(|c| prepared.contains_key(&c))
+            {
+                let axes = [false, true].map(|horizontal| {
+                    self.tree.data.layout.node_axis_constraints(
+                        &prepared,
+                        map,
+                        window,
+                        child,
+                        constraints,
+                        stack_offset,
+                        stack_line,
+                        gaps,
+                        horizontal,
+                    )
+                });
+                prepared.insert(child, axes);
+            }
+        }
         let mut sizes = vec![];
         self.tree.data.layout.apply_with_gaps(
+            &prepared,
             &self.tree.map,
             &self.tree.data.window,
             &self.tree.data.selection,
@@ -601,6 +650,16 @@ impl Drop for TraditionalLayoutSystem {
 }
 
 impl LayoutSystem for TraditionalLayoutSystem {
+    fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
+
+    fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
+        if participates {
+            self.inactive.remove(&window)
+        } else {
+            self.inactive.insert(window)
+        }
+    }
+
     fn create_layout(&mut self) -> LayoutId {
         let root = OwnedNode::new_root_in(&mut self.tree, "layout_root");
         self.layout_roots.insert(root)
@@ -650,29 +709,19 @@ impl LayoutSystem for TraditionalLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let mut sizes = vec![];
-        let tiling_area = compute_tiling_area(screen, gaps);
-
-        self.tree.data.layout.apply_with_gaps(
-            &self.tree.map,
-            &self.tree.data.window,
-            &self.tree.data.selection,
+        self.calculate_layout_for_node(
             self.root(layout),
-            tiling_area,
             screen,
-            &mut sizes,
+            compute_tiling_area(screen, gaps),
             stack_offset,
             constraints,
             gaps,
             stack_line,
-        );
-
-        sizes
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        let selection = self.selection(layout);
-        self.tree.data.window.at(selection)
+        self.find_best_focus_target(self.selection(layout)).map(|(_, w)| w)
     }
 
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -713,6 +762,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return false;
+        }
         if let Some(parent) = self.selection(layout).parent(self.map()) {
             self.select(parent);
             return true;
@@ -721,6 +773,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return false;
+        }
         if let Some(child) =
             self.tree.data.selection.last_selection(self.map(), self.selection(layout))
         {
@@ -812,10 +867,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn replace_window(&mut self, from: WindowId, to: WindowId) {
+        if self.inactive.remove(&from) {
+            self.inactive.insert(to);
+        }
         self.tree.data.window.replace_window(from, to);
     }
 
     fn remove_window(&mut self, wid: WindowId) {
+        self.inactive.remove(&wid);
         let nodes: Vec<_> =
             self.tree.data.window.take_nodes_for(wid).map(|(_, node)| node).collect();
         for node in nodes {
@@ -840,6 +899,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn remove_windows_for_app(&mut self, pid: pid_t) {
+        self.inactive.retain(|w| w.pid != pid);
         let nodes: Vec<_> =
             self.tree.data.window.take_nodes_for_app(pid).map(|(_, _, node)| node).collect();
         for node in nodes {
@@ -854,7 +914,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
             .filter_map(|node| self.window_at(node))
             .filter(|wid| wid.pid == pid)
             .collect::<Vec<_>>();
-        let delta = reconcile_app_membership(pid, current, desired);
+        let delta =
+            reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
         for wid in delta.removals {
             if let Some(node) = self.tree.data.window.node_for(layout, wid)
                 && !self.tree.data.layout.info[node].is_fullscreen
@@ -872,6 +933,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
+        if self.inactive.contains(&wid) {
+            return false;
+        }
         if let Some(node) = self.tree.data.window.node_for(layout, wid) {
             self.select(node);
             true
@@ -889,6 +953,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     ) {
+        if !self.window_participates(wid) {
+            return;
+        }
         if let Some(node) = self.tree.data.window.node_for(layout, wid) {
             if new_frame == screen {
                 self.tree.data.layout.set_fullscreen(node, true);
@@ -908,6 +975,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return false;
+        }
         let selection = self.selection(layout);
         self.move_node(layout, selection, direction)
     }
@@ -957,11 +1027,17 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
         let selection = self.selection(layout);
         self.nest_in_container_internal(layout, selection, kind);
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return Vec::new();
+        }
         let node = self.selection(layout);
         if self.tree.data.layout.toggle_fullscreen(node) {
             self.visible_windows_under_internal(node)
@@ -971,6 +1047,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return Vec::new();
+        }
         let node = self.selection(layout);
         if self.tree.data.layout.toggle_fullscreen_within_gaps(node) {
             self.visible_windows_under_internal(node)
@@ -981,11 +1060,16 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
         let root = self.root(layout);
-        root.traverse_preorder(&self.tree.map)
-            .any(|node| self.tree.data.layout.is_effectively_fullscreen(node))
+        let active = self.participating_nodes(root);
+        root.traverse_preorder(&self.tree.map).any(|node| {
+            active.contains(&node) && self.tree.data.layout.is_effectively_fullscreen(node)
+        })
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
         let mut selection = self.selection(layout);
 
         if let Some(target) = self.find_natural_join_target(selection, direction) {
@@ -1066,6 +1150,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return Vec::new();
+        }
         let selection = self.selection(layout);
 
         let target_container = if self.tree.data.window.at(selection).is_some() {
@@ -1131,6 +1218,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return Vec::new();
+        }
         let selection = self.selection(layout);
 
         let target_container = if self.tree.data.window.at(selection).is_some() {
@@ -1211,6 +1301,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
         let selection = self.selection(layout);
 
         if let Some(parent) = selection.parent(&self.tree.map) {
@@ -1273,6 +1366,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
         amount: f64,
         orientation: ResizeOrientation,
     ) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
         if amount == 0.0 {
             return;
         }
@@ -1327,6 +1423,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn move_stack_tab(&mut self, layout: LayoutId, window: WindowId, target: WindowId) -> bool {
+        if !self.window_participates(window) || !self.window_participates(target) {
+            return false;
+        }
         let map = &self.tree.map;
         let (Some(source), Some(target)) = (
             self.tree.data.window.node_for(layout, window),
@@ -1360,6 +1459,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
+        if !self.window_participates(a) || !self.window_participates(b) {
+            return false;
+        }
         let node_a = match self.tree.data.window.node_for(layout, a) {
             Some(n) => n,
             None => return false,
@@ -1408,10 +1510,16 @@ impl LayoutSystem for TraditionalLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
+        if !self.window_participates(source) || !self.window_participates(target) {
+            return false;
+        }
         self.apply_explicit_window_drop(layout, source, target, action)
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
+        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
         use crate::layout_engine::LayoutKind;
 
         let map = self.map();
@@ -1520,6 +1628,7 @@ impl TraditionalLayoutSystem {
 
         let mut out = Vec::new();
         let map = &self.tree.map;
+        let active = self.participating_nodes(self.root(layout));
 
         let tiling_area = compute_tiling_area(screen, gaps);
 
@@ -1533,15 +1642,20 @@ impl TraditionalLayoutSystem {
             }
 
             let kind = self.tree.data.layout.kind(node);
-            let children: Vec<_> = node.children(map).collect();
+            let children: Vec<_> = node.children(map).filter(|c| active.contains(c)).collect();
 
             if matches!(kind, HorizontalStack | VerticalStack) {
                 if children.is_empty() {
                     break;
                 }
 
-                let local_sel =
-                    self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
+                let local_sel = self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, node)
+                    .filter(|c| active.contains(c))
+                    .unwrap_or(children[0]);
                 let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
 
                 if self.tree.data.layout.is_effectively_fullscreen(local_sel) {
@@ -1576,9 +1690,10 @@ impl TraditionalLayoutSystem {
                 .data
                 .selection
                 .local_selection(map, node)
-                .or_else(|| node.first_child(map))
+                .filter(|c| active.contains(c))
+                .or_else(|| node.children(map).find(|c| active.contains(c)))
             {
-                rect = self.calculate_child_frame_in_container(node, next, rect, gaps);
+                rect = self.calculate_child_frame_in_container(&active, node, next, rect, gaps);
                 node = next;
                 continue;
             }
@@ -1600,6 +1715,7 @@ impl TraditionalLayoutSystem {
 
         let mut out = Vec::new();
         let map = &self.tree.map;
+        let active = self.participating_nodes(self.root(layout));
 
         let tiling_area = compute_tiling_area(screen, gaps);
 
@@ -1611,15 +1727,20 @@ impl TraditionalLayoutSystem {
             }
 
             let kind = self.tree.data.layout.kind(node);
-            let children: Vec<_> = node.children(map).collect();
+            let children: Vec<_> = node.children(map).filter(|c| active.contains(c)).collect();
 
             if matches!(kind, HorizontalStack | VerticalStack) {
                 if children.is_empty() {
                     continue;
                 }
 
-                let local_sel =
-                    self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
+                let local_sel = self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, node)
+                    .filter(|c| active.contains(c))
+                    .unwrap_or(children[0]);
                 let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
 
                 let is_horizontal = matches!(kind, HorizontalStack);
@@ -1720,6 +1841,7 @@ impl TraditionalLayoutSystem {
 
     fn calculate_child_frame_in_container(
         &self,
+        active: &HashSet<NodeId>,
         parent_node: NodeId,
         child_node: NodeId,
         parent_rect: CGRect,
@@ -1727,7 +1849,7 @@ impl TraditionalLayoutSystem {
     ) -> CGRect {
         let parent_kind = self.tree.data.layout.kind(parent_node);
         let map = &self.tree.map;
-        let siblings: Vec<_> = parent_node.children(map).collect();
+        let siblings: Vec<_> = parent_node.children(map).filter(|c| active.contains(c)).collect();
         let child_index = siblings.iter().position(|&n| n == child_node).unwrap_or(0);
 
         match parent_kind {
@@ -1853,7 +1975,7 @@ impl TraditionalLayoutSystem {
 
     fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
         if let Some(window) = self.window_at(node) {
-            return Some(window);
+            return self.window_participates(window).then_some(window);
         }
         // Along the movement axis, enter at the near edge. Across a split,
         // reuse its selected branch so a return trip retraces the focus path.
@@ -1917,14 +2039,24 @@ impl TraditionalLayoutSystem {
         direction: Direction,
         map: &NodeMap,
     ) -> Option<NodeId> {
+        let active = self.participating_nodes(target);
         let mut current = target;
         loop {
-            let children: Vec<_> = current.children(map).collect();
+            let children: Vec<_> = current
+                .children(map)
+                .filter(|c| self.inactive.is_empty() || active.contains(c))
+                .collect();
             if children.is_empty() {
                 return Some(current);
             }
             let layout_kind = self.tree.data.layout.kind(current);
-            if let Some(selected) = self.tree.data.selection.local_selection(map, current) {
+            if let Some(selected) = self
+                .tree
+                .data
+                .selection
+                .local_selection(map, current)
+                .filter(|c| self.inactive.is_empty() || active.contains(c))
+            {
                 match (layout_kind, direction) {
                     (LayoutKind::Horizontal, Direction::Up | Direction::Down)
                     | (LayoutKind::Vertical, Direction::Left | Direction::Right) => {
@@ -1944,54 +2076,63 @@ impl TraditionalLayoutSystem {
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.first().copied()),
                 (LayoutKind::Horizontal, Direction::Right) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.last().copied()),
                 (LayoutKind::Horizontal, Direction::Up) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.first().copied()),
                 (LayoutKind::Horizontal, Direction::Down) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.last().copied()),
                 (LayoutKind::Vertical, Direction::Up) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.first().copied()),
                 (LayoutKind::Vertical, Direction::Down) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.last().copied()),
                 (LayoutKind::Vertical, Direction::Left) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.first().copied()),
                 (LayoutKind::Vertical, Direction::Right) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.last().copied()),
                 _ if layout_kind.is_stacked() => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
+                    .filter(|c| self.inactive.is_empty() || active.contains(c))
                     .or(children.first().copied()),
                 _ => None,
             };
@@ -2003,11 +2144,22 @@ impl TraditionalLayoutSystem {
     }
 
     fn visible_windows_under_internal(&self, node: NodeId) -> Vec<WindowId> {
+        let active = self.participating_nodes(node);
         let mut stack = vec![node];
         let mut windows = vec![];
         while let Some(node) = stack.pop() {
+            if !active.contains(&node) {
+                continue;
+            }
             if self.layout(node).is_group() {
-                stack.extend(self.tree.data.selection.local_selection(self.map(), node));
+                stack.extend(
+                    self.tree
+                        .data
+                        .selection
+                        .local_selection(self.map(), node)
+                        .filter(|c| active.contains(c))
+                        .or_else(|| node.children(self.map()).find(|c| active.contains(c))),
+                );
             } else {
                 let children: Vec<_> = node.children(self.map()).collect();
                 for child in children.into_iter().rev() {
@@ -2025,8 +2177,26 @@ impl TraditionalLayoutSystem {
         };
         if self.tree.data.layout.kind(parent).orientation() == direction.orientation() {
             match direction {
-                Direction::Left | Direction::Up => from.prev_sibling(&self.tree.map),
-                Direction::Right | Direction::Down => from.next_sibling(&self.tree.map),
+                Direction::Left | Direction::Up => {
+                    let mut next = from.prev_sibling(&self.tree.map);
+                    while let Some(node) = next {
+                        if self.inactive.is_empty() || self.find_best_focus_target(node).is_some() {
+                            return Some(node);
+                        }
+                        next = node.prev_sibling(&self.tree.map);
+                    }
+                    None
+                }
+                Direction::Right | Direction::Down => {
+                    let mut next = from.next_sibling(&self.tree.map);
+                    while let Some(node) = next {
+                        if self.inactive.is_empty() || self.find_best_focus_target(node).is_some() {
+                            return Some(node);
+                        }
+                        next = node.next_sibling(&self.tree.map);
+                    }
+                    None
+                }
             }
         } else {
             None
@@ -2816,9 +2986,9 @@ impl Layout {
 
     fn node_axis_constraints(
         &self,
+        prepared: &ConstraintCache,
         map: &NodeMap,
         window: &WindowIndex,
-        selection: &Selection,
         node: NodeId,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         stack_offset: f64,
@@ -2833,7 +3003,8 @@ impl Layout {
             return (0.0, None, None, true);
         }
 
-        let children: Vec<_> = node.children(map).collect();
+        let children: Vec<_> =
+            node.children(map).filter(|child| prepared.contains_key(child)).collect();
         if children.is_empty() {
             return (0.0, None, None, true);
         }
@@ -2858,17 +3029,7 @@ impl Layout {
         let mut grows = Vec::with_capacity(children.len());
         let mut any_grow = false;
         for child in &children {
-            let (min, fixed, max, can_grow) = self.node_axis_constraints(
-                map,
-                window,
-                selection,
-                *child,
-                constraints,
-                stack_offset,
-                stack_line,
-                gaps,
-                horizontal,
-            );
+            let (min, fixed, max, can_grow) = prepared[&*child][horizontal as usize];
             mins.push(min.max(0.0));
             fixed_parts.push(fixed.map(|v| v.max(0.0)));
             max_parts.push(max.map(|v| v.max(0.0)));
@@ -2957,6 +3118,7 @@ impl Layout {
 
     fn apply_with_gaps(
         &self,
+        prepared: &ConstraintCache,
         map: &NodeMap,
         window: &WindowIndex,
         selection: &Selection,
@@ -2969,6 +3131,9 @@ impl Layout {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) {
+        if !prepared.contains_key(&node) {
+            return;
+        }
         let info = &self.info[node];
         let rect = if info.is_fullscreen {
             screen
@@ -2999,27 +3164,21 @@ impl Layout {
         use LayoutKind::*;
         match info.kind {
             HorizontalStack | VerticalStack => {
-                let children: Vec<_> = node.children(map).collect();
+                let children: Vec<_> =
+                    node.children(map).filter(|child| prepared.contains_key(child)).collect();
                 if children.is_empty() {
                     return;
                 }
                 let is_horizontal = matches!(info.kind, HorizontalStack);
-                let focused_child =
-                    selection.local_selection(map, node).unwrap_or_else(|| children[0]);
+                let focused_child = selection
+                    .local_selection(map, node)
+                    .filter(|child| prepared.contains_key(child))
+                    .unwrap_or_else(|| children[0]);
                 let focused_idx = children.iter().position(|&c| c == focused_child).unwrap_or(0);
                 let effective_stack_offset = if children.len() > 1 {
                     let focused_child = children[focused_idx];
-                    let (focus_min, focus_fixed, _focus_max, _) = self.node_axis_constraints(
-                        map,
-                        window,
-                        selection,
-                        focused_child,
-                        constraints,
-                        stack_offset,
-                        stack_line,
-                        gaps,
-                        is_horizontal,
-                    );
+                    let (focus_min, focus_fixed, _focus_max, _) =
+                        prepared[&focused_child][is_horizontal as usize];
                     let axis_len = if is_horizontal {
                         rect.size.width
                     } else {
@@ -3048,6 +3207,7 @@ impl Layout {
                         layout.get_frame_for_index(idx)
                     };
                     self.apply_with_gaps(
+                        prepared,
                         map,
                         window,
                         selection,
@@ -3063,6 +3223,7 @@ impl Layout {
                 }
             }
             Horizontal => self.layout_axis(
+                prepared,
                 map,
                 window,
                 selection,
@@ -3077,6 +3238,7 @@ impl Layout {
                 stack_line,
             ),
             Vertical => self.layout_axis(
+                prepared,
                 map,
                 window,
                 selection,
@@ -3095,6 +3257,7 @@ impl Layout {
 
     fn layout_axis(
         &self,
+        prepared: &ConstraintCache,
         map: &NodeMap,
         window: &WindowIndex,
         selection: &Selection,
@@ -3109,7 +3272,8 @@ impl Layout {
         stack_line: crate::common::config::StackLineReserve,
     ) {
         use objc2_core_foundation::{CGPoint, CGSize};
-        let children: Vec<_> = node.children(map).collect();
+        let children: Vec<_> =
+            node.children(map).filter(|child| prepared.contains_key(child)).collect();
         if children.is_empty() {
             return;
         }
@@ -3157,17 +3321,7 @@ impl Layout {
         let axis_constraints: Vec<AxisConstraints> = children
             .iter()
             .map(|&child| {
-                let (min, fixed, max, can_grow) = self.node_axis_constraints(
-                    map,
-                    window,
-                    selection,
-                    child,
-                    constraints,
-                    stack_offset,
-                    stack_line,
-                    gaps,
-                    horizontal,
-                );
+                let (min, fixed, max, can_grow) = prepared[&child][horizontal as usize];
                 AxisConstraints {
                     min,
                     fixed,
@@ -3212,6 +3366,7 @@ impl Layout {
             }
             .round();
             self.apply_with_gaps(
+                prepared,
                 map,
                 window,
                 selection,

@@ -86,7 +86,7 @@ impl FloatingLayoutSystem {
         let mut node = self.inner.selection(layout);
         loop {
             if let Some(wid) = self.inner.window_at(node) {
-                return Some(wid);
+                return self.inner.window_participates(wid).then_some(wid);
             }
             node = self
                 .inner
@@ -398,6 +398,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         windows
             .into_iter()
             .enumerate()
+            .filter(|(_, wid)| self.inner.window_participates(*wid))
             .map(|(index, wid)| {
                 let frame = self
                     .inner
@@ -490,8 +491,9 @@ impl LayoutSystem for FloatingLayoutSystem {
     }
 
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
+        let current = self.inner.windows_for_app(layout, pid);
         let delta =
-            super::reconcile_app_membership(pid, self.inner.windows_for_app(layout, pid), desired);
+            super::reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
         for wid in delta.removals {
             self.remove_window(wid);
         }

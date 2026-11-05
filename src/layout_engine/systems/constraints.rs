@@ -1,3 +1,9 @@
+// Both axis summaries are prepared bottom-up; absent nodes do not participate.
+pub(super) type ConstraintCache = crate::common::collections::HashMap<
+    crate::model::tree::NodeId,
+    [(f64, Option<f64>, Option<f64>, bool); 2],
+>;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AxisConstraints {
     pub min: f64,

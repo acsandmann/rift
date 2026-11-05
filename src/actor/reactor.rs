@@ -3381,7 +3381,7 @@ impl Reactor {
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(previous));
         }
         let Some(window) = restored.window else {
-            return outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(
+            return outcome.with_layout_event(LayoutEvent::WindowSuspended(
                 restored.record.current_window_id,
             ));
         };
@@ -4411,8 +4411,7 @@ impl Reactor {
                 if let Some(window) =
                     self.state.windows.observe_native_fullscreen(wsid, space, user, Some(pid))
                 {
-                    outcome = outcome
-                        .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(window));
+                    outcome = outcome.with_layout_event(LayoutEvent::WindowSuspended(window));
                 }
             } else if let Some(window) = self.state.windows.tracked_window_id(wsid) {
                 self.state
@@ -4669,7 +4668,11 @@ impl Reactor {
             return;
         }
         if !self.state.windows.reconcile_admission(wid) {
-            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+            self.send_layout_event(if self.state.windows.is_temporarily_unavailable(wid) {
+                LayoutEvent::WindowSuspended(wid)
+            } else {
+                LayoutEvent::WindowRemoved(wid)
+            });
             return;
         }
         if self.assigned_space_for_window_id(wid) != Some(space) {
@@ -4941,10 +4944,11 @@ impl Reactor {
             })
             .and_then(|screen| screen.space)
         };
-        self.layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .ensure_visible_spaces(&spaces, screens.len(), rule_space);
+        self.layout_manager.layout_engine.workspaces_mut().ensure_visible_spaces(
+            &spaces,
+            screens.len(),
+            rule_space,
+        );
         for space in spaces {
             self.expose_space_if_known(space);
         }
@@ -5014,9 +5018,9 @@ impl Reactor {
             LayoutEvent::WindowFocused(space, _) | LayoutEvent::WindowAdded(space, _) => {
                 Some(*space)
             }
-            LayoutEvent::WindowRemoved(wid) | LayoutEvent::WindowRemovedPreserveFloating(wid) => {
-                self.assigned_space_for_window_id(*wid)
-            }
+            LayoutEvent::WindowRemoved(wid)
+            | LayoutEvent::WindowRemovedPreserveFloating(wid)
+            | LayoutEvent::WindowSuspended(wid) => self.assigned_space_for_window_id(*wid),
             _ => None,
         };
         let focus_desktop = matches!(
@@ -5067,6 +5071,7 @@ impl Reactor {
             event_clone,
             LayoutEvent::WindowRemoved(_)
                 | LayoutEvent::WindowRemovedPreserveFloating(_)
+                | LayoutEvent::WindowSuspended(_)
                 | LayoutEvent::AppClosed(_)
         ) {
             self.maybe_send_menu_update();
@@ -5286,7 +5291,7 @@ impl Reactor {
 
         let mut windows_by_space: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
         for &wid in &window_ids {
-            if !self.state.windows.can_reconcile_admission(wid) {
+            if !self.state.windows.can_reconcile_admission(wid) && !reapply_effects {
                 continue;
             }
             let Some(space) = self
@@ -5335,6 +5340,7 @@ impl Reactor {
                 if let Some(assignment) = effects {
                     let effective_floating = assignment.should_float(was_floating);
                     if reapply_effects
+                        || !self.layout_manager.layout_engine.window_participates(*wid)
                         || previous_workspace != Some(assignment.workspace_id)
                         || was_floating != effective_floating
                         || was_ignored

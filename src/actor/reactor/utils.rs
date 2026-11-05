@@ -36,6 +36,11 @@ pub(crate) fn rejection_needs_removal(
     space: SpaceId,
 ) -> bool {
     let engine = &layout.layout_engine;
+    if state.windows.is_temporarily_unavailable(wid)
+        && !state.windows.window(wid).is_some_and(|w| w.manage_override == Some(false))
+    {
+        return false;
+    }
     engine.workspaces().workspace_for_window(&state.windows, space, wid).is_some()
         || engine.is_window_floating(wid)
 }

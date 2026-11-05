@@ -698,7 +698,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
             .filter_map(|node| self.inner.window_at(node))
             .filter(|wid| wid.pid == pid)
             .collect::<Vec<_>>();
-        let delta = reconcile_app_membership(pid, current, desired);
+        let delta =
+            reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
         for wid in delta.removals {
             if let Some(node) = self.inner.tree.data.window.node_for(layout, wid)
                 && !self.inner.tree.data.layout.info[node].is_fullscreen
@@ -713,6 +714,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        if self.visible_windows_in_layout(layout).is_empty() {
+            return false;
+        }
         let (_root, _master, _stack) = self.ensure_structure(layout);
         let Some(focused_wid) = self.inner.selected_window(layout) else {
             return false;
@@ -781,8 +785,21 @@ impl LayoutSystem for MasterStackLayoutSystem {
             let Some(neighbor) = neighbor else { return false };
             neighbor
         };
-        if target_idx != focused_idx {
-            let _ = self.inner.swap_windows(layout, focused_wid, windows[target_idx]);
+        let target_in_master = target_idx < master_count;
+        let participates = |index: &usize| {
+            (*index < master_count) == target_in_master
+                && self.inner.window_participates(windows[*index])
+        };
+        let target_idx = if target_idx < focused_idx {
+            (0..=target_idx).rev().find(participates)
+        } else {
+            (target_idx..windows.len()).find(participates)
+        };
+        let Some(target_idx) = target_idx else { return false };
+        if target_idx != focused_idx
+            && !self.inner.swap_windows(layout, focused_wid, windows[target_idx])
+        {
+            return false;
         }
         let _ = self.inner.select_window(layout, focused_wid);
         true
@@ -795,6 +812,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
+        if !self.window_participates(source) || !self.window_participates(target) {
+            return false;
+        }
         let _ = self.ensure_structure(layout);
         self.inner.apply_explicit_window_drop(layout, source, target, action)
     }
@@ -851,6 +871,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         amount: f64,
         orientation: ResizeOrientation,
     ) {
+        if self.visible_windows_in_layout(layout).is_empty() {
+            return;
+        }
         let _ = self.ensure_structure(layout);
         self.inner.resize_selection_by(layout, amount, orientation);
     }
@@ -1114,6 +1137,23 @@ mod tests {
         assert!(system.move_selection(layout, Direction::Up));
         let windows = system.windows_in_layout_by_container(layout);
         assert_eq!(windows, vec![w(3), w(2), w(1)]);
+        system.add_window_after_selection(layout, w(4));
+        system.set_window_participation(w(2), false);
+        assert!(system.select_window(layout, w(3)));
+        assert!(system.move_selection(layout, Direction::Down));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(4),
+            w(1),
+            w(2),
+            w(3)
+        ]);
+        system.set_window_participation(w(2), true);
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(4),
+            w(1),
+            w(2),
+            w(3)
+        ]);
     }
 
     #[test]

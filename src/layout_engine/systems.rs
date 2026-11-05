@@ -98,6 +98,7 @@ pub(crate) fn reconcile_app_membership(
     pid: pid_t,
     mut current: Vec<WindowId>,
     mut desired: Vec<WindowId>,
+    participates: impl Fn(WindowId) -> bool,
 ) -> AppMembershipDelta {
     debug_assert!(current.iter().all(|wid| wid.pid == pid));
     debug_assert!(desired.iter().all(|wid| wid.pid == pid));
@@ -128,11 +129,15 @@ pub(crate) fn reconcile_app_membership(
             (None, None) => break,
         }
     }
+    removals.retain(|window| participates(*window));
     AppMembershipDelta { additions, removals }
 }
 
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
+    fn window_participates(&self, _window: WindowId) -> bool { true }
+    /// Change eligibility without changing canonical membership or sizing.
+    fn set_window_participation(&mut self, _window: WindowId, _participates: bool) -> bool { false }
     fn create_layout(&mut self) -> LayoutId;
     fn contains_layout(&self, layout: LayoutId) -> bool;
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId;
@@ -239,6 +244,9 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
+        if !self.window_participates(source) || !self.window_participates(target) {
+            return false;
+        }
         if let crate::layout_engine::WindowDropAction::Move(direction) = action {
             return self.select_window(layout, source) && self.move_selection(layout, direction);
         }
@@ -325,6 +333,12 @@ pub(super) fn node_slot(
 /// Policy implementations still spell out every operation that can change their invariants.
 macro_rules! delegate_traditional_layout_system {
     (@tree) => {
+        fn window_participates(&self, window: WindowId) -> bool {
+            self.inner.window_participates(window)
+        }
+        fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
+            self.inner.set_window_participation(window, participates)
+        }
         fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
         fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
             self.inner.selected_window(layout)
@@ -427,7 +441,8 @@ mod tests {
 
     #[test]
     fn app_membership_reconciliation_is_representation_neutral() {
-        let delta = super::reconcile_app_membership(1, vec![w(1), w(3)], vec![w(2), w(3)]);
+        let delta =
+            super::reconcile_app_membership(1, vec![w(1), w(3)], vec![w(2), w(3)], |_| true);
         assert_eq!(delta.additions, vec![w(2)]);
         assert_eq!(delta.removals, vec![w(1)]);
     }
@@ -647,6 +662,129 @@ impl LayoutSystemKind {
             Self::Scrolling(system) => Some(Self::Scrolling(system.clone())),
             Self::Stack(system) => Some(Self::Stack(system.clone())),
             Self::Floating(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod participation_tests {
+    use objc2_core_foundation::{CGPoint, CGSize};
+
+    use super::*;
+
+    #[test]
+    fn suspended_members_preserve_slots_and_geometry_in_every_backend() {
+        let mut systems = [
+            LayoutSystemKind::Traditional(Default::default()),
+            LayoutSystemKind::Bsp(Default::default()),
+            LayoutSystemKind::Stack(Default::default()),
+            LayoutSystemKind::MasterStack(Default::default()),
+            LayoutSystemKind::Scrolling(Default::default()),
+        ];
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
+        let constraints = HashMap::default();
+        let mut gaps = crate::common::config::GapSettings::default();
+        gaps.inner.horizontal = 16.0;
+        gaps.inner.vertical = 12.0;
+        for (system, mode) in
+            systems
+                .iter_mut()
+                .zip(["traditional", "bsp", "stack", "master_stack", "scrolling"])
+        {
+            let layout = system.create_layout();
+            let frames = |system: &mut LayoutSystemKind| {
+                system.prepare_layout(layout, screen, &constraints, &gaps);
+                system.calculate_layout(
+                    layout,
+                    screen,
+                    20.0,
+                    &constraints,
+                    &gaps,
+                    Default::default(),
+                )
+            };
+            let windows = [1, 2, 3, 4].map(|i| WindowId::new(1, i));
+            for (index, &window) in windows.iter().enumerate() {
+                if index == 2 {
+                    system.split_selection(layout, LayoutKind::Vertical);
+                }
+                system.add_window_after_selection(layout, window);
+            }
+            system.select_window(layout, windows[1]);
+            system.resize_selection_by(layout, 0.13, ResizeOrientation::Horizontal);
+            system.select_window(layout, windows[0]);
+            let slots: Vec<_> = windows.iter().map(|&w| system.window_slot(layout, w)).collect();
+            let original = frames(system);
+            for &window in &windows[1..] {
+                system.set_window_participation(window, false);
+            }
+            let projected = frames(system);
+            assert_eq!(
+                projected.iter().map(|(w, _)| *w).collect::<Vec<_>>(),
+                vec![windows[0]],
+                "{mode}"
+            );
+            if mode != "scrolling" {
+                assert_eq!(
+                    projected[0].1,
+                    crate::layout_engine::utils::compute_tiling_area(screen, &gaps),
+                    "{mode}: an inactive subtree cannot reserve geometry"
+                );
+            }
+            for index in [2, 1, 3] {
+                system.set_window_participation(windows[index], true);
+            }
+            assert_eq!(frames(system), original, "{mode}");
+            assert_eq!(
+                windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
+                slots
+            );
+
+            for &window in &windows {
+                system.set_window_participation(window, false);
+            }
+            assert!(frames(system).is_empty());
+            for &window in windows.iter().rev() {
+                system.set_window_participation(window, true);
+            }
+            assert_eq!(
+                windows.iter().map(|&w| system.window_slot(layout, w)).collect::<Vec<_>>(),
+                slots
+            );
+
+            let returned = frames(system);
+            assert_eq!(
+                returned.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
+                original.iter().map(|(w, frame)| (*w, frame.size)).collect::<Vec<_>>(),
+                "{mode}"
+            );
+
+            system.set_window_participation(windows[1], false);
+            assert!(!system.select_window(layout, windows[1]));
+            assert!(!system.swap_windows(layout, windows[0], windows[1]));
+            let replacement = WindowId::new(1, 20);
+            system.replace_window(windows[1], replacement);
+            assert_eq!(system.window_slot(layout, replacement), slots[1]);
+            assert!(!system.window_participates(replacement));
+            system.remove_window(windows[2]);
+            let inserted = WindowId::new(1, 5);
+            system.add_window_after_selection(layout, inserted);
+            system.set_windows_for_app(layout, 1, vec![windows[0], windows[3], inserted]);
+            assert!(
+                system.contains_window(layout, replacement),
+                "inventory must retain suspended members"
+            );
+            assert!(!system.contains_window(layout, windows[2]));
+            let serialized = ron::ser::to_string(&system).unwrap();
+            let mut restarted: LayoutSystemKind = ron::de::from_str(&serialized).unwrap();
+            assert!(restarted.contains_window(layout, replacement));
+            assert!(!restarted.contains_window(layout, windows[1]));
+            restarted.remove_windows_for_app(1);
+            assert!(restarted.all_windows_in_layout(layout).is_empty());
+            system.set_window_participation(replacement, true);
+            system.remove_window(replacement);
+            assert!(!system.contains_window(layout, replacement));
+            assert!(system.contains_window(layout, inserted));
         }
     }
 }
