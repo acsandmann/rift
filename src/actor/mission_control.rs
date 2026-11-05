@@ -37,6 +37,8 @@ pub enum Input {
     Activate,
     ZoomStep(i8),
     Cycle(bool),
+    WindowSteps(i64),
+    WorkspaceSteps(i64),
     Click(CGPoint),
     PointerDown(CGPoint),
     PointerDrag(CGPoint),
@@ -51,6 +53,18 @@ pub enum Input {
 }
 
 impl Input {
+    fn navigation(&self) -> Option<(bool, i64)> {
+        match *self {
+            Self::Left | Self::Cycle(false) => Some((true, -1)),
+            Self::Right | Self::Cycle(true) => Some((true, 1)),
+            Self::WindowSteps(steps) => Some((true, steps)),
+            Self::Up => Some((false, -1)),
+            Self::Down => Some((false, 1)),
+            Self::WorkspaceSteps(steps) => Some((false, steps)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn from_keycode(keycode: u16, flags: CGEventFlags) -> Option<Self> {
         if !flags.intersects(CGEventFlags::MaskControl | CGEventFlags::MaskAlternate) {
             match keycode {
@@ -85,6 +99,23 @@ impl Input {
 fn merge_motion(event: &mut Event, next: Event) -> Result<(), Event> {
     match (event, next) {
         (Event::RefreshCurrentWorkspace, Event::RefreshCurrentWorkspace) => Ok(()),
+        (Event::Input(input), Event::Input(next))
+            if input.navigation().zip(next.navigation()).is_some_and(
+                |((windows, steps), (next_windows, next_steps))| {
+                    windows == next_windows && steps.signum() == next_steps.signum()
+                },
+            ) =>
+        {
+            let (windows, steps) = input.navigation().unwrap();
+            let (_, next_steps) = next.navigation().unwrap();
+            let steps = steps.saturating_add(next_steps);
+            *input = if windows {
+                Input::WindowSteps(steps)
+            } else {
+                Input::WorkspaceSteps(steps)
+            };
+            Ok(())
+        }
         (Event::Input(Input::Move(point)), Event::Input(Input::Move(next)))
         | (Event::Input(Input::PointerDrag(point)), Event::Input(Input::PointerDrag(next)))
         | (Event::Input(Input::Pan(point)), Event::Input(Input::Pan(next))) => {
@@ -195,7 +226,9 @@ impl MissionControlActor {
                     if pending_event.is_some() { pending_event.take() } else { self.rx.recv().await }
                 } => {
                     let Some((span, mut event)) = event else { break };
-                    if matches!(event, Event::RefreshCurrentWorkspace | Event::Input(Input::Scroll { .. } | Input::Zoom { .. } | Input::Magnify { .. } | Input::Move(_) | Input::PointerDrag(_) | Input::Pan(_))) {
+                    if matches!(event, Event::RefreshCurrentWorkspace | Event::Input(Input::Scroll { .. } | Input::Zoom { .. } | Input::Magnify { .. } | Input::Move(_) | Input::PointerDrag(_) | Input::Pan(_)))
+                        || matches!(&event, Event::Input(input) if input.navigation().is_some())
+                    {
                         for _ in 0..32 {
                             let Ok((next_span, next)) = self.rx.try_recv() else { break };
                             if let Err(next) = merge_motion(&mut event, next) {
@@ -393,6 +426,17 @@ mod tests {
         let mut refresh = Event::RefreshCurrentWorkspace;
         assert!(merge_motion(&mut refresh, Event::RefreshCurrentWorkspace).is_ok());
         assert!(merge_motion(&mut refresh, Event::Dismiss).is_err());
+        let mut navigation = Event::Input(Input::Right);
+        assert!(merge_motion(&mut navigation, Event::Input(Input::Right)).is_ok());
+        assert!(merge_motion(&mut navigation, Event::Input(Input::Cycle(true))).is_ok());
+        assert!(matches!(navigation, Event::Input(Input::WindowSteps(3))));
+        assert!(merge_motion(&mut navigation, Event::Input(Input::Left)).is_err());
+        assert!(merge_motion(&mut navigation, Event::Input(Input::Activate)).is_err());
+        assert!(merge_motion(&mut navigation, Event::Input(Input::Down)).is_err());
+        let mut workspace = Event::Input(Input::Up);
+        assert!(merge_motion(&mut workspace, Event::Input(Input::Up)).is_ok());
+        assert!(matches!(workspace, Event::Input(Input::WorkspaceSteps(-2))));
+
         let pivot = CGPoint::new(120., 90.);
         let mut pinch = Event::Input(Input::Magnify { point: pivot, factor: 1.1 });
         assert!(

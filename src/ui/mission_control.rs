@@ -1,4 +1,6 @@
 //! Persistent window geometry; only the camera projects it into the overview.
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cgs::compositor::{CgsWindow, LayerTransaction, WindowSurface, release_layer_tree};
@@ -26,6 +28,7 @@ const MIN_ZOOM: f64 = 0.08;
 const MAX_ZOOM: f64 = 2.0;
 const OVERVIEW_ZOOM: f64 = 0.34;
 const EXIT_MOTION: f64 = 0.28;
+const CAPTURE_PIXELS: usize = 96 * 1024 * 1024 / 4;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
@@ -297,6 +300,7 @@ struct SceneWindow {
     // Decorations share the camera but stay sharp and understated at small scales.
     shadow: Retained<CALayer>,
     preview: cgs::compositor::preview::PreviewLayer,
+    preview_frame: Option<(u32, i32, Instant)>,
     icon_image: Option<Retained<CGImage>>,
 }
 impl SceneWindow {
@@ -327,8 +331,23 @@ impl SceneWindow {
             world,
             shadow,
             preview,
+            preview_frame: None,
             icon_image: icon,
         }
+    }
+
+    fn set_frame(&mut self, frame: &cgs::compositor::preview::PreviewSurfaceFrame) -> bool {
+        let identity = (frame.window_id(), frame.process_id());
+        if self.preview_frame.is_some_and(|(id, pid, received)| {
+            (id, pid) == identity && received > frame.received_at()
+        }) {
+            return false;
+        }
+        let changed = self.preview.set_surface_frame(frame);
+        if changed {
+            self.preview_frame = Some((identity.0, identity.1, frame.received_at()));
+        }
+        changed
     }
 
     fn detach(&self) { self.shadow.removeFromSuperlayer(); }
@@ -465,11 +484,13 @@ struct DisplayOverview {
     help: Retained<CATextLayer>,
     help_index: Option<usize>,
     last_percentage: i32,
-    captures: Option<cgs::compositor::preview::PreviewCompositor>,
+    captures: Option<cgs::compositor::preview::PreviewCaptureSession>,
     clock: Option<crate::sys::display_link::DisplayLink>,
     camera_input: Instant,
     sources: Vec<cgs::compositor::preview::PreviewSource>,
     policy_dirty: bool,
+    capture_dirty: Arc<AtomicBool>,
+    capture_pixels: usize,
     dragged: Option<WindowId>,
     applied: Option<(Camera, f32)>,
     // CAContext must detach before its CGS window is released.
@@ -622,6 +643,8 @@ impl DisplayOverview {
             camera_input: Instant::now(),
             sources: Vec::new(),
             policy_dirty: true,
+            capture_dirty: Arc::new(AtomicBool::new(true)),
+            capture_pixels: CAPTURE_PIXELS,
             dragged: None,
             applied: None,
             _surface: surface,
@@ -988,6 +1011,14 @@ impl DisplayOverview {
             || self.windows.iter().zip(&self.sources).any(|(w, s)| {
                 w.data.info.sys_id.unwrap().as_u32() != s.window_id || w.data.id.pid != s.process_id
             });
+        let weight = |w: &SceneWindow| {
+            if intersects(camera.frame(w.world), viewport) || self.dragged == Some(w.data.id) {
+                if selected == Some(w.data.id) { 4 } else { 2 }
+            } else {
+                1
+            }
+        };
+        let total_weight = self.windows.iter().map(&weight).sum::<usize>().max(1);
         self.sources.clear();
         for w in &self.windows {
             let projected = camera.frame(w.world);
@@ -1001,6 +1032,12 @@ impl DisplayOverview {
             let zoom = zoom.min(if visible { 1. } else { 0.20 });
             let width = (w.world.size.width * zoom * self.scale).ceil().max(1.) as usize;
             let height = (w.world.size.height * zoom * self.scale).ceil().max(1.) as usize;
+            let pixels = (self.capture_pixels as f64 * weight(w) as f64 / total_weight as f64)
+                .min(if important { 2_000_000. } else { 900_000. })
+                .max(1.);
+            let shrink = (pixels / (width as f64 * height as f64)).sqrt().min(1.);
+            let width = (width as f64 * shrink).floor().max(1.) as usize;
+            let height = (height as f64 * shrink).floor().max(1.) as usize;
             self.sources.push(cgs::compositor::preview::PreviewSource {
                 window_id: w.data.info.sys_id.unwrap().as_u32(),
                 process_id: w.data.id.pid,
@@ -1053,6 +1090,7 @@ struct ViewState {
     windows: Vec<(RuntimeWindowData, crate::model::VirtualWorkspaceId, CGRect)>,
     wallpaper: Option<Retained<AnyObject>>,
     wallpaper_key: Option<String>,
+    capture_dirty: Arc<AtomicBool>,
 }
 #[derive(Default)]
 pub(crate) struct PreviewCache {
@@ -1060,7 +1098,7 @@ pub(crate) struct PreviewCache {
         ScreenInfo,
         CGRect,
         f64,
-        cgs::compositor::preview::PreviewCompositor,
+        cgs::compositor::preview::PreviewCaptureSession,
         ViewState,
     )>,
 }
@@ -1068,7 +1106,7 @@ impl PreviewCache {
     fn take(
         &mut self,
         d: &mut DisplayOverview,
-    ) -> Option<cgs::compositor::preview::PreviewCompositor> {
+    ) -> Option<cgs::compositor::preview::PreviewCaptureSession> {
         self.captures.retain(|(key, bounds, scale, _, _)| {
             key.display_uuid != d.info.display_uuid
                 || (key.id == d.info.id
@@ -1081,6 +1119,7 @@ impl PreviewCache {
             .iter()
             .position(|(key, _, _, _, _)| key.display_uuid == d.info.display_uuid)?;
         let (_, _, _, captures, state) = self.captures.swap_remove(i);
+        d.capture_dirty = state.capture_dirty;
         if !d.background_ready
             && state.wallpaper_key == d.wallpaper_key
             && let Some(image) = state.wallpaper
@@ -1200,44 +1239,36 @@ fn start_display(
         d.captures = cache.as_mut().and_then(|c| c.take(d));
         if !d.background_ready {
             let tx = wake.clone();
+            let dirty = d.capture_dirty.clone();
             d.desktop_snapshot = cgs::compositor::preview::DesktopSnapshot::new(
                 d.info.id.as_u32(),
                 d.scale,
-                move || tx.send(crate::actor::mission_control::Event::PumpPreviews),
+                move || {
+                    dirty.store(true, Ordering::Release);
+                    tx.send(crate::actor::mission_control::Event::PumpPreviews);
+                },
             )
             .map_err(|error| tracing::warn!(?error, "Desktop snapshot unavailable"))
             .ok();
         }
-        if let Some(m) = &mut d.captures {
-            let _ = m.attach_to(d._window.id(), &d.root);
-        } else {
+        if d.captures.is_none() {
             let tx = wake.clone();
-            d.captures = cgs::compositor::preview::PreviewCompositor::new_attached(
-                d._window.id(),
-                &d.root,
-                d.bounds,
-                d.scale,
-                move || tx.send(crate::actor::mission_control::Event::PumpPreviews),
-            )
+            let dirty = d.capture_dirty.clone();
+            d.captures = cgs::compositor::preview::PreviewCaptureSession::new(move || {
+                if !dirty.swap(true, Ordering::AcqRel) {
+                    tx.send(crate::actor::mission_control::Event::PumpPreviews);
+                }
+            })
             .map_err(|error| tracing::warn!(?error, "Spatial capture unavailable"))
             .ok();
         }
-        // Bootstrap at the useful overview resolution. Capturing a full Retina
-        // desktop first can exhaust admission before the entry animation starts.
         d.update_sources_at(d.selection.window, true, d.home);
-        if let Some(m) = &mut d.captures {
-            if let Err(error) = m.set_visual_scene(&[]).and_then(|()| {
-                if d.background_ready || d.desktop_snapshot.is_none() {
-                    m.show()
-                } else {
-                    Ok(())
-                }
-            }) {
-                tracing::warn!(?error, "Spatial capture startup failed");
-            }
-            tracing::debug!(windows=d.windows.len(),stats=?m.stats(),"Spatial capture started");
+        d.capture_dirty.store(true, Ordering::Release);
+        if !d.background_ready && d.desktop_snapshot.is_none() {
+            d.background_ready = true;
         }
     }
+
     if d.captures.is_none() {
         d.camera = d.home;
         d.background.setOpacity(1.);
@@ -1287,7 +1318,7 @@ pub struct OverviewSession {
     active: usize,
     selection: Selection,
     drag: Option<Drag>,
-    pending_drop: Option<(Drag, Option<cgs::compositor::preview::PreviewFrame>)>,
+    pending_drop: Option<(Drag, Option<cgs::compositor::preview::PreviewSurfaceFrame>)>,
     pressed: Option<(CGPoint, Camera)>,
     drop: Option<OverviewDrop>,
     phase: Phase,
@@ -1391,7 +1422,9 @@ impl OverviewSession {
         self.activate_display(self.active);
         self.wake = Some(wake.clone());
         self.previews = enabled;
+        let pixels = CAPTURE_PIXELS / self.displays.len().max(1);
         for d in &mut self.displays {
+            d.capture_pixels = pixels;
             start_display(d, enabled, &wake, cache.as_deref_mut());
         }
         self.selection = self.displays[self.active].selection;
@@ -1408,41 +1441,35 @@ impl OverviewSession {
     pub(crate) fn retain_previews(&mut self, cache: &mut Option<PreviewCache>) {
         let cache = cache.get_or_insert_with(Default::default);
         cache.captures.clear();
-        let mut reserved = 0;
         for d in &mut self.displays {
             if let Some(mut m) = d.captures.take() {
-                tracing::debug!(display = %d.info.display_uuid, stats = ?m.stats(), diagnostics = ?m.diagnostics(), "Spatial overview closed");
-                let _ = m.hide();
-                let _ = m.set_visual_scene(&[]);
-                let _ = m.set_sources(&[]);
-                reserved +=
-                    (d.bounds.size.width * d.scale * d.bounds.size.height * d.scale * 16.) as usize;
-                if reserved <= 256 * 1024 * 1024 {
-                    let camera = if matches!(self.phase, Phase::Overview) {
-                        d.motion.as_ref().map_or(d.camera, |m| m.to)
-                    } else {
-                        d.home
-                    };
-                    let state = ViewState {
-                        camera,
-                        anchor: d.home_anchor,
-                        workspace: d
-                            .workspaces
-                            .iter()
-                            .find(|ws| ws.is_active)
-                            .map(|ws| ws.workspace_id),
-                        selection: d.selection,
-                        homes: d.regions.iter().map(|r| (r.id, r.origin)).collect(),
-                        windows: d
-                            .windows
-                            .iter()
-                            .map(|w| (w.data.clone(), w.workspace, w.world))
-                            .collect(),
-                        wallpaper: unsafe { d.background.contents() },
-                        wallpaper_key: d.wallpaper_key.clone(),
-                    };
-                    cache.captures.push((d.info.clone(), d.bounds, d.scale, m, state));
-                }
+                tracing::debug!(display = %d.info.display_uuid, stats = ?m.stats(), "Spatial overview closed");
+                m.clear();
+                let camera = if matches!(self.phase, Phase::Overview) {
+                    d.motion.as_ref().map_or(d.camera, |m| m.to)
+                } else {
+                    d.home
+                };
+                let state = ViewState {
+                    camera,
+                    anchor: d.home_anchor,
+                    workspace: d
+                        .workspaces
+                        .iter()
+                        .find(|ws| ws.is_active)
+                        .map(|ws| ws.workspace_id),
+                    selection: d.selection,
+                    homes: d.regions.iter().map(|r| (r.id, r.origin)).collect(),
+                    windows: d
+                        .windows
+                        .iter()
+                        .map(|w| (w.data.clone(), w.workspace, w.world))
+                        .collect(),
+                    wallpaper: unsafe { d.background.contents() },
+                    wallpaper_key: d.wallpaper_key.clone(),
+                    capture_dirty: d.capture_dirty.clone(),
+                };
+                cache.captures.push((d.info.clone(), d.bounds, d.scale, m, state));
             }
         }
     }
@@ -1591,7 +1618,9 @@ impl OverviewSession {
             .position(|d| Some(&d.info.display_uuid) == active_uuid.as_ref())
             .unwrap_or(0);
         self.selection = self.displays.get(self.active).map_or(self.selection, |d| d.selection);
+        let pixels = CAPTURE_PIXELS / self.displays.len().max(1);
         for d in &mut self.displays {
+            d.capture_pixels = pixels;
             d.workspaces = workspaces_for(d.info.space);
             if self.shared {
                 for ws in &mut d.workspaces {
@@ -1655,10 +1684,17 @@ impl OverviewSession {
         }
         if let Some((id, Some(frame))) = completed {
             for d in &mut self.displays {
-                if d.windows.iter().any(|w| w.data.id == id)
-                    && let Some(m) = &mut d.captures
-                {
-                    m.reuse_frame(&frame);
+                if let Some(window) = d.windows.iter_mut().find(|window| {
+                    window.data.id == id
+                        && window.data.id.pid == frame.process_id()
+                        && window
+                            .data
+                            .info
+                            .sys_id
+                            .is_some_and(|sys_id| sys_id.as_u32() == frame.window_id())
+                }) {
+                    window.set_frame(&frame);
+                    window.shadow.setOpacity(1.);
                 }
             }
         }
@@ -1685,10 +1721,17 @@ impl OverviewSession {
     }
 
     pub(crate) fn needs_handoff(&self) -> bool {
-        self.displays
-            .get(self.active)
-            .and_then(|d| d.captures.as_ref())
-            .is_some_and(|m| m.is_visible() && m.stats().presented_frames > 0)
+        !matches!(self.phase, Phase::Waiting(_))
+            && self.displays.get(self.active).is_some_and(|d| {
+                d.captures.is_some()
+                    && d.windows.iter().any(|w| {
+                        w.preview.has_frame()
+                            && intersects(
+                                d.camera.frame(w.world),
+                                CGRect::new(CGPoint::ZERO, d.bounds.size),
+                            )
+                    })
+            })
     }
 
     fn activate(&mut self, dismiss: bool) -> Option<OverviewAction> {
@@ -1912,6 +1955,7 @@ impl OverviewSession {
         let mut target = d.camera;
         target.position.y = d.workspace_origin(ws.index).y + d.workspace_height / 2.
             - d.bounds.size.height / (2. * target.zoom);
+        d.sample(Instant::now());
         d.animate(target, self.duration);
         d.policy_dirty = true;
         self.change_selection(selection);
@@ -1931,6 +1975,7 @@ impl OverviewSession {
                 w.world.mid().x - d.bounds.size.width / (2. * target.zoom),
                 w.world.mid().y - d.bounds.size.height / (2. * target.zoom),
             );
+            d.sample(Instant::now());
             d.animate(target, self.duration);
         }
         d.policy_dirty = true;
@@ -2307,36 +2352,51 @@ impl OverviewSession {
                     }
                 }
             }
-            Input::Up | Input::Down => {
+            Input::Up | Input::Down | Input::WorkspaceSteps(_) => {
                 let d = &mut self.displays[self.active];
                 let current = d
                     .workspaces
                     .iter()
                     .position(|ws| ws.index == self.selection.workspace)
                     .unwrap_or(0);
-                let next = if matches!(input, Input::Up) {
-                    current.saturating_sub(1)
-                } else {
-                    (current + 1).min(d.workspaces.len() - 1)
+                let steps = match input {
+                    Input::Up => -1,
+                    Input::Down => 1,
+                    Input::WorkspaceSteps(steps) => steps,
+                    _ => unreachable!(),
                 };
+                let next = (current as i64)
+                    .saturating_add(steps)
+                    .clamp(0, d.workspaces.len() as i64 - 1) as usize;
                 self.select_workspace(next);
             }
-            Input::Left | Input::Right | Input::Cycle(_) => {
+            Input::Left | Input::Right | Input::Cycle(_) | Input::WindowSteps(_) => {
                 let d = &self.displays[self.active];
                 let ws = d.workspaces.iter().find(|ws| ws.index == self.selection.workspace)?;
-                if ws.windows.is_empty() {
+                let windows: Vec<_> = ws
+                    .windows
+                    .iter()
+                    .filter_map(|window| {
+                        d.windows.iter().position(|scene| scene.data.id == window.id)
+                    })
+                    .collect();
+                if windows.is_empty() {
                     return None;
                 }
-                let current = ws.windows.iter().position(|w| Some(w.id) == self.selection.window);
-                let forward = matches!(input, Input::Right | Input::Cycle(true));
-                let next = match current {
-                    Some(i) if forward => (i + 1) % ws.windows.len(),
-                    Some(i) => (i + ws.windows.len() - 1) % ws.windows.len(),
-                    None => 0,
+                let current = windows
+                    .iter()
+                    .position(|&index| Some(d.windows[index].data.id) == self.selection.window);
+                let steps = match input {
+                    Input::Right | Input::Cycle(true) => 1,
+                    Input::WindowSteps(steps) => steps,
+                    _ => -1,
                 };
-                if let Some(i) = d.windows.iter().position(|w| w.data.id == ws.windows[next].id) {
-                    self.select(i);
-                }
+                let count = windows.len() as i64;
+                let next = match current {
+                    Some(index) => (index as i64 + steps % count).rem_euclid(count),
+                    None => (steps - steps.signum()).rem_euclid(count),
+                } as usize;
+                self.select(windows[next]);
             }
             _ => {}
         }
@@ -2417,7 +2477,7 @@ impl OverviewSession {
                     self.displays[drag.display].windows.iter().find(|w| w.data.id == drag.window)
                 && let Some(frame) = owner.captured_frame(w.data.info.sys_id.unwrap().as_u32())
             {
-                canvas.set_frame(&frame);
+                canvas.set_surface_frame(&frame);
             }
             canvas.layer().setMasksToBounds(true);
             canvas.layer().setCornerRadius(10. * zoom);
@@ -2561,6 +2621,12 @@ impl OverviewSession {
     }
 
     pub(crate) fn pump_previews(&mut self) {
+        if !self.displays.iter().any(|d| {
+            d.capture_dirty.load(Ordering::Acquire)
+                || d.clock.as_ref().is_some_and(|clock| clock.has_update())
+        }) {
+            return;
+        }
         let _tx = LayerTransaction::disabled().flush_on_commit();
         let now = Instant::now();
         if let Phase::Waiting(start) = self.phase {
@@ -2633,16 +2699,6 @@ impl OverviewSession {
                 self.move_drag(point);
             }
         }
-        for drag in self.drag.iter_mut().chain(self.pending_drop.iter_mut().map(|(d, _)| d)) {
-            if let Some(canvas) = &mut drag.canvas
-                && let Some(owner) = &self.displays[drag.display].captures
-                && let Some(w) =
-                    self.displays[drag.display].windows.iter().find(|w| w.data.id == drag.window)
-                && let Some(frame) = owner.captured_frame(w.data.info.sys_id.unwrap().as_u32())
-            {
-                canvas.set_frame(&frame);
-            }
-        }
         for (display, d) in self.displays.iter_mut().enumerate() {
             if let Some(snapshot) = &d.desktop_snapshot {
                 match snapshot.take_image() {
@@ -2653,6 +2709,7 @@ impl OverviewSession {
                     }
                     Err(error) => {
                         tracing::warn!(?error, "Desktop background unavailable");
+                        d.background_ready = true;
                         d.desktop_snapshot = None;
                     }
                     _ => {}
@@ -2688,20 +2745,18 @@ impl OverviewSession {
             if !matches!(self.phase, Phase::Exiting { .. }) {
                 d.update_sources(d.selection.window, false);
             }
-            if let Some(m) = &mut d.captures {
-                if !m.is_visible() && (d.background_ready || d.desktop_snapshot.is_none()) {
-                    let _ = m.show();
-                }
-                if let Err(e) = m.render(now) {
+            if d.capture_dirty.swap(false, Ordering::AcqRel)
+                && let Some(m) = &mut d.captures
+            {
+                if let Err(e) = m.pump() {
                     tracing::warn!(?e, "Spatial capture update failed");
                 }
                 for w in &mut d.windows {
                     if !matches!(self.phase, Phase::Exiting { .. })
                         && let Some(frame) = m.captured_frame(w.data.info.sys_id.unwrap().as_u32())
+                        && w.set_frame(&frame)
                     {
-                        if w.preview.set_frame(&frame) {
-                            w.shadow.setOpacity(1.);
-                        }
+                        w.shadow.setOpacity(1.);
                     }
                 }
             }
@@ -2718,6 +2773,16 @@ impl OverviewSession {
                             }
                         }),
                 );
+            }
+        }
+        for drag in self.drag.iter_mut().chain(self.pending_drop.iter_mut().map(|(d, _)| d)) {
+            if let Some(canvas) = &mut drag.canvas
+                && let Some(owner) = &self.displays[drag.display].captures
+                && let Some(w) =
+                    self.displays[drag.display].windows.iter().find(|w| w.data.id == drag.window)
+                && let Some(frame) = owner.captured_frame(w.data.info.sys_id.unwrap().as_u32())
+            {
+                canvas.set_surface_frame(&frame);
             }
         }
         if let Some(drag) = &self.drag
