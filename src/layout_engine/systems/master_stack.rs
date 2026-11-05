@@ -529,23 +529,6 @@ impl MasterStackLayoutSystem {
         let _ = self.inner.swap_windows(layout, master_wid, stack_wid);
     }
 
-    pub(crate) fn collect_group_containers_in_selection_path(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        stack_offset: f64,
-        gaps: &crate::common::config::GapSettings,
-        stack_line: crate::common::config::StackLineReserve,
-    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        self.inner.collect_group_containers_in_selection_path(
-            layout,
-            screen,
-            stack_offset,
-            gaps,
-            stack_line,
-        )
-    }
-
     pub(crate) fn collect_group_containers(
         &self,
         layout: LayoutId,
@@ -553,9 +536,16 @@ impl MasterStackLayoutSystem {
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        selection_path_only: bool,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        self.inner
-            .collect_group_containers(layout, screen, stack_offset, gaps, stack_line)
+        self.inner.collect_group_containers(
+            layout,
+            screen,
+            stack_offset,
+            gaps,
+            stack_line,
+            selection_path_only,
+        )
     }
 }
 

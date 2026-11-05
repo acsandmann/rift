@@ -7,7 +7,7 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::systems::constraints::{
-    AxisConstraints, ConstraintCache, solve_axis_lengths,
+    AxisConstraints, ConstraintCache, container_axis_constraints, solve_axis_lengths,
 };
 use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
@@ -61,6 +61,9 @@ impl TraditionalLayoutSystem {
 
     fn participating_nodes(&self, root: NodeId) -> HashSet<NodeId> {
         let mut active = HashSet::default();
+        if self.inactive.is_empty() {
+            return active;
+        }
         for node in root.traverse_postorder(self.map()) {
             if self.window_at(node).is_some_and(|w| !self.inactive.contains(&w))
                 || node.children(self.map()).any(|child| active.contains(&child))
@@ -76,11 +79,6 @@ impl TraditionalLayoutSystem {
             return (!self.inactive.contains(&wid)).then_some((node, wid));
         }
 
-        let children: Vec<_> = node.children(self.map()).collect();
-        if children.is_empty() {
-            return None;
-        }
-
         let selected = self
             .tree
             .data
@@ -91,7 +89,7 @@ impl TraditionalLayoutSystem {
             return Some(target);
         }
 
-        for &child in &children {
+        for child in node.children(self.map()) {
             if Some(child) == selected {
                 continue;
             }
@@ -721,7 +719,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.find_best_focus_target(self.selection(layout)).map(|(_, w)| w)
+        let selection = self.tree.data.selection.current_selection(self.root(layout));
+        if let Some(window) = self.window_at(selection).filter(|w| !self.inactive.contains(w)) {
+            return Some(window);
+        }
+        self.find_best_focus_target(selection)
+            .or_else(|| self.find_best_focus_target(self.root(layout)))
+            .map(|(_, window)| window)
     }
 
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -762,7 +766,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return false;
         }
         if let Some(parent) = self.selection(layout).parent(self.map()) {
@@ -773,7 +777,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return false;
         }
         if let Some(child) =
@@ -975,7 +979,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return false;
         }
         let selection = self.selection(layout);
@@ -1027,7 +1031,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return;
         }
         let selection = self.selection(layout);
@@ -1035,7 +1039,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return Vec::new();
         }
         let node = self.selection(layout);
@@ -1047,7 +1051,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return Vec::new();
         }
         let node = self.selection(layout);
@@ -1062,12 +1066,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let root = self.root(layout);
         let active = self.participating_nodes(root);
         root.traverse_preorder(&self.tree.map).any(|node| {
-            active.contains(&node) && self.tree.data.layout.is_effectively_fullscreen(node)
+            (self.inactive.is_empty() || active.contains(&node))
+                && self.tree.data.layout.is_effectively_fullscreen(node)
         })
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return;
         }
         let mut selection = self.selection(layout);
@@ -1150,7 +1155,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return Vec::new();
         }
         let selection = self.selection(layout);
@@ -1218,7 +1223,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return Vec::new();
         }
         let selection = self.selection(layout);
@@ -1301,7 +1306,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return;
         }
         let selection = self.selection(layout);
@@ -1366,7 +1371,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         amount: f64,
         orientation: ResizeOrientation,
     ) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return;
         }
         if amount == 0.0 {
@@ -1517,7 +1522,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
-        if !self.inactive.is_empty() && self.visible_windows_in_layout(layout).is_empty() {
+        if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return;
         }
         use crate::layout_engine::LayoutKind;
@@ -1616,93 +1621,6 @@ impl TraditionalLayoutSystem {
         }
     }
 
-    pub(crate) fn collect_group_containers_in_selection_path(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        stack_offset: f64,
-        gaps: &crate::common::config::GapSettings,
-        stack_line: crate::common::config::StackLineReserve,
-    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        use crate::layout_engine::LayoutKind::*;
-
-        let mut out = Vec::new();
-        let map = &self.tree.map;
-        let active = self.participating_nodes(self.root(layout));
-
-        let tiling_area = compute_tiling_area(screen, gaps);
-
-        let mut node = self.root(layout);
-        let mut rect = tiling_area;
-
-        loop {
-            if self.tree.data.layout.is_effectively_fullscreen(node) {
-                out.clear();
-                break;
-            }
-
-            let kind = self.tree.data.layout.kind(node);
-            let children: Vec<_> = node.children(map).filter(|c| active.contains(c)).collect();
-
-            if matches!(kind, HorizontalStack | VerticalStack) {
-                if children.is_empty() {
-                    break;
-                }
-
-                let local_sel = self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, node)
-                    .filter(|c| active.contains(c))
-                    .unwrap_or(children[0]);
-                let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
-
-                if self.tree.data.layout.is_effectively_fullscreen(local_sel) {
-                    out.clear();
-                    break;
-                }
-
-                let is_horizontal = matches!(kind, HorizontalStack);
-                out.push(self.stack_group_container_info(
-                    node,
-                    kind,
-                    rect,
-                    &children,
-                    selected_index,
-                ));
-
-                let layout_res = stack_layout_result(
-                    rect,
-                    children.len(),
-                    stack_offset,
-                    is_horizontal,
-                    stack_line,
-                );
-                rect = layout_res.get_frame_for_index(selected_index);
-
-                node = local_sel;
-                continue;
-            }
-
-            if let Some(next) = self
-                .tree
-                .data
-                .selection
-                .local_selection(map, node)
-                .filter(|c| active.contains(c))
-                .or_else(|| node.children(map).find(|c| active.contains(c)))
-            {
-                rect = self.calculate_child_frame_in_container(&active, node, next, rect, gaps);
-                node = next;
-                continue;
-            }
-            break;
-        }
-
-        out
-    }
-
     pub(crate) fn collect_group_containers(
         &self,
         layout: LayoutId,
@@ -1710,6 +1628,7 @@ impl TraditionalLayoutSystem {
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
+        selection_path_only: bool,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         use crate::layout_engine::LayoutKind::*;
 
@@ -1723,24 +1642,38 @@ impl TraditionalLayoutSystem {
 
         while let Some((node, rect)) = stack.pop() {
             if self.tree.data.layout.is_effectively_fullscreen(node) {
+                if selection_path_only {
+                    out.clear();
+                    break;
+                }
                 continue;
             }
 
             let kind = self.tree.data.layout.kind(node);
-            let children: Vec<_> = node.children(map).filter(|c| active.contains(c)).collect();
+            let children: Vec<_> = node
+                .children(map)
+                .filter(|c| self.inactive.is_empty() || active.contains(c))
+                .collect();
+
+            let selected = self
+                .tree
+                .data
+                .selection
+                .local_selection(map, node)
+                .filter(|c| self.inactive.is_empty() || active.contains(c))
+                .or_else(|| children.first().copied());
 
             if matches!(kind, HorizontalStack | VerticalStack) {
                 if children.is_empty() {
                     continue;
                 }
 
-                let local_sel = self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, node)
-                    .filter(|c| active.contains(c))
-                    .unwrap_or(children[0]);
+                let local_sel = selected.unwrap();
+                if selection_path_only && self.tree.data.layout.is_effectively_fullscreen(local_sel)
+                {
+                    out.clear();
+                    break;
+                }
                 let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
 
                 let is_horizontal = matches!(kind, HorizontalStack);
@@ -1761,7 +1694,9 @@ impl TraditionalLayoutSystem {
                 );
 
                 for (i, &child) in children.iter().enumerate().rev() {
-                    if self.tree.data.layout.is_effectively_fullscreen(child) {
+                    if (selection_path_only && Some(child) != selected)
+                        || self.tree.data.layout.is_effectively_fullscreen(child)
+                    {
                         continue;
                     }
                     let child_rect = layout_res.get_frame_for_index(i);
@@ -1775,12 +1710,13 @@ impl TraditionalLayoutSystem {
             // accumulation used by selection-path geometry. Reverse only the work
             // queue so the depth-first traversal still visits children in order.
             let start = stack.len();
-            stack.extend(children.iter().copied().zip(self.child_frames_in_axis(
-                rect,
-                &children,
-                kind == Horizontal,
-                gaps,
-            )));
+            stack.extend(
+                children
+                    .iter()
+                    .copied()
+                    .zip(self.child_frames_in_axis(rect, &children, kind == Horizontal, gaps))
+                    .filter(|(child, _)| !selection_path_only || Some(*child) == selected),
+            );
             stack[start..].reverse();
         }
 
@@ -1837,33 +1773,6 @@ impl TraditionalLayoutSystem {
             *offset += inner_gap;
             Some(frame)
         })
-    }
-
-    fn calculate_child_frame_in_container(
-        &self,
-        active: &HashSet<NodeId>,
-        parent_node: NodeId,
-        child_node: NodeId,
-        parent_rect: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) -> CGRect {
-        let parent_kind = self.tree.data.layout.kind(parent_node);
-        let map = &self.tree.map;
-        let siblings: Vec<_> = parent_node.children(map).filter(|c| active.contains(c)).collect();
-        let child_index = siblings.iter().position(|&n| n == child_node).unwrap_or(0);
-
-        match parent_kind {
-            crate::layout_engine::LayoutKind::Horizontal => self
-                .child_frames_in_axis(parent_rect, &siblings, true, gaps)
-                .nth(child_index)
-                .unwrap_or(parent_rect),
-            crate::layout_engine::LayoutKind::Vertical => self
-                .child_frames_in_axis(parent_rect, &siblings, false, gaps)
-                .nth(child_index)
-                .unwrap_or(parent_rect),
-            crate::layout_engine::LayoutKind::HorizontalStack
-            | crate::layout_engine::LayoutKind::VerticalStack => parent_rect,
-        }
     }
 }
 
@@ -1981,19 +1890,23 @@ impl TraditionalLayoutSystem {
         // reuse its selected branch so a return trip retraces the focus path.
         // Stacks always present their selected member.
         let kind = self.tree.data.layout.kind(node);
-        if kind.is_stacked() || kind.orientation() != direction.orientation() {
-            if let Some(selected) = self.tree.data.selection.local_selection(self.map(), node) {
-                if let Some(window) = self.window_in_direction_from(selected, direction) {
-                    return Some(window);
-                }
-            }
+        let selected = (kind.is_stacked() || kind.orientation() != direction.orientation())
+            .then(|| self.tree.data.selection.local_selection(self.map(), node))
+            .flatten();
+        if let Some(window) =
+            selected.and_then(|child| self.window_in_direction_from(child, direction))
+        {
+            return Some(window);
         }
+        let alternative = |child: &NodeId| Some(*child) != selected;
         match direction {
             Direction::Left | Direction::Up => node
                 .children_rev(self.map())
+                .filter(alternative)
                 .find_map(|child| self.window_in_direction_from(child, direction)),
             Direction::Right | Direction::Down => node
                 .children(self.map())
+                .filter(alternative)
                 .find_map(|child| self.window_in_direction_from(child, direction)),
         }
     }
@@ -2040,103 +1953,22 @@ impl TraditionalLayoutSystem {
         map: &NodeMap,
     ) -> Option<NodeId> {
         let active = self.participating_nodes(target);
+        let participates = |child: &NodeId| self.inactive.is_empty() || active.contains(child);
         let mut current = target;
         loop {
-            let children: Vec<_> = current
-                .children(map)
-                .filter(|c| self.inactive.is_empty() || active.contains(c))
-                .collect();
-            if children.is_empty() {
-                return Some(current);
-            }
-            let layout_kind = self.tree.data.layout.kind(current);
-            if let Some(selected) = self
-                .tree
-                .data
-                .selection
-                .local_selection(map, current)
-                .filter(|c| self.inactive.is_empty() || active.contains(c))
-            {
-                match (layout_kind, direction) {
-                    (LayoutKind::Horizontal, Direction::Up | Direction::Down)
-                    | (LayoutKind::Vertical, Direction::Left | Direction::Right) => {
-                        current = selected;
-                        continue;
-                    }
-                    _ if layout_kind.is_stacked() => {
-                        current = selected;
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            let next_child = match (layout_kind, direction) {
-                (LayoutKind::Horizontal, Direction::Left) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.first().copied()),
-                (LayoutKind::Horizontal, Direction::Right) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.last().copied()),
-                (LayoutKind::Horizontal, Direction::Up) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.first().copied()),
-                (LayoutKind::Horizontal, Direction::Down) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.last().copied()),
-                (LayoutKind::Vertical, Direction::Up) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.first().copied()),
-                (LayoutKind::Vertical, Direction::Down) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.last().copied()),
-                (LayoutKind::Vertical, Direction::Left) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.first().copied()),
-                (LayoutKind::Vertical, Direction::Right) => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.last().copied()),
-                _ if layout_kind.is_stacked() => self
-                    .tree
-                    .data
-                    .selection
-                    .local_selection(map, current)
-                    .filter(|c| self.inactive.is_empty() || active.contains(c))
-                    .or(children.first().copied()),
-                _ => None,
+            let kind = self.tree.data.layout.kind(current);
+            let selected =
+                self.tree.data.selection.local_selection(map, current).filter(participates);
+            let edge = || match direction {
+                Direction::Left | Direction::Up => current.children(map).find(participates),
+                Direction::Right | Direction::Down => current.children_rev(map).find(participates),
             };
-            match next_child {
+            let next = if kind.is_stacked() {
+                selected.or_else(|| current.children(map).find(participates))
+            } else {
+                selected.or_else(edge)
+            };
+            match next {
                 Some(child) => current = child,
                 None => return Some(current),
             }
@@ -2148,7 +1980,7 @@ impl TraditionalLayoutSystem {
         let mut stack = vec![node];
         let mut windows = vec![];
         while let Some(node) = stack.pop() {
-            if !active.contains(&node) {
+            if !self.inactive.is_empty() && !active.contains(&node) {
                 continue;
             }
             if self.layout(node).is_group() {
@@ -2157,14 +1989,14 @@ impl TraditionalLayoutSystem {
                         .data
                         .selection
                         .local_selection(self.map(), node)
-                        .filter(|c| active.contains(c))
-                        .or_else(|| node.children(self.map()).find(|c| active.contains(c))),
+                        .filter(|c| self.inactive.is_empty() || active.contains(c))
+                        .or_else(|| {
+                            node.children(self.map())
+                                .find(|c| self.inactive.is_empty() || active.contains(c))
+                        }),
                 );
             } else {
-                let children: Vec<_> = node.children(self.map()).collect();
-                for child in children.into_iter().rev() {
-                    stack.push(child);
-                }
+                stack.extend(node.children_rev(self.map()));
             }
             windows.extend(self.window_at(node));
         }
@@ -3003,117 +2835,21 @@ impl Layout {
             return (0.0, None, None, true);
         }
 
-        let children: Vec<_> =
-            node.children(map).filter(|child| prepared.contains_key(child)).collect();
-        if children.is_empty() {
-            return (0.0, None, None, true);
-        }
-
         let kind = self.info[node].kind;
-        let axis_aligned = matches!(
-            (kind, horizontal),
-            (LayoutKind::Horizontal, true)
-                | (LayoutKind::HorizontalStack, true)
-                | (LayoutKind::Vertical, false)
-                | (LayoutKind::VerticalStack, false)
-        );
-        let inner_gap = if horizontal {
-            gaps.inner.horizontal
-        } else {
-            gaps.inner.vertical
-        };
-
-        let mut mins = Vec::with_capacity(children.len());
-        let mut fixed_parts = Vec::with_capacity(children.len());
-        let mut max_parts = Vec::with_capacity(children.len());
-        let mut grows = Vec::with_capacity(children.len());
-        let mut any_grow = false;
-        for child in &children {
-            let (min, fixed, max, can_grow) = prepared[&*child][horizontal as usize];
-            mins.push(min.max(0.0));
-            fixed_parts.push(fixed.map(|v| v.max(0.0)));
-            max_parts.push(max.map(|v| v.max(0.0)));
-            grows.push(can_grow);
-            any_grow |= can_grow;
-        }
-
-        if children.len() == 1 {
-            return (
-                mins[0],
-                fixed_parts[0],
-                max_parts[0],
-                grows.first().copied().unwrap_or(true),
-            );
-        }
-
-        let stack_span = stack_offset.max(0.0) * (children.len().saturating_sub(1) as f64);
-        let min_max = mins.iter().copied().fold(0.0_f64, |acc, value| acc.max(value));
-
-        if matches!(kind, LayoutKind::HorizontalStack | LayoutKind::VerticalStack) {
-            let stacked_on_axis = matches!(
-                (kind, horizontal),
-                (LayoutKind::HorizontalStack, true) | (LayoutKind::VerticalStack, false)
-            );
-            if stacked_on_axis {
-                let required_focus = mins
-                    .iter()
-                    .copied()
-                    .zip(fixed_parts.iter().copied())
-                    .fold(0.0_f64, |acc, (min, fixed)| acc.max(fixed.unwrap_or(min)));
-                let max_focus =
-                    max_parts.iter().copied().try_fold(0.0_f64, |acc, part| match part {
-                        Some(value) => Some(acc.max(value)),
-                        None => None,
-                    });
-                let reserve = stack_line.on_axis(kind, horizontal);
-                return (
-                    required_focus + stack_span + reserve,
-                    None,
-                    max_focus.map(|value| value + stack_span + reserve),
-                    any_grow,
-                );
-            }
-            let reserve = stack_line.on_axis(kind, horizontal);
-            let fixed_max = fixed_parts.iter().copied().try_fold(0.0, |acc, part| match part {
-                Some(value) => Some(if value > acc { value } else { acc }),
-                None => None,
-            });
-            let max_max = max_parts.iter().copied().try_fold(0.0_f64, |acc, part| match part {
-                Some(value) => Some(acc.max(value)),
-                None => None,
-            });
-            return (
-                min_max + reserve,
-                fixed_max.map(|value| value + reserve),
-                max_max.map(|value| value + reserve),
-                any_grow,
-            );
-        }
-
-        if axis_aligned {
-            let gap_total = inner_gap * (children.len().saturating_sub(1) as f64);
-            let min_total = mins.iter().sum::<f64>() + gap_total;
-            let fixed_total =
-                fixed_parts.iter().copied().try_fold(0.0, |acc, part| part.map(|p| acc + p));
-            let max_total =
-                max_parts.iter().copied().try_fold(0.0, |acc, part| part.map(|p| acc + p));
-            (
-                min_total,
-                fixed_total.map(|v| v + gap_total),
-                max_total.map(|v| v + gap_total),
-                any_grow,
-            )
-        } else {
-            let fixed_max = fixed_parts.into_iter().try_fold(0.0, |acc, part| match part {
-                Some(value) => Some(if value > acc { value } else { acc }),
-                None => None,
-            });
-            let max_max = max_parts.into_iter().try_fold(0.0_f64, |acc, part| match part {
-                Some(value) => Some(acc.max(value)),
-                None => None,
-            });
-            (min_max, fixed_max, max_max, any_grow)
-        }
+        container_axis_constraints(
+            node.children(map)
+                .filter_map(|child| prepared.get(&child))
+                .map(|axes| axes[horizontal as usize]),
+            kind,
+            horizontal,
+            if horizontal {
+                gaps.inner.horizontal
+            } else {
+                gaps.inner.vertical
+            },
+            stack_offset,
+            stack_line.on_axis(kind, horizontal),
+        )
     }
 
     fn apply_with_gaps(
@@ -5254,8 +4990,14 @@ mod tests {
             gaps.inner.horizontal = 10.0;
             gaps.inner.vertical = 10.0;
             let screen = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(620.0, 620.0));
-            let groups =
-                system.collect_group_containers(layout, screen, 0.0, &gaps, Default::default());
+            let groups = system.collect_group_containers(
+                layout,
+                screen,
+                0.0,
+                &gaps,
+                Default::default(),
+                false,
+            );
             assert_eq!(groups.len(), 3);
             for (i, (group, (offset, length))) in
                 groups.iter().zip([(0.0, 100.0), (110.0, 200.0), (320.0, 300.0)]).enumerate()
@@ -5268,12 +5010,13 @@ mod tests {
                 assert_eq!(group.node_id, nodes[i]);
                 assert_eq!(group.frame, expected);
                 system.select_window(layout, w(200 + i as u32 * 2));
-                let path = system.collect_group_containers_in_selection_path(
+                let path = system.collect_group_containers(
                     layout,
                     screen,
                     0.0,
                     &gaps,
                     Default::default(),
+                    true,
                 );
                 assert_eq!(path.last().unwrap().frame, expected);
             }
@@ -5305,6 +5048,7 @@ mod tests {
                 thickness: 28.0,
                 ..Default::default()
             },
+            false,
         );
         let group = groups.iter().find(|g| g.node_id == root).unwrap();
         assert_eq!(group.total_count, 2);

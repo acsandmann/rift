@@ -680,17 +680,21 @@ mod participation_tests {
             LayoutSystemKind::Stack(Default::default()),
             LayoutSystemKind::MasterStack(Default::default()),
             LayoutSystemKind::Scrolling(Default::default()),
+            LayoutSystemKind::Floating(Default::default()),
         ];
         let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
         let constraints = HashMap::default();
         let mut gaps = crate::common::config::GapSettings::default();
         gaps.inner.horizontal = 16.0;
         gaps.inner.vertical = 12.0;
-        for (system, mode) in
-            systems
-                .iter_mut()
-                .zip(["traditional", "bsp", "stack", "master_stack", "scrolling"])
-        {
+        for (system, mode) in systems.iter_mut().zip([
+            "traditional",
+            "bsp",
+            "stack",
+            "master_stack",
+            "scrolling",
+            "floating",
+        ]) {
             let layout = system.create_layout();
             let frames = |system: &mut LayoutSystemKind| {
                 system.prepare_layout(layout, screen, &constraints, &gaps);
@@ -724,7 +728,7 @@ mod participation_tests {
                 vec![windows[0]],
                 "{mode}"
             );
-            if mode != "scrolling" {
+            if mode != "scrolling" && mode != "floating" {
                 assert_eq!(
                     projected[0].1,
                     crate::layout_engine::utils::compute_tiling_area(screen, &gaps),
@@ -785,6 +789,19 @@ mod participation_tests {
             system.remove_window(replacement);
             assert!(!system.contains_window(layout, replacement));
             assert!(system.contains_window(layout, inserted));
+            let retained = system.all_windows_in_layout(layout);
+            for &window in &retained {
+                system.set_window_participation(window, false);
+            }
+            let newcomer = WindowId::new(1, 6);
+            system.add_window_after_selection(layout, newcomer);
+            assert_eq!(frames(system).iter().map(|(w, _)| *w).collect::<Vec<_>>(), vec![
+                newcomer
+            ]);
+            for &window in &retained {
+                system.set_window_participation(window, true);
+                assert!(system.contains_window(layout, window));
+            }
         }
     }
 }

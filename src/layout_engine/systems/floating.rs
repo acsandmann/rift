@@ -82,19 +82,6 @@ impl FloatingLayoutSystem {
             .collect()
     }
 
-    fn active_window(&self, layout: LayoutId) -> Option<WindowId> {
-        let mut node = self.inner.selection(layout);
-        loop {
-            if let Some(wid) = self.inner.window_at(node) {
-                return self.inner.window_participates(wid).then_some(wid);
-            }
-            node = self
-                .inner
-                .local_selection(node)
-                .or_else(|| node.first_child(self.inner.map()))?;
-        }
-    }
-
     fn members(&self, container: NodeId) -> Vec<WindowId> {
         container
             .traverse_preorder(self.inner.map())
@@ -130,12 +117,16 @@ impl FloatingLayoutSystem {
     }
 
     pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(wid) = self.active_window(layout)
+        if let Some(wid) = self.inner.selected_window(layout)
             && let Some(node) = self.inner.window_node(layout, wid)
             && let Some(parent) = node.parent(self.inner.map())
             && self.inner.layout(parent).is_stacked()
         {
-            return self.members(parent);
+            return self
+                .members(parent)
+                .into_iter()
+                .filter(|w| self.inner.window_participates(*w))
+                .collect();
         }
         self.inner.visible_windows_in_layout(layout)
     }
@@ -146,7 +137,7 @@ impl FloatingLayoutSystem {
         direction: Direction,
         exclude: Option<NodeId>,
     ) -> Option<WindowId> {
-        let focused = self.active_window(layout)?;
+        let focused = self.inner.selected_window(layout)?;
         let source = self.frames.get(&focused)?;
         let origin = source.mid();
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
@@ -184,7 +175,7 @@ impl FloatingLayoutSystem {
     }
 
     fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        let focused = self.active_window(layout)?;
+        let focused = self.inner.selected_window(layout)?;
         let node = self.inner.window_node(layout, focused)?;
         let parent = node.parent(self.inner.map())?;
         let kind = self.inner.layout(parent);
@@ -529,7 +520,7 @@ impl LayoutSystem for FloatingLayoutSystem {
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
-        let Some(focused) = self.active_window(layout) else {
+        let Some(focused) = self.inner.selected_window(layout) else {
             return;
         };
         let Some(selection) = self.inner.window_node(layout, focused) else {
@@ -583,7 +574,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let Some(focused) = self.active_window(layout) else {
+        let Some(focused) = self.inner.selected_window(layout) else {
             return Vec::new();
         };
         // Only an explicitly joined container can become a floating stack.
@@ -603,7 +594,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let focused = self.active_window(layout);
+        let focused = self.inner.selected_window(layout);
         let selection = self.inner.selection(layout);
         let container = selection
             .ancestors(self.inner.map())
@@ -631,7 +622,7 @@ impl LayoutSystem for FloatingLayoutSystem {
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
-        let Some(wid) = self.active_window(layout) else {
+        let Some(wid) = self.inner.selected_window(layout) else {
             return;
         };
         let Some(selection) = self.inner.window_node(layout, wid) else {

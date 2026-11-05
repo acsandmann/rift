@@ -1,8 +1,68 @@
-// Both axis summaries are prepared bottom-up; absent nodes do not participate.
-pub(super) type ConstraintCache = crate::common::collections::HashMap<
-    crate::model::tree::NodeId,
-    [(f64, Option<f64>, Option<f64>, bool); 2],
->;
+use crate::layout_engine::LayoutKind;
+
+type AxisSummary = (f64, Option<f64>, Option<f64>, bool);
+// Both axes are prepared bottom-up; absent nodes do not participate.
+pub(super) type ConstraintCache =
+    crate::common::collections::HashMap<crate::model::tree::NodeId, [AxisSummary; 2]>;
+
+// Shared by Traditional containers and BSP splits. A sole child contributes
+// exactly its own constraints; gaps and stack decorations belong to projections.
+pub(super) fn container_axis_constraints(
+    children: impl Iterator<Item = AxisSummary>,
+    kind: LayoutKind,
+    horizontal: bool,
+    gap: f64,
+    stack_offset: f64,
+    reserve: f64,
+) -> AxisSummary {
+    let aligned =
+        (kind.orientation() == crate::layout_engine::Orientation::Horizontal) == horizontal;
+    let stacked = kind.is_stacked();
+    let mut count = 0;
+    let mut axis = AxisConstraints {
+        fixed: Some(0.0),
+        max: Some(0.0),
+        ..Default::default()
+    };
+    let mut focused: f64 = 0.0;
+    let combine = |a: f64, b: f64| {
+        if aligned && !stacked {
+            a + b.max(0.0)
+        } else {
+            a.max(b.max(0.0))
+        }
+    };
+    for (min, fixed, max, grow) in children {
+        count += 1;
+        axis.min = combine(axis.min, min);
+        axis.fixed = axis.fixed.zip(fixed).map(|(a, b)| combine(a, b));
+        axis.max = axis.max.zip(max).map(|(a, b)| combine(a, b));
+        axis.can_grow |= grow;
+        focused = focused.max(fixed.unwrap_or(min));
+    }
+    if count == 0 {
+        return (0.0, None, None, true);
+    }
+    let extra = if count == 1 {
+        0.0
+    } else if !aligned {
+        reserve
+    } else if stacked {
+        stack_offset.max(0.0) * (count - 1) as f64 + reserve
+    } else {
+        gap * (count - 1) as f64
+    };
+    if count > 1 && stacked && aligned {
+        axis.min = focused;
+        axis.fixed = None;
+    }
+    (
+        axis.min + extra,
+        axis.fixed.map(|v| v + extra),
+        axis.max.map(|v| v + extra),
+        axis.can_grow,
+    )
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AxisConstraints {

@@ -41,7 +41,7 @@ pub struct WindowRecord {
     window_server_id: Option<WindowServerId>,
     workspace: Option<VirtualWorkspaceId>,
     visibility: WindowVisibility,
-    // Retain membership through stale AX admission snapshots during a return.
+    // Lifecycle suspension survives AX snapshots until layout admission resumes it.
     suspended: bool,
     pending_transfer: Option<PendingWindowTransfer>,
     rule_floating: bool,
@@ -323,9 +323,6 @@ impl WindowStore {
     /// Temporary unavailability changes admission, not logical workspace ownership.
     pub(crate) fn reconcile_admission(&mut self, wid: WindowId) -> bool {
         let admitted = self.window(wid).is_some_and(WindowState::is_admitted);
-        if admitted {
-            self.resume_window(wid);
-        }
         let explicitly_excluded =
             self.window(wid).is_some_and(|w| w.manage_override == Some(false));
         if !admitted && (explicitly_excluded || !self.is_temporarily_unavailable(wid)) {

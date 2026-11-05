@@ -6,7 +6,7 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::systems::constraints::{
-    AxisConstraints, ConstraintCache, solve_axis_lengths,
+    AxisConstraints, ConstraintCache, container_axis_constraints, solve_axis_lengths,
 };
 use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
@@ -491,7 +491,9 @@ impl BspLayoutSystem {
         let Some(state) = self.layouts.get(layout).copied() else {
             return;
         };
-        let sel = self.selection_of_layout(layout).unwrap_or(state.root);
+        let sel = self
+            .selection_of_layout(layout)
+            .unwrap_or_else(|| self.tree.data.selection.current_selection(state.root));
         match self.kind.get_mut(sel) {
             Some(NodeKind::Leaf {
                 window,
@@ -572,18 +574,12 @@ impl BspLayoutSystem {
         if !prepared.contains_key(&node) {
             return;
         }
-        let children: Vec<_> =
-            node.children(&self.tree.map).filter(|c| prepared.contains_key(c)).collect();
-        if matches!(self.kind.get(node), Some(NodeKind::Split { .. })) && children.len() == 1 {
-            self.calculate_layout_recursive(
-                prepared,
-                children[0],
-                rect,
-                screen,
-                constraints,
-                gaps,
-                out,
-            );
+        let mut children = node.children(&self.tree.map).filter(|c| prepared.contains_key(c));
+        if let Some(child) = children.next()
+            && children.next().is_none()
+            && matches!(self.kind.get(node), Some(NodeKind::Split { .. }))
+        {
+            self.calculate_layout_recursive(prepared, child, rect, screen, constraints, gaps, out);
             return;
         }
         match self.kind.get(node) {
@@ -802,58 +798,29 @@ impl BspLayoutSystem {
                 (0.0, None, None, true)
             }
             Some(NodeKind::Split { orientation, .. }) => {
-                let children: Vec<_> =
-                    node.children(&self.tree.map).filter(|c| prepared.contains_key(c)).collect();
-                if children.is_empty() {
-                    return (0.0, None, None, true);
-                }
-                let axis_aligned = *orientation
-                    == if horizontal {
-                        Orientation::Horizontal
-                    } else {
-                        Orientation::Vertical
-                    };
-                let inner_gap = if horizontal {
-                    gaps.inner.horizontal
-                } else {
-                    gaps.inner.vertical
+                let kind = match orientation {
+                    Orientation::Horizontal => LayoutKind::Horizontal,
+                    Orientation::Vertical => LayoutKind::Vertical,
                 };
-                let mut mins = Vec::with_capacity(children.len());
-                let mut fixed_parts = Vec::with_capacity(children.len());
-                let mut max_parts = Vec::with_capacity(children.len());
-                let mut any_grow = false;
-                for child in children {
-                    let (min, fixed, max, can_grow) = prepared[&child][horizontal as usize];
-                    mins.push(min.max(0.0));
-                    fixed_parts.push(fixed.map(|v| v.max(0.0)));
-                    max_parts.push(max.map(|v| v.max(0.0)));
-                    any_grow |= can_grow;
+                let mut summary = container_axis_constraints(
+                    node.children(&self.tree.map)
+                        .filter_map(|child| prepared.get(&child))
+                        .map(|axes| axes[horizontal as usize]),
+                    kind,
+                    horizontal,
+                    if horizontal {
+                        gaps.inner.horizontal
+                    } else {
+                        gaps.inner.vertical
+                    },
+                    0.0,
+                    0.0,
+                );
+                // BSP has always left the perpendicular maximum unconstrained.
+                if (*orientation == Orientation::Horizontal) != horizontal {
+                    summary.2 = None;
                 }
-                if axis_aligned {
-                    let gap_total = inner_gap * (fixed_parts.len().saturating_sub(1) as f64);
-                    let min_total = mins.iter().sum::<f64>() + gap_total;
-                    let fixed_total = fixed_parts
-                        .iter()
-                        .copied()
-                        .try_fold(0.0, |acc, part| part.map(|p| acc + p));
-                    let max_total =
-                        max_parts.iter().copied().try_fold(0.0, |acc, part| part.map(|p| acc + p));
-                    (
-                        min_total,
-                        fixed_total.map(|v| v + gap_total),
-                        max_total.map(|v| v + gap_total),
-                        any_grow,
-                    )
-                } else {
-                    let min_max = mins
-                        .into_iter()
-                        .fold(0.0, |acc, value| if value > acc { value } else { acc });
-                    let fixed_max = fixed_parts.into_iter().try_fold(0.0, |acc, part| match part {
-                        Some(value) => Some(if value > acc { value } else { acc }),
-                        None => None,
-                    });
-                    (min_max, fixed_max, None, any_grow)
-                }
+                summary
             }
             None => (0.0, None, None, true),
         }
@@ -2368,7 +2335,9 @@ impl LayoutSystem for BspLayoutSystem {
             return;
         };
 
-        let sel = self.selection_of_layout(layout).unwrap_or(state.root);
+        let sel = self
+            .selection_of_layout(layout)
+            .unwrap_or_else(|| self.tree.data.selection.current_selection(state.root));
         let target = self.descend_to_leaf(sel);
         match self.kind.get(target).cloned() {
             Some(NodeKind::Leaf { window, .. }) => {

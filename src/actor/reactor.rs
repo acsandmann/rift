@@ -5340,7 +5340,7 @@ impl Reactor {
                 if let Some(assignment) = effects {
                     let effective_floating = assignment.should_float(was_floating);
                     if reapply_effects
-                        || !self.layout_manager.layout_engine.window_participates(*wid)
+                        || self.state.windows.is_temporarily_unavailable(*wid)
                         || previous_workspace != Some(assignment.workspace_id)
                         || was_floating != effective_floating
                         || was_ignored

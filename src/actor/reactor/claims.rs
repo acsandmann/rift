@@ -7,6 +7,7 @@ use rift_protocol::WindowClaimFlags;
 use super::{LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
 use crate::common::collections::HashSet;
+use crate::layout_engine::systems::LayoutSystem;
 use crate::model::window_store::ClaimOwner;
 use crate::sys::screen::SpaceId;
 
@@ -100,6 +101,13 @@ impl Reactor {
             claim.workspace().filter(|id| engine.workspaces().workspaces.contains_key(*id))
         {
             self.state.windows.assign_window_to_workspace(wid, workspace);
+            // The owner may have changed the claim's destination. Reconcile only
+            // at release; an ordinary return keeps its canonical slot untouched.
+            for (id, current) in engine.workspaces_mut().workspaces.iter_mut() {
+                if id != workspace {
+                    current.layout_system.remove_window(wid);
+                }
+            }
             // Like any external move of a floating window, the owner's geometry is authoritative.
             if engine.is_window_floating(wid)
                 && let Some(window) = self.state.windows.window(wid)

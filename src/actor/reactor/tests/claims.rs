@@ -2,6 +2,7 @@ use rift_protocol::WindowClaimFlags;
 use test_log::test;
 
 use super::*;
+use crate::layout_engine::systems::LayoutSystem;
 use crate::model::window_store::ClaimOwner;
 
 const OWNED_ELSEWHERE: &str = "Window owned by another external manager";
@@ -339,6 +340,19 @@ fn claimed_window_keeps_its_workspace_across_workspace_switches() {
         parked,
         "released into a hidden workspace"
     );
+
+    reactor.claim_window(wid(1), OWNER, NONE).unwrap();
+    reactor.state.windows.assign_window_to_workspace(wid(1), other);
+    reactor.release_window(wid(1), OWNER).unwrap();
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.state.windows.workspace_for_window(wid(1)), Some(other));
+    for (id, workspace) in reactor.layout_manager.layout_engine.workspaces().workspaces.iter() {
+        let layout = workspace.active_layout().unwrap();
+        assert_eq!(
+            workspace.layout_system.contains_window(layout, wid(1)),
+            id == other
+        );
+    }
 }
 
 #[test]
