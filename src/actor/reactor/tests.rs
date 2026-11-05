@@ -8025,7 +8025,7 @@ fn inconclusive_membership_never_becomes_authoritative_by_retry_exhaustion() {
 }
 
 #[test]
-fn duplicate_minimize_repairs_stale_projection_and_inactive_assignment() {
+fn duplicate_minimize_suspends_geometry_and_preserves_inactive_assignment() {
     for tiled in [false, true] {
         let (mut reactor, wid, _wsid, space, inactive, screen) = reactor_with_window_on_space1();
         if tiled {
@@ -8047,7 +8047,7 @@ fn duplicate_minimize_repairs_stale_projection_and_inactive_assignment() {
         assert_eq!(reactor.layout_update_count - before, usize::from(tiled));
 
         assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
-        assert!(reactor.state.windows.workspace_for_window(wid).is_none());
+        assert!(reactor.state.windows.workspace_for_window(wid).is_some());
         reactor.state.windows.debug_assert_invariants();
     }
 }
@@ -10357,9 +10357,7 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
     let (a, b, external) = (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
     let single = |space| {
         space_state_event_with(vec![shared_left()], vec![Some(space)], |state| {
-            state
-                .display_space_ids
-                .insert("test-display-0".into(), vec![a, b]);
+            state.display_space_ids.insert("test-display-0".into(), vec![a, b]);
         })
     };
     reactor.handle_event(single(a));
@@ -10376,9 +10374,7 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
             vec![shared_left(), shared_right()],
             vec![Some(a), Some(external)],
             |state| {
-                state
-                    .display_space_ids
-                    .insert("test-display-0".into(), vec![a, b]);
+                state.display_space_ids.insert("test-display-0".into(), vec![a, b]);
             },
         )
     };
@@ -10716,8 +10712,14 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
 }
 
 #[test]
-fn deminiaturized_window_is_tiled_back_into_layout() {
-    for mode in [LayoutMode::Traditional, LayoutMode::Scrolling] {
+fn deminiaturized_window_restores_exact_layout_including_restart() {
+    for mode in [
+        LayoutMode::Traditional,
+        LayoutMode::Bsp,
+        LayoutMode::Stack,
+        LayoutMode::MasterStack,
+        LayoutMode::Scrolling,
+    ] {
         for stale_snapshot in [false, true] {
             let mut apps = Apps::new();
             let mut reactor = test_reactor();
@@ -10729,9 +10731,44 @@ fn deminiaturized_window_is_tiled_back_into_layout() {
                 mode,
             });
             apps.make_app_and_settle(&mut reactor, 1, make_windows(3));
+            let original = test_layout(&mut reactor, space, screen);
+            let native_frames: Vec<_> =
+                original.iter().map(|(wid, _)| (*wid, apps.windows[wid].frame)).collect();
             let restored = WindowId::new(1, 2);
             reactor.handle_event(Event::WindowMinimized(restored));
             apps.simulate_until_quiet(&mut reactor);
+            if stale_snapshot {
+                let snapshot = reactor
+                    .layout_manager
+                    .layout_engine
+                    .serialize_to_string(&reactor.state.windows);
+                reactor.layout_manager.layout_engine =
+                    LayoutEngine::deserialize_from_str(&snapshot).unwrap();
+                reactor
+                    .layout_manager
+                    .layout_engine
+                    .set_layout_settings(&reactor.config.settings.layout);
+                let ids: Vec<_> = (1..=3).map(|idx| WindowId::new(1, idx)).collect();
+                let discovered = ids
+                    .iter()
+                    .map(|&wid| {
+                        let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+                        info.frame = apps.windows[&wid].frame;
+                        (wid, info)
+                    })
+                    .collect();
+                for &wid in &ids {
+                    reactor.state.windows.remove_window_assignment(wid);
+                }
+                reactor.on_windows_discovered_with_app_info(1, discovered, ids, None);
+                apps.simulate_until_quiet(&mut reactor);
+                assert!(reactor.state.windows.workspace_for_window(restored).is_some());
+                assert!(
+                    !test_layout(&mut reactor, space, screen)
+                        .iter()
+                        .any(|(wid, _)| *wid == restored)
+                );
+            }
             let mut fresh = reactor.state.windows.window(restored).unwrap().info.clone();
             fresh.is_minimized = false;
             if stale_snapshot {
@@ -10751,8 +10788,8 @@ fn deminiaturized_window_is_tiled_back_into_layout() {
             apps.simulate_until_quiet(&mut reactor);
 
             let layout = test_layout(&mut reactor, space, screen);
-            assert_eq!(layout.len(), 3, "{mode:?} stale={stale_snapshot} {layout:?}");
-            for (wid, frame) in layout {
+            assert_eq!(layout, original, "{mode:?} stale={stale_snapshot}");
+            for (wid, frame) in native_frames {
                 assert!(
                     apps.windows[&wid].frame.same_as(frame),
                     "{mode:?} stale={stale_snapshot} {wid:?}"

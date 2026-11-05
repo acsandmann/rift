@@ -1534,9 +1534,7 @@ impl WorkspaceStore {
             window.manage_override = rule_override;
         }
         if !admitted {
-            if window_store.native_fullscreen_record_for_window(window_id).is_none()
-                || rule_override == Some(false)
-            {
+            if !window_store.is_temporarily_unavailable(window_id) || rule_override == Some(false) {
                 window_store.clear_rule_floating(window_id);
             }
             return Ok(AppRuleResult::Rejected(if rule_override == Some(false) {

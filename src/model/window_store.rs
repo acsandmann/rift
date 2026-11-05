@@ -41,6 +41,8 @@ pub struct WindowRecord {
     window_server_id: Option<WindowServerId>,
     workspace: Option<VirtualWorkspaceId>,
     visibility: WindowVisibility,
+    // Lifecycle suspension survives AX snapshots until layout admission resumes it.
+    suspended: bool,
     pending_transfer: Option<PendingWindowTransfer>,
     rule_floating: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
@@ -150,8 +152,8 @@ impl WindowServerRecord {
 
 /// Authoritative per-window metadata tracked by Rift.
 ///
-/// Workspace membership lives here, not inside `VirtualWorkspace`. Layout trees
-/// are only a materialized projection for arranging visible windows. Keeping the
+/// Workspace ownership lives here, not inside `VirtualWorkspace`. Layout trees
+/// retain canonical topology; geometry projects their participating members. Keeping the
 /// assignment index here avoids the old class of bugs where a window could be
 /// present in multiple workspace-owned sets after sleep/wake or same-space
 /// workspace moves, which then leaked into queries and layout recovery.
@@ -318,13 +320,33 @@ impl WindowStore {
         Some(assignment)
     }
 
-    /// Admission failure clears ownership except while native identity is recovering.
+    /// Temporary unavailability changes admission, not logical workspace ownership.
     pub(crate) fn reconcile_admission(&mut self, wid: WindowId) -> bool {
         let admitted = self.window(wid).is_some_and(WindowState::is_admitted);
-        if !admitted && self.native_fullscreen_record_for_window(wid).is_none() {
+        let explicitly_excluded =
+            self.window(wid).is_some_and(|w| w.manage_override == Some(false));
+        if !admitted && (explicitly_excluded || !self.is_temporarily_unavailable(wid)) {
             self.remove_window_assignment(wid);
         }
         admitted
+    }
+
+    pub(crate) fn suspend_window(&mut self, wid: WindowId) {
+        if let Some(record) = self.windows.get_mut(&wid) {
+            record.suspended = true;
+        }
+    }
+
+    pub(crate) fn resume_window(&mut self, wid: WindowId) {
+        if let Some(record) = self.windows.get_mut(&wid) {
+            record.suspended = false;
+        }
+    }
+
+    pub(crate) fn is_temporarily_unavailable(&self, wid: WindowId) -> bool {
+        self.record(wid).is_some_and(|r| r.suspended)
+            || self.window(wid).is_some_and(|w| w.info.is_minimized)
+            || self.is_window_native_fullscreen_suspended(wid)
     }
 
     pub(crate) fn is_visible_admitted(&self, wid: WindowId) -> bool {
@@ -499,9 +521,7 @@ impl WindowStore {
             self.mark_window_hidden(wsid);
         }
         self.set_visibility(wid, WindowVisibility::Minimized);
-        if self.native_fullscreen_record_for_window(wid).is_none() {
-            self.remove_window_assignment(wid);
-        }
+        self.windows.get_mut(&wid).unwrap().suspended = true;
         true
     }
 
@@ -1295,6 +1315,7 @@ impl WindowStore {
         // A claim keeps its saved workspace until release; only workspace removal clears it.
         let old = self.windows.get_mut(&window_id).and_then(|record| {
             record.pending_transfer = None;
+            record.suspended = false;
             record.workspace.take()
         });
         if let Some(old_assignment) = old {
@@ -1324,6 +1345,8 @@ impl WindowStore {
             None => return,
         };
 
+        let suspended = self.windows[&from].suspended;
+
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
         if let Some(assignment) = workspace {
@@ -1338,6 +1361,7 @@ impl WindowStore {
         if workspace.is_some() {
             target.workspace = workspace;
         }
+        target.suspended |= suspended;
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
         target.pending_transfer = pending;
@@ -1346,6 +1370,7 @@ impl WindowStore {
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
+            source.suspended = false;
             source.rule_floating = false;
             source.pending_transfer = None;
             source.floating_display_geometry = None;
@@ -1869,6 +1894,32 @@ mod tests {
         });
         state.is_manageable = true;
         state
+    }
+
+    #[test]
+    fn minimized_membership_survives_reconciliation_until_permanent_removal() {
+        let mut store = WindowStore::default();
+        let mut workspaces = WorkspaceStore::new();
+        let home = workspaces.create_workspace(SpaceId::new(10), None).unwrap();
+        let wid = WindowId::new(1, 1);
+        store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
+        store.assign_window_to_workspace(wid, home);
+
+        for _ in 0..2 {
+            assert!(store.observe_minimized(wid));
+            assert!(!store.reconcile_admission(wid));
+            assert_eq!(store.workspace_for_window(wid), Some(home));
+            assert_eq!(store.workspace_windows(home), vec![wid]);
+            store.debug_assert_invariants();
+        }
+
+        store.insert_window(wid, admitted(wid, WindowServerId::new(1)));
+        assert!(store.reconcile_admission(wid));
+        assert_eq!(store.workspace_for_window(wid), Some(home));
+        store.window_mut(wid).unwrap().manage_override = Some(false);
+        assert!(!store.reconcile_admission(wid));
+        assert_eq!(store.workspace_for_window(wid), None);
+        assert!(store.workspace_windows(home).is_empty());
     }
 
     #[test]

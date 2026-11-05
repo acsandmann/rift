@@ -78,8 +78,7 @@ pub fn handle_window_destroyed(
 ) -> EventOutcome {
     let wid = payload.window;
     if state.windows.suspend_fullscreen_ax_identity(wid) {
-        return EventOutcome::no_change()
-            .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+        return EventOutcome::no_change().with_layout_event(LayoutEvent::WindowSuspended(wid));
     }
     let Some(record) = state.windows.remove_window(wid) else {
         return EventOutcome::no_change();
@@ -108,11 +107,7 @@ pub fn handle_window_minimized(
     if !state.windows.observe_minimized(wid) {
         return Ok(EventOutcome::no_change());
     }
-    let removal = if state.windows.native_fullscreen_record_for_window(wid).is_some() {
-        LayoutEvent::WindowRemovedPreserveFloating(wid)
-    } else {
-        LayoutEvent::WindowRemoved(wid)
-    };
+    let removal = LayoutEvent::WindowSuspended(wid);
     Ok(EventOutcome::window_membership_changed(false, false)
         .with_arrange_passes(0)
         .with_layout_event(removal))
@@ -159,9 +154,8 @@ pub fn handle_window_deminiaturized(
     // even when the cached snapshot cannot currently be admitted.
     let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
     if active_space.is_some() && !state.windows.is_claimed(wid) {
-        // Minimizing clears workspace membership; reconcile app rules before
-        // projecting the restored window, just as for a newly created window.
-        // A claimed window keeps its saved workspace and returns on release.
+        // Reconcile admission while retaining the existing workspace and layout slot.
+        // A claimed window returns on release.
         outcome = outcome.with_created_window_finalization(wid);
     }
     Ok(outcome)

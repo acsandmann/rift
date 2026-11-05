@@ -403,7 +403,8 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     engine.floating_positions.store(hidden, w3, frame);
     engine.floating_positions.store(shown, w1, frame);
     store.window_mut(w3).unwrap().frame_monotonic.origin.x = 99_999.0;
-    let _ = engine.handle_event(&mut store, LayoutEvent::WindowRemovedPreserveFloating(minimized));
+    store.observe_minimized(minimized);
+    let _ = engine.handle_event(&mut store, LayoutEvent::WindowSuspended(minimized));
     let path = std::env::temp_dir().join(format!("rift-save-test-{}.ron", std::process::id()));
     engine.save_current_layout(path.clone(), &store, Some(a)).unwrap();
     let file = fs::read_to_string(&path).unwrap();
@@ -419,8 +420,8 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     assert_eq!(saved[&w2].frame, Some(store.window(w2).unwrap().frame_monotonic));
     assert_eq!((saved[&w3].frame, saved[&w3].workspace), (Some(frame), hidden));
     assert!(
-        !saved.contains_key(&minimized),
-        "a minimized tiled window has no slot"
+        saved.contains_key(&minimized),
+        "a minimized live window retains its canonical saved slot"
     );
     assert!(
         !loaded.workspaces.workspace_ids(d).is_empty(),
@@ -1109,15 +1110,11 @@ fn global_single_display_restore_stays_in_the_windows_native_space() {
     let file = session(&settings, &[(a, "display", &[window])]);
     for current in [a, b] {
         let (mut engine, mut store) = boot(&settings, &file);
-        resolve(
-            &mut engine,
-            &mut store,
-            &[(current, "display")],
-            &[("display", &[a, b])],
-        );
-        engine
-            .workspaces
-            .ensure_visible_spaces(&[current], 1, |_| None);
+        resolve(&mut engine, &mut store, &[(current, "display")], &[(
+            "display",
+            &[a, b],
+        )]);
+        engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
         let target = ws(&engine, current, 0);
         open(&mut engine, &mut store, target, window);
         assert_eq!(

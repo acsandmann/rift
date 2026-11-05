@@ -7,6 +7,7 @@ use rift_protocol::WindowClaimFlags;
 use super::{LayoutEvent, Reactor};
 use crate::actor::app::WindowId;
 use crate::common::collections::HashSet;
+use crate::layout_engine::systems::LayoutSystem;
 use crate::model::window_store::ClaimOwner;
 use crate::sys::screen::SpaceId;
 
@@ -42,13 +43,12 @@ impl Reactor {
             // Leave the projection (keeping floating state and the layout slot) before the
             // claim takes the assignment, but arrange only after: no write may target it.
             let space = reactor.assigned_space_for_window_id(wid);
-            let removal = LayoutEvent::WindowRemovedPreserveFloating(wid);
-            let removed = reactor.state.windows.is_admitted(wid)
-                && reactor
-                    .layout_manager
-                    .layout_engine
-                    .handle_event(&mut reactor.state.windows, removal)
-                    .changed;
+            let removal = LayoutEvent::WindowSuspended(wid);
+            let removed = reactor
+                .layout_manager
+                .layout_engine
+                .handle_event(&mut reactor.state.windows, removal)
+                .changed;
             reactor.state.windows.insert_claim(wid, owner, flags);
             if removed {
                 reactor.update_layout_or_warn(false, false, space);
@@ -101,6 +101,13 @@ impl Reactor {
             claim.workspace().filter(|id| engine.workspaces().workspaces.contains_key(*id))
         {
             self.state.windows.assign_window_to_workspace(wid, workspace);
+            // The owner may have changed the claim's destination. Reconcile only
+            // at release; an ordinary return keeps its canonical slot untouched.
+            for (id, current) in engine.workspaces_mut().workspaces.iter_mut() {
+                if id != workspace {
+                    current.layout_system.remove_window(wid);
+                }
+            }
             // Like any external move of a floating window, the owner's geometry is authoritative.
             if engine.is_window_floating(wid)
                 && let Some(window) = self.state.windows.window(wid)
