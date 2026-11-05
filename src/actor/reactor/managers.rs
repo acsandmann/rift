@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::CGRect;
 use rift_protocol::StackInfo;
 use tracing::trace;
 
@@ -219,61 +219,7 @@ pub struct LayoutManager {
 
 pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
 
-// macOS does not clip windows to a scrolling viewport. Constrain only edges
-// facing another display; unoccupied edges must allow normal offscreen motion.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ScrollingDisplayBounds {
-    screen: CGRect,
-    left: bool,
-    right: bool,
-}
-
-impl ScrollingDisplayBounds {
-    pub(super) fn for_screen(screen: CGRect, screens: &[CGRect]) -> Option<Self> {
-        let mut bounds = Self {
-            screen,
-            left: false,
-            right: false,
-        };
-        for other in screens {
-            // A display above/below the strip cannot receive horizontal overflow.
-            if other.max().y <= screen.origin.y || other.origin.y >= screen.max().y {
-                continue;
-            }
-            bounds.left |= other.max().x <= screen.origin.x;
-            bounds.right |= other.origin.x >= screen.max().x;
-        }
-        (bounds.left || bounds.right).then_some(bounds)
-    }
-
-    pub(super) fn apply(self, frame: CGRect) -> CGRect {
-        let mut bounded = bound_frame_to_screen(frame, self.screen);
-        // Preserve offscreen motion on edges without a neighboring display.
-        if !self.left {
-            bounded.origin.x = frame.origin.x.min(self.screen.max().x - frame.size.width);
-        } else if !self.right {
-            bounded.origin.x = frame.origin.x.max(self.screen.origin.x);
-        }
-        bounded
-    }
-}
-
-pub(super) fn bound_frame_to_screen(frame: CGRect, screen: CGRect) -> CGRect {
-    let screen_left = screen.origin.x;
-    let screen_top = screen.origin.y;
-    let screen_right = screen.max().x;
-    let screen_bottom = screen.max().y;
-    let max_x = (screen_right - frame.size.width).max(screen_left);
-    let max_y = (screen_bottom - frame.size.height).max(screen_top);
-
-    CGRect::new(
-        CGPoint::new(
-            frame.origin.x.clamp(screen_left, max_x),
-            frame.origin.y.clamp(screen_top, max_y),
-        ),
-        frame.size,
-    )
-}
+pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 
 fn bound_scrolling_tiled_frames_to_screen(
     reactor: &Reactor,
@@ -631,80 +577,4 @@ impl LayoutManager {
 /// Manages pending space changes
 pub struct PendingSpaceChangeManager {
     pub pending_space_change: Option<ForwardedSpaceState>,
-}
-
-#[cfg(test)]
-mod tests {
-    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-
-    use super::{ScrollingDisplayBounds, bound_frame_to_screen};
-
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
-        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
-    }
-
-    #[test]
-    fn bound_frame_to_screen_contains_partially_visible_left_window() {
-        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
-        let frame = rect(1500.0, 50.0, 700.0, 400.0);
-        let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 2000.0);
-        assert_eq!(bounded.size.width, 700.0);
-    }
-
-    #[test]
-    fn bound_frame_to_screen_contains_fully_offscreen_left_window() {
-        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
-        let frame = rect(1200.0, 80.0, 600.0, 300.0);
-        let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 2000.0);
-        assert_eq!(bounded.size.width, 600.0);
-    }
-
-    #[test]
-    fn bound_frame_to_screen_contains_fully_offscreen_right_window() {
-        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
-        let frame = rect(3200.0, 80.0, 600.0, 300.0);
-        let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 2400.0);
-        assert_eq!(bounded.size.width, 600.0);
-    }
-
-    #[test]
-    fn bound_frame_to_screen_contains_partially_visible_right_window() {
-        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
-        let frame = rect(2998.0, 80.0, 600.0, 300.0);
-        let bounded = bound_frame_to_screen(frame, screen);
-        assert_eq!(bounded.origin.x, 2400.0);
-        assert_eq!(bounded.size.width, 600.0);
-    }
-
-    #[test]
-    fn contained_scrolling_columns_expose_both_edges_on_the_owning_display() {
-        let screen = rect(1728.0, 0.0, 2560.0, 1400.0);
-        let width = 2048.0;
-        let left = rect(0.0, 0.0, 1728.0, 1400.0);
-        let right = rect(4288.0, 0.0, 1728.0, 1400.0);
-        let above = rect(1310.0, -1440.0, 2560.0, 1440.0);
-        for (neighbors, expected) in [
-            (vec![left, right], (1728.0, 1984.0, 2240.0)),
-            (vec![left], (1728.0, 1984.0, 4032.0)),
-            (vec![right], (-64.0, 1984.0, 2240.0)),
-            (vec![above], (-64.0, 1984.0, 4032.0)),
-        ] {
-            let bounds = ScrollingDisplayBounds::for_screen(screen, &neighbors);
-            let frame = |x| {
-                let frame = rect(x, 0.0, width, 1400.0);
-                bounds.map_or(frame, |bounds| bounds.apply(frame))
-            };
-            assert_eq!(
-                (
-                    frame(-64.0).origin.x,
-                    frame(1984.0).origin.x,
-                    frame(4032.0).origin.x
-                ),
-                expected
-            );
-        }
-    }
 }

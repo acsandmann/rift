@@ -10949,10 +10949,9 @@ fn display_refresh_reapplies_frames_when_macos_resized_windows_without_notificat
     });
     apps.simulate_until_quiet(&mut reactor);
     let expected: Vec<_> = apps.windows.iter().map(|(&wid, window)| (wid, window.frame)).collect();
-    assert!(
-        expected.iter().any(|(_, frame)| frame.origin.x >= screen.size.width
-            || frame.origin.x + frame.size.width <= 0.)
-    );
+    assert!(expected.iter().any(|(_, frame)| {
+        crate::model::hidden_window_placement::HiddenWindowPlacement::is_hidden(screen, *frame, &[])
+    }));
     // macOS can resize windows during hotplug without a usable AX notification.
     // Keep both Rift's observed frame and its transaction cache unchanged.
     for window in apps.windows.values_mut() {

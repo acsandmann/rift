@@ -25,6 +25,7 @@ use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::actor::wm_controller::{self, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
+use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 use crate::model::tx_store::WindowTxStore;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::app::{NSRunningApplicationExt, NativeWindowIdentity};
@@ -307,7 +308,10 @@ pub struct AppThreadHandle {
 /// presenter retain their revision even after the reactor accepts a new one.
 #[derive(Clone, Debug, Default)]
 #[doc(hidden)]
-pub struct FrameAuthority(Option<(crate::actor::spaces::TopologyGuard, u64)>);
+pub struct FrameAuthority(
+    Option<(crate::actor::spaces::TopologyGuard, u64)>,
+    Option<ScrollingDisplayBounds>,
+);
 
 impl FrameAuthority {
     fn is_older_than(&self, other: &Self) -> bool {
@@ -487,8 +491,16 @@ impl AppThreadHandle {
         guard: &crate::actor::spaces::TopologyGuard,
         revision: u64,
     ) {
-        self.frame_authority = FrameAuthority(Some((guard.clone(), revision)));
+        self.frame_authority = FrameAuthority(Some((guard.clone(), revision)), None);
     }
+
+    pub(crate) fn with_scrolling_bounds(&self, bounds: Option<ScrollingDisplayBounds>) -> Self {
+        let mut handle = self.clone();
+        handle.frame_authority.1 = bounds;
+        handle
+    }
+
+    pub(crate) fn constrains_scrolling(&self) -> bool { self.frame_authority.1.is_some() }
 
     pub fn send(&self, req: Request) -> anyhow::Result<()> {
         let mut req = req;
@@ -738,6 +750,7 @@ struct AppWindowState {
 
 /// The AX geometry operations used to place a window.
 trait FrameTarget {
+    fn scrolling_bounds(&self) -> Option<ScrollingDisplayBounds> { None }
     fn frame(&self) -> Result<CGRect, AxError>;
     fn set_position(&self, origin: CGPoint) -> Result<(), AxError>;
     fn set_size(&self, size: CGSize) -> Result<(), AxError>;
@@ -762,6 +775,8 @@ struct AuthorizedFrameTarget<'a, T> {
 }
 
 impl<T: FrameTarget> FrameTarget for AuthorizedFrameTarget<'_, T> {
+    fn scrolling_bounds(&self) -> Option<ScrollingDisplayBounds> { self.authority.1 }
+
     fn frame(&self) -> Result<CGRect, AxError> { self.target.frame() }
 
     fn set_position(&self, origin: CGPoint) -> Result<(), AxError> {
@@ -813,8 +828,8 @@ impl FrameWrites {
 fn write_frame(
     elem: &impl FrameTarget,
     current: CGRect,
-    target: CGRect,
-    writes: FrameWrites,
+    mut target: CGRect,
+    mut writes: FrameWrites,
 ) -> Result<FrameWrites, AxError> {
     // Moving before growing avoids clamping at a screen edge; shrinking first
     // avoids it in the opposite direction. A frame that grows on one axis and
@@ -830,6 +845,16 @@ fn write_frame(
         result.is_err()
     };
     let mut failed = FrameWrites::default();
+    if writes.size
+        && let Some(origin) = elem.scrolling_bounds().and_then(|bounds| {
+            bounds.resize_origin(current).or_else(|| bounds.resize_origin(target))
+        })
+    {
+        // Keep an origin independent of the unknown accepted width until readback.
+        failed.position = failed_with(elem.set_position(origin));
+        target.origin = origin;
+        writes.position = false;
+    }
     if writes.position && writes.size && grows && shrinks {
         let shrunk = CGSize::new(
             target.size.width.min(current.size.width),
@@ -866,6 +891,12 @@ fn reconcile_frame(
     mode: FrameMode,
     mut before_write: impl FnMut(),
 ) -> Result<CGRect, AxError> {
+    let bounds = elem.scrolling_bounds();
+    let constrain = |frame| bounds.map_or(frame, |bounds| bounds.apply(frame));
+    let mut target = constrain(target);
+    if mode == FrameMode::Position {
+        target.origin = constrain(CGRect::new(target.origin, hint.size)).origin;
+    }
     let planned = FrameWrites::between(hint, target, mode);
     let mut failed = FrameWrites::default();
     if planned.any() {
@@ -873,6 +904,10 @@ fn reconcile_frame(
         failed = write_frame(elem, hint, target, planned)?;
     }
     let mut frame = elem.frame()?;
+    let target = CGRect::new(
+        constrain(CGRect::new(target.origin, frame.size)).origin,
+        target.size,
+    );
     // A dimension the hint skipped is wrong, so the hint was stale. Correct it as
     // a full write from the observed frame would, rewriting position with any
     // size correction because some apps move the origin while resizing. A size
@@ -887,6 +922,14 @@ fn reconcile_frame(
         let fix_failed = write_frame(elem, frame, target, fix)?;
         failed.position |= fix_failed.position;
         failed.size |= fix_failed.size;
+        frame = elem.frame()?;
+    }
+    // The accepted size may differ (Terminal character cells, app minima).
+    // Reuse the readback already required by reconciliation, never requested size.
+    let constrained = constrain(CGRect::new(target.origin, frame.size));
+    if !failed.position && !constrained.origin.same_as(frame.origin) && bounds.is_some() {
+        before_write();
+        elem.set_position(constrained.origin)?;
         frame = elem.frame()?;
     }
     if failed.any() {
@@ -905,10 +948,14 @@ fn reconcile_frame(
 fn write_interactive_frame(
     elem: &impl FrameTarget,
     hint: &mut CGRect,
-    frame: CGRect,
-    set_size: bool,
+    mut frame: CGRect,
+    mut set_size: bool,
     source: FrameSource,
 ) {
+    if let Some(bounds) = elem.scrolling_bounds() {
+        frame = bounds.apply(CGRect::new(frame.origin, hint.size));
+        set_size = false;
+    }
     if set_size || (source != FrameSource::Drag && !hint.size.same_as(frame.size)) {
         let both = FrameWrites { position: true, size: true };
         let _ = write_frame(elem, *hint, frame, both);
@@ -2758,6 +2805,8 @@ mod frame_tests {
     struct FakeWindow {
         frame: Cell<CGRect>,
         min_size: CGSize,
+        size_step: f64,
+        placements: RefCell<Vec<CGRect>>,
         // Like WindowServer, keeps the bottom edge on this display by moving
         // the window up, but never above the display's top.
         display: Option<CGRect>,
@@ -2793,7 +2842,12 @@ mod frame_tests {
                 return Err(AxError::Ax(AXError::CannotComplete));
             }
             let size = CGSize::new(
-                size.width.max(self.min_size.width),
+                if self.size_step > 0.0 {
+                    (size.width / self.size_step).floor() * self.size_step
+                } else {
+                    size.width
+                }
+                .max(self.min_size.width),
                 size.height.max(self.min_size.height),
             );
             self.place(CGRect::new(self.frame.get().origin, size));
@@ -2809,6 +2863,7 @@ mod frame_tests {
                     frame.origin.y = (bottom - frame.size.height).max(display.origin.y);
                 }
             }
+            self.placements.borrow_mut().push(frame);
             self.frame.set(frame);
         }
     }
@@ -2819,6 +2874,46 @@ mod frame_tests {
 
     fn reconcile(window: &FakeWindow, target: CGRect) -> Result<CGRect, AxError> {
         reconcile_frame(window, window.frame.get(), target, FrameMode::Full, || {})
+    }
+
+    #[test]
+    fn stepped_sizes_keep_display_intersection_without_animation_reads() {
+        let screen = rect(623., 1726., 1728., 1000.);
+        for x in [screen.origin.x - 996., screen.max().x - 1.] {
+            let window = FakeWindow {
+                frame: Cell::new(rect(700., 1726., 1000., 800.)),
+                size_step: 10.,
+                ..Default::default()
+            };
+            let authority = FrameAuthority(None, ScrollingDisplayBounds::for_screen(screen, &[]));
+            let target = AuthorizedFrameTarget {
+                target: &window,
+                authority: &authority,
+            };
+            let requested = rect(x, 1726., 997., 800.);
+            let mut accepted =
+                reconcile_frame(&target, window.frame.get(), requested, FrameMode::Full, || {})
+                    .unwrap();
+            assert_eq!(accepted, window.frame.get());
+            assert_eq!(accepted.size.width, 990.);
+            window.calls.borrow_mut().clear();
+            for x in [-10000., 623.5, 10000.] {
+                write_interactive_frame(
+                    &target,
+                    &mut accepted,
+                    rect(x, 1726., 1103., 800.),
+                    true,
+                    FrameSource::Viewport,
+                );
+            }
+            assert!(window.calls.borrow().iter().all(|call| *call == "position"));
+            for frame in window.placements.borrow().iter() {
+                assert!(
+                    frame.max().x > screen.origin.x && frame.origin.x < screen.max().x,
+                    "lost display: {frame:?}"
+                );
+            }
+        }
     }
 
     #[test]

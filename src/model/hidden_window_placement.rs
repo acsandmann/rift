@@ -16,11 +16,70 @@ impl HideCorner {
     }
 }
 
+/// Physical scrolling constraint, prepared once from the display topology.
+/// Free edges retain one point; edges facing another display contain the window.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScrollingDisplayBounds {
+    screen: CGRect,
+    left: bool,
+    right: bool,
+}
+
+impl ScrollingDisplayBounds {
+    pub(crate) fn for_screen(screen: CGRect, screens: &[CGRect]) -> Option<Self> {
+        let mut bounds = Self {
+            screen,
+            left: false,
+            right: false,
+        };
+        for other in screens.iter().filter(|other| **other != screen) {
+            if other.max().y <= screen.origin.y || other.origin.y >= screen.max().y {
+                continue;
+            }
+            bounds.left |= other.origin.x < screen.origin.x;
+            bounds.right |= other.max().x > screen.max().x;
+        }
+        Some(bounds)
+    }
+
+    pub(crate) fn resize_origin(self, frame: CGRect) -> Option<CGPoint> {
+        (frame.origin.x < self.screen.origin.x || frame.max().x > self.screen.max().x).then_some(
+            CGPoint::new(
+                if self.right {
+                    self.screen.origin.x
+                } else {
+                    self.screen.max().x - HiddenWindowPlacement::REVEAL_PX
+                },
+                self.screen.origin.y,
+            ),
+        )
+    }
+
+    pub(crate) fn apply(self, mut frame: CGRect) -> CGRect {
+        let left = if self.left {
+            self.screen.origin.x
+        } else {
+            self.screen.origin.x - frame.size.width + HiddenWindowPlacement::REVEAL_PX
+        };
+        let right = if self.right {
+            (self.screen.max().x - frame.size.width).max(self.screen.origin.x)
+        } else {
+            self.screen.max().x - HiddenWindowPlacement::REVEAL_PX
+        };
+        frame.origin.x = frame.origin.x.clamp(left.min(right), right);
+        frame.origin.y = frame.origin.y.clamp(
+            self.screen.origin.y,
+            (self.screen.max().y - frame.size.height).max(self.screen.origin.y),
+        );
+        frame
+    }
+}
+
 /// Pure geometry used to place inactive-workspace windows just offscreen.
 pub struct HiddenWindowPlacement;
 
 impl HiddenWindowPlacement {
-    const REVEAL_PX: f64 = 1.0;
+    pub(crate) const REVEAL_PX: f64 = 1.0;
     const VISIBLE_THRESHOLD_PX: f64 = 3.0;
 
     fn rect_for_corner(screen: CGRect, window: CGRect, corner: HideCorner) -> CGRect {
@@ -94,6 +153,29 @@ mod tests {
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(x, y), CGSize::new(width, height))
+    }
+
+    #[test]
+    fn scrolling_retains_its_display_across_topologies_and_rounding() {
+        let screen = rect(-1200.5, -900.5, 1000.0, 800.0);
+        for neighbor in [
+            rect(-1200.5, -1900.5, 1500.0, 1000.0),
+            rect(-1200.5, -100.5, 1500.0, 1000.0),
+            rect(-2200.5, -900.5, 1000.0, 800.0),
+            rect(-200.5, -900.5, 1000.0, 800.0),
+            rect(-250.5, -150.5, 1000.0, 800.0),
+        ] {
+            let bounds = ScrollingDisplayBounds::for_screen(screen, &[neighbor]).unwrap();
+            for scale in [1.0_f64, 2.0] {
+                for x in [-3000.25, -1250.25, -200.25, 1000.25] {
+                    let frame =
+                        bounds.apply(rect((x * scale).round() / scale, -900.5, 499.5, 700.0));
+                    let own = HiddenWindowPlacement::intersection_area(screen, frame);
+                    assert!(own > 0.0);
+                    assert!(HiddenWindowPlacement::intersection_area(neighbor, frame) <= own);
+                }
+            }
+        }
     }
 
     #[test]

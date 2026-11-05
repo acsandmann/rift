@@ -2821,7 +2821,13 @@ impl OverviewSession {
                     .workspaces
                     .iter()
                     .find(|ws| ws.workspace_id == exit.target.workspace)
-                    .is_some_and(|ws| intersects(frame, ws.display_frame));
+                    .is_some_and(|ws| {
+                        !crate::model::hidden_window_placement::HiddenWindowPlacement::is_hidden(
+                            ws.display_frame,
+                            frame,
+                            &[],
+                        )
+                    });
                 if !visible {
                     continue;
                 }

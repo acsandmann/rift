@@ -21,6 +21,7 @@ use crate::layout_engine::systems::{
 };
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAction};
+use crate::model::hidden_window_placement::HiddenWindowPlacement;
 use crate::sys::geometry::Round;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,9 +357,9 @@ fn translate_frame(
     frame.origin.x += tiling.origin.x - offset;
     if park {
         if frame.max().x <= tiling.origin.x {
-            frame.origin.x = screen.origin.x - frame.size.width;
+            frame.origin.x = screen.origin.x - frame.size.width + HiddenWindowPlacement::REVEAL_PX;
         } else if frame.origin.x >= tiling.max().x {
-            frame.origin.x = screen.max().x;
+            frame.origin.x = screen.max().x - HiddenWindowPlacement::REVEAL_PX;
         }
     }
     frame
@@ -3193,7 +3194,7 @@ pub(crate) mod tests {
         }
         assert_eq!(logical[3].1.origin.x, logical[4].1.origin.x);
         assert!((logical[4].1.origin.y - logical[3].1.max().y - 11.0).abs() <= 1.0);
-        assert_eq!(native[3].1.origin.x, f.screen.max().x);
+        assert_eq!(native[3].1.origin.x, f.screen.max().x - 1.0);
         assert!(logical[3].1.origin.x > native[3].1.origin.x);
         assert_eq!(presented_frames(&f.system, f.layout).collect::<Vec<_>>(), native);
     }

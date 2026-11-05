@@ -105,7 +105,7 @@ type Frame = (WindowId, CGRect, bool, TransactionId, FrameSource);
 /// Reusable presenter-local batches: all motions on a display publish through
 /// one lock/wake per application, and terminal leases follow that publication.
 #[derive(Debug, Default)]
-struct FrameBatch(HashMap<pid_t, (AppThreadHandle, Vec<Frame>)>);
+struct FrameBatch(HashMap<(pid_t, bool), (AppThreadHandle, Vec<Frame>)>);
 impl FrameBatch {
     fn extend(
         &mut self,
@@ -116,7 +116,10 @@ impl FrameBatch {
         if !handle.can_write_frames() {
             return;
         }
-        let (actor, pending) = self.0.entry(pid).or_insert_with(|| (handle.clone(), Vec::new()));
+        let (actor, pending) = self
+            .0
+            .entry((pid, handle.constrains_scrolling()))
+            .or_insert_with(|| (handle.clone(), Vec::new()));
         if !actor.same_actor(handle) || !actor.can_write_frames() {
             *actor = handle.clone();
         }
@@ -234,6 +237,16 @@ enum Sample<'a> {
 
 impl PresentedWindow {
     fn begin(&mut self) {
+        // Reconcile size at the semantic boundary. Subsequent scrolling samples
+        // move the accepted AX size without reading or resizing on display ticks.
+        if self.handle.constrains_scrolling() && !self.from.size.same_as(self.to.size) {
+            let _ = self.handle.send(Request::set_window_frame(
+                self.wid,
+                CGRect::new(self.from.origin, self.to.size),
+                self.txid,
+                true,
+            ));
+        }
         if !std::mem::replace(&mut self.leased, true) {
             let _ = self.handle.send(Request::BeginWindowAnimation(self.wid, Default::default()));
         }
@@ -299,7 +312,9 @@ impl PresentedWindow {
 }
 
 fn stage_windows(windows: &mut [PresentedWindow], sample: Sample<'_>, frames: &mut FrameBatch) {
-    for group in windows.chunk_by_mut(|a, b| a.wid.pid == b.wid.pid) {
+    for group in windows.chunk_by_mut(|a, b| {
+        a.wid.pid == b.wid.pid && a.handle.constrains_scrolling() == b.handle.constrains_scrolling()
+    }) {
         let handle = group[0].handle.clone();
         frames.extend(
             &handle,
@@ -661,7 +676,7 @@ impl Reactor {
                     control.frame(wid, window.frame_monotonic)
                 });
                 Some(PresentedWindow {
-                    handle: app.handle.clone(),
+                    handle: app.handle.with_scrolling_bounds(bound),
                     wid,
                     wsid: window.info.sys_id,
                     from: window.frame_monotonic,
@@ -727,6 +742,20 @@ impl Reactor {
         }
         Some(windows)
     }
+}
+
+fn scrolling_bounds(
+    reactor: &Reactor,
+    space: SpaceId,
+) -> Option<super::managers::ScrollingDisplayBounds> {
+    if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+        != crate::common::config::LayoutMode::Scrolling
+    {
+        return None;
+    }
+    let screen = reactor.space_state.screen_by_space(space)?;
+    let screens: Vec<_> = reactor.space_state.screens.iter().map(|s| s.frame).collect();
+    super::managers::ScrollingDisplayBounds::for_screen(screen.frame, &screens)
 }
 
 impl AnimationManager {
@@ -1011,6 +1040,7 @@ impl AnimationManager {
             return false;
         };
         anim.display = screen.id.as_u32();
+        let bounds = scrolling_bounds(reactor, space);
         let mut any_frame_changed = camera;
 
         for &(wid, target_frame) in layout {
@@ -1058,7 +1088,11 @@ impl AnimationManager {
             }
             if is_active {
                 trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                anim.add_window(&app_state.handle, wid, current_frame, target_frame, txid);
+                let handle = app_state.handle.with_scrolling_bounds(
+                    bounds
+                        .filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
+                );
+                anim.add_window(&handle, wid, current_frame, target_frame, txid);
             } else {
                 anim.mark_handled(wid);
                 trace!(
@@ -1140,14 +1174,16 @@ impl AnimationManager {
 
     fn instant_layout_inner(
         reactor: &mut Reactor,
-        _space: SpaceId,
+        space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
         position_only: bool,
         force_frames: bool,
     ) -> bool {
         reactor.cancel_window_presentations(layout.iter().map(|(wid, _)| *wid).collect());
-        let mut per_app: HashMap<pid_t, _> = HashMap::default();
+        let bounds = scrolling_bounds(reactor, space);
+        let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
+        let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
@@ -1156,6 +1192,9 @@ impl AnimationManager {
                 continue;
             }
 
+            let constrained = bounds.is_some()
+                && reactor.state.windows.workspace_for_window(wid) == active
+                && !reactor.layout_manager.layout_engine.is_window_floating(wid);
             let window_store = &mut reactor.state.windows;
             let Some(window) = window_store.window_mut(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");
@@ -1186,8 +1225,9 @@ impl AnimationManager {
 
             let size_unchanged = !force_frames && current_frame.size.same_as(target_frame.size);
             window.frame_monotonic = target_frame;
-            let (frames, positions, first_wsid) =
-                per_app.entry(wid.pid).or_insert_with(|| (Vec::new(), Vec::new(), None));
+            let (frames, positions, first_wsid) = per_app
+                .entry((wid.pid, constrained))
+                .or_insert_with(|| (Vec::new(), Vec::new(), None));
             *first_wsid = first_wsid.or(window.info.sys_id);
             if position_only && size_unchanged {
                 positions.push((wid, target_frame));
@@ -1196,13 +1236,13 @@ impl AnimationManager {
             }
         }
 
-        for (pid, (frames, positions, first_wsid)) in per_app {
+        for ((pid, constrained), (frames, positions, first_wsid)) in per_app {
             let Some(app_state) = reactor.app_manager.apps.get(&pid) else {
                 debug!(?pid, "Skipping layout update for app - app no longer exists");
                 continue;
             };
 
-            let handle = &app_state.handle;
+            let handle = app_state.handle.with_scrolling_bounds(bounds.filter(|_| constrained));
 
             let txid = first_wsid
                 .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
