@@ -796,14 +796,7 @@ impl LayoutEngine {
         window_store: &WindowStore,
         space: SpaceId,
     ) -> Vec<WindowId> {
-        self.floating
-            .active_flat(space)
-            .into_iter()
-            .filter(|wid| {
-                !window_store.is_temporarily_unavailable(*wid)
-                    && self.workspaces.is_window_in_active_workspace(window_store, space, *wid)
-            })
-            .collect()
+        self.filter_active_workspace_windows(window_store, space, self.floating.active_flat(space))
     }
 
     fn preferred_focus_for_workspace(

@@ -2007,32 +2007,21 @@ impl TraditionalLayoutSystem {
         let Some(parent) = from.parent(&self.tree.map) else {
             return None;
         };
-        if self.tree.data.layout.kind(parent).orientation() == direction.orientation() {
-            match direction {
-                Direction::Left | Direction::Up => {
-                    let mut next = from.prev_sibling(&self.tree.map);
-                    while let Some(node) = next {
-                        if self.inactive.is_empty() || self.find_best_focus_target(node).is_some() {
-                            return Some(node);
-                        }
-                        next = node.prev_sibling(&self.tree.map);
-                    }
-                    None
-                }
-                Direction::Right | Direction::Down => {
-                    let mut next = from.next_sibling(&self.tree.map);
-                    while let Some(node) = next {
-                        if self.inactive.is_empty() || self.find_best_focus_target(node).is_some() {
-                            return Some(node);
-                        }
-                        next = node.next_sibling(&self.tree.map);
-                    }
-                    None
-                }
-            }
-        } else {
-            None
+        if self.tree.data.layout.kind(parent).orientation() != direction.orientation() {
+            return None;
         }
+        let sibling = |node: NodeId| match direction {
+            Direction::Left | Direction::Up => node.prev_sibling(&self.tree.map),
+            Direction::Right | Direction::Down => node.next_sibling(&self.tree.map),
+        };
+        let mut next = sibling(from);
+        while let Some(node) = next {
+            if self.inactive.is_empty() || self.find_best_focus_target(node).is_some() {
+                return Some(node);
+            }
+            next = sibling(node);
+        }
+        None
     }
 
     fn move_node(&mut self, layout: LayoutId, moving_node: NodeId, direction: Direction) -> bool {

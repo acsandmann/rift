@@ -626,150 +626,75 @@ impl BspLayoutSystem {
                     out.push((*w, target));
                 }
             }
-            Some(NodeKind::Split { orientation, ratio }) => match orientation {
-                Orientation::Horizontal => {
-                    let gap = gaps.inner.horizontal as f64;
-                    let total = rect.size.width;
-                    let available = (total - gap).max(0.0);
-                    let mut it = node.children(&self.tree.map);
-                    let first = it.next();
-                    let second = it.next();
-                    let (first_w, second_w) =
-                        if let (Some(first_node), Some(second_node)) = (first, second) {
-                            let (first_min, first_fixed, first_max, first_can_grow) =
-                                prepared[&first_node][1];
-                            let (second_min, second_fixed, second_max, second_can_grow) =
-                                prepared[&second_node][1];
-                            let solved = solve_axis_lengths(
-                                &[
-                                    AxisConstraints {
-                                        min: first_min,
-                                        fixed: first_fixed,
-                                        max: first_max,
-                                        weight: (*ratio as f64).max(0.0),
-                                        can_grow: first_can_grow,
-                                    },
-                                    AxisConstraints {
-                                        min: second_min,
-                                        fixed: second_fixed,
-                                        max: second_max,
-                                        weight: (1.0 - *ratio as f64).max(0.0),
-                                        can_grow: second_can_grow,
-                                    },
-                                ],
-                                available,
-                            );
-                            (
-                                solved.first().copied().unwrap_or(available * (*ratio as f64)),
-                                solved.get(1).copied().unwrap_or(0.0),
-                            )
-                        } else {
-                            let first_w_f = available * (*ratio as f64);
-                            let first_w = first_w_f.max(0.0);
-                            let second_w = (available - first_w).max(0.0);
-                            (first_w, second_w)
-                        };
-                    let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
-                    let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
-                        CGSize::new(second_w, rect.size.height),
-                    );
-                    let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(
-                            prepared,
-                            first,
-                            r1,
-                            screen,
-                            constraints,
-                            gaps,
-                            out,
+            Some(NodeKind::Split { orientation, ratio }) => {
+                let horizontal = *orientation == Orientation::Horizontal;
+                let (total, gap) = if horizontal {
+                    (rect.size.width, gaps.inner.horizontal)
+                } else {
+                    (rect.size.height, gaps.inner.vertical)
+                };
+                let available = (total - gap).max(0.0);
+                let mut it = node.children(&self.tree.map);
+                let first = it.next();
+                let second = it.next();
+                let (first_len, second_len) =
+                    if let (Some(first_node), Some(second_node)) = (first, second) {
+                        let (first_min, first_fixed, first_max, first_can_grow) =
+                            prepared[&first_node][horizontal as usize];
+                        let (second_min, second_fixed, second_max, second_can_grow) =
+                            prepared[&second_node][horizontal as usize];
+                        let solved = solve_axis_lengths(
+                            &[
+                                AxisConstraints {
+                                    min: first_min,
+                                    fixed: first_fixed,
+                                    max: first_max,
+                                    weight: (*ratio as f64).max(0.0),
+                                    can_grow: first_can_grow,
+                                },
+                                AxisConstraints {
+                                    min: second_min,
+                                    fixed: second_fixed,
+                                    max: second_max,
+                                    weight: (1.0 - *ratio as f64).max(0.0),
+                                    can_grow: second_can_grow,
+                                },
+                            ],
+                            available,
                         );
-                    }
-                    if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(
-                            prepared,
-                            second,
-                            r2,
-                            screen,
-                            constraints,
-                            gaps,
-                            out,
-                        );
-                    }
+                        (
+                            solved.first().copied().unwrap_or(available * (*ratio as f64)),
+                            solved.get(1).copied().unwrap_or(0.0),
+                        )
+                    } else {
+                        let first_len_f = available * (*ratio as f64);
+                        let first_len = first_len_f.max(0.0);
+                        let second_len = (available - first_len).max(0.0);
+                        (first_len, second_len)
+                    };
+                let mut r1 = rect;
+                let mut r2 = rect;
+                if horizontal {
+                    r1.size.width = first_len;
+                    r2.origin.x += first_len + gap;
+                    r2.size.width = second_len;
+                } else {
+                    r1.size.height = first_len;
+                    r2.origin.y += first_len + gap;
+                    r2.size.height = second_len;
                 }
-                Orientation::Vertical => {
-                    let gap = gaps.inner.vertical as f64;
-                    let total = rect.size.height;
-                    let available = (total - gap).max(0.0);
-                    let mut it = node.children(&self.tree.map);
-                    let first = it.next();
-                    let second = it.next();
-                    let (first_h, second_h) =
-                        if let (Some(first_node), Some(second_node)) = (first, second) {
-                            let (first_min, first_fixed, first_max, first_can_grow) =
-                                prepared[&first_node][0];
-                            let (second_min, second_fixed, second_max, second_can_grow) =
-                                prepared[&second_node][0];
-                            let solved = solve_axis_lengths(
-                                &[
-                                    AxisConstraints {
-                                        min: first_min,
-                                        fixed: first_fixed,
-                                        max: first_max,
-                                        weight: (*ratio as f64).max(0.0),
-                                        can_grow: first_can_grow,
-                                    },
-                                    AxisConstraints {
-                                        min: second_min,
-                                        fixed: second_fixed,
-                                        max: second_max,
-                                        weight: (1.0 - *ratio as f64).max(0.0),
-                                        can_grow: second_can_grow,
-                                    },
-                                ],
-                                available,
-                            );
-                            (
-                                solved.first().copied().unwrap_or(available * (*ratio as f64)),
-                                solved.get(1).copied().unwrap_or(0.0),
-                            )
-                        } else {
-                            let first_h_f = available * (*ratio as f64);
-                            let first_h = first_h_f.max(0.0);
-                            let second_h = (available - first_h).max(0.0);
-                            (first_h, second_h)
-                        };
-                    let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
-                    let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
-                        CGSize::new(rect.size.width, second_h),
+                for (child, frame) in node.children(&self.tree.map).zip([r1, r2]) {
+                    self.calculate_layout_recursive(
+                        prepared,
+                        child,
+                        frame,
+                        screen,
+                        constraints,
+                        gaps,
+                        out,
                     );
-                    let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(
-                            prepared,
-                            first,
-                            r1,
-                            screen,
-                            constraints,
-                            gaps,
-                            out,
-                        );
-                    }
-                    if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(
-                            prepared,
-                            second,
-                            r2,
-                            screen,
-                            constraints,
-                            gaps,
-                            out,
-                        );
-                    }
                 }
-            },
+            }
             None => {}
         }
     }
