@@ -1110,15 +1110,11 @@ fn global_single_display_restore_stays_in_the_windows_native_space() {
     let file = session(&settings, &[(a, "display", &[window])]);
     for current in [a, b] {
         let (mut engine, mut store) = boot(&settings, &file);
-        resolve(
-            &mut engine,
-            &mut store,
-            &[(current, "display")],
-            &[("display", &[a, b])],
-        );
-        engine
-            .workspaces
-            .ensure_visible_spaces(&[current], 1, |_| None);
+        resolve(&mut engine, &mut store, &[(current, "display")], &[(
+            "display",
+            &[a, b],
+        )]);
+        engine.workspaces.ensure_visible_spaces(&[current], 1, |_| None);
         let target = ws(&engine, current, 0);
         open(&mut engine, &mut store, target, window);
         assert_eq!(
