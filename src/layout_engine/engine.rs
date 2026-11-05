@@ -26,7 +26,7 @@ use crate::sys::screen::SpaceId;
 mod persistence;
 
 use persistence::PersistenceState;
-pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreSource, RestoreWarning};
+pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreSource};
 pub use rift_protocol::LayoutCommand;
 
 const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
@@ -174,6 +174,41 @@ impl std::ops::Deref for LayoutEventOutcome {
     fn deref(&self) -> &Self::Target { &self.response }
 }
 
+fn apply_workspace_layout_settings(
+    ws: &mut crate::model::VirtualWorkspace,
+    settings: &LayoutSettings,
+    display: Option<&str>,
+) {
+    let mode = ws.layout_mode;
+    let insertion_point = settings.window_insertion_point_for(mode);
+    match &mut ws.layout_system {
+        LayoutSystemKind::Traditional(system) => {
+            system.set_window_insertion_point(insertion_point);
+            system.set_equalize_nodes(settings.traditional.equalize_nodes);
+        }
+        LayoutSystemKind::Floating(system) => {
+            system.set_window_insertion_point(insertion_point);
+        }
+        LayoutSystemKind::Bsp(system) => {
+            system.set_window_insertion_point(insertion_point);
+            system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
+        }
+        LayoutSystemKind::Stack(system) => {
+            system.update_settings(settings.stack.default_orientation, insertion_point);
+        }
+        LayoutSystemKind::MasterStack(system) => {
+            let mut mode_settings = settings.master_stack.clone();
+            mode_settings.base = settings.resolved_base_for(mode);
+            system.update_settings(mode_settings);
+        }
+        LayoutSystemKind::Scrolling(system) => {
+            let mut mode_settings = settings.scrolling.effective_for_display(display);
+            mode_settings.base = settings.resolved_base_for(mode);
+            system.update_settings(&mode_settings);
+        }
+    }
+}
+
 pub struct LayoutEngine {
     floating: FloatingManager,
     floating_positions: FloatingPositionStore,
@@ -186,8 +221,6 @@ pub struct LayoutEngine {
     space_display_map: HashMap<SpaceId, Option<String>>,
     display_last_space: HashMap<String, SpaceId>,
     persistence: PersistenceState,
-    /// Set only while a master-file startup restore is waiting for the first display snapshot.
-    startup_restore_pending: bool,
     /// Legacy strip commands report boundary excess; workspace arbitration lives here.
     scroll_boundary: Option<((VirtualWorkspaceId, LayoutId, Direction), f64)>,
     // One original arrangement per workspace, shared by all native departures.
@@ -694,35 +727,8 @@ impl LayoutEngine {
         self.layout_settings = settings.clone();
 
         for (_, ws) in self.workspaces.workspaces.iter_mut() {
-            let mode = ws.layout_mode;
-            let insertion_point = settings.window_insertion_point_for(mode);
-            match &mut ws.layout_system {
-                LayoutSystemKind::Traditional(system) => {
-                    system.set_window_insertion_point(insertion_point);
-                    system.set_equalize_nodes(settings.traditional.equalize_nodes);
-                }
-                LayoutSystemKind::Floating(system) => {
-                    system.set_window_insertion_point(insertion_point);
-                }
-                LayoutSystemKind::Bsp(system) => {
-                    system.set_window_insertion_point(insertion_point);
-                    system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
-                }
-                LayoutSystemKind::Stack(system) => {
-                    system.update_settings(settings.stack.default_orientation, insertion_point);
-                }
-                LayoutSystemKind::MasterStack(system) => {
-                    let mut mode_settings = settings.master_stack.clone();
-                    mode_settings.base = settings.resolved_base_for(mode);
-                    system.update_settings(mode_settings);
-                }
-                LayoutSystemKind::Scrolling(system) => {
-                    let display = self.space_display_map.get(&ws.space).and_then(Option::as_deref);
-                    let mut mode_settings = settings.scrolling.effective_for_display(display);
-                    mode_settings.base = settings.resolved_base_for(mode);
-                    system.update_settings(&mode_settings);
-                }
-            }
+            let display = self.space_display_map.get(&ws.space).and_then(Option::as_deref);
+            apply_workspace_layout_settings(ws, settings, display);
         }
     }
 
@@ -1735,7 +1741,10 @@ impl LayoutEngine {
                 }
             }
             self.space_display_map.insert(space, Some(uuid.clone()));
-            self.display_last_space.insert(uuid, space);
+            // An unresolved saved Space still needs this display's evidence.
+            if !self.saved_space_is_unresolved(self.display_last_space.get(&uuid).copied()) {
+                self.display_last_space.insert(uuid, space);
+            }
         } else {
             self.space_display_map.remove(&space);
         }
@@ -1778,10 +1787,7 @@ impl LayoutEngine {
         // Saved native arrangements are keyed by workspace; one for a deleted workspace
         // would no longer resolve.
         for deleted in self.workspaces.remap_space(window_store, old_space, new_space) {
-            self.native_layouts.remove(&deleted);
-            if let Some(batch) = self.native_reconcile_batch.as_mut() {
-                batch.remove(&deleted);
-            }
+            self.forget_workspace(deleted);
         }
 
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
@@ -1793,6 +1799,17 @@ impl LayoutEngine {
                 *space = new_space;
             }
         }
+    }
+
+    /// Drop everything keyed by a workspace that no longer exists; one left behind would no
+    /// longer resolve.
+    fn forget_workspace(&mut self, workspace: VirtualWorkspaceId) {
+        self.native_layouts.remove(&workspace);
+        if let Some(batch) = self.native_reconcile_batch.as_mut() {
+            batch.remove(&workspace);
+        }
+        self.floating_positions.remove_workspace(workspace);
+        self.forget_persisted_workspace(workspace);
     }
 
     pub fn new(
@@ -1814,7 +1831,6 @@ impl LayoutEngine {
             space_display_map: HashMap::default(),
             display_last_space: HashMap::default(),
             persistence: PersistenceState::default(),
-            startup_restore_pending: false,
             scroll_boundary: None,
             native_layouts: HashMap::default(),
             native_reconcile_batch: None,
@@ -3395,13 +3411,14 @@ impl LayoutEngine {
     ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
         let workspace_context = workspace_context.into();
         let space = workspace_context.space;
-        let observation = window_store.window(window_id).map(|window| {
-            (
-                context.window_title.unwrap_or(&window.info.title).to_owned(),
-                window.frame_monotonic.size,
-            )
-        });
-        let restored = if let Some((title, size)) = observation {
+        let observation =
+            window_store.window(window_id).filter(|_| self.is_restoring()).map(|window| {
+                (
+                    context.window_title.unwrap_or(&window.info.title).to_owned(),
+                    window.frame_monotonic.size,
+                )
+            });
+        let restored = observation.is_some_and(|(title, size)| {
             self.observe_window_for_persistence(
                 window_store,
                 space,
@@ -3410,9 +3427,7 @@ impl LayoutEngine {
                 size,
                 context.app_bundle_id,
             )
-        } else {
-            false
-        };
+        });
         let mut decision = if reapply_workspace_rule {
             self.app_rules.evaluate_for_title_change(context)
         } else {
@@ -3838,7 +3853,6 @@ impl LayoutEngine {
         self.workspaces.transfer_window_identity(from, to);
         self.floating_positions.transfer_window_identity(from, to);
         self.floating.transfer_window_identity(from, to);
-        self.transfer_persisted_window_identity(from, to);
         if let Some(constraints) = self.window_layout_constraints.remove(&from) {
             self.window_layout_constraints.insert(to, constraints);
         }

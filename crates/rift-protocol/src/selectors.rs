@@ -16,6 +16,8 @@ pub enum WorkspaceSelector {
 pub enum RestoreScope {
     Workspace,
     Space,
+    /// The current Space of every connected display.
+    Displays,
 }
 
 #[derive(

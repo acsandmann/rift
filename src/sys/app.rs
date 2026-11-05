@@ -522,7 +522,7 @@ impl TryFrom<&AXUIElement> for WindowInfo {
     }
 }
 
-fn bundle_info_for_pid(pid: pid_t) -> (Option<String>, Option<PathBuf>) {
+pub(crate) fn bundle_info_for_pid(pid: pid_t) -> (Option<String>, Option<PathBuf>) {
     NSRunningApplication::with_process_id(pid)
         .map(|app| {
             let bundle_id = app.bundle_id().as_deref().map(|b| b.to_string());

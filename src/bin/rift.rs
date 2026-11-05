@@ -180,7 +180,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     if opt.validate {
         let path = restore_file();
-        match LayoutEngine::load(path.clone()) {
+        match LayoutEngine::validate_file(path.clone()) {
             Ok(_) => println!("Master file is valid: {}", path.display()),
             Err(error) => {
                 eprintln!("Could not load master file at {}: {error}", path.display());

@@ -166,13 +166,13 @@ enum ExecuteCommands {
         #[command(flatten)]
         file: LayoutFileSelection,
     },
-    /// Restore a layout file to the current workspace or macOS Space
+    /// Restore a layout file to the current workspace, macOS Space, or every display
     ///
     /// Use --master instead of PATH to load Rift's master file.
     LoadLayout {
         #[command(flatten)]
         file: LayoutFileSelection,
-        /// Restore one workspace or all saved workspaces for the current macOS Space.
+        /// Restore one workspace, the current macOS Space, or the current Space of every display.
         #[arg(long, value_enum, default_value_t = CliRestoreScope::Workspace)]
         scope: CliRestoreScope,
     },
@@ -244,6 +244,7 @@ enum WindowCommands {
 enum CliRestoreScope {
     Workspace,
     Space,
+    Displays,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -730,12 +731,13 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
                     layout::RestoreSource::SavedActiveSpace,
                 )
             };
-            layout::LayoutEngine::load(path.clone()).map_err(|error| {
+            layout::LayoutEngine::validate_file(path.clone()).map_err(|error| {
                 format!("could not load layout file at {}: {error}", path.display())
             })?;
             let scope = match scope {
                 CliRestoreScope::Workspace => layout::RestoreScope::Workspace,
                 CliRestoreScope::Space => layout::RestoreScope::Space,
+                CliRestoreScope::Displays => layout::RestoreScope::Displays,
             };
             CliCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::RestoreLayout { path, scope, source },

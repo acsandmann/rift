@@ -1,64 +1,75 @@
-use objc2_core_foundation::CGRect;
-
-use super::reconcile::ReconcileOutcome;
+use super::matcher::MatchScope;
+use super::snapshot::PersistedLayout;
 use super::*;
-use crate::model::VirtualWorkspace;
 
-#[derive(Clone, Copy)]
-struct WorkspaceMapping {
-    source_space: SpaceId,
-    source_workspace: VirtualWorkspaceId,
-    target_space: SpaceId,
-    target_workspace: VirtualWorkspaceId,
-}
+impl PersistedLayout {
+    /// The file's entry for a live Space. The disk master can still contain the previous launch's
+    /// SpaceIds even though startup already repaired the live engine; display identity bridges
+    /// that interval until the next master save.
+    fn entry_for_space(&self, engine: &LayoutEngine, space: SpaceId) -> Option<SpaceId> {
+        let saved_spaces = self.workspaces.layout_spaces();
+        Some(space).filter(|space| saved_spaces.contains(space)).or_else(|| {
+            engine
+                .display_uuid_for_space(space)
+                .and_then(|display| self.display_last_space.get(display).copied())
+                .filter(|space| saved_spaces.contains(space))
+        })
+    }
 
-/// Complete state for one workspace replacement. Construction is fallible; installation is not.
-struct WorkspaceRestoreState {
-    target_space: SpaceId,
-    target_workspace: VirtualWorkspaceId,
-    workspace: VirtualWorkspace,
-    floating_positions: Vec<(WindowId, CGRect)>,
-    floating_windows: HashSet<WindowId>,
-    replaced_windows: HashSet<WindowId>,
-}
+    /// Pair saved native Spaces with the live ones they restore into. A display the file has no
+    /// entry for is left alone, and one saved Space restores to at most one display.
+    fn space_pairs(
+        &self,
+        engine: &LayoutEngine,
+        request: RestoreRequest,
+        visible_spaces: &[SpaceId],
+    ) -> anyhow::Result<Vec<(SpaceId, SpaceId)>> {
+        if request.scope != RestoreScope::Displays {
+            return Ok(vec![(self.source_space(engine, request)?, request.active_space)]);
+        }
+        let mut pairs: Vec<(SpaceId, SpaceId)> = Vec::new();
+        for &space in visible_spaces {
+            if let Some(source) = self.entry_for_space(engine, space)
+                && !pairs.iter().any(|(claimed, _)| *claimed == source)
+            {
+                pairs.push((source, space));
+            }
+        }
+        // A shared catalog pairs by position, so only its active workspaces depend on these pairs.
+        if pairs.is_empty() && engine.workspaces.settings.mode != WorkspaceMode::Global {
+            anyhow::bail!("saved layout has no entry for any connected display");
+        }
+        Ok(pairs)
+    }
 
-/// Validated restore transaction. If this value exists, applying it cannot discover a missing
-/// workspace halfway through and leave a partially restored engine behind.
-struct RestorePlan {
-    request: RestoreRequest,
-    workspaces: Vec<WorkspaceRestoreState>,
-    target_active: Option<VirtualWorkspaceId>,
-    fingerprints: Vec<(WindowId, WindowFingerprint)>,
-}
+    /// A shared catalog follows workspaces between displays, so ordinals pair across all of it.
+    fn catalog_mappings(
+        &self,
+        engine: &LayoutEngine,
+    ) -> anyhow::Result<Vec<(VirtualWorkspaceId, VirtualWorkspaceId)>> {
+        let sources: Vec<_> = self.workspaces.catalog().collect();
+        let targets: Vec<_> = engine.workspaces.catalog().collect();
+        if sources.len() != targets.len() {
+            anyhow::bail!("saved and current catalogs have different workspace counts");
+        }
+        Ok(sources
+            .into_iter()
+            .zip(targets)
+            .filter(|(source, _)| self.workspaces[*source].active_layout().is_some())
+            .collect())
+    }
 
-impl RestorePlan {
     fn source_space(
-        snapshot: &LayoutEngine,
+        &self,
         engine: &LayoutEngine,
         request: RestoreRequest,
     ) -> anyhow::Result<SpaceId> {
-        let saved_spaces = snapshot.workspaces.layout_spaces();
-        let saved_active = snapshot
-            .persistence
-            .saved_active_space
-            .map(SpaceId::new)
-            .filter(|space| saved_spaces.contains(space));
+        let saved_spaces = self.workspaces.layout_spaces();
         let preferred = match request.source {
-            RestoreSource::SavedActiveSpace => saved_active.or_else(|| {
-                saved_spaces.contains(&request.active_space).then_some(request.active_space)
-            }),
-            RestoreSource::CurrentSpace => saved_spaces
-                .contains(&request.active_space)
-                .then_some(request.active_space)
-                .or_else(|| {
-                    // The disk master can still contain the previous launch's SpaceIds even
-                    // though startup already repaired the live engine. Display identity bridges
-                    // that interval until the next master save.
-                    engine
-                        .display_uuid_for_space(request.active_space)
-                        .and_then(|display| snapshot.display_last_space.get(display).copied())
-                        .filter(|space| saved_spaces.contains(space))
-                }),
+            RestoreSource::SavedActiveSpace => (self.saved_active_space())
+                .filter(|space| saved_spaces.contains(space))
+                .or(saved_spaces.contains(&request.active_space).then_some(request.active_space)),
+            RestoreSource::CurrentSpace => self.entry_for_space(engine, request.active_space),
         };
 
         if let Some(space) = preferred {
@@ -76,464 +87,184 @@ impl RestorePlan {
         }
     }
 
-    fn build(
-        mut snapshot: LayoutEngine,
+    /// Pair saved workspaces with the live ones they replace. This is the transaction boundary:
+    /// every fallible check belongs here, and nothing here mutates anything.
+    fn workspace_mappings(
+        &self,
         engine: &LayoutEngine,
-        window_store: &WindowStore,
         request: RestoreRequest,
-    ) -> anyhow::Result<Self> {
-        let source_space = Self::source_space(&snapshot, engine, request)?;
-        let source_active = snapshot.workspaces.active_workspace(source_space);
-        let mappings = match request.scope {
-            RestoreScope::Space => {
-                let source = snapshot.workspaces.workspace_ids(source_space);
-                let target = engine.workspaces.workspace_ids(request.active_space);
+        source_space: SpaceId,
+    ) -> anyhow::Result<Vec<(VirtualWorkspaceId, VirtualWorkspaceId)>> {
+        let sources = self.workspaces.workspace_ids(source_space);
+        let targets = engine.workspaces.workspace_ids(request.active_space);
+        let mappings: Vec<_> = match request.scope {
+            RestoreScope::Space | RestoreScope::Displays => {
                 // A space restore is all-or-nothing. `zip` silently truncates, which would split
                 // layout ownership between the snapshot and the pre-restore state.
-                if source.len() != target.len() {
+                if sources.len() != targets.len() {
                     return Err(anyhow::anyhow!(
                         "saved and current spaces have different workspace counts"
                     ));
                 }
-                source
-                    .iter()
-                    .copied()
-                    .zip(target.iter().copied())
-                    .map(|(source_workspace, target_workspace)| WorkspaceMapping {
-                        source_space,
-                        source_workspace,
-                        target_space: request.active_space,
-                        target_workspace,
-                    })
-                    .collect::<Vec<_>>()
+                sources.into_iter().zip(targets).collect()
             }
             RestoreScope::Workspace => {
-                let target_workspace = engine
+                let target = engine
                     .workspaces
                     .active_workspace(request.active_space)
                     .ok_or_else(|| anyhow::anyhow!("current space has no active workspace"))?;
-                let source_workspace = match request.source {
+                let source = match request.source {
                     // A portable workspace file represents what was active when it was saved.
-                    RestoreSource::SavedActiveSpace => source_active
+                    RestoreSource::SavedActiveSpace => self
+                        .workspaces
+                        .active_workspace(source_space)
                         .ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?,
                     // A master file represents the complete workspace catalog. Restoring S must
                     // therefore read S's ordinal from the saved native space, regardless of which
                     // workspace happened to be active when Rift last quit.
                     RestoreSource::CurrentSpace => {
-                        let target_workspaces =
-                            engine.workspaces.workspace_ids(request.active_space);
-                        let target_index = target_workspaces
-                            .iter()
-                            .position(|workspace| *workspace == target_workspace)
-                            .ok_or_else(|| {
+                        let index =
+                            targets.iter().position(|id| *id == target).ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "current active workspace is missing from its native space"
                                 )
                             })?;
-                        snapshot
-                            .workspaces
-                            .workspace_ids(source_space)
-                            .get(target_index)
-                            .copied()
-                            .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "saved space has no workspace at target index {target_index}"
-                            )
+                        sources.get(index).copied().ok_or_else(|| {
+                            anyhow::anyhow!("saved space has no workspace at target index {index}")
                         })?
                     }
                 };
-                vec![WorkspaceMapping {
-                    source_space,
-                    source_workspace,
-                    target_space: request.active_space,
-                    target_workspace,
-                }]
+                vec![(source, target)]
             }
         };
-
-        // Validate every source before consuming any snapshot state. This is the transaction
-        // boundary: all fallible structural checks belong above it.
-        for mapping in &mappings {
-            if snapshot
-                .workspaces
-                .workspace_info(mapping.source_space, mapping.source_workspace)
-                .and_then(VirtualWorkspace::active_layout)
-                .is_none()
-            {
-                return Err(anyhow::anyhow!("saved workspace layout is incomplete"));
-            }
-        }
-
-        // Resolve every candidate location while the snapshot is still intact. The extraction
-        // loop below consumes source workspaces; querying locations after that point either omits
-        // later candidates or indexes a workspace that has already been removed.
-        let restored_locations: HashMap<_, _> = snapshot
-            .persistence
-            .windows
-            .keys()
-            .map(|window| (*window, snapshot.restored_locations_for_window(*window)))
-            .collect();
-        let scoped_windows: HashSet<_> = restored_locations
+        if mappings
             .iter()
-            .filter_map(|(window, locations)| {
-                locations
-                    .iter()
-                    .copied()
-                    .any(|location| {
-                        mappings.iter().any(|mapping| {
-                            location == (mapping.source_space, mapping.source_workspace)
-                        })
-                    })
-                    .then_some(*window)
-            })
-            .collect();
-        let fingerprints = scoped_windows
-            .iter()
-            .filter_map(|window| {
-                snapshot
-                    .persistence
-                    .windows
-                    .get(window)
-                    .cloned()
-                    .map(|fingerprint| (*window, fingerprint))
-            })
-            .collect();
-
-        let mut target_active = None;
-        let mut workspaces = Vec::with_capacity(mappings.len());
-        for mapping in mappings {
-            let source_location = (mapping.source_space, mapping.source_workspace);
-            let workspace_windows: HashSet<_> = scoped_windows
-                .iter()
-                .copied()
-                .filter(|window| {
-                    restored_locations
-                        .get(window)
-                        .is_some_and(|locations| locations.contains(&source_location))
-                })
-                .collect();
-            let floating_windows = workspace_windows
-                .iter()
-                .copied()
-                .filter(|window| snapshot.floating.is_floating(*window))
-                .collect();
-            let floating_positions =
-                snapshot.floating_positions.workspace_positions(mapping.source_workspace);
-            let mut replaced_windows: HashSet<_> = engine
-                .floating_positions
-                .workspace_positions(mapping.target_workspace)
-                .into_iter()
-                .map(|(window, _)| window)
-                .collect();
-            let target = &engine.workspaces[mapping.target_workspace];
-            for layout in target.layout_state.all_layouts() {
-                replaced_windows.extend(target.layout_system.all_windows_in_layout(layout));
-            }
-            replaced_windows.extend(window_store.workspace_windows(mapping.target_workspace));
-            let mut workspace = snapshot
-                .workspaces
-                .workspaces
-                .remove(mapping.source_workspace)
-                .expect("workspace sources were validated before extraction");
-            // A restore replaces layout contents, not the target workspace's identity. Names are
-            // configured/current-session metadata and must not be copied from another workspace or
-            // from an old master snapshot.
-            workspace.name = engine
-                .workspaces
-                .workspace_info(mapping.target_space, mapping.target_workspace)
-                .expect("target workspace was validated before extraction")
-                .name
-                .clone();
-            workspace.space = mapping.target_space;
-            if source_active == Some(mapping.source_workspace) {
-                target_active = Some(mapping.target_workspace);
-            }
-            workspaces.push(WorkspaceRestoreState {
-                target_space: mapping.target_space,
-                target_workspace: mapping.target_workspace,
-                workspace,
-                floating_positions,
-                floating_windows,
-                replaced_windows,
-            });
-        }
-
-        Ok(Self {
-            request,
-            workspaces,
-            target_active,
-            fingerprints,
-        })
-    }
-
-    fn apply(
-        self,
-        engine: &mut LayoutEngine,
-        window_store: &mut WindowStore,
-        live_windows: HashMap<WindowId, WindowFingerprint>,
-    ) -> RestoreReport {
-        let live_ids = live_windows.keys().copied().collect::<HashSet<_>>();
-        let live_floating: HashSet<_> = live_windows
-            .keys()
-            .copied()
-            .filter(|window| engine.floating.is_floating(*window))
-            .collect();
-        let restored_targets = self
-            .workspaces
-            .iter()
-            .map(|workspace| (workspace.target_space, workspace.target_workspace))
-            .collect::<Vec<_>>();
-        let workspaces_replaced = self.workspaces.len();
-        for workspace in self.workspaces {
-            engine.install_workspace_restore_state(workspace);
-        }
-        if self.request.scope == RestoreScope::Space
-            && let Some(target_active) = self.target_active
+            .any(|(source, _)| self.workspaces.workspaces[*source].active_layout().is_none())
         {
-            engine.workspaces.set_active_workspace(self.request.active_space, target_active);
+            return Err(anyhow::anyhow!("saved workspace layout is incomplete"));
         }
-        // Only identities imported by this transaction are restoration candidates. Deriving this
-        // set from the whole live persistence map can arm unrelated windows which merely happen
-        // to already occupy the target workspace.
-        let restored_candidates =
-            self.fingerprints.iter().map(|(window, _)| *window).collect::<Vec<_>>();
-        for (window, fingerprint) in self.fingerprints {
-            engine.persistence.record(window, fingerprint);
-        }
-        engine.persistence.replace_pending(restored_candidates);
-
-        // A scoped restore must not consume a live identity outside its exact target. WindowId is
-        // explicitly process-local and can be reused across sessions. Detach an imported
-        // placeholder before matching when it collides with an out-of-scope live window or with a
-        // live window whose stronger app/WindowServer identity proves it is a different window.
-        // Doing this before reconciliation also allows another genuine candidate to match the live
-        // window without the colliding placeholder later deleting that match during cleanup.
-        let mut preempted_candidates = 0;
-        for (live, fingerprint) in &live_windows {
-            if !engine.persistence.pending_windows.contains(live) {
-                continue;
-            }
-            let live_assignment = window_store.workspace_for_window(*live);
-            let live_space = window_store
-                .current_window_server_space_for_window(*live)
-                .or_else(|| live_assignment.map(|assignment| engine.workspaces[assignment].space));
-            // WorkspaceStore is the authoritative Rift ownership record. WindowServer space can
-            // briefly lag or lead during native-space transitions, so it must not make an
-            // externally assigned window eligible for a restore transaction.
-            let live_is_in_scope = live_assignment.is_some_and(|assignment| {
-                restored_targets.contains(&(engine.workspaces[assignment].space, assignment))
-            });
-            let identity_is_compatible = engine
-                .persistence
-                .fingerprint(*live)
-                .is_some_and(|saved| saved.direct_identity_compatible_with(fingerprint));
-            if live_is_in_scope && identity_is_compatible {
-                continue;
-            }
-            engine.persistence.pending_windows.remove(live);
-            preempted_candidates += 1;
-            for &(space, workspace) in &restored_targets {
-                engine.workspaces[workspace].layout_system.remove_window(*live);
-                engine.floating_positions.remove_workspace_window(workspace, *live);
-                if engine.workspaces.last_focused_window(space, workspace) == Some(*live) {
-                    engine.workspaces.set_last_focused_window(space, workspace, None);
-                }
-            }
-            if live_floating.contains(live) {
-                engine.floating.add_floating(*live);
-                if let Some(live_space) = live_space {
-                    engine.floating.add_active(live_space, live.pid, *live);
-                }
-            } else {
-                engine.floating.remove_floating(*live);
-            }
-            engine.persistence.record(*live, fingerprint.clone());
-        }
-
-        let mut report = RestoreReport {
-            workspaces_replaced,
-            unmatched: preempted_candidates,
-            ..RestoreReport::default()
-        };
-        let mut ordered_live_windows = live_windows.into_iter().collect::<Vec<_>>();
-        ordered_live_windows.sort_unstable_by_key(|(window, _)| *window);
-        for (live, fingerprint) in ordered_live_windows {
-            if !window_store.contains_window(live) {
-                continue;
-            }
-            let live_assignment = window_store.workspace_for_window(live);
-            let live_space = window_store
-                .current_window_server_space_for_window(live)
-                .or_else(|| live_assignment.map(|assignment| engine.workspaces[assignment].space))
-                .unwrap_or(self.request.active_space);
-            let live_is_in_scope = live_assignment.is_some_and(|assignment| {
-                restored_targets.contains(&(engine.workspaces[assignment].space, assignment))
-            });
-            if !live_is_in_scope {
-                continue;
-            }
-            let ReconcileOutcome { matched, duplicates_removed } =
-                engine.reconcile_restored_window(window_store, live_space, live, &fingerprint);
-            report.matched += usize::from(matched);
-            report.duplicates_removed += duplicates_removed;
-            if !matched {
-                // A current window that is absent from the file is not part of the restore
-                // transaction. Re-project it using its authoritative assignment and preserve its
-                // pre-restore floating state instead of leaving a hole in the replaced workspace.
-                if live_floating.contains(&live) {
-                    engine.floating.add_floating(live);
-                    if let (Some(workspace), Some(window)) = (
-                        engine.workspaces().workspace_for_window(&window_store, live_space, live),
-                        window_store.window(live),
-                    ) {
-                        engine.floating_positions.store(workspace, live, window.frame_monotonic);
-                    }
-                } else {
-                    engine.floating.remove_floating(live);
-                }
-            }
-            // Reassert the projection for both matched and unmatched live windows. For matched
-            // floating windows this rebuilds the runtime-only active-floating index; for tiled
-            // windows the operation is idempotent when reconciliation already replaced the node.
-            engine.add_window_to_layout(window_store, live_space, live);
-            if engine.focused_window == Some(live)
-                && let Some(workspace) =
-                    engine.workspaces().workspace_for_window(&window_store, live_space, live)
-            {
-                engine.workspaces.set_last_focused_window(live_space, workspace, Some(live));
-            }
-            engine.persistence.record(live, fingerprint);
-        }
-        let still_pending = engine.persistence.pending_len();
-        report.unmatched += still_pending;
-        let ignored = engine.discard_all_unmatched_candidates();
-        debug_assert_eq!(ignored, still_pending);
-        engine.normalize_restored_targets(window_store, &live_ids, &restored_targets);
-        if report.unmatched > 0 {
-            report.warnings.push(RestoreWarning::UnmatchedWindows(report.unmatched));
-        }
-        report
+        Ok(mappings)
     }
 }
 
 impl LayoutEngine {
-    /// Enforce the post-restore ownership boundary independently of matcher behavior. Every
-    /// projection in a replaced workspace must represent a currently live window assigned to
-    /// that exact workspace, and its tiled/floating representation must agree with runtime state.
-    fn normalize_restored_targets(
-        &mut self,
-        window_store: &WindowStore,
-        live_windows: &HashSet<WindowId>,
-        targets: &[(SpaceId, VirtualWorkspaceId)],
-    ) {
-        for &(space, workspace) in targets {
-            let expected_assignment = workspace;
-            let entry = &self.workspaces[workspace];
-            let tiled_windows = entry
-                .layout_state
-                .all_layouts()
-                .flat_map(|layout| entry.layout_system.all_windows_in_layout(layout))
-                .collect::<HashSet<_>>();
-            for window in tiled_windows {
-                let valid = live_windows.contains(&window)
-                    && window_store.workspace_for_window(window) == Some(expected_assignment)
-                    && !self.floating.is_floating(window);
-                if !valid {
-                    self.workspaces[workspace].layout_system.remove_window(window);
-                }
-            }
-
-            let positioned_windows = self
-                .floating_positions
-                .workspace_positions(workspace)
-                .into_iter()
-                .map(|(window, _)| window)
-                .collect::<Vec<_>>();
-            for window in positioned_windows {
-                let valid = live_windows.contains(&window)
-                    && window_store.workspace_for_window(window) == Some(expected_assignment)
-                    && self.floating.is_floating(window);
-                if !valid {
-                    self.floating_positions.remove_workspace_window(workspace, window);
-                }
-            }
-
-            if self.workspaces.last_focused_window(space, workspace).is_some_and(|window| {
-                !live_windows.contains(&window)
-                    || window_store.workspace_for_window(window) != Some(expected_assignment)
-            }) {
-                self.workspaces.set_last_focused_window(space, workspace, None);
-            }
-        }
-
-        // Remove identity-only residue after all target projections have been normalized. A live
-        // window may legitimately remain floating in an out-of-scope workspace, so global state
-        // is touched only for identities which have neither a live window nor any saved location.
-        let locationless = self
-            .persistence
-            .windows
-            .keys()
-            .copied()
-            .filter(|window| {
-                !live_windows.contains(window)
-                    && self.restored_locations_for_window(*window).is_empty()
-            })
-            .collect::<Vec<_>>();
-        for window in locationless {
-            self.floating.remove_floating(window);
-            self.persistence.forget_window(window);
-        }
-    }
-
+    /// Everything fallible happens before the first mutation. After that, a window absent from the
+    /// file keeps its assignment and floating state, a saved window with no live match leaves no
+    /// trace, and anything outside the mapped workspaces is not touched.
     pub fn restore_layout(
         &mut self,
         path: PathBuf,
         request: RestoreRequest,
+        visible_spaces: &[SpaceId],
         window_store: &mut WindowStore,
-        _virtual_workspace_config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
     ) -> anyhow::Result<RestoreReport> {
-        let (mut snapshot, schema_version) = Self::load_with_schema_version(&path)?;
-        tracing::info!(
-            path = %path.display(),
-            schema_version,
-            scope = ?request.scope,
-            active_space = ?request.active_space,
-            "Loading persisted layout for restore"
-        );
-        // The source topology is file data, not a live engine to be reconciled with the current
-        // workspace-count setting. Only refresh layout-system settings; the installed workspace
-        // inherits the already-hydrated target manager's runtime configuration.
-        snapshot.apply_layout_settings(layout_settings);
-        self.refresh_window_fingerprints(window_store);
-        let live_windows = self.persistence.live_fingerprints();
-        let plan = RestorePlan::build(snapshot, self, window_store, request)?;
-        self.native_layouts.clear();
-        let report = plan.apply(self, window_store, live_windows);
-        tracing::info!(
-            path = %path.display(),
-            schema_version,
-            scope = ?request.scope,
-            workspaces_replaced = report.workspaces_replaced,
-            windows_matched = report.matched,
-            windows_unmatched = report.unmatched,
-            duplicates_removed = report.duplicates_removed,
-            "Persisted layout restore completed"
-        );
-        Ok(report)
-    }
+        let mut snapshot = PersistedLayout::read(&path)?;
+        let pairs = snapshot.space_pairs(self, request, visible_spaces)?;
+        let mappings = if request.scope == RestoreScope::Displays
+            && self.workspaces.settings.mode == WorkspaceMode::Global
+        {
+            snapshot.catalog_mappings(self)?
+        } else {
+            let mut mappings = Vec::new();
+            for &(source, active_space) in &pairs {
+                let request = RestoreRequest { active_space, ..request };
+                mappings.extend(snapshot.workspace_mappings(self, request, source)?);
+            }
+            mappings
+        };
+        let actives: Vec<_> = (pairs.iter())
+            .filter_map(|(source, space)| {
+                let source_active = snapshot.workspaces.active_workspace(*source)?;
+                let (_, active) = mappings.iter().find(|(source, _)| *source == source_active)?;
+                Some((*space, *active))
+            })
+            .collect();
+        let targets: Vec<_> = mappings.iter().map(|(_, target)| *target).collect();
+        // Candidates still waiting in a replaced workspace lose their slots with its tree.
+        self.persistence.pending.retain(|_, saved| !targets.contains(&saved.workspace));
+        for &(source, target) in &mappings {
+            let saved = snapshot
+                .workspaces
+                .workspaces
+                .remove(source)
+                .expect("workspace sources were validated before installation");
+            self.native_layouts.remove(&target);
+            let display = self.space_display_map.get(&self.workspaces[target].space);
+            let display = display.and_then(Option::as_deref);
+            let workspace = &mut self.workspaces[target];
+            workspace.restore_contents(saved);
+            crate::layout_engine::engine::apply_workspace_layout_settings(
+                workspace,
+                layout_settings,
+                display,
+            );
+        }
+        if request.scope != RestoreScope::Workspace {
+            for (space, active) in actives {
+                if self.workspaces[active].space == space {
+                    self.workspaces.set_active_workspace(space, active);
+                }
+            }
+        }
 
-    /// Install all state participating in workspace ownership as one operation.
-    fn install_workspace_restore_state(&mut self, state: WorkspaceRestoreState) {
-        for window in state.replaced_windows {
-            self.floating.remove_floating(window);
-            self.persistence.forget_window(window);
+        let mut scoped = 0usize;
+        for (window, mut saved) in snapshot.pending {
+            let Some((_, target)) = mappings.iter().find(|(source, _)| *source == saved.workspace)
+            else {
+                continue;
+            };
+            saved.workspace = *target;
+            scoped += 1;
+            // A process-local id can collide with a candidate that startup left pending elsewhere.
+            if let Some(previous) = self.persistence.pending.insert(window, saved) {
+                self.discard_saved_window(window, previous);
+            }
         }
-        self.workspaces[state.target_workspace] = state.workspace;
-        self.floating_positions
-            .replace_workspace_positions(state.target_workspace, state.floating_positions);
-        for window in state.floating_windows {
-            self.floating.add_floating(window);
+
+        let mut report = RestoreReport {
+            workspaces_replaced: mappings.len(),
+            ..RestoreReport::default()
+        };
+        let scope = MatchScope::Workspaces(&targets);
+        // Listed up front: a match moves a window into a later target, and it must not be seen
+        // again there, where it would take the slot of a same-titled window.
+        let live_windows: Vec<_> = (targets.iter())
+            .flat_map(|target| {
+                window_store.workspace_windows(*target).into_iter().map(|live| (*target, live))
+            })
+            .collect();
+        for (target, live) in live_windows {
+            let Some(window) = window_store.window(live) else {
+                continue;
+            };
+            let frame = window.frame_monotonic;
+            let evidence = WindowFingerprint::of(live, window);
+            let matched = self.reconcile_saved_window(window_store, live, &evidence, scope);
+            report.matched += usize::from(matched);
+            if !matched && self.floating.is_floating(live) {
+                self.floating_positions.store_if_absent(target, live, frame);
+            }
+            // Rebuild the projection for both outcomes: a matched floating window needs its
+            // runtime-only active entry, and a current window absent from the file needs a slot
+            // in the replaced tree.
+            let owner = window_store.workspace_for_window(live).unwrap_or(target);
+            let (from, space) = (self.workspaces[target].space, self.workspaces[owner].space);
+            if from != space {
+                report.moved.push((live, from, space));
+            }
+            self.add_window_to_layout(window_store, space, live);
+            if self.focused_window == Some(live) {
+                self.workspaces.set_last_focused_window(space, owner, Some(live));
+            }
         }
+        let unmatched: Vec<_> = (self.persistence.pending.iter())
+            .filter(|(_, saved)| targets.contains(&saved.workspace))
+            .map(|(window, _)| *window)
+            .collect();
+        self.discard_saved_windows(unmatched);
+        report.unmatched = scoped.saturating_sub(report.matched);
+        tracing::info!(path = %path.display(), ?report, "Persisted layout restore completed");
+        Ok(report)
     }
 }

@@ -260,6 +260,15 @@ impl VirtualWorkspace {
         }
     }
 
+    /// A restore replaces layout contents, not the workspace's identity: name, native owner and
+    /// home are current-session state that an old snapshot must not overwrite.
+    pub(crate) fn restore_contents(&mut self, saved: Self) {
+        self.last_focused = saved.last_focused;
+        self.layout_system = saved.layout_system;
+        self.layout_mode = saved.layout_mode;
+        self.layout_state = saved.layout_state;
+    }
+
     pub fn set_last_focused(&mut self, window_id: Option<WindowId>) {
         self.last_focused = window_id;
     }
@@ -616,18 +625,6 @@ impl WorkspaceStore {
             .values()
             .filter(|workspace| workspace.active_layout().is_some())
             .map(|workspace| workspace.space)
-            .collect()
-    }
-
-    pub(crate) fn all_layouts(&self) -> Vec<(SpaceId, VirtualWorkspaceId, LayoutId)> {
-        self.catalog()
-            .flat_map(|id| {
-                let workspace = &self[id];
-                workspace
-                    .layout_state
-                    .all_layouts()
-                    .map(move |layout| (workspace.space, id, layout))
-            })
             .collect()
     }
 
@@ -1065,6 +1062,22 @@ impl WorkspaceStore {
         deleted_target_workspace_ids
     }
 
+    /// Delete a native Space that no longer exists, returning the workspaces it took with it.
+    pub(crate) fn remove_space(&mut self, space: SpaceId) -> Vec<VirtualWorkspaceId> {
+        let removed = self.workspace_ids(space);
+        for id in &removed {
+            self.workspaces.remove(*id);
+        }
+        self.order.retain(|id| !removed.contains(id));
+        self.active_workspace_per_space.remove(&space);
+        for activation in self.active_workspace_per_space.values_mut() {
+            for slot in [&mut activation.previous, &mut activation.remembered] {
+                *slot = slot.filter(|id| !removed.contains(id));
+            }
+        }
+        removed
+    }
+
     pub fn create_workspace(
         &mut self,
         space: SpaceId,
@@ -1380,35 +1393,6 @@ impl WorkspaceStore {
             }
             if contained_from {
                 workspace.set_last_focused(Some(to));
-            }
-        }
-    }
-
-    pub(crate) fn forget_window_identity(&mut self, window: WindowId) {
-        for workspace in self.workspaces.values_mut() {
-            if workspace.last_focused() == Some(window) {
-                workspace.set_last_focused(None);
-            }
-        }
-    }
-
-    pub(crate) fn persisted_focus_locations(&self) -> Vec<(SpaceId, VirtualWorkspaceId, WindowId)> {
-        self.workspaces
-            .iter()
-            .filter_map(|(workspace, info)| {
-                info.last_focused().map(|window| (info.space, workspace, window))
-            })
-            .collect()
-    }
-
-    pub(crate) fn retain_window_focus_location(
-        &mut self,
-        window: WindowId,
-        keep: VirtualWorkspaceId,
-    ) {
-        for (workspace_id, workspace) in self.workspaces.iter_mut() {
-            if workspace_id != keep && workspace.last_focused() == Some(window) {
-                workspace.set_last_focused(None);
             }
         }
     }

@@ -883,7 +883,8 @@ impl Reactor {
     }
 
     pub(crate) fn serialize_state(&mut self) -> Result<String, serde_json::Error> {
-        let layout_engine_ron = self.layout_manager.layout_engine.serialize_to_string();
+        let layout_engine_ron =
+            self.layout_manager.layout_engine.serialize_to_string(&self.state.windows);
         let workspaces = self.layout_manager.layout_engine.workspaces();
         let totals = (
             workspaces.workspaces.len(),

@@ -37,26 +37,19 @@ impl FloatingPositionStore {
         Ok(())
     }
 
-    pub(crate) fn persisted_windows(&self) -> Vec<WindowId> {
-        self.positions.keys().map(|(_, window)| *window).collect()
-    }
-
-    pub(crate) fn positioned_windows(&self) -> Vec<WindowId> {
-        let mut windows = self.persisted_windows();
-        windows.sort_unstable();
-        windows.dedup();
-        windows
-    }
-
-    pub(crate) fn locations_for_window(&self, window: WindowId) -> Vec<VirtualWorkspaceId> {
-        let mut locations: Vec<_> = self
+    /// Every saved frame in a stable order, so a choice between duplicates is deterministic.
+    pub(crate) fn into_sorted(self) -> Vec<(VirtualWorkspaceId, WindowId, CGRect)> {
+        let mut positions: Vec<_> = self
             .positions
-            .keys()
-            .filter_map(|&(workspace, stored)| (stored == window).then_some(workspace))
+            .into_iter()
+            .map(|((workspace, window), frame)| (workspace, window, frame))
             .collect();
-        locations.sort_unstable();
-        locations.dedup();
-        locations
+        positions.sort_unstable_by_key(|&(workspace, window, _)| (workspace, window));
+        positions
+    }
+
+    pub(crate) fn positioned_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.positions.keys().map(|(_, window)| *window)
     }
 
     pub fn store(&mut self, workspace: VirtualWorkspaceId, window: WindowId, frame: CGRect) {
@@ -98,32 +91,8 @@ impl FloatingPositionStore {
         self.positions.remove(&(workspace, window));
     }
 
-    pub fn retain_window_location(&mut self, window: WindowId, keep: VirtualWorkspaceId) {
-        self.positions
-            .retain(|(workspace, stored), _| *stored != window || *workspace == keep);
-    }
-
-    pub fn replace_workspace_from(
-        &mut self,
-        source: &Self,
-        source_workspace: VirtualWorkspaceId,
-        target_workspace: VirtualWorkspaceId,
-    ) {
-        self.replace_workspace_positions(
-            target_workspace,
-            source.workspace_positions(source_workspace),
-        );
-    }
-
-    pub(crate) fn replace_workspace_positions(
-        &mut self,
-        workspace: VirtualWorkspaceId,
-        positions: Vec<(WindowId, CGRect)>,
-    ) {
+    pub(crate) fn remove_workspace(&mut self, workspace: VirtualWorkspaceId) {
         self.positions.retain(|(stored, _), _| *stored != workspace);
-        for (window, frame) in positions {
-            self.store(workspace, window, frame);
-        }
     }
 
     pub fn remove_app(&mut self, pid: pid_t) {
@@ -184,20 +153,5 @@ mod tests {
 
         assert_eq!(positions.get(workspace(), old), None);
         assert_eq!(positions.get(workspace(), new), Some(frame()));
-    }
-
-    #[test]
-    fn workspace_restore_replaces_target_frames_instead_of_merging() {
-        let mut source = FloatingPositionStore::default();
-        let mut target = FloatingPositionStore::default();
-        let source_window = WindowId::new(1, 1);
-        let stale_target_window = WindowId::new(2, 2);
-
-        source.store(workspace(), source_window, frame());
-        target.store(workspace(), stale_target_window, frame());
-        target.replace_workspace_from(&source, workspace(), workspace());
-
-        assert_eq!(target.get(workspace(), source_window), Some(frame()));
-        assert_eq!(target.get(workspace(), stale_target_window), None);
     }
 }

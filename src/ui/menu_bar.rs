@@ -812,6 +812,13 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &Rc<MenuActionHandler>) -> 
         "Update Master Layout",
         MenuActionHandler::on_save_master_file,
     );
+    add_action_item(
+        &saved_layouts_menu,
+        mtm,
+        handler,
+        "Restore Master Layout on All Displays",
+        MenuActionHandler::on_restore_master_file_displays,
+    );
     add_separator(&saved_layouts_menu);
     let (_, restore_workspace_menu) = add_submenu(&saved_layouts_menu, mtm, "Restore Workspace");
     let (_, restore_space_menu) = add_submenu(&saved_layouts_menu, mtm, "Restore Space");
@@ -1080,7 +1087,7 @@ impl MenuActionHandler {
     }
 
     fn validate_layout_path(path: PathBuf) -> Option<PathBuf> {
-        match LayoutEngine::load(path.clone()) {
+        match LayoutEngine::validate_file(path.clone()) {
             Ok(_) => Some(path),
             Err(error) => {
                 let mtm = MainThreadMarker::new()?;
@@ -1171,6 +1178,12 @@ impl MenuActionHandler {
 
     fn on_save_master_file(&self, _sender: Option<&NSMenuItem>) {
         self.emit(MenuAction::SaveMasterFile);
+    }
+
+    fn on_restore_master_file_displays(&self, _sender: Option<&NSMenuItem>) {
+        if Self::validate_layout_path(restore_file()).is_some() {
+            self.emit(MenuAction::RestoreMasterFile(RestoreScope::Displays));
+        }
     }
 
     fn on_restore_master_file_workspace(&self, _sender: Option<&NSMenuItem>) {

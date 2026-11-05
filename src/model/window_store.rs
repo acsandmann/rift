@@ -1547,14 +1547,6 @@ impl WindowStore {
         self.window_server_space(self.record(window)?.window_server_id?)
     }
 
-    pub fn current_window_server_space_for_window(&self, window_id: WindowId) -> Option<SpaceId> {
-        let wsid = self
-            .native_fullscreen_record_for_window(window_id)
-            .and_then(|record| record.window_server_id)
-            .or_else(|| self.record(window_id).and_then(WindowRecord::window_server_id))?;
-        self.window_server_space(wsid)
-    }
-
     pub fn set_visibility(&mut self, window_id: WindowId, visibility: WindowVisibility) {
         self.windows.entry(window_id).or_default().visibility = visibility;
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);

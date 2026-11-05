@@ -2459,16 +2459,30 @@ impl Reactor {
                     ));
                 };
                 let request = layout::RestoreRequest { scope, active_space, source };
-                let outcome = EventOutcome::window_membership_changed(false, true);
+                let mut outcome = EventOutcome::window_membership_changed(false, true);
+                let visible: Vec<_> = self.iter_active_spaces().collect();
                 let report = self.layout_manager.layout_engine.restore_layout(
                     path,
                     request,
+                    &visible,
                     &mut self.state.windows,
-                    &self.config.virtual_workspaces,
                     &self.config.settings.layout,
                 );
                 return Ok(match report {
-                    Ok(report) => outcome.with_stdout_line(report.summary()),
+                    Ok(report) => {
+                        for &(window, from, to) in &report.moved {
+                            // A restored floating frame is already on the display it returns to.
+                            let floating =
+                                self.layout_manager.layout_engine.is_window_floating(window);
+                            let source = if floating { to } else { from };
+                            if floating {
+                                self.state.windows.clear_floating_display_geometry(window);
+                            }
+                            let source = self.space_state.screen_by_space(source).map(|s| s.frame);
+                            outcome.absorb(self.request_window_transfer(window, to, source));
+                        }
+                        outcome.with_stdout_line(report.summary())
+                    }
                     Err(error) => {
                         tracing::error!(?scope, %error, "Could not restore saved layout");
                         outcome.with_stdout_line(format!("Could not restore saved layout: {error}"))
@@ -3687,12 +3701,17 @@ impl Reactor {
 
         let current_display_spaces = screens
             .iter()
-            .filter_map(|screen| screen.space.map(|space| (space, screen.display_uuid.clone())))
+            .filter_map(|screen| {
+                screen
+                    .space
+                    .map(|space| (space, screen.display_uuid.clone(), screen.frame.size))
+            })
             .collect::<Vec<_>>();
-        self.layout_manager.layout_engine.reconcile_startup_spaces(
+        self.layout_manager.layout_engine.resolve_saved_spaces(
             &mut self.state.windows,
             &current_display_spaces,
             screens.len(),
+            &display_space_ids,
         );
 
         let empty = HashMap::default();

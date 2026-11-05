@@ -4,16 +4,17 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-use objc2_core_foundation::CGSize;
+use objc2_core_foundation::{CGRect, CGSize};
 pub use rift_protocol::{RestoreScope, RestoreSource};
 use serde::{Deserialize, Serialize};
 
 use super::{FloatingManager, LayoutEngine};
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings};
+use crate::common::collections::{BTreeMap, BTreeSet, HashMap};
+use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings, WorkspaceMode};
 use crate::layout_engine::LayoutSystem;
 use crate::model::broadcast::BroadcastSender;
+use crate::model::reactor::WindowState;
 use crate::model::{
     AppRuleEngine, FloatingPositionStore, VirtualWorkspaceId, WindowStore, WorkspaceStore,
 };
@@ -28,38 +29,13 @@ pub struct RestoreRequest {
     pub source: RestoreSource,
 }
 
-impl RestoreRequest {
-    /// Restore a portable layout file from the space that was active when it was saved.
-    pub fn new(scope: RestoreScope, active_space: SpaceId) -> Self {
-        Self {
-            scope,
-            active_space,
-            source: RestoreSource::SavedActiveSpace,
-        }
-    }
-
-    /// Restore the master file's entry for the current native space when available.
-    pub fn from_master_file(scope: RestoreScope, active_space: SpaceId) -> Self {
-        Self {
-            scope,
-            active_space,
-            source: RestoreSource::CurrentSpace,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RestoreWarning {
-    UnmatchedWindows(usize),
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreReport {
     pub matched: usize,
     pub unmatched: usize,
-    pub duplicates_removed: usize,
     pub workspaces_replaced: usize,
-    pub warnings: Vec<RestoreWarning>,
+    /// Windows the restore assigned to another native Space: `(window, from, to)`.
+    pub moved: Vec<(WindowId, SpaceId, SpaceId)>,
 }
 
 impl RestoreReport {
@@ -72,12 +48,6 @@ impl RestoreReport {
             summary.push_str(&format!(
                 "; ignored {} saved window(s) that are not currently available",
                 self.unmatched
-            ));
-        }
-        if self.duplicates_removed > 0 {
-            summary.push_str(&format!(
-                "; repaired {} duplicate saved identity record(s)",
-                self.duplicates_removed
             ));
         }
         summary
@@ -95,121 +65,86 @@ struct WindowFingerprint {
 }
 
 impl WindowFingerprint {
-    fn app_compatible_with(&self, live: &Self) -> bool {
-        // A non-exact fallback must never cross two known bundle identities. Titles such as
-        // "Untitled" and common default sizes are not globally unique across applications.
-        self.app_id
-            .as_ref()
-            .zip(live.app_id.as_ref())
-            .is_none_or(|(saved, current)| saved == current)
-    }
-
-    fn direct_identity_compatible_with(&self, live: &Self) -> bool {
-        if !self.app_compatible_with(live) {
-            return false;
-        }
-        match self.window_server_id.zip(live.window_server_id) {
-            Some((saved, current)) => {
-                saved == current && (self.same_known_app(live) || self.same_title_and_size(live))
-            }
-            None => self.same_known_app(live) && self.same_title_and_size(live),
+    /// `WindowInfo` has no bundle id when its server lookup missed, but the process still names it.
+    fn of(id: WindowId, window: &WindowState) -> Self {
+        Self {
+            window_server_id: window.info.sys_id.map(|id| id.as_u32()),
+            title: Some(window.info.title.clone()).filter(|title| !title.trim().is_empty()),
+            width: window.frame_monotonic.size.width,
+            height: window.frame_monotonic.size.height,
+            app_id: (window.info.bundle_id.clone())
+                .or_else(|| crate::sys::app::bundle_info_for_pid(id.pid).0),
         }
     }
 
-    fn server_identity_compatible_with(&self, live: &Self) -> bool {
+    /// A fallback must never cross two known bundle identities: titles such as "Untitled" and
+    /// common default sizes are not globally unique across applications.
+    fn same_server_window(&self, live: &Self) -> bool {
         self.window_server_id.is_some()
             && self.window_server_id == live.window_server_id
-            && self.app_compatible_with(live)
+            && self.app_id.as_ref().zip(live.app_id.as_ref()).is_none_or(|(a, b)| a == b)
             && (self.same_known_app(live) || self.same_title_and_size(live))
+    }
+
+    /// WindowId is process-local, so it is direct evidence only while stronger saved identity does
+    /// not contradict it.
+    fn same_process_window(&self, live: &Self) -> bool {
+        if self.window_server_id.is_some() && live.window_server_id.is_some() {
+            self.same_server_window(live)
+        } else {
+            self.same_known_app(live) && self.same_title_and_size(live)
+        }
     }
 
     fn same_known_app(&self, live: &Self) -> bool {
         self.app_id.is_some() && self.app_id == live.app_id
     }
 
+    fn same_title(&self, live: &Self) -> bool { self.title.is_some() && self.title == live.title }
+
+    fn size_delta(&self, live: &Self) -> f64 {
+        (self.width - live.width).abs() + (self.height - live.height).abs()
+    }
+
     fn same_title_and_size(&self, live: &Self) -> bool {
-        self.title.is_some()
-            && self.title == live.title
-            && (self.width - live.width).abs() + (self.height - live.height).abs() <= 8.0
+        self.same_title(live) && self.size_delta(live) <= 8.0
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// A saved window waiting for its live identity. `workspace` is the one location resolved when the
+/// snapshot was read; a tiled window also holds a tree slot there, while a floating window (`frame`
+/// is set) exists only here until it matches.
+#[derive(Debug)]
+struct SavedWindow {
+    fingerprint: WindowFingerprint,
+    workspace: VirtualWorkspaceId,
+    frame: Option<CGRect>,
+}
+
+/// Restoration in progress. Live windows are described by `WindowStore` and have no entry here, so
+/// once matching finishes this state is empty and every window path skips it in O(1).
+#[derive(Debug, Default)]
 pub(super) struct PersistenceState {
-    #[serde(default, rename = "persisted_windows")]
-    windows: HashMap<WindowId, WindowFingerprint>,
-    /// Native space active when an explicit save was requested.
-    ///
-    /// A layout file contains every initialized native space. This hint makes a portable file's
-    /// intended source unambiguous when its SpaceIds do not exist in the current session.
-    #[serde(default)]
-    saved_active_space: Option<u64>,
-    #[serde(skip)]
-    pending_windows: HashSet<WindowId>,
-}
-
-impl PersistenceState {
-    fn validate(&self) -> anyhow::Result<()> {
-        for (window, fingerprint) in &self.windows {
-            if !fingerprint.width.is_finite()
-                || !fingerprint.height.is_finite()
-                || fingerprint.width < 0.0
-                || fingerprint.height < 0.0
-            {
-                return Err(anyhow::anyhow!(
-                    "window {window:?} has an invalid persisted size"
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn record(&mut self, window: WindowId, fingerprint: WindowFingerprint) {
-        self.windows.insert(window, fingerprint);
-    }
-
-    fn fingerprint(&self, window: WindowId) -> Option<&WindowFingerprint> {
-        self.windows.get(&window)
-    }
-
-    fn forget_window(&mut self, window: WindowId) {
-        self.windows.remove(&window);
-        self.pending_windows.remove(&window);
-    }
-
-    fn forget_app(&mut self, pid: pid_t) {
-        self.windows.retain(|window, _| window.pid != pid);
-        self.pending_windows.retain(|window| window.pid != pid);
-    }
-
-    fn rekey(&mut self, from: WindowId, to: WindowId) {
-        if let Some(fingerprint) = self.windows.remove(&from) {
-            self.windows.insert(to, fingerprint);
-        }
-        if self.pending_windows.remove(&from) {
-            self.pending_windows.insert(to);
-        }
-    }
-
-    fn replace_pending(&mut self, windows: impl IntoIterator<Item = WindowId>) {
-        self.pending_windows = windows.into_iter().collect();
-    }
-
-    fn remove_candidate(&mut self, window: WindowId) {
-        self.pending_windows.remove(&window);
-        self.windows.remove(&window);
-    }
-
-    fn pending_len(&self) -> usize { self.pending_windows.len() }
-
-    fn live_fingerprints(&self) -> HashMap<WindowId, WindowFingerprint> { self.windows.clone() }
-
-    fn set_saved_active_space(&mut self, space: Option<SpaceId>) {
-        self.saved_active_space = space.map(|space| space.get());
-    }
+    pending: HashMap<WindowId, SavedWindow>,
+    /// True until a startup restore has seen a complete display topology.
+    awaiting_topology: bool,
+    /// Application discoveries finished before that, in `discard_unmatched_candidates_for_app`'s
+    /// terms, to replay once saved destinations mean something.
+    awaited_discoveries: Vec<(pid_t, Option<String>, Vec<SpaceId>)>,
+    /// Saved native Spaces not proven to exist. They are destinations for nothing, which keeps
+    /// their workspaces intact for a display that may return.
+    unresolved_spaces: BTreeSet<SpaceId>,
 }
 
 impl LayoutEngine {
+    pub(super) fn is_restoring(&self) -> bool {
+        !self.persistence.pending.is_empty() && !self.persistence.awaiting_topology
+    }
+
+    pub(super) fn saved_space_is_unresolved(&self, space: Option<SpaceId>) -> bool {
+        space.is_some_and(|space| self.persistence.unresolved_spaces.contains(&space))
+    }
+
     pub(super) fn observe_window_for_persistence(
         &mut self,
         window_store: &mut WindowStore,
@@ -219,7 +154,10 @@ impl LayoutEngine {
         size: CGSize,
         app_id: Option<&str>,
     ) -> bool {
-        let fingerprint = WindowFingerprint {
+        if !self.is_restoring() {
+            return false;
+        }
+        let live = WindowFingerprint {
             window_server_id: window_store
                 .window(window)
                 .and_then(|window| window.info.sys_id)
@@ -229,27 +167,29 @@ impl LayoutEngine {
             height: size.height,
             app_id: app_id.filter(|app_id| !app_id.trim().is_empty()).map(str::to_owned),
         };
-        let outcome = self.reconcile_restored_window(window_store, space, window, &fingerprint);
-        self.persistence.record(window, fingerprint);
-        outcome.matched
+        self.reconcile_saved_window(window_store, window, &live, matcher::MatchScope::Space(space))
     }
 
     pub(super) fn forget_persisted_window(&mut self, window: WindowId) {
-        self.persistence.forget_window(window);
+        if let Some(saved) = self.persistence.pending.remove(&window) {
+            self.discard_saved_window(window, saved);
+        }
     }
 
-    pub(super) fn forget_persisted_app(&mut self, pid: pid_t) { self.persistence.forget_app(pid); }
+    pub(super) fn forget_persisted_app(&mut self, pid: pid_t) {
+        self.persistence.pending.retain(|window, _| window.pid != pid);
+    }
 
-    pub(super) fn transfer_persisted_window_identity(&mut self, from: WindowId, to: WindowId) {
-        self.persistence.rekey(from, to);
+    pub(super) fn forget_persisted_workspace(&mut self, workspace: VirtualWorkspaceId) {
+        self.persistence.pending.retain(|_, saved| saved.workspace != workspace);
     }
 }
 
 mod matcher;
-mod reconcile;
 mod restore;
 mod snapshot;
 mod storage;
+mod topology;
 
 #[cfg(test)]
 mod tests;

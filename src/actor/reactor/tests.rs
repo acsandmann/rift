@@ -8646,7 +8646,7 @@ fn topology_revocation_protects_windows_before_queued_invalidation_is_delivered(
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(std::future::Future::poll(running.as_mut(), &mut context).is_pending());
     let invalidation = invalidations.try_recv().unwrap().1;
-    let before = reactor.layout_manager.layout_engine.serialize_to_string();
+    let before = reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows);
     for event in [
         Event::WindowServerAppeared(wsid, space, SpaceEventKind::User),
         Event::WindowServerDestroyed(wsid, space, SpaceEventKind::User),
@@ -8667,7 +8667,7 @@ fn topology_revocation_protects_windows_before_queued_invalidation_is_delivered(
         assert!(reactor.state.windows.contains_window(wid));
         assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space));
         assert_eq!(
-            reactor.layout_manager.layout_engine.serialize_to_string(),
+            reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows),
             before
         );
     }
@@ -8900,7 +8900,7 @@ fn disconnect_does_not_erase_display_layout_memory() {
     );
     assert_eq!(reactor.test_workspace_ids(b), workspaces);
     assert_eq!(reactor.test_workspace_for_window(b, wid), Some(workspaces[1]));
-    let saved = reactor.layout_manager.layout_engine.serialize_to_string();
+    let saved = reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows);
     let loaded = LayoutEngine::deserialize_from_str(&saved).unwrap();
     assert_eq!(loaded.last_space_for_display_uuid(&display), Some(b));
 
@@ -9338,7 +9338,7 @@ fn rejected_config_preserves_live_graph_and_mode_migration_preserves_dormant_mem
         Some(a),
         Some(SpaceId::new(3)),
     ]));
-    let original = reactor.layout_manager.layout_engine.serialize_to_string();
+    let original = reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows);
     let mut invalid = reactor.config.clone();
     invalid.virtual_workspaces.default_workspace_count = 0;
     assert!(
@@ -9352,14 +9352,14 @@ fn rejected_config_preserves_live_graph_and_mode_migration_preserves_dormant_mem
         .is_err()
     );
     assert_eq!(
-        reactor.layout_manager.layout_engine.serialize_to_string(),
+        reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows),
         original
     );
     let mut invalid = reactor.config.clone();
     invalid.virtual_workspaces.workspace_names = vec!["Main".into(); 3];
     assert!(reactor.dispatch_workflow(Event::ConfigUpdated(invalid)).is_err());
     assert_eq!(
-        reactor.layout_manager.layout_engine.serialize_to_string(),
+        reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows),
         original
     );
     let dormant = reactor.test_workspace_ids(b);
@@ -10394,10 +10394,14 @@ fn named_pin_reload_moves_immediately_without_growing_catalog() {
                     assert_eq!(workspaces.active_workspace(b), None);
                     workspaces.create_workspace(b, Some("scratch".into())).unwrap();
                 }
-                let snapshot = reactor.layout_manager.layout_engine.serialize_to_string().replace(
-                    "rule_overridden:false",
-                    "rule_overridden:false,display_fallback:true",
-                );
+                let snapshot = reactor
+                    .layout_manager
+                    .layout_engine
+                    .serialize_to_string(&reactor.state.windows)
+                    .replace(
+                        "rule_overridden:false",
+                        "rule_overridden:false,display_fallback:true",
+                    );
                 reactor.layout_manager.layout_engine =
                     LayoutEngine::deserialize_from_str(&snapshot).unwrap();
                 reactor.handle_event(Event::ConfigUpdated(reactor.config.clone()));
@@ -10870,3 +10874,81 @@ fn display_refresh_reapplies_frames_when_macos_resized_windows_without_notificat
 }
 
 mod claims;
+
+#[test]
+fn master_restore_returns_a_window_to_the_display_it_was_saved_on() {
+    let (mut apps, mut reactor, a, b) = two_displays(Default::default());
+    let window = WindowId::new(1, 1);
+    reactor.state.windows.window_mut(window).unwrap().info.bundle_id = Some("com.example".into());
+    let path = std::env::temp_dir().join(format!("rift-displays-{}.ron", std::process::id()));
+    let engine = &reactor.layout_manager.layout_engine;
+    engine
+        .save_current_layout(path.clone(), &reactor.state.windows, Some(a))
+        .unwrap();
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: Some(1),
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(b));
+
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
+        path: path.clone(),
+        scope: layout::RestoreScope::Displays,
+        source: layout::RestoreSource::CurrentSpace,
+    })));
+    let _ = std::fs::remove_file(path);
+
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(a));
+    let pending = reactor.state.windows.record(window).unwrap().pending_transfer();
+    assert_eq!(pending.map(|transfer| transfer.requested_space), Some(a));
+}
+
+#[test]
+fn master_restore_returns_a_floating_window_to_its_saved_frame() {
+    let (mut apps, mut reactor, a, b) = two_displays(Default::default());
+    let window = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    apps.simulate_until_quiet(&mut reactor);
+    let saved = CGRect::new(CGPoint::new(200., 100.), CGSize::new(300., 200.));
+    let state = reactor.state.windows.window_mut(window).unwrap();
+    state.info.bundle_id = Some("com.example".into());
+    state.frame_monotonic = saved;
+    let path = std::env::temp_dir().join(format!("rift-floating-{}.ron", std::process::id()));
+    let engine = &reactor.layout_manager.layout_engine;
+    engine
+        .save_current_layout(path.clone(), &reactor.state.windows, Some(a))
+        .unwrap();
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: Some(1),
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(b));
+    // A projection intent from the session being replaced must not outlive the restore.
+    let stale = CGRect::new(CGPoint::new(600., 500.), CGSize::new(300., 200.));
+    reactor.state.windows.clear_floating_display_geometry(window);
+    reactor.state.windows.project_floating_frame(
+        window,
+        stale,
+        Some(shared_left()),
+        shared_right(),
+    );
+
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::RestoreLayout {
+        path: path.clone(),
+        scope: layout::RestoreScope::Displays,
+        source: layout::RestoreSource::CurrentSpace,
+    })));
+    let _ = std::fs::remove_file(path);
+
+    let pending = reactor.state.windows.record(window).unwrap().pending_transfer();
+    assert_eq!(
+        pending.and_then(|transfer| transfer.requested_frame),
+        Some(saved)
+    );
+}
