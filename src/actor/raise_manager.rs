@@ -27,6 +27,7 @@ pub enum Event {
 /// A queued layout response waiting to be processed.
 #[derive(Debug)]
 pub struct RaiseRequest {
+    pub mouse_token: Option<CancellationToken>,
     /// A set of windows to raise concurrently. Each inner vec should contain a
     /// set of windows from the same app and on the same screen.
     pub raise_windows: Vec<Vec<WindowId>>,
@@ -127,6 +128,7 @@ impl RaiseManager {
     fn handle_message(&mut self, msg: Event) {
         match msg {
             Event::RaiseRequest(RaiseRequest {
+                mouse_token,
                 raise_windows,
                 focus_window,
                 app_handles,
@@ -139,6 +141,7 @@ impl RaiseManager {
 
                 // Always queue the sequence
                 self.queued_sequences.push_back(RaiseRequest {
+                    mouse_token,
                     raise_windows,
                     focus_window,
                     app_handles,
@@ -171,6 +174,9 @@ impl RaiseManager {
                         // process_active_sequence) and must use a live token, or
                         // the app rejects it as cancelled and never reports
                         // completion, blocking the manager permanently.
+                        if sequence.raise_token.is_cancelled() {
+                            sequence.focus_batch = None;
+                        }
                         sequence.raise_token.cancel();
                         sequence.raise_token = CancellationToken::new();
                         // Restart the timeout window so the focus phase gets its
@@ -207,6 +213,7 @@ impl RaiseManager {
     fn start_new_sequence(
         &mut self,
         RaiseRequest {
+            mouse_token,
             raise_windows,
             focus_window,
             app_handles,
@@ -218,7 +225,10 @@ impl RaiseManager {
 
         // Send all raise requests with completion notification
         let mut pending_raises = HashSet::default();
-        let raise_token = CancellationToken::new();
+        let raise_token = mouse_token.unwrap_or_default();
+        if raise_token.is_cancelled() {
+            return;
+        }
 
         let mut focus_batch = None;
         for mut wids in raise_windows {
@@ -350,6 +360,7 @@ mod tests {
         focus_quiet: Quiet,
     ) -> Event {
         Event::RaiseRequest(RaiseRequest {
+            mouse_token: None,
             raise_windows: raise_windows.into_iter().map(|w| vec![w]).collect(),
             focus_window,
             app_handles,
@@ -795,6 +806,7 @@ mod tests {
                 vec![WindowId::new(1, 5), WindowId::new(1, 6)],
             ];
             let raise_request = Event::RaiseRequest(RaiseRequest {
+                mouse_token: None,
                 raise_windows: batched_windows,
                 focus_window: Some((WindowId::new(1, 7), None)),
                 app_handles,

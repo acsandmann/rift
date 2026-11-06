@@ -710,6 +710,7 @@ fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: Wind
     let wsid = info.sys_id.unwrap();
     let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
     let server_info = |layer| WindowServerInfo {
+        is_transient: false,
         id: wsid,
         pid: window.pid,
         layer,

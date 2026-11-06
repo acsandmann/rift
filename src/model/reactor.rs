@@ -119,7 +119,9 @@ impl WindowState {
     }
 
     pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
-        !self.info.is_minimized && manage_override.unwrap_or(self.is_manageable)
+        !self.info.is_minimized
+            && !crate::actor::reactor::utils::is_ax_transient(&self.info)
+            && manage_override.unwrap_or(self.is_manageable)
     }
 
     pub(crate) fn can_reconcile_admission(&self) -> bool { !self.info.is_minimized }

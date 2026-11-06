@@ -159,6 +159,7 @@ impl WindowServerRecord {
 /// workspace moves, which then leaked into queries and layout recovery.
 #[derive(Debug, Default)]
 pub struct WindowStore {
+    transient_windows: HashSet<WindowServerId>,
     topology_revision: u64,
     operation_generation: u64,
     windows: HashMap<WindowId, WindowRecord>,
@@ -738,6 +739,15 @@ impl WindowStore {
 
     pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
         let wsid = window.info.sys_id;
+        if crate::actor::reactor::utils::is_ax_transient(&window.info)
+            && matches!(
+                window.info.ax_role.as_deref(),
+                Some("AXWindow" | "AXSheet" | "AXPopover" | "AXMenu")
+            )
+            && let Some(wsid) = wsid
+        {
+            self.transient_windows.insert(wsid);
+        }
         let retained_workspace = {
             let record = self.windows.entry(window_id).or_default();
             record.state = Some(window);
@@ -923,10 +933,35 @@ impl WindowStore {
     }
 
     pub fn track_window_server_info(&mut self, info: WindowServerInfo) -> Option<WindowServerInfo> {
+        if info.is_transient {
+            self.transient_windows.insert(info.id);
+        }
         let record = self.server_record_mut(info.id);
         let old = record.info;
         record.info = Some(info);
         old
+    }
+
+    pub(crate) fn forget_transient(&mut self, id: WindowServerId) {
+        self.transient_windows.remove(&id);
+    }
+
+    pub(crate) fn transient_blocks_mouse_focus(
+        &self,
+        frontmost: impl Fn(i32) -> bool,
+        active_spaces: &HashSet<SpaceId>,
+    ) -> bool {
+        self.transient_windows.iter().any(|id| {
+            self.window_servers.get(id).is_some_and(|record| {
+                record.visible
+                    && record.space.is_some_and(|space| active_spaces.contains(&space))
+                    && record
+                        .info
+                        .map(|info| info.pid)
+                        .or_else(|| record.window_id.map(|w| w.pid))
+                        .is_some_and(&frontmost)
+            })
+        })
     }
 
     pub fn get_window_server_info(&self, wsid: WindowServerId) -> Option<WindowServerInfo> {
@@ -1034,6 +1069,7 @@ impl WindowStore {
     }
 
     pub fn remove_window_server_state(&mut self, wsid: WindowServerId) -> Option<WindowId> {
+        self.transient_windows.remove(&wsid);
         let wid = self.tracked_window_id(wsid);
         if let Some(record) = self.window_servers.get_mut(&wsid) {
             record.window_id = None;
@@ -1462,6 +1498,11 @@ impl WindowStore {
     }
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
+        self.transient_windows.retain(|id| {
+            self.window_servers
+                .get(id)
+                .is_some_and(|r| r.info.is_some_and(|i| i.pid != pid))
+        });
         let window_ids: Vec<_> =
             self.app_windows.get(&pid).into_iter().flatten().copied().collect();
         for window_id in window_ids {
@@ -1809,6 +1850,7 @@ mod tests {
         let mut store = WindowStore::default();
         let wsid = WindowServerId::new(42);
         store.track_window_server_info(WindowServerInfo {
+            is_transient: false,
             id: wsid,
             pid: 8,
             layer: 0,
@@ -1834,6 +1876,7 @@ mod tests {
         let mut store = WindowStore::default();
         let wsid = WindowServerId::new(77);
         store.track_window_server_info(WindowServerInfo {
+            is_transient: false,
             id: wsid,
             pid: 2,
             layer: 0,
@@ -2386,5 +2429,29 @@ mod tests {
             );
         }
         assert_eq!(store.workspace_window_count(workspace_id), 2);
+    }
+    #[test]
+    fn transient_focus_blocking_follows_native_visibility_and_space() {
+        let mut store = WindowStore::default();
+        let id = WindowServerId::new(998);
+        let mut info = crate::sys::window_server::get_window(id).unwrap();
+        info.is_transient = true;
+        let pid = info.pid;
+        let space = SpaceId::new(1);
+        let other = SpaceId::new(2);
+        let active = HashSet::from_iter([space]);
+        store.track_window_server_info(info);
+        store.observe_native_space(id, space, true);
+        assert!(store.transient_blocks_mouse_focus(|p| p == pid, &active));
+        assert!(!store.transient_blocks_mouse_focus(|_| false, &active));
+        store.observe_native_visibility(id, false);
+        assert!(!store.transient_blocks_mouse_focus(|_| true, &active));
+        store.observe_native_visibility(id, true);
+        store.observe_native_space(id, other, true);
+        assert!(!store.transient_blocks_mouse_focus(|_| true, &active));
+        store.observe_native_space(id, space, true);
+        assert!(store.transient_blocks_mouse_focus(|_| true, &active));
+        store.remove_windows_for_app(pid);
+        assert!(!store.transient_blocks_mouse_focus(|_| true, &active));
     }
 }

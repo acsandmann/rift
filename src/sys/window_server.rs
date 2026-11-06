@@ -364,6 +364,8 @@ fn window_query_run(filter: &WindowQueryFilter<'_>) -> Option<WindowIterator> {
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 #[allow(unused)]
 pub struct WindowServerInfo {
+    #[serde(default)]
+    pub is_transient: bool,
     pub id: WindowServerId,
     pub pid: pid_t,
     pub layer: i32,
@@ -535,6 +537,7 @@ fn get_visible_windows_raw<T: Type>() -> CFRetained<CFArray<T>> {
 pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     ids.iter()
         .map(|&id| WindowServerInfo {
+            is_transient: false,
             id,
             pid: 1234,
             layer: 0,
@@ -619,6 +622,19 @@ fn window_is_effectively_invisible(alpha: f32, layer: i32) -> bool {
     layer == 0 && alpha <= EFFECTIVELY_INVISIBLE_WINDOW_ALPHA
 }
 
+// Tags describe native behavior, not AX roles. In particular DOCUMENT is a
+// style bit, and an attached NSPopover can carry it too.
+fn native_window_is_transient(tags: SLSWindowTags, parent: u32) -> bool {
+    !tags.contains(SLSWindowTags::IGNORE_FOR_EVENTS)
+        && (tags.contains(SLSWindowTags::MODAL)
+            || (parent != 0 && tags.contains(SLSWindowTags::ATTACHED))
+            || tags.contains(
+                SLSWindowTags::FLOATING
+                    | SLSWindowTags::HIDE_ON_DEACTIVATE
+                    | SLSWindowTags::IGNORES_CYCLE,
+            ))
+}
+
 #[cfg_attr(test, allow(dead_code))]
 fn window_info_from_query(query: &WindowIterator) -> Option<WindowServerInfo> {
     let layer = query.level();
@@ -626,7 +642,17 @@ fn window_info_from_query(query: &WindowIterator) -> Option<WindowServerInfo> {
         return None;
     }
     let (min_frame, max_frame) = query.constraints();
+    let tags = SLSWindowTags::from_bits_retain(query.tags());
+    let parent = query.parent_id();
+    tracing::trace!(
+        wsid = query.window_id(),
+        ?tags,
+        parent,
+        layer,
+        "Native window classification"
+    );
     Some(WindowServerInfo {
+        is_transient: native_window_is_transient(tags, parent),
         id: WindowServerId::new(query.window_id()),
         pid: query.pid() as i32,
         layer,
@@ -1036,6 +1062,26 @@ pub unsafe fn switch_space(direction: crate::layout_engine::Direction) {
 #[cfg(test)]
 mod tests {
     use super::{SLSWindowTags, WindowServerId, key_window_in_z_order};
+
+    #[test]
+    fn native_transient_tags_match_observed_appkit_windows() {
+        // Captured on this Mac after an AppKit run-loop turn. These are native
+        // iterator masks, not fixtures produced by the classifier.
+        for (bits, parent, expected) in [
+            (0x0000200100482001, 0, false),  // regular and fixed-size NSWindow
+            (0x00002001004c6002, 0, true),   // hides-on-deactivate floating NSPanel
+            (0x00002001400c2481, 42, true),  // transient NSPopover (also DOCUMENT)
+            (0x00002001000ca082, 42, true),  // NSAlert sheet, without MODAL
+            (0x0000200100482003, 0, false),  // ordinary floating document
+            (0x00002001000ca282, 42, false), // input-transparent attached surface
+            (0x0000000080000000, 0, true),   // standalone modal
+        ] {
+            assert_eq!(
+                super::native_window_is_transient(SLSWindowTags::from_bits_retain(bits), parent),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn zero_window_server_id_is_not_a_window_id() {
