@@ -4,9 +4,56 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::MainThreadMarker;
 
-use crate::actor::{self, reactor};
-use crate::common::config::MissionControlSettings;
 use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewCache};
+use crate::{
+    actor::{self, reactor},
+    common::config::MissionControlKeySpecs,
+};
+use crate::{common::config::MissionControlSettings, sys::event::Hotkey};
+
+pub(crate) struct MissionControlKeyBindings {
+    left: Vec<Hotkey>,
+    down: Vec<Hotkey>,
+    up: Vec<Hotkey>,
+    right: Vec<Hotkey>,
+}
+
+impl MissionControlKeyBindings {
+    pub(crate) fn from_specs(specs: &MissionControlKeySpecs) -> Self {
+        Self {
+            left: Self::parse_bindings(&specs.left),
+            down: Self::parse_bindings(&specs.down),
+            up: Self::parse_bindings(&specs.up),
+            right: Self::parse_bindings(&specs.right),
+        }
+    }
+
+    fn parse_bindings(specs: &[String]) -> Vec<Hotkey> {
+        let mut bindings = Vec::new();
+
+        for spec in specs {
+            // Resolve the string using the currently cached keyboard layout.
+            let hotkey = match spec.parse::<Hotkey>() {
+                Ok(hotkey) => hotkey,
+                Err(error) => {
+                    tracing::warn!(
+                        %spec,
+                        %error,
+                        "Skipping Mission Control hotkey that no longer resolves"
+                    );
+                    continue;
+                }
+            };
+
+            // Prepare concrete modifier variants for exact runtime matching.
+            for modifiers in hotkey.modifiers.expand_to_specific() {
+                bindings.push(Hotkey::new(modifiers, hotkey.key_code));
+            }
+        }
+
+        bindings
+    }
+}
 
 #[derive(Debug)]
 pub enum Event {
@@ -92,6 +139,23 @@ impl Input {
             48 => Self::Cycle(!flags.contains(CGEventFlags::MaskShift)),
             _ => return None,
         })
+    }
+
+    pub(crate) fn from_hotkey(
+        hotkey: &Hotkey,
+        key_settings: &MissionControlKeyBindings,
+    ) -> Option<Self> {
+        if key_settings.left.contains(hotkey) {
+            Some(Self::Left)
+        } else if key_settings.down.contains(hotkey) {
+            Some(Self::Down)
+        } else if key_settings.up.contains(hotkey) {
+            Some(Self::Up)
+        } else if key_settings.right.contains(hotkey) {
+            Some(Self::Right)
+        } else {
+            None
+        }
     }
 }
 
@@ -410,6 +474,93 @@ impl MissionControlActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mission_control_configured_hotkeys_route_to_directions() {
+        let keys: MissionControlKeySpecs = toml::from_str(
+            r#"
+            left = ["H", "A"]
+            down = ["J"]
+            up = ["K"]
+            right = ["L"]
+            "#,
+        )
+        .unwrap();
+        let keys = MissionControlKeyBindings::from_specs(&keys);
+
+        for spec in ["H", "A"] {
+            assert!(matches!(
+                Input::from_hotkey(&spec.parse().unwrap(), &keys),
+                Some(Input::Left)
+            ));
+        }
+        assert!(matches!(
+            Input::from_hotkey(&"J".parse().unwrap(), &keys),
+            Some(Input::Down)
+        ));
+        assert!(matches!(
+            Input::from_hotkey(&"K".parse().unwrap(), &keys),
+            Some(Input::Up)
+        ));
+        assert!(matches!(
+            Input::from_hotkey(&"L".parse().unwrap(), &keys),
+            Some(Input::Right)
+        ));
+        for spec in ["Z", "Shift + H", "Ctrl + H"] {
+            assert!(
+                Input::from_hotkey(&spec.parse().unwrap(), &keys).is_none(),
+                "{spec}"
+            );
+        }
+        assert!(
+            Input::from_hotkey(
+                &"H".parse().unwrap(),
+                &MissionControlKeyBindings::from_specs(&MissionControlKeySpecs::default())
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn mission_control_expanded_modifiers_accept_either_side_but_reject_extra_modifiers() {
+        use crate::sys::hotkey::{KeyCode, Modifiers};
+
+        let keys: MissionControlKeySpecs = toml::from_str(r#"left = ["Alt + H"]"#).unwrap();
+        let expanded = MissionControlKeyBindings::from_specs(&keys);
+        // Expansion prepares a separate runtime copy without changing the source settings.
+        assert_eq!(keys.left, vec!["Alt + H"]);
+        assert_eq!(expanded.left.len(), 3);
+        for modifiers in [Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT, Modifiers::ALT] {
+            let hotkey = Hotkey::new(modifiers, KeyCode::KeyH);
+            assert!(matches!(
+                Input::from_hotkey(&hotkey, &expanded),
+                Some(Input::Left)
+            ));
+        }
+        for spec in ["H", "Ctrl + AltLeft + H", "Shift + AltRight + H"] {
+            assert!(
+                Input::from_hotkey(&spec.parse().unwrap(), &expanded).is_none(),
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn mission_control_expanded_side_specific_modifiers_stay_side_specific() {
+        let keys: MissionControlKeySpecs = toml::from_str(r#"left = ["AltLeft + H"]"#).unwrap();
+        let expanded = MissionControlKeyBindings::from_specs(&keys);
+        assert_eq!(expanded.left.len(), 1);
+        assert!(matches!(
+            Input::from_hotkey(&"AltLeft + H".parse().unwrap(), &expanded),
+            Some(Input::Left)
+        ));
+        for spec in ["AltRight + H", "Alt + H"] {
+            assert!(
+                Input::from_hotkey(&spec.parse().unwrap(), &expanded).is_none(),
+                "{spec}"
+            );
+        }
+    }
 
     #[test]
     fn disabled_settings_do_not_create_a_channel() {

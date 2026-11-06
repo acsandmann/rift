@@ -1384,6 +1384,25 @@ fn fallback_keycode_from_char(ch: &str) -> Option<KeyCode> {
     Some(code)
 }
 
+#[cfg(test)]
+static TEST_KEYMAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Simulate layout changes without native APIs; restore the cache even if a test panics.
+#[cfg(test)]
+pub(crate) fn with_test_keymap(test: impl FnOnce(&dyn Fn(&str, KeyCode))) {
+    let _lock = TEST_KEYMAP_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    struct RestoreKeymap(StdHashMap<String, KeyCode>);
+    impl Drop for RestoreKeymap {
+        fn drop(&mut self) {
+            *VIRTUAL_KEYMAP.write() = std::mem::take(&mut self.0);
+        }
+    }
+    let _restore = RestoreKeymap(VIRTUAL_KEYMAP.read().clone());
+    test(&|character, key| {
+        VIRTUAL_KEYMAP.write().insert(character.to_lowercase(), key);
+    });
+}
+
 mod tests {
 
     /// Every KeyCode must survive Display -> FromStr.
@@ -1470,6 +1489,7 @@ mod tests {
     fn cached_layout_remaps_worker_parsing_and_retains_last_good_map() {
         // Use a character absent from other fixtures so parallel parser tests
         // keep their fallback mappings. No test calls the native generator.
+        let _lock = TEST_KEYMAP_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let original = VIRTUAL_KEYMAP.read().clone();
         for key in [KeyCode::KeyH, KeyCode::KeyJ] {
             replace_virtual_keymap(StdHashMap::from([("§".into(), key)]));

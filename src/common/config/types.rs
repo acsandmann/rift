@@ -20,8 +20,12 @@ pub(super) const DEPRECATED_MAP: &[(&str, &str)] = &[
     ("toggle_tile_orientation", "toggle_orientation"),
 ];
 
-pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
-pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
+pub fn data_dir() -> PathBuf {
+    dirs::home_dir().unwrap().join(".rift")
+}
+pub fn restore_file() -> PathBuf {
+    data_dir().join("layout.ron")
+}
 pub fn config_file() -> PathBuf {
     dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
 }
@@ -954,7 +958,9 @@ impl Default for StackLineSettings {
     }
 }
 
-fn default_stack_line_thickness() -> f64 { cgs::tabs::TabBar::HEIGHT }
+fn default_stack_line_thickness() -> f64 {
+    cgs::tabs::TabBar::HEIGHT
+}
 
 impl StackLineSettings {
     /// The native tab bar is unusable below this thickness.
@@ -993,7 +999,9 @@ pub enum StackLineHoverMode {
 }
 
 impl StackLineHoverMode {
-    pub fn selects_on_hover(self) -> bool { self == Self::Click }
+    pub fn selects_on_hover(self) -> bool {
+        self == Self::Click
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
@@ -1109,24 +1117,54 @@ pub struct MissionControlSettings {
     /// Duration of Overview entry and camera navigation, in milliseconds.
     #[setting(label = "Animation duration", unit = "ms", enabled_by = "enabled")]
     pub fade_duration_ms: f64,
+    #[serde(default)]
+    #[setting(ignore)]
+    pub keys: MissionControlKeySpecs,
 }
 
-fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct MissionControlKeySpecs {
+    pub left: Vec<String>,
+    pub down: Vec<String>,
+    pub up: Vec<String>,
+    pub right: Vec<String>,
+}
 
-fn default_drop_zone_fraction() -> f64 { 0.25 }
+fn default_mission_control_fade_duration_ms() -> f64 {
+    180.0
+}
 
-fn default_mouse_action_none() -> MouseAction { MouseAction::None }
+fn default_drop_zone_fraction() -> f64 {
+    0.25
+}
 
-fn default_master_stack_ratio() -> f64 { 0.6 }
+fn default_mouse_action_none() -> MouseAction {
+    MouseAction::None
+}
 
-fn default_master_stack_count() -> usize { 1 }
+fn default_master_stack_ratio() -> f64 {
+    0.6
+}
 
-fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
-fn default_scrolling_preset_column_widths() -> Vec<f64> { vec![1.0 / 3.0, 0.5, 2.0 / 3.0] }
+fn default_master_stack_count() -> usize {
+    1
+}
 
-fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
+fn default_scrolling_column_width_ratio() -> f64 {
+    0.7
+}
+fn default_scrolling_preset_column_widths() -> Vec<f64> {
+    vec![1.0 / 3.0, 0.5, 2.0 / 3.0]
+}
 
-fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
+fn default_scrolling_min_column_width_ratio() -> f64 {
+    0.3
+}
+
+fn default_scrolling_max_column_width_ratio() -> f64 {
+    0.9
+}
 
 impl StackLineSettings {
     pub fn reserve(&self) -> StackLineReserve {
@@ -1314,7 +1352,9 @@ pub struct ScrollingLayoutSettings {
     pub gestures: ScrollingGestureSettings,
 }
 
-fn default_scrolling_animate() -> Option<bool> { Some(true) }
+fn default_scrolling_animate() -> Option<bool> {
+    Some(true)
+}
 
 impl Default for ScrollingLayoutSettings {
     fn default() -> Self {
@@ -1826,9 +1866,13 @@ impl InnerGaps {
     }
 }
 
-fn yes() -> bool { true }
+fn yes() -> bool {
+    true
+}
 
-fn default_stack_offset() -> f64 { 40.0 }
+fn default_stack_offset() -> f64 {
+    40.0
+}
 
 pub fn default_stack_orientation() -> StackDefaultOrientation {
     StackDefaultOrientation::Perpendicular
@@ -1838,13 +1882,21 @@ fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement 
     MasterStackNewWindowPlacement::Master
 }
 
-fn default_animation_duration() -> f64 { 0.3 }
+fn default_animation_duration() -> f64 {
+    0.3
+}
 
-fn default_animation_fps() -> f64 { 100.0 }
+fn default_animation_fps() -> f64 {
+    100.0
+}
 
-fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
+fn default_layout_folder() -> PathBuf {
+    PathBuf::from("~/.config/rift/layouts")
+}
 
-fn default_workspace_count() -> usize { 4 }
+fn default_workspace_count() -> usize {
+    4
+}
 
 fn default_workspace_names() -> Vec<String> {
     vec![
@@ -1857,10 +1909,18 @@ fn default_workspace_names() -> Vec<String> {
 
 // Interpreted as normalized fraction when <= 1.0. If > 1.0 and <= 100.0,
 // it is treated as a percentage (e.g. 40.0 -> 0.40).
-fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
-fn default_swipe_fingers() -> usize { 3 }
-fn default_distance_pct() -> f64 { 0.08 }
-fn default_overscroll_threshold() -> f64 { 0.55 }
+fn default_swipe_vertical_tolerance() -> f64 {
+    0.4
+}
+fn default_swipe_fingers() -> usize {
+    3
+}
+fn default_distance_pct() -> f64 {
+    0.08
+}
+fn default_overscroll_threshold() -> f64 {
+    0.55
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, ConfigEnum)]
 #[serde(rename_all = "snake_case")]

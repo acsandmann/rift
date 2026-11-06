@@ -17,9 +17,8 @@ use objc2_core_graphics::{
 use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
-use crate::actor;
-use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
+use crate::actor::{mission_control::MissionControlKeyBindings, spaces::ForwardedSpaceState};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
     BindingModeSpecs, Config, DragDropSettings, HorizontalMouseWarp, MouseAction, MouseModifier,
@@ -32,6 +31,7 @@ use crate::sys::hotkey::{
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::timer::Timer;
 use crate::sys::{gesture, power, window_server};
+use crate::{actor, common::config::MissionControlKeySpecs};
 
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 16_000_000; // 16ms ~= 62 Hz
 const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 32_000_000; // 32ms ~= 31 Hz
@@ -109,6 +109,8 @@ pub struct Input {
     hotkeys_active: Cell<bool>,
     wm_sender: wm_controller::Sender,
     mission_control_tx: RefCell<Option<super::mission_control::Sender>>,
+    mission_control_specs: RefCell<MissionControlKeySpecs>,
+    mission_control_keys: RefCell<MissionControlKeyBindings>,
 }
 
 impl Drop for Input {
@@ -335,6 +337,8 @@ impl Input {
         state.gesture_settings = super::gesture::Settings::new(&config);
         let gesture_control = super::gesture::Control::new(&config);
         let mouse_move_min_interval_ticks = mouse_move_sampling_profile(state.low_power_mode);
+        let mission_control_specs = config.settings.ui.mission_control.keys.clone();
+        let mission_control_keys = MissionControlKeyBindings::from_specs(&mission_control_specs);
         let input = Input {
             events_tx,
             requests_rx: Some(requests_rx),
@@ -363,6 +367,8 @@ impl Input {
             hotkeys_active: Cell::new(false),
             wm_sender,
             mission_control_tx: RefCell::new(mission_control_tx),
+            mission_control_specs: RefCell::new(mission_control_specs),
+            mission_control_keys: RefCell::new(mission_control_keys),
         };
         input.install_binding_specs(config.binding_mode_specs);
         input
@@ -560,6 +566,7 @@ impl Input {
             }
             Request::SetBindingMode(target) => self.transition_binding_mode(&target),
             Request::KeyboardLayoutChanged => {
+                self.rebuild_mission_control_bindings();
                 if self.hotkeys_active.get() {
                     self.rebuild_binding_maps();
                     should_rebuild_mask = true;
@@ -621,6 +628,9 @@ impl Input {
                         state.show_mouse();
                     }
                 }
+                *self.mission_control_specs.borrow_mut() =
+                    new_config.settings.ui.mission_control.keys;
+                self.rebuild_mission_control_bindings();
                 should_rebuild_mask = true;
             }
             Request::LayoutModesChanged(modes) => {
@@ -679,7 +689,9 @@ impl Input {
     }
 
     #[inline]
-    fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
+    fn reset_mouse_move_sample_gate(&self) {
+        self.mouse_move_last_timestamp.set(None);
+    }
 
     fn reconcile_after_tap_reenabled(&self) {
         let mut state = self.state.borrow_mut();
@@ -793,23 +805,38 @@ impl Input {
                     return true;
                 }
                 if event_type == CGEventType::KeyDown && self.mission_control_active.get() {
-                    let keycode = CGEvent::integer_value_field(
-                        Some(event),
-                        CGEventField::KeyboardEventKeycode,
-                    ) as u16;
-                    if let Some(input) = super::mission_control::Input::from_keycode(
-                        keycode,
-                        CGEvent::flags(Some(event)),
-                    ) {
+                    let flags = CGEvent::flags(Some(event));
+                    // If the user has any mission control keys set up we must try and find if the
+                    // received event matches one of them
+                    let configured_input = key_code_from_event(event).and_then(|key_code| {
+                        let state = self.state.borrow();
+                        let hotkey = Hotkey::new(
+                            modifiers_from_flags_with_keys(flags, &state.pressed_keys),
+                            key_code,
+                        );
+
+                        super::mission_control::Input::from_hotkey(
+                            &hotkey,
+                            &self.mission_control_keys.borrow(),
+                        )
+                    });
+
+                    // If configured input is SOME we use that
+                    if let Some(input) = configured_input.or_else(|| {
+                        let keycode = CGEvent::integer_value_field(
+                            Some(event),
+                            CGEventField::KeyboardEventKeycode,
+                        ) as u16;
+
+                        // otherwise default to default hardcoded mission control values
+                        super::mission_control::Input::from_keycode(keycode, flags)
+                    }) {
                         let configured_zoom =
                             matches!(input, super::mission_control::Input::ZoomStep(_))
                                 && key_code_from_event(event).is_some_and(|key_code| {
                                     let state = self.state.borrow();
                                     let hotkey = Hotkey::new(
-                                        modifiers_from_flags_with_keys(
-                                            CGEvent::flags(Some(event)),
-                                            &state.pressed_keys,
-                                        ),
+                                        modifiers_from_flags_with_keys(flags, &state.pressed_keys),
                                         key_code,
                                     );
                                     self.hotkeys
@@ -1205,6 +1232,11 @@ impl Input {
         trace!("Updated hotkey maps for current keyboard layout: {}", maps.len());
         *self.hotkeys.borrow_mut() = maps;
     }
+
+    fn rebuild_mission_control_bindings(&self) {
+        *self.mission_control_keys.borrow_mut() =
+            MissionControlKeyBindings::from_specs(&self.mission_control_specs.borrow());
+    }
 }
 
 fn overview_scroll_delta(delta: CGPoint, flags: CGEventFlags) -> CGPoint {
@@ -1312,9 +1344,13 @@ impl State {
         }
     }
 
-    fn note_key_down(&mut self, key_code: KeyCode) { self.pressed_keys.insert(key_code); }
+    fn note_key_down(&mut self, key_code: KeyCode) {
+        self.pressed_keys.insert(key_code);
+    }
 
-    fn note_key_up(&mut self, key_code: KeyCode) { self.pressed_keys.remove(&key_code); }
+    fn note_key_up(&mut self, key_code: KeyCode) {
+        self.pressed_keys.remove(&key_code);
+    }
 
     fn note_flags_changed(&mut self, key_code: KeyCode) {
         if !is_modifier_key(key_code) {
@@ -1957,6 +1993,12 @@ mod tests {
     }
 
     fn input() -> (Input, actor::Receiver<WmEvent>, actor::Receiver<Event>) {
+        input_with_mission_control_keys(MissionControlKeySpecs::default())
+    }
+
+    fn input_with_mission_control_keys(
+        keys: MissionControlKeySpecs,
+    ) -> (Input, actor::Receiver<WmEvent>, actor::Receiver<Event>) {
         let (events_tx, events_rx) = actor::channel();
         let (_, requests_rx) = actor::channel();
         let (wm_tx, wm_rx) = actor::channel();
@@ -1967,6 +2009,7 @@ mod tests {
         config.settings.focus_follows_mouse = false;
         config.settings.focus_follows_mouse_disable_hotkey = None;
         config.settings.mouse_hides_on_focus = false;
+        config.settings.ui.mission_control.keys = keys;
         let input = Input::new(
             config,
             events_tx,
@@ -1980,6 +2023,246 @@ mod tests {
             objc2_core_foundation::CGSize::new(1000., 1000.),
         ));
         (input, wm_rx, events_rx)
+    }
+
+    #[test]
+    fn mission_control_configured_events_are_consumed_only_while_active() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+
+        let keys = toml::from_str(r#"left = ["H", "Alt + H"]"#).unwrap();
+        let (input, mut wm_rx, mut reactor_rx) = input_with_mission_control_keys(keys);
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        // Native keycode 4 is H. Build real CGEvents to exercise the event-to-Hotkey path.
+        let event = CGEvent::new_keyboard_event(None, 4, true).unwrap();
+        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+
+        assert!(input.on_event(CGEventType::KeyDown, &event, None));
+        assert!(rx.try_recv().is_err());
+
+        input.mission_control_active.set(true);
+        for flags in [CGEventFlags::empty(), CGEventFlags::MaskAlternate] {
+            CGEvent::set_flags(Some(&event), flags);
+            assert!(!input.on_event(CGEventType::KeyDown, &event, None));
+            assert!(matches!(
+                rx.try_recv().unwrap().1,
+                OverviewEvent::Input(OverviewInput::Left)
+            ));
+        }
+        // An extra modifier must not accidentally match the plain H binding.
+        CGEvent::set_flags(Some(&event), CGEventFlags::MaskControl);
+        assert!(input.on_event(CGEventType::KeyDown, &event, None));
+        assert!(rx.try_recv().is_err());
+        assert!(wm_rx.try_recv().is_err());
+        assert!(reactor_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mission_control_empty_bindings_preserve_builtin_event_routes() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+
+        let (input, _, _) = input();
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        input.mission_control_active.set(true);
+        for code in [123, 124, 125, 126, 53, 36, 48, 24] {
+            let event = CGEvent::new_keyboard_event(None, code, true).unwrap();
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+            assert!(
+                !input.on_event(CGEventType::KeyDown, &event, None),
+                "keycode {code}"
+            );
+            let OverviewEvent::Input(action) = rx.try_recv().unwrap().1 else {
+                panic!("expected overview input for keycode {code}");
+            };
+            assert!(matches!(
+                (code, action),
+                (123, OverviewInput::Left)
+                    | (124, OverviewInput::Right)
+                    | (125, OverviewInput::Down)
+                    | (126, OverviewInput::Up)
+                    | (53, OverviewInput::Dismiss)
+                    | (36, OverviewInput::Activate)
+                    | (48, OverviewInput::Cycle(true))
+                    | (24, OverviewInput::ZoomStep(1))
+            ));
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mission_control_config_reload_replaces_and_expands_bindings() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+
+        let keys = toml::from_str(r#"left = ["H"]"#).unwrap();
+        let (input, _, _) = input_with_mission_control_keys(keys);
+        let (tx, mut rx) = actor::channel();
+        *input.mission_control_tx.borrow_mut() = Some(tx);
+        let old_event = CGEvent::new_keyboard_event(None, 4, true).unwrap();
+        CGEvent::set_flags(Some(&old_event), CGEventFlags::empty());
+        input.mission_control_active.set(true);
+        assert!(!input.on_event(CGEventType::KeyDown, &old_event, None));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            OverviewEvent::Input(OverviewInput::Left)
+        ));
+
+        // Reload while inactive, with all native input features disabled, so this test
+        // does not need to install a system event tap or request Accessibility access.
+        input.mission_control_active.set(false);
+        let mut config = Config::default();
+        config.settings.gestures.enabled = false;
+        config.settings.layout.scrolling.gestures.enabled = false;
+        config.settings.focus_follows_mouse = false;
+        config.settings.focus_follows_mouse_disable_hotkey = None;
+        config.settings.mouse_hides_on_focus = false;
+        config.settings.drag_drop.enabled = false;
+        config.settings.horizontal_mouse_warp = None;
+        config.settings.ui.mission_control.keys = toml::from_str(r#"right = ["Alt + L"]"#).unwrap();
+        let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        input.on_request(Request::ConfigUpdated(config), &recovery_tx);
+        assert!(input.tap.borrow().is_none());
+
+        input.mission_control_active.set(true);
+        assert!(input.on_event(CGEventType::KeyDown, &old_event, None));
+        assert!(rx.try_recv().is_err());
+        let new_event = CGEvent::new_keyboard_event(None, 37, true).unwrap();
+        CGEvent::set_flags(Some(&new_event), CGEventFlags::MaskAlternate);
+        assert!(!input.on_event(CGEventType::KeyDown, &new_event, None));
+        assert!(matches!(
+            rx.try_recv().unwrap().1,
+            OverviewEvent::Input(OverviewInput::Right)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn mission_control_layout_changes_preserve_direction_for_configured_characters() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        use crate::sys::hotkey::with_test_keymap;
+
+        with_test_keymap(|set_key| {
+            // Dedicated characters avoid changing mappings used by parallel tests.
+            let characters = ["¤", "µ", "ø", "æ"];
+            let layouts = [
+                [
+                    (KeyCode::KeyH, 4),
+                    (KeyCode::KeyJ, 38),
+                    (KeyCode::KeyK, 40),
+                    (KeyCode::KeyL, 37),
+                ],
+                [
+                    (KeyCode::KeyA, 0),
+                    (KeyCode::KeyS, 1),
+                    (KeyCode::KeyD, 2),
+                    (KeyCode::KeyF, 3),
+                ],
+            ];
+            for (character, (key, _)) in characters.iter().zip(layouts[0]) {
+                set_key(character, key);
+            }
+            let specs: MissionControlKeySpecs = toml::from_str(
+                r#"
+                left = ["¤", "Alt + ¤"]
+                down = ["µ", "Alt + µ"]
+                up = ["ø", "Alt + ø"]
+                right = ["æ", "Alt + æ"]
+                "#,
+            )
+            .unwrap();
+            let (input, mut wm_rx, mut reactor_rx) = input_with_mission_control_keys(specs.clone());
+            let (tx, mut rx) = actor::channel();
+            *input.mission_control_tx.borrow_mut() = Some(tx);
+            let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            assert!(!input.hotkeys_active.get());
+
+            // Switch A -> B -> A. Each character must retain its semantic direction,
+            // despite changing physical keycodes, with or without a generic modifier.
+            for layout_index in [0, 1, 0] {
+                input.mission_control_active.set(false);
+                for (character, (key, _)) in characters.iter().zip(layouts[layout_index]) {
+                    set_key(character, key);
+                }
+                input.on_request(Request::KeyboardLayoutChanged, &recovery_tx);
+                input.mission_control_active.set(true);
+                assert_eq!(*input.mission_control_specs.borrow(), specs);
+                for (direction, (_, code)) in layouts[layout_index].iter().enumerate() {
+                    for flags in [CGEventFlags::empty(), CGEventFlags::MaskAlternate] {
+                        let event = CGEvent::new_keyboard_event(None, *code, true).unwrap();
+                        CGEvent::set_flags(Some(&event), flags);
+                        assert!(!input.on_event(CGEventType::KeyDown, &event, None));
+                        let OverviewEvent::Input(action) = rx.try_recv().unwrap().1 else {
+                            panic!("expected directional input");
+                        };
+                        assert!(matches!(
+                            (direction, action),
+                            (0, OverviewInput::Left)
+                                | (1, OverviewInput::Down)
+                                | (2, OverviewInput::Up)
+                                | (3, OverviewInput::Right)
+                        ));
+                    }
+                }
+                // No stale bindings should remain at the previous layout's positions.
+                for (_, code) in layouts[1 - layout_index] {
+                    let event = CGEvent::new_keyboard_event(None, code, true).unwrap();
+                    CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+                    assert!(input.on_event(CGEventType::KeyDown, &event, None));
+                }
+                assert!(rx.try_recv().is_err());
+            }
+            assert!(input.tap.borrow().is_none());
+            assert!(wm_rx.try_recv().is_err());
+            assert!(reactor_rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn mission_control_layout_change_after_reload_uses_latest_specs() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        use crate::sys::hotkey::with_test_keymap;
+
+        with_test_keymap(|set_key| {
+            set_key("¤", KeyCode::KeyH);
+            let specs = toml::from_str(r#"left = ["¤"]"#).unwrap();
+            let (input, _, _) = input_with_mission_control_keys(specs);
+            let (tx, mut rx) = actor::channel();
+            *input.mission_control_tx.borrow_mut() = Some(tx);
+
+            let mut config = Config::default();
+            config.settings.gestures.enabled = false;
+            config.settings.layout.scrolling.gestures.enabled = false;
+            config.settings.focus_follows_mouse = false;
+            config.settings.focus_follows_mouse_disable_hotkey = None;
+            config.settings.mouse_hides_on_focus = false;
+            config.settings.drag_drop.enabled = false;
+            config.settings.horizontal_mouse_warp = None;
+            let latest_specs: MissionControlKeySpecs =
+                toml::from_str(r#"right = ["Alt + ¤"]"#).unwrap();
+            config.settings.ui.mission_control.keys = latest_specs.clone();
+            let (recovery_tx, _) = tokio::sync::mpsc::unbounded_channel();
+            input.on_request(Request::ConfigUpdated(config), &recovery_tx);
+            assert_eq!(*input.mission_control_specs.borrow(), latest_specs);
+            assert!(input.tap.borrow().is_none());
+
+            set_key("¤", KeyCode::KeyJ);
+            input.on_request(Request::KeyboardLayoutChanged, &recovery_tx);
+            input.mission_control_active.set(true);
+            let event = CGEvent::new_keyboard_event(None, 38, true).unwrap();
+            CGEvent::set_flags(Some(&event), CGEventFlags::MaskAlternate);
+            assert!(!input.on_event(CGEventType::KeyDown, &event, None));
+            assert!(matches!(
+                rx.try_recv().unwrap().1,
+                OverviewEvent::Input(OverviewInput::Right)
+            ));
+            // Neither the old direction nor the old physical key should be restored.
+            CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+            assert!(input.on_event(CGEventType::KeyDown, &event, None));
+            let old_event = CGEvent::new_keyboard_event(None, 4, true).unwrap();
+            CGEvent::set_flags(Some(&old_event), CGEventFlags::MaskAlternate);
+            assert!(input.on_event(CGEventType::KeyDown, &old_event, None));
+            assert!(rx.try_recv().is_err());
+        });
     }
 
     #[test]
@@ -2049,14 +2332,10 @@ mod tests {
         let (input, mut wm_rx, _) = input();
         input.hotkeys_active.set(true);
         input.rebuild_binding_maps();
-        input
-            .hotkeys
-            .borrow_mut()
-            .get_mut(0)
-            .unwrap()
-            .insert(Hotkey::new(Modifiers::empty(), KeyCode::KeyA), vec![
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            ]);
+        input.hotkeys.borrow_mut().get_mut(0).unwrap().insert(
+            Hotkey::new(Modifiers::empty(), KeyCode::KeyA),
+            vec![WmCommand::Wm(wm_controller::WmCmd::ReloadConfig)],
+        );
         let event = CGEvent::new_keyboard_event(None, 0, true).unwrap();
         CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         assert!(!input.on_event(CGEventType::KeyDown, &event, None));
@@ -2139,10 +2418,13 @@ mod tests {
     fn normal_command_after_binding_mode_transition_still_runs() {
         let (input, mut wm_rx, _) = input();
         input.install_binding_specs(vec![
-            ("default".into(), vec![(
-                "A".into(),
-                WmCommand::Wm(wm_controller::WmCmd::BindingMode("other".into())),
-            )]),
+            (
+                "default".into(),
+                vec![(
+                    "A".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::BindingMode("other".into())),
+                )],
+            ),
             ("other".into(), vec![]),
         ]);
         input.hotkeys_active.set(true);
@@ -2165,14 +2447,20 @@ mod tests {
     fn layout_rebuild_preserves_active_mode_and_rebuilds_each_map() {
         let (input, _, _) = input();
         input.install_binding_specs(vec![
-            ("default".into(), vec![(
-                "Ctrl + A".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
-            ("other".into(), vec![(
-                "Ctrl + B".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
+            (
+                "default".into(),
+                vec![(
+                    "Ctrl + A".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
+            (
+                "other".into(),
+                vec![(
+                    "Ctrl + B".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
         ]);
         input.hotkeys_active.set(true);
         input.active_mode.set(1);
@@ -2187,14 +2475,20 @@ mod tests {
     fn generic_modifiers_expand_inside_each_mode_and_replacement_resets_to_default() {
         let (input, _, _) = input();
         let specs = vec![
-            ("default".into(), vec![(
-                "Ctrl + A".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
-            ("other".into(), vec![(
-                "Alt + B".into(),
-                WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
-            )]),
+            (
+                "default".into(),
+                vec![(
+                    "Ctrl + A".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
+            (
+                "other".into(),
+                vec![(
+                    "Alt + B".into(),
+                    WmCommand::Wm(wm_controller::WmCmd::ReloadConfig),
+                )],
+            ),
         ];
         input.install_binding_specs(specs.clone());
         input.hotkeys_active.set(true);
