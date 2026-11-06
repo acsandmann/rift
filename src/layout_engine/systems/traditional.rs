@@ -765,6 +765,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.visible_windows_under_internal(selection)
     }
 
+    fn windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.selection(layout)
+            .traverse_preorder(&self.tree.map)
+            .filter_map(|node| self.tree.data.window.at(node))
+            .collect()
+    }
+
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
         if !self.inactive.is_empty() && self.find_best_focus_target(self.root(layout)).is_none() {
             return false;
