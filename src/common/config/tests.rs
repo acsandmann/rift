@@ -826,10 +826,10 @@ fn stack_tab_geometry_rejects_unusable_values() {
 }
 
 #[test]
-fn workspace_mode_defaults_to_per_display_and_round_trips() {
+fn workspace_mode_defaults_to_global_and_round_trips() {
     assert_eq!(
         toml::from_str::<VirtualWorkspaceSettings>("").unwrap().mode,
-        WorkspaceMode::PerDisplay
+        WorkspaceMode::Global
     );
     for (text, mode) in [
         ("per_display", WorkspaceMode::PerDisplay),
