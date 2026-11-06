@@ -81,12 +81,20 @@ fn shortcut_recorder_is_frontmost() -> bool {
             .is_some_and(|app| app.processIdentifier() == pid)
 }
 
+#[derive(Clone, Copy)]
+struct OverviewHotkey {
+    trigger: Option<KeyCode>,
+    flags: CGEventFlags,
+}
+
 pub struct Input {
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
     state: RefCell<State>,
     event_mask: Cell<CGEventMask>,
     mission_control_active: Cell<bool>,
+    activate_on_hotkey_release: Cell<bool>,
+    overview_hotkey: Cell<Option<OverviewHotkey>>,
     mission_control_bounds: RefCell<Vec<CGRect>>,
     overview_buttons: Cell<u8>,
     mouse_move_last_timestamp: Cell<Option<u64>>,
@@ -204,7 +212,7 @@ impl Input {
             // start/stop is frequent enough that rebuilding the WindowServer
             // tap costs more than filtering these releases in the callback.
             state.event_processing_enabled,
-            keyed_disable,
+            keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
         if self.mission_control_active.get() {
             mask |= (1u64 << CGEventType::LeftMouseDown.0)
@@ -341,6 +349,10 @@ impl Input {
             state: RefCell::new(state),
             event_mask: Cell::new(0),
             mission_control_active: Cell::new(false),
+            activate_on_hotkey_release: Cell::new(
+                config.settings.ui.mission_control.activate_on_hotkey_release,
+            ),
+            overview_hotkey: Cell::new(None),
             mission_control_bounds: RefCell::new(Vec::new()),
             overview_buttons: Cell::new(0),
             mouse_move_last_timestamp: Cell::new(None),
@@ -466,6 +478,7 @@ impl Input {
         let mut state = self.state.borrow_mut();
         match request {
             Request::ReleaseMissionControl => {
+                self.overview_hotkey.set(None);
                 self.mission_control_tx.borrow_mut().take();
                 self.mission_control_active.set(false);
                 self.mission_control_bounds.borrow_mut().clear();
@@ -481,6 +494,12 @@ impl Input {
                     self.overview_buttons.set(0);
                 }
                 self.mission_control_active.set(active);
+                if active {
+                    // Key releases can precede this asynchronous open acknowledgement.
+                    self.finish_overview_hotkey();
+                } else {
+                    self.overview_hotkey.set(None);
+                }
                 self.reset_mouse_move_sample_gate();
                 if active && state.hide_count > 0 {
                     state.show_mouse();
@@ -566,6 +585,9 @@ impl Input {
                 }
             }
             Request::ConfigUpdated(new_config) => {
+                self.activate_on_hotkey_release
+                    .set(new_config.settings.ui.mission_control.activate_on_hotkey_release);
+                self.overview_hotkey.set(None);
                 if *self.binding_mode_specs.borrow() != new_config.binding_mode_specs {
                     self.install_binding_specs(new_config.binding_mode_specs.clone());
                 }
@@ -682,6 +704,8 @@ impl Input {
     fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
 
     fn reconcile_after_tap_reenabled(&self) {
+        // A release may have been lost; do not activate from a later unrelated event.
+        self.overview_hotkey.set(None);
         let mut state = self.state.borrow_mut();
         self.reset_gestures();
         if state.captured_button.take().is_some() {
@@ -818,6 +842,13 @@ impl Input {
                                         .is_some_and(|bindings| bindings.contains_key(&hotkey))
                                 });
                         if !configured_zoom {
+                            if matches!(
+                                input,
+                                super::mission_control::Input::Dismiss
+                                    | super::mission_control::Input::Activate
+                            ) {
+                                self.overview_hotkey.set(None);
+                            }
                             self.send_overview(super::mission_control::Event::Input(input));
                             return false;
                         }
@@ -972,6 +1003,26 @@ impl Input {
         }
     }
 
+    fn finish_overview_hotkey(&self) {
+        let Some(hotkey) = self.overview_hotkey.get() else {
+            return;
+        };
+        let modifiers = CGEventFlags::MaskCommand
+            | CGEventFlags::MaskControl
+            | CGEventFlags::MaskAlternate
+            | CGEventFlags::MaskShift
+            | CGEventFlags::MaskSecondaryFn;
+        if self.mission_control_active.get()
+            && hotkey.trigger.is_none()
+            && !hotkey.flags.intersects(modifiers)
+        {
+            self.overview_hotkey.set(None);
+            self.send_overview(super::mission_control::Event::Input(
+                super::mission_control::Input::Activate,
+            ));
+        }
+    }
+
     fn send_overview(&self, event: super::mission_control::Event) {
         if let Some(tx) = &*self.mission_control_tx.borrow() {
             tx.send(event);
@@ -1077,6 +1128,14 @@ impl Input {
         // rather than the previous event's modifier state.
         let flags = CGEvent::flags(Some(event));
         state.current_flags = flags;
+        if let Some(mut hotkey) = self.overview_hotkey.get() {
+            if event_type == CGEventType::KeyUp && hotkey.trigger == key_code_opt {
+                hotkey.trigger = None;
+            }
+            hotkey.flags = flags;
+            self.overview_hotkey.set(Some(hotkey));
+            self.finish_overview_hotkey();
+        }
 
         if let Some(key_code) = key_code_opt {
             match event_type {
@@ -1117,6 +1176,25 @@ impl Input {
                     ) != 0;
                     if is_repeat {
                         return false;
+                    }
+                    if commands.iter().any(|cmd| {
+                        matches!(
+                            cmd,
+                            WmCommand::Wm(
+                                wm_controller::WmCmd::ShowMissionControlAll
+                                    | wm_controller::WmCmd::ShowMissionControlCurrent
+                            )
+                        )
+                    }) {
+                        self.overview_hotkey.set(
+                            (self.activate_on_hotkey_release.get()
+                                && !self.mission_control_active.get())
+                            .then_some(OverviewHotkey { trigger: Some(key_code), flags }),
+                        );
+                    } else if commands.iter().any(|cmd| {
+                        matches!(cmd, WmCommand::Wm(wm_controller::WmCmd::DismissMissionControl))
+                    }) {
+                        self.overview_hotkey.set(None);
                     }
                     for cmd in commands {
                         match cmd {
@@ -2042,6 +2120,159 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[test]
+    fn overview_hotkey_release_activates_once_after_all_keys_and_open_acknowledgement() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        for enabled in [false, true] {
+            for release_before_open in [false, true] {
+                for modifiers_first in [false, true] {
+                    for modified in [false, true] {
+                        let mut config = Config::default();
+                        config.settings.ui.mission_control.activate_on_hotkey_release = enabled;
+                        config.settings.gestures.enabled = false;
+                        config.settings.layout.scrolling.gestures.enabled = false;
+                        config.settings.focus_follows_mouse = false;
+                        config.settings.focus_follows_mouse_disable_hotkey = None;
+                        config.settings.mouse_hides_on_focus = false;
+                        let (events, _) = actor::channel();
+                        let (_, requests) = actor::channel();
+                        let (wm, mut wm_rx) = actor::channel();
+                        let (overview, mut overview_rx) = actor::channel();
+                        config.binding_mode_specs = vec![("default".into(), vec![(
+                            if modified {
+                                "Alt + Ctrl + A".into()
+                            } else {
+                                "A".into()
+                            },
+                            WmCommand::Wm(wm_controller::WmCmd::ShowMissionControlAll),
+                        )])];
+                        let input = Input::new(
+                            config,
+                            events,
+                            requests,
+                            wm,
+                            Some(overview),
+                            Arc::default(),
+                        );
+                        input.hotkeys_active.set(true);
+                        input.rebuild_binding_maps();
+                        assert_eq!(
+                            input.desired_event_mask() & (1u64 << CGEventType::KeyUp.0) != 0,
+                            enabled
+                        );
+                        let flags = if modified {
+                            CGEventFlags::MaskAlternate | CGEventFlags::MaskControl
+                        } else {
+                            CGEventFlags::empty()
+                        };
+                        let key = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+                        CGEvent::set_flags(Some(&key), flags);
+                        assert!(!input.on_event(CGEventType::KeyDown, &key, None));
+                        assert!(matches!(
+                            wm_rx.try_recv().unwrap().1,
+                            WmEvent::Command(WmCommand::Wm(
+                                wm_controller::WmCmd::ShowMissionControlAll
+                            ))
+                        ));
+                        assert!(overview_rx.try_recv().is_err());
+                        let (recovery, _) = tokio::sync::mpsc::unbounded_channel();
+                        if !release_before_open {
+                            input.on_request(
+                                Request::SetMissionControlActive(true, Vec::new()),
+                                &recovery,
+                            );
+                        }
+                        // Caps Lock is not a held modifier and must not prevent activation.
+                        let caps = CGEventFlags::MaskAlphaShift;
+                        let modifier = CGEvent::new_keyboard_event(None, 58, false).unwrap();
+                        if modified && modifiers_first {
+                            CGEvent::set_flags(Some(&modifier), CGEventFlags::MaskControl | caps);
+                            input.on_event(CGEventType::FlagsChanged, &modifier, None);
+                            assert!(overview_rx.try_recv().is_err());
+                            CGEvent::set_flags(Some(&modifier), caps);
+                            input.on_event(CGEventType::FlagsChanged, &modifier, None);
+                            assert!(overview_rx.try_recv().is_err());
+                        }
+                        CGEvent::set_flags(
+                            Some(&key),
+                            if modified && !modifiers_first {
+                                flags | caps
+                            } else {
+                                caps
+                            },
+                        );
+                        input.on_event(CGEventType::KeyUp, &key, None);
+                        if modified && !modifiers_first {
+                            assert!(overview_rx.try_recv().is_err());
+                            CGEvent::set_flags(Some(&modifier), CGEventFlags::MaskControl | caps);
+                            input.on_event(CGEventType::FlagsChanged, &modifier, None);
+                            assert!(overview_rx.try_recv().is_err());
+                            CGEvent::set_flags(Some(&modifier), caps);
+                            input.on_event(CGEventType::FlagsChanged, &modifier, None);
+                        }
+                        if release_before_open {
+                            assert!(overview_rx.try_recv().is_err());
+                            input.on_request(
+                                Request::SetMissionControlActive(true, Vec::new()),
+                                &recovery,
+                            );
+                        }
+                        if enabled {
+                            assert!(matches!(
+                                overview_rx
+                                    .try_recv()
+                                    .expect("released overview hotkey must activate its selection")
+                                    .1,
+                                OverviewEvent::Input(OverviewInput::Activate)
+                            ));
+                        }
+                        assert!(overview_rx.try_recv().is_err());
+                        input.on_event(CGEventType::KeyUp, &key, None);
+                        input.on_event(CGEventType::FlagsChanged, &modifier, None);
+                        assert!(
+                            overview_rx.try_recv().is_err(),
+                            "activation must happen at most once"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_overview_actions_cancel_pending_hotkey_release_activation() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        for (code, activate) in [(53, false), (36, true)] {
+            let (input, _, _) = input();
+            let (overview, mut rx) = actor::channel();
+            *input.mission_control_tx.borrow_mut() = Some(overview);
+            input.activate_on_hotkey_release.set(true);
+            input.hotkeys_active.set(true);
+            *input.hotkeys.borrow_mut() = vec![HashMap::from_iter([(
+                Hotkey::new(Modifiers::ALT_LEFT, KeyCode::KeyA),
+                vec![WmCommand::Wm(wm_controller::WmCmd::ShowMissionControlAll)],
+            )])];
+            let key = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+            CGEvent::set_flags(Some(&key), CGEventFlags::MaskAlternate);
+            input.on_event(CGEventType::KeyDown, &key, None);
+            input.mission_control_active.set(true);
+            let action = CGEvent::new_keyboard_event(None, code, true).unwrap();
+            CGEvent::set_flags(Some(&action), CGEventFlags::empty());
+            input.on_event(CGEventType::KeyDown, &action, None);
+            match rx.try_recv().unwrap().1 {
+                OverviewEvent::Input(OverviewInput::Activate) => assert!(activate),
+                OverviewEvent::Input(OverviewInput::Dismiss) => assert!(!activate),
+                unexpected => panic!("unexpected overview action: {unexpected:?}"),
+            }
+            CGEvent::set_flags(Some(&key), CGEventFlags::empty());
+            input.on_event(CGEventType::KeyUp, &key, None);
+            assert!(
+                rx.try_recv().is_err(),
+                "releasing a cancelled opener must not activate again"
+            );
+        }
     }
 
     #[test]

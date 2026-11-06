@@ -513,6 +513,39 @@ fn config_validation_rejects_empty_command_arrays() {
 }
 
 #[test]
+fn overview_hotkey_release_setting_defaults_to_sticky_and_can_be_edited() {
+    let mut document =
+        ConfigDocument::parse("[keys]\n[settings.ui.mission_control]\nenabled = true\n").unwrap();
+    assert!(
+        !document
+            .runtime()
+            .unwrap()
+            .settings
+            .ui
+            .mission_control
+            .activate_on_hotkey_release
+    );
+    let runtime = document
+        .update(|source| source.settings.ui.mission_control.activate_on_hotkey_release = true)
+        .unwrap();
+    assert!(runtime.settings.ui.mission_control.activate_on_hotkey_release);
+    assert!(
+        ConfigDocument::parse(&document.to_string())
+            .unwrap()
+            .runtime()
+            .unwrap()
+            .settings
+            .ui
+            .mission_control
+            .activate_on_hotkey_release
+    );
+    let runtime = document
+        .update(|source| source.settings.ui.mission_control.activate_on_hotkey_release = false)
+        .unwrap();
+    assert!(!runtime.settings.ui.mission_control.activate_on_hotkey_release);
+}
+
+#[test]
 fn default_document_is_the_canonical_template() {
     let document =
         ConfigDocument::from_source(ConfigDocument::default().source().unwrap()).unwrap();

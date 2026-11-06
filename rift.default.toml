@@ -202,6 +202,9 @@ vertical = 0
 # Enabling requires restarting Rift. Disabling on reload releases Overview resources.
 # Reload closes an open Overview; previews are optional and never request permission.
 [settings.ui.mission_control]
+# Activate the selected window/workspace after releasing the opening hotkey and all modifiers.
+# Leave false to keep Overview open until a click or Enter.
+activate_on_hotkey_release = false
 # enable a niri style overview
 enabled = false
 # Include empty workspaces as navigation and drag destinations.

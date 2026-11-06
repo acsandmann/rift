@@ -323,6 +323,11 @@ impl MissionControlActor {
                 } else if self.settings.enabled {
                     if self.settings.window_previews && !CGPreflightScreenCaptureAccess() {
                         CGRequestScreenCaptureAccess();
+                        // Cancel a pending release-to-activate opener when no session was opened.
+                        self.input_tx.send(super::input::Request::SetMissionControlActive(
+                            false,
+                            Vec::new(),
+                        ));
                         return;
                     }
                     if self.settings.window_previews {

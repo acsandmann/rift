@@ -1089,6 +1089,14 @@ impl StackLineReserve {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, ConfigSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MissionControlSettings {
+    #[serde(default)]
+    /// Release the shortcut key and all modifier keys to switch to the selected window or workspace.
+    /// When turned off, press Return or click to switch.
+    #[setting(
+        label = "Switch windows when shortcut keys are released",
+        enabled_by = "enabled"
+    )]
+    pub activate_on_hotkey_release: bool,
     /// Include workspaces without windows in Overview.
     #[serde(default = "yes")]
     #[setting(label = "Show empty workspaces", enabled_by = "enabled")]
