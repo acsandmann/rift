@@ -30,9 +30,9 @@ pub fn config_file() -> PathBuf {
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceMode {
     /// Each macOS desktop has its own set of workspaces, numbered independently.
-    #[default]
     PerDisplay,
     /// One set of workspaces across all displays. Each workspace belongs to one display at a time.
+    #[default]
     Global,
 }
 
