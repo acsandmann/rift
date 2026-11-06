@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -302,6 +303,8 @@ pub struct AppThreadHandle {
     requests_tx: actor::Sender<Request>,
     interactive_frames: InteractiveFrameQueue,
     frame_authority: FrameAuthority,
+    /// Set once the actor has attached to its app, shared by every clone.
+    attached: Arc<AtomicBool>,
 }
 
 /// The topology accepted when this producer was created. Clones held by an old
@@ -465,6 +468,7 @@ impl AppThreadHandle {
             requests_tx,
             interactive_frames: Default::default(),
             frame_authority: Default::default(),
+            attached: Default::default(),
         }
     }
 
@@ -475,6 +479,7 @@ impl AppThreadHandle {
                 requests_tx,
                 interactive_frames: Default::default(),
                 frame_authority: Default::default(),
+                attached: Default::default(),
             },
             rx,
         )
@@ -485,6 +490,11 @@ impl AppThreadHandle {
     pub(crate) fn same_actor(&self, other: &Self) -> bool {
         self.requests_tx.same_channel(&other.requests_tx)
     }
+
+    /// Whether the actor got through `init`: watching its app and holding its windows.
+    pub(crate) fn is_attached(&self) -> bool { self.attached.load(Ordering::Relaxed) }
+
+    pub(crate) fn mark_attached(&self) { self.attached.store(true, Ordering::Relaxed) }
 
     pub(crate) fn set_topology_authority(
         &mut self,
@@ -1139,6 +1149,7 @@ impl State {
         if !self.init(handle.clone(), info) {
             return;
         }
+        handle.mark_attached();
 
         let this = RefCell::new(self);
         // The raises channel is owned by State, so joining both tasks would keep
