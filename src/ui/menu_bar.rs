@@ -11,12 +11,13 @@ use cgs::Ui;
 use cgs::drawing::Canvas;
 use cgs::menu::{Menu, MenuItem, StatusItem};
 use cgs::window::{OpenPanel, SavePanel};
-use objc2::Message;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{AnyThread, Message};
 use objc2_app_kit::{
     NSAlert, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
-    NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSMenuItem, NSSavePanel, NSView,
+    NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSGraphicsContext, NSImage,
+    NSMenuItem, NSSavePanel, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGAffineTransform, CGFloat, CGPoint,
@@ -1766,6 +1767,47 @@ impl MenuBarPreview {
         self.view.canvas.ns_view().setHidden(!settings.enabled);
         // Intrinsic width is represented by one stable constraint, owned by the host.
         self.view.set_layout(layout);
+    }
+
+    /// Render one example with the same drawing path as the menu bar indicator.
+    #[allow(deprecated)]
+    pub fn choice_image(
+        &self,
+        style: WorkspaceDisplayStyle,
+        label: ActiveWorkspaceLabel,
+    ) -> Retained<NSImage> {
+        let settings = MenuBarSettings {
+            enabled: true,
+            mode: MenuBarDisplayMode::All,
+            display_style: style,
+            active_label: label,
+            current_display_only: true,
+            show_binding_mode: false,
+            show_fullscreen_indicator: false,
+            ..Default::default()
+        };
+        let mut workspace = self.displays[0].workspaces[0].clone();
+        workspace.is_active = false;
+        let displays = vec![DisplayWorkspaces {
+            display_uuid: "example".into(),
+            space: SpaceId::new(1),
+            is_active_context: true,
+            workspaces: vec![workspace],
+        }];
+        let layout = build_layout(&render_inputs(&displays, &settings), &self.view.text_attrs);
+        let size = CGSize::new(layout.size.width.max(1.0), 20.0);
+        let image = NSImage::initWithSize(NSImage::alloc(), size);
+        image.lockFocus();
+        if let Some(context) = NSGraphicsContext::currentContext() {
+            draw_menu_icon(
+                context.CGContext().as_ref(),
+                CGRect::new(CGPoint::ZERO, size),
+                &layout,
+                false,
+            );
+        }
+        image.unlockFocus();
+        image
     }
 
     pub fn width(&self) -> f64 { self.view.layout.borrow().size.width }

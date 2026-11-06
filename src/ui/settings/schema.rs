@@ -70,7 +70,9 @@ impl FormBuilder {
         self.schema_field_with_segments(field, get, set, symbols)
     }
 
-    /// Render a schema choice as a segmented control, with optional symbols per choice.
+    /// Use TabSelector for settings choices presented as tabs, matching Stack Tabs'
+    /// placement controls. Custom (non-schema) choices can use TabSelector::choices directly.
+    /// Symbols are optional for each choice.
     #[allow(dead_code)]
     pub(super) fn schema_segmented_field<T: ConfigSchema>(
         &mut self,

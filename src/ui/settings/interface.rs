@@ -5,6 +5,7 @@ use cgs::drawing::VisualEffect;
 use cgs::layout::{HStack, Spacer, VStack};
 use cgs::settings::{Section, SettingsPage, ValidationMessage};
 use cgs::style::Font;
+use cgs::tabs::TabSelector;
 use cgs::text::{Caption, Label};
 use cgs::view::NativeView;
 use cgs::{Insets, Ui};
@@ -120,31 +121,73 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         settings.enabled && settings.mode == MenuBarDisplayMode::All
     });
     let workspaces = Section::new(&ui, "Workspaces").row(display).row(mode).row(empty);
+    let message = Rc::new(ValidationMessage::new(&ui));
+    let weak_model = f.model.clone();
+    let error = Rc::downgrade(&message);
+    let style = Rc::new(
+        TabSelector::choices(&ui, &[("Layout", None), ("Index", None), ("Name", None)]).on_change(
+            move |index| {
+                Model::submit(
+                    &weak_model,
+                    Box::new(move |s| {
+                        let settings = &mut s.settings.ui.menu_bar;
+                        match index {
+                            0 => settings.display_style = WorkspaceDisplayStyle::Layout,
+                            1 | 2 => {
+                                settings.display_style = WorkspaceDisplayStyle::Label;
+                                settings.active_label = if index == 1 {
+                                    ActiveWorkspaceLabel::Index
+                                } else {
+                                    ActiveWorkspaceLabel::Name
+                                };
+                            }
+                            _ => {}
+                        }
+                        Ok(())
+                    }),
+                    error.clone(),
+                );
+            },
+        ),
+    );
+    let examples = MenuBarPreview::new(&ui);
+    for (index, (display, label)) in [
+        (WorkspaceDisplayStyle::Layout, ActiveWorkspaceLabel::Index),
+        (WorkspaceDisplayStyle::Label, ActiveWorkspaceLabel::Index),
+        (WorkspaceDisplayStyle::Label, ActiveWorkspaceLabel::Name),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let image = examples.choice_image(display, label);
+        style.ns_segmented_control().setImage_forSegment(Some(&image), index as isize);
+    }
+    style.accessibility_label("Show workspaces as: layouts, indexes, or names");
+    for (index, tip) in ["Layouts", "Indexes", "Names"].iter().enumerate() {
+        style.ns_segmented_control().setToolTip_forSegment(
+            Some(&objc2_foundation::NSString::from_str(tip)),
+            index as isize,
+        );
+    }
+    f.sync_when(
+        &style,
+        |s| s.settings.ui.menu_bar.clone(),
+        |style, s| {
+            let settings = &s.settings.ui.menu_bar;
+            let index = if settings.display_style == WorkspaceDisplayStyle::Layout {
+                0
+            } else if settings.active_label == ActiveWorkspaceLabel::Index {
+                1
+            } else {
+                2
+            };
+            style.set_selected(index);
+            style.ns_segmented_control().setEnabled(settings.enabled);
+        },
+    );
     let style = f
-        .popup(
-            "Show workspaces as",
-            vec![
-                ("Layouts", None),
-                ("Indexes", Some(ActiveWorkspaceLabel::Index)),
-                ("Names", Some(ActiveWorkspaceLabel::Name)),
-            ],
-            |s| {
-                let settings = &s.settings.ui.menu_bar;
-                (settings.display_style == WorkspaceDisplayStyle::Label)
-                    .then_some(settings.active_label)
-            },
-            |s, label| {
-                let settings = &mut s.settings.ui.menu_bar;
-                if let Some(label) = label {
-                    settings.display_style = WorkspaceDisplayStyle::Label;
-                    settings.active_label = label;
-                } else {
-                    settings.display_style = WorkspaceDisplayStyle::Layout;
-                }
-            },
-        )
+        .row("Show workspaces as", style, message)
         .description("Layouts show window arrangements. Unnamed workspaces use their index.");
-    f.enabled(&style, |s| s.settings.ui.menu_bar.enabled);
     let fullscreen = f
         .field(
             "show_fullscreen_indicator",
