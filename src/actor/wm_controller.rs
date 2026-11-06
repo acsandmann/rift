@@ -517,11 +517,16 @@ impl WmController {
         };
 
         let policy = running_app.activationPolicy();
-        if policy == NSApplicationActivationPolicy::Prohibited {
+        // A process started outside LaunchServices reads Prohibited until it
+        // sets its policy, and may show a window before rift reads Regular. A
+        // window shows it is an app, so wait for the policy as for Accessory.
+        let prohibited = policy == NSApplicationActivationPolicy::Prohibited;
+        if prohibited && source != AppDiscoverySource::WindowServer {
+            debug!(?pid, bundle = ?info.bundle_id, "App is prohibited; not spawning");
             return;
         }
         if !should_spawn_app(policy, source) {
-            if policy != NSApplicationActivationPolicy::Accessory {
+            if policy != NSApplicationActivationPolicy::Accessory && !prohibited {
                 return;
             }
             sys::app::ensure_activation_policy_observer(pid, running_app.clone(), info.clone());
