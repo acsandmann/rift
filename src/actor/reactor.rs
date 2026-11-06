@@ -15,7 +15,7 @@ mod native_tabs;
 mod query;
 mod replay;
 pub mod transaction_manager;
-mod utils;
+pub(crate) mod utils;
 
 #[cfg(test)]
 mod testing;
@@ -444,6 +444,7 @@ pub struct Reactor {
     refocus_manager: managers::RefocusManager,
     suppress_auto_workspace_switch_until_input: bool,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
+    mouse_raise_token: tokio_util::sync::CancellationToken,
     active_spaces: HashSet<SpaceId>,
     startup_ready: Option<oneshot::Sender<()>>,
     pub animation_tx: Option<AnimationSender>,
@@ -584,6 +585,7 @@ impl Reactor {
             },
             spaces_tx: None,
             topology_guard: Default::default(),
+            mouse_raise_token: Default::default(),
             active_spaces: HashSet::default(),
             startup_ready: None,
             animation_tx: None,
@@ -1045,6 +1047,10 @@ impl Reactor {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
             Event::ReleaseClaims(release) => release.apply(&mut reactor.borrow_mut()),
             Event::MouseFocusPending(publisher) => {
+                if reactor.borrow().transient_blocks_mouse_focus() {
+                    publisher.take_latest();
+                    return;
+                }
                 if reactor.borrow().viewport_gesture.as_ref().is_some_and(|s| !s.released) {
                     publisher.take_latest();
                     return;
@@ -1696,6 +1702,7 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowClosed(wsid) => {
+                self.state.windows.forget_transient(wsid);
                 let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
                     self.state.windows.mark_window_hidden(wsid);
                     return Ok(EventOutcome::default());
@@ -1789,6 +1796,12 @@ impl Reactor {
                     .and_then(|window| self.best_space_for_window_id(window))
                     .or_else(|| self.space_state.iter_known_spaces().next());
                 let window_server_info = window_server::get_window(wsid);
+                if let Some(info) = window_server_info.filter(|info| info.is_transient) {
+                    self.mouse_raise_token.cancel();
+                    self.mouse_raise_token = Default::default();
+                    self.state.windows.track_window_server_info(info);
+                    self.state.windows.observe_native_space(wsid, sid, true);
+                }
                 let owner_pid = window_server_info.as_ref().map(|info| info.pid);
                 let app_known =
                     owner_pid.is_some_and(|pid| self.app_manager.apps.contains_key(&pid));
@@ -2267,6 +2280,9 @@ impl Reactor {
                 return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
             }
             Event::MouseMoved(wsid) => {
+                if self.transient_blocks_mouse_focus() {
+                    return Ok(EventOutcome::default());
+                }
                 // Attached sheets focus their owning window; they are not
                 // independent tiling targets and may not appear in AXWindows.
                 let window = self.state.windows.tracked_window_id(wsid).or_else(|| {
@@ -2316,7 +2332,10 @@ impl Reactor {
                 let needs_layout_sync = window.is_some_and(|window| {
                     self.layout_manager.layout_engine.focused_window() != Some(window)
                 });
-                let outcome = window_workflow::handle_mouse_moved_over_window(
+                if self.mouse_raise_token.is_cancelled() {
+                    self.mouse_raise_token = Default::default();
+                }
+                let mut outcome = window_workflow::handle_mouse_moved_over_window(
                     &self.app_manager,
                     window_workflow::MouseMovedPayload {
                         window,
@@ -2331,6 +2350,11 @@ impl Reactor {
                         active_space,
                     },
                 )?;
+                for request in &mut outcome.raise_requests {
+                    if let raise_manager::Event::RaiseRequest(request) = request {
+                        request.mouse_token = Some(self.mouse_raise_token.clone());
+                    }
+                }
                 if !outcome.raise_requests.is_empty() {
                     self.pending_mouse_focus = window.map(|window| (window, Instant::now()));
                 }
@@ -2826,6 +2850,9 @@ impl Reactor {
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
     fn apply_event_outcome(&mut self, outcome: EventOutcome) {
+        if self.transient_blocks_mouse_focus() {
+            self.mouse_raise_token.cancel();
+        }
         let overview_notified =
             outcome.wm_events.iter().any(|e| matches!(e, WmEvent::OverviewChanged));
         let overview_inventory_changed = outcome.refresh_window_notifications
@@ -4410,7 +4437,7 @@ impl Reactor {
             .iter()
             .any(|wid| self.state.windows.window(*wid).is_some_and(WindowState::is_admitted));
 
-        let window_spaces = self
+        let window_spaces: HashMap<_, _> = self
             .state
             .windows
             .window_ids_for_pid(pid)
@@ -4426,6 +4453,16 @@ impl Reactor {
                 (wid, self.discovery_spaces_for_window(wid, native))
             })
             .collect();
+        // Excluded transients have no layout assignment to supply their Space.
+        // Reuse this inventory's native/discovery resolution for FFM visibility.
+        for (&wid, &(native, discovery)) in &window_spaces {
+            if let Some(window) = self.state.windows.window(wid)
+                && utils::is_ax_transient(&window.info)
+                && let Some(wsid) = window.info.sys_id
+            {
+                self.state.windows.set_window_server_space(wsid, native.or(discovery));
+            }
+        }
         let active_spaces = self
             .space_state
             .screens
@@ -5161,7 +5198,17 @@ impl Reactor {
 
     // Returns true if the window should be raised on mouse over considering
     // active workspace membership and potential occlusion of floating windows above it.
+    fn transient_blocks_mouse_focus(&self) -> bool {
+        self.state.windows.transient_blocks_mouse_focus(
+            |pid| self.main_window_tracker.is_globally_frontmost(pid),
+            &self.active_spaces,
+        )
+    }
+
     pub(crate) fn should_raise_on_mouse_over(&self, wid: WindowId, space: Option<SpaceId>) -> bool {
+        if self.transient_blocks_mouse_focus() {
+            return false;
+        }
         let Some(window) = self.state.windows.window(wid) else {
             return false;
         };
@@ -5665,6 +5712,7 @@ impl Reactor {
         });
 
         let msg = raise_manager::Event::RaiseRequest(RaiseRequest {
+            mouse_token: None,
             raise_windows: windows_by_app_and_screen.into_values().collect(),
             focus_window: focus_window_with_warp,
             app_handles,

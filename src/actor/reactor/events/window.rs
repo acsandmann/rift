@@ -462,6 +462,7 @@ pub fn handle_mouse_moved_over_window(
         }
         outcome = outcome.with_raise_request(crate::actor::raise_manager::Event::RaiseRequest(
             crate::actor::raise_manager::RaiseRequest {
+                mouse_token: None,
                 raise_windows: vec![vec![window]],
                 focus_window: Some((window, None)),
                 app_handles,

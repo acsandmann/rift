@@ -413,6 +413,7 @@ fn focus_window_raise_request(apps: &AppManager, window: WindowId) -> raise_mana
         app_handles.insert(window.pid, app.handle.clone());
     }
     raise_manager::Event::RaiseRequest(raise_manager::RaiseRequest {
+        mouse_token: None,
         raise_windows: Vec::new(),
         focus_window: Some((window, None)),
         app_handles,

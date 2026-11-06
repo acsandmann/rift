@@ -208,6 +208,7 @@ impl Reactor {
         frame: CGRect,
     ) {
         self.state.windows.track_window_server_info(WindowServerInfo {
+            is_transient: false,
             id: wsid,
             pid,
             layer: 0,
@@ -515,6 +516,7 @@ impl Apps {
                 windows
                     .iter()
                     .map(|info| WindowServerInfo {
+                        is_transient: false,
                         pid,
                         id: info.sys_id.unwrap(),
                         layer: 0,

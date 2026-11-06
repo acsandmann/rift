@@ -51,11 +51,20 @@ pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {
     }
 }
 
+pub(crate) fn is_ax_transient(info: &WindowInfo) -> bool {
+    info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
+        || (matches!(
+            info.ax_subrole.as_deref(),
+            Some("AXDialog" | "AXSystemDialog" | "AXSheet")
+        ) && !is_ibkr_desktop_dialog(info))
+}
+
 pub(super) fn compute_window_info_manageability(
     info: &WindowInfo,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
-    if info.is_minimized
+    if is_ax_transient(info)
+        || info.is_minimized
         || !info.is_root
         || info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
     {
@@ -72,7 +81,8 @@ pub(super) fn compute_window_info_manageability(
             return false;
         }
         if !allow_nonstandard_window {
-            if window_server_info(wsid).is_some_and(|server| server.layer != 0)
+            if window_server_info(wsid)
+                .is_some_and(|server| server.layer != 0 || server.is_transient)
                 || window_level(wsid.0).is_some_and(|level| level != NSNormalWindowLevel)
             {
                 return false;
@@ -97,15 +107,12 @@ fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
         bundle_id.starts_with("com.install4j.") || bundle_id == "com.azul.zulu.java"
     });
 
-    let max_size = info.max_size.unwrap_or(info.frame.size);
     let min_size = info.min_size.unwrap_or(info.frame.size);
-    let looks_like_primary_window = max_size.width >= 1200.0
-        || max_size.height >= 900.0
-        || min_size.width >= 1000.0
+    let looks_like_primary_window = min_size.width >= 1000.0
         || info.frame.size.width >= 1200.0
         || info.frame.size.height >= 900.0;
 
-    path_matches && bundle_matches && looks_like_primary_window
+    path_matches && bundle_matches && info.is_root && info.is_resizable && looks_like_primary_window
 }
 
 #[cfg(test)]
@@ -141,6 +148,16 @@ mod tests {
         let info = ax_window("AXStandardWindow", true);
 
         assert!(compute_window_info_manageability(&info, |_| None));
+    }
+
+    #[test]
+    fn standard_dialogs_and_sheets_are_not_documents() {
+        for subrole in ["AXDialog", "AXSystemDialog", "AXSheet"] {
+            assert!(!compute_window_info_manageability(
+                &ax_window(subrole, true),
+                |_| None
+            ));
+        }
     }
 
     #[test]
