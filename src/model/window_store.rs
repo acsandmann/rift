@@ -521,7 +521,7 @@ impl WindowStore {
             self.mark_window_hidden(wsid);
         }
         self.set_visibility(wid, WindowVisibility::Minimized);
-        self.windows.get_mut(&wid).unwrap().suspended = true;
+        self.suspend_window(wid);
         true
     }
 
@@ -633,7 +633,8 @@ impl WindowStore {
         self.mark_window_hidden(wsid);
         let wid = self.tracked_window_id(wsid)?;
         let record = self.record(wid)?;
-        if self.native_fullscreen_record_for_window(wid).is_some()
+        // Hiding, minimizing and fullscreen all retain ownership while suspended.
+        if self.is_temporarily_unavailable(wid)
             || !record.workspace.is_some_and(|assignment| {
                 workspaces
                     .workspaces

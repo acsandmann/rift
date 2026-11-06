@@ -1719,6 +1719,11 @@ impl Reactor {
                 if let Some(pid) = self.state.windows.observe_native_visibility(wsid, visible) {
                     self.request_window_inventory(pid);
                 }
+                if !visible && let Some(wid) = self.state.windows.tracked_window_id(wsid) {
+                    // Native hiding precedes AX minimize notifications. Preserve the
+                    // owner before a native snapshot can interpret absence as removal.
+                    self.state.windows.suspend_window(wid);
+                }
                 return Ok(EventOutcome::default());
             }
             Event::WindowInvalidated(wid, source) => {
@@ -1812,28 +1817,11 @@ impl Reactor {
                     observations,
                 );
             }
-            Event::WindowMinimized(wid) => {
-                return window_workflow::handle_window_minimized(&mut self.state, wid);
-            }
-            Event::WindowDeminiaturized(wid) => {
-                let active_space = self.state.windows.window(wid).and_then(|window| {
-                    self.assigned_space_for_window_id(wid)
-                        .or_else(|| {
-                            self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
-                        })
-                        .filter(|space| self.is_space_active(*space))
-                        .or_else(|| {
-                            window
-                                .info
-                                .sys_id
-                                .is_none()
-                                .then(|| self.workspace_command_space())
-                                .flatten()
-                        })
-                });
-                return window_workflow::handle_window_deminiaturized(
+            Event::WindowMinimized(wid) | Event::WindowDeminiaturized(wid) => {
+                return window_workflow::handle_window_visibility_changed(
                     &mut self.state,
-                    window_workflow::WindowDeminiaturizedPayload { window: wid, active_space },
+                    wid,
+                    matches!(event, Event::WindowDeminiaturized(_)),
                 );
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
@@ -2112,7 +2100,7 @@ impl Reactor {
                 }
                 self.store_current_floating_positions(space);
                 let mut response = self.layout_manager.layout_engine.activate_workspace(
-                    &self.state.windows,
+                    &mut self.state.windows,
                     space,
                     workspace,
                     window,
@@ -2884,17 +2872,22 @@ impl Reactor {
                 self.apply_event_outcome(restored);
                 continue;
             }
-            let active_space = self.state.windows.window(window).and_then(|state| {
-                self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
-                    .filter(|space| self.is_space_active(*space))
-                    .or_else(|| {
-                        state
-                            .info
-                            .sys_id
-                            .is_none()
-                            .then(|| self.workspace_command_space())
-                            .flatten()
-                    })
+            // Restored windows retain their logical owner even when macOS restores
+            // them on the current display or their last frame is parked offscreen.
+            let assigned_space = self.assigned_space_for_window_id(window);
+            let active_space = assigned_space.or_else(|| {
+                self.state.windows.window(window).and_then(|state| {
+                    self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+                        .filter(|space| self.is_space_active(*space))
+                        .or_else(|| {
+                            state
+                                .info
+                                .sys_id
+                                .is_none()
+                                .then(|| self.workspace_command_space())
+                                .flatten()
+                        })
+                })
             });
             if let Some(space) = active_space {
                 if let Some(app_info) =
@@ -2904,7 +2897,9 @@ impl Reactor {
                 }
                 if self.state.windows.is_admitted(window) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
-                    self.place_new_window_on_pointer_display(window, space);
+                    if assigned_space.is_none() {
+                        self.place_new_window_on_pointer_display(window, space);
+                    }
                 }
             }
         }
@@ -3272,7 +3267,11 @@ impl Reactor {
                 && utils::refresh_heuristic(&mut self.state, wid)
                     .is_some_and(|transition| transition.was_admitted && !transition.is_admitted)
             {
-                self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                self.send_layout_event(if self.state.windows.is_temporarily_unavailable(wid) {
+                    LayoutEvent::WindowSuspended(wid)
+                } else {
+                    LayoutEvent::WindowRemoved(wid)
+                });
             }
         }
     }
@@ -4376,21 +4375,7 @@ impl Reactor {
         }
         let observed_windows = new
             .into_iter()
-            .map(|(wid, info)| {
-                let current_native_space = info.sys_id.and_then(|wsid| native_spaces[&wsid]);
-                let active_space = self
-                    .assigned_space_for_window_id(wid)
-                    .or_else(|| {
-                        self.space_for_window_observation(&info.frame, info.sys_id, || {
-                            current_native_space
-                        })
-                    })
-                    .filter(|space| self.is_space_active(*space))
-                    .or_else(|| {
-                        info.sys_id.is_none().then(|| self.workspace_command_space()).flatten()
-                    });
-                window_discovery::ObservedWindow { wid, info, active_space }
-            })
+            .map(|(wid, info)| window_discovery::ObservedWindow { wid, info })
             .collect();
         let (new_windows, process_outcome) = window_discovery::process_window_list(
             &mut self.state,
@@ -5042,7 +5027,7 @@ impl Reactor {
             self.workspace_switch_manager
                 .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
             response = self.layout_manager.layout_engine.activate_workspace(
-                &self.state.windows,
+                &mut self.state.windows,
                 request.space,
                 request.workspace,
                 Some(request.window),
@@ -5370,6 +5355,9 @@ impl Reactor {
         let Some(window) = window.filter(|wid| self.window_is_standard(*wid)) else {
             return EventOutcome::no_change();
         };
+        if self.state.windows.is_temporarily_unavailable(window) {
+            return EventOutcome::no_change();
+        }
         let pid = window.pid;
         let Some(space) = self.best_space_for_window_id(window) else {
             return EventOutcome::no_change();
@@ -5450,7 +5438,7 @@ impl Reactor {
         self.workspace_switch_manager
             .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
         let response = self.layout_manager.layout_engine.activate_workspace(
-            &self.state.windows,
+            &mut self.state.windows,
             space,
             workspace,
             Some(window),

@@ -18,7 +18,6 @@ fn sync_existing_window_state(
     transactions: &TransactionManager,
     wid: WindowId,
     mut info: WindowInfo,
-    active_space: Option<SpaceId>,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
@@ -50,20 +49,31 @@ fn sync_existing_window_state(
 
     let mut admission_changed = false;
     let mut outcome = match (was_minimized, is_minimized) {
-        (_, true) => window::handle_window_minimized(state, wid)?,
-        (true, false) => {
-            window::handle_window_deminiaturized(state, window::WindowDeminiaturizedPayload {
-                window: wid,
-                active_space,
-            })?
+        (_, true) | (true, false) => {
+            window::handle_window_visibility_changed(state, wid, !is_minimized)?
         }
         _ => {
             let is_admitted = utils::refresh_heuristic(state, wid)
                 .is_some_and(|transition| transition.is_admitted);
             admission_changed = was_manageable != is_admitted;
             if was_manageable && !is_admitted {
+                crate::actor::reactor::events::EventOutcome::default().with_layout_event(
+                    if state.windows.is_temporarily_unavailable(wid) {
+                        LayoutEvent::WindowSuspended(wid)
+                    } else {
+                        LayoutEvent::WindowRemoved(wid)
+                    },
+                )
+            } else if is_admitted
+                && !claimed
+                && (admission_changed
+                    || (state.windows.is_temporarily_unavailable(wid)
+                        && state.windows.is_visible_admitted(wid)))
+            {
+                // A restored window can become admissible only after the fresh AX
+                // snapshot arrives, while its owning workspace is still inactive.
                 crate::actor::reactor::events::EventOutcome::default()
-                    .with_layout_event(LayoutEvent::WindowRemoved(wid))
+                    .with_created_window_finalization(wid)
             } else {
                 crate::actor::reactor::events::EventOutcome::default()
             }
@@ -111,7 +121,6 @@ fn should_emit_window_for_space(
 pub(crate) struct ObservedWindow {
     pub(crate) wid: WindowId,
     pub(crate) info: WindowInfo,
-    pub(crate) active_space: Option<SpaceId>,
 }
 
 pub(crate) fn process_window_list(
@@ -127,15 +136,14 @@ pub(crate) fn process_window_list(
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
 
     for window in observed {
-        let ObservedWindow { wid, info, active_space } = window;
+        let ObservedWindow { wid, info } = window;
         if let Some(previous) = state.windows.reconcile_ax_identity(wid, info.sys_id) {
             layout.layout_engine.transfer_persistent_window_identity(previous, wid);
             outcome =
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous));
         }
         if state.windows.contains_window(wid) {
-            if let Ok(existing_outcome) =
-                sync_existing_window_state(state, transactions, wid, info, active_space)
+            if let Ok(existing_outcome) = sync_existing_window_state(state, transactions, wid, info)
             {
                 outcome.absorb(existing_outcome);
             }

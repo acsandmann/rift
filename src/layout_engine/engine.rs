@@ -865,13 +865,23 @@ impl LayoutEngine {
 
     pub(crate) fn activate_workspace(
         &mut self,
-        window_store: &WindowStore,
+        window_store: &mut WindowStore,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
         if !self.workspaces.set_active_workspace(space, workspace_id) {
             return EventResponse::default();
+        }
+        // Returning windows keep their suspension while their workspace is hidden.
+        // Selecting that workspace admits them through the normal layout path.
+        for wid in window_store.workspace_windows(workspace_id) {
+            if window_store.is_temporarily_unavailable(wid)
+                && window_store.is_admitted(wid)
+                && !window_store.is_window_native_fullscreen_suspended(wid)
+            {
+                self.add_window_to_layout(window_store, space, wid);
+            }
         }
         self.update_active_floating_windows(window_store, space);
         self.broadcast_workspace_changed(space);
@@ -894,7 +904,7 @@ impl LayoutEngine {
 
     fn switch_to_workspace_id(
         &mut self,
-        window_store: &WindowStore,
+        window_store: &mut WindowStore,
         context: WorkspaceContext<'_>,
         id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
@@ -912,7 +922,7 @@ impl LayoutEngine {
 
     fn switch_to_previous_workspace(
         &mut self,
-        window_store: &WindowStore,
+        window_store: &mut WindowStore,
         context: WorkspaceContext<'_>,
     ) -> EventResponse {
         self.workspaces
@@ -923,7 +933,7 @@ impl LayoutEngine {
 
     fn navigate_to_workspace(
         &mut self,
-        window_store: &WindowStore,
+        window_store: &mut WindowStore,
         command_space: SpaceId,
         id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
@@ -1623,6 +1633,13 @@ impl LayoutEngine {
                     }
                 },
             };
+
+        if window_store.is_temporarily_unavailable(wid)
+            && self.workspaces.active_workspace(space) != Some(assigned_workspace)
+        {
+            // Arrange parking, but leave the saved slot suspended until selected.
+            return true;
+        }
 
         if matches!(
             self.workspaces[assigned_workspace].layout_system,
@@ -3067,7 +3084,16 @@ impl LayoutEngine {
         // Membership survives native fullscreen; geometry never targets it.
         positions
             .into_iter()
-            .filter(|(wid, _)| !window_store.is_temporarily_unavailable(*wid))
+            .filter(|(wid, _)| {
+                !window_store.is_temporarily_unavailable(*wid)
+                    || (window_store.is_admitted(*wid)
+                        && !window_store.is_window_native_fullscreen_suspended(*wid)
+                        && !self.workspaces.is_window_in_active_workspace(
+                            window_store,
+                            space,
+                            *wid,
+                        ))
+            })
             .collect()
     }
 
@@ -3782,6 +3808,13 @@ impl LayoutEngine {
                 .layout_system
                 .add_window_after_selection(target_layout, window_id);
         }
+        if self.workspaces.active_workspace(target_space) == Some(target_workspace_id)
+            && window_store.is_temporarily_unavailable(window_id)
+            && window_store.is_admitted(window_id)
+            && !window_store.is_window_native_fullscreen_suspended(window_id)
+        {
+            self.add_window_to_layout(window_store, target_space, window_id);
+        }
         if window_store.is_temporarily_unavailable(window_id) {
             self.workspaces[target_workspace_id]
                 .layout_system
@@ -4017,7 +4050,10 @@ mod tests {
             let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, windows[0]));
             assert_eq!(engine.workspaces.active_workspace(space), Some(other));
             assert_eq!(store.workspace_for_window(windows[0]), Some(owner));
-            assert!(engine.workspaces[owner].layout_system.window_participates(windows[0]));
+            assert!(
+                !engine.workspaces[owner].layout_system.window_participates(windows[0]),
+                "an inactive return must retain its suspended layout slot"
+            );
             assert!(!engine.workspaces[other].layout_system.window_participates(windows[1]));
             let next_mode = if mode == LayoutMode::Bsp {
                 LayoutMode::Traditional
@@ -4792,7 +4828,7 @@ mod tests {
         assert_eq!(focus.space, space);
         assert_eq!(focus.workspace, engine.workspaces.workspace_ids(space)[1]);
         let response = engine.activate_workspace(
-            &window_store,
+            &mut window_store,
             focus.space,
             focus.workspace,
             Some(focus.window),

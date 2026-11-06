@@ -10720,7 +10720,7 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
         LayoutMode::MasterStack,
         LayoutMode::Scrolling,
     ] {
-        for stale_snapshot in [false, true] {
+        for (stale_snapshot, native_metadata) in [(false, false), (true, false), (true, true)] {
             let mut apps = Apps::new();
             let mut reactor = test_reactor();
             let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -10735,6 +10735,49 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
             let native_frames: Vec<_> =
                 original.iter().map(|(wid, _)| (*wid, apps.windows[wid].frame)).collect();
             let restored = WindowId::new(1, 2);
+            let owner = reactor.state.windows.workspace_for_window(restored).unwrap();
+            reactor.handle_event(Event::WindowServerHidden(
+                reactor.test_window_server_id(restored),
+            ));
+            let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
+                .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
+                .to_vec();
+            reactor.reconcile_authoritative_active_window_snapshot(visible, false, &[]);
+            assert_eq!(
+                reactor.state.windows.workspace_for_window(restored),
+                Some(owner),
+                "native hide preceding AX minimize must preserve the workspace"
+            );
+            if stale_snapshot && native_metadata {
+                let wsid = reactor.test_window_server_id(restored);
+                let mut info = reactor.state.windows.get_window_server_info(wsid).unwrap();
+                info.frame = apps.windows[&restored].frame;
+                info.layer = 1;
+                reactor.update_partial_window_server_info(vec![info]);
+                assert_eq!(
+                    reactor.state.windows.workspace_for_window(restored),
+                    Some(owner),
+                    "transitional native metadata while hidden must retain the workspace"
+                );
+                info.layer = 0;
+                reactor.update_partial_window_server_info(vec![info]);
+            } else if stale_snapshot {
+                let mut transitional = reactor.state.windows.window(restored).unwrap().info.clone();
+                transitional.is_standard = false;
+                transitional.frame = apps.windows[&restored].frame;
+                reactor.on_windows_discovered_with_app_info(
+                    restored.pid,
+                    vec![(restored, transitional)],
+                    vec![WindowId::new(1, 1), WindowId::new(1, 3)],
+                    None,
+                );
+                assert_eq!(
+                    reactor.state.windows.workspace_for_window(restored),
+                    Some(owner),
+                    "transitional AX metadata while hidden must retain the workspace"
+                );
+                reactor.state.windows.window_mut(restored).unwrap().info.is_standard = true;
+            }
             reactor.handle_event(Event::WindowMinimized(restored));
             apps.simulate_until_quiet(&mut reactor);
             if stale_snapshot {
@@ -10769,6 +10812,20 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                         .any(|(wid, _)| *wid == restored)
                 );
             }
+            let original_workspace = reactor.state.windows.workspace_for_window(restored).unwrap();
+            let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
+                .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
+                .to_vec();
+            reactor.reconcile_authoritative_active_window_snapshot(visible, false, &[]);
+            assert_eq!(
+                reactor.state.windows.workspace_for_window(restored),
+                Some(original_workspace)
+            );
+            reactor.handle_test_workspace_command(space, &LayoutCommand::CreateWorkspace);
+            reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+            apps.simulate_until_quiet(&mut reactor);
+            let active_workspace =
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
             let mut fresh = reactor.state.windows.window(restored).unwrap().info.clone();
             fresh.is_minimized = false;
             if stale_snapshot {
@@ -10786,7 +10843,31 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 None,
             );
             apps.simulate_until_quiet(&mut reactor);
+            reactor.handle_event(Event::ApplicationMainWindowChanged(1, Some(restored), Quiet::No));
+            reactor.handle_event(Event::ApplicationActivated(1, Quiet::No));
+            reactor.handle_event(Event::WindowServerFocusChanged(WindowId::new(1, 1), space));
+            reactor.handle_event(Event::WindowServerFocusChanged(restored, space));
+            apps.simulate_until_quiet(&mut reactor);
+            assert_eq!(
+                reactor.layout_manager.layout_engine.workspaces().active_workspace(space),
+                active_workspace,
+                "restoring an inactive window must not follow its activation"
+            );
+            assert!(
+                !test_layout(&mut reactor, space, screen).iter().any(|(wid, _)| *wid == restored)
+            );
+            assert!(
+                !screen.contains(apps.windows[&restored].frame.mid()),
+                "the restored window must remain parked outside the active workspace"
+            );
 
+            assert_eq!(
+                reactor.state.windows.workspace_for_window(restored),
+                Some(original_workspace),
+                "restore must retain the workspace where the window was minimized"
+            );
+            reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+            apps.simulate_until_quiet(&mut reactor);
             let layout = test_layout(&mut reactor, space, screen);
             assert_eq!(layout, original, "{mode:?} stale={stale_snapshot}");
             for (wid, frame) in native_frames {
@@ -10797,6 +10878,28 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
             }
         }
     }
+}
+
+#[test]
+fn restored_window_can_be_explicitly_moved_into_the_active_workspace() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let window = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    reactor.handle_event(Event::WindowMinimized(window));
+    reactor.handle_test_workspace_command(space, &LayoutCommand::CreateWorkspace);
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    reactor.handle_event(Event::WindowDeminiaturized(window));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: Some(1),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(has_window_in_layout(&mut reactor, space, screen, window));
+    assert!(screen.contains(apps.windows[&window].frame.mid()));
 }
 
 #[test]

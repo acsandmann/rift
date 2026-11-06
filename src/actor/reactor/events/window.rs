@@ -100,30 +100,20 @@ pub(crate) fn apply_window_retirement(
         .with_layout_event(LayoutEvent::WindowRemoved(wid))
 }
 
-pub fn handle_window_minimized(
+/// Application hiding and AX minimization share one suspension/return lifecycle.
+pub fn handle_window_visibility_changed(
     state: &mut crate::model::RiftState,
     wid: WindowId,
+    visible: bool,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
-    if !state.windows.observe_minimized(wid) {
-        return Ok(EventOutcome::no_change());
+    if !visible {
+        if !state.windows.observe_minimized(wid) {
+            return Ok(EventOutcome::no_change());
+        }
+        return Ok(EventOutcome::window_membership_changed(false, false)
+            .with_arrange_passes(0)
+            .with_layout_event(LayoutEvent::WindowSuspended(wid)));
     }
-    let removal = LayoutEvent::WindowSuspended(wid);
-    Ok(EventOutcome::window_membership_changed(false, false)
-        .with_arrange_passes(0)
-        .with_layout_event(removal))
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct WindowDeminiaturizedPayload {
-    pub window: WindowId,
-    pub active_space: Option<SpaceId>,
-}
-
-pub fn handle_window_deminiaturized(
-    state: &mut crate::model::RiftState,
-    payload: WindowDeminiaturizedPayload,
-) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
-    let WindowDeminiaturizedPayload { window: wid, active_space } = payload;
     match state.windows.window_mut(wid) {
         Some(window) => {
             if !window.info.is_minimized {
@@ -153,7 +143,7 @@ pub fn handle_window_deminiaturized(
     // Minimized AX snapshots can have stale admission metadata. Refresh them
     // even when the cached snapshot cannot currently be admitted.
     let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
-    if active_space.is_some() && !state.windows.is_claimed(wid) {
+    if !state.windows.is_claimed(wid) {
         // Reconcile admission while retaining the existing workspace and layout slot.
         // A claimed window returns on release.
         outcome = outcome.with_created_window_finalization(wid);

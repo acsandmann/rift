@@ -694,15 +694,13 @@ fn release_arranges_each_affected_space_once_through_the_visible_path() {
 /// Minimize/restore, then losing and regaining native admission through window-server
 /// info and through inventory, all while claimed.
 fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: WindowId) {
-    let queries = window_server::window_space_query_count();
     let arrangements = layout_updates(reactor, |r| {
         r.handle_event(Event::WindowMinimized(window));
         r.handle_event(Event::WindowDeminiaturized(window));
     });
-    // Only the restore event's own Space lookup, as for any minimized window.
     assert_eq!(
-        (arrangements, window_server::window_space_query_count() - queries),
-        (0, 1)
+        arrangements, 0,
+        "a claimed window must not trigger layout writes"
     );
     let mut info = reactor.state.windows.window(window).unwrap().info.clone();
     info.is_minimized = false;
