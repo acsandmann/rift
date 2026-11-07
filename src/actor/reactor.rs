@@ -1391,6 +1391,12 @@ impl Reactor {
                     .collect();
                 self.cancel_window_presentations(windows);
             }
+            // Only a snapshot whose revision revoked frames ends animations. A
+            // repeat of the accepted revision, or one where windows only moved
+            // between Spaces, would stop a window short of its frame.
+            Event::SpaceStateChanged(state)
+                if state.revision == self.space_state.revision
+                    || self.topology_guard.invalidated_revision() < state.revision => {}
             Event::MissionControlNativeEntered
             | Event::TopologyInvalidated(_)
             | Event::SpaceStateChanged(_)

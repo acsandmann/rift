@@ -644,18 +644,25 @@ impl SpacesActor {
             resized_spaces,
             active_window_spaces: self.state.visible_window_spaces.clone(),
         };
-        if self.state.last_forwarded.as_ref().is_none_or(|previous| {
+        let presentation_changed = self.state.last_forwarded.as_ref().is_none_or(|previous| {
             !forwarded.destroyed_spaces.is_empty()
                 || previous.screens != forwarded.screens
                 || previous.fullscreen_spaces != forwarded.fullscreen_spaces
                 || previous.display_space_ids != forwarded.display_space_ids
-                || previous.active_window_spaces != forwarded.active_window_spaces
                 || previous.membership_complete != forwarded.membership_complete
-        }) {
+        });
+        let membership_changed = self.state.last_forwarded.as_ref().is_some_and(|previous| {
+            previous.active_window_spaces != forwarded.active_window_spaces
+        });
+        if presentation_changed || membership_changed {
             self.state.revision = self.state.revision.wrapping_add(1);
             forwarded.revision = self.state.revision;
-            // Revoke queued app-actor frames before publishing a changed presentation,
-            // including ordinary native Space switches without physical churn.
+        }
+        // Revoke queued app-actor frames before publishing a changed presentation,
+        // including ordinary native Space switches without physical churn. A window
+        // that only moved between Spaces (as move_window_to_display moves it) leaves
+        // the frames valid; revoking them dropped the moved window's resize.
+        if presentation_changed {
             self.state.topology_guard.invalidate(self.state.revision);
         }
         self.state.last_forwarded = Some(forwarded.clone());
