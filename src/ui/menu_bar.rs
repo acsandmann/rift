@@ -17,7 +17,7 @@ use objc2::{AnyThread, Message};
 use objc2_app_kit::{
     NSAlert, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
     NSFontAttributeName, NSFontWeightBold, NSFontWeightMedium, NSGraphicsContext, NSImage,
-    NSMenuItem, NSSavePanel, NSView,
+    NSMenuItem, NSSavePanel, NSTextAlignment, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGAffineTransform, CGFloat, CGPoint,
@@ -116,6 +116,9 @@ pub struct MenuIcon {
     /// Whether the text style owns the status item instead of the drawn view.
     showing_title: bool,
     rendered_title: String,
+    title_width: f64,
+    /// The titles `title_width` was measured from; remeasured only when they change.
+    measured_titles: Vec<String>,
 }
 
 struct WorkspaceMenuItem {
@@ -186,6 +189,8 @@ impl MenuIcon {
             rendered_binding_mode: String::new(),
             showing_title: false,
             rendered_title: String::new(),
+            title_width: 0.0,
+            measured_titles: Vec::new(),
         };
         this.menu_handler.set_layout_folder(layout_folder.to_path_buf());
         this.refresh_layout_library();
@@ -399,17 +404,37 @@ impl MenuIcon {
         } else if !item.isVisible() {
             item.setVisible(true);
         }
+        let Some(button) = item.button(self.mtm) else { return };
         if !self.showing_title {
-            // Leaving a drawn style: drop its fixed width and canvas.
+            // Leaving a drawn style: hide its canvas; its fixed width is replaced below.
             self.showing_title = true;
             self.view.setHidden(true);
             self.render_key = None;
-            item.setLength(objc2_app_kit::NSVariableStatusItemLength);
+            self.title_width = 0.0;
+            self.measured_titles.clear();
+            button.setAlignment(NSTextAlignment::Center);
         }
-        if self.rendered_title != title {
-            self.status_item.set_title(&title);
-            self.rendered_title = title;
+        // Size for the widest title any workspace could produce, so switching between
+        // names of different lengths never resizes the item or slides its neighbours.
+        let candidates: Vec<String> = title_candidates(displays, settings, binding_mode).collect();
+        if self.measured_titles != candidates {
+            let widest = candidates
+                .iter()
+                .map(|candidate| {
+                    button.setTitle(&NSString::from_str(candidate));
+                    button.fittingSize().width.ceil()
+                })
+                .fold(0.0, f64::max);
+            self.measured_titles = candidates;
+            if self.title_width != widest {
+                self.title_width = widest;
+                item.setLength(widest);
+            }
+        } else if self.rendered_title == title {
+            return;
         }
+        button.setTitle(&NSString::from_str(&title));
+        self.rendered_title = title;
     }
 }
 
@@ -428,8 +453,33 @@ fn status_title(
     else {
         return String::new();
     };
+    decorated_title(workspace, workspace.has_fullscreen, settings, binding_mode)
+}
+
+/// Every title the text style could show for these workspaces, for a stable item width.
+fn title_candidates<'a>(
+    displays: &'a [DisplayWorkspaces],
+    settings: &'a MenuBarSettings,
+    binding_mode: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    displays.iter().flat_map(|display| &display.workspaces).map(move |workspace| {
+        decorated_title(
+            workspace,
+            settings.show_fullscreen_indicator,
+            settings,
+            binding_mode,
+        )
+    })
+}
+
+fn decorated_title(
+    workspace: &Workspace,
+    fullscreen: bool,
+    settings: &MenuBarSettings,
+    binding_mode: &str,
+) -> String {
     let label = workspace_label(workspace, ActiveWorkspaceLabel::Name);
-    let mut title = if settings.show_fullscreen_indicator && workspace.has_fullscreen {
+    let mut title = if settings.show_fullscreen_indicator && fullscreen {
         format!("[{label}]")
     } else {
         label.into_owned()
@@ -1456,6 +1506,13 @@ mod layout_library_tests {
         assert_eq!(status_title(&displays, &settings, ""), "[1]");
 
         assert_eq!(status_title(&[], &settings, "resize"), "");
+
+        // The width reserves room for every workspace, bracketed as if each were fullscreen.
+        let candidates: Vec<_> = title_candidates(&displays, &settings, "").collect();
+        assert_eq!(candidates, ["[main]", "[web]", "[1]", "[web]"]);
+        settings.show_fullscreen_indicator = false;
+        let candidates: Vec<_> = title_candidates(&displays, &settings, "resize").collect();
+        assert_eq!(candidates[0], "main · resize");
     }
 
     #[test]
