@@ -23,6 +23,7 @@ fn sync_existing_window_state(
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
 
     let is_minimized = info.is_minimized;
+    let wsid = info.sys_id;
     let rift_owns_geometry =
         info.sys_id.is_some_and(|wsid| transactions.get_target_frame(wsid).is_some());
     let needs_arrange;
@@ -42,19 +43,24 @@ fn sync_existing_window_state(
         // Preserve the observed frame and minimize transition until their handlers run.
         info.frame = existing.info.frame;
         info.is_minimized = was_minimized;
+        if wsid.is_none() {
+            existing.is_transient = crate::sys::app::is_ax_transient(&info);
+        }
         existing.info = info;
     } else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
     }
 
+    if let Some(wsid) = wsid {
+        state.windows.refresh_transient(wsid);
+    }
     let mut admission_changed = false;
     let mut outcome = match (was_minimized, is_minimized) {
         (_, true) | (true, false) => {
             window::handle_window_visibility_changed(state, wid, !is_minimized)?
         }
         _ => {
-            let is_admitted = utils::refresh_heuristic(state, wid)
-                .is_some_and(|transition| transition.is_admitted);
+            let is_admitted = utils::refresh_heuristic(state, wid).unwrap_or(false);
             admission_changed = was_manageable != is_admitted;
             if was_manageable && !is_admitted {
                 crate::actor::reactor::events::EventOutcome::default().with_layout_event(

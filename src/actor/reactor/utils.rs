@@ -3,30 +3,18 @@ use objc2_app_kit::NSNormalWindowLevel;
 use crate::actor::app::WindowId;
 use crate::actor::reactor::managers::LayoutManager;
 use crate::model::RiftState;
-use crate::sys::app::WindowInfo;
+use crate::sys::app::{WindowInfo, is_ax_transient, is_ibkr_desktop_dialog};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
 
-pub(crate) struct AdmissionTransition {
-    pub(crate) was_admitted: bool,
-    pub(crate) is_admitted: bool,
-}
-
-pub(crate) fn refresh_heuristic(
-    state: &mut RiftState,
-    wid: WindowId,
-) -> Option<AdmissionTransition> {
+pub(crate) fn refresh_heuristic(state: &mut RiftState, wid: WindowId) -> Option<bool> {
     let window = state.windows.window(wid)?;
-    let was_admitted = window.is_admitted();
     let manageable = compute_window_info_manageability(&window.info, |wsid| {
         state.windows.get_window_server_info(wsid)
     });
     let window = state.windows.window_mut(wid)?;
     window.is_manageable = manageable;
-    Some(AdmissionTransition {
-        was_admitted,
-        is_admitted: window.is_admitted(),
-    })
+    Some(window.is_admitted())
 }
 
 pub(crate) fn rejection_needs_removal(
@@ -51,14 +39,6 @@ pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {
     }
 }
 
-pub(crate) fn is_ax_transient(info: &WindowInfo) -> bool {
-    info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
-        || (matches!(
-            info.ax_subrole.as_deref(),
-            Some("AXDialog" | "AXSystemDialog" | "AXSheet")
-        ) && !is_ibkr_desktop_dialog(info))
-}
-
 pub(super) fn compute_window_info_manageability(
     info: &WindowInfo,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
@@ -80,9 +60,11 @@ pub(super) fn compute_window_info_manageability(
         if window_is_sticky(wsid) {
             return false;
         }
+        if window_server_info(wsid).is_some_and(|server| server.is_transient) {
+            return false;
+        }
         if !allow_nonstandard_window {
-            if window_server_info(wsid)
-                .is_some_and(|server| server.layer != 0 || server.is_transient)
+            if window_server_info(wsid).is_some_and(|server| server.layer != 0)
                 || window_level(wsid.0).is_some_and(|level| level != NSNormalWindowLevel)
             {
                 return false;
@@ -90,29 +72,6 @@ pub(super) fn compute_window_info_manageability(
         }
     }
     true
-}
-
-fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
-    if info.ax_role.as_deref() != Some("AXWindow") || info.ax_subrole.as_deref() != Some("AXDialog")
-    {
-        return false;
-    }
-
-    let path_matches = info.path.as_ref().and_then(|path| path.to_str()).is_some_and(|path| {
-        let path = path.to_ascii_lowercase();
-        path.contains("ibkr%20desktop") || path.contains("ibkr desktop")
-    });
-
-    let bundle_matches = info.bundle_id.as_deref().is_some_and(|bundle_id| {
-        bundle_id.starts_with("com.install4j.") || bundle_id == "com.azul.zulu.java"
-    });
-
-    let min_size = info.min_size.unwrap_or(info.frame.size);
-    let looks_like_primary_window = min_size.width >= 1000.0
-        || info.frame.size.width >= 1200.0
-        || info.frame.size.height >= 900.0;
-
-    path_matches && bundle_matches && info.is_root && info.is_resizable && looks_like_primary_window
 }
 
 #[cfg(test)]
@@ -194,5 +153,16 @@ mod tests {
         info.path = Some(PathBuf::from("file:///Applications/IBKR%20Desktop.app"));
 
         assert!(compute_window_info_manageability(&info, |_| None));
+        // Preserve the original compatibility case based on maximum size,
+        // without imposing a new resizability requirement.
+        info.frame.size = CGSize::new(800.0, 600.0);
+        info.max_size = Some(CGSize::new(1400.0, 900.0));
+        info.is_resizable = false;
+        assert!(compute_window_info_manageability(&info, |_| None));
+        let id = crate::sys::window_server::WindowServerId::new(998);
+        info.sys_id = Some(id);
+        let mut native = crate::sys::window_server::get_window(id).unwrap();
+        native.is_transient = true;
+        assert!(!compute_window_info_manageability(&info, |_| Some(native)));
     }
 }

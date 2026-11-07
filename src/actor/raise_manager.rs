@@ -14,6 +14,7 @@ use crate::sys::timer::Timer;
 /// Messages that can be sent to the raise manager
 #[derive(Debug)]
 pub enum Event {
+    MouseRaisesCancelled,
     RaiseRequest(RaiseRequest),
     RaiseCompleted {
         window_id: WindowId,
@@ -126,7 +127,11 @@ impl RaiseManager {
     }
 
     fn handle_message(&mut self, msg: Event) {
+        if self.active_sequence.as_ref().is_some_and(|s| s.raise_token.is_cancelled()) {
+            self.active_sequence = None;
+        }
         match msg {
+            Event::MouseRaisesCancelled => {}
             Event::RaiseRequest(RaiseRequest {
                 mouse_token,
                 raise_windows,
@@ -174,9 +179,6 @@ impl RaiseManager {
                         // process_active_sequence) and must use a live token, or
                         // the app rejects it as cancelled and never reports
                         // completion, blocking the manager permanently.
-                        if sequence.raise_token.is_cancelled() {
-                            sequence.focus_batch = None;
-                        }
                         sequence.raise_token.cancel();
                         sequence.raise_token = CancellationToken::new();
                         // Restart the timeout window so the focus phase gets its
@@ -286,6 +288,10 @@ impl RaiseManager {
         let Some(sequence) = &mut self.active_sequence else {
             return false;
         };
+        if sequence.raise_token.is_cancelled() {
+            self.active_sequence = None;
+            return true;
+        }
         let mut changed = false;
 
         // If all regular raises are complete but we have a focus window, send
@@ -865,5 +871,61 @@ mod tests {
                 panic!("Expected Raise request for first batch");
             }
         });
+    }
+    #[test]
+    fn cancelled_hover_releases_active_and_queued_work_without_stalling_explicit_focus() {
+        let mut manager = RaiseManager::new();
+        let (handles, mut rx) = create_test_app_handles();
+        let hover = WindowId::new(1, 1);
+        let explicit = WindowId::new(1, 2);
+        let token = CancellationToken::new();
+        let mut mouse =
+            create_layout_response(vec![hover], Some((hover, None)), handles.clone(), Quiet::Yes);
+        let Event::RaiseRequest(request) = &mut mouse else {
+            unreachable!()
+        };
+        request.mouse_token = Some(token.clone());
+        manager.handle_message(mouse);
+        let sent = collect_requests(&mut rx);
+        assert!(matches!(&sent[..], [Request::Raise(w, _, _, _)] if w == &[hover]));
+        // A second hover is queued behind the active one.
+        manager.handle_message(Event::RaiseRequest(RaiseRequest {
+            mouse_token: Some(token.clone()),
+            raise_windows: vec![vec![hover]],
+            focus_window: Some((hover, None)),
+            app_handles: handles.clone(),
+            focus_quiet: Quiet::Yes,
+        }));
+        let cancelled_sequence = manager.active_sequence.as_ref().unwrap().sequence_id;
+        token.cancel();
+        // Any scheduler wake must retire cancellation before processing more work.
+        manager.handle_message(Event::RaiseCompleted {
+            window_id: hover,
+            sequence_id: u64::MAX,
+        });
+        assert!(manager.active_sequence.is_none());
+        assert!(manager.queued_sequences.is_empty());
+        assert!(collect_requests(&mut rx).is_empty());
+        manager.handle_message(create_layout_response(
+            vec![explicit],
+            Some((explicit, None)),
+            handles,
+            Quiet::No,
+        ));
+        let sent = collect_requests(&mut rx);
+        assert!(
+            matches!(&sent[..], [Request::Raise(w, t, _, Quiet::No)] if w == &[explicit] && !t.is_cancelled())
+        );
+        // A stale hover timeout must not clear or reset the explicit request.
+        let current = manager.active_sequence.as_ref().unwrap().sequence_id;
+        manager.handle_message(Event::RaiseTimeout {
+            sequence_id: cancelled_sequence,
+        });
+        assert_eq!(manager.active_sequence.as_ref().unwrap().sequence_id, current);
+        manager.handle_message(Event::RaiseCompleted {
+            window_id: explicit,
+            sequence_id: current,
+        });
+        assert!(manager.active_sequence.is_none());
     }
 }

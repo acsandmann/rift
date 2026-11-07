@@ -15,7 +15,7 @@ mod native_tabs;
 mod query;
 mod replay;
 pub mod transaction_manager;
-pub(crate) mod utils;
+mod utils;
 
 #[cfg(test)]
 mod testing;
@@ -1702,9 +1702,9 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowClosed(wsid) => {
-                self.state.windows.forget_transient(wsid);
+                self.state.windows.mark_window_hidden(wsid);
                 let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
-                    self.state.windows.mark_window_hidden(wsid);
+                    self.state.windows.remove_window_server_state(wsid);
                     return Ok(EventOutcome::default());
                 };
                 if self.retain_native_tab_slot_on_departure(wid) {
@@ -1796,12 +1796,6 @@ impl Reactor {
                     .and_then(|window| self.best_space_for_window_id(window))
                     .or_else(|| self.space_state.iter_known_spaces().next());
                 let window_server_info = window_server::get_window(wsid);
-                if let Some(info) = window_server_info.filter(|info| info.is_transient) {
-                    self.mouse_raise_token.cancel();
-                    self.mouse_raise_token = Default::default();
-                    self.state.windows.track_window_server_info(info);
-                    self.state.windows.observe_native_space(wsid, sid, true);
-                }
                 let owner_pid = window_server_info.as_ref().map(|info| info.pid);
                 let app_known =
                     owner_pid.is_some_and(|pid| self.app_manager.apps.contains_key(&pid));
@@ -2850,9 +2844,6 @@ impl Reactor {
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
     fn apply_event_outcome(&mut self, outcome: EventOutcome) {
-        if self.transient_blocks_mouse_focus() {
-            self.mouse_raise_token.cancel();
-        }
         let overview_notified =
             outcome.wm_events.iter().any(|e| matches!(e, WmEvent::OverviewChanged));
         let overview_inventory_changed = outcome.refresh_window_notifications
@@ -3058,6 +3049,13 @@ impl Reactor {
 
         #[cfg(test)]
         self.event_outcome_phase_trace.push("raising");
+        if !self.mouse_raise_token.is_cancelled() && self.transient_blocks_mouse_focus() {
+            self.mouse_raise_token.cancel();
+            let _ = self
+                .communication_manager
+                .raise_manager_tx
+                .try_send(raise_manager::Event::MouseRaisesCancelled);
+        }
         for request in outcome.raise_requests {
             if let Err(error) = self.communication_manager.raise_manager_tx.try_send(request) {
                 warn!(%error, "failed to send raise request");
@@ -3290,9 +3288,14 @@ impl Reactor {
 
     fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
         for info in ws_info {
+            let was_admitted = self
+                .state
+                .windows
+                .tracked_window_id(info.id)
+                .is_some_and(|wid| self.state.windows.is_admitted(wid));
             if let Some(wid) = self.state.windows.observe_native_window(info)
                 && utils::refresh_heuristic(&mut self.state, wid)
-                    .is_some_and(|transition| transition.was_admitted && !transition.is_admitted)
+                    .is_some_and(|admitted| was_admitted && !admitted)
             {
                 self.send_layout_event(if self.state.windows.is_temporarily_unavailable(wid) {
                     LayoutEvent::WindowSuspended(wid)
@@ -4457,7 +4460,7 @@ impl Reactor {
         // Reuse this inventory's native/discovery resolution for FFM visibility.
         for (&wid, &(native, discovery)) in &window_spaces {
             if let Some(window) = self.state.windows.window(wid)
-                && utils::is_ax_transient(&window.info)
+                && crate::sys::app::is_ax_transient(&window.info)
                 && let Some(wsid) = window.info.sys_id
             {
                 self.state.windows.set_window_server_space(wsid, native.or(discovery));

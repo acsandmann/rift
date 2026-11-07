@@ -456,6 +456,7 @@ impl WindowStore {
         if let Some(wid) = window
             && ordered_in == Some(false)
         {
+            self.mark_window_hidden(wsid);
             return NativeDeparture::Closed(wid);
         }
         let remove_projection = window.and_then(|wid| self.record(wid)).is_some_and(|record| {
@@ -475,7 +476,13 @@ impl WindowStore {
         if let Some(old) = self.record(wid).and_then(WindowRecord::window_server_id)
             && Some(old) != wsid
         {
-            self.remove_window_server_state(old);
+            if self.get_window_server_info(old).is_some_and(|info| info.is_transient) {
+                self.server_record_mut(old).window_id = None;
+                self.windows.get_mut(&wid).unwrap().window_server_id = None;
+                self.refresh_transient(old);
+            } else {
+                self.remove_window_server_state(old);
+            }
             self.windows.get_mut(&wid).unwrap().pending_transfer = None;
         }
         let wsid = wsid?;
@@ -739,15 +746,6 @@ impl WindowStore {
 
     pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
         let wsid = window.info.sys_id;
-        if crate::actor::reactor::utils::is_ax_transient(&window.info)
-            && matches!(
-                window.info.ax_role.as_deref(),
-                Some("AXWindow" | "AXSheet" | "AXPopover" | "AXMenu")
-            )
-            && let Some(wsid) = wsid
-        {
-            self.transient_windows.insert(wsid);
-        }
         let retained_workspace = {
             let record = self.windows.entry(window_id).or_default();
             record.state = Some(window);
@@ -872,6 +870,7 @@ impl WindowStore {
             self.window_servers.get(&wsid).is_some_and(WindowServerRecord::is_empty);
         if should_remove {
             self.window_servers.remove(&wsid);
+            self.refresh_transient(wsid);
         }
     }
 
@@ -895,6 +894,9 @@ impl WindowStore {
             && let Some(record) = self.windows.get_mut(&old)
         {
             record.window_server_id = None;
+            if let Some(window) = &mut record.state {
+                window.is_transient = crate::sys::app::is_ax_transient(&window.info);
+            }
         }
         if let Some(previous_wsid) = self
             .windows
@@ -904,6 +906,7 @@ impl WindowStore {
             && let Some(record) = self.window_servers.get_mut(&previous_wsid)
         {
             record.window_id = None;
+            self.refresh_transient(previous_wsid);
             self.prune_window_server_record(previous_wsid);
         }
         let window = self.windows.entry(window_id).or_default();
@@ -928,22 +931,40 @@ impl WindowStore {
             native_record.window_server_id = Some(wsid);
             self.upsert_native_fullscreen_record(native_record);
         }
+        self.refresh_transient(wsid);
         self.prune_window_server_record(wsid);
         old
     }
 
     pub fn track_window_server_info(&mut self, info: WindowServerInfo) -> Option<WindowServerInfo> {
-        if info.is_transient {
-            self.transient_windows.insert(info.id);
+        if self.tracked_window_id(info.id).is_some_and(|wid| wid.pid != info.pid) {
+            self.remove_window_server_state(info.id);
         }
         let record = self.server_record_mut(info.id);
         let old = record.info;
         record.info = Some(info);
+        self.refresh_transient(info.id);
         old
     }
 
-    pub(crate) fn forget_transient(&mut self, id: WindowServerId) {
-        self.transient_windows.remove(&id);
+    pub(crate) fn refresh_transient(&mut self, id: WindowServerId) {
+        let native = self.get_window_server_info(id).is_some_and(|info| info.is_transient);
+        let ax = self.tracked_window_id(id).and_then(|wid| self.window_mut(wid));
+        let mut blocks = native;
+        if let Some(window) = ax {
+            let transient = crate::sys::app::is_ax_transient(&window.info);
+            window.is_transient = native || transient;
+            blocks |= transient
+                && matches!(
+                    window.info.ax_role.as_deref(),
+                    Some("AXWindow" | "AXSheet" | "AXPopover" | "AXMenu")
+                );
+        }
+        if blocks {
+            self.transient_windows.insert(id);
+        } else {
+            self.transient_windows.remove(&id);
+        }
     }
 
     pub(crate) fn transient_blocks_mouse_focus(
@@ -1069,7 +1090,6 @@ impl WindowStore {
     }
 
     pub fn remove_window_server_state(&mut self, wsid: WindowServerId) -> Option<WindowId> {
-        self.transient_windows.remove(&wsid);
         let wid = self.tracked_window_id(wsid);
         if let Some(record) = self.window_servers.get_mut(&wsid) {
             record.window_id = None;
@@ -1082,7 +1102,11 @@ impl WindowStore {
             && let Some(record) = self.windows.get_mut(&wid)
         {
             record.window_server_id = None;
+            if let Some(window) = &mut record.state {
+                window.is_transient = crate::sys::app::is_ax_transient(&window.info);
+            }
         }
+        self.refresh_transient(wsid);
         self.prune_window_server_record(wsid);
         wid
     }
@@ -1486,7 +1510,14 @@ impl WindowStore {
             self.remove_window_from_workspace_index(window_id, assignment);
         }
         if let Some(wsid) = record.window_server_id {
-            self.remove_window_server_state(wsid);
+            if self.is_window_visible(wsid)
+                && self.get_window_server_info(wsid).is_some_and(|info| info.is_transient)
+            {
+                self.server_record_mut(wsid).window_id = None;
+                self.refresh_transient(wsid);
+            } else {
+                self.remove_window_server_state(wsid);
+            }
         }
         if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
             windows.remove(&window_id);
@@ -1499,13 +1530,16 @@ impl WindowStore {
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
         self.transient_windows.retain(|id| {
-            self.window_servers
-                .get(id)
-                .is_some_and(|r| r.info.is_some_and(|i| i.pid != pid))
+            self.window_servers.get(id).is_some_and(|r| {
+                r.info.map(|i| i.pid).or_else(|| r.window_id.map(|w| w.pid)) != Some(pid)
+            })
         });
         let window_ids: Vec<_> =
             self.app_windows.get(&pid).into_iter().flatten().copied().collect();
         for window_id in window_ids {
+            if let Some(wsid) = self.record(window_id).and_then(WindowRecord::window_server_id) {
+                self.mark_window_hidden(wsid);
+            }
             self.remove_window(window_id);
         }
 

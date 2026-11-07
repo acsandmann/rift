@@ -1920,6 +1920,7 @@ impl State {
             }
             Err(err) => return Err(err.into()),
         };
+        check_cancel()?;
         let make_key_result =
             window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
         if let Some(Err(err)) = &make_key_result {
@@ -1939,6 +1940,7 @@ impl State {
             // activation wait. Cancellation can stop follow-up batch raises, but it
             // must not leave process activation detached from its target window.
             let window = this.window(first)?;
+            check_cancel()?;
             trace("raise before activation wait", &window.elem, || {
                 window.elem.raise()
             })?;
@@ -1960,6 +1962,7 @@ impl State {
         }
 
         for (i, &wid) in wids.iter().enumerate() {
+            check_cancel()?;
             debug_assert_eq!(wid.pid, this.pid);
             if waits_for_activation && i == 0 {
                 trace!(?wid, "Skipping duplicate raise after activation wait");

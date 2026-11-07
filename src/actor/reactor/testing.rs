@@ -239,6 +239,7 @@ impl Reactor {
         is_manageable: bool,
     ) {
         self.state.windows.insert_window(wid, super::WindowState {
+            is_transient: false,
             info: WindowInfo {
                 has_native_tabs: false,
                 is_standard: true,
