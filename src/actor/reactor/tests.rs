@@ -11321,17 +11321,20 @@ fn native_only_transient_appearance_preserves_discovery_and_scopes_hover_cancell
 }
 
 #[test]
-fn ax_transients_veto_manage_rules_and_remove_existing_layout_slots() {
-    for (role, subrole) in [
-        ("AXWindow", "AXDialog"),
-        ("AXWindow", "AXSystemDialog"),
-        ("AXSheet", ""),
-        ("AXPopover", ""),
+fn admission_loss_suspends_membership_until_return_or_destruction() {
+    for (role, subrole, standard, root, manage) in [
+        ("AXWindow", "AXDialog", false, true, None),
+        ("AXWindow", "AXSystemDialog", false, true, Some(true)),
+        ("AXSheet", "", false, false, Some(true)),
+        ("AXPopover", "", false, false, Some(true)),
+        ("AXWindow", "AXStandardWindow", false, true, None),
+        ("AXWindow", "AXStandardWindow", true, false, None),
     ] {
         let cfg = crate::common::config::VirtualWorkspaceSettings {
+            default_workspace_count: 2,
             app_rules: vec![crate::common::config::AppWorkspaceRule {
                 app_id: Some("com.testapp2".into()),
-                manage: Some(true),
+                manage,
                 ..Default::default()
             }],
             ..Default::default()
@@ -11339,28 +11342,60 @@ fn ax_transients_veto_manage_rules_and_remove_existing_layout_slots() {
         let mut reactor = test_reactor_with_workspace_settings(&cfg);
         let mut apps = Apps::new();
         let space = SpaceId::new(1);
-        reactor.handle_event(space_state_event(
-            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
-            vec![Some(space)],
-        ));
-        reactor.handle_events(apps.make_app(2, make_windows(1)));
-        let wid = WindowId::new(2, 1);
-        assert!(reactor.state.windows.window(wid).unwrap().is_admitted());
-        assert_eq!(
-            reactor.state.windows.window(wid).unwrap().manage_override,
-            Some(true)
+        apps.make_app_and_settle_on_screen(
+            &mut reactor,
+            CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.)),
+            space,
+            2,
+            make_windows(1),
         );
-        let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+        let wid = WindowId::new(2, 1);
+        let home = reactor.test_workspace_for_window(space, wid).unwrap();
+        let other = reactor.test_workspace(space, 1);
+        reactor.handle_test_workspace_command(space, &LayoutCommand::SwitchToWorkspace(1));
+        let original = reactor.state.windows.window(wid).unwrap().info.clone();
+        let mut info = original.clone();
         info.ax_role = Some(role.into());
         info.ax_subrole = Some(subrole.into());
-        reactor.discover_test_windows(2, vec![(wid, info.clone())], vec![]);
-        assert!(!reactor.state.windows.window(wid).unwrap().is_admitted());
+        info.is_standard = standard;
+        info.is_root = root;
+        let popup = WindowId::new(2, 2);
+        let mut popup_info = info.clone();
+        popup_info.sys_id = Some(WindowServerId::new(20002));
+        for _ in 0..2 {
+            reactor.discover_test_windows(
+                2,
+                vec![(wid, info.clone()), (popup, popup_info.clone())],
+                vec![],
+            );
+            assert!(!reactor.state.windows.is_admitted(wid));
+            assert_eq!(reactor.test_workspace_for_window(space, wid), Some(home));
+            assert!(reactor.test_workspace_for_window(space, popup).is_none());
+            assert_eq!(
+                reactor.state.windows.window(wid).unwrap().info.ax_subrole,
+                info.ax_subrole
+            );
+        }
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+        // Selecting the owning workspace must not resume an inadmissible window.
+        reactor.handle_test_workspace_command(space, &LayoutCommand::SwitchToWorkspace(0));
+        assert!(!reactor.state.windows.is_admitted(wid));
+        assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
+        reactor.handle_test_workspace_command(space, &LayoutCommand::SwitchToWorkspace(1));
+        reactor.discover_test_windows(2, vec![(wid, original)], vec![popup]);
+        assert!(reactor.state.windows.is_admitted(wid));
+        assert_eq!(reactor.test_workspace_for_window(space, wid), Some(home));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.workspaces().active_workspace(space),
+            Some(other)
+        );
+        reactor.handle_test_workspace_command(space, &LayoutCommand::SwitchToWorkspace(0));
+        assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+        // Permanent destruction must still discard retained ownership.
+        reactor.discover_test_windows(2, vec![(wid, info)], vec![popup]);
+        reactor.handle_event(Event::WindowDestroyed(wid));
         assert!(reactor.test_workspace_for_window(space, wid).is_none());
-        assert!(reactor.state.windows.contains_window(wid));
-        info.ax_role = Some("AXWindow".into());
-        info.ax_subrole = Some("AXStandardWindow".into());
-        reactor.discover_test_windows(2, vec![(wid, info)], vec![]);
-        assert!(reactor.state.windows.window(wid).unwrap().is_admitted());
+        assert!(!reactor.state.windows.contains_window(wid));
     }
 }
 

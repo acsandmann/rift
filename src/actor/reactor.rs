@@ -5252,7 +5252,7 @@ impl Reactor {
                 .is_some_and(|t| t.native && t.pid == wid.pid)
         }) && !crate::sys::app::is_ibkr_desktop_dialog(&window.info);
         if was_admitted && !window.is_admitted() {
-            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+            self.send_layout_event(LayoutEvent::WindowSuspended(wid));
         }
     }
 

@@ -343,9 +343,14 @@ impl WindowStore {
         }
     }
 
+    /// Live windows can lose heuristic admission as their AX/native metadata
+    /// changes. Suspend their layout participation without forgetting ownership;
+    /// only an explicit exclusion or retirement should discard that ownership.
     pub(crate) fn is_temporarily_unavailable(&self, wid: WindowId) -> bool {
         self.record(wid).is_some_and(|r| r.suspended)
-            || self.window(wid).is_some_and(|w| w.info.is_minimized)
+            || self.window(wid).is_some_and(|w| {
+                w.info.is_minimized || (w.manage_override != Some(false) && !w.is_admitted())
+            })
             || self.is_window_native_fullscreen_suspended(wid)
     }
 
