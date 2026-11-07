@@ -595,7 +595,13 @@ impl WindowStore {
         observed: &[(WindowServerId, Option<SpaceId>)],
         active_spaces: &HashSet<SpaceId>,
     ) -> HashSet<WindowServerId> {
-        let observed_ids: HashSet<_> = observed.iter().map(|(wsid, _)| *wsid).collect();
+        // This inventory excludes attached windows. Transient absence is not
+        // visibility evidence; their lifecycle events remain authoritative.
+        let observed_ids: HashSet<_> = observed
+            .iter()
+            .map(|(wsid, _)| *wsid)
+            .chain(self.transient_windows.iter().copied())
+            .collect();
         let hidden: Vec<_> = self
             .iter_visible_window_server_ids()
             .filter(|wsid| !observed_ids.contains(wsid))

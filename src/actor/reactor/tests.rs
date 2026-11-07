@@ -11247,7 +11247,21 @@ fn native_only_transient_appearance_preserves_discovery_and_scopes_hover_cancell
         assert!(reactor.state.windows.tracked_window_id(info.id).is_none());
         assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
         assert_eq!(token.is_cancelled(), !background);
+        // Attached sheets/popovers are classified by the appearance query but
+        // excluded from the parent-filtered manageable-window Space inventory.
+        let main_wsid = reactor.test_window_server_id(main);
+        assert!(reactor.state.windows.is_window_visible(main_wsid));
+        reactor.space_state.membership_complete = true;
+        reactor.reconcile_authoritative_active_window_snapshot(vec![], false, &[]);
+        assert!(reactor.state.windows.is_window_visible(info.id));
+        assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
+        assert!(
+            !reactor.state.windows.is_window_visible(main_wsid),
+            "ordinary snapshot absence must still hide normal windows"
+        );
         reactor.handle_event(Event::WindowServerHidden(info.id));
+        reactor.reconcile_authoritative_active_window_snapshot(vec![], false, &[]);
+        assert!(!reactor.state.windows.is_window_visible(info.id));
         assert!(!reactor.transient_blocks_mouse_focus());
         reactor.handle_event(Event::WindowServerUnhidden(info.id));
         assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
