@@ -11559,3 +11559,76 @@ fn rule_owned_window_survives_late_cross_display_notifications() {
     assert_eq!(reactor.state.windows.workspace_for_window(window), Some(owner));
     assert_eq!(test_layout(&mut reactor, a, shared_left()), before);
 }
+
+/// Firefox's video fullscreen moves its window into a fullscreen Space without it appearing
+/// there; a complete snapshot merely omits it. Mid-move its membership lists the user Space
+/// too, or nothing at all.
+#[test]
+fn native_fullscreen_seen_only_as_snapshot_absence_preserves_split_ratio() {
+    use crate::sys::window_server::set_window_spaces_override as set_membership;
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1200., 900.));
+    let space = SpaceId::new(1);
+    let fullscreen_space = SpaceId::new(0x400000000 + space.get());
+    let in_transit = [vec![], vec![space, fullscreen_space], vec![
+        fullscreen_space,
+    ]];
+    for membership in in_transit {
+        let (mut apps, mut reactor) = test_context();
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+        apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Bsp,
+        });
+        let browser = WindowId::new(1, 1);
+        reactor.handle_event(Event::WindowServerFocusChanged(browser, space));
+        reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.2 });
+        apps.simulate_until_quiet(&mut reactor);
+        let mut before = test_layout(&mut reactor, space, screen);
+        assert!(before.iter().all(|(_, frame)| frame.size.width != screen.size.width / 2.));
+        let wsid = |wid| reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+        let (browser_wsid, other_wsid) = (wsid(browser), wsid(WindowId::new(2, 1)));
+        let snapshot = |reactor: &mut Reactor, members: &[WindowServerId], entered: bool| {
+            reactor.handle_event(space_state_event_with(vec![screen], vec![Some(space)], |s| {
+                s.membership_complete = true;
+                s.active_window_spaces = members.iter().map(|wsid| (*wsid, space)).collect();
+                if entered {
+                    s.fullscreen_spaces.insert(fullscreen_space);
+                } else {
+                    s.destroyed_spaces.insert(fullscreen_space);
+                }
+            }));
+        };
+        let ids = |spaces: &[SpaceId]| Some(spaces.iter().map(|s| s.get()).collect());
+
+        // Entry, in the order Firefox produces it.
+        set_membership(browser_wsid, ids(&membership));
+        snapshot(&mut reactor, &[other_wsid], true);
+        window_server_destroyed(&mut reactor, browser_wsid, space, SpaceEventKind::User);
+        reactor.discover_test_windows(1, vec![], vec![]);
+        set_membership(browser_wsid, ids(&[fullscreen_space]));
+        apps.simulate_until_quiet(&mut reactor);
+        assert!(
+            reactor.state.windows.native_fullscreen_record_for_window(browser).is_some(),
+            "{membership:?}: native fullscreen entry must suspend, not remove, the window"
+        );
+
+        // Exit.
+        set_membership(browser_wsid, ids(&[space]));
+        window_server_destroyed(
+            &mut reactor,
+            browser_wsid,
+            fullscreen_space,
+            SpaceEventKind::Fullscreen,
+        );
+        snapshot(&mut reactor, &[browser_wsid, other_wsid], false);
+        window_server_appeared(&mut reactor, browser_wsid, space, SpaceEventKind::User);
+        apps.simulate_until_quiet(&mut reactor);
+        set_membership(browser_wsid, None);
+
+        let mut after = test_layout(&mut reactor, space, screen);
+        before.sort_by_key(|(wid, _)| *wid);
+        after.sort_by_key(|(wid, _)| *wid);
+        assert_eq!(before, after, "{membership:?}");
+    }
+}

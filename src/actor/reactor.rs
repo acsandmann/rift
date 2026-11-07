@@ -936,6 +936,36 @@ impl Reactor {
             {
                 continue;
             }
+            // Firefox's video fullscreen moves its window into a fullscreen Space without it
+            // appearing there, so absence is the only entry evidence. Mid-move the window may
+            // still list its user Space (which the single-Space lookup prefers) or none at all.
+            let membership = window_server::window_spaces(wsid);
+            let fullscreen = match membership.iter().find(|s| self.is_fullscreen_space(**s)) {
+                Some(space) => Some(*space),
+                None if membership.is_empty() => match self.space_state.fullscreen_spaces.len() {
+                    0 => None,
+                    1 => self.space_state.fullscreen_spaces.iter().next().copied(),
+                    _ => {
+                        // In transit with several candidate destinations; decide next sample.
+                        self.request_space_snapshot();
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            if let Some(space) = fullscreen {
+                let user = self
+                    .state
+                    .windows
+                    .tracked_window_id(wsid)
+                    .and_then(|window| self.assigned_space_for_window_id(window));
+                if let Some(window) =
+                    self.state.windows.observe_native_fullscreen(wsid, space, user, None)
+                {
+                    self.send_layout_event(LayoutEvent::WindowSuspended(window));
+                }
+                continue;
+            }
             let inactive_target = self
                 .resolve_native_space(wsid, None)
                 .filter(|space| !self.is_space_active(*space))
@@ -1761,6 +1791,11 @@ impl Reactor {
                     .then(|| self.resolve_native_space(wsid, None))
                     .flatten();
                 self.transient_focus.depart(wsid, sid, resolved);
+                // Leaving the user Space is how native fullscreen entry looks from there;
+                // treating it as a move would hand the window to the fullscreen Space.
+                if matches!(kind, SpaceEventKind::User) && self.is_known_fullscreen_window(wsid) {
+                    return Ok(EventOutcome::no_change());
+                }
                 if matches!(kind, SpaceEventKind::User)
                     && let Some(space) = resolved.filter(|space| *space != sid)
                     && self.defer_native_space_move(wsid, space)
