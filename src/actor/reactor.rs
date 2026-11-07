@@ -2939,6 +2939,7 @@ impl Reactor {
                     self.process_windows_for_app_rules(vec![window], app_info, false);
                 }
                 if self.state.windows.is_admitted(window) {
+                    let space = self.assigned_space_for_window_id(window).unwrap_or(space);
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
                     if assigned_space.is_none() {
                         self.place_new_window_on_pointer_display(window, space);
@@ -4706,7 +4707,11 @@ impl Reactor {
         {
             return self.restore_native_fullscreen(Some(wsid), window, Some(space));
         }
-        self.reassign_window_to_authoritative_space(window, space, false);
+        // Appearance can restore participation, but is not an authoritative move.
+        let owner = self.assigned_space_for_window_id(window).unwrap_or(space);
+        if self.is_space_active(owner) && self.state.windows.is_visible_admitted(window) {
+            self.send_layout_event(LayoutEvent::WindowAdded(owner, window));
+        }
         EventOutcome::no_change()
     }
 
@@ -4717,7 +4722,14 @@ impl Reactor {
         preserve_workspace_ordinal: bool,
     ) {
         // A claim holds the destination; release replays this reconciliation.
-        if self.state.windows.is_claimed(wid) {
+        if self.state.windows.is_claimed(wid)
+            || self
+                .state
+                .windows
+                .record(wid)
+                .and_then(|record| record.pending_transfer())
+                .is_some()
+        {
             return;
         }
         if !self.state.windows.reconcile_admission(wid) {
@@ -5039,6 +5051,7 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        let event = self.layout_manager.layout_engine.normalize_event(&self.state.windows, event);
         // Discovery and title-rule refreshes share this effect boundary. Logical
         // assignment has already resolved the target, while native observations
         // continue to describe physical placement until membership catches up.

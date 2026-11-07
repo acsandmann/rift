@@ -1954,11 +1954,26 @@ impl LayoutEngine {
         }
     }
 
+    /// Lifecycle additions restore participation, never logical ownership.
+    pub(crate) fn normalize_event(&self, windows: &WindowStore, event: LayoutEvent) -> LayoutEvent {
+        match event {
+            LayoutEvent::WindowAdded(space, window) => LayoutEvent::WindowAdded(
+                windows
+                    .workspace_for_window(window)
+                    .and_then(|workspace| self.workspaces.workspace_space(workspace))
+                    .unwrap_or(space),
+                window,
+            ),
+            event => event,
+        }
+    }
+
     pub fn handle_event(
         &mut self,
         window_store: &mut WindowStore,
         event: LayoutEvent,
     ) -> LayoutEventOutcome {
+        let event = self.normalize_event(window_store, event);
         let mut app_rules = AppRuleOutcome::default();
         let response = self.handle_event_inner(window_store, event, &mut app_rules);
         LayoutEventOutcome { response, app_rules }

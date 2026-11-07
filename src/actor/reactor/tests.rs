@@ -11447,3 +11447,80 @@ fn only_current_actor_exit_clears_native_blockers() {
     reactor.handle_event(Event::AppActorExited(main.pid, active));
     assert!(!reactor.transient_blocks_mouse_focus());
 }
+
+#[test]
+fn rule_owned_window_survives_late_cross_display_notifications() {
+    use crate::layout_engine::systems::LayoutSystem;
+    let mut settings = shared_settings();
+    settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+        app_id: Some("com.testapp1".into()),
+        workspace: Some(WorkspaceSelector::Index(1)),
+        ..Default::default()
+    }];
+    let (mut apps, mut reactor, a, b) = two_displays(settings);
+    let window = WindowId::new(1, 1002);
+    let wsid = WindowServerId::new(1002);
+    let frame = CGRect::new(CGPoint::new(1500., 200.), CGSize::new(400., 400.));
+    reactor.handle_event(Event::WindowCreated(
+        window,
+        make_window_info(frame, Some(wsid), "Ghostty", None),
+        None,
+        None,
+    ));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(window),
+        Some(a),
+        "creation finalization"
+    );
+    let owner = reactor.state.windows.workspace_for_window(window).unwrap();
+    for _ in 0..2 {
+        reactor.handle_event(Event::WindowServerAppeared(wsid, b, SpaceEventKind::User));
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(window),
+            Some(owner),
+            "late appearance"
+        );
+        reactor.send_layout_event(LayoutEvent::WindowAdded(b, window));
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(window),
+            Some(owner),
+            "duplicate add"
+        );
+        reactor.reconcile_windows_in_authoritative_active_snapshot(&[(wsid, Some(b))], &[]);
+        assert_eq!(
+            reactor.state.windows.workspace_for_window(window),
+            Some(owner),
+            "pending snapshot"
+        );
+    }
+    apps.simulate_until_quiet(&mut reactor);
+    let workspace = &reactor.layout_manager.layout_engine.workspaces()[owner];
+    assert!(
+        workspace
+            .layout_system
+            .contains_window(workspace.active_layout().unwrap(), window)
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(window), Some(a));
+    assert!(shared_left().contains(apps.windows[&window].frame.mid()));
+    reactor.handle_event(space_state_event_with(
+        vec![shared_left(), shared_right()],
+        vec![Some(a), Some(b)],
+        |s| {
+            s.membership_complete = true;
+            s.active_window_spaces.insert(wsid, a);
+        },
+    ));
+    assert!(reactor.state.windows.record(window).unwrap().pending_transfer().is_none());
+    let before = test_layout(&mut reactor, a, shared_left());
+    let focused = reactor.layout_manager.layout_engine.focused_window();
+    apps.requests();
+    for _ in 0..2 {
+        reactor.handle_event(Event::WindowServerAppeared(wsid, b, SpaceEventKind::User));
+        reactor.send_layout_event(LayoutEvent::WindowAdded(b, window));
+    }
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), focused);
+    assert!(reactor.state.windows.record(window).unwrap().pending_transfer().is_none());
+    assert!(apps.requests().is_empty(), "duplicates must not write geometry");
+    assert_eq!(reactor.state.windows.workspace_for_window(window), Some(owner));
+    assert_eq!(test_layout(&mut reactor, a, shared_left()), before);
+}
