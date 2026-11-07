@@ -364,8 +364,6 @@ fn window_query_run(filter: &WindowQueryFilter<'_>) -> Option<WindowIterator> {
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 #[allow(unused)]
 pub struct WindowServerInfo {
-    #[serde(default)]
-    pub is_transient: bool,
     pub id: WindowServerId,
     pub pid: pid_t,
     pub layer: i32,
@@ -537,7 +535,6 @@ fn get_visible_windows_raw<T: Type>() -> CFRetained<CFArray<T>> {
 pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     ids.iter()
         .map(|&id| WindowServerInfo {
-            is_transient: false,
             id,
             pid: 1234,
             layer: 0,
@@ -564,19 +561,7 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
 }
 
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
-    #[cfg(test)]
-    {
-        return get_windows(&[id]).into_iter().next();
-    }
-
-    #[cfg(not(test))]
-    {
-        let query = WindowIterator::new(&[id])?;
-        if query.count() != 1 || query.advance().is_none() {
-            return None;
-        }
-        return window_info_from_query(&query);
-    }
+    get_window_with_transient(id).map(|(info, _)| info)
 }
 
 fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<i64> {
@@ -622,6 +607,28 @@ fn window_is_effectively_invisible(alpha: f32, layer: i32) -> bool {
     layer == 0 && alpha <= EFFECTIVELY_INVISIBLE_WINDOW_ALPHA
 }
 
+/// Appearance-only metadata and transient classification from one native query.
+pub(crate) fn get_window_with_transient(id: WindowServerId) -> Option<(WindowServerInfo, bool)> {
+    #[cfg(test)]
+    {
+        return get_windows(&[id]).into_iter().next().map(|info| (info, false));
+    }
+    #[cfg(not(test))]
+    {
+        let query = WindowIterator::new(&[id])?;
+        if query.count() != 1 || query.advance().is_none() {
+            return None;
+        }
+        Some((
+            window_info_from_query(&query)?,
+            native_window_is_transient(
+                SLSWindowTags::from_bits_retain(query.tags()),
+                query.parent_id(),
+            ),
+        ))
+    }
+}
+
 // Tags describe native behavior, not AX roles. In particular DOCUMENT is a
 // style bit, and an attached NSPopover can carry it too.
 fn native_window_is_transient(tags: SLSWindowTags, parent: u32) -> bool {
@@ -642,17 +649,7 @@ fn window_info_from_query(query: &WindowIterator) -> Option<WindowServerInfo> {
         return None;
     }
     let (min_frame, max_frame) = query.constraints();
-    let tags = SLSWindowTags::from_bits_retain(query.tags());
-    let parent = query.parent_id();
-    tracing::trace!(
-        wsid = query.window_id(),
-        ?tags,
-        parent,
-        layer,
-        "Native window classification"
-    );
     Some(WindowServerInfo {
-        is_transient: native_window_is_transient(tags, parent),
         id: WindowServerId::new(query.window_id()),
         pid: query.pid() as i32,
         layer,

@@ -193,21 +193,7 @@ pub fn handle_window_server_appeared(
         app_known,
         running_app_info,
     } = observations;
-    let was_admitted = state
-        .windows
-        .tracked_window_id(wsid)
-        .filter(|wid| state.windows.is_admitted(*wid));
-    let previous = state.windows.get_window_server_info(wsid);
-    let known = previous.is_some() || state.windows.is_window_server_observed(wsid);
-    if let Some(info) = window_server_info
-        && (info.is_transient || previous.is_some_and(|old| old.is_transient))
-    {
-        state.windows.track_window_server_info(info);
-    }
     let mut outcome = EventOutcome::default();
-    if let Some(wid) = was_admitted.filter(|wid| !state.windows.is_admitted(*wid)) {
-        outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(wid));
-    }
     if matches!(kind, SpaceEventKind::User) {
         if let Some(resolved_space) = resolved_space {
             if resolved_space != sid {
@@ -234,7 +220,7 @@ pub fn handle_window_server_appeared(
         }
     }
 
-    if known {
+    if state.windows.knows_window_server_id(wsid) || state.windows.is_window_server_observed(wsid) {
         if !mission_control_active {
             match kind {
                 SpaceEventKind::User => {

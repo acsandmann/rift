@@ -208,7 +208,6 @@ impl Reactor {
         frame: CGRect,
     ) {
         self.state.windows.track_window_server_info(WindowServerInfo {
-            is_transient: false,
             id: wsid,
             pid,
             layer: 0,
@@ -239,7 +238,6 @@ impl Reactor {
         is_manageable: bool,
     ) {
         self.state.windows.insert_window(wid, super::WindowState {
-            is_transient: false,
             info: WindowInfo {
                 has_native_tabs: false,
                 is_standard: true,
@@ -517,7 +515,6 @@ impl Apps {
                 windows
                     .iter()
                     .map(|info| WindowServerInfo {
-                        is_transient: false,
                         pid,
                         id: info.sys_id.unwrap(),
                         layer: 0,

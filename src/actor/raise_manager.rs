@@ -16,6 +16,7 @@ use crate::sys::timer::Timer;
 pub enum Event {
     MouseRaisesCancelled,
     RaiseRequest(RaiseRequest),
+    MouseRaiseRequest(RaiseRequest, CancellationToken),
     RaiseCompleted {
         window_id: WindowId,
         sequence_id: u64,
@@ -28,7 +29,6 @@ pub enum Event {
 /// A queued layout response waiting to be processed.
 #[derive(Debug)]
 pub struct RaiseRequest {
-    pub mouse_token: Option<CancellationToken>,
     /// A set of windows to raise concurrently. Each inner vec should contain a
     /// set of windows from the same app and on the same screen.
     pub raise_windows: Vec<Vec<WindowId>>,
@@ -42,7 +42,7 @@ pub struct RaiseManager {
     /// The currently active sequence, if any
     active_sequence: Option<ActiveSequence>,
     /// Queued sequences waiting to be processed
-    queued_sequences: VecDeque<RaiseRequest>,
+    queued_sequences: VecDeque<(RaiseRequest, Option<CancellationToken>)>,
     next_sequence_id: u64,
     input_tx: Option<input::Sender>,
 }
@@ -132,26 +132,15 @@ impl RaiseManager {
         }
         match msg {
             Event::MouseRaisesCancelled => {}
-            Event::RaiseRequest(RaiseRequest {
-                mouse_token,
-                raise_windows,
-                focus_window,
-                app_handles,
-                focus_quiet,
-            }) => {
+            Event::RaiseRequest(request) => {
                 debug!(
                     "Processing layout response with {} raise_windows",
-                    raise_windows.len()
+                    request.raise_windows.len()
                 );
-
-                // Always queue the sequence
-                self.queued_sequences.push_back(RaiseRequest {
-                    mouse_token,
-                    raise_windows,
-                    focus_window,
-                    app_handles,
-                    focus_quiet,
-                });
+                self.queued_sequences.push_back((request, None));
+            }
+            Event::MouseRaiseRequest(request, token) => {
+                self.queued_sequences.push_back((request, Some(token)));
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 trace!("Raise completed for {:?} in sequence {}", window_id, sequence_id);
@@ -204,8 +193,8 @@ impl RaiseManager {
 
     fn process_queued_responses(&mut self) -> bool {
         if self.active_sequence.is_none() {
-            if let Some(queued) = self.queued_sequences.pop_front() {
-                self.start_new_sequence(queued);
+            if let Some((queued, token)) = self.queued_sequences.pop_front() {
+                self.start_new_sequence(queued, token);
                 return true;
             }
         }
@@ -215,12 +204,12 @@ impl RaiseManager {
     fn start_new_sequence(
         &mut self,
         RaiseRequest {
-            mouse_token,
             raise_windows,
             focus_window,
             app_handles,
             focus_quiet,
         }: RaiseRequest,
+        mouse_token: Option<CancellationToken>,
     ) {
         let sequence_id = self.next_sequence_id;
         self.next_sequence_id += 1;
@@ -366,7 +355,6 @@ mod tests {
         focus_quiet: Quiet,
     ) -> Event {
         Event::RaiseRequest(RaiseRequest {
-            mouse_token: None,
             raise_windows: raise_windows.into_iter().map(|w| vec![w]).collect(),
             focus_window,
             app_handles,
@@ -812,7 +800,6 @@ mod tests {
                 vec![WindowId::new(1, 5), WindowId::new(1, 6)],
             ];
             let raise_request = Event::RaiseRequest(RaiseRequest {
-                mouse_token: None,
                 raise_windows: batched_windows,
                 focus_window: Some((WindowId::new(1, 7), None)),
                 app_handles,
@@ -879,23 +866,25 @@ mod tests {
         let hover = WindowId::new(1, 1);
         let explicit = WindowId::new(1, 2);
         let token = CancellationToken::new();
-        let mut mouse =
-            create_layout_response(vec![hover], Some((hover, None)), handles.clone(), Quiet::Yes);
-        let Event::RaiseRequest(request) = &mut mouse else {
+        let Event::RaiseRequest(request) =
+            create_layout_response(vec![hover], Some((hover, None)), handles.clone(), Quiet::Yes)
+        else {
             unreachable!()
         };
-        request.mouse_token = Some(token.clone());
+        let mouse = Event::MouseRaiseRequest(request, token.clone());
         manager.handle_message(mouse);
         let sent = collect_requests(&mut rx);
         assert!(matches!(&sent[..], [Request::Raise(w, _, _, _)] if w == &[hover]));
         // A second hover is queued behind the active one.
-        manager.handle_message(Event::RaiseRequest(RaiseRequest {
-            mouse_token: Some(token.clone()),
-            raise_windows: vec![vec![hover]],
-            focus_window: Some((hover, None)),
-            app_handles: handles.clone(),
-            focus_quiet: Quiet::Yes,
-        }));
+        manager.handle_message(Event::MouseRaiseRequest(
+            RaiseRequest {
+                raise_windows: vec![vec![hover]],
+                focus_window: Some((hover, None)),
+                app_handles: handles.clone(),
+                focus_quiet: Quiet::Yes,
+            },
+            token.clone(),
+        ));
         let cancelled_sequence = manager.active_sequence.as_ref().unwrap().sequence_id;
         token.cancel();
         // Any scheduler wake must retire cancellation before processing more work.

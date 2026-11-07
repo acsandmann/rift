@@ -85,14 +85,12 @@ pub(crate) struct WindowState {
     /// Rift/macOS heuristic result, kept separately from an explicit app-rule
     /// override so every discovered window can remain tracked.
     pub(crate) is_manageable: bool,
-    pub(crate) is_transient: bool,
     pub(crate) manage_override: Option<bool>,
 }
 
 impl From<WindowInfo> for WindowState {
     fn from(info: WindowInfo) -> WindowState {
         WindowState {
-            is_transient: crate::sys::app::is_ax_transient(&info),
             frame_monotonic: info.frame,
             info,
             is_manageable: false,
@@ -122,7 +120,7 @@ impl WindowState {
 
     pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
         !self.info.is_minimized
-            && !self.is_transient
+            && !crate::sys::app::is_ax_transient(&self.info)
             && manage_override.unwrap_or(self.is_manageable)
     }
 

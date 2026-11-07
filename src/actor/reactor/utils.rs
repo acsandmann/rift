@@ -7,14 +7,26 @@ use crate::sys::app::{WindowInfo, is_ax_transient, is_ibkr_desktop_dialog};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
 
-pub(crate) fn refresh_heuristic(state: &mut RiftState, wid: WindowId) -> Option<bool> {
+pub(crate) struct AdmissionTransition {
+    pub(crate) was_admitted: bool,
+    pub(crate) is_admitted: bool,
+}
+
+pub(crate) fn refresh_heuristic(
+    state: &mut RiftState,
+    wid: WindowId,
+) -> Option<AdmissionTransition> {
     let window = state.windows.window(wid)?;
+    let was_admitted = window.is_admitted();
     let manageable = compute_window_info_manageability(&window.info, |wsid| {
         state.windows.get_window_server_info(wsid)
     });
     let window = state.windows.window_mut(wid)?;
     window.is_manageable = manageable;
-    Some(window.is_admitted())
+    Some(AdmissionTransition {
+        was_admitted,
+        is_admitted: window.is_admitted(),
+    })
 }
 
 pub(crate) fn rejection_needs_removal(
@@ -43,11 +55,7 @@ pub(super) fn compute_window_info_manageability(
     info: &WindowInfo,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
-    if is_ax_transient(info)
-        || info.is_minimized
-        || !info.is_root
-        || info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
-    {
+    if is_ax_transient(info) || info.is_minimized || !info.is_root {
         return false;
     }
 
@@ -58,9 +66,6 @@ pub(super) fn compute_window_info_manageability(
 
     if let Some(wsid) = info.sys_id {
         if window_is_sticky(wsid) {
-            return false;
-        }
-        if window_server_info(wsid).is_some_and(|server| server.is_transient) {
             return false;
         }
         if !allow_nonstandard_window {
@@ -159,10 +164,5 @@ mod tests {
         info.max_size = Some(CGSize::new(1400.0, 900.0));
         info.is_resizable = false;
         assert!(compute_window_info_manageability(&info, |_| None));
-        let id = crate::sys::window_server::WindowServerId::new(998);
-        info.sys_id = Some(id);
-        let mut native = crate::sys::window_server::get_window(id).unwrap();
-        native.is_transient = true;
-        assert!(!compute_window_info_manageability(&info, |_| Some(native)));
     }
 }

@@ -33,7 +33,6 @@ fn live_state(window: WindowId) -> WindowState {
     let saved = evidence(window);
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(saved.width, saved.height));
     WindowState {
-        is_transient: false,
         info: WindowInfo {
             has_native_tabs: false,
             is_standard: true,

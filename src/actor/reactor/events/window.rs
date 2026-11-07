@@ -446,6 +446,7 @@ pub struct MouseMovedPayload {
 pub fn handle_mouse_moved_over_window(
     apps: &crate::actor::reactor::managers::AppManager,
     payload: MouseMovedPayload,
+    mouse_token: &tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let Some(window) = payload.window else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
@@ -460,15 +461,16 @@ pub fn handle_mouse_moved_over_window(
         if let Some(app) = apps.apps.get(&window.pid) {
             app_handles.insert(window.pid, app.handle.clone());
         }
-        outcome = outcome.with_raise_request(crate::actor::raise_manager::Event::RaiseRequest(
-            crate::actor::raise_manager::RaiseRequest {
-                mouse_token: None,
-                raise_windows: vec![vec![window]],
-                focus_window: Some((window, None)),
-                app_handles,
-                focus_quiet: Quiet::Yes,
-            },
-        ));
+        outcome =
+            outcome.with_raise_request(crate::actor::raise_manager::Event::MouseRaiseRequest(
+                crate::actor::raise_manager::RaiseRequest {
+                    raise_windows: vec![vec![window]],
+                    focus_window: Some((window, None)),
+                    app_handles,
+                    focus_quiet: Quiet::Yes,
+                },
+                mouse_token.clone(),
+            ));
     }
     if let Some(space) = payload.active_space {
         outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
