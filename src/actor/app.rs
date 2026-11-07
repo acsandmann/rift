@@ -1921,6 +1921,13 @@ impl State {
             Err(err) => return Err(err.into()),
         };
         check_cancel()?;
+        // Select the target main window before activating the process. Otherwise
+        // apps with windows on several workspaces can restore their previous
+        // main window during activation, even though make-key targets `first`.
+        // AXMain is not writable in every app; retain the make-key/raise fallback.
+        if let Err(err) = this.window(first)?.elem.set_bool_attribute("AXMain", true) {
+            debug!(?first, ?err, "Failed to select main window before activation");
+        }
         let make_key_result =
             window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
         if let Some(Err(err)) = &make_key_result {
@@ -1964,11 +1971,12 @@ impl State {
         for (i, &wid) in wids.iter().enumerate() {
             check_cancel()?;
             debug_assert_eq!(wid.pid, this.pid);
-            if waits_for_activation && i == 0 {
-                trace!(?wid, "Skipping duplicate raise after activation wait");
-            } else {
-                let window = this.window(wid)?;
-                trace("raise", &window.elem, || window.elem.raise())?;
+            let window = this.window(wid)?;
+            // Activation may restore a different main window after the initial
+            // raise. Reassert the target after the wait, before reporting focus.
+            trace("raise", &window.elem, || window.elem.raise())?;
+            if let Err(err) = window.elem.set_bool_attribute("AXMain", true) {
+                debug!(?wid, ?err, "Failed to select main window after raise");
             }
 
             // TODO: Check the frontmost (layer 0) window of the window server and retry if necessary.
