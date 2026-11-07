@@ -88,6 +88,11 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
             |s| &mut s.settings.ui.menu_bar,
         )
         .description("Follows the display with the active macOS menu bar.");
+    // Text always shows just the current workspace, so the workspace filters do not apply.
+    f.enabled(&display, |s| {
+        let settings = &s.settings.ui.menu_bar;
+        settings.enabled && settings.display_style != WorkspaceDisplayStyle::Text
+    });
     let mode = f.popup(
         "Workspaces to show",
         vec![
@@ -97,7 +102,10 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         |s| s.settings.ui.menu_bar.mode,
         |s, value| s.settings.ui.menu_bar.mode = value,
     );
-    f.enabled(&mode, |s| s.settings.ui.menu_bar.enabled);
+    f.enabled(&mode, |s| {
+        let settings = &s.settings.ui.menu_bar;
+        settings.enabled && settings.display_style != WorkspaceDisplayStyle::Text
+    });
     let empty = f.field(
         "show_empty",
         |s| &s.settings.ui.menu_bar,
@@ -118,43 +126,51 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
     let empty = empty.description_view(empty_hint);
     f.enabled(&empty, |s| {
         let settings = &s.settings.ui.menu_bar;
-        settings.enabled && settings.mode == MenuBarDisplayMode::All
+        settings.enabled
+            && settings.mode == MenuBarDisplayMode::All
+            && settings.display_style != WorkspaceDisplayStyle::Text
     });
     let workspaces = Section::new(&ui, "Workspaces").row(display).row(mode).row(empty);
     let message = Rc::new(ValidationMessage::new(&ui));
     let weak_model = f.model.clone();
     let error = Rc::downgrade(&message);
     let style = Rc::new(
-        TabSelector::choices(&ui, &[("Layout", None), ("Index", None), ("Name", None)]).on_change(
-            move |index| {
-                Model::submit(
-                    &weak_model,
-                    Box::new(move |s| {
-                        let settings = &mut s.settings.ui.menu_bar;
-                        match index {
-                            0 => settings.display_style = WorkspaceDisplayStyle::Layout,
-                            1 | 2 => {
-                                settings.display_style = WorkspaceDisplayStyle::Label;
-                                settings.active_label = if index == 1 {
-                                    ActiveWorkspaceLabel::Index
-                                } else {
-                                    ActiveWorkspaceLabel::Name
-                                };
-                            }
-                            _ => {}
+        TabSelector::choices(&ui, &[
+            ("Layout", None),
+            ("Index", None),
+            ("Name", None),
+            ("Text", None),
+        ])
+        .on_change(move |index| {
+            Model::submit(
+                &weak_model,
+                Box::new(move |s| {
+                    let settings = &mut s.settings.ui.menu_bar;
+                    match index {
+                        0 => settings.display_style = WorkspaceDisplayStyle::Layout,
+                        1 | 2 => {
+                            settings.display_style = WorkspaceDisplayStyle::Label;
+                            settings.active_label = if index == 1 {
+                                ActiveWorkspaceLabel::Index
+                            } else {
+                                ActiveWorkspaceLabel::Name
+                            };
                         }
-                        Ok(())
-                    }),
-                    error.clone(),
-                );
-            },
-        ),
+                        3 => settings.display_style = WorkspaceDisplayStyle::Text,
+                        _ => {}
+                    }
+                    Ok(())
+                }),
+                error.clone(),
+            );
+        }),
     );
     let examples = MenuBarPreview::new(&ui);
     for (index, (display, label)) in [
         (WorkspaceDisplayStyle::Layout, ActiveWorkspaceLabel::Index),
         (WorkspaceDisplayStyle::Label, ActiveWorkspaceLabel::Index),
         (WorkspaceDisplayStyle::Label, ActiveWorkspaceLabel::Name),
+        (WorkspaceDisplayStyle::Text, ActiveWorkspaceLabel::Name),
     ]
     .into_iter()
     .enumerate()
@@ -162,8 +178,12 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         let image = examples.choice_image(display, label);
         style.ns_segmented_control().setImage_forSegment(Some(&image), index as isize);
     }
-    style.accessibility_label("Show workspaces as: layouts, indexes, or names");
-    for (index, tip) in ["Layouts", "Indexes", "Names"].iter().enumerate() {
+    style.accessibility_label(
+        "Show workspaces as: layouts, indexes, names, or current workspace text",
+    );
+    for (index, tip) in
+        ["Layouts", "Indexes", "Names", "Current workspace as text"].iter().enumerate()
+    {
         style.ns_segmented_control().setToolTip_forSegment(
             Some(&objc2_foundation::NSString::from_str(tip)),
             index as isize,
@@ -174,20 +194,20 @@ pub(super) fn menu_bar(ui: Ui, model: &Rc<Model>) -> Page {
         |s| s.settings.ui.menu_bar.clone(),
         |style, s| {
             let settings = &s.settings.ui.menu_bar;
-            let index = if settings.display_style == WorkspaceDisplayStyle::Layout {
-                0
-            } else if settings.active_label == ActiveWorkspaceLabel::Index {
-                1
-            } else {
-                2
+            let index = match (settings.display_style, settings.active_label) {
+                (WorkspaceDisplayStyle::Layout, _) => 0,
+                (WorkspaceDisplayStyle::Label, ActiveWorkspaceLabel::Index) => 1,
+                (WorkspaceDisplayStyle::Label, ActiveWorkspaceLabel::Name) => 2,
+                (WorkspaceDisplayStyle::Text, _) => 3,
             };
             style.set_selected(index);
             style.ns_segmented_control().setEnabled(settings.enabled);
         },
     );
-    let style = f
-        .row("Show workspaces as", style, message)
-        .description("Layouts show window arrangements. Unnamed workspaces use their index.");
+    let style = f.row("Show workspaces as", style, message).description(
+        "Layouts show window arrangements. Text shows only the current workspace. \
+         Unnamed workspaces use their index.",
+    );
     let fullscreen = f
         .field(
             "show_fullscreen_indicator",

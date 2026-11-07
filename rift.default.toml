@@ -223,7 +223,8 @@ mode = "all"
 # when showing workspaces as labels ("index" or "name"), choose which label to render
 active_label = "index"
 # when displaying workspaces, choose whether to draw the layout preview or a set of labels
-# options are "layout" or "label" (i3-style)
+# options are "layout", "label" (i3-style), or "text" (just the current workspace's name as
+# plain text; mode, show_empty, and current_display_only do not apply)
 display_style = "layout"
 # when display_style = "label", add brackets (e.g. "[2]") when a window is in fullscreen
 show_fullscreen_indicator = false

@@ -113,6 +113,9 @@ pub struct MenuIcon {
     prev_width: f64,
     render_key: Option<MenuIconRenderKey>,
     rendered_binding_mode: String,
+    /// Whether the text style owns the status item instead of the drawn view.
+    showing_title: bool,
+    rendered_title: String,
 }
 
 struct WorkspaceMenuItem {
@@ -181,6 +184,8 @@ impl MenuIcon {
             prev_width: 0.0,
             render_key: None,
             rendered_binding_mode: String::new(),
+            showing_title: false,
+            rendered_title: String::new(),
         };
         this.menu_handler.set_layout_folder(layout_folder.to_path_buf());
         this.refresh_layout_library();
@@ -309,6 +314,17 @@ impl MenuIcon {
         } else {
             ""
         };
+        if settings.display_style == WorkspaceDisplayStyle::Text {
+            self.update_status_title(displays, settings, binding_mode);
+            return;
+        }
+        if self.showing_title {
+            self.showing_title = false;
+            self.rendered_title.clear();
+            self.status_item.set_title("");
+            self.status_item.ns_status_item().setLength(self.prev_width);
+            self.view.setHidden(false);
+        }
         let render_inputs = render_inputs(displays, settings);
         let render_changed =
             self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
@@ -366,6 +382,63 @@ impl MenuIcon {
             }
         }
     }
+
+    /// The text style: a native title, so AppKit supplies the menu bar font and highlight.
+    fn update_status_title(
+        &mut self,
+        displays: &[DisplayWorkspaces],
+        settings: &MenuBarSettings,
+        binding_mode: &str,
+    ) {
+        let title = status_title(displays, settings, binding_mode);
+        let item = self.status_item.ns_status_item();
+        if title.is_empty() {
+            if item.isVisible() {
+                item.setVisible(false);
+            }
+        } else if !item.isVisible() {
+            item.setVisible(true);
+        }
+        if !self.showing_title {
+            // Leaving a drawn style: drop its fixed width and canvas.
+            self.showing_title = true;
+            self.view.setHidden(true);
+            self.render_key = None;
+            item.setLength(objc2_app_kit::NSVariableStatusItemLength);
+        }
+        if self.rendered_title != title {
+            self.status_item.set_title(&title);
+            self.rendered_title = title;
+        }
+    }
+}
+
+/// The current workspace's name (or index, if unnamed) on the display hosting the active
+/// menu bar, plus any binding mode.
+fn status_title(
+    displays: &[DisplayWorkspaces],
+    settings: &MenuBarSettings,
+    binding_mode: &str,
+) -> String {
+    let Some(workspace) = displays
+        .iter()
+        .find(|display| display.is_active_context)
+        .or_else(|| displays.first())
+        .and_then(|display| display.workspaces.iter().find(|workspace| workspace.is_active))
+    else {
+        return String::new();
+    };
+    let label = workspace_label(workspace, ActiveWorkspaceLabel::Name);
+    let mut title = if settings.show_fullscreen_indicator && workspace.has_fullscreen {
+        format!("[{label}]")
+    } else {
+        label.into_owned()
+    };
+    if !binding_mode.is_empty() {
+        title.push_str(" · ");
+        title.push_str(binding_mode);
+    }
+    title
 }
 
 #[derive(Default)]
@@ -1362,6 +1435,30 @@ mod layout_library_tests {
     }
 
     #[test]
+    fn text_title_names_only_the_active_workspace_on_the_active_display() {
+        let mut displays = displays();
+        displays[0].workspaces[0].is_active = false;
+        displays[0].workspaces[1].is_active = true;
+        let mut settings = MenuBarSettings {
+            display_style: WorkspaceDisplayStyle::Text,
+            ..Default::default()
+        };
+
+        assert_eq!(status_title(&displays, &settings, ""), "web");
+        displays[0].is_active_context = false;
+        displays[1].is_active_context = true;
+        assert_eq!(status_title(&displays, &settings, ""), "main");
+
+        displays[1].workspaces[0].name.clear();
+        displays[1].workspaces[0].has_fullscreen = true;
+        assert_eq!(status_title(&displays, &settings, "resize"), "1 · resize");
+        settings.show_fullscreen_indicator = true;
+        assert_eq!(status_title(&displays, &settings, ""), "[1]");
+
+        assert_eq!(status_title(&[], &settings, "resize"), "");
+    }
+
+    #[test]
     fn each_display_filters_independently_and_retains_active_empty_workspaces() {
         let mut displays = displays();
         for display in &mut displays {
@@ -1755,6 +1852,20 @@ impl MenuBarPreview {
     }
 
     pub fn update(&self, settings: &MenuBarSettings) {
+        self.view.canvas.ns_view().setHidden(!settings.enabled);
+        if settings.display_style == WorkspaceDisplayStyle::Text {
+            let binding_mode = if settings.show_binding_mode {
+                "resize"
+            } else {
+                ""
+            };
+            self.view.set_layout(title_layout(&status_title(
+                &self.displays,
+                settings,
+                binding_mode,
+            )));
+            return;
+        }
         let mut layout =
             build_layout(&render_inputs(&self.displays, settings), &self.view.text_attrs);
         if settings.show_binding_mode {
@@ -1764,7 +1875,6 @@ impl MenuBarPreview {
                 layout.binding_mode = Some((x, line));
             }
         }
-        self.view.canvas.ns_view().setHidden(!settings.enabled);
         // Intrinsic width is represented by one stable constraint, owned by the host.
         self.view.set_layout(layout);
     }
@@ -1787,14 +1897,18 @@ impl MenuBarPreview {
             ..Default::default()
         };
         let mut workspace = self.displays[0].workspaces[0].clone();
-        workspace.is_active = false;
+        workspace.is_active = style == WorkspaceDisplayStyle::Text;
         let displays = vec![DisplayWorkspaces {
             display_uuid: "example".into(),
             space: SpaceId::new(1),
             is_active_context: true,
             workspaces: vec![workspace],
         }];
-        let layout = build_layout(&render_inputs(&displays, &settings), &self.view.text_attrs);
+        let layout = if style == WorkspaceDisplayStyle::Text {
+            title_layout(&status_title(&displays, &settings, ""))
+        } else {
+            build_layout(&render_inputs(&displays, &settings), &self.view.text_attrs)
+        };
         let size = CGSize::new(layout.size.width.max(1.0), 20.0);
         let image = NSImage::initWithSize(NSImage::alloc(), size);
         image.lockFocus();
@@ -1814,6 +1928,19 @@ impl MenuBarPreview {
 }
 impl cgs::view::NativeView for MenuBarPreview {
     fn ns_view(&self) -> &NSView { self.view.canvas.ns_view() }
+}
+
+/// Preview geometry for the text style, in the menu bar's own font like the native title.
+fn title_layout(title: &str) -> MenuIconLayout {
+    let attrs = build_text_attrs(&NSFont::menuBarFontOfSize(0.0));
+    let line = build_cached_text_line(title, &attrs);
+    let size = CGSize::new(line.as_ref().map_or(0.0, |line| line.width.ceil()), LABEL_HEIGHT);
+    // Plain text needs no cells; it draws through the trailing binding-mode slot.
+    MenuIconLayout {
+        size,
+        binding_mode: line.map(|line| (0.0, line)),
+        ..Default::default()
+    }
 }
 
 fn label_cell_width(text_width: f64) -> f64 {
