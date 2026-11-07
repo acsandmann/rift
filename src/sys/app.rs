@@ -604,3 +604,31 @@ pub(crate) fn is_own_window_focused(window: crate::actor::app::WindowId) -> bool
             .sheetParent()
             .is_some_and(|parent| parent.windowNumber() == window.idx.get() as isize)
 }
+
+pub(crate) fn is_ax_transient(info: &WindowInfo) -> bool {
+    info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
+        || (matches!(
+            info.ax_subrole.as_deref(),
+            Some("AXDialog" | "AXSystemDialog" | "AXSheet")
+        ) && !is_ibkr_desktop_dialog(info))
+}
+
+pub(crate) fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
+    let max = info.max_size.unwrap_or(info.frame.size);
+    let min = info.min_size.unwrap_or(info.frame.size);
+    info.ax_role.as_deref() == Some("AXWindow")
+        && info.ax_subrole.as_deref() == Some("AXDialog")
+        && info
+            .bundle_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("com.install4j.") || id == "com.azul.zulu.java")
+        && info.path.as_ref().and_then(|p| p.to_str()).is_some_and(|p| {
+            p.as_bytes().windows(14).any(|s| s.eq_ignore_ascii_case(b"ibkr%20desktop"))
+                || p.as_bytes().windows(12).any(|s| s.eq_ignore_ascii_case(b"ibkr desktop"))
+        })
+        && (max.width >= 1200.0
+            || max.height >= 900.0
+            || min.width >= 1000.0
+            || info.frame.size.width >= 1200.0
+            || info.frame.size.height >= 900.0)
+}

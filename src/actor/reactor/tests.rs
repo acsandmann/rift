@@ -3441,10 +3441,12 @@ fn refreshing_hidden_window_does_not_steal_focus_across_displays() {
                 Direction::Right,
             )));
         }
-        let (_, raise_manager::Event::RaiseRequest(request)) =
-            raise_rx.try_recv().expect("cross-display focus must request the destination")
-        else {
-            panic!("expected focus request")
+        let (_, event) =
+            raise_rx.try_recv().expect("cross-display focus must request the destination");
+        let request = match (event, mouse_focus) {
+            (raise_manager::Event::MouseRaiseRequest(request, _), true)
+            | (raise_manager::Event::RaiseRequest(request), false) => request,
+            _ => panic!("expected focus request with the correct origin"),
         };
         assert_eq!(request.focus_window.map(|(wid, _)| wid), Some(destination));
         assert!(raise_rx.try_recv().is_err());
@@ -4272,6 +4274,7 @@ fn focus_follows_mouse_emits_focus_without_explicit_arrange() {
             needs_layout_sync: true,
             active_space: Some(space),
         },
+        &Default::default(),
     )
     .expect("mouse focus workflow");
 
@@ -4414,11 +4417,17 @@ fn focus_follows_mouse_raise_is_quiet_so_stale_main_window_cannot_switch_workspa
             needs_layout_sync: true,
             active_space: Some(space),
         },
+        &Default::default(),
     )
     .expect("mouse focus workflow");
 
     match outcome.raise_requests.as_slice() {
-        [raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, focus_quiet, .. })] => {
+        [
+            raise_manager::Event::MouseRaiseRequest(
+                RaiseRequest { focus_window, focus_quiet, .. },
+                _,
+            ),
+        ] => {
             assert_eq!(focus_window.map(|(wid, _)| wid), Some(window));
             assert_eq!(*focus_quiet, Quiet::Yes);
         }
@@ -11154,4 +11163,287 @@ fn master_restore_returns_a_floating_window_to_its_saved_frame() {
         pending.and_then(|transfer| transfer.requested_frame),
         Some(saved)
     );
+}
+
+#[test]
+fn ax_dialog_is_unmanaged_and_blocks_mouse_focus_until_hidden() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1512., 982.))],
+        vec![Some(space)],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    let target = WindowId::new(1, 1);
+    let about = WindowId::new(2, 1);
+    let mut info = make_windows(1).remove(0);
+    info.bundle_id = Some("com.test.dialog".into());
+    info.ax_role = Some("AXWindow".into());
+    info.ax_subrole = Some("AXDialog".into());
+    info.is_resizable = false;
+    info.title.clear();
+    info.frame = CGRect::new(CGPoint::new(616., 144.), CGSize::new(280., 503.));
+    reactor.handle_events(apps.make_app_with_opts(2, vec![info], Some(about), true, true));
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    assert!(!reactor.state.windows.window(about).unwrap().is_admitted());
+    assert!(reactor.test_workspace_for_window(space, about).is_none());
+    assert!(reactor.transient_blocks_mouse_focus());
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    reactor.handle_event(Event::MouseMoved(reactor.test_window_server_id(target)));
+    assert!(raise_rx.try_recv().is_err());
+    let wsid = reactor.test_window_server_id(about);
+    reactor.handle_event(Event::WindowServerHidden(wsid));
+    assert!(!reactor.transient_blocks_mouse_focus());
+    assert!(reactor.should_raise_on_mouse_over(target, Some(space)));
+    reactor.handle_event(Event::WindowServerUnhidden(wsid));
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.handle_event(Event::WindowClosed(wsid));
+    assert!(!reactor.transient_blocks_mouse_focus());
+
+    let mut dialog = make_windows(1).remove(0);
+    dialog.ax_role = Some("AXWindow".into());
+    dialog.ax_subrole = Some("AXDialog".into());
+    dialog.sys_id = Some(WindowServerId::new(20002));
+    let created = WindowId::new(2, 2);
+    reactor.handle_event(Event::WindowCreated(created, dialog, None, None));
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.handle_event(Event::WindowDestroyed(created));
+    assert!(!reactor.transient_blocks_mouse_focus());
+
+    let mut report = make_windows(1).remove(0);
+    report.bundle_id = Some("com.test.dialog".into());
+    report.ax_role = Some("AXWindow".into());
+    report.ax_subrole = Some("AXStandardWindow".into());
+    report.is_resizable = true;
+    let primary = WindowId::new(3, 1);
+    reactor.handle_events(apps.make_app_with_opts(3, vec![report], Some(primary), true, true));
+    reactor.handle_event(Event::ApplicationGloballyActivated(3));
+    assert!(reactor.state.windows.window(primary).unwrap().is_admitted());
+    assert!(reactor.test_workspace_for_window(space, primary).is_some());
+    assert!(!reactor.transient_blocks_mouse_focus());
+}
+
+#[test]
+fn native_only_transient_appearance_preserves_discovery_and_scopes_hover_cancellation() {
+    for background in [false, true] {
+        let (_, mut reactor, space, main, mut info) = pending_activation_context();
+        if background {
+            info.pid += 1;
+        }
+        let token = reactor.mouse_raise_token.clone();
+        reactor.transient_focus.native(info.id, info.pid, space, true);
+        let outcome = topology_workflow::handle_window_server_appeared(
+            &mut reactor.state,
+            topology_workflow::WindowServerLifecyclePayload {
+                window_server_id: info.id,
+                space,
+                kind: SpaceEventKind::User,
+            },
+            topology_workflow::WindowServerAppearedObservations {
+                resolved_space: Some(space),
+                active_spaces: [space].into_iter().collect(),
+                mission_control_active: false,
+                last_known_user_space: Some(space),
+                window_server_info: Some(info),
+                app_known: true,
+                running_app_info: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            outcome.window_inventory_requests.contains(&info.pid),
+            "first appearance must still request discovery"
+        );
+        reactor.apply_event_outcome(outcome);
+        assert!(reactor.state.windows.tracked_window_id(info.id).is_none());
+        assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
+        assert_eq!(token.is_cancelled(), !background);
+        reactor.discover_test_windows(main.pid, vec![], vec![main]);
+        assert!(
+            reactor
+                .notification_manager
+                .last_sls_notification_ids
+                .contains(&info.id.as_u32()),
+            "native-only transients need lifecycle notifications too"
+        );
+        reactor.handle_event(Event::ApplicationGloballyActivated(info.pid));
+        assert!(reactor.transient_blocks_mouse_focus());
+        reactor.handle_event(Event::ApplicationGloballyActivated(main.pid));
+        assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
+        // Attached sheets/popovers are classified by the appearance query but
+        // excluded from the parent-filtered manageable-window Space inventory.
+        let main_wsid = reactor.test_window_server_id(main);
+        assert!(reactor.state.windows.is_window_visible(main_wsid));
+        reactor.space_state.membership_complete = true;
+        reactor.reconcile_authoritative_active_window_snapshot(vec![], false, &[]);
+        assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
+        assert!(
+            !reactor.state.windows.is_window_visible(main_wsid),
+            "ordinary snapshot absence must still hide normal windows"
+        );
+        reactor.handle_event(Event::WindowServerHidden(info.id));
+        reactor.reconcile_authoritative_active_window_snapshot(vec![], false, &[]);
+        assert!(!reactor.transient_blocks_mouse_focus());
+        reactor.handle_event(Event::WindowServerUnhidden(info.id));
+        assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
+        window_server::set_window_spaces_override(info.id, Some(vec![99]));
+        reactor.handle_event(Event::WindowServerDestroyed(
+            info.id,
+            space,
+            SpaceEventKind::User,
+        ));
+        window_server::set_window_spaces_override(info.id, None);
+        assert!(!reactor.transient_blocks_mouse_focus());
+        assert!(reactor.transient_focus.windows.contains_key(&info.id));
+        // A delayed departure from the old Space must preserve a visible return.
+        window_server::set_window_spaces_override(info.id, Some(vec![space.get()]));
+        reactor.handle_event(Event::WindowServerDestroyed(
+            info.id,
+            SpaceId::new(99),
+            SpaceEventKind::User,
+        ));
+        window_server::set_window_spaces_override(info.id, None);
+        assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
+        reactor.handle_event(Event::WindowServerAppeared(info.id, space, SpaceEventKind::User));
+        assert!(!reactor.transient_blocks_mouse_focus());
+        reactor.transient_focus.native(info.id, info.pid, space, true);
+        assert_eq!(reactor.transient_blocks_mouse_focus(), !background);
+        reactor.handle_event(Event::TopologyInvalidated(next_test_topology_revision()));
+        assert!(reactor.refreshes_blocked());
+        reactor.handle_loop_event(Event::WindowClosed(info.id));
+        assert!(!reactor.transient_blocks_mouse_focus());
+        assert!(reactor.state.windows.contains_window(main));
+        reactor.transient_focus.native(info.id, info.pid, space, true);
+        reactor.handle_event(Event::ApplicationThreadTerminated(info.pid));
+        assert!(!reactor.transient_blocks_mouse_focus());
+    }
+}
+
+#[test]
+fn ax_transients_veto_manage_rules_and_remove_existing_layout_slots() {
+    for (role, subrole) in [
+        ("AXWindow", "AXDialog"),
+        ("AXWindow", "AXSystemDialog"),
+        ("AXSheet", ""),
+        ("AXPopover", ""),
+    ] {
+        let cfg = crate::common::config::VirtualWorkspaceSettings {
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp2".into()),
+                manage: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut reactor = test_reactor_with_workspace_settings(&cfg);
+        let mut apps = Apps::new();
+        let space = SpaceId::new(1);
+        reactor.handle_event(space_state_event(
+            vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
+            vec![Some(space)],
+        ));
+        reactor.handle_events(apps.make_app(2, make_windows(1)));
+        let wid = WindowId::new(2, 1);
+        assert!(reactor.state.windows.window(wid).unwrap().is_admitted());
+        assert_eq!(
+            reactor.state.windows.window(wid).unwrap().manage_override,
+            Some(true)
+        );
+        let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+        info.ax_role = Some(role.into());
+        info.ax_subrole = Some(subrole.into());
+        reactor.discover_test_windows(2, vec![(wid, info.clone())], vec![]);
+        assert!(!reactor.state.windows.window(wid).unwrap().is_admitted());
+        assert!(reactor.test_workspace_for_window(space, wid).is_none());
+        assert!(reactor.state.windows.contains_window(wid));
+        info.ax_role = Some("AXWindow".into());
+        info.ax_subrole = Some("AXStandardWindow".into());
+        reactor.discover_test_windows(2, vec![(wid, info)], vec![]);
+        assert!(reactor.state.windows.window(wid).unwrap().is_admitted());
+    }
+}
+
+#[test]
+fn ax_reclassification_updates_blocking_and_preserves_native_only_identity() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+    ));
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    let wid = WindowId::new(2, 1);
+    let wsid = reactor.test_window_server_id(wid);
+    let mut info = reactor.state.windows.window(wid).unwrap().info.clone();
+    info.ax_role = Some("AXWindow".into());
+    info.ax_subrole = Some("AXDialog".into());
+    reactor.discover_test_windows(2, vec![(wid, info.clone())], vec![]);
+    assert!(reactor.transient_blocks_mouse_focus());
+    assert!(!reactor.state.windows.window(wid).unwrap().is_admitted());
+    info.ax_subrole = Some("AXStandardWindow".into());
+    reactor.discover_test_windows(2, vec![(wid, info.clone())], vec![]);
+    assert!(!reactor.transient_blocks_mouse_focus());
+    assert!(reactor.state.windows.window(wid).unwrap().is_admitted());
+    let mut native = reactor.state.windows.get_window_server_info(wsid).unwrap();
+    reactor.transient_focus.native(native.id, native.pid, space, true);
+    // Missing AX role metadata cannot erase positive native evidence.
+    info.ax_role = None;
+    info.ax_subrole = None;
+    reactor.discover_test_windows(2, vec![(wid, info)], vec![]);
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.state.windows.reconcile_ax_identity(wid, Some(WindowServerId::new(999)));
+    assert!(reactor.state.windows.tracked_window_id(wsid).is_none());
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.handle_event(Event::WindowClosed(wsid));
+    assert!(!reactor.transient_blocks_mouse_focus());
+    native.id = WindowServerId::new(999);
+    reactor.transient_focus.native(native.id, native.pid, space, true);
+    reactor.state.windows.track_window_server_info(native);
+    reactor.state.windows.observe_native_space(native.id, space, true);
+    assert!(reactor.transient_blocks_mouse_focus());
+    window_server::set_window_spaces_override(native.id, Some(vec![]));
+    window_server::set_window_ordered_in_override(native.id, Some(false));
+    reactor.handle_event(Event::WindowServerDestroyed(
+        native.id,
+        space,
+        SpaceEventKind::User,
+    ));
+    window_server::set_window_spaces_override(native.id, None);
+    window_server::set_window_ordered_in_override(native.id, None);
+    assert!(!reactor.transient_blocks_mouse_focus());
+    assert!(!reactor.state.windows.contains_window(wid));
+}
+
+#[test]
+fn native_admission_veto_survives_manage_rule() {
+    let (mut apps, mut reactor, space, main, _) = pending_activation_context();
+    let id = WindowServerId::new(20003);
+    reactor.transient_focus.native(id, main.pid, space, true);
+    let wid = WindowId::new(main.pid, 3);
+    let mut info = make_windows(1).remove(0);
+    info.sys_id = Some(id);
+    info.ax_role = Some("AXWindow".into());
+    info.ax_subrole = Some("AXStandardWindow".into());
+    reactor.handle_event(Event::WindowCreated(wid, info, None, None));
+    let window = reactor.state.windows.window_mut(wid).unwrap();
+    window.manage_override = Some(true);
+    assert!(!window.is_admitted());
+    assert!(reactor.test_workspace_for_window(space, wid).is_none());
+    reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
+    assert!(!reactor.state.windows.window(wid).unwrap().native_transient);
+    apps.simulate_until_quiet(&mut reactor);
+}
+
+#[test]
+fn only_current_actor_exit_clears_native_blockers() {
+    let (_, mut reactor, space, main, info) = pending_activation_context();
+    let active = reactor.app_manager.apps[&main.pid].handle.clone();
+    let (stale, _) = AppThreadHandle::channel();
+    reactor.transient_focus.native(info.id, main.pid, space, true);
+    reactor.handle_event(Event::AppActorExited(main.pid, stale));
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.handle_event(Event::AppActorExited(main.pid, active));
+    assert!(!reactor.transient_blocks_mouse_focus());
 }

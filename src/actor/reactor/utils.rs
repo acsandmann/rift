@@ -3,7 +3,7 @@ use objc2_app_kit::NSNormalWindowLevel;
 use crate::actor::app::WindowId;
 use crate::actor::reactor::managers::LayoutManager;
 use crate::model::RiftState;
-use crate::sys::app::WindowInfo;
+use crate::sys::app::{WindowInfo, is_ax_transient, is_ibkr_desktop_dialog};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
 
@@ -55,10 +55,7 @@ pub(super) fn compute_window_info_manageability(
     info: &WindowInfo,
     mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
-    if info.is_minimized
-        || !info.is_root
-        || info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
-    {
+    if is_ax_transient(info) || info.is_minimized || !info.is_root {
         return false;
     }
 
@@ -80,32 +77,6 @@ pub(super) fn compute_window_info_manageability(
         }
     }
     true
-}
-
-fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
-    if info.ax_role.as_deref() != Some("AXWindow") || info.ax_subrole.as_deref() != Some("AXDialog")
-    {
-        return false;
-    }
-
-    let path_matches = info.path.as_ref().and_then(|path| path.to_str()).is_some_and(|path| {
-        let path = path.to_ascii_lowercase();
-        path.contains("ibkr%20desktop") || path.contains("ibkr desktop")
-    });
-
-    let bundle_matches = info.bundle_id.as_deref().is_some_and(|bundle_id| {
-        bundle_id.starts_with("com.install4j.") || bundle_id == "com.azul.zulu.java"
-    });
-
-    let max_size = info.max_size.unwrap_or(info.frame.size);
-    let min_size = info.min_size.unwrap_or(info.frame.size);
-    let looks_like_primary_window = max_size.width >= 1200.0
-        || max_size.height >= 900.0
-        || min_size.width >= 1000.0
-        || info.frame.size.width >= 1200.0
-        || info.frame.size.height >= 900.0;
-
-    path_matches && bundle_matches && looks_like_primary_window
 }
 
 #[cfg(test)]
@@ -144,6 +115,16 @@ mod tests {
     }
 
     #[test]
+    fn standard_dialogs_and_sheets_are_not_documents() {
+        for subrole in ["AXDialog", "AXSystemDialog", "AXSheet"] {
+            assert!(!compute_window_info_manageability(
+                &ax_window(subrole, true),
+                |_| None
+            ));
+        }
+    }
+
+    #[test]
     fn non_window_ax_role_is_not_manageable() {
         let mut info = ax_window("AXStandardWindow", true);
         info.ax_role = Some("AXTextField".into());
@@ -176,6 +157,12 @@ mod tests {
         info.bundle_id = Some("com.install4j.runtime.123".into());
         info.path = Some(PathBuf::from("file:///Applications/IBKR%20Desktop.app"));
 
+        assert!(compute_window_info_manageability(&info, |_| None));
+        // Preserve the original compatibility case based on maximum size,
+        // without imposing a new resizability requirement.
+        info.frame.size = CGSize::new(800.0, 600.0);
+        info.max_size = Some(CGSize::new(1400.0, 900.0));
+        info.is_resizable = false;
         assert!(compute_window_info_manageability(&info, |_| None));
     }
 }
