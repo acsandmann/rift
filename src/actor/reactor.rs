@@ -1376,6 +1376,7 @@ impl Reactor {
             if !self.app_manager.apps.get(pid).is_some_and(|app| app.handle.same_actor(handle)) {
                 return Ok(EventOutcome::no_change());
             }
+            self.transient_focus.windows.retain(|_, t| t.pid != *pid);
             event = Event::ApplicationThreadTerminated(*pid);
         }
         match &event {
@@ -1807,6 +1808,9 @@ impl Reactor {
                         self.transient_focus.ax(wsid, info.pid, &window.info, space);
                     }
                     self.transient_focus.visibility(wsid, true);
+                }
+                if let Some(wid) = self.state.windows.tracked_window_id(wsid) {
+                    self.sync_native_admission(wid);
                 }
                 if matches!(kind, SpaceEventKind::User)
                     && let Some(space) = resolved
@@ -2899,6 +2903,7 @@ impl Reactor {
             self.maybe_reapply_app_rules_for_window(window);
         }
         for window in outcome.finalize_created_windows {
+            self.sync_native_admission(window);
             if self.state.windows.native_fullscreen_record_for_window(window).is_some() {
                 let restored = self.restore_native_fullscreen(None, window, None);
                 self.apply_event_outcome(restored);
@@ -4441,6 +4446,11 @@ impl Reactor {
         outcome.absorb(process_outcome);
         let new_window_ids: Vec<_> = new_windows.iter().map(|(wid, _)| *wid).collect();
         window_discovery::update_window_states(&mut self.state, new_windows);
+        for id in native_spaces.keys() {
+            if let Some(wid) = self.state.windows.tracked_window_id(*id) {
+                self.sync_native_admission(wid);
+            }
+        }
         for (wsid, space) in fullscreen_observations {
             if self.is_fullscreen_space(space) {
                 let user = self
@@ -5214,6 +5224,22 @@ impl Reactor {
                 screen.frame,
                 Some(screen.display_uuid.as_str()),
             );
+        }
+    }
+
+    fn sync_native_admission(&mut self, wid: WindowId) {
+        let Some(window) = self.state.windows.window_mut(wid) else {
+            return;
+        };
+        let was_admitted = window.is_admitted();
+        window.native_transient = window.info.sys_id.is_some_and(|id| {
+            self.transient_focus
+                .windows
+                .get(&id)
+                .is_some_and(|t| t.native && t.pid == wid.pid)
+        }) && !crate::sys::app::is_ibkr_desktop_dialog(&window.info);
+        if was_admitted && !window.is_admitted() {
+            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
         }
     }
 

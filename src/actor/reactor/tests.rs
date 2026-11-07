@@ -11415,3 +11415,35 @@ fn ax_reclassification_updates_blocking_and_preserves_native_only_identity() {
     assert!(!reactor.transient_blocks_mouse_focus());
     assert!(!reactor.state.windows.contains_window(wid));
 }
+
+#[test]
+fn native_admission_veto_survives_manage_rule() {
+    let (mut apps, mut reactor, space, main, _) = pending_activation_context();
+    let id = WindowServerId::new(20003);
+    reactor.transient_focus.native(id, main.pid, space, true);
+    let wid = WindowId::new(main.pid, 3);
+    let mut info = make_windows(1).remove(0);
+    info.sys_id = Some(id);
+    info.ax_role = Some("AXWindow".into());
+    info.ax_subrole = Some("AXStandardWindow".into());
+    reactor.handle_event(Event::WindowCreated(wid, info, None, None));
+    let window = reactor.state.windows.window_mut(wid).unwrap();
+    window.manage_override = Some(true);
+    assert!(!window.is_admitted());
+    assert!(reactor.test_workspace_for_window(space, wid).is_none());
+    reactor.handle_event(Event::WindowServerAppeared(id, space, SpaceEventKind::User));
+    assert!(!reactor.state.windows.window(wid).unwrap().native_transient);
+    apps.simulate_until_quiet(&mut reactor);
+}
+
+#[test]
+fn only_current_actor_exit_clears_native_blockers() {
+    let (_, mut reactor, space, main, info) = pending_activation_context();
+    let active = reactor.app_manager.apps[&main.pid].handle.clone();
+    let (stale, _) = AppThreadHandle::channel();
+    reactor.transient_focus.native(info.id, main.pid, space, true);
+    reactor.handle_event(Event::AppActorExited(main.pid, stale));
+    assert!(reactor.transient_blocks_mouse_focus());
+    reactor.handle_event(Event::AppActorExited(main.pid, active));
+    assert!(!reactor.transient_blocks_mouse_focus());
+}
