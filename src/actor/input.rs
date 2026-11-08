@@ -199,7 +199,9 @@ impl Input {
             disable_hotkey.as_ref().is_some_and(|key| !is_modifier_key(key.key_code));
         let hotkeys_enabled = self.hotkeys.borrow().iter().any(|map| !map.is_empty());
         let mut mask = build_event_mask(
-            hotkeys_enabled || keyed_disable || self.mission_control_active.get(),
+            // Keyboard launchers must end wake/unlock activation suppression
+            // even when no Rift keyboard bindings are configured.
+            true,
             hotkeys_enabled || disable_hotkey.is_some(),
             (state.event_processing_enabled
                 && (state.mouse_hides_on_focus
@@ -809,6 +811,9 @@ impl Input {
             CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged => {
                 if event::is_rift_synthetic_event(event) {
                     return true;
+                }
+                if event_type == CGEventType::KeyDown {
+                    self.events_tx.send(Event::KeyboardInput);
                 }
                 if shortcut_recorder_is_frontmost() {
                     self.state
@@ -2064,16 +2069,17 @@ mod tests {
     fn mask_tracks_mouse_feature_enablement() {
         let (input, _, _) = input();
         assert!(input.hotkeys.borrow().is_empty());
-        assert_eq!(input.desired_event_mask(), 0);
+        let keyboard_mask = 1u64 << CGEventType::KeyDown.0;
+        assert_eq!(input.desired_event_mask(), keyboard_mask);
         input.state.borrow_mut().mouse_features_enabled = false;
         input.state.borrow_mut().event_processing_enabled = true;
         let stable_release_mask =
             (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
-        assert_eq!(input.desired_event_mask(), stable_release_mask);
+        assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
         assert_eq!(
             input.desired_event_mask(),
-            stable_release_mask | (1u64 << CGEventType::MouseMoved.0)
+            stable_release_mask | keyboard_mask | (1u64 << CGEventType::MouseMoved.0)
         );
         input.state.borrow_mut().mouse_settings.action2 = MouseAction::Move;
         input.state.borrow_mut().mouse_features_enabled = true;
@@ -2273,6 +2279,30 @@ mod tests {
                 "releasing a cancelled opener must not activate again"
             );
         }
+    }
+
+    #[test]
+    fn unbound_keyboard_input_releases_lifecycle_guard_without_consuming_keys() {
+        let (input, mut wm_rx, mut events_rx) = input();
+        assert!(input.hotkeys.borrow().is_empty());
+        assert_ne!(input.desired_event_mask() & (1u64 << CGEventType::KeyDown.0), 0);
+        let event = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+        assert!(input.on_event(CGEventType::KeyDown, &event, None));
+        assert!(matches!(events_rx.try_recv().unwrap().1, Event::KeyboardInput));
+        assert!(events_rx.try_recv().is_err());
+        assert!(wm_rx.try_recv().is_err());
+
+        // Releases and Rift's own posted keys cannot release the wake guard.
+        assert!(input.on_event(CGEventType::KeyUp, &event, None));
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::EventSourceUserData,
+            0x5249_4654,
+        );
+        assert!(input.on_event(CGEventType::KeyDown, &event, None));
+        assert!(events_rx.try_recv().is_err());
+        assert!(wm_rx.try_recv().is_err());
     }
 
     #[test]
