@@ -11581,7 +11581,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
         LayoutMode::MasterStack,
         LayoutMode::Scrolling,
     ] {
-        for early in 0..4 {
+        for early in 0..6 {
             let mut apps = Apps::new();
             let mut reactor = test_reactor();
             let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
@@ -11632,27 +11632,72 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 );
                 assert!(retired.is_empty(), "ordered out is not closed");
             }
-            if early == 3 {
+            if early == 3 || early == 4 {
                 reactor.space_state.fullscreen_spaces.insert(fullscreen);
+                if early == 4 {
+                    crate::sys::window_server::set_window_spaces_override(
+                        wsid,
+                        Some(vec![fullscreen.get()]),
+                    );
+                }
                 // Native membership can lose the window before fullscreen entry
                 // or an ordered-out notification identifies the transition.
                 let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
                     .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
                     .to_vec();
                 reactor.reconcile_authoritative_active_window_snapshot(visible, false, &[]);
+                if early == 4 {
+                    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+                    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+                    assert!(
+                        !test_layout(&mut reactor, space, screen)
+                            .iter()
+                            .any(|(wid, _)| *wid == window),
+                        "fullscreen must not leave an empty tile after workspace activation: {mode:?}"
+                    );
+                    crate::sys::window_server::set_window_spaces_override(wsid, None);
+                }
             }
             window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
             window_server_appeared(&mut reactor, wsid, space, SpaceEventKind::User);
+            if early == 5 {
+                // Exit is visible to the live query before the Space inventory catches up.
+                reactor.space_state.fullscreen_spaces.clear();
+                crate::sys::window_server::set_window_spaces_override(
+                    wsid,
+                    Some(vec![space.get()]),
+                );
+                let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
+                    .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
+                    .to_vec();
+                reactor.reconcile_authoritative_active_window_snapshot(visible, false, &[]);
+                window_server_appeared(&mut reactor, wsid, space, SpaceEventKind::User);
+                let windows = (1..=3)
+                    .map(|idx| {
+                        let wid = WindowId::new(1, idx);
+                        (wid, reactor.state.windows.window(wid).unwrap().info.clone())
+                    })
+                    .collect();
+                reactor.discover_test_windows(1, windows, vec![]);
+                crate::sys::window_server::set_window_spaces_override(wsid, None);
+            }
             apps.simulate_until_quiet(&mut reactor);
             assert_eq!(
                 test_layout(&mut reactor, space, screen),
                 original,
                 "{mode:?}, order={early}"
             );
-            assert_eq!(
-                reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows),
-                topology
-            );
+            // Workspace switches and hiding during a stale snapshot can change focus.
+            // The geometry assertions still require the exact original arrangement.
+            if early < 4 {
+                assert_eq!(
+                    reactor
+                        .layout_manager
+                        .layout_engine
+                        .serialize_to_string(&reactor.state.windows),
+                    topology
+                );
+            }
             for (wid, frame) in native_frames {
                 assert!(
                     apps.windows[&wid].frame.same_as(frame),

@@ -938,10 +938,32 @@ impl Reactor {
             {
                 continue;
             }
-            let inactive_target = self
-                .resolve_native_space(wsid, None)
-                .filter(|space| !self.is_space_active(*space))
-                .filter(|space| {
+            let resolved = self.resolve_native_space(wsid, None);
+            if let Some(fullscreen) = resolved.filter(|space| self.is_fullscreen_space(*space)) {
+                let user = self
+                    .state
+                    .windows
+                    .tracked_window_id(wsid)
+                    .and_then(|wid| self.assigned_space_for_window_id(wid));
+                if let Some(wid) =
+                    self.state.windows.observe_native_fullscreen(wsid, fullscreen, user, None)
+                {
+                    self.send_layout_event(LayoutEvent::WindowSuspended(wid));
+                }
+                continue;
+            }
+            // A live return can precede the accepted Space inventory. Keep its
+            // retained slot suspended rather than destructively reconciling stale absence.
+            if let Some(space) = resolved.filter(|space| self.is_space_active(*space))
+                && window_server::window_spaces(wsid).as_slice() == [space]
+                && let Some(wid) = self.state.windows.tracked_window_id(wsid)
+            {
+                self.state.windows.suspend_window(wid);
+                self.send_layout_event(LayoutEvent::WindowSuspended(wid));
+                continue;
+            }
+            let inactive_target =
+                resolved.filter(|space| !self.is_space_active(*space)).filter(|space| {
                     #[cfg(test)]
                     {
                         let _ = space;
