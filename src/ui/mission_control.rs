@@ -2352,6 +2352,55 @@ impl OverviewSession {
                     }
                 }
             }
+            Input::SwitchWorkspace(ref selector) | Input::MoveToWorkspace(ref selector, _) => {
+                use crate::common::config::WorkspaceSelector;
+                let d = &self.displays[self.active];
+                let current =
+                    d.workspaces.iter().position(|ws| ws.index == self.selection.workspace)?;
+                let destination = match selector {
+                    WorkspaceSelector::Index(index) => {
+                        d.workspaces.iter().position(|ws| ws.index == *index)
+                    }
+                    WorkspaceSelector::Name(name) if name == "next" => {
+                        (current + 1 < d.workspaces.len()).then_some(current + 1)
+                    }
+                    WorkspaceSelector::Name(name) if name == "prev" => current.checked_sub(1),
+                    WorkspaceSelector::Name(name) => {
+                        d.workspaces.iter().position(|ws| ws.name == *name)
+                    }
+                }?;
+                if matches!(input, Input::MoveToWorkspace(..)) {
+                    self.drop = Some(OverviewDrop {
+                        window: self.selection.window?,
+                        workspace: d.workspaces[destination].workspace_id,
+                        target: None,
+                        frame: d
+                            .windows
+                            .iter()
+                            .find(|w| Some(w.data.id) == self.selection.window)
+                            .filter(|w| w.data.is_floating)
+                            .map(|w| w.data.layout_frame.unwrap_or(w.data.info.frame)),
+                    });
+                    if matches!(input, Input::MoveToWorkspace(_, true)) {
+                        self.select_workspace(destination);
+                    }
+                } else {
+                    self.select_workspace(destination);
+                }
+            }
+            Input::MoveNode(direction) => {
+                use crate::layout_engine::WindowDropAction;
+                let d = &self.displays[self.active];
+                let source = d.windows.iter().find(|w| Some(w.data.id) == self.selection.window)?;
+                let workspace =
+                    d.workspaces.iter().find(|ws| ws.index == source.workspace_index)?;
+                self.drop = Some(OverviewDrop {
+                    window: source.data.id,
+                    workspace: workspace.workspace_id,
+                    target: Some((source.data.id, WindowDropAction::Move(direction))),
+                    frame: None,
+                });
+            }
             Input::Up | Input::Down | Input::WorkspaceSteps(_) => {
                 let d = &mut self.displays[self.active];
                 let current = d

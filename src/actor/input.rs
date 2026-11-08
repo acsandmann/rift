@@ -830,23 +830,22 @@ impl Input {
                         keycode,
                         CGEvent::flags(Some(event)),
                     ) {
-                        let configured_zoom =
-                            matches!(input, super::mission_control::Input::ZoomStep(_))
-                                && key_code_from_event(event).is_some_and(|key_code| {
-                                    let state = self.state.borrow();
-                                    let hotkey = Hotkey::new(
-                                        modifiers_from_flags_with_keys(
-                                            CGEvent::flags(Some(event)),
-                                            &state.pressed_keys,
-                                        ),
-                                        key_code,
-                                    );
-                                    self.hotkeys
-                                        .borrow()
-                                        .get(self.active_mode.get())
-                                        .is_some_and(|bindings| bindings.contains_key(&hotkey))
-                                });
-                        if !configured_zoom {
+                        let configured_hotkey =
+                            key_code_from_event(event).is_some_and(|key_code| {
+                                let state = self.state.borrow();
+                                let hotkey = Hotkey::new(
+                                    modifiers_from_flags_with_keys(
+                                        CGEvent::flags(Some(event)),
+                                        &state.pressed_keys,
+                                    ),
+                                    key_code,
+                                );
+                                self.hotkeys
+                                    .borrow()
+                                    .get(self.active_mode.get())
+                                    .is_some_and(|bindings| bindings.contains_key(&hotkey))
+                            });
+                        if !configured_hotkey {
                             if matches!(
                                 input,
                                 super::mission_control::Input::Dismiss
@@ -1202,6 +1201,12 @@ impl Input {
                         self.overview_hotkey.set(None);
                     }
                     for cmd in commands {
+                        if self.mission_control_active.get()
+                            && let Some(input) = super::mission_control::Input::from_command(cmd)
+                        {
+                            self.send_overview(super::mission_control::Event::Input(input));
+                            continue;
+                        }
                         match cmd {
                             WmCommand::Wm(wm_controller::WmCmd::BindingMode(target)) => {
                                 self.transition_binding_mode(target);
@@ -2244,6 +2249,65 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn configured_overview_actions_use_selected_mode_without_desktop_dispatch() {
+        use super::super::mission_control::{Event as OverviewEvent, Input as OverviewInput};
+        use crate::common::config::WorkspaceSelector;
+        use crate::layout_engine::{Direction, LayoutCommand};
+        let commands = [
+            WmCommand::ReactorCommand(super::super::reactor::Command::Layout(
+                LayoutCommand::MoveFocus(Direction::Left),
+            )),
+            WmCommand::ReactorCommand(super::super::reactor::Command::Layout(
+                LayoutCommand::MoveNode(Direction::Right),
+            )),
+            WmCommand::Wm(wm_controller::WmCmd::MoveWindowToWorkspace(
+                WorkspaceSelector::Index(1),
+            )),
+            WmCommand::Wm(wm_controller::WmCmd::SwitchToWorkspace(
+                WorkspaceSelector::Index(1),
+            )),
+        ];
+        for (index, command) in commands.into_iter().enumerate() {
+            let (input, mut wm_rx, mut events_rx) = input();
+            let (overview, mut rx) = actor::channel();
+            *input.mission_control_tx.borrow_mut() = Some(overview);
+            input.mission_control_active.set(true);
+            input.hotkeys_active.set(true);
+            input.active_mode.set(1);
+            *input.hotkeys.borrow_mut() = vec![
+                HashMap::default(),
+                HashMap::from_iter([(Hotkey::new(Modifiers::ALT_LEFT, KeyCode::KeyA), vec![
+                    command,
+                ])]),
+            ];
+            let key = CGEvent::new_keyboard_event(None, 0, true).unwrap();
+            CGEvent::set_flags(Some(&key), CGEventFlags::MaskAlternate);
+            assert!(!input.on_event(CGEventType::KeyDown, &key, None));
+            match (index, rx.try_recv().unwrap().1) {
+                (0, OverviewEvent::Input(OverviewInput::Left))
+                | (1, OverviewEvent::Input(OverviewInput::MoveNode(Direction::Right)))
+                | (
+                    2,
+                    OverviewEvent::Input(OverviewInput::MoveToWorkspace(
+                        WorkspaceSelector::Index(1),
+                        false,
+                    )),
+                )
+                | (
+                    3,
+                    OverviewEvent::Input(OverviewInput::SwitchWorkspace(WorkspaceSelector::Index(
+                        1,
+                    ))),
+                ) => {}
+                unexpected => panic!("unexpected overview action: {unexpected:?}"),
+            }
+            assert!(wm_rx.try_recv().is_err());
+            assert!(matches!(events_rx.try_recv().unwrap().1, Event::KeyboardInput));
+            assert!(events_rx.try_recv().is_err());
         }
     }
 

@@ -30,6 +30,9 @@ pub enum Event {
 #[derive(Debug)]
 pub enum Input {
     Dismiss,
+    MoveNode(crate::layout_engine::Direction),
+    SwitchWorkspace(crate::common::config::WorkspaceSelector),
+    MoveToWorkspace(crate::common::config::WorkspaceSelector, bool),
     Left,
     Right,
     Up,
@@ -53,6 +56,38 @@ pub enum Input {
 }
 
 impl Input {
+    pub(crate) fn from_command(command: &super::wm_controller::WmCommand) -> Option<Self> {
+        use super::wm_controller::{WmCmd, WmCommand};
+        use crate::layout_engine::{Direction, LayoutCommand};
+        match command {
+            WmCommand::ReactorCommand(reactor::Command::Layout(command)) => match command {
+                LayoutCommand::MoveFocus(direction) => Some(match direction {
+                    Direction::Left => Self::Left,
+                    Direction::Right => Self::Right,
+                    Direction::Up => Self::Up,
+                    Direction::Down => Self::Down,
+                }),
+                LayoutCommand::MoveNode(direction) => Some(Self::MoveNode(*direction)),
+                LayoutCommand::SwitchToWorkspace(index) => Some(Self::SwitchWorkspace(
+                    crate::common::config::WorkspaceSelector::Index(*index),
+                )),
+                LayoutCommand::MoveWindowToWorkspace {
+                    workspace,
+                    follow,
+                    window_id: None,
+                } => Some(Self::MoveToWorkspace(workspace.clone(), *follow)),
+                _ => None,
+            },
+            WmCommand::Wm(WmCmd::SwitchToWorkspace(workspace)) => {
+                Some(Self::SwitchWorkspace(workspace.clone()))
+            }
+            WmCommand::Wm(WmCmd::MoveWindowToWorkspace(workspace)) => {
+                Some(Self::MoveToWorkspace(workspace.clone(), false))
+            }
+            _ => None,
+        }
+    }
+
     fn navigation(&self) -> Option<(bool, i64)> {
         match *self {
             Self::Left | Self::Cycle(false) => Some((true, -1)),
