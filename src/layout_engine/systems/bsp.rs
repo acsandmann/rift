@@ -1,4 +1,4 @@
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
@@ -784,6 +784,8 @@ impl crate::model::tree::Observer for Components {
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::CGPoint;
+
     use super::*;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
