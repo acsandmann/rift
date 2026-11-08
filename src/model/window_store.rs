@@ -449,6 +449,7 @@ impl WindowStore {
         resolved_space: Option<SpaceId>,
         active_spaces: &HashSet<SpaceId>,
         ordered_in: Option<bool>,
+        suitable: Option<bool>,
     ) -> NativeDeparture {
         if let Some(space) = resolved_space.filter(|space| *space != reported_space) {
             return NativeDeparture::Moved(
@@ -457,10 +458,16 @@ impl WindowStore {
             );
         }
         let window = self.tracked_window_id(wsid);
-        if let Some(wid) = window
-            && ordered_in == Some(false)
-        {
-            return NativeDeparture::Closed(wid);
+        // Ordering out precedes fullscreen entry too. Only retire when the
+        // independent native inventory also rejects this window identity.
+        if let Some(wid) = window {
+            if ordered_in == Some(false)
+                && suitable == Some(false)
+                && self.native_fullscreen_record_for_window(wid).is_none()
+            {
+                return NativeDeparture::Closed(wid);
+            }
+            self.suspend_window(wid);
         }
         let remove_projection = window.and_then(|wid| self.record(wid)).is_some_and(|record| {
             record.workspace.is_some() && self.native_space(window.unwrap()) == Some(reported_space)
@@ -554,6 +561,7 @@ impl WindowStore {
         mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
     ) -> Vec<(WindowId, Option<WindowServerId>)> {
         let observed: HashSet<_> = observed.iter().copied().collect();
+        let mut suspended = Vec::new();
         let retired: Vec<_> = self
             .window_ids_for_pid(pid)
             .filter_map(|wid| {
@@ -567,6 +575,10 @@ impl WindowStore {
                 }
                 let wsid = record.window_server_id?;
                 let observation = observe(wsid, self.get_window_server_info(wsid));
+                if observation.suitable == Some(true) && observation.ordered_in == Some(false) {
+                    suspended.push(wid);
+                    return None;
+                }
                 (observation.suitable == Some(false)
                     || observation.ordered_in == Some(false)
                     || observation.info.is_some_and(|info| {
@@ -577,6 +589,9 @@ impl WindowStore {
                 .then_some((wid, Some(wsid)))
             })
             .collect();
+        for wid in suspended {
+            self.suspend_window(wid);
+        }
         for &(wid, _) in &retired {
             self.remove_window(wid);
         }

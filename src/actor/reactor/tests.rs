@@ -11570,3 +11570,112 @@ fn rule_owned_window_survives_late_cross_display_notifications() {
     assert_eq!(reactor.state.windows.workspace_for_window(window), Some(owner));
     assert_eq!(test_layout(&mut reactor, a, shared_left()), before);
 }
+
+#[test]
+fn native_fullscreen_restores_middle_window_exactly_across_notification_orderings() {
+    use crate::model::window_store::InventoryWindowObservation;
+    for mode in [
+        LayoutMode::Bsp,
+        LayoutMode::Traditional,
+        LayoutMode::Stack,
+        LayoutMode::MasterStack,
+        LayoutMode::Scrolling,
+    ] {
+        for early in 0..4 {
+            let mut apps = Apps::new();
+            let mut reactor = test_reactor();
+            let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+            let space = SpaceId::new(1);
+            let fullscreen = SpaceId::new(0x400000001);
+            reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+            reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+                workspace: None,
+                mode,
+            });
+            apps.make_app_and_settle(&mut reactor, 1, make_windows(3));
+            let window = WindowId::new(1, 2);
+            let wsid = reactor.test_window_server_id(window);
+            let original = test_layout(&mut reactor, space, screen);
+            let native_frames: Vec<_> =
+                original.iter().map(|(wid, _)| (*wid, apps.windows[wid].frame)).collect();
+            let topology =
+                reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows);
+            if early == 1 {
+                let outcome = topology_workflow::handle_window_server_destroyed(
+                    &mut reactor.state,
+                    &reactor.transaction_manager,
+                    &mut reactor.drag_manager,
+                    topology_workflow::WindowServerLifecyclePayload {
+                        window_server_id: wsid,
+                        space,
+                        kind: SpaceEventKind::User,
+                    },
+                    topology_workflow::WindowServerDestroyedObservations {
+                        resolved_space: Some(space),
+                        active_spaces: [space].into_iter().collect(),
+                        ordered_in: Some(false),
+                        suitable: Some(true),
+                    },
+                )
+                .unwrap();
+                reactor.apply_event_outcome(outcome);
+            } else if early == 2 {
+                let retired = reactor.state.windows.reconcile_app_inventory(
+                    1,
+                    &[WindowId::new(1, 1), WindowId::new(1, 3)],
+                    &HashSet::default(),
+                    |_, info| InventoryWindowObservation {
+                        info,
+                        suitable: Some(true),
+                        ordered_in: Some(false),
+                    },
+                );
+                assert!(retired.is_empty(), "ordered out is not closed");
+            }
+            if early == 3 {
+                reactor.space_state.fullscreen_spaces.insert(fullscreen);
+                // Native membership can lose the window before fullscreen entry
+                // or an ordered-out notification identifies the transition.
+                let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
+                    .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
+                    .to_vec();
+                reactor.reconcile_authoritative_active_window_snapshot(visible, false, &[]);
+            }
+            window_server_appeared(&mut reactor, wsid, fullscreen, SpaceEventKind::Fullscreen);
+            window_server_appeared(&mut reactor, wsid, space, SpaceEventKind::User);
+            apps.simulate_until_quiet(&mut reactor);
+            assert_eq!(
+                test_layout(&mut reactor, space, screen),
+                original,
+                "{mode:?}, order={early}"
+            );
+            assert_eq!(
+                reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows),
+                topology
+            );
+            for (wid, frame) in native_frames {
+                assert!(
+                    apps.windows[&wid].frame.same_as(frame),
+                    "native frame {mode:?} {wid:?}"
+                );
+            }
+            // AX replacement must rekey the retained middle node in place.
+            let replacement = WindowId::new(1, 99);
+            let info = reactor.state.windows.window(window).unwrap().info.clone();
+            reactor.discover_test_windows(1, vec![(replacement, info)], vec![
+                WindowId::new(1, 1),
+                WindowId::new(1, 3),
+            ]);
+            let rekeyed: Vec<_> = original
+                .iter()
+                .map(|&(wid, frame)| (if wid == window { replacement } else { wid }, frame))
+                .collect();
+            assert_eq!(test_layout(&mut reactor, space, screen), rekeyed);
+            reactor.handle_event(Event::WindowClosed(wsid));
+            assert!(!reactor.state.windows.contains_window(replacement));
+            assert!(
+                !test_layout(&mut reactor, space, screen).iter().any(|(wid, _)| *wid == window)
+            );
+        }
+    }
+}

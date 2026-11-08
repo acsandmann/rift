@@ -100,6 +100,7 @@ pub struct WindowServerDestroyedObservations {
     pub resolved_space: Option<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
     pub ordered_in: Option<bool>,
+    pub suitable: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -129,6 +130,7 @@ pub fn handle_window_server_destroyed(
         resolved_space,
         active_spaces,
         ordered_in,
+        suitable,
     } = observations;
     let mut outcome = EventOutcome::default();
     if matches!(kind, SpaceEventKind::Fullscreen) {
@@ -146,6 +148,7 @@ pub fn handle_window_server_destroyed(
             resolved_space,
             &active_spaces,
             ordered_in,
+            suitable,
         ) {
             crate::model::window_store::NativeDeparture::Moved(window, space) => {
                 if let Some(wid) = window {

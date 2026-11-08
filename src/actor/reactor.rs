@@ -952,6 +952,17 @@ impl Reactor {
                         window_server::space_is_user(space.get())
                     }
                 });
+            // Fullscreen topology can precede the window's entry notification.
+            // Use the same retained participation as minimize/hide until identity resolves.
+            if inactive_target.is_none()
+                && !self.space_state.fullscreen_spaces.is_empty()
+                && let Some(wid) = self.state.windows.tracked_window_id(wsid)
+            {
+                self.state.windows.mark_window_hidden(wsid);
+                self.state.windows.suspend_window(wid);
+                self.send_layout_event(LayoutEvent::WindowSuspended(wid));
+                continue;
+            }
             if let Some((wid, target)) = self.state.windows.reconcile_native_absence(
                 self.layout_manager.layout_engine.workspaces(),
                 wsid,
@@ -1783,11 +1794,15 @@ impl Reactor {
                 {
                     return Ok(EventOutcome::default());
                 }
+                let ordered_in = matches!(kind, SpaceEventKind::User)
+                    .then(|| window_server::window_ordered_in(wsid))
+                    .flatten();
                 let observations = topology_workflow::WindowServerDestroyedObservations {
                     resolved_space: resolved,
                     active_spaces: self.active_spaces.clone(),
-                    ordered_in: matches!(kind, SpaceEventKind::User)
-                        .then(|| window_server::window_ordered_in(wsid))
+                    ordered_in,
+                    suitable: (ordered_in == Some(false))
+                        .then(|| window_server::app_window_suitability(wsid))
                         .flatten(),
                 };
                 return topology_workflow::handle_window_server_destroyed(
