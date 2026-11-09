@@ -803,6 +803,7 @@ impl DisplayOverview {
                 );
             }
         }
+        self.update_stacking(self.selection.window);
         self.invalidate_scene();
     }
 
@@ -993,9 +994,48 @@ impl DisplayOverview {
             .map(|r| r.id)
     }
 
+    /// Keep capture inventory stable while focus changes the visible stacking order.
+    fn update_stacking(&mut self, selected: Option<WindowId>) {
+        for w in &self.windows {
+            let focused =
+                self.workspaces.iter().find(|ws| ws.workspace_id == w.workspace).and_then(|ws| {
+                    selected
+                        .filter(|id| ws.windows.iter().any(|window| window.id == *id))
+                        .or(ws.focused_window)
+                });
+            w.shadow.setZPosition(if w.data.is_floating {
+                1.5
+            } else if focused == Some(w.data.id) {
+                1.
+            } else {
+                0.5
+            });
+        }
+        // Drag targeting uses front-to-back order, just like pointer picking.
+        for region in &mut self.regions {
+            region.drops.targets.sort_by(|a, b| {
+                let rank = |id| {
+                    self.windows
+                        .iter()
+                        .enumerate()
+                        .find(|(_, w)| w.data.id == id)
+                        .map_or((0., 0), |(index, w)| (w.shadow.zPosition(), index))
+                };
+                let a = rank(a.window);
+                let b = rank(b.window);
+                b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1))
+            });
+        }
+    }
+
     fn hit(&self, p: CGPoint) -> Option<usize> {
         let world = self.camera.unproject(self.local(p));
-        self.windows.iter().rposition(|w| contains(w.world, world))
+        self.windows
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| contains(w.world, world))
+            .max_by(|(_, a), (_, b)| a.shadow.zPosition().total_cmp(&b.shadow.zPosition()))
+            .map(|(index, _)| index)
     }
 
     fn update_sources(&mut self, selected: Option<WindowId>, immediate: bool) {
@@ -1662,6 +1702,7 @@ impl OverviewSession {
                     .find(|ws| ws.index == d.selection.workspace)
                     .and_then(|ws| ws.focused_window);
             }
+            d.update_stacking(d.selection.window);
             if empty && !d.windows.is_empty() {
                 d.home = d.default_camera();
                 d.animate(d.home, self.duration);
@@ -1791,11 +1832,9 @@ impl OverviewSession {
             return action.or(Some(OverviewAction::Dismiss));
         }
         let window = if dismiss { None } else { self.selection.window };
-        if let Some(w) =
-            self.displays[self.active].windows.iter().find(|w| Some(w.data.id) == window)
-        {
-            // The selected preview must match the real window being raised at handoff.
-            w.shadow.setZPosition(1.);
+        for (index, d) in self.displays.iter_mut().enumerate() {
+            // Dismiss restores desktop focus; activation preserves the chosen preview.
+            d.update_stacking((!dismiss && index == self.active).then_some(window).flatten());
         }
         let now = Instant::now();
         for d in &mut self.displays {
@@ -1928,11 +1967,8 @@ impl OverviewSession {
             if let Some(wake) = &self.wake {
                 wake.send(crate::actor::mission_control::Event::RefreshCurrentWorkspace);
             }
-            for d in &self.displays {
-                if let Some(w) = d.windows.iter().find(|w| Some(w.data.id) == self.selection.window)
-                {
-                    w.shadow.setZPosition(0.5);
-                }
+            for d in &mut self.displays {
+                d.update_stacking(d.selection.window);
             }
         }
         let now = Instant::now();
@@ -2028,6 +2064,7 @@ impl OverviewSession {
         let selected = selection.window;
         for d in &mut self.displays {
             d.policy_dirty |= previous != selected;
+            d.update_stacking(d.selection.window);
             d.update_focus_ring(d.applied.map_or(0., |(_, opacity)| opacity));
         }
     }
