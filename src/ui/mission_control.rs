@@ -529,9 +529,9 @@ impl DisplayOverview {
             .and_then(|url| url.absoluteString())
             .map(|url| url.to_string());
         let mut background_ready = false;
-        let gradient = crate::sys::wallpaper::gradient_for_display(&info.display_uuid);
-        let wallpaper_key = gradient.as_ref().map(|(key, _)| key.clone()).or(wallpaper_key);
-        if let Some((_, image)) = gradient {
+        let color_wallpaper = crate::sys::wallpaper::color_for_display(&info.display_uuid);
+        let wallpaper_key = color_wallpaper.as_ref().map(|(key, _)| key.clone()).or(wallpaper_key);
+        if let Some((_, image)) = color_wallpaper {
             image_contents(&background, &image);
             background_ready = true;
         } else if let Some(url) = wallpaper_url

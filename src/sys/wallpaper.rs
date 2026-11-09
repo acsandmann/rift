@@ -3,7 +3,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_core_foundation::{CFArray, CFPropertyList, CFRetained, CFString, CGPoint};
+use objc2_core_foundation::{
+    CFArray, CFPropertyList, CFRetained, CFString, CGPoint, CGRect, CGSize,
+};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorRenderingIntent,
     CGColorSpace, CGContext, CGGradient, CGGradientDrawingOptions, CGImage, CGImageAlphaInfo,
@@ -38,7 +40,7 @@ fn get(object: &AnyObject, path: &[&str]) -> Option<Retained<AnyObject>> {
 
 fn desktop_content(store: &AnyObject, display: &str) -> Option<Retained<AnyObject>> {
     // shortcut: Space-specific wallpaper overrides are not resolved here. Do not substitute a
-    // global gradient when such overrides exist; add Space UUID resolution before supporting them.
+    // global color when such overrides exist; add Space UUID resolution before supporting them.
     if let Some(spaces) = get(store, &["Spaces"])
         && spaces.downcast_ref::<NSDictionary>()?.count() != 0
     {
@@ -49,7 +51,7 @@ fn desktop_content(store: &AnyObject, display: &str) -> Option<Retained<AnyObjec
         .or_else(|| get(store, &["SystemDefault", "Desktop", "Content"]))
 }
 
-fn gradient_color(content: &AnyObject) -> Option<(CFRetained<CGColor>, u64)> {
+fn wallpaper_color(content: &AnyObject) -> Option<(CFRetained<CGColor>, bool, u64)> {
     let choices = get(content, &["Choices"])?;
     let choices = choices.downcast_ref::<NSArray<AnyObject>>()?;
     if choices.count() != 1 {
@@ -69,10 +71,13 @@ fn gradient_color(content: &AnyObject) -> Option<(CFRetained<CGColor>, u64)> {
         "toggle",
         "_0",
         "isOn",
-    ])?;
-    if !enabled.downcast_ref::<NSNumber>()?.boolValue() {
-        return None;
-    }
+    ]);
+    let gradient = match enabled {
+        Some(value) => value.downcast_ref::<NSNumber>()?.boolValue(),
+        None => false,
+    };
+    // Previously, solid colors were rejected here when the gradient toggle was off.
+    // if !enabled.downcast_ref::<NSNumber>()?.boolValue() { return None; }
     let color = get(&values, &["values", "customColor", "color", "_0", "color"])?;
     let components = get(&color, &["components"])?;
     let components = components.downcast_ref::<NSArray<AnyObject>>()?;
@@ -101,7 +106,7 @@ fn gradient_color(content: &AnyObject) -> Option<(CFRetained<CGColor>, u64)> {
     let color = unsafe { CGColor::new(Some(&space), rgba.as_ptr())? };
     let mut hash = DefaultHasher::new();
     options.to_vec().hash(&mut hash);
-    Some((color, hash.finish()))
+    Some((color, gradient, hash.finish()))
 }
 
 /// The color adjustment used by macOS 26's WallpaperGradientExtension: increase saturation,
@@ -131,7 +136,7 @@ fn adjusted_color([r, g, b, alpha]: [f64; 4]) -> ([f64; 4], bool) {
     ([adjust(r), adjust(g), adjust(b), alpha], amount < 0.0)
 }
 
-fn render(color: &CGColor) -> Option<CFRetained<CGImage>> {
+fn render(color: &CGColor, generate_gradient: bool) -> Option<CFRetained<CGImage>> {
     let srgb = CGColorSpace::with_name(Some(&CFString::from_str("kCGColorSpaceSRGB")))?;
     // Convert before applying Apple's luminance calculation, including for Generic RGB colors.
     let base = unsafe {
@@ -145,21 +150,6 @@ fn render(color: &CGColor) -> Option<CFRetained<CGImage>> {
     if CGColor::number_of_components(Some(&base)) != 4 {
         return None;
     }
-    // The converted RGB color owns exactly four components for its lifetime.
-    let rgba = unsafe { std::slice::from_raw_parts(CGColor::components(Some(&base)), 4) };
-    let ([r, g, b, a], reverse) = adjusted_color(rgba.try_into().ok()?);
-    // Apple's derived stop uses Generic RGB, while the original stop remains sRGB.
-    let adjusted = CGColor::new_generic_rgb(r, g, b, a);
-    let colors = if reverse {
-        [&*adjusted, &*base]
-    } else {
-        [&*base, &*adjusted]
-    };
-    let colors = CFArray::from_objects(&colors);
-    // Evenly spaced, correctly typed CGColor stops retained by the array.
-    let gradient = unsafe {
-        CGGradient::with_colors(Some(&srgb), Some(colors.as_opaque()), std::ptr::null())?
-    };
     // A vertical strip stretches horizontally without changing the gradient. CoreGraphics owns
     // the buffer; the resulting CGImage participates in Overview's existing background cache.
     let context = unsafe {
@@ -173,23 +163,47 @@ fn render(color: &CGColor) -> Option<CFRetained<CGImage>> {
             CGImageAlphaInfo::PremultipliedLast.0,
         )?
     };
-    CGContext::draw_linear_gradient(
-        Some(&context),
-        Some(&gradient),
-        CGPoint::ZERO,
-        CGPoint::new(0.0, 1024.0),
-        CGGradientDrawingOptions::empty(),
-    );
+    let bounds = CGRect::new(CGPoint::ZERO, CGSize::new(1.0, 1024.0));
+    // macOS composites translucent wallpaper colors over white, not application windows.
+    CGContext::set_rgb_fill_color(Some(&context), 1.0, 1.0, 1.0, 1.0);
+    CGContext::fill_rect(Some(&context), bounds);
+    if generate_gradient {
+        // The converted RGB color owns exactly four components for its lifetime.
+        let rgba = unsafe { std::slice::from_raw_parts(CGColor::components(Some(&base)), 4) };
+        let ([r, g, b, a], reverse) = adjusted_color(rgba.try_into().ok()?);
+        // Apple's derived stop uses Generic RGB, while the original stop remains sRGB.
+        let adjusted = CGColor::new_generic_rgb(r, g, b, a);
+        let colors = if reverse {
+            [&*adjusted, &*base]
+        } else {
+            [&*base, &*adjusted]
+        };
+        let colors = CFArray::from_objects(&colors);
+        // Evenly spaced, correctly typed CGColor stops retained by the array.
+        let gradient = unsafe {
+            CGGradient::with_colors(Some(&srgb), Some(colors.as_opaque()), std::ptr::null())?
+        };
+        CGContext::draw_linear_gradient(
+            Some(&context),
+            Some(&gradient),
+            CGPoint::ZERO,
+            CGPoint::new(0.0, 1024.0),
+            CGGradientDrawingOptions::empty(),
+        );
+    } else {
+        CGContext::set_fill_color_with_color(Some(&context), Some(&base));
+        CGContext::fill_rect(Some(&context), bounds);
+    }
     CGBitmapContextCreateImage(Some(&context))
 }
 
-pub(crate) fn gradient_for_display(display: &str) -> Option<(String, CFRetained<CGImage>)> {
+pub(crate) fn color_for_display(display: &str) -> Option<(String, CFRetained<CGImage>)> {
     let path =
         dirs::home_dir()?.join("Library/Application Support/com.apple.wallpaper/Store/Index.plist");
     let store = plist(&NSData::with_bytes(&std::fs::read(path).ok()?))?;
     let content = desktop_content(&store, display)?;
-    let (color, hash) = gradient_color(&content)?;
-    Some((format!("gradient:{hash:x}"), render(&color)?))
+    let (color, gradient, hash) = wallpaper_color(&content)?;
+    Some((format!("color:{hash:x}"), render(&color, gradient)?))
 }
 
 #[cfg(test)]
@@ -237,13 +251,13 @@ mod tests {
     #[test]
     fn reads_nested_gradient_and_rejects_other_or_malformed_wallpapers() {
         let good = content(COLOR, true, RGBA);
-        let (color, key) = gradient_color(&xml(&good)).unwrap();
+        let (color, gradient, key) = wallpaper_color(&xml(&good)).unwrap();
         assert_eq!(CGColor::number_of_components(Some(&color)), 4);
+        assert!(gradient);
         let changed = content(COLOR, true, &RGBA.replace("0.15", "0.25"));
-        assert_ne!(key, gradient_color(&xml(&changed)).unwrap().1);
+        assert_ne!(key, wallpaper_color(&xml(&changed)).unwrap().2);
         for bad in [
             content("com.apple.wallpaper.choice.image", true, RGBA),
-            content(COLOR, false, RGBA),
             content(COLOR, true, "<real>0.5</real>"),
             content(
                 COLOR,
@@ -254,7 +268,7 @@ mod tests {
             content(COLOR, true, &RGBA.replace("0.15", "2.0")),
             good.replace("<data>", "<string>").replace("</data>", "</string>"),
         ] {
-            assert!(gradient_color(&xml(&bad)).is_none());
+            assert!(wallpaper_color(&xml(&bad)).is_none());
         }
         assert!(plist(&NSData::with_bytes(b"not a plist")).is_none());
     }
@@ -269,8 +283,8 @@ mod tests {
             <key>Displays</key><dict><key>external</key><dict><key>Desktop</key><dict><key>Content</key>{image}</dict></dict></dict>
             <key>Spaces</key><dict/></dict>"#
         ));
-        assert!(gradient_color(&desktop_content(&store, "builtin").unwrap()).is_some());
-        assert!(gradient_color(&desktop_content(&store, "external").unwrap()).is_none());
+        assert!(wallpaper_color(&desktop_content(&store, "builtin").unwrap()).is_some());
+        assert!(wallpaper_color(&desktop_content(&store, "external").unwrap()).is_none());
         let ambiguous = xml("<dict><key>Spaces</key><dict><key>space</key><dict/></dict></dict>");
         assert!(desktop_content(&ambiguous, "builtin").is_none());
     }
@@ -296,9 +310,58 @@ mod tests {
     }
 
     #[test]
+    fn solid_colors_are_recognized_and_have_distinct_cache_keys() {
+        let (_, gradient, gradient_key) =
+            wallpaper_color(&xml(&content(COLOR, true, RGBA))).unwrap();
+        let (_, solid, solid_key) = wallpaper_color(&xml(&content(COLOR, false, RGBA))).unwrap();
+        assert!(gradient);
+        assert!(!solid);
+        assert_ne!(gradient_key, solid_key);
+    }
+
+    #[test]
+    fn solid_and_gradient_opacity_is_flattened_over_white() {
+        for gradient in [false, true] {
+            let mut opaque = Vec::new();
+            for alpha in [1.0, 0.5, 0.0] {
+                let rgba = RGBA.replace("<real>1</real>", &format!("<real>{alpha}</real>"));
+                let (color, enabled, _) =
+                    wallpaper_color(&xml(&content(COLOR, gradient, &rgba))).unwrap();
+                let image = render(&color, enabled).unwrap();
+                let provider = CGImage::data_provider(Some(&image)).unwrap();
+                let pixels =
+                    objc2_core_graphics::CGDataProvider::data(Some(&provider)).unwrap().to_vec();
+                assert!(
+                    pixels.chunks_exact(4).all(|pixel| pixel[3] == 255),
+                    "wallpaper must never reveal windows behind the overview"
+                );
+                if !gradient {
+                    assert!(
+                        pixels.chunks_exact(4).all(|pixel| pixel == &pixels[..4]),
+                        "solid wallpaper must be uniform"
+                    );
+                }
+                if alpha == 1.0 {
+                    opaque = pixels;
+                } else {
+                    for (pixel, original) in pixels.chunks_exact(4).zip(opaque.chunks_exact(4)) {
+                        for channel in 0..3 {
+                            let expected = original[channel] as f64 * alpha + 255.0 * (1.0 - alpha);
+                            assert!(
+                                (pixel[channel] as f64 - expected).abs() <= 1.0,
+                                "opacity must blend over white, including at zero opacity"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn renders_color_managed_gradient_image() {
-        let (color, _) = gradient_color(&xml(&content(COLOR, true, RGBA))).unwrap();
-        let image = render(&color).unwrap();
+        let (color, _, _) = wallpaper_color(&xml(&content(COLOR, true, RGBA))).unwrap();
+        let image = render(&color, true).unwrap();
         assert_eq!(CGImage::width(Some(&image)), 1);
         assert_eq!(CGImage::height(Some(&image)), 1024);
         let provider = CGImage::data_provider(Some(&image)).unwrap();
