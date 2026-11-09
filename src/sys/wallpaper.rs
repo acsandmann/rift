@@ -39,15 +39,19 @@ fn get(object: &AnyObject, path: &[&str]) -> Option<Retained<AnyObject>> {
 }
 
 fn desktop_content(store: &AnyObject, display: &str) -> Option<Retained<AnyObject>> {
-    // shortcut: Space-specific wallpaper overrides are not resolved here. Do not substitute a
-    // global color when such overrides exist; add Space UUID resolution before supporting them.
+    // macOS also populates Spaces when monitors have different wallpapers. An exact
+    // display record is usable even when those Space records exist.
+    if let Some(content) = get(store, &["Displays", display, "Desktop", "Content"]) {
+        return Some(content);
+    }
+    // shortcut: Without a display record, Space-specific overrides are unresolved. Do not
+    // substitute a global color; add Space UUID resolution before supporting that fallback.
     if let Some(spaces) = get(store, &["Spaces"])
         && spaces.downcast_ref::<NSDictionary>()?.count() != 0
     {
         return None;
     }
-    get(store, &["Displays", display, "Desktop", "Content"])
-        .or_else(|| get(store, &["AllSpacesAndDisplays", "Desktop", "Content"]))
+    get(store, &["AllSpacesAndDisplays", "Desktop", "Content"])
         .or_else(|| get(store, &["SystemDefault", "Desktop", "Content"]))
 }
 
@@ -359,6 +363,39 @@ mod tests {
         assert!(wallpaper_color(&desktop_content(&store, "external").unwrap()).is_none());
         let ambiguous = xml("<dict><key>Spaces</key><dict><key>space</key><dict/></dict></dict>");
         assert!(desktop_content(&ambiguous, "builtin").is_none());
+    }
+
+    #[test]
+    fn each_monitor_uses_its_own_wallpaper_when_space_records_exist() {
+        let builtin = content(COLOR, true, RGBA);
+        let external = content(COLOR, false, &RGBA.replace("0.15", "0.8"));
+        let image = content("com.apple.wallpaper.choice.image", false, RGBA);
+        let store = xml(&format!(
+            r#"<dict>
+            <key>Displays</key><dict>
+                <key>builtin</key><dict><key>Desktop</key><dict><key>Content</key>{builtin}</dict></dict>
+                <key>external</key><dict><key>Desktop</key><dict><key>Content</key>{external}</dict></dict>
+                <key>photo</key><dict><key>Desktop</key><dict><key>Content</key>{image}</dict></dict>
+            </dict>
+            <key>Spaces</key><dict>
+                <key></key><dict><key>Default</key><dict><key>Desktop</key><dict><key>Content</key>{external}</dict></dict></dict>
+                <key>space-uuid</key><dict><key>Default</key><dict><key>Desktop</key><dict><key>Content</key>{builtin}</dict></dict></dict>
+            </dict>
+            <key>SystemDefault</key><dict><key>Desktop</key><dict><key>Content</key>{external}</dict></dict>
+            </dict>"#
+        ));
+        let (_, gradient, builtin_key) =
+            wallpaper_color(&desktop_content(&store, "builtin").unwrap()).unwrap();
+        let (_, solid, external_key) =
+            wallpaper_color(&desktop_content(&store, "external").unwrap()).unwrap();
+        assert!(gradient);
+        assert!(!solid);
+        assert_ne!(builtin_key, external_key);
+        assert!(wallpaper_color(&desktop_content(&store, "photo").unwrap()).is_none());
+        assert!(
+            desktop_content(&store, "unknown-display").is_none(),
+            "unresolved Space overrides must not select an unrelated global wallpaper"
+        );
     }
 
     #[test]
