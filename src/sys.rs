@@ -30,6 +30,7 @@ pub mod service;
 pub mod skylight;
 pub mod space_switch;
 pub mod timer;
+pub(crate) mod wallpaper;
 pub mod window_notify;
 pub mod window_recovery;
 pub mod window_server;

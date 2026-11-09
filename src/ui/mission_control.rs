@@ -514,7 +514,11 @@ impl DisplayOverview {
             full.size.height - inset,
         );
         let scale = screen.backingScaleFactor();
-        let root = layer(CGRect::new(CGPoint::ZERO, bounds.size), scale);
+        // Keep scene coordinates below the menu bar, but paint the wallpaper behind its
+        // translucent backdrop too; a surface ending at the bar leaves a visible seam.
+        // let root = layer(CGRect::new(CGPoint::ZERO, bounds.size), scale);
+        let root = layer(CGRect::new(CGPoint::ZERO, full.size), scale);
+        root.setBounds(rect(0., -inset, full.size.width, full.size.height));
         root.setGeometryFlipped(true);
         root.setMasksToBounds(true);
         let background = layer(rect(0., -inset, full.size.width, full.size.height), scale);
@@ -525,7 +529,12 @@ impl DisplayOverview {
             .and_then(|url| url.absoluteString())
             .map(|url| url.to_string());
         let mut background_ready = false;
-        if let Some(url) = wallpaper_url
+        let gradient = crate::sys::wallpaper::gradient_for_display(&info.display_uuid);
+        let wallpaper_key = gradient.as_ref().map(|(key, _)| key.clone()).or(wallpaper_key);
+        if let Some((_, image)) = gradient {
+            image_contents(&background, &image);
+            background_ready = true;
+        } else if let Some(url) = wallpaper_url
             && let Some(image) = NSImage::initWithContentsOfURL(NSImage::alloc(), &url)
             && let Some(image) = unsafe {
                 image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None)
@@ -552,11 +561,21 @@ impl DisplayOverview {
         focus_ring.setBorderColor(Some(&NSColor::controlAccentColor().CGColor()));
         focus_ring.setHidden(true);
         root.addSublayer(&focus_ring);
-        let window = CgsWindow::new_compositor(bounds, 0.).ok()?;
+        // let window = CgsWindow::new_compositor(bounds, 0.).ok()?;
+        let window = CgsWindow::new_compositor(full, 0.).ok()?;
         window.set_resolution(scale).ok()?;
         window.set_level(19).ok()?;
         window.disable_shadow();
-        let surface = WindowSurface::new_scaled(window.id(), root.bounds(), &root, scale).ok()?;
+        // Shadow-flag experiment did not affect the seam:
+        // window.set_tags(crate::sys::skylight::SLSWindowTags::DISABLE_SHADOW.bits()).ok()?;
+        // let surface = WindowSurface::new_scaled(window.id(), root.bounds(), &root, scale).ok()?;
+        let surface = WindowSurface::new_scaled(
+            window.id(),
+            CGRect::new(CGPoint::ZERO, full.size),
+            &root,
+            scale,
+        )
+        .ok()?;
         let controls = pill(rect(18., bounds.size.height - 138., 270., 35.), scale, 17.5);
 
         controls.setBorderWidth(0.5);
