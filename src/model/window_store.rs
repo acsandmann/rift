@@ -41,8 +41,8 @@ pub struct WindowRecord {
     window_server_id: Option<WindowServerId>,
     workspace: Option<VirtualWorkspaceId>,
     visibility: WindowVisibility,
-    // Lifecycle suspension survives AX snapshots until layout admission resumes it.
-    suspended: bool,
+    // AX invalidation retains ownership until fresh AX evidence or confirmed retirement.
+    ax_invalidated: bool,
     pending_transfer: Option<PendingWindowTransfer>,
     rule_floating: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
@@ -226,17 +226,20 @@ impl WindowStore {
         }
     }
 
-    /// Rift manages a window when native admission passes and no external owner holds it.
+    /// Rift manages a valid AX window when admission passes and no external owner holds it.
     pub(crate) fn is_admitted(&self, wid: WindowId) -> bool {
         self.record(wid).is_some_and(|record| {
-            record.claim.is_none() && record.state.as_ref().is_some_and(WindowState::is_admitted)
+            !record.ax_invalidated
+                && record.claim.is_none()
+                && record.state.as_ref().is_some_and(WindowState::is_admitted)
         })
     }
 
     /// Rules and admission are reconciled only for windows Rift may manage.
     pub(crate) fn can_reconcile_admission(&self, wid: WindowId) -> bool {
         self.record(wid).is_some_and(|record| {
-            record.claim.is_none()
+            !record.ax_invalidated
+                && record.claim.is_none()
                 && record.state.as_ref().is_some_and(WindowState::can_reconcile_admission)
         })
     }
@@ -331,23 +334,24 @@ impl WindowStore {
         admitted
     }
 
-    pub(crate) fn suspend_window(&mut self, wid: WindowId) {
+    pub(crate) fn invalidate_ax_identity(&mut self, wid: WindowId) {
         if let Some(record) = self.windows.get_mut(&wid) {
-            record.suspended = true;
+            record.ax_invalidated = true;
         }
     }
 
-    pub(crate) fn resume_window(&mut self, wid: WindowId) {
-        if let Some(record) = self.windows.get_mut(&wid) {
-            record.suspended = false;
-        }
+    /// Only a fresh AX observation validates an invalidated identity.
+    pub(crate) fn validate_ax_identity(&mut self, wid: WindowId) -> bool {
+        self.windows
+            .get_mut(&wid)
+            .is_some_and(|r| std::mem::take(&mut r.ax_invalidated))
     }
 
     /// Live windows can lose heuristic admission as their AX/native metadata
     /// changes. Suspend their layout participation without forgetting ownership;
     /// only an explicit exclusion or retirement should discard that ownership.
     pub(crate) fn is_temporarily_unavailable(&self, wid: WindowId) -> bool {
-        self.record(wid).is_some_and(|r| r.suspended)
+        self.record(wid).is_some_and(|r| r.ax_invalidated)
             || self.window(wid).is_some_and(|w| {
                 w.info.is_minimized || (w.manage_override != Some(false) && !w.is_admitted())
             })
@@ -467,10 +471,11 @@ impl WindowStore {
             {
                 return NativeDeparture::Closed(wid);
             }
-            self.suspend_window(wid);
         }
         let remove_projection = window.and_then(|wid| self.record(wid)).is_some_and(|record| {
-            record.workspace.is_some() && self.native_space(window.unwrap()) == Some(reported_space)
+            record.workspace.is_some()
+                && self.is_temporarily_unavailable(window.unwrap())
+                && self.native_space(window.unwrap()) == Some(reported_space)
         });
         self.observe_native_space(wsid, reported_space, false);
         NativeDeparture::Hidden { window, remove_projection }
@@ -533,7 +538,7 @@ impl WindowStore {
             self.mark_window_hidden(wsid);
         }
         self.set_visibility(wid, WindowVisibility::Minimized);
-        self.suspend_window(wid);
+        self.validate_ax_identity(wid);
         true
     }
 
@@ -561,13 +566,12 @@ impl WindowStore {
         mut observe: impl FnMut(WindowServerId, Option<WindowServerInfo>) -> InventoryWindowObservation,
     ) -> Vec<(WindowId, Option<WindowServerId>)> {
         let observed: HashSet<_> = observed.iter().copied().collect();
-        let mut suspended = Vec::new();
         let retired: Vec<_> = self
             .window_ids_for_pid(pid)
             .filter_map(|wid| {
                 let record = self.record(wid)?;
                 if observed.contains(&wid)
-                    || inactive.contains(&wid)
+                    || (inactive.contains(&wid) && !record.ax_invalidated)
                     || record.state.as_ref()?.info.is_minimized
                     || self.native_fullscreen_record_for_window(wid).is_some()
                 {
@@ -575,8 +579,13 @@ impl WindowStore {
                 }
                 let wsid = record.window_server_id?;
                 let observation = observe(wsid, self.get_window_server_info(wsid));
-                if observation.suitable == Some(true) && observation.ordered_in == Some(false) {
-                    suspended.push(wid);
+                if observation.suitable == Some(true)
+                    && observation.ordered_in == Some(false)
+                    && !record.ax_invalidated
+                {
+                    // AX omission can be caused by native ordering. After AX
+                    // invalidation, omission plus ordering out confirms retirement;
+                    // native suitability describes type, not AX liveness.
                     return None;
                 }
                 (observation.suitable == Some(false)
@@ -589,9 +598,6 @@ impl WindowStore {
                 .then_some((wid, Some(wsid)))
             })
             .collect();
-        for wid in suspended {
-            self.suspend_window(wid);
-        }
         for &(wid, _) in &retired {
             self.remove_window(wid);
         }
@@ -640,8 +646,8 @@ impl WindowStore {
             .collect()
     }
 
-    /// Authoritative absence removes admission, not identity. A confirmed move
-    /// retains assignment until the coordinator resolves its target workspace.
+    /// Native absence may reflect ordering rather than an AX lifecycle change.
+    /// Confirmed moves reconcile location; a live AX window keeps its ownership.
     pub(crate) fn reconcile_native_absence(
         &mut self,
         workspaces: &crate::model::virtual_workspace::WorkspaceStore,
@@ -668,7 +674,7 @@ impl WindowStore {
             self.set_window_server_space(wsid, Some(space));
             return Some((wid, Some(space)));
         }
-        if preserve_assignment {
+        if preserve_assignment || self.is_admitted(wid) {
             return None;
         }
         self.remove_window_assignment(wid);
@@ -761,6 +767,7 @@ impl WindowStore {
         let retained_workspace = {
             let record = self.windows.entry(window_id).or_default();
             record.state = Some(window);
+            record.ax_invalidated = false;
             record.workspace
         };
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
@@ -1336,7 +1343,6 @@ impl WindowStore {
         // A claim keeps its saved workspace until release; only workspace removal clears it.
         let old = self.windows.get_mut(&window_id).and_then(|record| {
             record.pending_transfer = None;
-            record.suspended = false;
             record.workspace.take()
         });
         if let Some(old_assignment) = old {
@@ -1366,7 +1372,7 @@ impl WindowStore {
             None => return,
         };
 
-        let suspended = self.windows[&from].suspended;
+        let ax_invalidated = self.windows[&from].ax_invalidated;
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
@@ -1382,7 +1388,7 @@ impl WindowStore {
         if workspace.is_some() {
             target.workspace = workspace;
         }
-        target.suspended |= suspended;
+        target.ax_invalidated |= ax_invalidated;
         target.rule_floating |= rule_floating;
         target.visibility = visibility;
         target.pending_transfer = pending;
@@ -1391,7 +1397,7 @@ impl WindowStore {
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
-            source.suspended = false;
+            source.ax_invalidated = false;
             source.rule_floating = false;
             source.pending_transfer = None;
             source.floating_display_geometry = None;

@@ -19,6 +19,7 @@ fn sync_existing_window_state(
     wid: WindowId,
     mut info: WindowInfo,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
+    let ax_returned = state.windows.validate_ax_identity(wid);
     let was_minimized = state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
     let was_manageable = state.windows.window(wid).is_some_and(WindowState::is_admitted);
 
@@ -64,12 +65,7 @@ fn sync_existing_window_state(
                         LayoutEvent::WindowRemoved(wid)
                     },
                 )
-            } else if is_admitted
-                && !claimed
-                && (admission_changed
-                    || (state.windows.is_temporarily_unavailable(wid)
-                        && state.windows.is_visible_admitted(wid)))
-            {
+            } else if is_admitted && !claimed && (admission_changed || ax_returned) {
                 // A restored window can become admissible only after the fresh AX
                 // snapshot arrives, while its owning workspace is still inactive.
                 crate::actor::reactor::events::EventOutcome::default()
@@ -79,7 +75,10 @@ fn sync_existing_window_state(
             }
         }
     };
-    if needs_arrange && was_minimized == is_minimized && !admission_changed {
+    if (needs_arrange || admission_changed || ax_returned)
+        && state.windows.is_admitted(wid)
+        && was_minimized == is_minimized
+    {
         outcome.absorb(crate::actor::reactor::events::EventOutcome::layout_changed(
             false,
         ));

@@ -6,6 +6,7 @@ use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
 use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
+use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
@@ -2721,7 +2722,13 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     );
 
     assert!(reactor.assign_test_window_to_workspace(user_space, duplicate_wid, active_workspace));
-    reactor.send_layout_event(LayoutEvent::WindowAdded(user_space, duplicate_wid));
+    // Seed a stale persisted projection. WindowAdded itself must now reject
+    // logically unavailable windows instead of manufacturing this ghost.
+    let engine = &mut reactor.layout_manager.layout_engine;
+    let layout = engine.workspaces().active_layout(user_space, active_workspace).unwrap();
+    engine.workspaces_mut()[active_workspace]
+        .layout_system
+        .add_window_after_selection(layout, duplicate_wid);
     assert!(has_window_in_layout(
         &mut reactor,
         user_space,
@@ -2957,6 +2964,11 @@ fn mission_control_refresh_known_visible_fallback_does_not_restore_window_moved_
 
     reactor.handle_test_workspace_command(space, &LayoutCommand::CreateWorkspace);
 
+    // Absence alone is ordering evidence. Supply the actual native move that
+    // distinguishes this case from a still-valid ordered-out window.
+    let moved_wsid = reactor.test_window_server_id(moved);
+    let other_space = SpaceId::new(2);
+    window_server::set_window_spaces_override(moved_wsid, Some(vec![other_space.get()]));
     reactor.space_state.membership_complete = true;
     reactor.refresh_windows_after_mission_control_with_active_windows(vec![(
         retained_wsid,
@@ -2977,6 +2989,8 @@ fn mission_control_refresh_known_visible_fallback_does_not_restore_window_moved_
         "workspace switching must not re-project a window that Mission Control moved to another native space"
     );
     assert!(has_window_in_layout(&mut reactor, space, screen, retained));
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(other_space));
+    window_server::set_window_spaces_override(moved_wsid, None);
 }
 
 #[test]
@@ -3601,6 +3615,53 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
         ),
         "another window from the activated app should remain visible on the current workspace"
     );
+    // Native ordering is independent of AX minimization and workspace ownership.
+    let wsid = reactor.test_window_server_id(activated);
+    let assignment = reactor.state.windows.workspace_for_window(activated);
+    for event in [
+        Event::WindowServerUnhidden(wsid),
+        Event::WindowServerHidden(wsid),
+        Event::WindowServerHidden(wsid),
+        Event::WindowServerUnhidden(wsid),
+        Event::WindowServerHidden(wsid),
+    ] {
+        reactor.handle_event(event);
+        assert!(!reactor.state.windows.is_temporarily_unavailable(activated));
+        assert_eq!(reactor.state.windows.workspace_for_window(activated), assignment);
+    }
+    let outcome = topology_workflow::handle_window_server_destroyed(
+        &mut reactor.state,
+        &reactor.transaction_manager,
+        &mut reactor.drag_manager,
+        topology_workflow::WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space,
+            kind: SpaceEventKind::User,
+        },
+        topology_workflow::WindowServerDestroyedObservations {
+            resolved_space: Some(space),
+            active_spaces: [space].into_iter().collect(),
+            ordered_in: Some(false),
+            suitable: Some(true),
+        },
+    )
+    .unwrap();
+    reactor.apply_event_outcome(outcome);
+    assert!(!reactor.state.windows.is_temporarily_unavailable(activated));
+    let retired = reactor.state.windows.reconcile_app_inventory(
+        activated.pid,
+        &[same_app_visible],
+        &HashSet::default(),
+        |_, info| crate::model::window_store::InventoryWindowObservation {
+            info,
+            suitable: Some(true),
+            ordered_in: Some(false),
+        },
+    );
+    assert!(retired.is_empty());
+    assert!(!reactor.state.windows.is_temporarily_unavailable(activated));
+    // Drain the coalesced inventory request before testing activation itself.
+    apps.requests();
     reactor.handle_event(Event::ApplicationGloballyActivated(activated.pid));
     reactor.handle_event(Event::WindowServerFocusChanged(same_app_visible, space));
     reactor.handle_event(Event::ApplicationMainWindowChanged(
@@ -3928,6 +3989,33 @@ fn assert_repeated_activation_follows_main(
         );
         assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
         apps.simulate_until_quiet(reactor);
+    }
+}
+
+#[test]
+fn activation_follows_ax_restored_window_on_inactive_workspace() {
+    for stale_metadata in [false, true] {
+        let (mut apps, mut reactor, space, main, _) = pending_activation_context();
+        let info = reactor.state.windows.window(main).unwrap().info.clone();
+        let owner = reactor.state.windows.workspace_for_window(main);
+        // ApplicationHidden/ApplicationShown use these same AX lifecycle events.
+        reactor.handle_event(Event::WindowMinimized(main));
+        if stale_metadata {
+            reactor.state.windows.window_mut(main).unwrap().info.is_standard = false;
+        }
+        reactor.handle_event(Event::WindowDeminiaturized(main));
+        if stale_metadata {
+            reactor.handle_event(Event::WindowServerHidden(reactor.test_window_server_id(main)));
+            reactor.discover_test_windows(main.pid, vec![(main, info)], vec![main]);
+        }
+        assert_eq!(reactor.state.windows.workspace_for_window(main), owner);
+        reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::Yes));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+            Some(1),
+            "restoration and quiet activation must not select the window's workspace"
+        );
+        assert_repeated_activation_follows_main(&mut apps, &mut reactor, space, main);
     }
 }
 
@@ -5234,7 +5322,7 @@ fn authoritative_active_window_snapshot_reassigns_window_across_active_displays(
 }
 
 #[test]
-fn authoritative_active_window_snapshot_removes_missing_window_from_active_layout() {
+fn native_snapshot_omission_preserves_live_ax_window_layout() {
     let (mut apps, mut reactor) = test_context();
     let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -5258,8 +5346,8 @@ fn authoritative_active_window_snapshot_removes_missing_window_from_active_layou
     );
 
     assert!(
-        !has_window_in_layout(&mut reactor, space, frame, moved),
-        "active-space window missing from the authoritative snapshot must be removed immediately"
+        has_window_in_layout(&mut reactor, space, frame, moved),
+        "native ordering absence alone must not remove a valid AX window from layout"
     );
     assert!(
         !reactor.state.windows.is_window_visible(moved_wsid),
@@ -6329,6 +6417,101 @@ fn ax_invalidation_before_lifecycle_signal_preserves_workspace_assignment() {
 }
 
 #[test]
+fn ax_destroyed_window_stops_consuming_space_until_positive_ax_return() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(3));
+    let window = WindowId::new(1, 2);
+    let wsid = reactor.test_window_server_id(window);
+    let original = test_layout(&mut reactor, space, screen);
+    let owner = reactor.state.windows.workspace_for_window(window);
+    let windows = (1..=3)
+        .map(|idx| {
+            let wid = WindowId::new(1, idx);
+            (wid, reactor.state.windows.window(wid).unwrap().info.clone())
+        })
+        .collect();
+
+    reactor.handle_event(Event::WindowInvalidated(
+        window,
+        super::WindowInvalidationSource::AxDestroyedNotification,
+    ));
+    assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+    assert_eq!(reactor.state.windows.workspace_for_window(window), owner);
+
+    apps.requests();
+    // Neither selecting the owning workspace nor a cached native admission may
+    // turn an invalid AX identity back into a participating window.
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    assert!(reactor.state.windows.is_temporarily_unavailable(window));
+    assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+    assert!(
+        apps.requests().iter().all(|request| match request {
+            Request::SetWindowFrames(frames, ..) => frames.iter().all(|(wid, _)| *wid != window),
+            _ => true,
+        }),
+        "workspace switches must not write frames to an invalid AX identity"
+    );
+    window_server_appeared(&mut reactor, wsid, space, SpaceEventKind::User);
+    assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+
+    // Capso's AX inventory is empty before WindowHidden arrives: cached native
+    // visibility must not re-admit the invalidated AX identity during discovery.
+    let outcome = window_discovery::emit_layout_events(
+        &mut reactor.state,
+        &mut reactor.layout_manager,
+        window_discovery::EmitLayoutPayload {
+            pid: window.pid,
+            known_visible: &[],
+            app_info: &None,
+            window_spaces: [(window, (Some(space), Some(space)))].into_iter().collect(),
+            active_spaces: vec![space],
+            focused_window: None,
+        },
+    );
+    reactor.apply_event_outcome(outcome);
+    assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+    reactor.handle_event(Event::WindowServerHidden(wsid));
+    reactor.handle_event(Event::WindowServerUnhidden(wsid));
+    assert!(!has_window_in_layout(&mut reactor, space, screen, window));
+
+    // AX replacement is still allowed to restore the retained middle slot.
+    reactor.discover_test_windows(window.pid, windows, vec![]);
+    assert_eq!(test_layout(&mut reactor, space, screen), original);
+    // Yab omits its closed settings window from AXWindows while WindowServer
+    // still reports a suitable, ordered-out native window. No WindowClosed follows.
+    reactor.handle_event(Event::WindowServerHidden(wsid));
+    reactor.handle_event(Event::WindowInvalidated(
+        window,
+        super::WindowInvalidationSource::StaleAxElement,
+    ));
+    let retired = reactor.state.windows.reconcile_app_inventory(
+        window.pid,
+        &[WindowId::new(1, 1), WindowId::new(1, 3)],
+        &HashSet::default(),
+        |_, info| crate::model::window_store::InventoryWindowObservation {
+            info,
+            suitable: Some(true),
+            ordered_in: Some(false),
+        },
+    );
+    for retired in retired {
+        let outcome = window_workflow::apply_window_retirement(
+            &reactor.transaction_manager,
+            &mut reactor.drag_manager,
+            retired,
+        );
+        reactor.apply_event_outcome(outcome);
+    }
+    assert!(reactor.state.windows.record(window).is_none());
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    assert_eq!(test_layout(&mut reactor, space, screen).len(), 2);
+}
+
+#[test]
 fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -7392,7 +7575,8 @@ fn empty_active_space_membership_during_wake_race_does_not_blank_known_active_wi
     snapshot.active_window_spaces.clear();
     reactor.handle_event(Event::SpaceStateChanged(snapshot));
     assert!(!reactor.state.windows.is_window_visible(wsid));
-    assert!(reactor.test_workspace_for_window(space, wid).is_none());
+    assert!(reactor.test_workspace_for_window(space, wid).is_some());
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
 }
 
 #[test]
@@ -8191,37 +8375,50 @@ fn close_and_native_hide_inventory_retile_survivors_without_duplicate_arrange() 
 #[test]
 fn inventory_negatives_require_native_authority_even_when_hidden() {
     use crate::model::window_store::InventoryWindowObservation;
-    for visible in [true, false] {
-        for (suitable, ordered_in, retired) in [
-            (Some(true), Some(true), false),
-            (Some(true), None, false),
-            (None, Some(true), false),
-            (None, None, false),
-            (Some(false), None, true),
-            (None, Some(false), true),
-        ] {
-            let (mut reactor, wid, wsid, _, _, _) = reactor_with_window_on_space1();
-            reactor.state.windows.observe_native_visibility(wsid, visible);
-            let result = reactor.state.windows.reconcile_app_inventory(
-                wid.pid,
-                &[],
-                &HashSet::default(),
-                |_, _| InventoryWindowObservation {
-                    info: None,
-                    suitable,
-                    ordered_in,
-                },
-            );
-            assert_eq!(
-                result,
-                if retired {
-                    vec![(wid, Some(wsid))]
-                } else {
-                    vec![]
+    for (invalidated, inactive) in [(false, false), (true, false), (true, true)] {
+        for visible in [true, false] {
+            for (suitable, ordered_in, retired) in [
+                (Some(true), Some(false), invalidated),
+                (Some(true), Some(true), false),
+                (Some(true), None, false),
+                (None, Some(true), false),
+                (None, None, false),
+                (Some(false), None, true),
+                (None, Some(false), true),
+            ] {
+                let (mut reactor, wid, wsid, _, _, _) = reactor_with_window_on_space1();
+                if invalidated {
+                    reactor.handle_event(Event::WindowInvalidated(
+                        wid,
+                        super::WindowInvalidationSource::StaleAxElement,
+                    ));
                 }
-            );
-            assert_eq!(reactor.state.windows.contains_window(wid), !retired);
-            reactor.state.windows.debug_assert_invariants();
+                reactor.state.windows.observe_native_visibility(wsid, visible);
+                let result = reactor.state.windows.reconcile_app_inventory(
+                    wid.pid,
+                    &[],
+                    &if inactive {
+                        [wid].into_iter().collect()
+                    } else {
+                        HashSet::default()
+                    },
+                    |_, _| InventoryWindowObservation {
+                        info: None,
+                        suitable,
+                        ordered_in,
+                    },
+                );
+                assert_eq!(
+                    result,
+                    if retired {
+                        vec![(wid, Some(wsid))]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(reactor.state.windows.contains_window(wid), !retired);
+                reactor.state.windows.debug_assert_invariants();
+            }
         }
     }
 }
@@ -10740,7 +10937,12 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
         LayoutMode::MasterStack,
         LayoutMode::Scrolling,
     ] {
-        for (stale_snapshot, native_metadata) in [(false, false), (true, false), (true, true)] {
+        for (stale_snapshot, native_metadata, native_event_first) in [
+            (false, false, true),
+            (true, false, true),
+            (true, true, true),
+            (false, false, false),
+        ] {
             let mut apps = Apps::new();
             let mut reactor = test_reactor();
             let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -10756,9 +10958,11 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 original.iter().map(|(wid, _)| (*wid, apps.windows[wid].frame)).collect();
             let restored = WindowId::new(1, 2);
             let owner = reactor.state.windows.workspace_for_window(restored).unwrap();
-            reactor.handle_event(Event::WindowServerHidden(
-                reactor.test_window_server_id(restored),
-            ));
+            if native_event_first {
+                reactor.handle_event(Event::WindowServerHidden(
+                    reactor.test_window_server_id(restored),
+                ));
+            }
             let visible = [WindowId::new(1, 1), WindowId::new(1, 3)]
                 .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
                 .to_vec();
@@ -10768,6 +10972,8 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 Some(owner),
                 "native hide preceding AX minimize must preserve the workspace"
             );
+            assert!(!reactor.state.windows.is_temporarily_unavailable(restored));
+            assert_eq!(test_layout(&mut reactor, space, screen), original);
             if stale_snapshot && native_metadata {
                 let wsid = reactor.test_window_server_id(restored);
                 let mut info = reactor.state.windows.get_window_server_info(wsid).unwrap();
@@ -10863,22 +11069,27 @@ fn deminiaturized_window_restores_exact_layout_including_restart() {
                 None,
             );
             apps.simulate_until_quiet(&mut reactor);
-            reactor.handle_event(Event::ApplicationMainWindowChanged(1, Some(restored), Quiet::No));
-            reactor.handle_event(Event::ApplicationActivated(1, Quiet::No));
-            reactor.handle_event(Event::WindowServerFocusChanged(WindowId::new(1, 1), space));
-            reactor.handle_event(Event::WindowServerFocusChanged(restored, space));
+            // Restoring placement and Rift's quiet activations do not select the
+            // workspace. Explicit user activation is covered separately.
+            reactor.handle_event(Event::ApplicationMainWindowChanged(
+                1,
+                Some(restored),
+                Quiet::Yes,
+            ));
+            reactor.handle_event(Event::ApplicationActivated(1, Quiet::Yes));
             apps.simulate_until_quiet(&mut reactor);
             assert_eq!(
                 reactor.layout_manager.layout_engine.workspaces().active_workspace(space),
                 active_workspace,
-                "restoring an inactive window must not follow its activation"
+                "restoring an inactive window must not follow a quiet activation"
             );
             assert!(
                 !test_layout(&mut reactor, space, screen).iter().any(|(wid, _)| *wid == restored)
             );
             assert!(
                 !screen.contains(apps.windows[&restored].frame.mid()),
-                "the restored window must remain parked outside the active workspace"
+                "the restored window must remain parked outside the active workspace: {mode:?}, stale={stale_snapshot}, native={native_metadata}, frame={:?}",
+                apps.windows[&restored].frame
             );
 
             assert_eq!(
@@ -11581,7 +11792,7 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
         LayoutMode::MasterStack,
         LayoutMode::Scrolling,
     ] {
-        for early in 0..6 {
+        for early in 0..8 {
             let mut apps = Apps::new();
             let mut reactor = test_reactor();
             let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
@@ -11600,7 +11811,10 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 original.iter().map(|(wid, _)| (*wid, apps.windows[wid].frame)).collect();
             let topology =
                 reactor.layout_manager.layout_engine.serialize_to_string(&reactor.state.windows);
-            if early == 1 {
+            if early >= 6 {
+                reactor.mark_test_window_visible_in_space(wsid, space);
+            }
+            if early == 1 || early >= 6 {
                 let outcome = topology_workflow::handle_window_server_destroyed(
                     &mut reactor.state,
                     &reactor.transaction_manager,
@@ -11632,6 +11846,25 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                 );
                 assert!(retired.is_empty(), "ordered out is not closed");
             }
+            if early >= 6 {
+                // The log reports native departure, then an ordered-out resize
+                // to the fullscreen content rect before fullscreen membership.
+                reactor.handle_event(Event::WindowServerHidden(wsid));
+                reactor.handle_event(Event::WindowFrameChanged(
+                    window,
+                    CGRect::new(CGPoint::new(0., 1.), CGSize::new(1000., 999.)),
+                    Some(reactor.transaction_manager.get_last_sent_txid(wsid)),
+                    Requested(false),
+                    Some(if early == 7 {
+                        MouseState::Down
+                    } else {
+                        MouseState::Up
+                    }),
+                ));
+                if early == 7 {
+                    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+                }
+            }
             if early == 3 || early == 4 {
                 reactor.space_state.fullscreen_spaces.insert(fullscreen);
                 if early == 4 {
@@ -11646,6 +11879,12 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
                     .map(|wid| (reactor.test_window_server_id(wid), Some(space)))
                     .to_vec();
                 reactor.reconcile_authoritative_active_window_snapshot(visible, false, &[]);
+                if early == 3 {
+                    assert!(
+                        !reactor.state.windows.is_temporarily_unavailable(window),
+                        "fullscreen topology alone does not identify this window as fullscreen"
+                    );
+                }
                 if early == 4 {
                     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
                     reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
@@ -11743,12 +11982,13 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
             .collect::<Vec<_>>();
         assert!(reactor.query_window_info(wid).is_some());
         for duplicate in [false, true] {
-            let event = if native {
-                Event::WindowServerHidden(wsid)
-            } else {
-                Event::WindowMinimized(wid)
-            };
-            let outcome = reactor.dispatch_workflow(event).unwrap();
+            if native {
+                reactor.handle_event(Event::WindowServerHidden(wsid));
+                if !duplicate {
+                    assert!(!reactor.state.windows.is_temporarily_unavailable(wid));
+                }
+            }
+            let outcome = reactor.dispatch_workflow(Event::WindowMinimized(wid)).unwrap();
             assert_eq!(
                 outcome
                     .wm_events
@@ -11767,11 +12007,11 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
             );
             assert_eq!(reactor.state.windows.workspace_for_window(wid), assignment);
         }
-        reactor.handle_event(if native {
-            Event::WindowServerUnhidden(wsid)
-        } else {
-            Event::WindowDeminiaturized(wid)
-        });
+        if native {
+            reactor.handle_event(Event::WindowServerUnhidden(wsid));
+            assert!(reactor.state.windows.is_temporarily_unavailable(wid));
+        }
+        reactor.handle_event(Event::WindowDeminiaturized(wid));
         apps.simulate_until_quiet(&mut reactor);
         assert!(reactor.query_window_info(wid).is_some());
         assert_eq!(reactor.state.windows.workspace_for_window(wid), assignment);

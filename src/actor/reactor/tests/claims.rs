@@ -103,7 +103,10 @@ fn claim_detaches_without_destroying_and_release_restores_the_slot() {
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), vec![wid(1), wid(3)]);
 
+    // Ordering out while externally owned does not invalidate the live AX window.
+    reactor.handle_event(Event::WindowServerHidden(reactor.test_window_server_id(wid(2))));
     assert_eq!(reactor.release_window(wid(2), OWNER), Ok(()));
+    assert_eq!(tiled(&mut reactor, space), before);
     apps.simulate_until_quiet(&mut reactor);
     assert_eq!(tiled(&mut reactor, space), before);
     assert_eq!(

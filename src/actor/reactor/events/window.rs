@@ -114,9 +114,10 @@ pub fn handle_window_visibility_changed(
             .with_arrange_passes(0)
             .with_layout_event(LayoutEvent::WindowSuspended(wid)));
     }
+    let ax_returned = state.windows.validate_ax_identity(wid);
     match state.windows.window_mut(wid) {
         Some(window) => {
-            if !window.info.is_minimized {
+            if !window.info.is_minimized && !ax_returned {
                 return Ok(crate::actor::reactor::events::EventOutcome::no_change());
             }
             window.info.is_minimized = false;

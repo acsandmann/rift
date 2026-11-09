@@ -19,7 +19,7 @@ use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspac
 use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceContext, WorkspaceStore};
 use crate::model::{
     AppRuleEffects, AppRuleEngine, AppRuleResult, FloatingPositionStore, WindowRuleContext,
-    WindowStore,
+    WindowStore, WindowVisibility,
 };
 use crate::sys::screen::SpaceId;
 
@@ -123,6 +123,7 @@ pub enum LayoutEvent {
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
     WindowRemovedPreserveFloating(WindowId),
+    /// Suspend projection only; lifecycle state is owned by the window store.
     WindowSuspended(WindowId),
     WindowFocused(SpaceId, WindowId),
     WindowResized {
@@ -874,16 +875,6 @@ impl LayoutEngine {
         if !self.workspaces.set_active_workspace(space, workspace_id) {
             return EventResponse::default();
         }
-        // Returning windows keep their suspension while their workspace is hidden.
-        // Selecting that workspace admits them through the normal layout path.
-        for wid in window_store.workspace_windows(workspace_id) {
-            if window_store.is_temporarily_unavailable(wid)
-                && window_store.is_admitted(wid)
-                && !window_store.is_window_native_fullscreen_suspended(wid)
-            {
-                self.add_window_to_layout(window_store, space, wid);
-            }
-        }
         self.update_active_floating_windows(window_store, space);
         self.broadcast_workspace_changed(space);
         self.broadcast_windows_changed(window_store, space);
@@ -1490,8 +1481,7 @@ impl LayoutEngine {
                     .workspace_for_window(*window)
                     .or_else(|| windows.claim(*window).and_then(|claim| claim.workspace()))
                     == Some(workspace)
-                    && (windows.is_visible_admitted(*window)
-                        || windows.is_temporarily_unavailable(*window))
+                    && (windows.is_admitted(*window) || windows.is_temporarily_unavailable(*window))
                     && !self.floating.is_floating(*window)
                     && desired.insert(*window)
             })
@@ -1532,8 +1522,7 @@ impl LayoutEngine {
         }
     }
 
-    fn suspend_window(&mut self, window_store: &mut WindowStore, wid: WindowId) -> bool {
-        window_store.suspend_window(wid);
+    fn suspend_window(&mut self, window_store: &WindowStore, wid: WindowId) -> bool {
         if let Some(assignment) = window_store.workspace_for_window(wid)
             && let Some(workspace) = self.workspaces.workspaces.get_mut(assignment)
         {
@@ -1615,6 +1604,11 @@ impl LayoutEngine {
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
+        // Layout admission projects lifecycle state; it cannot restore AX validity.
+        if window_store.is_temporarily_unavailable(wid) {
+            return false;
+        }
+
         let active_space_before = window_store.workspace_for_window(wid).map_or_else(
             || self.space_with_window(wid),
             |id| self.projected_space_in(id, wid),
@@ -1635,13 +1629,6 @@ impl LayoutEngine {
                 },
             };
 
-        if window_store.is_temporarily_unavailable(wid)
-            && self.workspaces.active_workspace(space) != Some(assigned_workspace)
-        {
-            // Arrange parking, but leave the saved slot suspended until selected.
-            return true;
-        }
-
         if matches!(
             self.workspaces[assigned_workspace].layout_system,
             LayoutSystemKind::Floating(_)
@@ -1649,7 +1636,6 @@ impl LayoutEngine {
             self.floating.remove_floating(wid);
         }
         let should_be_floating = self.floating.is_floating(wid);
-        window_store.resume_window(wid);
         let resumed = self.workspaces[assigned_workspace]
             .layout_system
             .set_window_participation(wid, true);
@@ -2297,6 +2283,14 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
+                // Native departure no longer suspends logical availability. Its
+                // ordered-out transition frames still cannot edit the saved split.
+                if window_store
+                    .record(wid)
+                    .is_some_and(|r| r.visibility() == WindowVisibility::Hidden)
+                {
+                    return EventResponse::default();
+                }
                 if let Some(constraints) = self.window_layout_constraints.get_mut(&wid) {
                     constraints.locked_width = new_frame.size.width;
                 }
@@ -3100,16 +3094,7 @@ impl LayoutEngine {
         // Membership survives native fullscreen; geometry never targets it.
         positions
             .into_iter()
-            .filter(|(wid, _)| {
-                !window_store.is_temporarily_unavailable(*wid)
-                    || (window_store.is_admitted(*wid)
-                        && !window_store.is_window_native_fullscreen_suspended(*wid)
-                        && !self.workspaces.is_window_in_active_workspace(
-                            window_store,
-                            space,
-                            *wid,
-                        ))
-            })
+            .filter(|(wid, _)| !window_store.is_temporarily_unavailable(*wid))
             .collect()
     }
 
@@ -3824,13 +3809,6 @@ impl LayoutEngine {
                 .layout_system
                 .add_window_after_selection(target_layout, window_id);
         }
-        if self.workspaces.active_workspace(target_space) == Some(target_workspace_id)
-            && window_store.is_temporarily_unavailable(window_id)
-            && window_store.is_admitted(window_id)
-            && !window_store.is_window_native_fullscreen_suspended(window_id)
-        {
-            self.add_window_to_layout(window_store, target_space, window_id);
-        }
         if window_store.is_temporarily_unavailable(window_id) {
             self.workspaces[target_workspace_id]
                 .layout_system
@@ -4050,6 +4028,7 @@ mod tests {
                 true
             ));
             for &window in &windows {
+                store.invalidate_ax_identity(window);
                 let _ = engine.handle_event(&mut store, LayoutEvent::WindowSuspended(window));
             }
             let _ = engine.handle_event(&mut store, LayoutEvent::WindowFocused(space, windows[0]));
@@ -4063,12 +4042,13 @@ mod tests {
                 "suspension never snapshots topology"
             );
             engine.workspaces.set_active_workspace(space, other);
+            store.validate_ax_identity(windows[0]);
             let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, windows[0]));
             assert_eq!(engine.workspaces.active_workspace(space), Some(other));
             assert_eq!(store.workspace_for_window(windows[0]), Some(owner));
             assert!(
-                !engine.workspaces[owner].layout_system.window_participates(windows[0]),
-                "an inactive return must retain its suspended layout slot"
+                engine.workspaces[owner].layout_system.window_participates(windows[0]),
+                "a confirmed AX return restores its slot without selecting its workspace"
             );
             assert!(!engine.workspaces[other].layout_system.window_participates(windows[1]));
             let next_mode = if mode == LayoutMode::Bsp {
@@ -4078,6 +4058,7 @@ mod tests {
             };
             engine.switch_workspace_layout_mode(&store, space, other, next_mode);
             assert!(!engine.workspaces[other].layout_system.window_participates(windows[1]));
+            store.validate_ax_identity(windows[1]);
             let _ = engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, windows[1]));
             assert_eq!(store.workspace_for_window(windows[1]), Some(other));
             store.remove_window(windows[0]);
@@ -4857,6 +4838,7 @@ mod tests {
         let frame = CGRect::new(CGPoint::new(80.0, 120.0), CGSize::new(640.0, 480.0));
         engine.store_floating_position(target, window, frame);
         for observed in [false, true] {
+            window_store.invalidate_ax_identity(window);
             let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowSuspended(window));
             assert!(window_store.is_temporarily_unavailable(window));
             let event = if observed {
@@ -4875,6 +4857,7 @@ mod tests {
             } else {
                 LayoutEvent::WindowAdded(space, window)
             };
+            window_store.validate_ax_identity(window);
             let _ = engine.handle_event(&mut window_store, event);
             assert!(!window_store.is_temporarily_unavailable(window));
             assert!(engine.workspaces[target].layout_system.window_participates(window));
@@ -6545,6 +6528,7 @@ mod tests {
                 Some(expected)
             );
         }
+        window_store.invalidate_ax_identity(wid);
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowSuspended(wid));
         assert!(engine.relocate_window_to_workspace(
             &mut window_store,
@@ -6555,6 +6539,7 @@ mod tests {
         ));
         assert!(window_store.is_temporarily_unavailable(wid));
         assert!(!engine.workspaces[ws1].layout_system.window_participates(wid));
+        window_store.validate_ax_identity(wid);
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, wid));
         assert_eq!(window_store.workspace_for_window(wid), Some(ws1));
         for (id, workspace) in engine.workspaces.workspaces.iter() {

@@ -952,14 +952,11 @@ impl Reactor {
                 }
                 continue;
             }
-            // A live return can precede the accepted Space inventory. Keep its
-            // retained slot suspended rather than destructively reconciling stale absence.
+            // Live membership can precede the accepted Space inventory. Stale
+            // absence alone must not change layout participation or ownership.
             if let Some(space) = resolved.filter(|space| self.is_space_active(*space))
                 && window_server::window_spaces(wsid).as_slice() == [space]
-                && let Some(wid) = self.state.windows.tracked_window_id(wsid)
             {
-                self.state.windows.suspend_window(wid);
-                self.send_layout_event(LayoutEvent::WindowSuspended(wid));
                 continue;
             }
             let inactive_target =
@@ -974,15 +971,10 @@ impl Reactor {
                         window_server::space_is_user(space.get())
                     }
                 });
-            // Fullscreen topology can precede the window's entry notification.
-            // Use the same retained participation as minimize/hide until identity resolves.
-            if inactive_target.is_none()
-                && !self.space_state.fullscreen_spaces.is_empty()
-                && let Some(wid) = self.state.windows.tracked_window_id(wsid)
-            {
-                self.state.windows.mark_window_hidden(wsid);
-                self.state.windows.suspend_window(wid);
-                self.send_layout_event(LayoutEvent::WindowSuspended(wid));
+            // Fullscreen topology can precede a positive entry observation.
+            // Preserve ownership, but another window's fullscreen is not evidence
+            // that this window is logically unavailable.
+            if inactive_target.is_none() && !self.space_state.fullscreen_spaces.is_empty() {
                 continue;
             }
             if let Some((wid, target)) = self.state.windows.reconcile_native_absence(
@@ -1773,38 +1765,29 @@ impl Reactor {
             }
             Event::WindowServerHidden(wsid) | Event::WindowServerUnhidden(wsid) => {
                 let visible = matches!(event, Event::WindowServerUnhidden(_));
-                let wid = self.state.windows.tracked_window_id(wsid);
-                let was_unavailable =
-                    wid.map(|wid| self.state.windows.is_temporarily_unavailable(wid));
+                // WindowServer hidden/unhidden means ordered out/in, not AX
+                // minimization or application hiding. Keep lifecycle suspension
+                // independent of this native visibility evidence.
                 if let Some(pid) = self.state.windows.observe_native_visibility(wsid, visible) {
                     self.request_window_inventory(pid);
                 }
-                if !visible && let Some(wid) = self.state.windows.tracked_window_id(wsid) {
-                    // Native hiding precedes AX minimize notifications. Preserve the
-                    // owner before a native snapshot can interpret absence as removal.
-                    self.state.windows.suspend_window(wid);
-                }
-                let mut outcome = EventOutcome::default();
-                if was_unavailable
-                    != wid.map(|wid| self.state.windows.is_temporarily_unavailable(wid))
-                {
-                    outcome.wm_events.push(WmEvent::OverviewChanged);
-                }
-                return Ok(outcome);
+                return Ok(EventOutcome::default());
             }
             Event::WindowInvalidated(wid, source) => {
                 // AX elements are routinely invalidated while the display/session is
                 // transitioning, and the notification establishing that transition can
                 // arrive later. Keep the logical window, workspace assignment, and layout
                 // node until WindowServer destruction or an authoritative inventory proves
-                // that the native window is gone. A later inventory can then rebind the new
-                // AX element to this stable WindowServer-backed identity in place.
+                // that the native window is gone. Suspend participation while the AX
+                // identity is invalid; a positive AX return can restore the retained slot.
                 trace!(
                     ?wid,
                     ?source,
                     "Preserving logical window after AX element invalidation"
                 );
+                self.state.windows.invalidate_ax_identity(wid);
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications)
+                    .with_layout_event(LayoutEvent::WindowSuspended(wid))
                     .with_window_inventory_request(wid.pid));
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
@@ -4848,7 +4831,7 @@ impl Reactor {
                 engine.note_eviction(&self.state.windows, wid, from);
             }
         }
-        if self.is_space_active(space) && self.state.windows.is_visible_admitted(wid) {
+        if self.is_space_active(space) && self.state.windows.is_admitted(wid) {
             self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
         }
     }
@@ -5769,11 +5752,10 @@ impl Reactor {
 
         if let Some(wid) = focus_window
             && let Some(state) = self.state.windows.window(wid)
-            && let Some(wsid) = state.info.sys_id
+            && state.info.sys_id.is_some()
         {
-            let is_visible = self.state.windows.is_window_visible(wsid);
             let best_space = self.best_space_for_window_state(state);
-            if !is_visible {
+            if self.state.windows.is_temporarily_unavailable(wid) {
                 focus_window = None;
                 if let Some(space) = workspace_switch_space
                     && !self.is_in_drag()
@@ -5971,10 +5953,8 @@ impl Reactor {
             let Some(window) = self.state.windows.window(wid) else {
                 return false;
             };
-            let Some(wsid) = window.info.sys_id else {
-                return false;
-            };
-            self.state.windows.is_window_visible(wsid)
+            window.info.sys_id.is_some()
+                && !self.state.windows.is_temporarily_unavailable(wid)
                 && self.best_space_for_window_id(wid) == Some(space)
                 && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
                     &self.state.windows,
