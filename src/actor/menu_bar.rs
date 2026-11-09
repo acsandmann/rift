@@ -44,6 +44,18 @@ pub struct Update {
 }
 
 impl Update {
+    fn active_workspace_changed(&self, previous: &Self) -> bool {
+        self.active_space_is_activated != previous.active_space_is_activated
+            || self.displays.len() != previous.displays.len()
+            || self.displays.iter().zip(&previous.displays).any(|(display, old)| {
+                display.display_uuid != old.display_uuid
+                    || display.space != old.space
+                    || display.is_active_context != old.is_active_context
+                    || display.workspaces.iter().find(|w| w.is_active).map(|w| &w.id)
+                        != old.workspaces.iter().find(|w| w.is_active).map(|w| &w.id)
+            })
+    }
+
     pub fn context_workspaces(&self) -> &[Workspace] {
         self.displays
             .iter()
@@ -126,12 +138,12 @@ impl Menu {
     }
 
     pub async fn run(mut self) {
-        // Updates are latest-wins: only the newest one is applied once updates go quiet.
+        // Layout updates are latest-wins; workspace switches bypass the debounce.
         const DEBOUNCE: Duration = Duration::from_millis(150);
 
         let mut pending: Option<Update> = None;
         // Reusable main-run-loop timers; idle while disarmed, so they cost no thread or wakeup.
-        // The debounce stays exact: it already delays the visible workspace indicator.
+        // Workspace selection is applied immediately; geometry-only updates use this timer.
         let mut debounce = Timer::manual();
         // Nothing waits on a layout-folder rescan, so it may coalesce with other wakeups.
         let mut refresh_layouts = Timer::manual().with_tolerance(Duration::from_millis(50));
@@ -162,8 +174,14 @@ impl Menu {
                             let _enter = span.enter();
                             match event {
                                 Event::Update(update) => {
-                                    pending = Some(update);
-                                    debounce.set_next_fire(DEBOUNCE);
+                                    if self.last_update.as_ref().is_none_or(|last| update.active_workspace_changed(last)) {
+                                        // Discard older queued geometry so it cannot restore a stale selection.
+                                        pending = None;
+                                        self.handle_update(update);
+                                    } else {
+                                        pending = Some(update);
+                                        debounce.set_next_fire(DEBOUNCE);
+                                    }
                                 }
                                 Event::BindingModeChanged(mode) => {
                                     self.binding_mode = mode;
@@ -430,6 +448,60 @@ mod tests {
                 workspaces,
             }],
         }
+    }
+
+    #[test]
+    fn workspace_switches_bypass_geometry_bursts_on_either_display() {
+        let mut first = workspace("traditional");
+        let mut second = first.clone();
+        second.id = "workspace-2".into();
+        second.is_active = false;
+        let mut shown = update(vec![first.clone(), second.clone()]);
+        shown.displays.push(DisplayWorkspaces {
+            display_uuid: "b".into(),
+            space: SpaceId::new(2),
+            is_active_context: false,
+            workspaces: vec![first.clone(), second.clone()],
+        });
+        for display in [0, 1] {
+            let mut switched = shown.clone();
+            switched.displays[display].workspaces[0].is_active = false;
+            switched.displays[display].workspaces[1].is_active = true;
+            assert!(switched.active_workspace_changed(&shown));
+            let mut geometry = switched.clone();
+            geometry.displays[display].workspaces[1].windows.push(CGRect::ZERO);
+            geometry.displays[display].workspaces[1].window_count += 1;
+            assert!(
+                !geometry.active_workspace_changed(&switched),
+                "animation frames after a switch must remain debounced"
+            );
+            assert!(
+                shown.active_workspace_changed(&switched),
+                "switching straight back must also bypass a pending geometry update"
+            );
+        }
+        first.window_count = 9;
+        second.name = "renamed".into();
+        let mut details = shown.clone();
+        details.displays[0].workspaces = vec![first, second];
+        assert!(!details.active_workspace_changed(&shown));
+    }
+
+    #[test]
+    fn display_and_native_space_context_changes_update_immediately() {
+        let shown = update(vec![workspace("traditional")]);
+        let mut context = shown.clone();
+        context.displays[0].is_active_context = false;
+        assert!(context.active_workspace_changed(&shown));
+        context = shown.clone();
+        context.displays[0].space = SpaceId::new(2);
+        assert!(context.active_workspace_changed(&shown));
+        context = shown.clone();
+        context.active_space_is_activated = false;
+        assert!(context.active_workspace_changed(&shown));
+        context = shown.clone();
+        context.displays.clear();
+        assert!(context.active_workspace_changed(&shown));
     }
 
     #[test]
