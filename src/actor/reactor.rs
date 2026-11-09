@@ -1440,6 +1440,15 @@ impl Reactor {
                     .collect();
                 self.cancel_window_presentations(windows);
             }
+            Event::SpaceStateChanged(snapshot)
+                if !snapshot.authoritative
+                    || self.space_revision_superseded(snapshot.revision)
+                    || (snapshot.revision == self.space_state.revision
+                        && !self.refreshes_blocked()) =>
+            {
+                // Restated membership is not a topology transition. Cancelling here
+                // can strand a window midway through an otherwise valid animation.
+            }
             Event::MissionControlNativeEntered
             | Event::TopologyInvalidated(_)
             | Event::SpaceStateChanged(_)
@@ -4245,7 +4254,7 @@ impl Reactor {
             .filter(|_| self.is_space_active(target))
             .map(|screen| screen.frame);
         let engine = &self.layout_manager.layout_engine;
-        let frame = self
+        let mut frame = self
             .state
             .windows
             .workspace_for_window(window)
@@ -4257,6 +4266,24 @@ impl Reactor {
                     self.frame_on_display(window, frame, source_frame, screen)
                 })
             });
+        if screen.is_some()
+            && self.layout_manager.layout_engine.workspaces().is_window_in_active_workspace(
+                &self.state.windows,
+                target,
+                window,
+            )
+            && !self.layout_manager.layout_engine.is_window_floating(window)
+            && self.layout_manager.layout_engine.active_layout_mode_at(target)
+                != crate::common::config::LayoutMode::Floating
+        {
+            // Move directly into the destination tile. A source-sized placement
+            // followed immediately by a resize can lose one AX size component.
+            frame = LayoutManager::calculate_layout(self, Some(target))
+                .into_iter()
+                .flat_map(|(_, layout)| layout)
+                .find_map(|(wid, frame)| (wid == window).then_some(frame))
+                .or(frame);
+        }
         command_workflow::request_window_transfer(
             &mut self.state,
             &mut self.layout_manager,

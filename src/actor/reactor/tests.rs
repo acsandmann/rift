@@ -5281,10 +5281,10 @@ fn display_index_selector_uses_physical_left_to_right_order() {
 }
 
 #[test]
-fn moving_tiled_window_to_display_applies_destination_layout_after_transfer_frame() {
+fn moving_tiled_window_to_display_writes_destination_tile_directly() {
     let (mut apps, mut reactor) = test_context();
     let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., -800.), CGSize::new(1900., 800.));
     reactor.handle_event(space_state_event(vec![left, right], vec![
         Some(SpaceId::new(1)),
         Some(SpaceId::new(2)),
@@ -5311,17 +5311,10 @@ fn moving_tiled_window_to_display_applies_destination_layout_after_transfer_fram
         })
         .collect();
 
+    assert!(!writes.is_empty(), "the move must write a frame");
     assert!(
-        writes.len() >= 2,
-        "expected transfer and tiled writes: {writes:?}"
-    );
-    assert!(
-        writes.last().is_some_and(|frame| frame.same_as(right)),
-        "the destination layout must supply the final frame: {writes:?}"
-    );
-    assert!(
-        !writes.first().is_some_and(|frame| frame.same_as(right)),
-        "the initial transfer frame should preserve the source tile size: {writes:?}"
+        writes.iter().all(|frame| frame.same_as(right)),
+        "every transfer write must use the destination tile: {writes:?}"
     );
 }
 
