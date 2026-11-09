@@ -11,6 +11,7 @@ use crate::actor::app::{AppThreadHandle, FrameMode, FrameSource, Request, Window
 use crate::actor::gesture::{Context, Control};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::{HashMap, HashSet};
+use crate::common::config::AnimationEasing;
 use crate::layout_engine::systems::scrolling::{
     CameraSpring, PresentedViewport, ViewportPresentation,
 };
@@ -154,6 +155,7 @@ struct ActiveAnimation {
 pub struct Animation {
     interval: Duration,
     duration: Duration,
+    easing: AnimationEasing,
     display: u32,
     windows: Vec<PresentedWindow>,
     handled_windows: Vec<WindowId>,
@@ -1035,6 +1037,7 @@ impl AnimationManager {
         let mut anim = Animation::new(
             reactor.config.settings.animation_fps,
             reactor.config.settings.animation_duration,
+            reactor.config.settings.animation_easing,
         );
         let Some(screen) = reactor.space_state.screen_by_space(space) else {
             return false;
@@ -1460,11 +1463,12 @@ impl ActiveAnimation {
 }
 
 impl Animation {
-    fn new(fps: f64, duration: f64) -> Self {
+    fn new(fps: f64, duration: f64, easing: AnimationEasing) -> Self {
         let interval = Duration::from_secs_f64(1.0 / fps);
         Self {
             interval,
             duration: Duration::from_secs_f64(duration),
+            easing,
             display: 0,
             windows: vec![],
             handled_windows: vec![],
@@ -1532,7 +1536,7 @@ impl Animation {
             &mut self.windows,
             Sample::Transition {
                 progress: t,
-                eased: ease(t),
+                eased: ease(t, self.easing),
                 set_size: (previous < 0.5 && t >= 0.5) || t == 1.0,
             },
             frames,
@@ -1547,7 +1551,9 @@ impl Animation {
 }
 
 #[cfg(test)]
-fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect { interpolate_frame(a, b, ease(t)) }
+fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {
+    interpolate_frame(a, b, ease(t, AnimationEasing::default()))
+}
 
 fn interpolate_frame(a: CGRect, b: CGRect, s: f64) -> CGRect {
     CGRect {
@@ -1591,11 +1597,51 @@ fn contain_transition_frame(from: CGRect, to: CGRect, mut frame: CGRect) -> CGRe
     frame
 }
 
-fn ease(t: f64) -> f64 {
+/// Curves follow easings.net; `EaseInOut` is the circular in-out curve.
+fn ease(t: f64, easing: AnimationEasing) -> f64 {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    match easing {
+        AnimationEasing::EaseInOut | AnimationEasing::EaseInOutCirc => {
+            if t < 0.5 {
+                (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
+            } else {
+                (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
+            }
+        }
+        AnimationEasing::Linear => t,
+        // 1 - cos(t * PI / 2), written so the final sample lands exactly on 1.
+        AnimationEasing::EaseInSine => 1.0 - f64::sin((1.0 - t) * FRAC_PI_2),
+        AnimationEasing::EaseOutSine => f64::sin(t * FRAC_PI_2),
+        AnimationEasing::EaseInOutSine => (1.0 - f64::cos(t * PI)) / 2.0,
+        AnimationEasing::EaseInQuad => f64::powi(t, 2),
+        AnimationEasing::EaseOutQuad => 1.0 - f64::powi(1.0 - t, 2),
+        AnimationEasing::EaseInOutQuad => ease_in_out_power(t, 2),
+        AnimationEasing::EaseInCubic => f64::powi(t, 3),
+        AnimationEasing::EaseOutCubic => 1.0 - f64::powi(1.0 - t, 3),
+        AnimationEasing::EaseInOutCubic => ease_in_out_power(t, 3),
+        AnimationEasing::EaseInQuart => f64::powi(t, 4),
+        AnimationEasing::EaseOutQuart => 1.0 - f64::powi(1.0 - t, 4),
+        AnimationEasing::EaseInOutQuart => ease_in_out_power(t, 4),
+        AnimationEasing::EaseInQuint => f64::powi(t, 5),
+        AnimationEasing::EaseOutQuint => 1.0 - f64::powi(1.0 - t, 5),
+        AnimationEasing::EaseInOutQuint => ease_in_out_power(t, 5),
+        AnimationEasing::EaseInExpo if t == 0.0 => 0.0,
+        AnimationEasing::EaseInExpo => f64::exp2(10.0 * t - 10.0),
+        AnimationEasing::EaseOutExpo if t == 1.0 => 1.0,
+        AnimationEasing::EaseOutExpo => 1.0 - f64::exp2(-10.0 * t),
+        AnimationEasing::EaseInOutExpo if t == 0.0 || t == 1.0 => t,
+        AnimationEasing::EaseInOutExpo if t < 0.5 => f64::exp2(20.0 * t - 10.0) / 2.0,
+        AnimationEasing::EaseInOutExpo => 1.0 - f64::exp2(10.0 - 20.0 * t) / 2.0,
+        AnimationEasing::EaseInCirc => 1.0 - f64::sqrt(1.0 - f64::powi(t, 2)),
+        AnimationEasing::EaseOutCirc => f64::sqrt(1.0 - f64::powi(t - 1.0, 2)),
+    }
+}
+
+fn ease_in_out_power(t: f64, n: i32) -> f64 {
     if t < 0.5 {
-        (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
+        f64::powi(2.0 * t, n) / 2.0
     } else {
-        (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
+        1.0 - f64::powi(2.0 - 2.0 * t, n) / 2.0
     }
 }
 
@@ -1613,7 +1659,11 @@ mod tests {
 
     fn empty_animation() -> Animation {
         let settings = crate::common::config::Config::default().settings;
-        Animation::new(settings.animation_fps, settings.animation_duration)
+        Animation::new(
+            settings.animation_fps,
+            settings.animation_duration,
+            settings.animation_easing,
+        )
     }
 
     fn animation(handle: &AppThreadHandle, wid: WindowId, from: CGRect, to: CGRect) -> Animation {
@@ -1753,7 +1803,7 @@ mod tests {
         for fps in [60.0, 120.0] {
             let (tx, mut rx) = crate::actor::channel();
             let handle = AppThreadHandle::new_for_test(tx);
-            let mut a = Animation::new(fps, 0.3);
+            let mut a = Animation::new(fps, 0.3, AnimationEasing::default());
             a.add_window(
                 &handle,
                 WindowId::new(1, 1),
@@ -1790,7 +1840,7 @@ mod tests {
         let start = Instant::now();
         for (fps, expected) in [(60.0, 60), (30.0, 30)] {
             let (handle, mut rx) = AppThreadHandle::channel();
-            let mut a = Animation::new(fps, 1.0);
+            let mut a = Animation::new(fps, 1.0, AnimationEasing::default());
             let wid = WindowId::new(1, 1);
             a.add_window(
                 &handle,
@@ -2680,5 +2730,85 @@ mod tests {
             matches!(requests[2], Observed::Request(Request::EndWindowAnimation(req_wid, _)) if req_wid == wid)
         );
         assert_set_window_frame(&requests[3], wid, rect(80.0, 90.0, 10.0, 10.0));
+    }
+
+    #[test]
+    fn default_easing_keeps_the_circular_ease_in_out_curve() {
+        assert_eq!(AnimationEasing::default(), AnimationEasing::EaseInOut);
+        for step in 0..=1000 {
+            let t = step as f64 / 1000.0;
+            let circular = if t < 0.5 {
+                (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
+            } else {
+                (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
+            };
+            assert_eq!(ease(t, AnimationEasing::EaseInOut).to_bits(), circular.to_bits());
+        }
+    }
+
+    #[test]
+    fn every_easing_starts_at_rest_lands_on_target_and_never_reverses() {
+        for index in 0..AnimationEasing::CONFIG_CHOICES.len() {
+            let easing = AnimationEasing::from_config_choice(index).unwrap();
+            assert_eq!(ease(0.0, easing), 0.0, "{easing:?}");
+            assert_eq!(ease(1.0, easing), 1.0, "{easing:?}");
+            let mut previous = 0.0;
+            for step in 1..=1000 {
+                let eased = ease(step as f64 / 1000.0, easing);
+                assert!((previous..=1.0).contains(&eased), "{easing:?} at {step}");
+                previous = eased;
+            }
+        }
+    }
+
+    #[test]
+    fn configured_easing_drives_transitions_after_a_config_update() {
+        use super::super::Event;
+        use super::super::testing::*;
+
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        apps.make_app_and_settle_on_screen(
+            &mut reactor,
+            rect(0., 0., 1000., 1000.),
+            space,
+            1,
+            make_windows(1),
+        );
+        let mut config = reactor.config.clone();
+        config.settings.animate = true;
+        config.settings.animation_easing = AnimationEasing::Linear;
+        reactor.handle_event(Event::ConfigUpdated(config));
+        let (sender, receiver) = AnimationSender::channel();
+        reactor.animation_tx = Some(sender);
+        apps.requests();
+
+        let wid = WindowId::new(1, 1);
+        let from = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+        let mut to = from;
+        to.origin.x += 400.0;
+        assert!(AnimationManager::animate_layout(
+            &mut reactor,
+            space,
+            &[(wid, to)],
+            false,
+            None,
+            true,
+        ));
+        let mut manager = AnimationManager::new();
+        manager.handle_message(receiver.commands.try_recv().unwrap());
+        let start = Instant::now();
+        active_mut(&mut manager).unwrap().started = start;
+        apps.requests();
+        let quarter = Duration::from_secs_f64(reactor.config.settings.animation_duration / 4.0);
+        manager.tick_at(start + quarter);
+        let mut x = None;
+        for request in apps.requests() {
+            if let Request::InteractiveFramesPending(queue) = request {
+                queue.drain_with(|_, frame, _, _, _, _, _| x = Some(frame.origin.x));
+            }
+        }
+        // EaseInOut would be ~27px in at a quarter of the duration; linear is 100px.
+        assert!((x.unwrap() - (from.origin.x + 100.0)).abs() < 1e-6, "{x:?}");
     }
 }
