@@ -714,6 +714,59 @@ pub fn spawn_app_thread(
     }
 }
 
+// AX activation can precede Carbon; Carbon activation can precede AX unhide.
+// Keep the quiet context until the corresponding authoritative edge is ready.
+#[derive(Default)]
+enum PendingActivation {
+    #[default]
+    None,
+    Ax(Instant, Quiet),
+    Hidden(Quiet, Option<WindowId>),
+}
+
+impl PendingActivation {
+    fn ax_activated(&mut self, quiet: Quiet) {
+        if !matches!(self, Self::Hidden(..)) {
+            *self = Self::Ax(Instant::now(), quiet);
+        }
+    }
+
+    fn ax_deactivated(&mut self) {
+        // AX frontmost can lag the authoritative global activation edge.
+        if matches!(self, Self::Ax(..)) {
+            *self = Self::None;
+        }
+    }
+
+    fn globally_activated(
+        &mut self,
+        hidden: bool,
+        initiated: Option<(Quiet, Option<WindowId>)>,
+    ) -> Option<(Quiet, Option<WindowId>)> {
+        let pending = std::mem::take(self);
+        let context = initiated.unwrap_or_else(|| match pending {
+            Self::Ax(at, quiet) if at.elapsed() < Duration::from_millis(1000) => (quiet, None),
+            _ => (Quiet::No, None),
+        });
+        if hidden {
+            *self = Self::Hidden(context.0, context.1);
+            None
+        } else {
+            Some(context)
+        }
+    }
+
+    fn shown(&mut self) -> Option<(Quiet, Option<WindowId>)> {
+        if let Self::Hidden(quiet, window) = self {
+            let context = (*quiet, *window);
+            *self = Self::None;
+            Some(context)
+        } else {
+            None
+        }
+    }
+}
+
 struct State {
     pid: pid_t,
     bundle_id: Option<String>,
@@ -725,7 +778,7 @@ struct State {
     elem_to_wid: HashMap<AXUIElement, WindowId>,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
-    pending_activation_quiet: Option<(Instant, Quiet)>,
+    pending_activation: PendingActivation,
     is_hidden: bool,
     is_frontmost: bool,
     enhanced_ui: EnhancedUi,
@@ -2093,33 +2146,32 @@ impl State {
         );
 
         if !is_frontmost {
-            self.pending_activation_quiet = None;
+            self.pending_activation.ax_deactivated();
             if old_frontmost {
                 self.send_event(Event::ApplicationDeactivated(self.pid));
             }
-        } else if !old_frontmost {
+        } else if !old_frontmost && !self.is_hidden {
             let (quiet, quiet_window_change) = self.take_activation_context();
             self.on_main_window_changed(quiet_window_change, true);
-            self.pending_activation_quiet = Some((Instant::now(), quiet));
+            self.pending_activation.ax_activated(quiet);
         }
         Ok(())
     }
 
     fn on_global_activation(&mut self) -> Result<(), AxError> {
-        let (quiet, quiet_window_change) = if self.last_activated.is_some() {
-            self.take_activation_context()
-        } else if let Some((ts, quiet)) = self.pending_activation_quiet.take()
-            && ts.elapsed() < Duration::from_millis(1000)
-        {
-            (quiet, None)
-        } else {
-            (Quiet::No, None)
-        };
-
-        // Carbon is the authoritative inter-application activation edge. AX
-        // frontmost polling/notifications can lag it, so do not reject this
-        // request based on a transient AX value.
+        let initiated = self.last_activated.is_some().then(|| self.take_activation_context());
+        // Carbon owns the activation edge; AX unhide must finish before its
+        // resolved activation is delivered to the reactor.
         self.is_frontmost = true;
+        if let Some((quiet, window)) =
+            self.pending_activation.globally_activated(self.is_hidden, initiated)
+        {
+            self.finish_activation(quiet, window);
+        }
+        Ok(())
+    }
+
+    fn finish_activation(&mut self, quiet: Quiet, quiet_window_change: Option<WindowId>) {
         if self.on_main_window_changed(quiet_window_change, true).is_none()
             && self.main_window.take().is_some()
         {
@@ -2129,7 +2181,6 @@ impl State {
             self.send_event(Event::ApplicationMainWindowChanged(self.pid, None, Quiet::No));
         }
         self.send_event(Event::ApplicationActivated(self.pid, quiet));
-        Ok(())
     }
 
     async fn wait_for_activation(
@@ -2174,6 +2225,7 @@ impl State {
         }
 
         self.is_hidden = true;
+        self.pending_activation.ax_deactivated();
         let mut to_minimize = Vec::new();
         for (wid, window) in self.windows.iter_mut() {
             if window.hidden_by_app {
@@ -2216,6 +2268,9 @@ impl State {
 
         for wid in to_restore {
             self.send_event(Event::WindowDeminiaturized(wid));
+        }
+        if let Some((quiet, window)) = self.pending_activation.shown() {
+            self.finish_activation(quiet, window);
         }
     }
 
@@ -2760,7 +2815,7 @@ pub(crate) async fn run_app(
         elem_to_wid: HashMap::default(),
         main_window: None,
         last_activated: None,
-        pending_activation_quiet: None,
+        pending_activation: PendingActivation::None,
         is_hidden: false,
         is_frontmost: false,
         enhanced_ui: EnhancedUi::default(),
@@ -2803,6 +2858,44 @@ fn trace<T>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_activation_waits_for_show_and_preserves_user_or_quiet_intent() {
+        for quiet in [Quiet::No, Quiet::Yes] {
+            let mut pending = PendingActivation::default();
+            let window = Some(WindowId::new(7, 1));
+            assert_eq!(pending.globally_activated(true, Some((quiet, window))), None);
+            // Lagging AX notifications cannot replace or cancel a Carbon edge.
+            pending.ax_activated(Quiet::No);
+            pending.ax_deactivated();
+            assert_eq!(pending.shown(), Some((quiet, window)));
+            assert_eq!(pending.shown(), None);
+        }
+    }
+
+    #[test]
+    fn showing_without_global_activation_does_not_activate() {
+        let mut pending = PendingActivation::default();
+        pending.ax_activated(Quiet::Yes);
+        assert_eq!(pending.shown(), None);
+        assert_eq!(pending.globally_activated(false, None), Some((Quiet::Yes, None)));
+        pending.ax_activated(Quiet::Yes);
+        pending.ax_deactivated();
+        assert_eq!(pending.globally_activated(false, None), Some((Quiet::No, None)));
+    }
+
+    #[test]
+    fn new_global_activation_replaces_old_deferred_quiet_context() {
+        let mut pending = PendingActivation::default();
+        assert_eq!(pending.globally_activated(true, Some((Quiet::Yes, None))), None);
+        assert_eq!(pending.globally_activated(true, None), None);
+        assert_eq!(pending.shown(), Some((Quiet::No, None)));
+    }
 }
 
 #[cfg(test)]

@@ -1567,7 +1567,7 @@ impl Reactor {
                 let mut outcome = application_workflow::handle_application_activated(
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
-                if quiet == Quiet::No {
+                if quiet == Quiet::No && self.main_window_tracker.is_globally_frontmost(pid) {
                     // Use only the app thread's resolved main window; pending
                     // AX admission can leave the previous main window cached.
                     let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
@@ -5696,7 +5696,7 @@ impl Reactor {
 
         let original_focus = focus_window;
 
-        let focus_quiet = workspace_switch_space.map_or(Quiet::No, |_| Quiet::Yes);
+        let mut focus_quiet = workspace_switch_space.map_or(Quiet::No, |_| Quiet::Yes);
 
         let handled_without_raise = if raise_windows.is_empty() && focus_window.is_none() {
             // An active switch alone is not a focus request. Only its explicit
@@ -5733,6 +5733,9 @@ impl Reactor {
                     self.try_focus_or_warp_without_raise(Some(space), &mut focus_window)
                 }
             } else if let Some(space) = pending_refocus_space.take() {
+                // Automatic fallback focus must not become a user workspace activation
+                // if its raise completes after another workspace has been selected.
+                focus_quiet = Quiet::Yes;
                 let selected = self.layout_manager.layout_engine.selected_window(space);
                 if let Some(wid) = self.visible_focus_candidate_in_active_workspace(space, selected)
                 {

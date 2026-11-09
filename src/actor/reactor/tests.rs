@@ -3534,6 +3534,21 @@ fn pending_removal_refocus_during_auto_switch_uses_workspace_selection() {
     };
     assert_eq!(request.focus_window.map(|(wid, _)| wid), Some(window));
     assert!(raise_rx.try_recv().is_err());
+
+    // A queued fallback can finish after a subsequent workspace switch. Its
+    // activation belongs to Rift and must not take the user back again.
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    reactor.handle_event(Event::ApplicationGloballyActivated(window.pid));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(
+        window.pid,
+        Some(window),
+        Quiet::Yes,
+    ));
+    reactor.handle_event(Event::ApplicationActivated(window.pid, request.focus_quiet));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(1)
+    );
 }
 
 #[test]
@@ -3990,6 +4005,17 @@ fn assert_repeated_activation_follows_main(
         assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
         apps.simulate_until_quiet(reactor);
     }
+}
+
+#[test]
+fn late_activation_cannot_switch_after_another_app_became_frontmost() {
+    let (_, mut reactor, space, main, _) = pending_activation_context();
+    reactor.handle_event(Event::ApplicationGloballyActivated(99));
+    reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(1)
+    );
 }
 
 #[test]
