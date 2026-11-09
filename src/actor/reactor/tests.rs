@@ -2149,6 +2149,30 @@ fn cross_display_drag_clears_source_floating_position() {
 }
 
 #[test]
+fn only_a_closed_window_rearranges_during_a_drag() {
+    let (mut reactor, wid, _wsid, space1, _space2, frame, _screen2) =
+        reactor_with_window_on_space1_two_displays();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    let workspace = reactor.test_workspace(space1, 0);
+    let [moved_away, closed] = [2, 3].map(|idx| {
+        let window = WindowId::new(1, idx);
+        let server_id = WindowServerId::new(120 + idx as u32);
+        reactor.add_test_window(window, server_id, Some(space1), frame);
+        assert!(reactor.assign_test_window_to_workspace(space1, window, workspace));
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space1, window));
+        window
+    });
+    begin_tiled_native_drag(&mut reactor, wid, frame, space1, space1);
+
+    let before = reactor.layout_update_count;
+    reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(moved_away));
+    assert_eq!(reactor.layout_update_count, before);
+
+    reactor.send_layout_event(LayoutEvent::WindowRemoved(closed));
+    assert_eq!(reactor.layout_update_count, before + 1);
+}
+
+#[test]
 fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
     let (mut reactor, floating_wid, space1, _screen, floating_frame) =
         reactor_with_floating_window();

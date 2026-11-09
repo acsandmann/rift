@@ -5193,11 +5193,14 @@ impl Reactor {
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, workspace_switch_space);
         if geometry_changed {
-            self.update_layout_or_warn(
-                false,
-                workspace_switch_space.is_some(),
-                workspace_switch_space.or(event_space),
-            );
+            // A pass mid-drag moves the dragged window back to its slot.
+            if !self.is_in_drag() || matches!(event_clone, LayoutEvent::WindowRemoved(_)) {
+                self.update_layout_or_warn(
+                    false,
+                    workspace_switch_space.is_some(),
+                    workspace_switch_space.or(event_space),
+                );
+            }
             if self.is_in_drag() {
                 self.refresh_active_drag_scene();
             }
