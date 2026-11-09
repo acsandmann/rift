@@ -12047,3 +12047,82 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(!reactor.state.windows.contains_window(wid));
     }
 }
+
+/// Global mode, one display at startup, a second connected later: the second
+/// display has no workspace.
+fn reactor_with_window_and_display_without_workspace()
+-> (Reactor, WindowId, SpaceId, SpaceId, CGRect) {
+    let mut reactor = test_reactor_with_workspace_settings(&shared_settings());
+    let (space1, space2) = (SpaceId::new(1), SpaceId::new(2));
+    let wid = WindowId::new(1, 1);
+    let frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
+
+    reactor.handle_event(space_state_event(vec![shared_left()], vec![Some(space1)]));
+    reactor.add_test_app(wid.pid);
+    let workspace = reactor.test_workspace(space1, 0);
+    reactor.add_test_window(wid, WindowServerId::new(121), Some(space1), frame);
+    assert!(reactor.assign_test_window_to_workspace(space1, wid, workspace));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
+
+    reactor.handle_event(space_state_event(vec![shared_left(), shared_right()], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace(space2),
+        None,
+        "precondition: the new display has no workspace"
+    );
+
+    (reactor, wid, space1, space2, frame)
+}
+
+fn begin_tiled_native_drag(
+    reactor: &mut Reactor,
+    window: WindowId,
+    origin_frame: CGRect,
+    origin_space: SpaceId,
+    current_space: SpaceId,
+) {
+    reactor.drag_manager.actor.begin_native(
+        crate::actor::drag::DragSource {
+            window,
+            origin_frame,
+            last_frame: origin_frame,
+            origin_space: Some(origin_space),
+            current_space: Some(current_space),
+            tiled: true,
+        },
+        crate::actor::drag::DragScene::default(),
+    );
+}
+
+#[test]
+fn dropping_a_window_on_a_display_without_a_workspace_does_not_panic() {
+    let (mut reactor, wid, space1, space2, frame) =
+        reactor_with_window_and_display_without_workspace();
+    begin_tiled_native_drag(&mut reactor, wid, frame, space1, space2);
+
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+
+    assert!(!reactor.drag_manager.actor.is_active());
+    assert_eq!(reactor.assigned_space_for_window_id(wid), None);
+}
+
+#[test]
+fn toggling_float_on_a_display_without_a_workspace_stays_floating() {
+    let (mut reactor, wid, space1, space2, _) = reactor_with_window_and_display_without_workspace();
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+
+    let _ = reactor.layout_manager.layout_engine.handle_command(
+        &mut reactor.state.windows,
+        Some(space2),
+        &[space1, space2],
+        &Default::default(),
+        LayoutCommand::ToggleWindowFloating,
+    );
+
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+}

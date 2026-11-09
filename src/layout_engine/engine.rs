@@ -1615,19 +1615,16 @@ impl LayoutEngine {
         );
         let mut inserted = false;
 
-        let assigned_workspace =
-            match self.workspaces().workspace_for_window(&window_store, space, wid) {
-                Some(workspace_id) => workspace_id,
-                None => match self.workspaces.auto_assign_window(window_store, wid, space) {
-                    Ok(workspace_id) => workspace_id,
-                    Err(e) => {
-                        warn!("Failed to auto-assign window to workspace: {:?}", e);
-                        self.workspaces
-                            .active_workspace(space)
-                            .expect("No active workspace available")
-                    }
-                },
-            };
+        let Some(assigned_workspace) =
+            self.workspaces().workspace_for_window(&window_store, space, wid).or_else(|| {
+                self.workspaces
+                    .auto_assign_window(window_store, wid, space)
+                    .inspect_err(|e| warn!("Failed to auto-assign window to workspace: {e:?}"))
+                    .ok()
+            })
+        else {
+            return false;
+        };
 
         if matches!(
             self.workspaces[assigned_workspace].layout_system,
@@ -2411,14 +2408,13 @@ impl LayoutEngine {
             };
             if is_floating {
                 if let Some(space) = space {
-                    let assigned_workspace = self
+                    let Some(assigned_workspace) = self
                         .workspaces()
                         .workspace_for_window(&window_store, space, wid)
-                        .unwrap_or_else(|| {
-                            self.workspaces
-                                .active_workspace(space)
-                                .expect("No active workspace available")
-                        });
+                        .or_else(|| self.workspaces.active_workspace(space))
+                    else {
+                        return EventResponse::default();
+                    };
 
                     if let Some(layout) = self.workspaces.active_layout(space, assigned_workspace) {
                         self.workspaces[assigned_workspace]

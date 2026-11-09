@@ -1154,6 +1154,7 @@ impl WorkspaceStore {
         self.active_workspace_per_space.get(&space)?.previous
     }
 
+    /// `None` if the space has no workspace, e.g. a display connected after startup in global mode.
     pub fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
         self.active_workspace_per_space.get(&space)?.current
     }
