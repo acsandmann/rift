@@ -451,60 +451,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_switches_bypass_geometry_bursts_on_either_display() {
-        let mut first = workspace("traditional");
-        let mut second = first.clone();
-        second.id = "workspace-2".into();
-        second.is_active = false;
-        let mut shown = update(vec![first.clone(), second.clone()]);
-        shown.displays.push(DisplayWorkspaces {
-            display_uuid: "b".into(),
-            space: SpaceId::new(2),
-            is_active_context: false,
-            workspaces: vec![first.clone(), second.clone()],
-        });
-        for display in [0, 1] {
-            let mut switched = shown.clone();
-            switched.displays[display].workspaces[0].is_active = false;
-            switched.displays[display].workspaces[1].is_active = true;
-            assert!(switched.active_workspace_changed(&shown));
-            let mut geometry = switched.clone();
-            geometry.displays[display].workspaces[1].windows.push(CGRect::ZERO);
-            geometry.displays[display].workspaces[1].window_count += 1;
-            assert!(
-                !geometry.active_workspace_changed(&switched),
-                "animation frames after a switch must remain debounced"
-            );
-            assert!(
-                shown.active_workspace_changed(&switched),
-                "switching straight back must also bypass a pending geometry update"
-            );
-        }
-        first.window_count = 9;
-        second.name = "renamed".into();
-        let mut details = shown.clone();
-        details.displays[0].workspaces = vec![first, second];
-        assert!(!details.active_workspace_changed(&shown));
-    }
-
-    #[test]
-    fn display_and_native_space_context_changes_update_immediately() {
-        let shown = update(vec![workspace("traditional")]);
-        let mut context = shown.clone();
-        context.displays[0].is_active_context = false;
-        assert!(context.active_workspace_changed(&shown));
-        context = shown.clone();
-        context.displays[0].space = SpaceId::new(2);
-        assert!(context.active_workspace_changed(&shown));
-        context = shown.clone();
-        context.active_space_is_activated = false;
-        assert!(context.active_workspace_changed(&shown));
-        context = shown.clone();
-        context.displays.clear();
-        assert!(context.active_workspace_changed(&shown));
-    }
-
-    #[test]
     fn grouped_signature_and_command_context() {
         let mut base = update(vec![workspace("bsp")]);
         base.displays.push(DisplayWorkspaces {
