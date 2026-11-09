@@ -1773,6 +1773,9 @@ impl Reactor {
             }
             Event::WindowServerHidden(wsid) | Event::WindowServerUnhidden(wsid) => {
                 let visible = matches!(event, Event::WindowServerUnhidden(_));
+                let wid = self.state.windows.tracked_window_id(wsid);
+                let was_unavailable =
+                    wid.map(|wid| self.state.windows.is_temporarily_unavailable(wid));
                 if let Some(pid) = self.state.windows.observe_native_visibility(wsid, visible) {
                     self.request_window_inventory(pid);
                 }
@@ -1781,7 +1784,13 @@ impl Reactor {
                     // owner before a native snapshot can interpret absence as removal.
                     self.state.windows.suspend_window(wid);
                 }
-                return Ok(EventOutcome::default());
+                let mut outcome = EventOutcome::default();
+                if was_unavailable
+                    != wid.map(|wid| self.state.windows.is_temporarily_unavailable(wid))
+                {
+                    outcome.wm_events.push(WmEvent::OverviewChanged);
+                }
+                return Ok(outcome);
             }
             Event::WindowInvalidated(wid, source) => {
                 // AX elements are routinely invalidated while the display/session is
@@ -1898,11 +1907,16 @@ impl Reactor {
                 );
             }
             Event::WindowMinimized(wid) | Event::WindowDeminiaturized(wid) => {
-                return window_workflow::handle_window_visibility_changed(
+                let was_unavailable = self.state.windows.is_temporarily_unavailable(wid);
+                let mut outcome = window_workflow::handle_window_visibility_changed(
                     &mut self.state,
                     wid,
                     matches!(event, Event::WindowDeminiaturized(_)),
-                );
+                )?;
+                if was_unavailable != self.state.windows.is_temporarily_unavailable(wid) {
+                    outcome.wm_events.push(WmEvent::OverviewChanged);
+                }
+                return Ok(outcome);
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 let mission_control_active = self.is_mission_control_active();
@@ -3330,7 +3344,9 @@ impl Reactor {
     fn create_window_data(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         let window_state = self.state.windows.window(window_id)?;
         let externally_managed = self.state.windows.is_claimed(window_id);
-        if !window_state.is_admitted() && !externally_managed {
+        if (!window_state.is_admitted() || self.state.windows.is_temporarily_unavailable(window_id))
+            && !externally_managed
+        {
             return None;
         }
         let app = self.app_manager.apps.get(&window_id.pid)?;

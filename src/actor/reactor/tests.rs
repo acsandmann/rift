@@ -11724,3 +11724,67 @@ fn native_fullscreen_restores_middle_window_exactly_across_notification_ordering
         }
     }
 }
+
+#[test]
+fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
+    // Application hiding uses the same AX suspension events as minimization.
+    for native in [false, true] {
+        let (mut apps, mut reactor) = test_context();
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let space = SpaceId::new(1);
+        let wid = WindowId::new(1, 1);
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+        let wsid = reactor.test_window_server_id(wid);
+        let assignment = reactor.state.windows.workspace_for_window(wid);
+        let positions = reactor
+            .query_windows(Some(space))
+            .iter()
+            .map(|w| (w.id, w.layout_position))
+            .collect::<Vec<_>>();
+        assert!(reactor.query_window_info(wid).is_some());
+        for duplicate in [false, true] {
+            let event = if native {
+                Event::WindowServerHidden(wsid)
+            } else {
+                Event::WindowMinimized(wid)
+            };
+            let outcome = reactor.dispatch_workflow(event).unwrap();
+            assert_eq!(
+                outcome
+                    .wm_events
+                    .iter()
+                    .filter(|e| matches!(e, WmEvent::OverviewChanged))
+                    .count(),
+                usize::from(!duplicate)
+            );
+            reactor.apply_event_outcome(outcome);
+            assert!(reactor.query_window_info(wid).is_none());
+            assert!(
+                reactor
+                    .query_workspaces(Some(space))
+                    .iter()
+                    .all(|ws| ws.windows.iter().all(|w| w.id != wid))
+            );
+            assert_eq!(reactor.state.windows.workspace_for_window(wid), assignment);
+        }
+        reactor.handle_event(if native {
+            Event::WindowServerUnhidden(wsid)
+        } else {
+            Event::WindowDeminiaturized(wid)
+        });
+        apps.simulate_until_quiet(&mut reactor);
+        assert!(reactor.query_window_info(wid).is_some());
+        assert_eq!(reactor.state.windows.workspace_for_window(wid), assignment);
+        assert_eq!(
+            reactor
+                .query_windows(Some(space))
+                .iter()
+                .map(|w| (w.id, w.layout_position))
+                .collect::<Vec<_>>(),
+            positions
+        );
+        reactor.handle_event(Event::WindowDestroyed(wid));
+        assert!(reactor.query_window_info(wid).is_none());
+        assert!(!reactor.state.windows.contains_window(wid));
+    }
+}
