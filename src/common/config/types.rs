@@ -298,15 +298,30 @@ impl VirtualWorkspaceSettings {
             }
         }
 
-        // Validate rules and check duplicates in a single pass
-        let mut seen_app_ids = crate::common::collections::HashSet::default();
-        let mut seen_app_names = crate::common::collections::HashSet::default();
-        let mut seen_title_regexes = crate::common::collections::HashSet::default();
-        let mut seen_title_substrings = crate::common::collections::HashSet::default();
-        let mut seen_ax_roles = crate::common::collections::HashSet::default();
-        let mut seen_ax_subroles = crate::common::collections::HashSet::default();
+        // Rules for different apps can share a title or AX role. A rule is only a duplicate
+        // when it matches exactly the same windows as an earlier one, and since the earlier
+        // rule wins a tie, the later one would never apply.
+        let mut seen_matchers: crate::common::collections::HashMap<_, usize> = Default::default();
 
         for (index, rule) in self.app_rules.iter().enumerate() {
+            fn field(value: &Option<String>) -> Option<&str> {
+                value.as_deref().filter(|v| !v.is_empty())
+            }
+            let matcher = (
+                field(&rule.app_id).map(str::to_ascii_lowercase),
+                field(&rule.app_name).map(str::to_lowercase),
+                field(&rule.title_regex).map(str::to_owned),
+                field(&rule.title_substring).map(str::to_lowercase),
+                field(&rule.ax_role).map(str::to_owned),
+                field(&rule.ax_subrole).map(str::to_owned),
+            );
+            let first = *seen_matchers.entry(matcher).or_insert(index);
+            if first != index {
+                issues.push(format!(
+                    "App rule {index} matches the same windows as rule {first}, so it never applies"
+                ));
+            }
+
             let app_id_empty = rule.app_id.as_ref().map_or(true, |id| id.is_empty());
             if app_id_empty
                 && rule.app_name.is_none()
@@ -375,26 +390,6 @@ impl VirtualWorkspaceSettings {
                         index, app_id
                     ));
                 }
-
-                let has_specific_match = rule.app_name.is_some()
-                    || rule.title_regex.is_some()
-                    || rule.title_substring.is_some()
-                    || rule.ax_role.is_some()
-                    || rule.ax_subrole.is_some();
-                if !app_id.is_empty() && !has_specific_match && !seen_app_ids.insert(app_id) {
-                    issues.push(format!("Duplicate app_id '{}' in rule {}", app_id, index));
-                }
-            }
-
-            if let Some(ref app_name) = rule.app_name {
-                let has_specific_match = rule.app_id.is_some()
-                    || rule.title_regex.is_some()
-                    || rule.title_substring.is_some()
-                    || rule.ax_role.is_some()
-                    || rule.ax_subrole.is_some();
-                if !has_specific_match && !seen_app_names.insert(app_name) {
-                    issues.push(format!("Duplicate app_name '{}' in rule {}", app_name, index));
-                }
             }
 
             if let Some(ref title_re) = rule.title_regex {
@@ -407,8 +402,6 @@ impl VirtualWorkspaceSettings {
                         "App rule {} has invalid title_regex '{}': {}",
                         index, title_re, error
                     ));
-                } else if !seen_title_regexes.insert(title_re) {
-                    issues.push(format!("Duplicate title_regex '{}' in rule {}", title_re, index));
                 }
             }
 
@@ -425,31 +418,14 @@ impl VirtualWorkspaceSettings {
                 ));
             }
 
-            if let Some(ref title_sub) = rule.title_substring {
-                if title_sub.is_empty() {
-                    issues.push(format!("App rule {} has empty title_substring", index));
-                } else if !seen_title_substrings.insert(title_sub) {
-                    issues.push(format!(
-                        "Duplicate title_substring '{}' in rule {}",
-                        title_sub, index
-                    ));
-                }
+            if rule.title_substring.as_deref() == Some("") {
+                issues.push(format!("App rule {} has empty title_substring", index));
             }
-
-            if let Some(ref ax_role) = rule.ax_role {
-                if ax_role.is_empty() {
-                    issues.push(format!("App rule {} has empty ax_role", index));
-                } else if !seen_ax_roles.insert(ax_role) {
-                    issues.push(format!("Duplicate ax_role '{}' in rule {}", ax_role, index));
-                }
+            if rule.ax_role.as_deref() == Some("") {
+                issues.push(format!("App rule {} has empty ax_role", index));
             }
-
-            if let Some(ref ax_sub) = rule.ax_subrole {
-                if ax_sub.is_empty() {
-                    issues.push(format!("App rule {} has empty ax_subrole", index));
-                } else if !seen_ax_subroles.insert(ax_sub) {
-                    issues.push(format!("Duplicate ax_subrole '{}' in rule {}", ax_sub, index));
-                }
+            if rule.ax_subrole.as_deref() == Some("") {
+                issues.push(format!("App rule {} has empty ax_subrole", index));
             }
         }
 

@@ -1237,7 +1237,7 @@ fn add_rule(ui: Ui, model: &Rc<Model>, edit_rule: Rc<dyn Fn(usize)>) {
                         }
                         Err(error) => {
                             // A duplicate is resolved by narrowing the new rule, so reveal the matchers.
-                            if error.starts_with("Duplicate app_")
+                            if error.contains("matches the same windows as rule")
                                 && let Some(matchers) = matchers.upgrade()
                             {
                                 matchers.set_expanded(true);
