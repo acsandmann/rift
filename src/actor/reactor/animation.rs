@@ -1418,6 +1418,7 @@ impl ActiveAnimation {
         for window in &mut next.windows {
             if let Some(old) = self.animation.windows.iter().find(|old| old.wid == window.wid) {
                 window.from = old.frame;
+                window.frame = old.frame;
                 window.leased = old.leased;
             } else {
                 window.begin();
@@ -2578,6 +2579,13 @@ mod tests {
 
         let resumed_start = transition_state(&manager).unwrap().animation.windows[0].from;
         assert_eq!(resumed_start, continuing_frame);
+
+        // The presenter publishes immediately after a replacement, before the
+        // next display tick. Queries and subsequent layouts must see the last
+        // displayed frame rather than the new command's stale starting frame.
+        let mut control = PresenterControl::default();
+        manager.publish_frames(&mut control, true);
+        assert_eq!(control.frame(wid, CGRect::ZERO), continuing_frame);
 
         manager.tick_at(transition_state(&manager).unwrap().started + Duration::from_millis(10));
         let expected_next = get_frame(resumed_start, rect(80.0, 90.0, 10.0, 10.0), 1.0 / 30.0);
