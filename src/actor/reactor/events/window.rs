@@ -147,7 +147,11 @@ pub fn handle_window_visibility_changed(
     if !state.windows.is_claimed(wid) {
         // Reconcile admission while retaining the existing workspace and layout slot.
         // A claimed window returns on release.
-        outcome = outcome.with_created_window_finalization(wid);
+        // WindowAdded restores membership only; the restore transition owns
+        // the arrange pass, even if the following inventory is unchanged.
+        outcome = outcome
+            .with_created_window_finalization(wid)
+            .with_arrange_passes(state.windows.is_admitted(wid).into());
     }
     Ok(outcome)
 }

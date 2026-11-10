@@ -1988,6 +1988,41 @@ fn unmanageable_window_crossing_spaces_is_not_reinserted_into_layout() {
 }
 
 #[test]
+fn restoring_minimized_window_retiles_survivor_without_focus_change() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let frame = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(2));
+    let restored = WindowId::new(2, 1);
+    let survivor = WindowId::new(2, 2);
+    let original = apps.windows[&survivor].frame;
+    reactor.handle_event(Event::WindowMinimized(restored));
+    // Apply only frame writes: the simulated app inventory has no minimized state.
+    let requests = apps.requests();
+    let writes = requests
+        .into_iter()
+        .filter(|request| matches!(request, Request::SetWindowFrames(..)))
+        .collect();
+    let events = apps.simulate_events_for_requests(writes);
+    reactor.handle_events(events);
+    let expanded = apps.windows[&survivor].frame;
+    assert!(expanded.size.width > original.size.width);
+    apps.requests();
+
+    // The log shows inventory can reconcile restoration before the AX notification.
+    let mut info = reactor.state.windows.window(restored).unwrap().info.clone();
+    info.is_minimized = false;
+    reactor.discover_test_windows(restored.pid, vec![(restored, info)], vec![restored, survivor]);
+    reactor.handle_event(Event::WindowDeminiaturized(restored));
+    let requests = apps.requests();
+    assert!(requests.iter().any(|request| matches!(request,
+        Request::SetWindowFrames(frames, ..)
+            if frames.iter().any(|(wid, frame)| *wid == survivor && frame.size.width < expanded.size.width)
+    )), "restoration must write the survivor's tiled frame without a focus event");
+}
+
+#[test]
 fn deminiaturize_refreshes_stale_snapshot_without_activation() {
     let (mut reactor, wid, _wsid, space, _other, frame) = reactor_with_window_on_space1();
     reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
