@@ -319,7 +319,8 @@ pub fn handle_window_frame_changed(
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
-    let dragging = mouse_state == Some(MouseState::Down) || drag.actor.is_active();
+    let dragging = state.windows.is_admitted(wid)
+        && (mouse_state == Some(MouseState::Down) || drag.actor.is_active());
     if dragging {
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = !old_frame.size.same_as(new_frame.size);
