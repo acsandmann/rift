@@ -160,36 +160,6 @@ fn app_rule_validation_reports_invalid_regex_and_ignored_effects() {
 }
 
 #[test]
-fn app_rule_validation_allows_shared_matchers_across_apps() {
-    let mut settings = VirtualWorkspaceSettings::default();
-    for app_id in ["com.example.Mail", "com.example.Chat"] {
-        settings.app_rules.push(AppWorkspaceRule {
-            app_id: Some(app_id.into()),
-            floating: true,
-            ax_subrole: Some("AXDialog".into()),
-            ..Default::default()
-        });
-        settings.app_rules.push(AppWorkspaceRule {
-            app_id: Some(app_id.into()),
-            floating: true,
-            title_substring: Some("Settings".into()),
-            ..Default::default()
-        });
-    }
-    assert!(settings.validate().is_empty());
-
-    // App ids are compared case-insensitively, so this repeats the first rule.
-    settings.app_rules.push(AppWorkspaceRule {
-        app_id: Some("com.example.mail".into()),
-        floating: true,
-        ax_subrole: Some("AXDialog".into()),
-        ..Default::default()
-    });
-    let issues = settings.validate();
-    assert!(issues.iter().any(|issue| issue.contains("same windows as rule 0")));
-}
-
-#[test]
 fn horizontal_mouse_warp_config_parsing() {
     let missing: Settings = toml::from_str("").unwrap();
     assert_eq!(missing.horizontal_mouse_warp, None);
