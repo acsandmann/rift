@@ -140,6 +140,48 @@ jobs:
             done
           done
 
+      - name: Import signing certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.RIFT_SIGNING_P12 }}
+          p12-password: ${{ secrets.RIFT_SIGNING_PASSWORD }}
+
+      - name: Trust signing certificate
+        run: |
+          security find-certificate -p signing_temp.keychain \
+            > "$RUNNER_TEMP/rift.crt"
+
+          sudo security add-trusted-cert \
+            -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain \
+            "$RUNNER_TEMP/rift.crt"
+
+      - name: Sign release binaries
+        run: |
+          set -euo pipefail
+
+          SIGNER=$(openssl x509 -in "$RUNNER_TEMP/rift.crt" \
+            -noout -fingerprint -sha1 |
+            cut -d= -f2 | tr -d ':')
+
+          security find-identity -v -p codesigning \
+            signing_temp.keychain | grep -F "$SIGNER"
+
+          codesign --force --timestamp=none \
+            --sign "$SIGNER" \
+            --identifier git.acsandmann.rift \
+            dist/rift
+
+          codesign --force --timestamp=none \
+            --sign "$SIGNER" \
+            --identifier git.acsandmann.rift.cli \
+            dist/rift-cli
+
+          codesign --verify --verbose=2 dist/rift
+          codesign --verify --verbose=2 dist/rift-cli
+          codesign -dr - dist/rift
+
+
       - name: Package tarball
         id: pkg
         run: |
