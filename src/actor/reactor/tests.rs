@@ -6973,6 +6973,24 @@ fn empty_inventory_keeps_window_parked_on_inactive_workspace() {
         reactor.test_workspace_windows(space, secondary).contains(&wid),
         "the window must stay in its workspace layout"
     );
+
+    // Lock/unlock invalidates the AX identity before the inventory settles.
+    // The same omission must not retire the parked window in that state either.
+    reactor.handle_event(Event::WindowInvalidated(
+        wid,
+        super::WindowInvalidationSource::InvalidUiElement,
+    ));
+    assert!(reactor.state.windows.is_temporarily_unavailable(wid));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.discover_test_windows(wid.pid, vec![], vec![]);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert_eq!(
+        reactor.test_workspace_for_window(space, wid),
+        Some(secondary),
+        "AX invalidation must not make an empty inventory retire the parked window"
+    );
+    assert!(reactor.test_workspace_windows(space, secondary).contains(&wid));
 }
 
 #[test]
@@ -8568,13 +8586,13 @@ fn inventory_negatives_require_native_authority_even_when_hidden() {
     for (invalidated, inactive) in [(false, false), (true, false), (true, true)] {
         for visible in [true, false] {
             for (suitable, ordered_in, retired) in [
-                (Some(true), Some(false), invalidated),
+                (Some(true), Some(false), invalidated && !inactive),
                 (Some(true), Some(true), false),
                 (Some(true), None, false),
                 (None, Some(true), false),
                 (None, None, false),
-                (Some(false), None, true),
-                (None, Some(false), true),
+                (Some(false), None, !inactive),
+                (None, Some(false), !inactive),
             ] {
                 let (mut reactor, wid, wsid, _, _, _) = reactor_with_window_on_space1();
                 if invalidated {
