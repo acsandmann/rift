@@ -255,7 +255,7 @@ impl Reactor {
                 ax_role: None,
                 ax_subrole: None,
             },
-            presented_frame: frame,
+            frame_monotonic: frame,
             is_manageable,
             manage_override: None,
         });
@@ -609,8 +609,8 @@ impl Apps {
                 Request::ApplicationGloballyActivated(pid) => {
                     events.push(Event::ApplicationActivated(pid, Quiet::No));
                 }
-                Request::SetWindowFrames(frames, txid, mode, _, _) => {
-                    for (wid, frame) in frames {
+                Request::SetWindowFrames(frames, mode, _, _) => {
+                    for (wid, frame, txid) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         if mode == crate::actor::app::FrameMode::Position {

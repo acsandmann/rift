@@ -134,7 +134,7 @@ pub fn handle_command_layout(
             let assignment = state.windows.workspace_for_window(window)?;
             let screen =
                 visible_space_frames.get(&layout.layout_engine.workspaces()[assignment].space)?;
-            let frame = state.windows.window(window)?.presented_frame;
+            let frame = state.windows.window(window)?.frame_monotonic;
             Some((
                 window,
                 super::super::Reactor::center_frame_on_screen(frame, *screen),
@@ -223,7 +223,7 @@ fn current_floating_positions(
         .into_iter()
         .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))
         .filter_map(|window| {
-            state.windows.window(window).map(|state| (window, state.presented_frame))
+            state.windows.window(window).map(|state| (window, state.frame_monotonic))
         })
         .collect()
 }

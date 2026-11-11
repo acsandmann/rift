@@ -31,14 +31,14 @@ fn sync_existing_window_state(
     if let Some(existing) = state.windows.window_mut(wid) {
         let valid_frame = info.frame.size.width != 0.0 || info.frame.size.height != 0.0;
         let geometry_changed =
-            !rift_owns_geometry && valid_frame && !existing.presented_frame.same_as(info.frame);
+            !rift_owns_geometry && valid_frame && !existing.frame_monotonic.same_as(info.frame);
         let constraints_changed = existing.info.is_resizable != info.is_resizable
             || existing.info.min_size != info.min_size
             || existing.info.max_size != info.max_size;
         // A claimed window's owner has geometry authority.
         needs_arrange = (geometry_changed || constraints_changed) && !claimed;
         if !rift_owns_geometry && valid_frame {
-            existing.presented_frame = info.frame;
+            existing.frame_monotonic = info.frame;
         }
         // Discovery is an observation even while presentation owns the frame.
         if !valid_frame {

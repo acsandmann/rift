@@ -219,7 +219,7 @@ fn claimed_floating_window_keeps_its_classification_and_adopts_owner_geometry() 
         Requested(false),
         None,
     ));
-    assert_eq!(reactor.state.windows.window(wid).unwrap().presented_frame, moved);
+    assert_eq!(reactor.state.windows.window(wid).unwrap().frame_monotonic, moved);
     assert!(!reactor.is_in_drag(), "an owner move is not a Rift drag");
     let stored = |r: &Reactor| r.layout_manager.layout_engine.get_floating_position(workspace, wid);
     assert_eq!(stored(&reactor), Some(floating_frame));
@@ -248,8 +248,7 @@ fn claim_cancels_drag_animation_and_pending_geometry() {
         crate::actor::drag::DragScene::default(),
     );
     reactor.drag_manager.externally_controlled_window = Some(wid);
-    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-    reactor.transaction_manager.store_txid(wsid, txid, frame, false);
+    reactor.transaction_manager.request_frame(wsid, frame, false);
     let (animation_tx, animation_rx) = animation::AnimationSender::channel();
     reactor.animation_tx = Some(animation_tx);
 
@@ -657,7 +656,7 @@ fn discovering_an_owner_moved_claimed_window_arranges_nothing() {
                 .windows
                 .window(window)
                 .unwrap()
-                .presented_frame
+                .frame_monotonic
                 .same_as(info.frame)
         );
     }
@@ -711,7 +710,7 @@ fn minimize_and_lose_admission_while_claimed(reactor: &mut Reactor, window: Wind
     reactor.discover_test_windows(window.pid, vec![(window, info.clone())], visible.clone());
 
     let wsid = info.sys_id.unwrap();
-    let frame = reactor.state.windows.window(window).unwrap().presented_frame;
+    let frame = reactor.state.windows.window(window).unwrap().frame_monotonic;
     let server_info = |layer| WindowServerInfo {
         id: wsid,
         pid: window.pid,

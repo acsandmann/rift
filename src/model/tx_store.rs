@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
 use objc2_core_foundation::CGRect;
 
 use crate::actor::reactor::transaction_manager::TransactionId;
@@ -10,10 +9,8 @@ use crate::sys::window_server::WindowServerId;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TxRecord {
     pub txid: TransactionId,
-    /// Retained after settlement to recognize delayed samples of this generation.
     pub target: Option<CGRect>,
-    retried: bool,
-    pub settled: bool,
+    /// A live gesture can await terminal readback without a fixed target.
     pub presentation: bool,
 }
 
@@ -24,31 +21,6 @@ pub struct WindowTxStore(Arc<DashMap<WindowServerId, TxRecord>>);
 impl WindowTxStore {
     pub fn new() -> Self { Self::default() }
 
-    pub fn insert(
-        &self,
-        id: WindowServerId,
-        txid: TransactionId,
-        target: CGRect,
-        presentation: bool,
-    ) {
-        let record = TxRecord {
-            txid,
-            target: Some(target),
-            presentation,
-            ..Default::default()
-        };
-        match self.0.entry(id) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().txid == txid {
-                    *entry.get_mut() = record;
-                }
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(record);
-            }
-        }
-    }
-
     pub fn get(&self, id: &WindowServerId) -> Option<TxRecord> {
         self.0.get(id).map(|entry| *entry)
     }
@@ -58,16 +30,7 @@ impl WindowTxStore {
     pub fn clear_target(&self, id: &WindowServerId) {
         if let Some(mut record) = self.0.get_mut(id) {
             record.target = None;
-        }
-    }
-
-    /// A retiring presentation cannot clear a newer semantic transaction.
-    pub fn clear_target_if_current(&self, id: &WindowServerId, txid: TransactionId) {
-        if let Some(mut record) = self.0.get_mut(id)
-            && record.txid == txid
-            && record.presentation
-        {
-            record.target = None;
+            record.presentation = false;
         }
     }
 
@@ -76,46 +39,34 @@ impl WindowTxStore {
             && record.presentation
         {
             record.target = None;
-        }
-    }
-
-    pub fn settle(&self, id: WindowServerId, txid: TransactionId) {
-        if let Some(mut record) = self.0.get_mut(&id)
-            && record.txid == txid
-        {
-            record.settled = true;
             record.presentation = false;
         }
     }
 
-    /// One readback-driven repair per generation. Duplicate acknowledgements cannot
-    /// enqueue more work, and a replacement transaction gets its own budget.
-    pub fn retry_target(&self, id: WindowServerId, txid: TransactionId) -> Option<CGRect> {
-        let mut record = self.0.get_mut(&id)?;
-        if record.txid != txid || record.retried {
-            return None;
+    /// Completion retires an attempt, not proof that its target was applied.
+    /// Future layouts compare against observation and can request the frame again.
+    pub fn finish(&self, id: WindowServerId, txid: TransactionId) {
+        if let Some(mut record) = self.0.get_mut(&id)
+            && record.txid == txid
+        {
+            record.target = None;
+            record.presentation = false;
         }
-        let target = record.target?;
-        record.retried = true;
-        record.settled = false;
-        record.presentation = false;
-        Some(target)
     }
 
-    pub fn next_txid(&self, id: WindowServerId) -> TransactionId { self.advance(id, None) }
-
-    fn advance(&self, id: WindowServerId, target: Option<CGRect>) -> TransactionId {
+    pub fn begin(
+        &self,
+        id: WindowServerId,
+        target: Option<CGRect>,
+        presentation: bool,
+    ) -> TransactionId {
         let mut record = self.0.entry(id).or_default();
         *record = TxRecord {
             txid: record.txid.next(),
             target,
-            ..Default::default()
+            presentation,
         };
         record.txid
-    }
-
-    pub fn set_last_txid(&self, id: WindowServerId, txid: TransactionId) {
-        *self.0.entry(id).or_default() = TxRecord { txid, ..Default::default() };
     }
 
     pub fn last_txid(&self, id: &WindowServerId) -> TransactionId {
@@ -134,8 +85,7 @@ mod tests {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(1);
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
-        let txid = store.next_txid(wsid);
-        store.insert(wsid, txid, target, false);
+        let txid = store.begin(wsid, Some(target), false);
         assert_eq!(txid, TransactionId::default().next());
         assert_eq!(store.get(&wsid).unwrap().target, Some(target));
 
@@ -145,15 +95,14 @@ mod tests {
         assert_eq!(record.txid, txid);
         assert_eq!(record.target, None);
 
-        let newer = store.next_txid(wsid);
-        store.insert(wsid, newer, target, true);
-        store.clear_target_if_current(&wsid, txid);
+        let newer = store.begin(wsid, Some(target), true);
+        store.finish(wsid, txid);
         assert_eq!(
             store.get(&wsid).unwrap().target,
             Some(target),
             "late retirement must preserve the new target"
         );
-        store.clear_target_if_current(&wsid, newer);
+        store.finish(wsid, newer);
         assert_eq!(store.get(&wsid).unwrap().target, None);
         assert_eq!(store.last_txid(&wsid), newer);
     }
@@ -163,28 +112,11 @@ mod tests {
         let store = WindowTxStore::new();
         let wsid = WindowServerId::new(2);
 
-        let txid_1 = store.next_txid(wsid);
         let target = CGRect::new(CGPoint::new(1.0, 2.0), CGSize::new(3.0, 4.0));
-        store.insert(wsid, txid_1, target, false);
+        let txid_1 = store.begin(wsid, Some(target), false);
         store.clear_target(&wsid);
 
-        let txid_2 = store.next_txid(wsid);
+        let txid_2 = store.begin(wsid, None, false);
         assert_eq!(txid_2, txid_1.next());
-    }
-
-    #[test]
-    fn set_last_txid_clears_any_stale_target() {
-        let store = WindowTxStore::new();
-        let wsid = WindowServerId::new(3);
-        let txid_1 = store.next_txid(wsid);
-        let target = CGRect::new(CGPoint::new(5.0, 6.0), CGSize::new(7.0, 8.0));
-        store.insert(wsid, txid_1, target, false);
-
-        let txid_2 = txid_1.next();
-        store.set_last_txid(wsid, txid_2);
-
-        let record = store.get(&wsid).expect("tx record should exist");
-        assert_eq!(record.txid, txid_2);
-        assert_eq!(record.target, None);
     }
 }

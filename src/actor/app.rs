@@ -505,7 +505,7 @@ impl AppThreadHandle {
     pub fn send(&self, req: Request) -> anyhow::Result<()> {
         let mut req = req;
         match &mut req {
-            Request::SetWindowFrames(_, _, _, _, authority)
+            Request::SetWindowFrames(_, _, _, authority)
             | Request::BeginWindowAnimation(_, authority)
             | Request::EndWindowAnimation(_, authority) => {
                 *authority = self.frame_authority.clone()
@@ -615,8 +615,7 @@ pub enum Request {
     CloseWindow(Option<WindowServerId>),
 
     SetWindowFrames(
-        Vec<(WindowId, CGRect)>,
-        TransactionId,
+        Vec<(WindowId, CGRect, TransactionId)>,
         FrameMode,
         bool,
         FrameAuthority,
@@ -646,7 +645,7 @@ pub enum FrameMode {
 impl Request {
     pub(crate) fn authorized(self) -> Option<(Self, FrameAuthority)> {
         let authority = match &self {
-            Self::SetWindowFrames(_, _, _, _, authority)
+            Self::SetWindowFrames(_, _, _, authority)
             | Self::BeginWindowAnimation(_, authority)
             | Self::EndWindowAnimation(_, authority)
             | Self::CancelWindowAnimation(_, _, authority) => authority.clone(),
@@ -662,8 +661,7 @@ impl Request {
 
     pub fn set_window_frame(wid: WindowId, frame: CGRect, txid: TransactionId, eui: bool) -> Self {
         Self::SetWindowFrames(
-            vec![(wid, frame)],
-            txid,
+            vec![(wid, frame, txid)],
             FrameMode::Full,
             eui,
             Default::default(),
@@ -673,7 +671,7 @@ impl Request {
     #[inline]
     fn disables_enhanced_ui(&self) -> bool {
         match self {
-            Self::SetWindowFrames(_, _, _, enabled, _) => *enabled,
+            Self::SetWindowFrames(_, _, enabled, _) => *enabled,
             _ => false,
         }
     }
@@ -961,11 +959,22 @@ fn reconcile_frame(
         constrain(CGRect::new(target.origin, frame.size)).origin,
         target.size,
     );
-    // A dimension the hint skipped is wrong, so the hint was stale. Correct it as
-    // a full write from the observed frame would, rewriting position with any
-    // size correction because some apps move the origin while resizing. A size
-    // that was already attempted and a rejected position are not retried.
-    let missed = FrameWrites::between(frame, target, mode).without(planned);
+    // Reconcile skipped or lost writes once from the actual readback. Explicitly
+    // rejected setters are not retried; app clamping remains observed geometry.
+    let mut missed = FrameWrites::between(frame, target, mode).without(planned);
+    // An attempted component still at the hint was lost. A different accepted
+    // size is application clamping, not evidence that the setter was skipped.
+    let lost = |before: f64, actual: f64, wanted: f64| {
+        (before - actual).abs() < 0.1 && (actual - wanted).abs() >= 0.1
+    };
+    missed.size |= planned.size
+        && !failed.size
+        && (lost(hint.size.width, frame.size.width, target.size.width)
+            || lost(hint.size.height, frame.size.height, target.size.height));
+    missed.position |= planned.position
+        && !failed.position
+        && (lost(hint.origin.x, frame.origin.x, target.origin.x)
+            || lost(hint.origin.y, frame.origin.y, target.origin.y));
     if missed.any() {
         let fix = FrameWrites {
             position: !failed.position,
@@ -1517,8 +1526,8 @@ impl State {
                     });
                 });
             }
-            Request::SetWindowFrames(frames, txid, mode, _, _) => {
-                for (wid, desired) in frames {
+            Request::SetWindowFrames(frames, mode, _, _) => {
+                for (wid, desired, txid) in frames {
                     if !authority.is_current() {
                         break;
                     }
@@ -1559,8 +1568,7 @@ impl State {
                             || self.hold_batch_eui(eui),
                         )
                     });
-                    if matches!(result, Err(AxError::Ax(AXError::CannotComplete)))
-                        && self.window(wid).is_ok_and(|window| !window.is_animating)
+                    if result.is_err() && self.window(wid).is_ok_and(|window| !window.is_animating)
                     {
                         self.send_event(Event::WindowFrameRequestFailed(wid, txid));
                     }
@@ -1680,7 +1688,7 @@ impl State {
                     self.restart_notifications_after_animation(&elem);
                 }
                 let readback = trace("frame", &elem, || elem.frame());
-                if matches!(readback, Err(AxError::Ax(AXError::CannotComplete)))
+                if readback.is_err()
                     && let Some(txid) = txid
                 {
                     self.send_event(Event::WindowFrameRequestFailed(wid, txid));
@@ -1708,7 +1716,7 @@ impl State {
                             || {},
                         )
                     });
-                    if matches!(result, Err(AxError::Ax(AXError::CannotComplete)))
+                    if result.is_err()
                         && let Some(txid) = txid
                     {
                         self.send_event(Event::WindowFrameRequestFailed(wid, txid));
@@ -2949,6 +2957,7 @@ mod frame_tests {
         display: Option<CGRect>,
         rejects_position: bool,
         unresponsive: bool,
+        dropped_writes: Cell<u8>,
         calls: RefCell<Vec<&'static str>>,
     }
 
@@ -2966,6 +2975,10 @@ mod frame_tests {
             if self.unresponsive {
                 return Err(AxError::Ax(AXError::CannotComplete));
             }
+            if self.dropped_writes.get() > 0 {
+                self.dropped_writes.set(self.dropped_writes.get() - 1);
+                return Ok(());
+            }
             if self.rejects_position {
                 return Err(AxError::Ax(AXError::Failure));
             }
@@ -2977,6 +2990,10 @@ mod frame_tests {
             self.calls.borrow_mut().push("size");
             if self.unresponsive {
                 return Err(AxError::Ax(AXError::CannotComplete));
+            }
+            if self.dropped_writes.get() > 0 {
+                self.dropped_writes.set(self.dropped_writes.get() - 1);
+                return Ok(());
             }
             let size = CGSize::new(
                 if self.size_step > 0.0 {
@@ -3157,6 +3174,23 @@ mod frame_tests {
         let target = rect(1475.0, 171.0, 1170.0, 780.0);
         assert_eq!(reconcile(&window, target).unwrap(), target);
         assert_eq!(*window.calls.borrow(), ["size", "position", "size", "frame"]);
+    }
+
+    #[test]
+    fn lost_setters_are_corrected_once_and_a_later_attempt_can_recover() {
+        for drops in [1, 2, 4] {
+            let start = rect(0., 0., 400., 400.);
+            let target = rect(50., 40., 600., 600.);
+            let window = FakeWindow {
+                frame: Cell::new(start),
+                dropped_writes: Cell::new(drops),
+                ..Default::default()
+            };
+            let actual = reconcile(&window, target).unwrap();
+            assert_eq!(actual, if drops == 4 { start } else { target });
+            assert!(window.calls.borrow().iter().filter(|call| **call == "frame").count() <= 2);
+            assert_eq!(reconcile(&window, target).unwrap(), target);
+        }
     }
 
     #[test]

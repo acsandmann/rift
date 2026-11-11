@@ -1674,7 +1674,7 @@ impl LayoutEngine {
             let constraints = self.window_layout_constraints.entry(wid).or_insert_with(|| {
                 WindowLayoutConstraints {
                     is_resizable: window.info.is_resizable,
-                    locked_height: window.presented_frame.size.height,
+                    locked_height: window.frame_monotonic.size.height,
                     min_width: window.info.min_size.map_or(0.0, |size| size.width),
                     min_height: window.info.min_size.map_or(0.0, |size| size.height),
                     max_width: window.info.max_size.map_or(0.0, |size| size.width),
@@ -1683,7 +1683,7 @@ impl LayoutEngine {
                 }
                 .normalized()
             });
-            constraints.locked_width = window.presented_frame.size.width;
+            constraints.locked_width = window.frame_monotonic.size.width;
         }
     }
 
@@ -2443,7 +2443,7 @@ impl LayoutEngine {
                             && let (Some(center), Some(size), Some(current)) = (
                                 visible_space_frames.get(&space).map(|frame| frame.mid()),
                                 self.workspaces[ws_id].layout_state.active_size(),
-                                window_store.window(wid).map(|window| window.presented_frame),
+                                window_store.window(wid).map(|window| window.frame_monotonic),
                             )
                         {
                             let screen = CGRect::new(
@@ -2499,7 +2499,7 @@ impl LayoutEngine {
                         .workspace_for_window(&window_store, space, wid)
                         .or_else(|| self.workspaces.active_workspace(space));
                     if let (Some(ws), Some(frame)) =
-                        (ws, window_store.window(wid).map(|w| w.presented_frame))
+                        (ws, window_store.window(wid).map(|w| w.frame_monotonic))
                     {
                         self.floating_positions.store(ws, wid, frame);
                     }
@@ -3465,7 +3465,7 @@ impl LayoutEngine {
             window_store.window(window_id).filter(|_| self.is_restoring()).map(|window| {
                 (
                     context.window_title.unwrap_or(&window.info.title).to_owned(),
-                    window.presented_frame.size,
+                    window.frame_monotonic.size,
                 )
             });
         let restored = observation.is_some_and(|(title, size)| {
@@ -3844,7 +3844,7 @@ impl LayoutEngine {
         frame: CGRect,
     ) {
         if let Some(state) = windows.window_mut(window) {
-            state.presented_frame = frame;
+            state.frame_monotonic = frame;
         }
         if self.is_window_floating(window)
             && let Some(assignment) = windows.workspace_for_window(window)

@@ -349,7 +349,7 @@ pub enum Event {
     #[serde(skip)]
     DragMotion(crate::actor::drag::DragMotion),
     #[serde(skip)]
-    NativeMouseDown {
+    NativeDrag {
         point: CGPoint,
     },
     #[serde(skip)]
@@ -1019,31 +1019,6 @@ impl Reactor {
         }
     }
 
-    /// Terminal readback/failure is the only retry trigger. The shared transaction
-    /// owns the budget, so duplicate events and retired animations cannot loop.
-    fn reconcile_window_frame(&self, wid: WindowId, txid: TransactionId) {
-        if self.refreshes_blocked() || !self.state.windows.can_place_window(wid) {
-            return;
-        }
-        let Some(app) = self.app_manager.apps.get(&wid.pid) else {
-            return;
-        };
-        let Some(wsid) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) else {
-            return;
-        };
-        let Some(target) = self.transaction_manager.store.retry_target(wsid, txid) else {
-            return;
-        };
-        let bounds = self
-            .assigned_space_for_window_id(wid)
-            .and_then(|space| animation::scrolling_bounds(self, space))
-            .filter(|_| !self.layout_manager.layout_engine.is_window_floating(wid));
-        let _ = app
-            .handle
-            .with_scrolling_bounds(bounds)
-            .send(Request::set_window_frame(wid, target, txid, true));
-    }
-
     fn is_in_drag(&self) -> bool { self.drag_manager.actor.is_active() }
 
     fn is_mission_control_active(&self) -> bool {
@@ -1275,7 +1250,7 @@ impl Reactor {
                 | Event::WindowServerFocusChanged(..)
                 | Event::MouseMoved(..)
                 | Event::DragMotion(..)
-                | Event::NativeMouseDown { .. }
+                | Event::NativeDrag { .. }
                 | Event::ModifierMouseDown { .. }
                 | Event::Gesture(..)
                 | Event::Command(Command::Layout(..))
@@ -1921,7 +1896,9 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowFrameRequestFailed(wid, txid) => {
-                self.reconcile_window_frame(wid, txid);
+                if let Some(wsid) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) {
+                    self.transaction_manager.store.finish(wsid, txid);
+                }
                 return Ok(EventOutcome::no_change());
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
@@ -1944,12 +1921,6 @@ impl Reactor {
                 {
                     self.transaction_manager.clear_target_for_window(wsid);
                 }
-                if !requested.0
-                    && effective_mouse_state == Some(MouseState::Down)
-                    && self.drag_manager.native_geometry_intent(wid, new_frame).is_some()
-                {
-                    self.cancel_window_presentations(vec![wid]);
-                }
                 let disposition = window_workflow::classify_window_frame_change(
                     &mut self.state,
                     &self.transaction_manager,
@@ -1961,19 +1932,21 @@ impl Reactor {
                     &mut effective_mouse_state,
                     mission_control_active,
                 );
-                if let window_workflow::FrameChangeDisposition::Reconcile(txid) = disposition {
-                    self.reconcile_window_frame(wid, txid);
-                }
-                if !matches!(
-                    disposition,
-                    window_workflow::FrameChangeDisposition::NeedsGeometryAnalysis
-                ) {
-                    let mut outcome = EventOutcome::no_change();
-                    outcome.dispatch_mouse_up = effective_mouse_state
-                        == Some(crate::sys::event::MouseState::Up)
-                        && self.drag_manager.actor.is_active();
-                    outcome.focused_window = raised_window;
-                    return Ok(outcome);
+                let interaction = match disposition {
+                    window_workflow::FrameChangeDisposition::NeedsGeometryAnalysis(interaction) => {
+                        interaction
+                    }
+                    window_workflow::FrameChangeDisposition::Handled => {
+                        let mut outcome = EventOutcome::no_change();
+                        outcome.dispatch_mouse_up = effective_mouse_state
+                            == Some(crate::sys::event::MouseState::Up)
+                            && self.drag_manager.actor.is_active();
+                        outcome.focused_window = raised_window;
+                        return Ok(outcome);
+                    }
+                };
+                if interaction.is_some() {
+                    self.cancel_window_presentations(vec![wid]);
                 }
                 let (server_id, old_frame) = self
                     .state
@@ -2040,6 +2013,7 @@ impl Reactor {
                         window: wid,
                         new_frame,
                         mouse_state: effective_mouse_state,
+                        interaction,
                         old_space,
                         new_space,
                         old_space_active,
@@ -2137,25 +2111,15 @@ impl Reactor {
                 self.drag_manager.native_down = None;
                 return Ok(interaction_workflow::handle_cancel(&mut self.drag_manager));
             }
-            Event::NativeMouseDown { point } => {
-                self.drag_manager.native_down = None;
-                if let Some(wsid) = window_server::get_window_at_point(point)
-                    && let Some(wid) = self.state.windows.tracked_window_id(wsid)
-                    && self.state.windows.is_admitted(wid)
-                {
-                    // A transfer's final AX acknowledgement may still be queued.
-                    // Anchor native interaction to the frame visible at pointer-down.
-                    if let Some(query) = window_server::WindowIterator::new(&[wsid])
-                        && query.advance().is_some()
-                        && let Some(window) = self.state.windows.window_mut(wid)
-                    {
-                        window.info.frame = query.bounds();
-                        window.presented_frame = window.info.frame;
-                    }
-                    if let Some(window) = self.state.windows.window(wid) {
-                        self.drag_manager.native_down = Some((wid, window.info.frame, point));
-                    }
-                }
+            Event::NativeDrag { point } => {
+                // Resolve the source only after physical drag motion, using the
+                // already observed frame. Ordinary clicks do no Reactor work.
+                self.drag_manager.native_down = window_server::get_window_at_point(point)
+                    .and_then(|wsid| self.state.windows.tracked_window_id(wsid))
+                    .filter(|wid| self.state.windows.is_admitted(*wid))
+                    .and_then(|wid| {
+                        self.state.windows.window(wid).map(|w| (wid, w.info.frame, point))
+                    });
                 return Ok(EventOutcome::no_change());
             }
             Event::ModifierMouseDown { button, point, action } => {
@@ -2165,7 +2129,7 @@ impl Reactor {
                     let state = self.state.windows.window(window)?;
                     self.state.windows.is_admitted(window).then_some((
                         window,
-                        state.presented_frame,
+                        state.frame_monotonic,
                         state.info.sys_id,
                     ))
                 });
@@ -2347,7 +2311,7 @@ impl Reactor {
                             .map(|s| s.frame)
                             .unwrap_or(destination);
                         let mut frame =
-                            self.state.windows.window(intent.window).unwrap().presented_frame;
+                            self.state.windows.window(intent.window).unwrap().frame_monotonic;
                         frame.origin.x += destination.origin.x - source.origin.x;
                         frame.origin.y += destination.origin.y - source.origin.y;
                         frame
@@ -2435,7 +2399,7 @@ impl Reactor {
                 self.mouse_inventory_hit = None;
                 let active_space = window.and_then(|window| {
                     self.state.windows.window(window).and_then(|state| {
-                        self.best_space_for_window(&state.presented_frame, state.info.sys_id)
+                        self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
                             .filter(|space| self.is_space_active(*space))
                             .or_else(|| {
                                 state
@@ -2668,7 +2632,7 @@ impl Reactor {
                 let window_server_id = window_server_id.map(WindowServerId::new);
                 let resolved_space = self.best_space_for_window_id(window_id).or_else(|| {
                     self.state.windows.window(window_id).and_then(|window| {
-                        self.best_space_for_window(&window.presented_frame, window.info.sys_id)
+                        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
                     })
                 });
                 return command_workflow::handle_command_reactor_focus_window(
@@ -2739,7 +2703,7 @@ impl Reactor {
                 }
                 let focus_window_center = focus_window
                     .and_then(|wid| self.state.windows.window(wid))
-                    .map(|window| window.presented_frame.mid());
+                    .map(|window| window.frame_monotonic.mid());
                 return command_workflow::handle_focus_display(
                     &self.app_manager,
                     command_workflow::DisplayFocusPayload {
@@ -2793,7 +2757,7 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 let window_server_id = window_state.info.sys_id;
-                let window_frame = window_state.presented_frame;
+                let window_frame = window_state.frame_monotonic;
                 let source_space = self
                     .assigned_space_for_window_id(window)
                     .or_else(|| self.best_space_for_window_id(window))
@@ -2918,7 +2882,7 @@ impl Reactor {
                 let moves = windows
                     .into_iter()
                     .filter_map(|window| {
-                        let frame = self.state.windows.window(window)?.presented_frame;
+                        let frame = self.state.windows.window(window)?.frame_monotonic;
                         let source = self
                             .space_state
                             .screen_by_space(source_space)
@@ -3016,7 +2980,7 @@ impl Reactor {
             let assigned_space = self.assigned_space_for_window_id(window);
             let active_space = assigned_space.or_else(|| {
                 self.state.windows.window(window).and_then(|state| {
-                    self.best_space_for_window(&state.presented_frame, state.info.sys_id)
+                    self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
                         .filter(|space| self.is_space_active(*space))
                         .or_else(|| {
                             state
@@ -3084,14 +3048,7 @@ impl Reactor {
             let window_server_id =
                 self.state.windows.window(write.window).and_then(|window| window.info.sys_id);
             let transaction = if let Some(window_server_id) = window_server_id {
-                let transaction = self.transaction_manager.generate_next_txid(window_server_id);
-                self.transaction_manager.store_txid(
-                    window_server_id,
-                    transaction,
-                    write.frame,
-                    false,
-                );
-                transaction
+                self.transaction_manager.request_frame(window_server_id, write.frame, false)
             } else {
                 TransactionId::default()
             };
@@ -3274,7 +3231,7 @@ impl Reactor {
                 .filter_map(|id| {
                     let state = self.state.windows.window(id)?;
                     (state.is_admitted() && !state.info.is_minimized && state.info.is_standard)
-                        .then_some((id, state.presented_frame))
+                        .then_some((id, state.frame_monotonic))
                 })
                 .collect();
             if let Some(wm) = &self.communication_manager.wm_sender {
@@ -3311,7 +3268,7 @@ impl Reactor {
             let from = self
                 .main_window()
                 .and_then(|wid| self.state.windows.window(wid))
-                .map(|window| window.presented_frame);
+                .map(|window| window.frame_monotonic);
             if let Some(to) = to
                 && let Some(input_tx) = &self.communication_manager.input_tx
             {
@@ -3408,7 +3365,7 @@ impl Reactor {
             app_name,
             info: WindowInfo {
                 title: window_state.info.title.clone(),
-                frame: window_state.presented_frame,
+                frame: window_state.frame_monotonic,
                 bundle_id,
                 ..window_state.info.clone()
             },
@@ -4769,7 +4726,7 @@ impl Reactor {
     }
 
     fn best_space_for_window_state(&self, window: &WindowState) -> Option<SpaceId> {
-        self.best_space_for_window(&window.presented_frame, window.info.sys_id)
+        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
     }
 
     fn hidden_assigned_space_for_frame(
@@ -4791,7 +4748,7 @@ impl Reactor {
 
     fn hidden_assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         let window = self.state.windows.window(wid)?;
-        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.presented_frame)
+        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic)
     }
 
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
@@ -5037,7 +4994,7 @@ impl Reactor {
         }
         let discovery = self.assigned_space_for_window_id(wid).or(authoritative).or_else(|| {
             let window = self.state.windows.window(wid)?;
-            self.best_space_for_frame(&window.presented_frame).filter(|space| {
+            self.best_space_for_frame(&window.frame_monotonic).filter(|space| {
                 self.is_space_active(*space)
                     || !window.info.sys_id.is_some_and(|wsid| self.is_known_fullscreen_window(wsid))
             })
@@ -5072,7 +5029,7 @@ impl Reactor {
     }
 
     fn window_frame_on_known_screen(&self, wid: WindowId) -> Option<CGRect> {
-        let frame = self.state.windows.window(wid)?.presented_frame;
+        let frame = self.state.windows.window(wid)?.frame_monotonic;
         self.screen_for_point(frame.mid()).map(|_| frame)
     }
 
@@ -5291,9 +5248,9 @@ impl Reactor {
                     );
                     continue;
                 };
-                placement.resolve_frame(window.presented_frame, screen.frame)
+                placement.resolve_frame(window.frame_monotonic, screen.frame)
             } else {
-                placement.resolve_frame(window.presented_frame, CGRect::default())
+                placement.resolve_frame(window.frame_monotonic, CGRect::default())
             };
 
             let window_server_id = window.info.sys_id;
@@ -5314,8 +5271,8 @@ impl Reactor {
                 );
             }
             let transaction = if let Some(window_server_id) = window_server_id {
-                let transaction = self.transaction_manager.generate_next_txid(window_server_id);
-                self.transaction_manager.store_txid(window_server_id, transaction, frame, false);
+                let transaction =
+                    self.transaction_manager.request_frame(window_server_id, frame, false);
                 transaction
             } else {
                 TransactionId::default()
@@ -5346,7 +5303,7 @@ impl Reactor {
                 );
                 continue;
             };
-            let old_frame = window.presented_frame;
+            let old_frame = window.frame_monotonic;
             let mut new_frame = old_frame;
             if let Some(width) = resize.size.w {
                 new_frame.size.width = width;
@@ -5425,7 +5382,7 @@ impl Reactor {
             return false;
         }
 
-        let candidate_frame = window.presented_frame;
+        let candidate_frame = window.frame_monotonic;
 
         if matches!(self.menu_manager.menu_state, MenuState::Open(_)) {
             trace!(?wid, "Skipping autoraise while menu open");
@@ -5460,7 +5417,7 @@ impl Reactor {
             other != wid
                 && state.info.sys_id.is_some()
                 && self.layout_manager.layout_engine.is_window_floating(other)
-                && candidate_frame.contains_rect(state.presented_frame)
+                && candidate_frame.contains_rect(state.frame_monotonic)
         });
         if !could_occlude {
             return true;
@@ -5490,7 +5447,7 @@ impl Reactor {
             let Some(above_state) = self.state.windows.window(above_wid) else {
                 continue;
             };
-            let above_frame = above_state.presented_frame;
+            let above_frame = above_state.frame_monotonic;
             if !candidate_frame.contains_rect(above_frame) {
                 continue;
             }
@@ -6629,7 +6586,7 @@ impl Reactor {
                 self.state
                     .windows
                     .window(wid)
-                    .map(|window_state| (wid, window_state.presented_frame))
+                    .map(|window_state| (wid, window_state.frame_monotonic))
             })
             .collect::<Vec<_>>();
 

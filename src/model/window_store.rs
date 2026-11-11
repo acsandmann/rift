@@ -82,7 +82,7 @@ struct FloatingDisplayGeometry {
 impl WindowRecord {
     /// Latest presentation frame. Native observations live in `WindowState::info.frame`.
     pub fn frame(&self) -> Option<objc2_core_foundation::CGRect> {
-        self.state.as_ref().map(|state| state.presented_frame)
+        self.state.as_ref().map(|state| state.frame_monotonic)
     }
 
     pub fn window_server_id(&self) -> Option<WindowServerId> { self.window_server_id }
@@ -1012,7 +1012,7 @@ impl WindowStore {
         self.clear_window_server_observed(info.id);
         let window = self.window_mut(wid)?;
         if info.layer == 0 {
-            window.presented_frame = info.frame;
+            window.frame_monotonic = info.frame;
             window.info.frame = info.frame;
         }
         Some(wid)

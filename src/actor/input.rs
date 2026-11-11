@@ -105,6 +105,7 @@ pub struct Input {
     mouse_focus_publisher: reactor::MouseFocusPublisher,
     drag_motion_publisher: crate::actor::drag::DragMotionPublisher,
     native_motion_active: Arc<AtomicBool>,
+    native_press: Cell<Option<CGPoint>>,
     gesture_control: super::gesture::Control,
     gesture_filter: RefCell<gesture::Filter>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
@@ -217,7 +218,8 @@ impl Input {
             keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
         if state.event_processing_enabled {
-            mask |= 1u64 << CGEventType::LeftMouseDown.0;
+            mask |=
+                (1u64 << CGEventType::LeftMouseDown.0) | (1u64 << CGEventType::LeftMouseDragged.0);
         }
         if self.mission_control_active.get() {
             mask |= (1u64 << CGEventType::LeftMouseDown.0)
@@ -368,6 +370,7 @@ impl Input {
             mouse_focus_publisher: reactor::MouseFocusPublisher::default(),
             drag_motion_publisher: crate::actor::drag::DragMotionPublisher::default(),
             native_motion_active,
+            native_press: Cell::new(None),
             gesture_control,
             gesture_filter: RefCell::new(gesture::Filter::default()),
             tap: RefCell::new(None),
@@ -926,6 +929,11 @@ impl Input {
                 let point = self
                     .maybe_horizontal_mouse_warp(event)
                     .unwrap_or_else(|| CGEvent::location(Some(event)));
+                if button == crate::actor::drag::MouseButton::Left
+                    && let Some(point) = self.native_press.take()
+                {
+                    self.events_tx.send(Event::NativeDrag { point });
+                }
                 let captured = self.state.borrow().captured_button == Some(button);
                 if captured || self.native_motion_active.load(Ordering::Acquire) {
                     let publisher = &self.drag_motion_publisher;
@@ -936,6 +944,7 @@ impl Input {
                 !captured
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
+                self.native_press.set(None);
                 let mut state = self.state.borrow_mut();
                 if state.hide_count > 0 {
                     state.show_mouse();
@@ -978,13 +987,14 @@ impl Input {
                     return false;
                 }
                 if button == crate::actor::drag::MouseButton::Left {
-                    self.events_tx.send(Event::NativeMouseDown {
-                        point: CGEvent::location(Some(event)),
-                    });
+                    self.native_press.set(Some(CGEvent::location(Some(event))));
                 }
                 true
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
+                if event_type == CGEventType::LeftMouseUp {
+                    self.native_press.set(None);
+                }
                 if event_type == CGEventType::LeftMouseUp && self.mission_control_active.get() {
                     self.send_overview(super::mission_control::Event::Input(
                         super::mission_control::Input::PointerUp(CGEvent::location(Some(event))),
@@ -2079,6 +2089,30 @@ mod tests {
     }
 
     #[test]
+    fn native_clicks_do_not_wake_reactor_and_drag_start_is_sent_once() {
+        let (input, _, mut events) = input();
+        let press = CGPoint::new(100., 200.);
+        let event = CGEvent::new_mouse_event(
+            None,
+            CGEventType::LeftMouseDown,
+            press,
+            objc2_core_graphics::CGMouseButton::Left,
+        )
+        .unwrap();
+        CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+        assert!(input.on_event(CGEventType::LeftMouseDown, &event, None));
+        assert!(events.try_recv().is_err());
+        CGEvent::set_location(Some(&event), CGPoint::new(110., 200.));
+        for _ in 0..2 {
+            assert!(input.on_event(CGEventType::LeftMouseDragged, &event, None));
+        }
+        assert!(
+            matches!(events.try_recv().unwrap().1, Event::NativeDrag { point } if point == press)
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
     fn mask_tracks_mouse_feature_enablement() {
         let (input, _, _) = input();
         assert!(input.hotkeys.borrow().is_empty());
@@ -2087,6 +2121,7 @@ mod tests {
         input.state.borrow_mut().mouse_features_enabled = false;
         input.state.borrow_mut().event_processing_enabled = true;
         let stable_release_mask = (1u64 << CGEventType::LeftMouseDown.0)
+            | (1u64 << CGEventType::LeftMouseDragged.0)
             | (1u64 << CGEventType::LeftMouseUp.0)
             | (1u64 << CGEventType::RightMouseUp.0);
         assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);

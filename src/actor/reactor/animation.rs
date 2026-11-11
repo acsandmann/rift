@@ -264,7 +264,7 @@ impl PresentedWindow {
         if let Some(store) = store
             && let Some(wsid) = self.wsid
         {
-            store.clear_target_if_current(&wsid, self.txid);
+            store.finish(wsid, self.txid);
         }
     }
 
@@ -450,13 +450,13 @@ impl CameraAnimation {
         for window in &mut self.windows {
             window.announced = false;
             window.txid = window.wsid.map_or_else(TransactionId::default, |wsid| {
-                let txid = self.store.next_txid(wsid);
-                if self.gesture.is_none() && !self.presentation.gesturing() {
-                    let frame = self.presentation.target_frame(window.to, window.fixed, self.scale);
-                    let frame = self.bound.map_or(frame, |bounds| bounds.apply(frame));
-                    self.store.insert(wsid, txid, frame, true);
-                }
-                txid
+                let target =
+                    (self.gesture.is_none() && !self.presentation.gesturing()).then(|| {
+                        let frame =
+                            self.presentation.target_frame(window.to, window.fixed, self.scale);
+                        self.bound.map_or(frame, |bounds| bounds.apply(frame))
+                    });
+                self.store.begin(wsid, target, true)
             });
             window.begin();
         }
@@ -524,7 +524,7 @@ impl Reactor {
         }
         for (wid, frame) in frames {
             if let Some(window) = self.state.windows.window_mut(wid) {
-                window.presented_frame = frame;
+                window.frame_monotonic = frame;
             }
         }
         self.commit_presentations();
@@ -563,7 +563,7 @@ impl Reactor {
                 if let Some(frame) = frame
                     && let Some(model) = self.state.windows.window_mut(wid)
                 {
-                    model.presented_frame = frame;
+                    model.frame_monotonic = frame;
                 }
             }
             if let Some(session) = &mut self.viewport_gesture
@@ -604,7 +604,7 @@ impl Reactor {
             };
             for (wid, frame) in frames {
                 if let Some(window) = self.state.windows.window_mut(wid) {
-                    window.presented_frame = frame;
+                    window.frame_monotonic = frame;
                 }
             }
             if let Some(tx) = &self.animation_tx {
@@ -676,14 +676,14 @@ impl Reactor {
                 }
                 let window = self.state.windows.window(wid)?;
                 let app = self.app_manager.apps.get(&wid.pid)?;
-                let frame = control.as_ref().map_or(window.presented_frame, |control| {
-                    control.frame(wid, window.presented_frame)
+                let frame = control.as_ref().map_or(window.frame_monotonic, |control| {
+                    control.frame(wid, window.frame_monotonic)
                 });
                 Some(PresentedWindow {
                     handle: app.handle.with_scrolling_bounds(bound),
                     wid,
                     wsid: window.info.sys_id,
-                    from: window.presented_frame,
+                    from: window.frame_monotonic,
                     to: base_frame,
                     fixed,
                     announced: false,
@@ -748,7 +748,7 @@ impl Reactor {
     }
 }
 
-pub(super) fn scrolling_bounds(
+fn scrolling_bounds(
     reactor: &Reactor,
     space: SpaceId,
 ) -> Option<super::managers::ScrollingDisplayBounds> {
@@ -1069,16 +1069,19 @@ impl AnimationManager {
             let window_server_id = window.info.sys_id;
             let pending = window_server_id
                 .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
-            // Matching the observed frame cannot cancel an older, different target.
-            if pending.is_some_and(|frame| frame.same_as(target_frame))
-                || (pending.is_none() && target_frame.same_as(current_frame))
+            if pending.is_some_and(|frame| frame.same_as(target_frame)) {
+                continue;
+            }
+            if pending.is_none()
+                && target_frame.same_as(current_frame)
+                && target_frame.same_as(window.frame_monotonic)
             {
+                // A replacement must retire an older motion even if AX already
+                // reports the new layout's destination.
+                anim.mark_handled(wid);
                 continue;
             }
             any_frame_changed = true;
-            let txid = window_server_id
-                .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
-                .unwrap_or_default();
 
             let Some(app_state) = &reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
@@ -1087,14 +1090,15 @@ impl AnimationManager {
 
             let is_active = reactor.state.windows.workspace_for_window(wid) == Some(active_ws);
 
-            if let Some(wsid) = window_server_id {
-                reactor.transaction_manager.store_txid(
-                    wsid,
-                    txid,
-                    target_frame,
-                    is_active && reactor.animation_tx.is_some(),
-                );
-            }
+            let txid = window_server_id
+                .map(|wsid| {
+                    reactor.transaction_manager.request_frame(
+                        wsid,
+                        target_frame,
+                        is_active && reactor.animation_tx.is_some(),
+                    )
+                })
+                .unwrap_or_default();
             if is_active {
                 trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
                 let handle = app_state.handle.with_scrolling_bounds(
@@ -1119,7 +1123,7 @@ impl AnimationManager {
             }
 
             if let Some(window) = reactor.state.windows.window_mut(wid) {
-                window.presented_frame = target_frame;
+                window.frame_monotonic = target_frame;
             }
         }
 
@@ -1192,7 +1196,7 @@ impl AnimationManager {
         reactor.cancel_window_presentations(layout.iter().map(|(wid, _)| *wid).collect());
         let bounds = scrolling_bounds(reactor, space);
         let active = reactor.layout_manager.layout_engine.workspaces().active_workspace(space);
-        let mut per_app: HashMap<(pid_t, bool, TransactionId), _> = HashMap::default();
+        let mut per_app: HashMap<(pid_t, bool), _> = HashMap::default();
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
@@ -1217,7 +1221,9 @@ impl AnimationManager {
                 .and_then(|wsid| reactor.transaction_manager.get_target_frame(wsid));
             if !force_frames
                 && (pending.is_some_and(|frame| frame.same_as(target_frame))
-                    || (pending.is_none() && target_frame.same_as(current_frame)))
+                    || (pending.is_none()
+                        && target_frame.same_as(current_frame)
+                        && target_frame.same_as(window.frame_monotonic)))
             {
                 continue;
             }
@@ -1230,27 +1236,26 @@ impl AnimationManager {
             );
 
             let size_unchanged = !force_frames && current_frame.size.same_as(target_frame.size);
-            window.presented_frame = target_frame;
+            window.frame_monotonic = target_frame;
             let txid = window
                 .info
                 .sys_id
                 .map(|wsid| {
-                    let txid = reactor.transaction_manager.generate_next_txid(wsid);
-                    reactor.transaction_manager.store_txid(wsid, txid, target_frame, false);
+                    let txid = reactor.transaction_manager.request_frame(wsid, target_frame, false);
                     txid
                 })
                 .unwrap_or_default();
             let (frames, positions) = per_app
-                .entry((wid.pid, constrained, txid))
+                .entry((wid.pid, constrained))
                 .or_insert_with(|| (Vec::new(), Vec::new()));
             if position_only && size_unchanged {
-                positions.push((wid, target_frame));
+                positions.push((wid, target_frame, txid));
             } else {
-                frames.push((wid, target_frame));
+                frames.push((wid, target_frame, txid));
             }
         }
 
-        for ((pid, constrained, txid), (frames, positions)) in per_app {
+        for ((pid, constrained), (frames, positions)) in per_app {
             let Some(app_state) = reactor.app_manager.apps.get(&pid) else {
                 debug!(?pid, "Skipping layout update for app - app no longer exists");
                 continue;
@@ -1262,20 +1267,13 @@ impl AnimationManager {
                 (!positions.is_empty()).then(|| {
                     Request::SetWindowFrames(
                         positions,
-                        txid,
                         FrameMode::Position,
                         true,
                         Default::default(),
                     )
                 }),
                 (!frames.is_empty()).then(|| {
-                    Request::SetWindowFrames(
-                        frames,
-                        txid,
-                        FrameMode::Full,
-                        true,
-                        Default::default(),
-                    )
+                    Request::SetWindowFrames(frames, FrameMode::Full, true, Default::default())
                 }),
             ];
             for request in requests.into_iter().flatten() {
@@ -1705,11 +1703,11 @@ mod tests {
 
     fn assert_set_window_frame(request: &Observed, wid: WindowId, frame: CGRect) {
         match request {
-            Observed::Request(Request::SetWindowFrames(frames, txid, FrameMode::Full, eui, _)) => {
-                let (req_wid, req_frame) = frames[0];
+            Observed::Request(Request::SetWindowFrames(frames, FrameMode::Full, eui, _)) => {
+                let (req_wid, req_frame, txid) = frames[0];
                 assert_eq!(req_wid, wid);
                 assert_eq!(req_frame, frame);
-                assert_eq!(*txid, TransactionId::default());
+                assert_eq!(txid, TransactionId::default());
                 assert!(*eui);
             }
             _ => panic!("expected SetWindowFrame, got {request:?}"),

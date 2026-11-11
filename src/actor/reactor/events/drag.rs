@@ -24,7 +24,7 @@ pub fn build_drag_scene(
                 Some(crate::actor::drag::DragSceneTarget {
                     window,
                     space,
-                    frame: state.windows.window(window)?.presented_frame,
+                    frame: state.windows.window(window)?.frame_monotonic,
                 })
             })
             .collect(),

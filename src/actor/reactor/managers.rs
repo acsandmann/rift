@@ -62,15 +62,10 @@ impl DragManager {
     ) -> Option<crate::actor::drag::DragKind> {
         use crate::actor::drag::DragKind;
         if let Some(source) = self.actor.source() {
-            return (source.window == wid).then(|| self.actor.kind()).flatten();
+            return self.actor.kind().filter(|_| source.window == wid);
         }
         let (window, anchor, point) = self.native_down?;
         if window != wid {
-            return None;
-        }
-        let in_x = point.x >= anchor.origin.x - 8.0 && point.x <= anchor.max().x + 8.0;
-        let in_y = point.y >= anchor.origin.y - 8.0 && point.y <= anchor.max().y + 8.0;
-        if !in_x || !in_y {
             return None;
         }
         let pointer = crate::sys::event::current_cursor_location().ok()?;
@@ -88,8 +83,7 @@ impl DragManager {
                 || follows_edge(point.y, pointer.y, anchor.max().y, new.max().y))
         {
             Some(DragKind::NativeResize)
-        } else if point.y <= anchor.origin.y + 32.0
-            && near(pointer.x - point.x, new.origin.x - anchor.origin.x)
+        } else if near(pointer.x - point.x, new.origin.x - anchor.origin.x)
             && near(pointer.y - point.y, new.origin.y - anchor.origin.y)
         {
             Some(DragKind::NativeMove)
@@ -458,7 +452,7 @@ impl LayoutManager {
                     frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.presented_frame),
+                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)

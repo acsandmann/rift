@@ -6,7 +6,7 @@ use crate::sys::window_server::WindowServerId;
 
 /// A per-window counter that tracks the last time the reactor sent a request to
 /// change the window frame.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransactionId(u32);
 
 impl TransactionId {
@@ -22,15 +22,13 @@ pub struct TransactionManager {
 impl TransactionManager {
     pub fn new(store: WindowTxStore) -> Self { Self { store } }
 
-    /// Stores a transaction ID for a window with its target frame.
-    pub fn store_txid(
+    pub fn request_frame(
         &self,
         wsid: WindowServerId,
-        txid: TransactionId,
         target: CGRect,
         presentation: bool,
-    ) {
-        self.store.insert(wsid, txid, target, presentation);
+    ) -> TransactionId {
+        self.store.begin(wsid, Some(target), presentation)
     }
 
     /// Removes the transaction ID entry for a window.
@@ -41,12 +39,7 @@ impl TransactionManager {
 
     /// Generates the next transaction ID for a window.
     pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId {
-        self.store.next_txid(wsid)
-    }
-
-    /// Sets the last sent transaction ID for a window.
-    pub fn set_last_sent_txid(&self, wsid: WindowServerId, txid: TransactionId) {
-        self.store.set_last_txid(wsid, txid);
+        self.store.begin(wsid, None, false)
     }
 
     /// Gets the last sent transaction ID for a window.
@@ -56,7 +49,6 @@ impl TransactionManager {
 
     /// Gets the target frame for a window's transaction, if it exists.
     pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> {
-        let record = self.store.get(&wsid)?;
-        (!record.settled).then_some(record.target).flatten()
+        self.store.get(&wsid)?.target
     }
 }

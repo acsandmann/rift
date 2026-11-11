@@ -112,7 +112,7 @@ impl Reactor {
             if engine.is_window_floating(wid)
                 && let Some(window) = self.state.windows.window(wid)
             {
-                engine.store_floating_position(workspace, wid, window.presented_frame);
+                engine.store_floating_position(workspace, wid, window.frame_monotonic);
             }
         }
         if self.state.windows.native_fullscreen_record_for_window(wid).is_some() {

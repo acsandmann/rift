@@ -79,7 +79,7 @@ pub(crate) struct WindowState {
     pub(crate) info: WindowInfo,
     /// Presentation frame used for animation continuity and hit testing.
     /// This may be intended geometry; `info.frame` is the last native observation.
-    pub(crate) presented_frame: CGRect,
+    pub(crate) frame_monotonic: CGRect,
     /// Rift/macOS heuristic result, kept separately from an explicit app-rule
     /// override so every discovered window can remain tracked.
     pub(crate) is_manageable: bool,
@@ -90,7 +90,7 @@ pub(crate) struct WindowState {
 impl From<WindowInfo> for WindowState {
     fn from(info: WindowInfo) -> WindowState {
         WindowState {
-            presented_frame: info.frame,
+            frame_monotonic: info.frame,
             info,
             is_manageable: false,
             native_transient: false,
