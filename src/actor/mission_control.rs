@@ -6,7 +6,9 @@ use objc2_foundation::MainThreadMarker;
 
 use crate::actor::{self, reactor};
 use crate::common::config::MissionControlSettings;
-use crate::ui::mission_control::{OverviewAction, OverviewSession, PreviewCache};
+use crate::ui::mission_control::{
+    DesktopBackgrounds, OverviewAction, OverviewSession, PreviewCache,
+};
 
 #[derive(Debug)]
 pub enum Event {
@@ -214,6 +216,7 @@ pub struct MissionControlActor {
     rx: Receiver,
     tx: Sender,
     cache: Option<PreviewCache>,
+    backgrounds: DesktopBackgrounds,
     reactor: reactor::ReactorHandle,
     session: Option<OverviewSession>,
     generation: u64,
@@ -243,6 +246,7 @@ impl MissionControlActor {
             rx,
             tx,
             cache: None,
+            backgrounds: DesktopBackgrounds::new(mtm),
             reactor,
             session: None,
             generation: 0,
@@ -312,7 +316,7 @@ impl MissionControlActor {
                 }
                 self.refresh_pending = false;
                 if let Some(session) = &mut self.session {
-                    session.refresh(&displays, &workspaces, moved);
+                    session.refresh(&displays, &workspaces, moved, &mut self.backgrounds);
                     self.stack_line_tx
                         .send(super::stack_line::Event::OverviewBounds(session.input_bounds()));
                     self.input_tx.send(super::input::Request::SetMissionControlActive(
@@ -373,7 +377,7 @@ impl MissionControlActor {
                         self.mtm,
                         &self.settings,
                         self.shared,
-                        &mut self.cache,
+                        &mut self.backgrounds,
                     );
                     if let Some(session) = &mut self.session {
                         session.start_previews(

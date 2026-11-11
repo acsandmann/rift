@@ -13,7 +13,9 @@ use objc2_app_kit::{
 use objc2_core_foundation::{
     CFRetained, CFString, CFType, CGAffineTransform, CGPoint, CGRect, CGSize,
 };
-use objc2_core_graphics::{CGColor, CGDisplayBounds, CGImage, CGPath};
+use objc2_core_graphics::{
+    CGColor, CGDisplayBounds, CGImage, CGPath, CGPreflightScreenCaptureAccess,
+};
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::{CALayer, CATextLayer};
 
@@ -473,9 +475,6 @@ struct DisplayOverview {
     home: Camera,
     motion: Option<Motion>,
     background: Retained<CALayer>,
-    desktop_snapshot: Option<cgs::compositor::preview::DesktopSnapshot>,
-    background_ready: bool,
-    wallpaper_key: Option<String>,
     root: Retained<CALayer>,
     pictures: Retained<CALayer>,
     focus_ring: Retained<CALayer>,
@@ -502,6 +501,7 @@ impl DisplayOverview {
         info: ScreenInfo,
         workspaces: Vec<RuntimeWorkspaceData>,
         mtm: MainThreadMarker,
+        wallpaper: Option<&CGImage>,
     ) -> Option<Self> {
         let screen =
             NSScreen::screens(mtm).iter().find(|s| s.get_number().ok() == Some(info.id))?;
@@ -518,27 +518,22 @@ impl DisplayOverview {
         root.setGeometryFlipped(true);
         root.setMasksToBounds(true);
         let background = layer(rect(0., -inset, full.size.width, full.size.height), scale);
-        // A native desktop asset, decoded once per overview context; no wallpaper capture stream.
-        let wallpaper_url = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen);
-        let wallpaper_key = wallpaper_url
-            .as_ref()
-            .and_then(|url| url.absoluteString())
-            .map(|url| url.to_string());
-        let mut background_ready = false;
-        if let Some(url) = wallpaper_url
+        // Prefer the startup snapshot; decode the native image only as a fallback.
+        if let Some(image) = wallpaper {
+            image_contents(&background, image);
+        } else if let Some(url) = NSWorkspace::sharedWorkspace().desktopImageURLForScreen(&screen)
             && let Some(image) = NSImage::initWithContentsOfURL(NSImage::alloc(), &url)
             && let Some(image) = unsafe {
                 image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None)
             }
         {
             image_contents(&background, &image);
-            background_ready = true;
-            unsafe {
-                background.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
-            }
         } else {
-            // Native solid-color desktops and unavailable dynamic assets have no file to decode.
+            // No usable image file; retain a neutral background if snapshot capture also fails.
             background.setBackgroundColor(Some(&NSColor::windowBackgroundColor().CGColor()));
+        }
+        unsafe {
+            background.setContentsGravity(objc2_quartz_core::kCAGravityResizeAspectFill);
         }
         background.setOpacity(0.);
         root.addSublayer(&background);
@@ -627,9 +622,6 @@ impl DisplayOverview {
             home: camera,
             motion: None,
             background,
-            desktop_snapshot: None,
-            background_ready,
-            wallpaper_key,
             root,
             pictures,
             focus_ring,
@@ -1120,6 +1112,57 @@ impl DisplayOverview {
     }
 }
 
+// One capture per startup display, retained independently of window preview sessions.
+#[derive(Default)]
+pub(crate) struct DesktopBackgrounds(
+    Vec<(
+        u32,
+        Option<cgs::compositor::preview::DesktopSnapshot>,
+        Option<Retained<CGImage>>,
+    )>,
+);
+impl DesktopBackgrounds {
+    pub(crate) fn new(mtm: MainThreadMarker) -> Self {
+        if !CGPreflightScreenCaptureAccess() {
+            return Self::default();
+        }
+        Self(
+            NSScreen::screens(mtm)
+                .iter()
+                .filter_map(|screen| {
+                    let id = screen.get_number().ok()?.as_u32();
+                    let snapshot = cgs::compositor::preview::DesktopSnapshot::new(
+                        id,
+                        screen.backingScaleFactor(),
+                        || {},
+                    )
+                    .map_err(|error| tracing::warn!(?error, "Desktop snapshot unavailable"))
+                    .ok()?;
+                    Some((id, Some(snapshot), None))
+                })
+                .collect(),
+        )
+    }
+
+    fn image(&mut self, display: u32) -> Option<&CGImage> {
+        let (_, snapshot, image) = self.0.iter_mut().find(|(id, _, _)| *id == display)?;
+        if let Some(pending) = snapshot {
+            match pending.take_image() {
+                Ok(Some(captured)) => {
+                    *image = Some(captured);
+                    *snapshot = None;
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "Desktop background unavailable");
+                    *snapshot = None;
+                }
+                Ok(None) => {}
+            }
+        }
+        image.as_deref()
+    }
+}
+
 // Logical scene state survives focus handoffs; capture producers never do.
 struct ViewState {
     camera: Camera,
@@ -1128,8 +1171,6 @@ struct ViewState {
     selection: Selection,
     homes: Vec<(crate::model::VirtualWorkspaceId, CGPoint)>,
     windows: Vec<(RuntimeWindowData, crate::model::VirtualWorkspaceId, CGRect)>,
-    wallpaper: Option<Retained<AnyObject>>,
-    wallpaper_key: Option<String>,
     capture_dirty: Arc<AtomicBool>,
 }
 #[derive(Default)]
@@ -1160,15 +1201,6 @@ impl PreviewCache {
             .position(|(key, _, _, _, _)| key.display_uuid == d.info.display_uuid)?;
         let (_, _, _, captures, state) = self.captures.swap_remove(i);
         d.capture_dirty = state.capture_dirty;
-        if !d.background_ready
-            && state.wallpaper_key == d.wallpaper_key
-            && let Some(image) = state.wallpaper
-        {
-            unsafe {
-                d.background.setContents(Some(&image));
-            }
-            d.background_ready = true;
-        }
         if state
             .homes
             .iter()
@@ -1277,20 +1309,6 @@ fn start_display(
     ));
     if enabled {
         d.captures = cache.as_mut().and_then(|c| c.take(d));
-        if !d.background_ready {
-            let tx = wake.clone();
-            let dirty = d.capture_dirty.clone();
-            d.desktop_snapshot = cgs::compositor::preview::DesktopSnapshot::new(
-                d.info.id.as_u32(),
-                d.scale,
-                move || {
-                    dirty.store(true, Ordering::Release);
-                    tx.send(crate::actor::mission_control::Event::PumpPreviews);
-                },
-            )
-            .map_err(|error| tracing::warn!(?error, "Desktop snapshot unavailable"))
-            .ok();
-        }
         if d.captures.is_none() {
             let tx = wake.clone();
             let dirty = d.capture_dirty.clone();
@@ -1304,9 +1322,6 @@ fn start_display(
         }
         d.update_sources_at(d.selection.window, true, d.home);
         d.capture_dirty.store(true, Ordering::Release);
-        if !d.background_ready && d.desktop_snapshot.is_none() {
-            d.background_ready = true;
-        }
     }
 
     if d.captures.is_none() {
@@ -1386,7 +1401,7 @@ impl OverviewSession {
         mtm: MainThreadMarker,
         settings: &MissionControlSettings,
         shared: bool,
-        _cache: &mut Option<PreviewCache>,
+        backgrounds: &mut DesktopBackgrounds,
     ) -> Option<Self> {
         let _tx = LayerTransaction::disabled().flush_on_commit();
         let mut displays = Vec::new();
@@ -1407,7 +1422,8 @@ impl OverviewSession {
             if workspaces.is_empty() {
                 continue;
             }
-            if let Some(view) = DisplayOverview::new(d.info, workspaces, mtm) {
+            let wallpaper = backgrounds.image(d.info.id.as_u32());
+            if let Some(view) = DisplayOverview::new(d.info, workspaces, mtm, wallpaper) {
                 if d.is_active_context {
                     active = displays.len();
                 }
@@ -1505,8 +1521,6 @@ impl OverviewSession {
                         .iter()
                         .map(|w| (w.data.clone(), w.workspace, w.world))
                         .collect(),
-                    wallpaper: unsafe { d.background.contents() },
-                    wallpaper_key: d.wallpaper_key.clone(),
                     capture_dirty: d.capture_dirty.clone(),
                 };
                 cache.captures.push((d.info.clone(), d.bounds, d.scale, m, state));
@@ -1519,6 +1533,7 @@ impl OverviewSession {
         topology: &[RuntimeDisplayData],
         catalog: &[RuntimeWorkspaceData],
         moved: Option<WindowId>,
+        backgrounds: &mut DesktopBackgrounds,
     ) {
         let active_uuid = self.displays.get(self.active).map(|d| d.info.display_uuid.clone());
         // Workspace activation changes the live model behind us. Keep the visible
@@ -1642,6 +1657,7 @@ impl OverviewSession {
                 native.info.clone(),
                 workspaces,
                 MainThreadMarker::new().unwrap(),
+                backgrounds.image(native.info.id.as_u32()),
             ) {
                 if let Some(wake) = &self.wake {
                     start_display(&mut d, self.previews, wake, None);
@@ -2727,9 +2743,8 @@ impl OverviewSession {
                         })
                     })
             });
-            if (ready && self.displays.iter().all(|d| d.background_ready))
-                || now.duration_since(start) > Duration::from_secs(2)
-            {
+            // Wallpaper capture must never delay the opening transition.
+            if ready || now.duration_since(start) > Duration::from_secs(2) {
                 self.phase = Phase::Entering(now);
                 for d in &mut self.displays {
                     d.animate(d.home, self.duration);
@@ -2786,21 +2801,6 @@ impl OverviewSession {
             }
         }
         for (display, d) in self.displays.iter_mut().enumerate() {
-            if let Some(snapshot) = &d.desktop_snapshot {
-                match snapshot.take_image() {
-                    Ok(Some(image)) => {
-                        image_contents(&d.background, &image);
-                        d.background_ready = true;
-                        d.desktop_snapshot = None;
-                    }
-                    Err(error) => {
-                        tracing::warn!(?error, "Desktop background unavailable");
-                        d.background_ready = true;
-                        d.desktop_snapshot = None;
-                    }
-                    _ => {}
-                }
-            }
             let tick = d.clock.as_ref().and_then(|clock| clock.latest());
             if let Some((_, target)) = tick {
                 d.sample(target.max(now));
