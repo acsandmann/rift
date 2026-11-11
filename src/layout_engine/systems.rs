@@ -1,5 +1,5 @@
 use enum_dispatch::enum_dispatch;
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -8,46 +8,93 @@ use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
+/// How tiling may size a window, with the minimum size the window reports.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Sizing {
+    /// Not resizable: kept at its own size.
+    Fixed { min: CGSize },
+    /// Resizable; traditional tiling may shrink it below `advisory_min`.
+    Resizable { advisory_min: CGSize },
+    /// Resizable, but never below `min` (`AppWorkspaceRule::respect_min_size`).
+    ResizableAtLeastMin { min: CGSize },
+}
+
+impl Default for Sizing {
+    fn default() -> Self { Self::Fixed { min: CGSize::ZERO } }
+}
+
+use constraints::sanitize as clean;
+
+/// The minimum a window reports, or `None` when it reports none (0x0) or garbage.
+pub(crate) fn reported_min_size(size: Option<CGSize>) -> Option<CGSize> {
+    size.map(|s| CGSize::new(clean(s.width), clean(s.height)))
+        .filter(|s| *s != CGSize::ZERO)
+}
+
+impl Sizing {
+    pub fn new(is_resizable: bool, respect_min_size: bool, min: Option<CGSize>) -> Self {
+        let min = reported_min_size(min).unwrap_or(CGSize::ZERO);
+        match (is_resizable, respect_min_size) {
+            (false, _) => Self::Fixed { min },
+            (true, false) => Self::Resizable { advisory_min: min },
+            (true, true) => Self::ResizableAtLeastMin { min },
+        }
+    }
+
+    fn reported_min(self) -> CGSize {
+        let (Self::Fixed { min }
+        | Self::Resizable { advisory_min: min }
+        | Self::ResizableAtLeastMin { min }) = self;
+        min
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WindowLayoutConstraints {
-    pub is_resizable: bool,
+    pub sizing: Sizing,
     pub locked_width: f64,
     pub locked_height: f64,
-    pub min_width: f64,
-    pub min_height: f64,
     pub max_width: f64,
     pub max_height: f64,
 }
 
 impl WindowLayoutConstraints {
     pub fn normalized(self) -> Self {
-        let clean = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
-        let min_width = clean(self.min_width);
-        let min_height = clean(self.min_height);
+        let min = self.sizing.reported_min();
         let mut max_width = clean(self.max_width);
         let mut max_height = clean(self.max_height);
-        if max_width > 0.0 && max_width < min_width {
-            max_width = min_width;
+        if max_width > 0.0 && max_width < min.width {
+            max_width = min.width;
         }
-        if max_height > 0.0 && max_height < min_height {
-            max_height = min_height;
+        if max_height > 0.0 && max_height < min.height {
+            max_height = min.height;
         }
         Self {
-            is_resizable: self.is_resizable,
+            sizing: self.sizing,
             locked_width: clean(self.locked_width),
             locked_height: clean(self.locked_height),
-            min_width,
-            min_height,
             max_width,
             max_height,
         }
     }
 
-    pub fn min_for_axis(self, horizontal: bool) -> f64 {
-        if horizontal {
-            self.min_width
-        } else {
-            self.min_height
+    /// The window's reported minimum, advisory or not: for layouts that respect every
+    /// minimum (bsp, scrolling, floating). Traditional tiling uses `tiled_min`.
+    pub fn reported_min(self, horizontal: bool) -> f64 {
+        let min = self.sizing.reported_min();
+        if horizontal { min.width } else { min.height }
+    }
+
+    /// The minimum traditional tiling won't go below.
+    pub fn tiled_min(self, horizontal: bool) -> f64 {
+        match self.sizing {
+            Sizing::Fixed { .. } | Sizing::ResizableAtLeastMin { .. } => {
+                self.reported_min(horizontal)
+            }
+            // Some apps report transient or overly conservative min/max bounds while still
+            // being user-resizable. In traditional tiling, honoring those bounds at split
+            // time causes visibly uneven insertion (e.g. 2:1 right after a 50/50 split).
+            Sizing::Resizable { .. } => 0.0,
         }
     }
 
@@ -65,14 +112,15 @@ impl WindowLayoutConstraints {
         } else {
             self.locked_height
         };
-        let min = self.min_for_axis(horizontal);
+        let min = self.reported_min(horizontal);
         let max = self.max_for_axis(horizontal);
         // Axis-specific lock: when min/max collapse to the same positive value,
         // treat that axis as fixed even if the window is generally resizable.
+        // An advisory minimum counts here: min == max is a lock, not a floor.
         if min > 0.0 && max > 0.0 && (min - max).abs() <= f64::EPSILON {
             return Some(max);
         }
-        if !self.is_resizable {
+        if let Sizing::Fixed { .. } = self.sizing {
             return (locked > 0.0).then_some(locked);
         }
         None
@@ -443,8 +491,10 @@ pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::CGSize;
+
     use super::{
-        BspLayoutSystem, LayoutSystem, MasterStackLayoutSystem, ScrollingLayoutSystem,
+        BspLayoutSystem, LayoutSystem, MasterStackLayoutSystem, ScrollingLayoutSystem, Sizing,
         TraditionalLayoutSystem, WindowLayoutConstraints,
     };
     use crate::actor::app::WindowId;
@@ -492,11 +542,11 @@ mod tests {
     #[test]
     fn axis_specific_fixed_detection_supports_one_axis_locked_other_resizable() {
         let c = WindowLayoutConstraints {
-            is_resizable: true,
+            sizing: Sizing::Resizable {
+                advisory_min: CGSize::new(723.0, 470.0),
+            },
             locked_width: 700.0,
             locked_height: 400.0,
-            min_width: 723.0,
-            min_height: 470.0,
             max_width: 723.0,
             max_height: 0.0,
         }
@@ -512,11 +562,9 @@ mod tests {
     #[test]
     fn non_resizable_zero_locked_size_is_not_treated_as_fixed() {
         let c = WindowLayoutConstraints {
-            is_resizable: false,
+            sizing: Sizing::Fixed { min: CGSize::ZERO },
             locked_width: 0.0,
             locked_height: 0.0,
-            min_width: 0.0,
-            min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
         }
@@ -531,11 +579,9 @@ mod tests {
     #[test]
     fn non_resizable_positive_locked_size_remains_fixed() {
         let c = WindowLayoutConstraints {
-            is_resizable: false,
+            sizing: Sizing::Fixed { min: CGSize::ZERO },
             locked_width: 640.0,
             locked_height: 360.0,
-            min_width: 0.0,
-            min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
         }
@@ -551,11 +597,9 @@ mod tests {
     #[test]
     fn positive_max_only_constraint_is_not_treated_as_fixed() {
         let c = WindowLayoutConstraints {
-            is_resizable: true,
+            sizing: Sizing::Resizable { advisory_min: CGSize::ZERO },
             locked_width: 0.0,
             locked_height: 0.0,
-            min_width: 0.0,
-            min_height: 0.0,
             max_width: 600.0,
             max_height: 480.0,
         }

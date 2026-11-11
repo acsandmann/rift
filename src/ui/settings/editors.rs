@@ -1018,6 +1018,9 @@ fn rule_behavior(rule: &AppWorkspaceRule) -> String {
             WorkspaceSelector::Name(name) => name.clone(),
         });
     }
+    if rule.respect_min_size {
+        parts.push("Minimum size".into());
+    }
     if rule.focus {
         parts.push("Focus".into());
     }
@@ -1428,6 +1431,15 @@ fn rule_detail(ui: Ui, model: &Rc<Model>, i: usize) -> Page {
                 }
             },
         ))
+        .row(f.switch(
+            "Respect minimum size",
+            move |s| s.virtual_workspaces.app_rules.get(i).is_some_and(|r| r.respect_min_size),
+            move |s, v| {
+                if let Some(r) = s.virtual_workspaces.app_rules.get_mut(i) {
+                    r.respect_min_size = v;
+                }
+            },
+        ).help("Never tile matching windows below the minimum size they report. Applies when Rift next sees a window."))
         .row(f.switch(
             "Focus window",
             move |s| s.virtual_workspaces.app_rules.get(i).is_some_and(|r| r.focus),

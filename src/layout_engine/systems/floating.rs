@@ -217,7 +217,7 @@ impl FloatingLayoutSystem {
             if let Some(fixed) = limits.fixed_for_axis(horizontal) {
                 return fixed;
             }
-            let value = value.max(limits.min_for_axis(horizontal));
+            let value = value.max(limits.reported_min(horizontal));
             let max = limits.max_for_axis(horizontal);
             if max > 0.0 { value.min(max) } else { value }
         };
