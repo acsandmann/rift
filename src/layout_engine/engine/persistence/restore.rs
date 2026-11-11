@@ -238,7 +238,7 @@ impl LayoutEngine {
             let Some(window) = window_store.window(live) else {
                 continue;
             };
-            let frame = window.frame_monotonic;
+            let frame = window.presented_frame;
             let evidence = WindowFingerprint::of(live, window);
             let matched = self.reconcile_saved_window(window_store, live, &evidence, scope);
             report.matched += usize::from(matched);

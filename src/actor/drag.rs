@@ -15,6 +15,7 @@ pub use crate::model::drag::{
     DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
     DropTarget, DropZone,
 };
+#[cfg(test)]
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
@@ -127,6 +128,7 @@ impl Session {
 pub enum StartKind {
     Native {
         window: WindowId,
+        resize: bool,
     },
     Modifier {
         button: MouseButton,
@@ -297,8 +299,8 @@ impl DragActor {
         id
     }
 
-    pub fn await_native(&mut self, window: WindowId) -> u64 {
-        self.await_start(StartKind::Native { window })
+    pub fn await_native(&mut self, window: WindowId, resize: bool) -> u64 {
+        self.await_start(StartKind::Native { window, resize })
     }
 
     pub fn await_modifier(
@@ -328,8 +330,8 @@ impl DragActor {
             return true;
         };
         match pending.kind {
-            StartKind::Native { window } if window == source.window => {
-                self.start_native_session(source, scene);
+            StartKind::Native { window, resize } if window == source.window => {
+                self.start_native_session(source, scene, resize);
                 true
             }
             StartKind::Modifier { button, point, action } => {
@@ -348,15 +350,18 @@ impl DragActor {
         if self.update_native(source.window, source.last_frame, source.current_space) {
             return;
         }
-        let id = self.await_native(source.window);
+        let id = self.await_native(
+            source.window,
+            !source.origin_frame.size.same_as(source.last_frame.size),
+        );
         let _ = self.resolve_start(id, Some(source), scene);
     }
 
-    fn start_native_session(&mut self, source: DragSource, scene: DragScene) {
-        let kind = if source.origin_frame.size.same_as(source.last_frame.size) {
-            DragKind::NativeMove
-        } else {
+    fn start_native_session(&mut self, source: DragSource, scene: DragScene, resize: bool) {
+        let kind = if resize {
             DragKind::NativeResize
+        } else {
+            DragKind::NativeMove
         };
         let pointer = CGPoint::new(
             source.last_frame.origin.x + source.last_frame.size.width / 2.0,
@@ -383,11 +388,6 @@ impl DragActor {
             return false;
         }
         session.source.last_frame = frame;
-        session.kind = if session.source.origin_frame.size.same_as(frame.size) {
-            DragKind::NativeMove
-        } else {
-            DragKind::NativeResize
-        };
         if session.source.current_space != current_space {
             session.source.current_space = current_space;
             session.invalidate_drop();
@@ -504,7 +504,7 @@ impl DragActor {
         if matches!(
             self.state,
             State::AwaitingSource(PendingStart {
-                kind: StartKind::Native { window: pending },
+                kind: StartKind::Native { window: pending, .. },
                 ..
             }) if pending == window
         ) {
@@ -1159,8 +1159,8 @@ mod tests {
     #[test]
     fn stale_source_resolution_is_ignored() {
         let mut actor = DragActor::new(DragDropSettings::default());
-        let stale = actor.await_native(w(1));
-        let current = actor.await_native(w(2));
+        let stale = actor.await_native(w(1), false);
+        let current = actor.await_native(w(2), false);
         assert!(!actor.resolve_start(stale, None, DragScene::default()));
         assert!(actor.is_active());
         assert!(actor.resolve_start(current, None, DragScene::default()));

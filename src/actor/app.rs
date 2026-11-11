@@ -1309,6 +1309,12 @@ impl State {
             ..
         } = pending;
         let _guard = span.enter();
+        if let Some(wsid) = self.window(wid)?.window_server_id
+            && let Some(store) = &self.tx_store
+            && store.last_txid(&wsid) != txid
+        {
+            return Ok(());
+        }
         let window = self.window_mut(wid)?;
         window.last_seen_txid = txid;
         window.frame_source = source;
@@ -1516,6 +1522,13 @@ impl State {
                     if !authority.is_current() {
                         break;
                     }
+                    if let Ok(window) = self.window(wid)
+                        && let Some(wsid) = window.window_server_id
+                        && let Some(store) = &self.tx_store
+                        && store.last_txid(&wsid) != txid
+                    {
+                        continue;
+                    }
                     let (elem, hint) = match self.window_mut(wid) {
                         Ok(window) => {
                             window.last_seen_txid = txid;
@@ -1546,6 +1559,11 @@ impl State {
                             || self.hold_batch_eui(eui),
                         )
                     });
+                    if matches!(result, Err(AxError::Ax(AXError::CannotComplete)))
+                        && self.window(wid).is_ok_and(|window| !window.is_animating)
+                    {
+                        self.send_event(Event::WindowFrameRequestFailed(wid, txid));
+                    }
                     let frame = match self.handle_ax_result(wid, result)? {
                         Some(frame) => {
                             self.window_mut(wid)?.last_known_frame = frame;
@@ -1554,6 +1572,11 @@ impl State {
                         None => continue,
                     };
 
+                    // Size preparation inside a presentation is intermediate work.
+                    // EndWindowAnimation reports the terminal AX readback.
+                    if self.window(wid)?.is_animating {
+                        continue;
+                    }
                     self.send_event(Event::WindowFrameChanged(
                         wid,
                         frame,
@@ -1656,11 +1679,16 @@ impl State {
                     self.enhanced_ui.release(&app);
                     self.restart_notifications_after_animation(&elem);
                 }
-                let mut frame =
-                    match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame,
-                        None => return Ok(false),
-                    };
+                let readback = trace("frame", &elem, || elem.frame());
+                if matches!(readback, Err(AxError::Ax(AXError::CannotComplete)))
+                    && let Some(txid) = txid
+                {
+                    self.send_event(Event::WindowFrameRequestFailed(wid, txid));
+                }
+                let mut frame = match self.handle_ax_result(wid, readback)? {
+                    Some(frame) => frame,
+                    None => return Ok(false),
+                };
                 // Intermediate AX writes can be clamped while a growing column
                 // still overlaps the screen edge. The intended-frame cache is
                 // only a hint: repair against observed geometry once motion ends.
@@ -1680,6 +1708,11 @@ impl State {
                             || {},
                         )
                     });
+                    if matches!(result, Err(AxError::Ax(AXError::CannotComplete)))
+                        && let Some(txid) = txid
+                    {
+                        self.send_event(Event::WindowFrameRequestFailed(wid, txid));
+                    }
                     frame = match self.handle_ax_result(wid, result)? {
                         Some(frame) => frame,
                         None => return Ok(false),

@@ -428,7 +428,7 @@ impl Reactor {
                         .into_iter()
                         .filter_map(|wid| {
                             predicted.get(&wid).copied().or_else(|| {
-                                self.state.windows.window(wid).map(|w| w.frame_monotonic)
+                                self.state.windows.window(wid).map(|w| w.presented_frame)
                             })
                         })
                         .collect();

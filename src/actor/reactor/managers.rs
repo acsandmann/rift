@@ -17,6 +17,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{DragDropSettings, LayoutMode};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
+use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -42,6 +43,7 @@ impl AppManager {
 /// Manages drag operations and window swapping
 pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
+    pub native_down: Option<(WindowId, CGRect, objc2_core_foundation::CGPoint)>,
     pub native_motion_active: Arc<AtomicBool>,
     pub externally_controlled_window: Option<WindowId>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
@@ -51,6 +53,51 @@ pub struct DragManager {
 }
 
 impl DragManager {
+    /// Native intent belongs to the pressed window, and resize intent starts at
+    /// its border. A button held elsewhere cannot authorize layout mutations.
+    pub fn native_geometry_intent(
+        &self,
+        wid: WindowId,
+        new: CGRect,
+    ) -> Option<crate::actor::drag::DragKind> {
+        use crate::actor::drag::DragKind;
+        if let Some(source) = self.actor.source() {
+            return (source.window == wid).then(|| self.actor.kind()).flatten();
+        }
+        let (window, anchor, point) = self.native_down?;
+        if window != wid {
+            return None;
+        }
+        let in_x = point.x >= anchor.origin.x - 8.0 && point.x <= anchor.max().x + 8.0;
+        let in_y = point.y >= anchor.origin.y - 8.0 && point.y <= anchor.max().y + 8.0;
+        if !in_x || !in_y {
+            return None;
+        }
+        let pointer = crate::sys::event::current_cursor_location().ok()?;
+        if pointer.same_as(point) {
+            return None;
+        }
+        let near = |a: f64, b: f64| (a - b).abs() <= 8.0;
+        let follows_edge = |press: f64, cursor: f64, before: f64, after: f64| {
+            near(press, before) && (before - after).abs() > 0.1 && near(cursor, after)
+        };
+        if !anchor.size.same_as(new.size)
+            && (follows_edge(point.x, pointer.x, anchor.origin.x, new.origin.x)
+                || follows_edge(point.x, pointer.x, anchor.max().x, new.max().x)
+                || follows_edge(point.y, pointer.y, anchor.origin.y, new.origin.y)
+                || follows_edge(point.y, pointer.y, anchor.max().y, new.max().y))
+        {
+            Some(DragKind::NativeResize)
+        } else if point.y <= anchor.origin.y + 32.0
+            && near(pointer.x - point.x, new.origin.x - anchor.origin.x)
+            && near(pointer.y - point.y, new.origin.y - anchor.origin.y)
+        {
+            Some(DragKind::NativeMove)
+        } else {
+            None
+        }
+    }
+
     pub fn sync_motion_gate(&self) {
         let active = self.actor.is_active()
             && matches!(
@@ -65,6 +112,9 @@ impl DragManager {
 
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
+        if self.native_down.is_some_and(|(window, _, _)| window == wid) {
+            self.native_down = None;
+        }
         if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
             self.externally_controlled_window = None;
         }
@@ -73,6 +123,7 @@ impl DragManager {
     }
 
     pub fn reset(&mut self) {
+        self.native_down = None;
         self.actor.cancel();
         self.sync_motion_gate();
         self.release_preview();
@@ -407,7 +458,7 @@ impl LayoutManager {
                     frame,
                     &gaps,
                     reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
+                    |wid| reactor.state.windows.window(wid).map(|w| w.presented_frame),
                     &all_screen_frames,
                 );
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)

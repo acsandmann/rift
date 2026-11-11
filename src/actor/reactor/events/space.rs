@@ -219,7 +219,6 @@ pub fn handle_window_server_appeared(
 
             state.windows.observe_native_space(wsid, resolved_space, true);
             state.windows.note_window_server_fullscreen_exit(wsid, resolved_space);
-            outcome.confirmed_window_spaces.push((wsid, resolved_space));
         }
     }
 

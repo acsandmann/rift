@@ -10,7 +10,7 @@ use crate::layout_engine::LayoutEvent;
 use crate::model::WindowVisibility;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::event::MouseState;
-use crate::sys::geometry::SameAs;
+use crate::sys::geometry::{IsWithin, SameAs};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerInfo;
 
@@ -24,7 +24,6 @@ pub struct WindowCreatedPayload {
 pub fn handle_window_created(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
-    transactions: &TransactionManager,
     payload: WindowCreatedPayload,
 ) -> anyhow::Result<EventOutcome> {
     let WindowCreatedPayload {
@@ -43,13 +42,6 @@ pub fn handle_window_created(
     let rule_override = state.windows.window(wid).and_then(|window| window.manage_override);
     let mut window_state: WindowState = window.into();
     window_state.manage_override = rule_override;
-    if let Some(wsid) = window_state.info.sys_id {
-        transactions.store_txid(
-            wsid,
-            transactions.get_last_sent_txid(wsid),
-            window_state.frame_monotonic,
-        );
-    }
 
     state.windows.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
@@ -175,6 +167,7 @@ pub struct WindowFrameChangedPayload {
 pub enum FrameChangeDisposition {
     Handled,
     NeedsGeometryAnalysis,
+    Reconcile(TransactionId),
 }
 
 pub fn classify_window_frame_change(
@@ -193,53 +186,83 @@ pub fn classify_window_frame_change(
         return FrameChangeDisposition::Handled;
     };
     let server_id = window.info.sys_id;
-    let old_frame = window.frame_monotonic;
-
+    let old_frame = window.info.frame;
+    let native_intent = !requested
+        && *mouse_state == Some(MouseState::Down)
+        && drag.native_geometry_intent(wid, new_frame).is_some();
+    let transaction = server_id.and_then(|server| transactions.store.get(&server));
+    // Generations fence acknowledgements even after a target has settled.
+    if let (Some(record), Some(seen)) = (transaction, last_seen)
+        && seen != record.txid
+        && !native_intent
+        && (requested || (!record.settled && record.target.is_some()))
+    {
+        query_mouse_for_active_drag(drag, mouse_state);
+        return FrameChangeDisposition::Handled;
+    }
     if mission_control_active {
         drag.reset();
+        if let Some(window) = state.windows.window_mut(wid) {
+            window.info.frame = new_frame;
+        }
         return FrameChangeDisposition::Handled;
     }
-
-    if let Some(server) = server_id
-        && let Some(target) = transactions.get_target_frame(server)
-        && let Some(seen) = last_seen
-    {
-        if seen != transactions.get_last_sent_txid(server) {
-            query_mouse_for_active_drag(drag, mouse_state);
-            return FrameChangeDisposition::Handled;
+    if native_intent {
+        if drag.actor.source().is_none()
+            && let Some(server) = server_id
+        {
+            // Retire queued writes/acknowledgements before the user's first frame.
+            transactions.generate_next_txid(server);
         }
-        if mouse_state.is_none() {
-            *mouse_state = crate::sys::event::get_mouse_state();
-        }
-        if *mouse_state == Some(MouseState::Down) {
-            transactions.clear_target_for_window(server);
-        } else {
-            if new_frame.same_as(target) {
-                transactions.clear_target_for_window(server);
-            }
-            if let Some(window) = state.windows.window_mut(wid) {
-                window.frame_monotonic = new_frame;
-            }
-            return FrameChangeDisposition::Handled;
-        }
+        return FrameChangeDisposition::NeedsGeometryAnalysis;
     }
-    if requested {
+    if let Some(server) = server_id
+        && let Some(record) = transaction
+        && let Some(target) = record.target
+        && (!record.settled || (requested && last_seen.is_some()))
+    {
+        // Clamp only to known application constraints, never infer a new
+        // semantic width from an intermediate or rejected frame.
+        let mut accepted = target;
+        if let Some(min) = window.info.min_size {
+            accepted.size.width = accepted.size.width.max(min.width);
+            accepted.size.height = accepted.size.height.max(min.height);
+        }
+        if let Some(max) = window.info.max_size {
+            if max.width > 0.0 {
+                accepted.size.width = accepted.size.width.min(max.width);
+            }
+            if max.height > 0.0 {
+                accepted.size.height = accepted.size.height.min(max.height);
+            }
+        }
+        let satisfied = new_frame.is_within(0.5, accepted);
+        // After settlement a duplicate terminal report may describe an
+        // older sample of the same generation. Repair once without letting
+        // late duplicates overwrite the confirmed observation.
+        if (!record.settled || satisfied)
+            && let Some(window) = state.windows.window_mut(wid)
+        {
+            window.info.frame = new_frame;
+            window.presented_frame = new_frame;
+        }
+        // A presentation can pass through its destination before motion ends.
+        // Its terminal readback, rather than a display-tick observation, retires it.
+        if satisfied && (!record.presentation || requested) {
+            transactions.store.settle(server, record.txid);
+        } else if requested && let Some(txid) = last_seen {
+            return FrameChangeDisposition::Reconcile(txid);
+        }
+        query_mouse_for_active_drag(drag, mouse_state);
+        return FrameChangeDisposition::Handled;
+    }
+    if requested || old_frame.same_as(new_frame) {
         query_mouse_for_active_drag(drag, mouse_state);
         if let Some(window) = state.windows.window_mut(wid) {
-            window.frame_monotonic = new_frame;
-        }
-        if let Some(server) = server_id {
-            transactions.clear_target_for_window(server);
+            window.info.frame = new_frame;
+            window.presented_frame = new_frame;
         }
         return FrameChangeDisposition::Handled;
-    }
-
-    if old_frame.same_as(new_frame) {
-        query_mouse_for_active_drag(drag, mouse_state);
-        return FrameChangeDisposition::Handled;
-    }
-    if mouse_state.is_none() {
-        *mouse_state = crate::sys::event::get_mouse_state();
     }
     FrameChangeDisposition::NeedsGeometryAnalysis
 }
@@ -275,16 +298,17 @@ pub fn handle_window_frame_changed(
         return Ok(outcome);
     };
     let server_id = window.info.sys_id;
-    let old_frame = window.frame_monotonic;
+    let old_frame = window.info.frame;
 
-    if !old_space_active && !new_space_active {
-        return Ok(outcome);
-    }
     if old_frame.same_as(new_frame) {
         return Ok(outcome);
     }
     if let Some(window) = state.windows.window_mut(wid) {
-        window.frame_monotonic = new_frame;
+        window.presented_frame = new_frame;
+        window.info.frame = new_frame;
+    }
+    if !old_space_active && !new_space_active {
+        return Ok(outcome);
     }
     // The external owner has geometry authority; keep only native facts current.
     if state.windows.is_claimed(wid) {
@@ -323,15 +347,22 @@ pub fn handle_window_frame_changed(
         layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
+    let interaction = drag.native_geometry_intent(wid, new_frame);
     let dragging = state.windows.is_admitted(wid)
-        && (mouse_state == Some(MouseState::Down) || drag.actor.is_active());
+        && mouse_state == Some(MouseState::Down)
+        && interaction.is_some();
     if dragging {
+        let old_frame = if drag.actor.source().is_none() {
+            drag.native_down.map_or(old_frame, |(_, frame, _)| frame)
+        } else {
+            old_frame
+        };
         let tiled = !layout.layout_engine.is_window_floating(wid);
-        let native_resize = !old_frame.size.same_as(new_frame.size);
+        let native_resize = interaction == Some(crate::actor::drag::DragKind::NativeResize);
         if !drag.actor.update_native(wid, new_frame, new_space) {
             // The start of a user drag is intent, even when no workspace changes.
             layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
-            let session_id = drag.actor.await_native(wid);
+            let session_id = drag.actor.await_native(wid, native_resize);
             let scene = if tiled && !native_resize {
                 new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
                     crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
@@ -398,14 +429,6 @@ pub fn handle_window_frame_changed(
             } else if let Some(server) = server_id {
                 state.windows.set_window_server_space(server, None);
             }
-        } else if !old_frame.size.same_as(new_frame.size) && old_space_active {
-            outcome.arrange.is_resize = true;
-            outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
-                wid,
-                old_frame,
-                new_frame,
-                screens: screens.into(),
-            });
         }
     }
 

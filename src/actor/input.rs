@@ -216,6 +216,9 @@ impl Input {
             state.event_processing_enabled,
             keyed_disable || (self.activate_on_hotkey_release.get() && hotkeys_enabled),
         );
+        if state.event_processing_enabled {
+            mask |= 1u64 << CGEventType::LeftMouseDown.0;
+        }
         if self.mission_control_active.get() {
             mask |= (1u64 << CGEventType::LeftMouseDown.0)
                 | (1u64 << CGEventType::LeftMouseUp.0)
@@ -973,6 +976,11 @@ impl Input {
                         action,
                     });
                     return false;
+                }
+                if button == crate::actor::drag::MouseButton::Left {
+                    self.events_tx.send(Event::NativeMouseDown {
+                        point: CGEvent::location(Some(event)),
+                    });
                 }
                 true
             }
@@ -2078,8 +2086,9 @@ mod tests {
         assert_eq!(input.desired_event_mask(), keyboard_mask);
         input.state.borrow_mut().mouse_features_enabled = false;
         input.state.borrow_mut().event_processing_enabled = true;
-        let stable_release_mask =
-            (1u64 << CGEventType::LeftMouseUp.0) | (1u64 << CGEventType::RightMouseUp.0);
+        let stable_release_mask = (1u64 << CGEventType::LeftMouseDown.0)
+            | (1u64 << CGEventType::LeftMouseUp.0)
+            | (1u64 << CGEventType::RightMouseUp.0);
         assert_eq!(input.desired_event_mask(), stable_release_mask | keyboard_mask);
         input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
         assert_eq!(

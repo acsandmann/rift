@@ -255,7 +255,7 @@ impl Reactor {
                 ax_role: None,
                 ax_subrole: None,
             },
-            frame_monotonic: frame,
+            presented_frame: frame,
             is_manageable,
             manage_override: None,
         });
@@ -613,13 +613,12 @@ impl Apps {
                     for (wid, frame) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
-                        let old_frame = window.frame;
                         if mode == crate::actor::app::FrameMode::Position {
                             window.frame.origin = frame.origin;
                         } else {
                             window.frame = frame;
                         }
-                        if !window.animating && !old_frame.same_as(window.frame) {
+                        if !window.animating {
                             events.push(Event::WindowFrameChanged(
                                 wid,
                                 window.frame,

@@ -6,7 +6,7 @@ use crate::sys::window_server::WindowServerId;
 
 /// A per-window counter that tracks the last time the reactor sent a request to
 /// change the window frame.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TransactionId(u32);
 
 impl TransactionId {
@@ -23,16 +23,14 @@ impl TransactionManager {
     pub fn new(store: WindowTxStore) -> Self { Self { store } }
 
     /// Stores a transaction ID for a window with its target frame.
-    pub fn store_txid(&self, wsid: WindowServerId, txid: TransactionId, target: CGRect) {
-        self.store.insert(wsid, txid, target);
-    }
-
-    /// Updates multiple transaction ID entries.
-    pub fn update_txid_entries<I>(&self, entries: I)
-    where I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)> {
-        for (wsid, txid, target) in entries {
-            self.store.insert(wsid, txid, target);
-        }
+    pub fn store_txid(
+        &self,
+        wsid: WindowServerId,
+        txid: TransactionId,
+        target: CGRect,
+        presentation: bool,
+    ) {
+        self.store.insert(wsid, txid, target, presentation);
     }
 
     /// Removes the transaction ID entry for a window.
@@ -58,6 +56,7 @@ impl TransactionManager {
 
     /// Gets the target frame for a window's transaction, if it exists.
     pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> {
-        self.store.get(&wsid)?.target
+        let record = self.store.get(&wsid)?;
+        (!record.settled).then_some(record.target).flatten()
     }
 }

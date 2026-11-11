@@ -77,11 +77,9 @@ pub(crate) struct AppState {
 #[derive(Debug, Clone)]
 pub(crate) struct WindowState {
     pub(crate) info: WindowInfo,
-    /// The last known frame of the window. Always includes the last write.
-    ///
-    /// This value only updates monotonically with respect to writes; in other
-    /// words, we only accept reads when we know they come after the last write.
-    pub(crate) frame_monotonic: CGRect,
+    /// Presentation frame used for animation continuity and hit testing.
+    /// This may be intended geometry; `info.frame` is the last native observation.
+    pub(crate) presented_frame: CGRect,
     /// Rift/macOS heuristic result, kept separately from an explicit app-rule
     /// override so every discovered window can remain tracked.
     pub(crate) is_manageable: bool,
@@ -92,7 +90,7 @@ pub(crate) struct WindowState {
 impl From<WindowInfo> for WindowState {
     fn from(info: WindowInfo) -> WindowState {
         WindowState {
-            frame_monotonic: info.frame,
+            presented_frame: info.frame,
             info,
             is_manageable: false,
             native_transient: false,
@@ -109,7 +107,7 @@ impl WindowState {
             ax_role: self.info.ax_role.clone(),
             ax_subrole: self.info.ax_subrole.clone(),
             is_resizable: self.info.is_resizable,
-            current_size: self.frame_monotonic.size,
+            current_size: self.info.frame.size,
             min_size: self.info.min_size,
             max_size: self.info.max_size,
         }

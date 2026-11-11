@@ -10,7 +10,11 @@ use crate::sys::window_server::WindowServerId;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TxRecord {
     pub txid: TransactionId,
+    /// Retained after settlement to recognize delayed samples of this generation.
     pub target: Option<CGRect>,
+    retried: bool,
+    pub settled: bool,
+    pub presentation: bool,
 }
 
 /// Thread-safe cache mapping window server IDs to their last known transaction.
@@ -20,13 +24,27 @@ pub struct WindowTxStore(Arc<DashMap<WindowServerId, TxRecord>>);
 impl WindowTxStore {
     pub fn new() -> Self { Self::default() }
 
-    pub fn insert(&self, id: WindowServerId, txid: TransactionId, target: CGRect) {
+    pub fn insert(
+        &self,
+        id: WindowServerId,
+        txid: TransactionId,
+        target: CGRect,
+        presentation: bool,
+    ) {
+        let record = TxRecord {
+            txid,
+            target: Some(target),
+            presentation,
+            ..Default::default()
+        };
         match self.0.entry(id) {
             Entry::Occupied(mut entry) => {
-                *entry.get_mut() = TxRecord { txid, target: Some(target) }
+                if entry.get().txid == txid {
+                    *entry.get_mut() = record;
+                }
             }
             Entry::Vacant(entry) => {
-                entry.insert(TxRecord { txid, target: Some(target) });
+                entry.insert(record);
             }
         }
     }
@@ -47,31 +65,57 @@ impl WindowTxStore {
     pub fn clear_target_if_current(&self, id: &WindowServerId, txid: TransactionId) {
         if let Some(mut record) = self.0.get_mut(id)
             && record.txid == txid
+            && record.presentation
         {
             record.target = None;
         }
+    }
+
+    pub fn clear_presentation_target(&self, id: WindowServerId) {
+        if let Some(mut record) = self.0.get_mut(&id)
+            && record.presentation
+        {
+            record.target = None;
+        }
+    }
+
+    pub fn settle(&self, id: WindowServerId, txid: TransactionId) {
+        if let Some(mut record) = self.0.get_mut(&id)
+            && record.txid == txid
+        {
+            record.settled = true;
+            record.presentation = false;
+        }
+    }
+
+    /// One readback-driven repair per generation. Duplicate acknowledgements cannot
+    /// enqueue more work, and a replacement transaction gets its own budget.
+    pub fn retry_target(&self, id: WindowServerId, txid: TransactionId) -> Option<CGRect> {
+        let mut record = self.0.get_mut(&id)?;
+        if record.txid != txid || record.retried {
+            return None;
+        }
+        let target = record.target?;
+        record.retried = true;
+        record.settled = false;
+        record.presentation = false;
+        Some(target)
     }
 
     pub fn next_txid(&self, id: WindowServerId) -> TransactionId { self.advance(id, None) }
 
     fn advance(&self, id: WindowServerId, target: Option<CGRect>) -> TransactionId {
         let mut record = self.0.entry(id).or_default();
-        record.txid = record.txid.next();
-        record.target = target;
+        *record = TxRecord {
+            txid: record.txid.next(),
+            target,
+            ..Default::default()
+        };
         record.txid
     }
 
     pub fn set_last_txid(&self, id: WindowServerId, txid: TransactionId) {
-        match self.0.entry(id) {
-            Entry::Occupied(mut entry) => {
-                let record = entry.get_mut();
-                record.txid = txid;
-                record.target = None;
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(TxRecord { txid, target: None });
-            }
-        }
+        *self.0.entry(id).or_default() = TxRecord { txid, ..Default::default() };
     }
 
     pub fn last_txid(&self, id: &WindowServerId) -> TransactionId {
@@ -91,7 +135,7 @@ mod tests {
         let wsid = WindowServerId::new(1);
         let target = CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(30.0, 40.0));
         let txid = store.next_txid(wsid);
-        store.insert(wsid, txid, target);
+        store.insert(wsid, txid, target, false);
         assert_eq!(txid, TransactionId::default().next());
         assert_eq!(store.get(&wsid).unwrap().target, Some(target));
 
@@ -102,7 +146,7 @@ mod tests {
         assert_eq!(record.target, None);
 
         let newer = store.next_txid(wsid);
-        store.insert(wsid, newer, target);
+        store.insert(wsid, newer, target, true);
         store.clear_target_if_current(&wsid, txid);
         assert_eq!(
             store.get(&wsid).unwrap().target,
@@ -121,7 +165,7 @@ mod tests {
 
         let txid_1 = store.next_txid(wsid);
         let target = CGRect::new(CGPoint::new(1.0, 2.0), CGSize::new(3.0, 4.0));
-        store.insert(wsid, txid_1, target);
+        store.insert(wsid, txid_1, target, false);
         store.clear_target(&wsid);
 
         let txid_2 = store.next_txid(wsid);
@@ -134,7 +178,7 @@ mod tests {
         let wsid = WindowServerId::new(3);
         let txid_1 = store.next_txid(wsid);
         let target = CGRect::new(CGPoint::new(5.0, 6.0), CGSize::new(7.0, 8.0));
-        store.insert(wsid, txid_1, target);
+        store.insert(wsid, txid_1, target, false);
 
         let txid_2 = txid_1.next();
         store.set_last_txid(wsid, txid_2);
