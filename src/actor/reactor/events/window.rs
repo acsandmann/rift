@@ -216,21 +216,13 @@ pub fn classify_window_frame_change(
         }
         return FrameChangeDisposition::NeedsGeometryAnalysis(native_intent);
     }
-    if let (Some(server), Some(record)) = (server_id, transaction) {
-        let pending = record.target.is_some() || record.presentation;
-        if requested && last_seen.is_some() {
-            transactions.store.finish(server, record.txid);
-        }
-        if pending || requested {
-            if let Some(window) = state.windows.window_mut(wid) {
-                window.info.frame = new_frame;
-                window.frame_monotonic = new_frame;
-            }
-            query_mouse_for_active_drag(drag, mouse_state);
-            return FrameChangeDisposition::Handled;
-        }
+    if requested && let (Some(server), Some(txid)) = (server_id, last_seen) {
+        transactions.store.finish(server, txid);
     }
-    if requested || old_frame.same_as(new_frame) {
+    if requested
+        || old_frame.same_as(new_frame)
+        || transaction.is_some_and(|record| record.target.is_some() || record.presentation)
+    {
         query_mouse_for_active_drag(drag, mouse_state);
         if let Some(window) = state.windows.window_mut(wid) {
             window.info.frame = new_frame;
@@ -238,6 +230,7 @@ pub fn classify_window_frame_change(
         }
         return FrameChangeDisposition::Handled;
     }
+
     FrameChangeDisposition::NeedsGeometryAnalysis(None)
 }
 

@@ -1544,15 +1544,18 @@ impl State {
                             window.frame_source = FrameSource::Ordinary;
                             (window.elem.clone(), window.last_known_frame)
                         }
-                        Err(err) => match err {
-                            AxError::Ax(code) => {
-                                if self.handle_ax_error(wid, &code) {
-                                    continue;
+                        Err(err) => {
+                            self.send_event(Event::WindowFrameRequestFailed(wid, txid));
+                            match err {
+                                AxError::Ax(code) => {
+                                    if self.handle_ax_error(wid, &code) {
+                                        continue;
+                                    }
+                                    return Err(AxError::Ax(code));
                                 }
-                                return Err(AxError::Ax(code));
+                                AxError::NotFound => continue,
                             }
-                            AxError::NotFound => continue,
-                        },
+                        }
                     };
 
                     // The acknowledgment always carries geometry read back from AX.

@@ -83,7 +83,8 @@ impl DragManager {
                 || follows_edge(point.y, pointer.y, anchor.max().y, new.max().y))
         {
             Some(DragKind::NativeResize)
-        } else if near(pointer.x - point.x, new.origin.x - anchor.origin.x)
+        } else if !anchor.origin.same_as(new.origin)
+            && near(pointer.x - point.x, new.origin.x - anchor.origin.x)
             && near(pointer.y - point.y, new.origin.y - anchor.origin.y)
         {
             Some(DragKind::NativeMove)

@@ -44,14 +44,16 @@ impl AnimationSender {
         self.tx.send(message)
     }
 
-    pub fn cancel(&self, windows: Vec<WindowId>) -> Vec<(WindowId, CGRect)> {
+    pub fn cancel(&self, windows: Vec<WindowId>) -> Vec<(WindowId, Option<CGRect>)> {
         let mut control = self.control.lock();
         let frames = windows
             .iter()
-            .filter_map(|wid| {
-                let (handle, frame) = control.frames.remove(wid)?;
-                handle.cancel_window_animation(*wid);
-                Some((*wid, frame))
+            .map(|wid| {
+                let frame = control.frames.remove(wid).map(|(handle, frame)| {
+                    handle.cancel_window_animation(*wid);
+                    frame
+                });
+                (*wid, frame)
             })
             .collect();
         control.cancelled.extend(windows.iter().copied());
@@ -498,13 +500,6 @@ impl Reactor {
             return;
         }
         windows.sort_unstable();
-        // This cancels queued as well as published presentations. Ordinary AX
-        // requests remain pending and can still be coalesced by instant_layout.
-        for &wid in &windows {
-            if let Some(wsid) = self.state.windows.window(wid).and_then(|w| w.info.sys_id) {
-                self.transaction_manager.store.clear_presentation_target(wsid);
-            }
-        }
         let mut frames = Vec::new();
         for camera in self.presentations.values_mut() {
             if let Some(state) = &mut camera.headless {
@@ -513,7 +508,7 @@ impl Reactor {
                         .windows
                         .iter()
                         .filter(|w| windows.binary_search(&w.wid).is_ok())
-                        .map(|w| (w.wid, w.frame)),
+                        .map(|w| (w.wid, Some(w.frame))),
                 );
                 state.cancel_windows(&windows);
                 state.publish_state(Instant::now());
@@ -523,8 +518,15 @@ impl Reactor {
             frames.extend(tx.cancel(windows));
         }
         for (wid, frame) in frames {
+            // Retire after the presenter fence: a camera can allocate its
+            // generation while consuming a command queued before cancellation.
             if let Some(window) = self.state.windows.window_mut(wid) {
-                window.frame_monotonic = frame;
+                if let Some(wsid) = window.info.sys_id {
+                    self.transaction_manager.store.clear_presentation_target(wsid);
+                }
+                if let Some(frame) = frame {
+                    window.frame_monotonic = frame;
+                }
             }
         }
         self.commit_presentations();
@@ -594,7 +596,7 @@ impl Reactor {
         if let Some(mut camera) = self.presentations.remove(&space) {
             camera.state.lock().stopped = true;
             let frames = if let Some(headless) = &mut camera.headless {
-                let frames = headless.windows.iter().map(|w| (w.wid, w.frame)).collect();
+                let frames = headless.windows.iter().map(|w| (w.wid, Some(w.frame))).collect();
                 headless.stop();
                 frames
             } else if let Some(tx) = &self.animation_tx {
@@ -604,7 +606,12 @@ impl Reactor {
             };
             for (wid, frame) in frames {
                 if let Some(window) = self.state.windows.window_mut(wid) {
-                    window.frame_monotonic = frame;
+                    if let Some(wsid) = window.info.sys_id {
+                        self.transaction_manager.store.clear_presentation_target(wsid);
+                    }
+                    if let Some(frame) = frame {
+                        window.frame_monotonic = frame;
+                    }
                 }
             }
             if let Some(tx) = &self.animation_tx {
@@ -1105,7 +1112,7 @@ impl AnimationManager {
                     bounds
                         .filter(|_| !reactor.layout_manager.layout_engine.is_window_floating(wid)),
                 );
-                anim.add_window(&handle, wid, current_frame, target_frame, txid);
+                anim.add_window(&handle, wid, window.frame_monotonic, target_frame, txid);
             } else {
                 anim.mark_handled(wid);
                 trace!(
@@ -1235,7 +1242,9 @@ impl AnimationManager {
                 "Instant workspace positioning"
             );
 
-            let size_unchanged = !force_frames && current_frame.size.same_as(target_frame.size);
+            let size_unchanged = !force_frames
+                && current_frame.size.same_as(target_frame.size)
+                && window.frame_monotonic.size.same_as(target_frame.size);
             window.frame_monotonic = target_frame;
             let txid = window
                 .info
@@ -2527,7 +2536,7 @@ mod tests {
         let frames = sender.cancel(vec![wid]);
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].0, wid);
-        assert!(frames[0].1.origin.x > 0.0 && frames[0].1.origin.x < 100.0);
+        assert!(frames[0].1.unwrap().origin.x > 0.0 && frames[0].1.unwrap().origin.x < 100.0);
         drop(sender);
         runner.join().unwrap();
         let requests = collect_requests(&mut rx);

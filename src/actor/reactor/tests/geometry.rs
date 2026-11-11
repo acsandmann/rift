@@ -3,6 +3,22 @@ use test_log::test;
 use super::super::animation::{AnimationManager, AnimationSender};
 use super::*;
 
+fn scrolling_displays(
+    settings: crate::common::config::VirtualWorkspaceSettings,
+) -> (Apps, Reactor, SpaceId, SpaceId) {
+    let (apps, mut r, a, b) = two_displays(settings);
+    r.config.settings.layout.scrolling.column_width_ratio = 0.5;
+    r.config.settings.layout.scrolling.preserve_window_sizes = false;
+    r.layout_manager.layout_engine.set_layout_settings(&r.config.settings.layout);
+    for space in [a, b] {
+        r.handle_test_workspace_command(space, &LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+    }
+    (apps, r, a, b)
+}
+
 #[test]
 fn scrolling_proportions_survive_transfers_and_hotplug() {
     for operation in 0..3 {
@@ -12,20 +28,9 @@ fn scrolling_proportions_survive_transfers_and_hotplug() {
         } else {
             shared_settings()
         };
-        let (mut apps, mut r, a, b) = two_displays(settings);
+        let (mut apps, mut r, a, b) = scrolling_displays(settings);
         let wid = WindowId::new(1, 1);
         let wsid = r.test_window_server_id(wid);
-        let mut config = r.config.clone();
-        config.settings.layout.scrolling.column_width_ratio = 0.5;
-        config.settings.layout.scrolling.preserve_window_sizes = false;
-        r.layout_manager.layout_engine.set_layout_settings(&config.settings.layout);
-        r.config = config;
-        for space in [a, b] {
-            r.handle_test_workspace_command(space, &LayoutCommand::SetWorkspaceLayout {
-                workspace: None,
-                mode: LayoutMode::Scrolling,
-            });
-        }
         let connected = r.space_state.screens.clone();
         for destination in [1, 0, 1, 0] {
             let space = if destination == 0 { a } else { b };
@@ -54,6 +59,25 @@ fn scrolling_proportions_survive_transfers_and_hotplug() {
                         wrap_around: false,
                     }
                 })));
+            }
+            let pending = r.transaction_manager.get_target_frame(wsid);
+            r.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space))], false, &[]);
+            assert_eq!(
+                r.transaction_manager.get_target_frame(wsid),
+                pending,
+                "Space membership cannot acknowledge geometry"
+            );
+            if let Some(mut intermediate) = pending {
+                intermediate.size.width -= 127.;
+                apps.windows.get_mut(&wid).unwrap().frame = intermediate;
+                let txid = r.transaction_manager.get_last_sent_txid(wsid);
+                r.handle_event(Event::WindowFrameChanged(
+                    wid,
+                    intermediate,
+                    Some(txid),
+                    Requested(false),
+                    Some(MouseState::Down),
+                ));
             }
             apps.simulate_until_quiet(&mut r);
             let space = r.assigned_space_for_window_id(wid).unwrap();
@@ -154,6 +178,7 @@ fn failed_attempts_release_batched_requests_and_fence_stale_acknowledgements() {
         apps.simulate_until_quiet(&mut r);
         for (wid, frame) in layout {
             assert_eq!(apps.windows[&wid].frame, frame);
+            assert_eq!(r.state.windows.window(wid).unwrap().info.frame, frame);
         }
         AnimationManager::instant_layout(&mut r, space, &layout, None);
         assert!(
@@ -165,7 +190,7 @@ fn failed_attempts_release_batched_requests_and_fence_stale_acknowledgements() {
 
 #[test]
 fn instant_layout_replaces_a_queued_animation_without_stranding_its_target() {
-    for published in [false, true] {
+    for (published, position_only) in [(false, false), (true, false), (true, true)] {
         let (mut apps, mut r) = test_context();
         let wid = WindowId::new(1, 1);
         let space = SpaceId::new(1);
@@ -184,7 +209,11 @@ fn instant_layout_replaces_a_queued_animation_without_stranding_its_target() {
             r.state.windows.window_mut(wid).unwrap().frame_monotonic = sample;
         }
         let replacement = if published { [(wid, source)] } else { layout };
-        AnimationManager::instant_layout(&mut r, space, &replacement, None);
+        if position_only {
+            AnimationManager::workspace_switch_layout(&mut r, space, &replacement, None);
+        } else {
+            AnimationManager::instant_layout(&mut r, space, &replacement, None);
+        }
         apps.simulate_until_quiet(&mut r);
         assert_eq!(apps.windows[&wid].frame, replacement[0].1);
     }
@@ -193,21 +222,19 @@ fn instant_layout_replaces_a_queued_animation_without_stranding_its_target() {
 #[test]
 fn only_verified_native_resizing_changes_layout_dimensions() {
     for interaction in ["unrelated", "resize", "custom titlebar move"] {
-        let (mut apps, mut r) = test_context();
-        let space = SpaceId::new(1);
-        let screen = shared_left();
-        apps.make_app_and_settle_on_screen(&mut r, screen, space, 1, make_windows(1));
+        let (mut apps, mut r, _, space) = scrolling_displays(shared_settings());
+        let screen = shared_right();
         let wid = WindowId::new(1, 1);
-        let mut config = r.config.clone();
-        config.settings.layout.scrolling.preserve_window_sizes = false;
-        config.settings.layout.scrolling.column_width_ratio = 0.5;
-        r.layout_manager.layout_engine.set_layout_settings(&config.settings.layout);
-        r.config = config;
-        r.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
-            workspace: None,
-            mode: LayoutMode::Scrolling,
-        });
+        r.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWindowToDisplay {
+                selector: DisplaySelector::Index(1),
+                window_id: Some(1),
+            },
+        )));
         apps.simulate_until_quiet(&mut r);
+        let wsid = r.test_window_server_id(wid);
+        r.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space))], false, &[]);
+        window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
         let frame = apps.windows[&wid].frame;
         let resize = interaction == "resize";
         let press = if resize { frame.max() } else { frame.mid() };
@@ -243,5 +270,6 @@ fn only_verified_native_resizing_changes_layout_dimensions() {
             );
         }
         window_server::set_cursor_location_override(None);
+        window_server::set_window_spaces_override(wsid, None);
     }
 }
