@@ -1585,9 +1585,26 @@ fn user_space_window_server_destroyed_removes_window_when_window_server_is_gone(
     reactor.insert_test_window(wid, wsid, Some(space1), frame, true);
     reactor.state.windows.mark_window_visible(wsid);
 
-    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
-    window_server_destroyed(&mut reactor, wsid, space1, SpaceEventKind::User);
-    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+    // Supply the absent window's native observations explicitly: synthetic ID 22
+    // can belong to a real desktop window with a different space or suitability.
+    let outcome = topology_workflow::handle_window_server_destroyed(
+        &mut reactor.state,
+        &reactor.transaction_manager,
+        &mut reactor.drag_manager,
+        topology_workflow::WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space: space1,
+            kind: SpaceEventKind::User,
+        },
+        topology_workflow::WindowServerDestroyedObservations {
+            resolved_space: None,
+            active_spaces: reactor.active_spaces.clone(),
+            ordered_in: Some(false),
+            suitable: Some(false),
+        },
+    )
+    .unwrap();
+    reactor.apply_event_outcome(outcome);
 
     assert!(!reactor.state.windows.contains_window(wid));
     assert_eq!(reactor.state.windows.tracked_window_id(wsid), None);
