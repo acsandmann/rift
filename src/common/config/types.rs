@@ -818,6 +818,9 @@ pub enum WorkspaceDisplayStyle {
     #[default]
     Layout,
     Label,
+    /// Plain text naming only the current workspace on the active display.
+    /// Unnamed workspaces use their index.
+    Text,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, ConfigSchema)]
@@ -829,7 +832,8 @@ pub struct MenuBarSettings {
     pub enabled: bool,
     #[serde(default)]
     /// Include workspaces without windows in the menu bar.
-    #[setting(label = "Show empty workspaces", enabled_by = "enabled")]
+    // The settings page enables this row; it also depends on mode and display style.
+    #[setting(label = "Show empty workspaces")]
     pub show_empty: bool,
     #[serde(default = "yes")]
     /// Show the active binding mode beside workspaces, except in default mode.
@@ -837,7 +841,8 @@ pub struct MenuBarSettings {
     pub show_binding_mode: bool,
     #[serde(default)]
     /// Only show workspaces from the display currently hosting the active menu bar.
-    #[setting(label = "Only show current display", enabled_by = "enabled")]
+    // The settings page enables this row; it also depends on display style.
+    #[setting(label = "Only show current display")]
     pub current_display_only: bool,
     #[serde(default)]
     /// Choose whether to show all workspaces or only the active one.
