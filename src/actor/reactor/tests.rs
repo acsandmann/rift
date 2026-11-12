@@ -1918,29 +1918,90 @@ fn genuine_external_frame_changes_invalidate_layout() {
 }
 
 #[test]
-fn external_resize_requests_one_arrange_pass() {
-    let (mut reactor, wid, _wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
-    let resized = CGRect::new(
-        frame.origin,
-        CGSize::new(frame.size.width + 80.0, frame.size.height + 40.0),
-    );
+fn scrolling_display_transfer_ignores_intermediate_native_width() {
+    let (mut apps, mut reactor, a, b) = two_displays(Default::default());
+    let window = WindowId::new(1, 1);
+    let mut config = reactor.config.clone();
+    config.settings.layout.scrolling.column_width_ratio = 0.5;
+    config.settings.layout.scrolling.preserve_window_sizes = false;
+    reactor
+        .layout_manager
+        .layout_engine
+        .set_layout_settings(&config.settings.layout);
+    reactor.config = config;
+    for space in [b, a] {
+        reactor.space_state.command_space = Some(space);
+        reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+            workspace: None,
+            mode: LayoutMode::Scrolling,
+        });
+    }
+    apps.simulate_until_quiet(&mut reactor);
+    let original_width = apps.windows[&window].frame.size.width;
 
-    let outcome = reactor
-        .dispatch_workflow(Event::WindowFrameChanged(
-            wid,
-            resized,
+    for index in [1, 0] {
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWindowToDisplay {
+                selector: DisplaySelector::Index(index),
+                window_id: Some(1),
+            },
+        )));
+        apps.simulate_until_quiet(&mut reactor);
+        let expected = apps.windows[&window].frame;
+        // A late AX frame can retain a source/clamped width after landing.
+        let intermediate = CGRect::new(
+            expected.origin,
+            CGSize::new(expected.size.width * 0.8, expected.size.height),
+        );
+        apps.windows.get_mut(&window).unwrap().frame = intermediate;
+        reactor.handle_event(Event::WindowFrameChanged(
+            window,
+            intermediate,
             None,
             Requested(false),
             Some(MouseState::Up),
-        ))
-        .unwrap();
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(apps.windows[&window].frame.size.width, expected.size.width);
+    }
+    assert_eq!(apps.windows[&window].frame.size.width, original_width);
+}
 
-    assert!(outcome.arrange.passes > 0);
-    assert_eq!(outcome.arrange.passes, 1);
-    assert!(outcome.arrange.is_resize);
-    let before = reactor.layout_update_count;
-    reactor.apply_event_outcome(outcome);
-    assert_eq!(reactor.layout_update_count - before, 1);
+#[test]
+fn native_frame_changes_only_resize_layout_during_user_drag() {
+    for mouse in [MouseState::Up, MouseState::Down] {
+        let (mut reactor, wid, _wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+        let resized = CGRect::new(
+            frame.origin,
+            CGSize::new(frame.size.width + 80.0, frame.size.height + 40.0),
+        );
+
+        let outcome = reactor
+            .dispatch_workflow(Event::WindowFrameChanged(
+                wid,
+                resized,
+                None,
+                Requested(false),
+                Some(mouse),
+            ))
+            .unwrap();
+
+        assert!(outcome.arrange.passes > 0);
+        assert_eq!(outcome.arrange.passes, 1);
+        assert_eq!(
+            outcome.layout_events.iter().any(|event| matches!(
+                event, LayoutEvent::WindowResized { wid: window, new_frame, .. }
+                    if *window == wid && *new_frame == resized
+            )),
+            mouse == MouseState::Down
+        );
+        let before = reactor.layout_update_count;
+        reactor.apply_event_outcome(outcome);
+        assert_eq!(
+            reactor.layout_update_count - before,
+            usize::from(mouse == MouseState::Up)
+        );
+    }
 }
 
 #[test]
