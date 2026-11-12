@@ -486,7 +486,8 @@ pub struct Settings {
     #[setting(ignore)]
     pub animation_duration: f64,
     #[serde(default = "default_animation_fps")]
-    /// Maximum number of frames per second during a window animation.
+    /// Maximum number of frames per second during a window animation; 0 follows
+    /// the display refresh rate.
     // #[setting(
     //     label = "Frame rate",
     //     group = "general",
@@ -1564,9 +1565,9 @@ impl Settings {
             ));
         }
 
-        if self.animation_fps <= 0.0 {
+        if !self.animation_fps.is_finite() || self.animation_fps < 0.0 {
             issues.push(format!(
-                "animation_fps must be positive, got {}",
+                "animation_fps must be non-negative (0 = display refresh rate), got {}",
                 self.animation_fps
             ));
         }

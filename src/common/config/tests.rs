@@ -160,6 +160,20 @@ fn app_rule_validation_reports_invalid_regex_and_ignored_effects() {
 }
 
 #[test]
+fn animation_fps_accepts_zero_as_the_display_refresh_rate() {
+    let mut settings = Config::default().settings;
+    settings.animation_fps = 0.0;
+    assert!(settings.validate().is_empty());
+    for fps in [-1.0, f64::NAN, f64::INFINITY] {
+        settings.animation_fps = fps;
+        assert!(
+            settings.validate().iter().any(|issue| issue.contains("animation_fps")),
+            "{fps}"
+        );
+    }
+}
+
+#[test]
 fn horizontal_mouse_warp_config_parsing() {
     let missing: Settings = toml::from_str("").unwrap();
     assert_eq!(missing.horizontal_mouse_warp, None);
