@@ -1626,9 +1626,10 @@ impl LayoutEngine {
                     Ok(workspace_id) => workspace_id,
                     Err(e) => {
                         warn!("Failed to auto-assign window to workspace: {:?}", e);
-                        self.workspaces
-                            .active_workspace(space)
-                            .expect("No active workspace available")
+                        let Some(workspace) = self.workspaces.active_workspace(space) else {
+                            return false;
+                        };
+                        workspace
                     }
                 },
             };
@@ -2415,14 +2416,13 @@ impl LayoutEngine {
             };
             if is_floating {
                 if let Some(space) = space {
-                    let assigned_workspace = self
+                    let Some(assigned_workspace) = self
                         .workspaces()
                         .workspace_for_window(&window_store, space, wid)
-                        .unwrap_or_else(|| {
-                            self.workspaces
-                                .active_workspace(space)
-                                .expect("No active workspace available")
-                        });
+                        .or_else(|| self.workspaces.active_workspace(space))
+                    else {
+                        return EventResponse::default();
+                    };
 
                     if let Some(layout) = self.workspaces.active_layout(space, assigned_workspace) {
                         self.workspaces[assigned_workspace]
@@ -4744,6 +4744,48 @@ mod tests {
             engine.next_space_for_direction(source, Direction::Up, &[source, above], &frames),
             Some(above)
         );
+    }
+
+    #[test]
+    fn workspace_less_display_rejects_layout_admission_and_keeps_windows_floating() {
+        for floating in [true, false] {
+            let settings = VirtualWorkspaceSettings {
+                mode: crate::common::config::WorkspaceMode::Global,
+                default_workspace_count: 1,
+                ..Default::default()
+            };
+            let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+            let mut store = WindowStore::default();
+            let source = SpaceId::new(1);
+            let destination = SpaceId::new(2);
+            for space in [source, destination] {
+                let _ = engine.handle_event(
+                    &mut store,
+                    LayoutEvent::SpaceExposed(space, CGSize::new(1000.0, 800.0)),
+                );
+            }
+            assert!(engine.workspaces.active_workspace(destination).is_none());
+            let window = WindowId::new(1, 1);
+            if floating {
+                engine.floating.add_floating(window);
+                let _ = engine
+                    .handle_event(&mut store, LayoutEvent::WindowFocused(destination, window));
+                let response = engine.handle_command(
+                    &mut store,
+                    Some(destination),
+                    &[source, destination],
+                    &HashMap::default(),
+                    LayoutCommand::ToggleWindowFloating,
+                );
+                assert!(!response.changed);
+                assert!(engine.is_window_floating(window));
+            } else {
+                let _ =
+                    engine.handle_event(&mut store, LayoutEvent::WindowAdded(destination, window));
+                assert_eq!(store.workspace_for_window(window), None);
+                assert_eq!(engine.space_with_window(window), None);
+            }
+        }
     }
 
     #[test]

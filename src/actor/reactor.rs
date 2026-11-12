@@ -5192,7 +5192,9 @@ impl Reactor {
         let geometry_changed = response.changed;
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, workspace_switch_space);
-        if geometry_changed {
+        if geometry_changed
+            && (!self.is_in_drag() || matches!(event_clone, LayoutEvent::WindowRemoved(_)))
+        {
             self.update_layout_or_warn(
                 false,
                 workspace_switch_space.is_some(),

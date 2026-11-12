@@ -2188,6 +2188,64 @@ fn events_that_change_no_managed_layout_do_not_arrange() {
 }
 
 #[test]
+fn layout_events_defer_arrangement_during_drag_except_removal() {
+    for modifier in [false, true] {
+        let (mut reactor, wid, _, space, _, frame) = reactor_with_window_on_space1();
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+        let source = crate::actor::drag::DragSource {
+            window: wid,
+            origin_frame: frame,
+            last_frame: frame,
+            origin_space: Some(space),
+            current_space: Some(space),
+            tiled: true,
+        };
+        if modifier {
+            reactor.drag_manager.actor.begin_modifier(
+                source,
+                frame.mid(),
+                crate::common::config::MouseAction::Move,
+                crate::actor::drag::DragScene::default(),
+            );
+            reactor.drag_manager.actor.motion(crate::actor::drag::DragMotion {
+                point: CGPoint::new(frame.mid().x + 30.0, frame.mid().y),
+            });
+        } else {
+            reactor.drag_manager.actor.begin_native(source, Default::default());
+        }
+        assert!(reactor.is_in_drag());
+        let added = WindowId::new(1, 2);
+        let observe = || {
+            LayoutEvent::TestWindowsObserved(
+                space,
+                vec![crate::layout_engine::WindowLayoutInfo {
+                    window_id: added,
+                    title: None,
+                    ax_role: None,
+                    ax_subrole: None,
+                    is_resizable: true,
+                    current_size: frame.size,
+                    min_size: None,
+                    max_size: None,
+                }],
+                None,
+            )
+        };
+        let before = reactor.layout_update_count;
+        reactor.send_layout_event(observe());
+        assert_eq!(reactor.layout_update_count, before);
+        assert!(reactor.test_active_workspace_windows(space).contains(&added));
+        reactor.send_layout_event(LayoutEvent::WindowRemoved(added));
+        assert_eq!(reactor.layout_update_count, before + 1);
+        reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+        assert!(!reactor.is_in_drag());
+        let before = reactor.layout_update_count;
+        reactor.send_layout_event(observe());
+        assert_eq!(reactor.layout_update_count, before + 1);
+    }
+}
+
+#[test]
 fn cross_display_drag_clears_source_floating_position() {
     let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
         reactor_with_window_on_space1_two_displays();
