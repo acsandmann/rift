@@ -1443,7 +1443,7 @@ impl Reactor {
             Event::SpaceStateChanged(snapshot)
                 if !snapshot.authoritative
                     || self.space_revision_superseded(snapshot.revision)
-                    || (snapshot.revision == self.space_state.revision
+                    || (!snapshot.presentation_changed(&self.space_state)
                         && !self.refreshes_blocked()) =>
             {
                 // Restated membership is not a topology transition. Cancelling here

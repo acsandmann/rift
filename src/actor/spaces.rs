@@ -131,6 +131,13 @@ pub struct ForwardedSpaceState {
 }
 
 impl ForwardedSpaceState {
+    pub(super) fn presentation_changed(&self, previous: &Self) -> bool {
+        !self.destroyed_spaces.is_empty()
+            || self.screens != previous.screens
+            || self.fullscreen_spaces != previous.fullscreen_spaces
+            || self.display_space_ids != previous.display_space_ids
+    }
+
     pub fn screen_by_space(&self, space: SpaceId) -> Option<&ScreenInfo> {
         self.screens.iter().find(|screen| screen.space == Some(space))
     }
@@ -644,19 +651,23 @@ impl SpacesActor {
             resized_spaces,
             active_window_spaces: self.state.visible_window_spaces.clone(),
         };
-        if self.state.last_forwarded.as_ref().is_none_or(|previous| {
-            !forwarded.destroyed_spaces.is_empty()
-                || previous.screens != forwarded.screens
-                || previous.fullscreen_spaces != forwarded.fullscreen_spaces
-                || previous.display_space_ids != forwarded.display_space_ids
-                || previous.active_window_spaces != forwarded.active_window_spaces
-                || previous.membership_complete != forwarded.membership_complete
-        }) {
+        let presentation_changed = self
+            .state
+            .last_forwarded
+            .as_ref()
+            .is_none_or(|previous| forwarded.presentation_changed(previous));
+        if presentation_changed
+            || self.state.last_forwarded.as_ref().is_none_or(|previous| {
+                previous.active_window_spaces != forwarded.active_window_spaces
+                    || previous.membership_complete != forwarded.membership_complete
+            })
+        {
             self.state.revision = self.state.revision.wrapping_add(1);
             forwarded.revision = self.state.revision;
-            // Revoke queued app-actor frames before publishing a changed presentation,
-            // including ordinary native Space switches without physical churn.
-            self.state.topology_guard.invalidate(self.state.revision);
+            if presentation_changed {
+                // Revoke queued frames only when their presentation is stale.
+                self.state.topology_guard.invalidate(self.state.revision);
+            }
         }
         self.state.last_forwarded = Some(forwarded.clone());
         forwarded

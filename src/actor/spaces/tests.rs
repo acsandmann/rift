@@ -929,6 +929,40 @@ fn queued_active_space_notification_waits_for_a_real_switch_or_bounded_membershi
 }
 
 #[test]
+fn membership_changes_preserve_queued_geometry_authority() {
+    use crate::actor::app::{AppThreadHandle, Request, WindowId};
+    let mut rig = Rig::new();
+    let native = sample(vec![screen(1, "left", 1), screen(2, "right", 2)]);
+    rig.membership(1, &[7]);
+    rig.membership(2, &[]);
+    let before = rig.tick(0, Some(native.clone())).unwrap();
+    let (mut producer, mut requests) = AppThreadHandle::channel();
+    producer.set_topology_authority(&rig.actor.topology_guard(), before.revision);
+    producer
+        .send(Request::set_window_frame(
+            WindowId::new(1, 1),
+            CGRect::ZERO,
+            Default::default(),
+            false,
+        ))
+        .unwrap();
+    let queued = requests.try_recv().unwrap().1;
+    rig.membership(1, &[]);
+    rig.membership(2, &[7]);
+    let after = rig.tick(0, Some(native.clone())).unwrap();
+    assert!(after.revision > before.revision);
+    assert_eq!(
+        after.active_window_spaces[&WindowServerId::new(7)],
+        SpaceId::new(2)
+    );
+    assert!(queued.authorized().is_some());
+    assert!(producer.can_write_frames());
+    let duplicate = rig.tick(0, Some(native)).unwrap();
+    assert_eq!(duplicate.revision, after.revision);
+    assert!(producer.can_write_frames());
+}
+
+#[test]
 fn a_space_switch_revokes_queued_geometry_before_the_reactor_receives_it() {
     use crate::actor::app::{AppThreadHandle, Request, WindowId};
     for notify in [false, true] {
