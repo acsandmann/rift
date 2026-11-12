@@ -829,7 +829,7 @@ pub struct MenuBarSettings {
     pub enabled: bool,
     #[serde(default)]
     /// Include workspaces without windows in the menu bar.
-    #[setting(label = "Show empty workspaces", enabled_by = "enabled")]
+    #[setting(label = "Show empty workspaces")]
     pub show_empty: bool,
     #[serde(default = "yes")]
     /// Show the active binding mode beside workspaces, except in default mode.
