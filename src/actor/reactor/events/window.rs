@@ -187,10 +187,12 @@ pub fn classify_window_frame_change(
     };
     let server_id = window.info.sys_id;
     let old_frame = window.info.frame;
-    let native_intent = (!requested && *mouse_state == Some(MouseState::Down))
-        .then(|| drag.native_geometry_intent(wid, new_frame))
-        .flatten();
     let transaction = server_id.and_then(|server| transactions.store.get(&server));
+    let finishing_resize = drag.actor.kind() == Some(crate::actor::drag::DragKind::NativeResize)
+        && transaction.is_some_and(|record| record.presentation);
+    let native_intent = (!requested && !finishing_resize && *mouse_state == Some(MouseState::Down))
+        .then(|| drag.native_geometry_intent(wid, old_frame, new_frame))
+        .flatten();
     // Generations fence acknowledgements even after a target has settled.
     if let (Some(record), Some(seen)) = (transaction, last_seen)
         && seen != record.txid
@@ -319,11 +321,6 @@ pub fn handle_window_frame_changed(
         && mouse_state == Some(MouseState::Down)
         && interaction.is_some();
     if dragging {
-        let old_frame = if drag.actor.source().is_none() {
-            drag.native_down.map_or(old_frame, |(_, frame, _)| frame)
-        } else {
-            old_frame
-        };
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = interaction == Some(crate::actor::drag::DragKind::NativeResize);
         if !drag.actor.update_native(wid, new_frame, new_space) {

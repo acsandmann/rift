@@ -612,6 +612,7 @@ pub enum Request {
     /// focused/main window and the quiet marker before notifying the reactor.
     ApplicationGloballyActivated(pid_t),
     WindowMaybeDestroyed(WindowId),
+    FinishNativeResize(WindowId, u64, TransactionId),
     CloseWindow(Option<WindowServerId>),
 
     SetWindowFrames(
@@ -1504,6 +1505,13 @@ impl State {
                 if !event::post_command_w(self.pid) {
                     warn!(pid = self.pid, ?window_server_id, "Failed to post Command-W");
                 }
+            }
+            Request::FinishNativeResize(wid, session, txid) => {
+                let frame = self.window(wid).and_then(|w| w.elem.frame()).ok();
+                if let Some(frame) = frame {
+                    self.window_mut(wid)?.last_known_frame = frame;
+                }
+                self.send_event(Event::NativeResizeFinished(wid, session, txid, frame));
             }
             Request::RefreshWindowInventory(token) => {
                 self.refresh_window_inventory(token)?;

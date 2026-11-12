@@ -2221,10 +2221,9 @@ fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
         CGPoint::new(floating_frame.origin.x + 10., floating_frame.origin.y + 10.),
         floating_frame.size,
     );
-    reactor.drag_manager.native_down = Some((
-        floating_wid,
-        floating_frame,
-        CGPoint::new(floating_frame.origin.x + 20., floating_frame.origin.y + 10.),
+    reactor.drag_manager.native_down = Some(CGPoint::new(
+        floating_frame.origin.x + 20.,
+        floating_frame.origin.y + 10.,
     ));
     crate::sys::window_server::set_cursor_location_override(Some(CGPoint::new(
         floating_frame.origin.x + 30.,

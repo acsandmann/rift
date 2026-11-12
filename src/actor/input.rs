@@ -105,7 +105,6 @@ pub struct Input {
     mouse_focus_publisher: reactor::MouseFocusPublisher,
     drag_motion_publisher: crate::actor::drag::DragMotionPublisher,
     native_motion_active: Arc<AtomicBool>,
-    native_press: Cell<Option<CGPoint>>,
     gesture_control: super::gesture::Control,
     gesture_filter: RefCell<gesture::Filter>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
@@ -370,7 +369,6 @@ impl Input {
             mouse_focus_publisher: reactor::MouseFocusPublisher::default(),
             drag_motion_publisher: crate::actor::drag::DragMotionPublisher::default(),
             native_motion_active,
-            native_press: Cell::new(None),
             gesture_control,
             gesture_filter: RefCell::new(gesture::Filter::default()),
             tap: RefCell::new(None),
@@ -929,11 +927,6 @@ impl Input {
                 let point = self
                     .maybe_horizontal_mouse_warp(event)
                     .unwrap_or_else(|| CGEvent::location(Some(event)));
-                if button == crate::actor::drag::MouseButton::Left
-                    && let Some(point) = self.native_press.take()
-                {
-                    self.events_tx.send(Event::NativeDrag { point });
-                }
                 let captured = self.state.borrow().captured_button == Some(button);
                 if captured || self.native_motion_active.load(Ordering::Acquire) {
                     let publisher = &self.drag_motion_publisher;
@@ -944,7 +937,6 @@ impl Input {
                 !captured
             }
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
-                self.native_press.set(None);
                 let mut state = self.state.borrow_mut();
                 if state.hide_count > 0 {
                     state.show_mouse();
@@ -987,14 +979,14 @@ impl Input {
                     return false;
                 }
                 if button == crate::actor::drag::MouseButton::Left {
-                    self.native_press.set(Some(CGEvent::location(Some(event))));
+                    // Enqueue before the application can change its geometry.
+                    self.events_tx.send(Event::NativeMouseDown {
+                        point: CGEvent::location(Some(event)),
+                    });
                 }
                 true
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
-                if event_type == CGEventType::LeftMouseUp {
-                    self.native_press.set(None);
-                }
                 if event_type == CGEventType::LeftMouseUp && self.mission_control_active.get() {
                     self.send_overview(super::mission_control::Event::Input(
                         super::mission_control::Input::PointerUp(CGEvent::location(Some(event))),
@@ -2089,7 +2081,7 @@ mod tests {
     }
 
     #[test]
-    fn native_clicks_do_not_wake_reactor_and_drag_start_is_sent_once() {
+    fn native_press_precedes_geometry_and_motion_does_not_repeat_it() {
         let (input, _, mut events) = input();
         let press = CGPoint::new(100., 200.);
         let event = CGEvent::new_mouse_event(
@@ -2101,14 +2093,12 @@ mod tests {
         .unwrap();
         CGEvent::set_flags(Some(&event), CGEventFlags::empty());
         assert!(input.on_event(CGEventType::LeftMouseDown, &event, None));
-        assert!(events.try_recv().is_err());
+        assert!(matches!(events.try_recv().unwrap().1,
+            Event::NativeMouseDown { point } if point == press));
         CGEvent::set_location(Some(&event), CGPoint::new(110., 200.));
         for _ in 0..2 {
             assert!(input.on_event(CGEventType::LeftMouseDragged, &event, None));
         }
-        assert!(
-            matches!(events.try_recv().unwrap().1, Event::NativeDrag { point } if point == press)
-        );
         assert!(events.try_recv().is_err());
     }
 

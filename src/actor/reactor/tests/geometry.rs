@@ -221,7 +221,7 @@ fn instant_layout_replaces_a_queued_animation_without_stranding_its_target() {
 
 #[test]
 fn only_verified_native_resizing_changes_layout_dimensions() {
-    for interaction in ["unrelated", "resize", "custom titlebar move"] {
+    for interaction in ["unrelated", "elsewhere", "resize", "custom titlebar move"] {
         let (mut apps, mut r, _, space) = scrolling_displays(shared_settings());
         let screen = shared_right();
         let wid = WindowId::new(1, 1);
@@ -236,10 +236,13 @@ fn only_verified_native_resizing_changes_layout_dimensions() {
         r.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space))], false, &[]);
         window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
         let frame = apps.windows[&wid].frame;
-        let resize = interaction == "resize";
-        let press = if resize { frame.max() } else { frame.mid() };
+        let resize = matches!(interaction, "resize" | "elsewhere");
+        let mut press = if resize { frame.max() } else { frame.mid() };
+        if interaction == "elsewhere" {
+            press.y += 50.;
+        }
         if interaction != "unrelated" {
-            r.drag_manager.native_down = Some((wid, frame, press));
+            r.handle_event(Event::NativeMouseDown { point: press });
         }
         for delta in [40., 80.] {
             let moved = CGRect::new(
@@ -261,7 +264,7 @@ fn only_verified_native_resizing_changes_layout_dimensions() {
             apps.simulate_until_quiet(&mut r);
             assert_eq!(
                 test_layout(&mut r, space, screen)[0].1.size.width,
-                if resize {
+                if interaction == "resize" {
                     moved.size.width
                 } else {
                     frame.size.width
@@ -272,4 +275,92 @@ fn only_verified_native_resizing_changes_layout_dimensions() {
         window_server::set_cursor_location_override(None);
         window_server::set_window_spaces_override(wsid, None);
     }
+}
+
+#[test]
+fn inward_resize_uses_pre_change_observation_before_drag_motion() {
+    let (mut apps, mut r, space, _) = scrolling_displays(shared_settings());
+    apps.simulate_until_quiet(&mut r);
+    let wid = WindowId::new(1, 1);
+    let frame = apps.windows[&wid].frame;
+    // Input enqueues this press before forwarding it to the application.
+    r.handle_event(Event::NativeMouseDown { point: frame.max() });
+    let mut resized = frame;
+    resized.size.width -= 180.;
+    window_server::set_cursor_location_override(Some(resized.max()));
+    apps.windows.get_mut(&wid).unwrap().frame = resized;
+    // AX arrives before the first physical drag event. The original press is
+    // now outside the window; neither hit-testing it nor saving this frame works.
+    r.handle_event(Event::WindowFrameChanged(
+        wid,
+        resized,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert_eq!(
+        test_layout(&mut r, space, shared_left())[0].1.size.width,
+        resized.size.width
+    );
+    window_server::set_cursor_location_override(None);
+}
+
+#[test]
+fn native_resize_commits_release_frame_before_delayed_ax_after_transfer() {
+    let (mut apps, mut r, _, space) = scrolling_displays(shared_settings());
+    let wid = WindowId::new(1, 1);
+    r.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: Some(1),
+        },
+    )));
+    apps.simulate_until_quiet(&mut r);
+    let wsid = r.test_window_server_id(wid);
+    window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
+    let frame = apps.windows[&wid].frame;
+    r.drag_manager.native_down = Some(frame.max());
+    let mut intermediate = frame;
+    intermediate.size.width -= 40.;
+    window_server::set_cursor_location_override(Some(intermediate.max()));
+    apps.windows.get_mut(&wid).unwrap().frame = intermediate;
+    r.handle_event(Event::WindowFrameChanged(
+        wid,
+        intermediate,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    let old_txid = r.transaction_manager.get_last_sent_txid(wsid);
+    let mut final_frame = frame;
+    final_frame.size.width -= 90.;
+    apps.windows.get_mut(&wid).unwrap().frame = final_frame;
+    r.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+    // A queued observation may be delivered before the authoritative release read.
+    r.handle_event(Event::WindowFrameChanged(
+        wid,
+        intermediate,
+        Some(old_txid),
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+    apps.simulate_until_quiet(&mut r);
+    // And duplicate/reordered native notifications may follow it.
+    for observed in [final_frame, intermediate, final_frame] {
+        r.handle_event(Event::WindowFrameChanged(
+            wid,
+            observed,
+            Some(old_txid),
+            Requested(false),
+            Some(MouseState::Up),
+        ));
+        apps.simulate_until_quiet(&mut r);
+    }
+    assert_eq!(
+        test_layout(&mut r, space, shared_right())[0].1.size.width,
+        final_frame.size.width
+    );
+    assert_eq!(apps.windows[&wid].frame.size.width, final_frame.size.width);
+    window_server::set_cursor_location_override(None);
+    window_server::set_window_spaces_override(wsid, None);
 }

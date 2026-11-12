@@ -43,7 +43,7 @@ impl AppManager {
 /// Manages drag operations and window swapping
 pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
-    pub native_down: Option<(WindowId, CGRect, objc2_core_foundation::CGPoint)>,
+    pub native_down: Option<objc2_core_foundation::CGPoint>,
     pub native_motion_active: Arc<AtomicBool>,
     pub externally_controlled_window: Option<WindowId>,
     pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
@@ -53,19 +53,25 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    /// Native intent belongs to the pressed window, and resize intent starts at
-    /// its border. A button held elsewhere cannot authorize layout mutations.
+    /// AX identifies the window. Validate its first change against the press
+    /// and the observation preceding that change, before starting a drag session.
     pub fn native_geometry_intent(
         &self,
         wid: WindowId,
+        anchor: CGRect,
         new: CGRect,
     ) -> Option<crate::actor::drag::DragKind> {
         use crate::actor::drag::DragKind;
         if let Some(source) = self.actor.source() {
             return self.actor.kind().filter(|_| source.window == wid);
         }
-        let (window, anchor, point) = self.native_down?;
-        if window != wid {
+        let point = self.native_down?;
+        // A press elsewhere cannot authorize this window's geometry change.
+        if point.x < anchor.origin.x - 8.0
+            || point.x > anchor.max().x + 8.0
+            || point.y < anchor.origin.y - 8.0
+            || point.y > anchor.max().y + 8.0
+        {
             return None;
         }
         let pointer = crate::sys::event::current_cursor_location().ok()?;
@@ -107,9 +113,6 @@ impl DragManager {
 
     /// A window leaving Rift's control can no longer be dragged by it.
     pub fn forget_window(&mut self, wid: WindowId) {
-        if self.native_down.is_some_and(|(window, _, _)| window == wid) {
-            self.native_down = None;
-        }
         if self.actor.window_removed(wid) && self.externally_controlled_window == Some(wid) {
             self.externally_controlled_window = None;
         }

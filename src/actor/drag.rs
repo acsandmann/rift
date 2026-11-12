@@ -176,6 +176,9 @@ impl DragActor {
         }
     }
 
+    /// Fence asynchronous completion against a replacement interaction.
+    pub fn session_id(&self) -> u64 { self.next_session_id.wrapping_sub(1) }
+
     pub fn source(&self) -> Option<DragSource> { self.session().map(|session| session.source) }
 
     pub fn target(&self) -> Option<DropTarget> { self.session()?.target.validated() }

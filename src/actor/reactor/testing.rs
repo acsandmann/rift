@@ -609,6 +609,10 @@ impl Apps {
                 Request::ApplicationGloballyActivated(pid) => {
                     events.push(Event::ApplicationActivated(pid, Quiet::No));
                 }
+                Request::FinishNativeResize(wid, session, txid) => {
+                    let frame = self.windows.get(&wid).map(|w| w.frame);
+                    events.push(Event::NativeResizeFinished(wid, session, txid, frame));
+                }
                 Request::SetWindowFrames(frames, mode, _, _) => {
                     for (wid, frame, txid) in frames {
                         let window = self.windows.entry(wid).or_default();
