@@ -11398,6 +11398,16 @@ fn overview_activation_resolves_scrolled_target_before_native_focus() {
             (workspace, Some(target), stamp)
         );
         assert_eq!(prepared.frames.len(), if switch_workspace { 1 } else { 3 });
+        assert!(raise_rx.try_recv().is_err(), "preparation must not activate an app during the zoom");
+        // Focus observations for the old viewport can arrive while AX is still
+        // applying the covered placements. They must not restore the old focus
+        // and schedule a second visible scroll after the overview exits.
+        reactor.handle_event(Event::WindowServerFocusChanged(WindowId::new(1, 1), space));
+        assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(target));
+        // The overview host is gone before the final native focus is requested.
+        reactor.handle_event(Event::OverviewSelectWorkspace {
+            display: display.clone(), workspace, window: Some(target), transition: None,
+        });
         let (_, raise_manager::Event::RaiseRequest(request)) = raise_rx.try_recv().unwrap() else {
             panic!("overview activation must request native focus");
         };
@@ -11406,6 +11416,11 @@ fn overview_activation_resolves_scrolled_target_before_native_focus() {
             Some(target),
             "stale native visibility must not replace the explicitly selected window"
         );
+        reactor.handle_event(Event::RaiseCompleted { window_id: target, sequence_id: 42 });
+        assert!(reactor.overview_focus.is_none());
+        assert!(animation_rx.commands.try_iter().all(|message| !matches!(message,
+            super::animation::Message::Camera(_) | super::animation::Message::Replace(_)
+        )), "late focus completion must place the final viewport without another scroll");
         let (reply, mut snapshots) = actor::channel();
         reactor.handle_loop_event(Event::Query(query::QueryRequest::Overview {
             shared: true,

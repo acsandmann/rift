@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cgs::compositor::{CgsWindow, LayerTransaction, WindowSurface, release_layer_tree};
-use objc2::AnyThread;
+use objc2::{AnyThread, DeclaredClass, define_class};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2_app_kit::{
     NSColor, NSCursor, NSFont, NSImage, NSRunningApplication, NSScreen, NSWorkspace,
 };
@@ -16,8 +16,8 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{
     CGColor, CGDisplayBounds, CGImage, CGPath, CGPreflightScreenCaptureAccess,
 };
-use objc2_foundation::MainThreadMarker;
-use objc2_quartz_core::{CALayer, CATextLayer};
+use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSNumber, NSString, NSValue};
+use objc2_quartz_core::{CALayer, CATextLayer, CABasicAnimation, CAAnimation, CAAnimationDelegate, CAMediaTiming, CATransform3D, NSValueCATransform3DAdditions};
 
 use crate::actor::app::WindowId;
 use crate::actor::mission_control::Input;
@@ -30,6 +30,8 @@ const MIN_ZOOM: f64 = 0.08;
 const MAX_ZOOM: f64 = 2.0;
 const OVERVIEW_ZOOM: f64 = 0.34;
 const EXIT_MOTION: f64 = 0.28;
+const HANDOFF_TIMEOUT: f64 = 1.;
+const REVEAL_MOTION: f64 = 0.08;
 const CAPTURE_PIXELS: usize = 96 * 1024 * 1024 / 4;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
@@ -62,6 +64,14 @@ impl Camera {
             (p.x - self.position.x) * self.zoom,
             (p.y - self.position.y) * self.zoom,
         )
+    }
+
+    fn transform(self) -> CATransform3D {
+        CATransform3D::new_affine_transform(CGAffineTransform {
+            a: self.zoom, b: 0., c: 0., d: self.zoom,
+            tx: -self.position.x * self.zoom,
+            ty: -self.position.y * self.zoom,
+        })
     }
 
     fn unproject(self, p: CGPoint) -> CGPoint {
@@ -100,9 +110,21 @@ impl Camera {
 
 #[derive(Clone, Copy)]
 enum MotionCurve {
-    Settle,
     Enter,
     Smooth,
+}
+
+define_class! {
+    #[unsafe(super(NSObject))]
+    #[ivars = Arc<AtomicBool>]
+    struct CameraCompletion;
+    unsafe impl NSObjectProtocol for CameraCompletion {}
+    unsafe impl CAAnimationDelegate for CameraCompletion {
+        #[unsafe(method(animationDidStop:finished:))]
+        fn stopped(&self, _animation: &CAAnimation, finished: bool) {
+            if finished { self.ivars().store(true, Ordering::Release); }
+        }
+    }
 }
 
 struct Motion {
@@ -111,13 +133,14 @@ struct Motion {
     start: Instant,
     duration: f64,
     curve: MotionCurve,
+    submitted: bool,
+    completed: Arc<AtomicBool>,
 }
 impl Motion {
     fn sample(&self, now: Instant) -> (Camera, bool) {
         let t = (now.duration_since(self.start).as_secs_f64() / self.duration).min(1.);
         // Entry settles quickly; focus accelerates into the window without a first-frame jump.
         let t = match self.curve {
-            MotionCurve::Settle => (1. - (-6. * t).exp()) / (1. - (-6.0_f64).exp()),
             // A direct initial response with a zero-velocity landing, without bounce.
             MotionCurve::Enter => 1. - (1. - t).powi(3),
             MotionCurve::Smooth => t * t * (3. - 2. * t),
@@ -166,6 +189,18 @@ fn layer(frame: CGRect, scale: f64) -> Retained<CALayer> {
     l.setContentsScale(scale);
     l
 }
+fn fade(layer: &CALayer, to: f32) {
+    let from = unsafe { layer.presentationLayer() }.map_or(layer.opacity(), |p| p.opacity());
+    let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("opacity")));
+    unsafe {
+        animation.setFromValue(Some(&NSNumber::new_f32(from)));
+        animation.setToValue(Some(&NSNumber::new_f32(to)));
+    }
+    animation.setDuration(REVEAL_MOTION);
+    layer.setOpacity(to);
+    layer.addAnimation_forKey(&animation, Some(&NSString::from_str("reveal")));
+}
+
 fn set_text(l: &CATextLayer, text: &str) {
     let text = CFString::from_str(text);
     unsafe {
@@ -315,16 +350,17 @@ impl SceneWindow {
         icon: Option<Retained<CGImage>>,
     ) -> Self {
         let shadow = layer(CGRect::ZERO, scale);
-        shadow.setCornerRadius(8.);
+        shadow.setCornerRadius(10.);
         shadow.setBackgroundColor(Some(&color(0.10, 0.105, 0.115, 1.)));
         shadow.setShadowColor(Some(&color(0., 0., 0., 1.)));
         shadow.setShadowOpacity(0.28);
-        shadow.setShadowRadius(12.);
-        shadow.setShadowOffset(CGSize::new(0., 4.));
+        shadow.setShadowRadius(18.);
+        shadow.setShadowOffset(CGSize::new(0., 10.));
         shadow.setZPosition(0.5);
         root.addSublayer(&shadow);
         let preview = cgs::compositor::preview::PreviewLayer::new();
         preview.layer().setMasksToBounds(true);
+        preview.layer().setCornerRadius(10.);
         shadow.addSublayer(preview.layer());
         Self {
             data,
@@ -355,17 +391,18 @@ impl SceneWindow {
     fn detach(&self) { self.shadow.removeFromSuperlayer(); }
 
     fn apply_geometry(&self) {
+        if !self.shadow.transform().is_identity() {
+            self.shadow.setTransform(CATransform3D::new_scale(1., 1., 1.));
+        }
         let bounds = CGRect::new(CGPoint::ZERO, self.world.size);
         if self.preview.layer().bounds() != bounds {
             let path = unsafe { CGPath::with_rounded_rect(bounds, 10., 10., std::ptr::null()) };
             self.shadow.setShadowPath(Some(&path));
             self.preview.layer().setFrame(bounds);
         }
-        self.shadow.setFrame(self.world);
-        self.shadow.setCornerRadius(10.);
-        self.shadow.setShadowRadius(18.);
-        self.shadow.setShadowOffset(CGSize::new(0., 10.));
-        self.preview.layer().setCornerRadius(10.);
+        if self.shadow.frame() != self.world {
+            self.shadow.setFrame(self.world);
+        }
     }
 }
 
@@ -490,6 +527,7 @@ struct DisplayOverview {
     policy_dirty: bool,
     capture_dirty: Arc<AtomicBool>,
     capture_pixels: usize,
+    refresh_rate: f32,
     dragged: Option<WindowId>,
     applied: Option<(Camera, f32)>,
     // CAContext must detach before its CGS window is released.
@@ -542,11 +580,11 @@ impl DisplayOverview {
         pictures.setAnchorPoint(CGPoint::ZERO);
         root.addSublayer(&pictures);
         let focus_ring = layer(CGRect::ZERO, scale);
-        focus_ring.setZPosition(1.5);
+        focus_ring.setZPosition(2.);
         focus_ring.setBorderWidth(2.5);
         focus_ring.setBorderColor(Some(&NSColor::controlAccentColor().CGColor()));
         focus_ring.setHidden(true);
-        root.addSublayer(&focus_ring);
+        pictures.addSublayer(&focus_ring);
         let window = CgsWindow::new_compositor(bounds, 0.).ok()?;
         window.set_resolution(scale).ok()?;
         window.set_level(19).ok()?;
@@ -637,6 +675,7 @@ impl DisplayOverview {
             policy_dirty: true,
             capture_dirty: Arc::new(AtomicBool::new(true)),
             capture_pixels: CAPTURE_PIXELS,
+            refresh_rate: screen.maximumFramesPerSecond().max(1) as f32,
             dragged: None,
             applied: None,
             _surface: surface,
@@ -848,7 +887,9 @@ impl DisplayOverview {
     }
 
     fn apply_camera(&mut self, decorations: f32) {
-        if self.applied == Some((self.camera, decorations)) {
+        if self.applied == Some((self.camera, decorations))
+            && self.motion.as_ref().is_none_or(|motion| motion.submitted)
+        {
             return;
         }
         let previous = self.applied.replace((self.camera, decorations));
@@ -856,19 +897,47 @@ impl DisplayOverview {
         let geometry = previous.is_none();
         let zoom_changed = previous.is_none_or(|(camera, _)| camera.zoom != zoom);
         let opacity_changed = previous.is_none_or(|(_, opacity)| opacity != decorations);
-        self.pictures.setPosition(CGPoint::new(
-            -self.camera.position.x * zoom,
-            -self.camera.position.y * zoom,
-        ));
-        if zoom_changed {
-            self.pictures.setAffineTransform(CGAffineTransform {
-                a: zoom,
-                b: 0.,
-                c: 0.,
-                d: zoom,
-                tx: 0.,
-                ty: 0.,
-            });
+        let key = NSString::from_str("camera");
+        let submitting = self.motion.as_ref().is_some_and(|motion| !motion.submitted);
+        if let Some(motion) = &mut self.motion {
+            if !motion.submitted {
+                motion.submitted = true;
+                motion.start = Instant::now();
+                // Both curves are cubic polynomials. Linear time control points
+                // reproduce the camera math exactly without sampled keyframes.
+                let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform")));
+                let from = unsafe { NSValue::valueWithCATransform3D(motion.from.transform()) };
+                let to = unsafe { NSValue::valueWithCATransform3D(motion.to.transform()) };
+                unsafe {
+                    animation.setFromValue(Some(&from));
+                    animation.setToValue(Some(&to));
+                }
+                animation.setTimingFunction(Some(&objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
+                    1. / 3., match motion.curve { MotionCurve::Enter => 1., MotionCurve::Smooth => 0. },
+                    2. / 3., 1.,
+                )));
+                animation.setDuration(motion.duration);
+                if animation.respondsToSelector(objc2::sel!(setPreferredFrameRateRange:)) {
+                    animation.setPreferredFrameRateRange(objc2_quartz_core::CAFrameRateRange::new(
+                        30_f32.min(self.refresh_rate), self.refresh_rate, self.refresh_rate,
+                    ));
+                }
+                let completion = CameraCompletion::alloc().set_ivars(motion.completed.clone());
+                let completion: Retained<CameraCompletion> = unsafe { objc2::msg_send![super(completion), init] };
+                animation.setDelegate(Some(ProtocolObject::from_ref(&*completion)));
+                self.pictures.setPosition(CGPoint::ZERO);
+                self.pictures.setTransform(motion.to.transform());
+                self.pictures.addAnimation_forKey(&animation, Some(&key));
+            }
+        } else {
+            self.pictures.removeAnimationForKey(&key);
+            self.pictures.setPosition(CGPoint::ZERO);
+            self.pictures.setTransform(self.camera.transform());
+        }
+        // Once exit chrome has faded, the compositor needs no decoration,
+        // percentage-text, culling, or geometry writes on subsequent ticks.
+        if !geometry && !submitting && !opacity_changed && decorations == 0. && self.motion.is_some() {
+            return;
         }
         let factor = (zoom / OVERVIEW_ZOOM).sqrt().clamp(0.75, 1.1);
         let viewport = CGRect::new(CGPoint::ZERO, self.bounds.size);
@@ -904,7 +973,9 @@ impl DisplayOverview {
             }
         }
         for w in &self.windows {
-            let visible = intersects(self.camera.frame(w.world), viewport);
+            let visible = intersects(self.camera.frame(w.world), viewport)
+                || self.motion.as_ref().is_some_and(|m| intersects(
+                    union(m.from.frame(w.world), m.to.frame(w.world)), viewport));
             let hidden = !visible || self.dragged == Some(w.data.id);
             if w.shadow.isHidden() != hidden {
                 w.shadow.setHidden(hidden);
@@ -939,9 +1010,9 @@ impl DisplayOverview {
             && selected.is_some();
         self.focus_ring.setHidden(!visible);
         if let Some(w) = selected {
-            let camera = self.applied.map_or(self.camera, |(camera, _)| camera);
-            self.focus_ring.setFrame(camera.frame(w.world));
-            self.focus_ring.setCornerRadius(10. * camera.zoom);
+            self.focus_ring.setFrame(w.world);
+            self.focus_ring.setBorderWidth(2.5 / self.camera.zoom);
+            self.focus_ring.setCornerRadius(10.);
         }
         self.focus_ring.setOpacity(opacity);
     }
@@ -954,12 +1025,17 @@ impl DisplayOverview {
     }
 
     fn animate(&mut self, to: Camera, duration: f64) {
+        self.sample(Instant::now());
+        self.pictures.removeAnimationForKey(&NSString::from_str("camera"));
+        self.pictures.setTransform(self.camera.transform());
         self.motion = Some(Motion {
             from: self.camera,
             to,
             start: Instant::now(),
             duration: duration.max(0.001),
-            curve: MotionCurve::Settle,
+            curve: MotionCurve::Enter,
+            submitted: false,
+            completed: Arc::new(AtomicBool::new(false)),
         });
         self.request_camera_frame();
     }
@@ -967,8 +1043,14 @@ impl DisplayOverview {
     fn sample(&mut self, now: Instant) {
         if let Some(motion) = &self.motion {
             let (camera, done) = motion.sample(now);
-            self.camera = camera;
-            if done {
+            self.camera = unsafe { self.pictures.presentationLayer() }
+                .filter(|_| motion.submitted)
+                .map(|layer| {
+                    let t = layer.transform();
+                    Camera { zoom: t.m11, position: CGPoint::new(-t.m41 / t.m11, -t.m42 / t.m11) }
+                }).unwrap_or(camera);
+            if motion.completed.load(Ordering::Acquire) || (!motion.submitted && done) {
+                self.camera = motion.to;
                 self.motion = None;
                 self.policy_dirty = true;
             }
@@ -1043,6 +1125,14 @@ impl DisplayOverview {
             || self.windows.iter().zip(&self.sources).any(|(w, s)| {
                 w.data.info.sys_id.unwrap().as_u32() != s.window_id || w.data.id.pid != s.process_id
             });
+        // Interactive camera updates can arrive at 120+ Hz. Reuse the current
+        // capture sizes until input settles instead of reconfiguring SCStreams
+        // for every fractional zoom. The existing input clock covers this tail.
+        if !immediate && !inventory_changed && self.dragged.is_none()
+            && self.camera_input.elapsed() < Duration::from_millis(100)
+        {
+            return;
+        }
         let weight = |w: &SceneWindow| {
             if intersects(camera.frame(w.world), viewport) || self.dragged == Some(w.data.id) {
                 if selected == Some(w.data.id) { 4 } else { 2 }
@@ -1363,7 +1453,6 @@ enum Phase {
 
 struct ExitScene {
     target: OverviewTarget,
-    geometry: Vec<(WindowId, CGRect, CGRect)>,
     outgoing: Vec<WindowId>,
     start: Instant,
     duration: f64,
@@ -1378,6 +1467,7 @@ pub struct OverviewSession {
     drop: Option<OverviewDrop>,
     phase: Phase,
     exit: Option<ExitScene>,
+    reveal: Option<Instant>,
     show_empty: bool,
     shared: bool,
     duration: f64,
@@ -1447,6 +1537,7 @@ impl OverviewSession {
             drop: None,
             phase: Phase::Waiting(Instant::now()),
             exit: None,
+            reveal: None,
             wake: None,
             previews: false,
             show_empty: settings.show_empty_workspaces,
@@ -1495,6 +1586,14 @@ impl OverviewSession {
     }
 
     pub(crate) fn retain_previews(&mut self, cache: &mut Option<PreviewCache>) {
+        // Remove the cover before stopping producers or releasing cached frames.
+        // Capture cleanup must not extend the visible close transition.
+        for d in &self.displays {
+            if let Some(clock) = &d.clock { clock.set_paused(true); }
+            if let Err(error) = d._window.order_out() {
+                tracing::warn!(?error, "Failed to hide overview host");
+            }
+        }
         let cache = cache.get_or_insert_with(Default::default);
         cache.captures.clear();
         for d in &mut self.displays {
@@ -1815,7 +1914,10 @@ impl OverviewSession {
         } else {
             Camera {
                 zoom: 1.,
-                position: workspace.map_or(CGPoint::ZERO, |ws| d.workspace_origin(ws.index)),
+                position: chosen.and_then(|w| w.data.layout_frame.map(|frame| CGPoint::new(
+                    w.world.origin.x - frame.origin.x + d.bounds.origin.x,
+                    w.world.origin.y - frame.origin.y + d.bounds.origin.y,
+                ))).unwrap_or_else(|| workspace.map_or(CGPoint::ZERO, |ws| d.workspace_origin(ws.index))),
             }
         };
         let action = if !dismiss {
@@ -1847,6 +1949,8 @@ impl OverviewSession {
         if !self.needs_handoff() {
             return action.or(Some(OverviewAction::Dismiss));
         }
+        self.reveal = None;
+        self.pressed = None;
         let window = if dismiss { None } else { self.selection.window };
         for (index, d) in self.displays.iter_mut().enumerate() {
             // Dismiss restores desktop focus; activation preserves the chosen preview.
@@ -1862,8 +1966,16 @@ impl OverviewSession {
             start: now,
             target_ready: dismiss,
         };
-        // Focus/AX work runs behind the animation, never ahead of its first frame.
-        self.animate_exit(target);
+        // Activation first resolves the authoritative scrolling viewport. Keep
+        // the presented overview stable until its geometry reply arrives.
+        if dismiss {
+            self.animate_exit(target);
+        } else {
+            for d in &mut self.displays {
+                d.apply_camera(1.);
+                d.request_camera_frame();
+            }
+        }
         action
     }
 
@@ -1883,22 +1995,17 @@ impl OverviewSession {
         }
         let _tx = LayerTransaction::disabled().flush_on_commit();
         let d = &self.displays[self.active];
-        let target = d
-            .windows
-            .iter()
-            .find(|w| Some(w.data.id) == prepared.window)
-            .and_then(|w| {
-                let ws = d.workspaces.iter().find(|ws| ws.workspace_id == w.workspace)?;
-                let frame = prepared.frames.iter().find(|(id, _)| *id == w.data.id)?.1;
-                (ws.display_uuid.as_deref() == Some(&d.info.display_uuid)).then(|| Camera {
-                    zoom: 1.,
-                    position: CGPoint::new(
-                        w.world.origin.x - frame.origin.x + d.bounds.origin.x,
-                        w.world.origin.y - frame.origin.y + d.bounds.origin.y,
-                    ),
-                })
-            })
-            .unwrap_or_else(|| d.motion.as_ref().map_or(d.camera, |m| m.to));
+        // Resolve one authoritative destination before submitting the close.
+        // Scrolling translates the strip; its selected window anchors the camera.
+        let target = d.windows.iter().find(|w| Some(w.data.id) == prepared.window)
+            .filter(|w| d.workspaces.iter().any(|ws| ws.workspace_id == w.workspace
+                && ws.display_uuid.as_deref() == Some(&d.info.display_uuid)))
+            .and_then(|w| prepared.frames.iter().find(|(id, _)| *id == w.data.id)
+                .map(|(_, frame)| Camera { zoom: 1., position: CGPoint::new(
+                    w.world.origin.x - frame.origin.x + d.bounds.origin.x,
+                    w.world.origin.y - frame.origin.y + d.bounds.origin.y,
+                ) }))
+            .unwrap_or_else(|| d.desktop_camera());
         if let Phase::Exiting { target_ready, window, .. } = &mut self.phase {
             *target_ready = true;
             if prepared.window.is_some_and(|id| !prepared.frames.iter().any(|(w, _)| *w == id)) {
@@ -1906,21 +2013,16 @@ impl OverviewSession {
             }
         }
         let now = Instant::now();
-        let remaining = (EXIT_MOTION - now.duration_since(prepared.stamp).as_secs_f64()).max(0.08);
+        let remaining = EXIT_MOTION;
+        if let Phase::Exiting { start, .. } = &mut self.phase { *start = now; }
+        self.animate_exit(target);
         let d = &mut self.displays[self.active];
-        if d.motion.as_ref().map_or(d.camera, |m| m.to) != target {
-            // Correct from the currently displayed position, without restarting the whole exit.
-            d.sample(now);
-            d.animate(target, remaining);
-            d.motion.as_mut().unwrap().curve = MotionCurve::Smooth;
-            d.policy_dirty = true;
-        }
         let local_workspace = d
             .workspaces
             .iter()
             .find(|ws| ws.workspace_id == prepared.workspace)
             .is_some_and(|ws| ws.display_uuid.as_deref() == Some(&d.info.display_uuid));
-        let geometry = prepared
+        let geometry: Vec<_> = prepared
             .frames
             .iter()
             .filter(|_| local_workspace)
@@ -1934,6 +2036,28 @@ impl OverviewSession {
                 Some((id, w.world, to))
             })
             .collect();
+        for &(id, from, to) in &geometry {
+            if from == to { continue; }
+            let Some(w) = d.windows.iter_mut().find(|w| w.data.id == id) else { continue; };
+            let transform = CATransform3D::new_affine_transform(CGAffineTransform {
+                a: to.size.width / from.size.width.max(1.), b: 0., c: 0.,
+                d: to.size.height / from.size.height.max(1.),
+                tx: to.mid().x - from.mid().x, ty: to.mid().y - from.mid().y,
+            });
+            let values = unsafe { [NSValue::valueWithCATransform3D(w.shadow.transform()),
+                NSValue::valueWithCATransform3D(transform)] };
+            let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform")));
+            unsafe {
+                animation.setFromValue(Some(&values[0]));
+                animation.setToValue(Some(&values[1]));
+            }
+            animation.setDuration(remaining);
+            animation.setTimingFunction(Some(&objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(0.333333, 0., 0.666667, 1.)));
+            // Keep persistent scene coordinates intact; only the exit layer
+            // moves. Caching the reconciled frame would shift the next opening.
+            w.shadow.setTransform(transform);
+            w.shadow.addAnimation_forKey(&animation, Some(&NSString::from_str("exit")));
+        }
         let outgoing = d
             .windows
             .iter()
@@ -1949,7 +2073,6 @@ impl OverviewSession {
             .collect();
         self.exit = Some(ExitScene {
             target: prepared,
-            geometry,
             outgoing,
             start: now,
             duration: remaining,
@@ -1971,6 +2094,8 @@ impl OverviewSession {
             motion.start = now;
             motion.curve = MotionCurve::Smooth;
             d.policy_dirty = true;
+            d.apply_camera(d.applied.map_or(1., |(_, opacity)| opacity));
+            d.focus_ring.setHidden(true);
         }
     }
 
@@ -1989,10 +2114,23 @@ impl OverviewSession {
         }
         let now = Instant::now();
         self.exit = None;
+        let revealing = self.reveal.take().is_some();
         for d in &mut self.displays {
+            if revealing {
+                fade(&d.root, 1.);
+            }
             d.sample(now);
             d.motion = None;
+            d.applied = None;
             d.background.setOpacity(1.);
+            for w in &mut d.windows {
+                if let Some(presentation) = unsafe { w.shadow.presentationLayer() } {
+                    w.world = presentation.frame();
+                }
+                w.shadow.removeAnimationForKey(&NSString::from_str("exit"));
+                w.apply_geometry();
+            }
+            d.apply_camera(1.);
         }
         self.phase = Phase::Overview;
     }
@@ -2089,7 +2227,13 @@ impl OverviewSession {
         if self.displays.is_empty() {
             return Some(OverviewAction::Dismiss);
         }
-        if matches!(self.phase, Phase::Exiting { .. }) && matches!(input, Input::Move(_)) {
+        // Releases and repeated activation keys belong to the closing gesture;
+        // they must not interrupt the exit or restart its handoff deadline.
+        if matches!(self.phase, Phase::Exiting { .. })
+            && matches!(input, Input::Move(_) | Input::PointerDown(_) | Input::PointerDrag(_)
+                | Input::PointerUp(_) | Input::Click(_) | Input::Activate | Input::Dismiss
+                | Input::EndPan(_))
+        {
             return None;
         }
         let transaction = LayerTransaction::disabled();
@@ -2531,6 +2675,11 @@ impl OverviewSession {
             let d = &mut self.displays[self.active];
             d.request_camera_frame();
         }
+        for d in &mut self.displays {
+            if d.motion.as_ref().is_some_and(|motion| !motion.submitted) {
+                d.apply_camera(d.applied.map_or(1., |(_, opacity)| opacity));
+            }
+        }
         None
     }
 
@@ -2633,11 +2782,13 @@ impl OverviewSession {
     }
 
     pub(crate) fn toggle(&mut self) {
+        let _tx = LayerTransaction::disabled().flush_on_commit();
         if matches!(self.phase, Phase::Exiting { .. }) {
             self.interrupt();
             for d in &mut self.displays {
                 d.animate(d.home, self.duration);
                 d.motion.as_mut().unwrap().curve = MotionCurve::Enter;
+                d.apply_camera(d.applied.map_or(1., |(_, opacity)| opacity));
             }
             self.phase = Phase::Entering(Instant::now());
         } else {
@@ -2732,7 +2883,7 @@ impl OverviewSession {
         }) {
             return;
         }
-        let _tx = LayerTransaction::disabled().flush_on_commit();
+        let _tx = LayerTransaction::disabled();
         let now = Instant::now();
         if let Phase::Waiting(start) = self.phase {
             let ready = self.displays.iter().all(|d| {
@@ -2763,6 +2914,7 @@ impl OverviewSession {
             Phase::Entering(start) if self.fade_duration > 0. => {
                 (now.duration_since(start).as_secs_f64() / self.fade_duration).min(1.) as f32
             }
+            Phase::Exiting { target_ready: false, .. } => 1.,
             Phase::Exiting { start, .. } => {
                 1. - (now.duration_since(start).as_secs_f64()
                     / self.fade_duration.min(0.12).max(0.001))
@@ -2803,50 +2955,17 @@ impl OverviewSession {
                 self.move_drag(point);
             }
         }
-        for (display, d) in self.displays.iter_mut().enumerate() {
+        let mut submitted = false;
+        for d in &mut self.displays {
             let tick = d.clock.as_ref().and_then(|clock| clock.latest());
-            if let Some((_, target)) = tick {
-                d.sample(target.max(now));
-            }
-            if display == self.active
-                && tick.is_some()
-                && let Some(exit) = &self.exit
-            {
-                let sample = tick.map_or(now, |(_, target)| target.max(now));
-                let t = (sample.duration_since(exit.start).as_secs_f64() / exit.duration).min(1.);
-                let t = t * t * (3. - 2. * t);
-                for &(id, from, to) in &exit.geometry {
-                    if let Some(w) = d.windows.iter_mut().find(|w| w.data.id == id) {
-                        let mix = |a: f64, b: f64| a + (b - a) * t;
-                        w.world = rect(
-                            mix(from.origin.x, to.origin.x),
-                            mix(from.origin.y, to.origin.y),
-                            mix(from.size.width, to.size.width),
-                            mix(from.size.height, to.size.height),
-                        );
-                        w.apply_geometry();
-                    }
-                }
+            if tick.is_some() {
+                d.sample(now);
             }
             if tick.is_some() || d.applied.is_none() {
+                submitted |= d.motion.as_ref().is_some_and(|motion| !motion.submitted);
                 d.apply_camera(decorations);
-            }
-            if !matches!(self.phase, Phase::Exiting { .. }) {
-                d.update_sources(d.selection.window, false);
-            }
-            if d.capture_dirty.swap(false, Ordering::AcqRel)
-                && let Some(m) = &mut d.captures
-            {
-                if let Err(e) = m.pump() {
-                    tracing::warn!(?e, "Spatial capture update failed");
-                }
-                for w in &mut d.windows {
-                    if !matches!(self.phase, Phase::Exiting { .. })
-                        && let Some(frame) = m.captured_frame(w.data.info.sys_id.unwrap().as_u32())
-                        && w.set_frame(&frame)
-                    {
-                        w.shadow.setOpacity(1.);
-                    }
+                if matches!(self.phase, Phase::Exiting { .. }) {
+                    d.focus_ring.setHidden(true);
                 }
             }
             if let Some(clock) = &d.clock {
@@ -2862,6 +2981,33 @@ impl OverviewSession {
                             }
                         }),
                 );
+            }
+        }
+        // Commit motion before source policy changes or capture pumping can block.
+        // A new animation must reach the custom CAContext before capture work.
+        // Subsequent display ticks only commit decoration changes normally.
+        drop(if submitted { _tx.flush_on_commit() } else { _tx });
+        let _tx = LayerTransaction::disabled();
+        for d in &mut self.displays {
+            // Existing IOSurfaces keep updating during motion. Stream resizing
+            // and snapshot/live policy changes wait until the camera settles.
+            if !matches!(self.phase, Phase::Exiting { .. }) && d.motion.is_none() {
+                d.update_sources(d.selection.window, false);
+            }
+            if !matches!(self.phase, Phase::Exiting { .. })
+                && d.capture_dirty.swap(false, Ordering::AcqRel)
+                && let Some(m) = &mut d.captures
+            {
+                if let Err(e) = m.pump() {
+                    tracing::warn!(?e, "Spatial capture update failed");
+                }
+                for w in &mut d.windows {
+                    if let Some(frame) = m.captured_frame(w.data.info.sys_id.unwrap().as_u32())
+                        && w.set_frame(&frame)
+                    {
+                        w.shadow.setOpacity(1.);
+                    }
+                }
             }
         }
         for drag in self.drag.iter_mut().chain(self.pending_drop.iter_mut().map(|(d, _)| d)) {
@@ -2888,13 +3034,41 @@ impl OverviewSession {
         }
     }
 
+    pub(crate) fn completed_activation(&self) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
+        let exit = self.exit.as_ref()?;
+        Some((self.displays[self.active].info.display_uuid.clone(), exit.target.workspace, exit.target.window))
+    }
+
     pub(crate) fn handoff_ready(&mut self) -> bool {
-        let Phase::Exiting { window, start, target_ready } = self.phase else {
+        let Phase::Exiting { start, .. } = self.phase else { return false; };
+        if let Some(reveal) = self.reveal {
+            return reveal.elapsed().as_secs_f64() >= REVEAL_MOTION;
+        }
+        if self.displays.iter().any(|d| d.motion.is_some()) {
             return false;
-        };
-        if start.elapsed() > Duration::from_secs(2) {
+        }
+        // Preparation precedes AX focus and frame acknowledgements. Reveal only
+        // once native focus and placement agree; the timeout is failure recovery.
+        if self.native_handoff_ready() {
+            // Matching geometry needs no crossfade: dissolving identical window
+            // images still ghosts text when their live content differs.
             return true;
         }
+        if start.elapsed().as_secs_f64() < HANDOFF_TIMEOUT {
+            return false;
+        }
+        let _tx = LayerTransaction::disabled().flush_on_commit();
+        for d in &self.displays {
+            fade(&d.root, 0.);
+        }
+        self.reveal = Some(Instant::now());
+        false
+    }
+
+    fn native_handoff_ready(&self) -> bool {
+        let Phase::Exiting { window, target_ready, .. } = self.phase else {
+            return false;
+        };
         if !target_ready || self.displays.iter().any(|d| d.motion.is_some()) {
             return false;
         }
@@ -2979,7 +3153,7 @@ impl OverviewSession {
             if ws.display_uuid.as_deref() != Some(&d.info.display_uuid) {
                 return intersects(native.frame, ws.display_frame);
             }
-            let preview = d.camera.frame(w.world);
+            let preview = d.camera.frame(w.shadow.frame());
             let tolerance = 1.;
             (preview.origin.x + d.bounds.origin.x - native.frame.origin.x).abs() <= tolerance
                 && (preview.origin.y + d.bounds.origin.y - native.frame.origin.y).abs() <= tolerance
@@ -3017,10 +3191,16 @@ mod tests {
             to: c,
             start: Instant::now(),
             duration: 0.3,
-            curve: MotionCurve::Settle,
+            curve: MotionCurve::Enter,
+            submitted: false,
+            completed: Arc::new(AtomicBool::new(false)),
         };
-        for ms in [25, 125, 250] {
-            let camera = motion.sample(motion.start + Duration::from_millis(ms)).0;
+        // The compositor transform must preserve the same zoom pivot at both cadences.
+        for frame in 1..36 {
+            let camera = motion.sample(motion.start + Duration::from_secs_f64(frame as f64 / 120.)).0;
+            let transform = camera.transform();
+            assert!((300. * transform.m11 + transform.m41 - 200.).abs() < 1e-9);
+            assert!((250. * transform.m22 + transform.m42 - 100.).abs() < 1e-9);
             let point = camera.project(CGPoint::new(300., 250.));
             assert!(
                 (point.x - 200.).abs() < 1e-9 && (point.y - 100.).abs() < 1e-9,
@@ -3056,6 +3236,8 @@ mod tests {
             start,
             duration: 0.3,
             curve: MotionCurve::Enter,
+            submitted: false,
+            completed: Arc::new(AtomicBool::new(false)),
         };
         let quarter = first.sample(start + Duration::from_millis(75)).0;
         let progress = (quarter.zoom - first.from.zoom) / (first.to.zoom - first.from.zoom);
@@ -3071,6 +3253,8 @@ mod tests {
             start: start + Duration::from_millis(120),
             duration: 0.3,
             curve: MotionCurve::Smooth,
+            submitted: false,
+            completed: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(reverse.sample(reverse.start).0, middle);
         let early = reverse.sample(reverse.start + Duration::from_millis(75)).0;

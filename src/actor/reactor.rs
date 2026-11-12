@@ -434,6 +434,7 @@ pub struct Reactor {
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
     pending_mouse_focus: Option<(WindowId, Instant)>,
+    overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_inventory_hit: Option<WindowServerId>,
     drag_manager: managers::DragManager,
     workspace_switch_manager: managers::WorkspaceSwitchManager,
@@ -531,6 +532,7 @@ impl Reactor {
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             pending_mouse_focus: None,
+            overview_focus: None,
             mouse_inventory_hit: None,
             drag_manager: managers::DragManager {
                 actor: crate::actor::drag::DragActor::new(config.settings.drag_drop),
@@ -1572,6 +1574,11 @@ impl Reactor {
                 );
             }
             Event::ApplicationActivated(pid, quiet) => {
+                if self.overview_focus.is_some_and(|(_, selected, started)|
+                    selected.pid != pid && started.elapsed() < Duration::from_secs(1))
+                {
+                    return Ok(EventOutcome::default());
+                }
                 self.clear_menu_state_for_non_owner(pid);
                 let mut outcome = application_workflow::handle_application_activated(
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
@@ -1618,6 +1625,11 @@ impl Reactor {
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
+                if self.overview_focus.is_some_and(|(space, selected, started)|
+                    space == reported_space && selected != window && started.elapsed() < Duration::from_secs(1))
+                {
+                    return Ok(EventOutcome::default());
+                }
                 if self.window_needs_inventory(window) {
                     // Recover stale admission before the cached-layout-focus
                     // fast path as well, without rescanning excluded windows.
@@ -2181,6 +2193,18 @@ impl Reactor {
                 let changed =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
                         != Some(workspace);
+                if transition.is_none() && !changed
+                    && window.is_some() && self.layout_manager.layout_engine.focused_window() == window
+                {
+                    let window_id = window.unwrap();
+                    return command_workflow::handle_command_reactor_focus_window(
+                        &self.state, &self.app_manager, command_workflow::FocusWindowPayload {
+                            window_id, window_server_id: self.state.windows.window(window_id).and_then(|w| w.info.sys_id),
+                            resolved_space: Some(space), space_is_active: true,
+                        },
+                    );
+                }
+                self.overview_focus = transition.and_then(|stamp| window.map(|window| (space, window, stamp)));
                 if transition.is_some() {
                     self.stop_camera(space);
                 }
@@ -2218,6 +2242,12 @@ impl Reactor {
                     .is_some_and(|screen| screen.display_uuid != display)
                 {
                     outcome.display_switch_warp = Some(space);
+                }
+                if transition.is_some() {
+                    if let Some(window) = response.focus_window {
+                        outcome.layout_events.push(LayoutEvent::WindowFocused(space, window));
+                    }
+                    return Ok(outcome);
                 }
                 if let Some(window) = window.filter(|&window| response.focus_window == Some(window))
                 {
@@ -2440,12 +2470,21 @@ impl Reactor {
                 if self.pending_mouse_focus.is_some_and(|(window, _)| window == window_id) {
                     self.pending_mouse_focus = None;
                 }
-                return Ok(system_workflow::handle_raise_completed(
+                let mut outcome = system_workflow::handle_raise_completed(
                     system_workflow::RaiseCompletedPayload {
                         window: window_id,
                         sequence: sequence_id,
                     },
-                )?);
+                )?;
+                if let Some((space, selected, _)) = self.overview_focus.filter(|(_, selected, started)| *selected == window_id && started.elapsed() < Duration::from_secs(1)) {
+                    self.overview_focus = None;
+                    self.stop_camera(space);
+                    outcome.absorb(EventOutcome::layout_changed(false)
+                        .with_layout_event(LayoutEvent::WindowFocused(space, selected))
+                        .with_arrange_space_scope(Some(space)));
+                    outcome.arrange.instant = true;
+                }
+                return Ok(outcome);
             }
             Event::RaiseTimeout { sequence_id } => {
                 return Ok(system_workflow::handle_raise_timeout(sequence_id)?);
@@ -2913,7 +2952,16 @@ impl Reactor {
     /// writes, then UI/platform presentation state is refreshed. Broadcast and
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
-    fn apply_event_outcome(&mut self, outcome: EventOutcome) {
+    fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
+        // AX activation and inventory replies can arrive after overview preparation.
+        // Until its focus completes, native layout work remains covered and instant.
+        if let Some((space, _, _)) = self.overview_focus
+            .filter(|(_, _, started)| started.elapsed() < Duration::from_secs(1))
+        {
+            if outcome.arrange.space_scope.is_none_or(|scope| scope == space) {
+                outcome.arrange.instant = true;
+            }
+        }
         let overview_notified =
             outcome.wm_events.iter().any(|e| matches!(e, WmEvent::OverviewChanged));
         let overview_inventory_changed = outcome.refresh_window_notifications
@@ -5123,6 +5171,13 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        if let LayoutEvent::WindowFocused(space, window) = &event {
+            if self.overview_focus.is_some_and(|(covered, selected, started)|
+                covered == *space && selected != *window && started.elapsed() < Duration::from_secs(1))
+            {
+                return;
+            }
+        }
         let event = self.layout_manager.layout_engine.normalize_event(&self.state.windows, event);
         // Discovery and title-rule refreshes share this effect boundary. Logical
         // assignment has already resolved the target, while native observations

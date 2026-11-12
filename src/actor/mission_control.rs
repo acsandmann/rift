@@ -336,7 +336,13 @@ impl MissionControlActor {
                 if let Some(session) = self.session.as_mut() {
                     session.pump_previews();
                     if session.handoff_ready() {
+                        let activation = session.completed_activation();
                         self.close();
+                        if let Some((display, workspace, window)) = activation {
+                            self.reactor.send(reactor::Event::OverviewSelectWorkspace {
+                                display, workspace, window, transition: None,
+                            });
+                        }
                     }
                 }
             }
