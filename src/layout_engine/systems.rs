@@ -250,6 +250,13 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         if let crate::layout_engine::WindowDropAction::Move(direction) = action {
             return self.select_window(layout, source) && self.move_selection(layout, direction);
         }
+        if let crate::layout_engine::WindowDropAction::ConsumeOrExpel(direction) = action {
+            if !self.select_window(layout, source) {
+                return false;
+            }
+            self.consume_or_expel_selection(layout, direction);
+            return true;
+        }
         self.apply_target_drop(layout, source, target, action)
     }
 

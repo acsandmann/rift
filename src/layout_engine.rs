@@ -19,6 +19,7 @@ pub enum WindowDropAction {
     Stack,
     Insert(Direction),
     Move(Direction),
+    ConsumeOrExpel(Direction),
 }
 
 impl From<crate::common::config::MouseDropAction> for WindowDropAction {

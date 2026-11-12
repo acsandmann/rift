@@ -2441,7 +2441,7 @@ impl OverviewSession {
                     self.select_workspace(destination);
                 }
             }
-            Input::MoveNode(direction) => {
+            Input::MoveNode(direction) | Input::ConsumeOrExpel(direction) => {
                 use crate::layout_engine::WindowDropAction;
                 let d = &self.displays[self.active];
                 let source = d.windows.iter().find(|w| Some(w.data.id) == self.selection.window)?;
@@ -2450,7 +2450,10 @@ impl OverviewSession {
                 self.drop = Some(OverviewDrop {
                     window: source.data.id,
                     workspace: workspace.workspace_id,
-                    target: Some((source.data.id, WindowDropAction::Move(direction))),
+                    target: Some((source.data.id, match input {
+                        Input::ConsumeOrExpel(_) => WindowDropAction::ConsumeOrExpel(direction),
+                        _ => WindowDropAction::Move(direction),
+                    })),
                     frame: None,
                 });
             }

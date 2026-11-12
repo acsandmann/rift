@@ -329,7 +329,11 @@ impl LayoutEngine {
 
             if let Some((target, action)) = drop.target {
                 if (target == drop.window
-                    && !matches!(action, crate::layout_engine::WindowDropAction::Move(_)))
+                    && !matches!(
+                        action,
+                        crate::layout_engine::WindowDropAction::Move(_)
+                            | crate::layout_engine::WindowDropAction::ConsumeOrExpel(_)
+                    ))
                     || windows.workspace_for_window(target) != Some(destination)
                     || self.is_window_floating(target)
                 {

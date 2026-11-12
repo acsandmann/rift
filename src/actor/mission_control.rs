@@ -33,6 +33,7 @@ pub enum Event {
 pub enum Input {
     Dismiss,
     MoveNode(crate::layout_engine::Direction),
+    ConsumeOrExpel(crate::layout_engine::Direction),
     SwitchWorkspace(crate::common::config::WorkspaceSelector),
     MoveToWorkspace(crate::common::config::WorkspaceSelector, bool),
     Left,
@@ -70,6 +71,9 @@ impl Input {
                     Direction::Down => Self::Down,
                 }),
                 LayoutCommand::MoveNode(direction) => Some(Self::MoveNode(*direction)),
+                LayoutCommand::ConsumeOrExpelWindow(direction) => {
+                    Some(Self::ConsumeOrExpel(*direction))
+                }
                 LayoutCommand::SwitchToWorkspace(index) => Some(Self::SwitchWorkspace(
                     crate::common::config::WorkspaceSelector::Index(*index),
                 )),
