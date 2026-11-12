@@ -169,6 +169,9 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> Vec<(WindowId, CGRect)>;
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId>;
+    fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+        self.selected_window(layout) == Some(window)
+    }
     /// Return every window stored in this layout, including members hidden by a stack.
     /// Persistence validation must not confuse "currently visible" with "serialized" or an
     /// unmatchable hidden member can survive forever as a ghost.
@@ -349,6 +352,9 @@ macro_rules! delegate_traditional_layout_system {
         fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
         fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
             self.inner.selected_window(layout)
+        }
+        fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+            self.inner.selection_contains_window(layout, window)
         }
         fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_in_layout(layout)

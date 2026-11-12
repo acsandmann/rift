@@ -728,6 +728,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
             .map(|(_, window)| window)
     }
 
+    fn selection_contains_window(&self, layout: LayoutId, window: WindowId) -> bool {
+        let selection = self.selection(layout);
+        self.window_node(layout, window)
+            .is_some_and(|node| node.ancestors(self.map()).any(|ancestor| ancestor == selection))
+    }
+
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         self.root(layout)
             .traverse_preorder(&self.tree.map)

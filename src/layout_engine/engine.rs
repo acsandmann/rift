@@ -2262,10 +2262,16 @@ impl LayoutEngine {
                         );
                         return EventResponse::default();
                     }
+                    let preserve_selection = self.focused_window == Some(wid)
+                        && self.workspaces[ws_id]
+                            .layout_system
+                            .selection_contains_window(layout, wid);
                     self.focused_window = Some(wid);
                     let selection_changed =
                         self.workspaces[ws_id].layout_system.selected_window(layout) != Some(wid);
-                    let _ = self.workspaces[ws_id].layout_system.select_window(layout, wid);
+                    if !preserve_selection {
+                        let _ = self.workspaces[ws_id].layout_system.select_window(layout, wid);
+                    }
                     self.workspaces.set_last_focused_window(space, ws_id, Some(wid));
                     return EventResponse {
                         changed: selection_changed
