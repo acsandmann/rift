@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use dispatchr::queue;
 use dispatchr::time::Time;
+use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -52,7 +53,8 @@ pub enum WmEvent {
     AppLaunch(pid_t, AppInfo, AppDiscoverySource),
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
-    AppTerminated(pid_t),
+    AppTerminated(Option<pid_t>),
+    RetryApp(Retained<NSRunningApplication>, AppDiscoverySource, u8),
     AppExited(pid_t, AppThreadHandle),
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
@@ -204,7 +206,7 @@ pub struct WmController {
 struct AppLifecycle(HashMap<pid_t, (AppThreadHandle, AppPhase)>);
 
 enum AppPhase {
-    Active, // Includes initialization.
+    Active(AppDiscoverySource, u8), // Includes initialization.
     Stopping(Option<(AppInfo, AppDiscoverySource)>),
 }
 
@@ -230,7 +232,7 @@ impl AppLifecycle {
             return None;
         }
         let (handle, rx) = AppThreadHandle::channel();
-        self.0.insert(pid, (handle.clone(), AppPhase::Active));
+        self.0.insert(pid, (handle.clone(), AppPhase::Active(source, 0)));
         Some((handle, rx))
     }
 
@@ -241,18 +243,19 @@ impl AppLifecycle {
         }
     }
 
-    fn exited(
-        &mut self,
-        pid: pid_t,
-        handle: &AppThreadHandle,
-    ) -> Option<Option<(AppInfo, AppDiscoverySource)>> {
+    fn exited(&mut self, pid: pid_t, handle: &AppThreadHandle) -> Option<AppPhase> {
         if !self.0.get(&pid)?.0.same_actor(handle) {
             return None;
         }
-        Some(match self.0.remove(&pid)?.1 {
-            AppPhase::Stopping(info) => info,
-            _ => None,
-        })
+        self.0.remove(&pid).map(|(_, phase)| phase)
+    }
+
+    fn reconcile(&mut self, mut running: impl FnMut(pid_t) -> bool) -> Vec<pid_t> {
+        let dead: Vec<_> = self.0.keys().copied().filter(|&pid| !running(pid)).collect();
+        for &pid in &dead {
+            self.terminate(pid);
+        }
+        dead
     }
 }
 
@@ -359,14 +362,51 @@ impl WmController {
                 self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
             }
             AppTerminated(pid) => {
-                sys::app::remove_application_observer(pid);
-                self.apps.terminate(pid);
+                if let Some(pid) = pid {
+                    sys::app::remove_application_observer(pid);
+                    self.apps.terminate(pid);
+                } else {
+                    for pid in self.apps.reconcile(|pid| {
+                        NSRunningApplication::with_process_id(pid)
+                            .is_some_and(|app| !app.isTerminated())
+                    }) {
+                        sys::app::remove_application_observer(pid);
+                    }
+                }
             }
             AppExited(pid, handle) => {
-                if let Some(relaunch) = self.apps.exited(pid, &handle) {
+                if let Some(phase) = self.apps.exited(pid, &handle) {
                     self.events_tx.send(Event::AppActorExited(pid, handle));
-                    if let Some((info, source)) = relaunch {
-                        self.new_app(pid, info, source);
+                    match phase {
+                        AppPhase::Stopping(Some((info, source))) => self.new_app(pid, info, source),
+                        AppPhase::Active(source, attempt) => {
+                            if let Some(app) = NSRunningApplication::with_process_id(pid)
+                                .filter(|app| !app.isTerminated())
+                            {
+                                queue::main().after_f_s(
+                                    Time::new_after(
+                                        Time::NOW,
+                                        (100i64 << attempt.min(5)) * 1_000_000,
+                                    ),
+                                    (
+                                        self.sender.clone(),
+                                        WmEvent::RetryApp(app, source, attempt.saturating_add(1)),
+                                    ),
+                                    |(sender, event)| sender.send(event),
+                                );
+                            }
+                        }
+                        AppPhase::Stopping(None) => {}
+                    }
+                }
+            }
+            RetryApp(app, source, attempt) => {
+                let pid = app.processIdentifier();
+                // Keep the application instance so PID reuse cannot revive a terminated app.
+                if !app.isTerminated() && !self.apps.0.contains_key(&pid) {
+                    self.new_app(pid, AppInfo::from(&*app), source);
+                    if let Some((_, AppPhase::Active(_, count))) = self.apps.0.get_mut(&pid) {
+                        *count = attempt;
                     }
                 }
             }
@@ -516,6 +556,9 @@ impl WmController {
             return;
         };
 
+        if running_app.isTerminated() {
+            return;
+        }
         let policy = running_app.activationPolicy();
         if policy == NSApplicationActivationPolicy::Prohibited {
             return;
@@ -648,6 +691,29 @@ mod app_lifecycle_tests {
     }
 
     #[test]
+    fn unresolved_termination_checks_only_tracked_apps() {
+        let mut apps = AppLifecycle::default();
+        let info = || AppInfo {
+            bundle_id: None,
+            localized_name: None,
+        };
+        let (_, mut live) = apps.reserve(41, info(), AppDiscoverySource::Process).unwrap();
+        let (_, mut dead) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
+        let mut checked = Vec::new();
+        assert_eq!(
+            apps.reconcile(|pid| {
+                checked.push(pid);
+                pid == 41
+            }),
+            vec![42]
+        );
+        checked.sort();
+        assert_eq!(checked, vec![41, 42]);
+        assert!(live.try_recv().is_err());
+        assert!(matches!(dead.try_recv().unwrap().1, Request::Terminate));
+    }
+
+    #[test]
     fn dedupe_failure_termination_and_reuse() {
         for terminated in [false, true] {
             let mut apps = AppLifecycle::default();
@@ -662,7 +728,12 @@ mod app_lifecycle_tests {
                 assert!(matches!(rx.try_recv().unwrap().1, Request::Terminate));
                 assert!(apps.reserve(42, info(), AppDiscoverySource::Process).is_none());
             }
-            assert!(apps.exited(42, &old).is_some());
+            let phase = apps.exited(42, &old).unwrap();
+            if terminated {
+                assert!(matches!(phase, AppPhase::Stopping(Some(_))));
+            } else {
+                assert!(matches!(phase, AppPhase::Active(AppDiscoverySource::Process, 0)));
+            }
             let (new, _rx) = apps.reserve(42, info(), AppDiscoverySource::Process).unwrap();
             assert!(apps.exited(42, &old).is_none());
             assert!(!new.same_actor(&old));
