@@ -1574,9 +1574,9 @@ impl Reactor {
                 );
             }
             Event::ApplicationActivated(pid, quiet) => {
-                if self.overview_focus.is_some_and(|(_, selected, started)|
-                    selected.pid != pid && started.elapsed() < Duration::from_secs(1))
-                {
+                if self.overview_focus.is_some_and(|(_, selected, started)| {
+                    selected.pid != pid && started.elapsed() < Duration::from_secs(1)
+                }) {
                     return Ok(EventOutcome::default());
                 }
                 self.clear_menu_state_for_non_owner(pid);
@@ -1625,9 +1625,11 @@ impl Reactor {
                 return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
-                if self.overview_focus.is_some_and(|(space, selected, started)|
-                    space == reported_space && selected != window && started.elapsed() < Duration::from_secs(1))
-                {
+                if self.overview_focus.is_some_and(|(space, selected, started)| {
+                    space == reported_space
+                        && selected != window
+                        && started.elapsed() < Duration::from_secs(1)
+                }) {
                     return Ok(EventOutcome::default());
                 }
                 if self.window_needs_inventory(window) {
@@ -2193,18 +2195,29 @@ impl Reactor {
                 let changed =
                     self.layout_manager.layout_engine.workspaces().active_workspace(space)
                         != Some(workspace);
-                if transition.is_none() && !changed
-                    && window.is_some() && self.layout_manager.layout_engine.focused_window() == window
+                if transition.is_none()
+                    && !changed
+                    && window.is_some()
+                    && self.layout_manager.layout_engine.focused_window() == window
                 {
                     let window_id = window.unwrap();
                     return command_workflow::handle_command_reactor_focus_window(
-                        &self.state, &self.app_manager, command_workflow::FocusWindowPayload {
-                            window_id, window_server_id: self.state.windows.window(window_id).and_then(|w| w.info.sys_id),
-                            resolved_space: Some(space), space_is_active: true,
+                        &self.state,
+                        &self.app_manager,
+                        command_workflow::FocusWindowPayload {
+                            window_id,
+                            window_server_id: self
+                                .state
+                                .windows
+                                .window(window_id)
+                                .and_then(|w| w.info.sys_id),
+                            resolved_space: Some(space),
+                            space_is_active: true,
                         },
                     );
                 }
-                self.overview_focus = transition.and_then(|stamp| window.map(|window| (space, window, stamp)));
+                self.overview_focus =
+                    transition.and_then(|stamp| window.map(|window| (space, window, stamp)));
                 if transition.is_some() {
                     self.stop_camera(space);
                 }
@@ -2476,12 +2489,18 @@ impl Reactor {
                         sequence: sequence_id,
                     },
                 )?;
-                if let Some((space, selected, _)) = self.overview_focus.filter(|(_, selected, started)| *selected == window_id && started.elapsed() < Duration::from_secs(1)) {
+                if let Some((space, selected, _)) =
+                    self.overview_focus.filter(|(_, selected, started)| {
+                        *selected == window_id && started.elapsed() < Duration::from_secs(1)
+                    })
+                {
                     self.overview_focus = None;
                     self.stop_camera(space);
-                    outcome.absorb(EventOutcome::layout_changed(false)
-                        .with_layout_event(LayoutEvent::WindowFocused(space, selected))
-                        .with_arrange_space_scope(Some(space)));
+                    outcome.absorb(
+                        EventOutcome::layout_changed(false)
+                            .with_layout_event(LayoutEvent::WindowFocused(space, selected))
+                            .with_arrange_space_scope(Some(space)),
+                    );
                     outcome.arrange.instant = true;
                 }
                 return Ok(outcome);
@@ -2955,7 +2974,8 @@ impl Reactor {
     fn apply_event_outcome(&mut self, mut outcome: EventOutcome) {
         // AX activation and inventory replies can arrive after overview preparation.
         // Until its focus completes, native layout work remains covered and instant.
-        if let Some((space, _, _)) = self.overview_focus
+        if let Some((space, _, _)) = self
+            .overview_focus
             .filter(|(_, _, started)| started.elapsed() < Duration::from_secs(1))
         {
             if outcome.arrange.space_scope.is_none_or(|scope| scope == space) {
@@ -5172,9 +5192,11 @@ impl Reactor {
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
         if let LayoutEvent::WindowFocused(space, window) = &event {
-            if self.overview_focus.is_some_and(|(covered, selected, started)|
-                covered == *space && selected != *window && started.elapsed() < Duration::from_secs(1))
-            {
+            if self.overview_focus.is_some_and(|(covered, selected, started)| {
+                covered == *space
+                    && selected != *window
+                    && started.elapsed() < Duration::from_secs(1)
+            }) {
                 return;
             }
         }

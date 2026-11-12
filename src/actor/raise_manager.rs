@@ -572,27 +572,47 @@ mod tests {
                 let (handles, mut rx) = create_test_app_handles();
                 let selected = WindowId::new(1, 3);
                 manager.handle_message(create_layout_response(
-                    vec![], Some((selected, None)), handles.clone(), Quiet::Yes,
+                    vec![],
+                    Some((selected, None)),
+                    handles.clone(),
+                    Quiet::Yes,
                 ));
                 // Leave the request on the app queue while geometry runs, just
                 // as in the reported trace. The deadline fires before dequeue.
                 manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
                 let (_, request) = rx.try_recv().unwrap();
-                let Request::Raise(windows, token, sequence, _) = request else { panic!("expected focus"); };
+                let Request::Raise(windows, token, sequence, _) = request else {
+                    panic!("expected focus");
+                };
                 assert_eq!(windows, vec![selected]);
-                assert!(!token.is_cancelled(), "slow geometry must not discard the selected focus");
+                assert!(
+                    !token.is_cancelled(),
+                    "slow geometry must not discard the selected focus"
+                );
                 if supersede {
                     let next = WindowId::new(1, 4);
                     manager.handle_message(create_layout_response(
-                        vec![], Some((next, None)), handles, Quiet::Yes,
+                        vec![],
+                        Some((next, None)),
+                        handles,
+                        Quiet::Yes,
                     ));
                     assert!(token.is_cancelled(), "new intent must cancel the delayed focus");
                     let requests = collect_requests(&mut rx);
                     assert_raise_request(&requests[0], next, 2, Quiet::Yes);
-                    manager.handle_message(Event::RaiseCompleted { window_id: selected, sequence_id: sequence });
-                    manager.handle_message(Event::RaiseCompleted { window_id: next, sequence_id: 2 });
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: selected,
+                        sequence_id: sequence,
+                    });
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: next,
+                        sequence_id: 2,
+                    });
                 } else {
-                    manager.handle_message(Event::RaiseCompleted { window_id: selected, sequence_id: sequence });
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: selected,
+                        sequence_id: sequence,
+                    });
                 }
                 assert!(manager.active_sequence.is_none());
             }

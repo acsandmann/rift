@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use cgs::compositor::{CgsWindow, LayerTransaction, WindowSurface, release_layer_tree};
-use objc2::{AnyThread, DeclaredClass, define_class};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{AnyThread, DeclaredClass, define_class};
 use objc2_app_kit::{
     NSColor, NSCursor, NSFont, NSImage, NSRunningApplication, NSScreen, NSWorkspace,
 };
@@ -16,8 +16,11 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{
     CGColor, CGDisplayBounds, CGImage, CGPath, CGPreflightScreenCaptureAccess,
 };
-use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSNumber, NSString, NSValue};
-use objc2_quartz_core::{CALayer, CATextLayer, CABasicAnimation, CAAnimation, CAAnimationDelegate, CAMediaTiming, CATransform3D, NSValueCATransform3DAdditions};
+use objc2_foundation::{MainThreadMarker, NSNumber, NSObject, NSObjectProtocol, NSString, NSValue};
+use objc2_quartz_core::{
+    CAAnimation, CAAnimationDelegate, CABasicAnimation, CALayer, CAMediaTiming, CATextLayer,
+    CATransform3D, NSValueCATransform3DAdditions,
+};
 
 use crate::actor::app::WindowId;
 use crate::actor::mission_control::Input;
@@ -68,7 +71,10 @@ impl Camera {
 
     fn transform(self) -> CATransform3D {
         CATransform3D::new_affine_transform(CGAffineTransform {
-            a: self.zoom, b: 0., c: 0., d: self.zoom,
+            a: self.zoom,
+            b: 0.,
+            c: 0.,
+            d: self.zoom,
             tx: -self.position.x * self.zoom,
             ty: -self.position.y * self.zoom,
         })
@@ -116,13 +122,17 @@ enum MotionCurve {
 
 define_class! {
     #[unsafe(super(NSObject))]
-    #[ivars = Arc<AtomicBool>]
+    #[ivars = (Arc<AtomicBool>, Option<crate::actor::mission_control::Sender>)]
     struct CameraCompletion;
     unsafe impl NSObjectProtocol for CameraCompletion {}
     unsafe impl CAAnimationDelegate for CameraCompletion {
         #[unsafe(method(animationDidStop:finished:))]
         fn stopped(&self, _animation: &CAAnimation, finished: bool) {
-            if finished { self.ivars().store(true, Ordering::Release); }
+            if finished && !self.ivars().0.swap(true, Ordering::AcqRel) {
+                if let Some(wake) = &self.ivars().1 {
+                    wake.send(crate::actor::mission_control::Event::PumpPreviews);
+                }
+            }
         }
     }
 }
@@ -199,6 +209,32 @@ fn fade(layer: &CALayer, to: f32) {
     animation.setDuration(REVEAL_MOTION);
     layer.setOpacity(to);
     layer.addAnimation_forKey(&animation, Some(&NSString::from_str("reveal")));
+}
+
+fn decoration_fade(layer: &CALayer, shadow: bool, to: f32, duration: f64) {
+    let displayed = unsafe { layer.presentationLayer() };
+    let from = if shadow {
+        displayed.as_deref().unwrap_or(layer).shadowOpacity()
+    } else {
+        displayed.as_deref().unwrap_or(layer).opacity()
+    };
+    let key = NSString::from_str(if shadow { "shadowOpacity" } else { "opacity" });
+    let animation = CABasicAnimation::animationWithKeyPath(Some(&key));
+    unsafe {
+        animation.setFromValue(Some(&NSNumber::new_f32(from)));
+        animation.setToValue(Some(&NSNumber::new_f32(to)));
+    }
+    animation.setDuration(duration);
+    if shadow {
+        layer.setShadowOpacity(to);
+    } else {
+        layer.setOpacity(to);
+    }
+    if duration > 0. && from != to {
+        layer.addAnimation_forKey(&animation, Some(&key));
+    } else {
+        layer.removeAnimationForKey(&key);
+    }
 }
 
 fn set_text(l: &CATextLayer, text: &str) {
@@ -528,6 +564,8 @@ struct DisplayOverview {
     capture_dirty: Arc<AtomicBool>,
     capture_pixels: usize,
     refresh_rate: f32,
+    decoration_duration: f64,
+    wake: Option<crate::actor::mission_control::Sender>,
     dragged: Option<WindowId>,
     applied: Option<(Camera, f32)>,
     // CAContext must detach before its CGS window is released.
@@ -676,6 +714,8 @@ impl DisplayOverview {
             capture_dirty: Arc::new(AtomicBool::new(true)),
             capture_pixels: CAPTURE_PIXELS,
             refresh_rate: screen.maximumFramesPerSecond().max(1) as f32,
+            decoration_duration: 0.,
+            wake: None,
             dragged: None,
             applied: None,
             _surface: surface,
@@ -887,13 +927,15 @@ impl DisplayOverview {
     }
 
     fn apply_camera(&mut self, decorations: f32) {
-        if self.applied == Some((self.camera, decorations))
+        let camera = self.motion.as_ref().map_or(self.camera, |motion| motion.to);
+        if self.applied == Some((camera, decorations))
+            && !self.policy_dirty
             && self.motion.as_ref().is_none_or(|motion| motion.submitted)
         {
             return;
         }
-        let previous = self.applied.replace((self.camera, decorations));
-        let zoom = self.camera.zoom;
+        let previous = self.applied.replace((camera, decorations));
+        let zoom = camera.zoom;
         let geometry = previous.is_none();
         let zoom_changed = previous.is_none_or(|(camera, _)| camera.zoom != zoom);
         let opacity_changed = previous.is_none_or(|(_, opacity)| opacity != decorations);
@@ -905,29 +947,44 @@ impl DisplayOverview {
                 motion.start = Instant::now();
                 // Both curves are cubic polynomials. Linear time control points
                 // reproduce the camera math exactly without sampled keyframes.
-                let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform")));
+                let animation =
+                    CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform")));
                 let from = unsafe { NSValue::valueWithCATransform3D(motion.from.transform()) };
                 let to = unsafe { NSValue::valueWithCATransform3D(motion.to.transform()) };
                 unsafe {
                     animation.setFromValue(Some(&from));
                     animation.setToValue(Some(&to));
                 }
-                animation.setTimingFunction(Some(&objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
-                    1. / 3., match motion.curve { MotionCurve::Enter => 1., MotionCurve::Smooth => 0. },
-                    2. / 3., 1.,
-                )));
+                animation.setTimingFunction(Some(
+                    &objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
+                        1. / 3.,
+                        match motion.curve {
+                            MotionCurve::Enter => 1.,
+                            MotionCurve::Smooth => 0.,
+                        },
+                        2. / 3.,
+                        1.,
+                    ),
+                ));
                 animation.setDuration(motion.duration);
                 if animation.respondsToSelector(objc2::sel!(setPreferredFrameRateRange:)) {
                     animation.setPreferredFrameRateRange(objc2_quartz_core::CAFrameRateRange::new(
-                        30_f32.min(self.refresh_rate), self.refresh_rate, self.refresh_rate,
+                        30_f32.min(self.refresh_rate),
+                        self.refresh_rate,
+                        self.refresh_rate,
                     ));
                 }
-                let completion = CameraCompletion::alloc().set_ivars(motion.completed.clone());
-                let completion: Retained<CameraCompletion> = unsafe { objc2::msg_send![super(completion), init] };
+                let completion = CameraCompletion::alloc()
+                    .set_ivars((motion.completed.clone(), self.wake.clone()));
+                let completion: Retained<CameraCompletion> =
+                    unsafe { objc2::msg_send![super(completion), init] };
                 animation.setDelegate(Some(ProtocolObject::from_ref(&*completion)));
                 self.pictures.setPosition(CGPoint::ZERO);
                 self.pictures.setTransform(motion.to.transform());
                 self.pictures.addAnimation_forKey(&animation, Some(&key));
+                if let Some(clock) = &self.clock {
+                    clock.set_paused(true);
+                }
             }
         } else {
             self.pictures.removeAnimationForKey(&key);
@@ -936,7 +993,12 @@ impl DisplayOverview {
         }
         // Once exit chrome has faded, the compositor needs no decoration,
         // percentage-text, culling, or geometry writes on subsequent ticks.
-        if !geometry && !submitting && !opacity_changed && decorations == 0. && self.motion.is_some() {
+        if !geometry
+            && !submitting
+            && !opacity_changed
+            && decorations == 0.
+            && self.motion.is_some()
+        {
             return;
         }
         let factor = (zoom / OVERVIEW_ZOOM).sqrt().clamp(0.75, 1.1);
@@ -946,8 +1008,10 @@ impl DisplayOverview {
                 region.origin,
                 CGSize::new(self.info.frame.size.width, self.workspace_height),
             ));
-            let group = self.camera.frame(bounds);
-            let hidden = !intersects(group, viewport) || group.max().y < 44. * factor;
+            let group = camera.frame(bounds);
+            let visible = intersects(group, viewport) && group.max().y >= 44. * factor;
+            let hidden = !visible && self.motion.as_ref().is_none_or(|motion|
+                !intersects(motion.from.frame(bounds), viewport));
             if region.label.isHidden() != hidden {
                 region.label.setHidden(hidden);
             }
@@ -956,7 +1020,36 @@ impl DisplayOverview {
                 let x =
                     group.origin.x.max(12.).min((self.bounds.size.width - width - 12.).max(12.));
                 let y = (group.origin.y - 38. * factor).max(12.);
+                if self.motion.is_none() {
+                    region.label.removeAnimationForKey(&NSString::from_str("position"));
+                }
+                let position = unsafe { region.label.presentationLayer() }
+                    .map_or(region.label.position(), |p| p.position());
                 region.label.setPosition(CGPoint::new(x, y));
+                if submitting && let Some(motion) = &self.motion {
+                    let animation = CABasicAnimation::animationWithKeyPath(Some(
+                        &NSString::from_str("position"),
+                    ));
+                    unsafe {
+                        animation.setFromValue(Some(&NSValue::valueWithPoint(position)));
+                        animation.setToValue(Some(&NSValue::valueWithPoint(CGPoint::new(x, y))));
+                    }
+                    animation.setDuration(motion.duration);
+                    animation.setTimingFunction(Some(
+                        &objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
+                            1. / 3.,
+                            match motion.curve {
+                                MotionCurve::Enter => 1.,
+                                MotionCurve::Smooth => 0.,
+                            },
+                            2. / 3.,
+                            1.,
+                        ),
+                    ));
+                    region
+                        .label
+                        .addAnimation_forKey(&animation, Some(&NSString::from_str("position")));
+                }
                 if zoom_changed {
                     region.label.setAffineTransform(CGAffineTransform {
                         a: factor,
@@ -969,13 +1062,14 @@ impl DisplayOverview {
                 }
             }
             if opacity_changed {
-                region.label.setOpacity(decorations);
+                decoration_fade(&region.label, false, decorations, self.decoration_duration);
             }
         }
         for w in &self.windows {
-            let visible = intersects(self.camera.frame(w.world), viewport)
-                || self.motion.as_ref().is_some_and(|m| intersects(
-                    union(m.from.frame(w.world), m.to.frame(w.world)), viewport));
+            let visible = intersects(camera.frame(w.world), viewport)
+                || self.motion.as_ref().is_some_and(|m| {
+                    intersects(union(m.from.frame(w.world), m.to.frame(w.world)), viewport)
+                });
             let hidden = !visible || self.dragged == Some(w.data.id);
             if w.shadow.isHidden() != hidden {
                 w.shadow.setHidden(hidden);
@@ -986,7 +1080,7 @@ impl DisplayOverview {
                 } else {
                     0.
                 });
-                w.shadow.setShadowOpacity(0.28 * decorations);
+                decoration_fade(&w.shadow, true, 0.28 * decorations, self.decoration_duration);
             }
             if geometry {
                 w.apply_geometry();
@@ -999,7 +1093,7 @@ impl DisplayOverview {
             self.last_percentage = percent;
         }
         if opacity_changed {
-            self.controls.setOpacity(decorations);
+            decoration_fade(&self.controls, false, decorations, self.decoration_duration);
         }
     }
 
@@ -1011,16 +1105,20 @@ impl DisplayOverview {
         self.focus_ring.setHidden(!visible);
         if let Some(w) = selected {
             self.focus_ring.setFrame(w.world);
-            self.focus_ring.setBorderWidth(2.5 / self.camera.zoom);
+            self.focus_ring.setBorderWidth(
+                2.5 / self.applied.map_or(self.camera.zoom, |(camera, _)| camera.zoom),
+            );
             self.focus_ring.setCornerRadius(10.);
         }
-        self.focus_ring.setOpacity(opacity);
+        if self.focus_ring.opacity() != opacity {
+            decoration_fade(&self.focus_ring, false, opacity, self.decoration_duration);
+        }
     }
 
     fn request_camera_frame(&mut self) {
         self.camera_input = Instant::now();
         if let Some(clock) = &self.clock {
-            clock.set_paused(false);
+            clock.set_paused(self.motion.as_ref().is_some_and(|motion| motion.submitted));
         }
     }
 
@@ -1047,12 +1145,18 @@ impl DisplayOverview {
                 .filter(|_| motion.submitted)
                 .map(|layer| {
                     let t = layer.transform();
-                    Camera { zoom: t.m11, position: CGPoint::new(-t.m41 / t.m11, -t.m42 / t.m11) }
-                }).unwrap_or(camera);
+                    Camera {
+                        zoom: t.m11,
+                        position: CGPoint::new(-t.m41 / t.m11, -t.m42 / t.m11),
+                    }
+                })
+                .unwrap_or(camera);
             if motion.completed.load(Ordering::Acquire) || (!motion.submitted && done) {
                 self.camera = motion.to;
                 self.motion = None;
+                self.decoration_duration = 0.;
                 self.policy_dirty = true;
+                self.request_camera_frame();
             }
         }
     }
@@ -1128,7 +1232,9 @@ impl DisplayOverview {
         // Interactive camera updates can arrive at 120+ Hz. Reuse the current
         // capture sizes until input settles instead of reconfiguring SCStreams
         // for every fractional zoom. The existing input clock covers this tail.
-        if !immediate && !inventory_changed && self.dragged.is_none()
+        if !immediate
+            && !inventory_changed
+            && self.dragged.is_none()
             && self.camera_input.elapsed() < Duration::from_millis(100)
         {
             return;
@@ -1393,6 +1499,7 @@ fn start_display(
     mut cache: Option<&mut PreviewCache>,
 ) {
     let tx = wake.clone();
+    d.wake = Some(wake.clone());
     d.clock = Some(crate::sys::display_link::DisplayLink::for_display_callback(
         d.info.id.as_u32(),
         move || tx.send(crate::actor::mission_control::Event::PumpPreviews),
@@ -1442,7 +1549,7 @@ struct Drag {
 // Exiting keeps textures until the reactor has installed a visible, matching real window.
 enum Phase {
     Waiting(Instant),
-    Entering(Instant),
+    Entering,
     Overview,
     Exiting {
         window: Option<WindowId>,
@@ -1589,7 +1696,9 @@ impl OverviewSession {
         // Remove the cover before stopping producers or releasing cached frames.
         // Capture cleanup must not extend the visible close transition.
         for d in &self.displays {
-            if let Some(clock) = &d.clock { clock.set_paused(true); }
+            if let Some(clock) = &d.clock {
+                clock.set_paused(true);
+            }
             if let Err(error) = d._window.order_out() {
                 tracing::warn!(?error, "Failed to hide overview host");
             }
@@ -1914,10 +2023,18 @@ impl OverviewSession {
         } else {
             Camera {
                 zoom: 1.,
-                position: chosen.and_then(|w| w.data.layout_frame.map(|frame| CGPoint::new(
-                    w.world.origin.x - frame.origin.x + d.bounds.origin.x,
-                    w.world.origin.y - frame.origin.y + d.bounds.origin.y,
-                ))).unwrap_or_else(|| workspace.map_or(CGPoint::ZERO, |ws| d.workspace_origin(ws.index))),
+                position: chosen
+                    .and_then(|w| {
+                        w.data.layout_frame.map(|frame| {
+                            CGPoint::new(
+                                w.world.origin.x - frame.origin.x + d.bounds.origin.x,
+                                w.world.origin.y - frame.origin.y + d.bounds.origin.y,
+                            )
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        workspace.map_or(CGPoint::ZERO, |ws| d.workspace_origin(ws.index))
+                    }),
             }
         };
         let action = if !dismiss {
@@ -1997,15 +2114,28 @@ impl OverviewSession {
         let d = &self.displays[self.active];
         // Resolve one authoritative destination before submitting the close.
         // Scrolling translates the strip; its selected window anchors the camera.
-        let target = d.windows.iter().find(|w| Some(w.data.id) == prepared.window)
-            .filter(|w| d.workspaces.iter().any(|ws| ws.workspace_id == w.workspace
-                && ws.display_uuid.as_deref() == Some(&d.info.display_uuid)))
-            .and_then(|w| prepared.frames.iter().find(|(id, _)| *id == w.data.id)
-                .map(|(_, frame)| Camera { zoom: 1., position: CGPoint::new(
-                    w.world.origin.x - frame.origin.x + d.bounds.origin.x,
-                    w.world.origin.y - frame.origin.y + d.bounds.origin.y,
-                ) }))
-            .unwrap_or_else(|| d.desktop_camera());
+        let target =
+            d.windows
+                .iter()
+                .find(|w| Some(w.data.id) == prepared.window)
+                .filter(|w| {
+                    d.workspaces.iter().any(|ws| {
+                        ws.workspace_id == w.workspace
+                            && ws.display_uuid.as_deref() == Some(&d.info.display_uuid)
+                    })
+                })
+                .and_then(|w| {
+                    prepared.frames.iter().find(|(id, _)| *id == w.data.id).map(|(_, frame)| {
+                        Camera {
+                            zoom: 1.,
+                            position: CGPoint::new(
+                                w.world.origin.x - frame.origin.x + d.bounds.origin.x,
+                                w.world.origin.y - frame.origin.y + d.bounds.origin.y,
+                            ),
+                        }
+                    })
+                })
+                .unwrap_or_else(|| d.desktop_camera());
         if let Phase::Exiting { target_ready, window, .. } = &mut self.phase {
             *target_ready = true;
             if prepared.window.is_some_and(|id| !prepared.frames.iter().any(|(w, _)| *w == id)) {
@@ -2014,7 +2144,9 @@ impl OverviewSession {
         }
         let now = Instant::now();
         let remaining = EXIT_MOTION;
-        if let Phase::Exiting { start, .. } = &mut self.phase { *start = now; }
+        if let Phase::Exiting { start, .. } = &mut self.phase {
+            *start = now;
+        }
         self.animate_exit(target);
         let d = &mut self.displays[self.active];
         let local_workspace = d
@@ -2037,22 +2169,38 @@ impl OverviewSession {
             })
             .collect();
         for &(id, from, to) in &geometry {
-            if from == to { continue; }
-            let Some(w) = d.windows.iter_mut().find(|w| w.data.id == id) else { continue; };
+            if from == to {
+                continue;
+            }
+            let Some(w) = d.windows.iter_mut().find(|w| w.data.id == id) else {
+                continue;
+            };
             let transform = CATransform3D::new_affine_transform(CGAffineTransform {
-                a: to.size.width / from.size.width.max(1.), b: 0., c: 0.,
+                a: to.size.width / from.size.width.max(1.),
+                b: 0.,
+                c: 0.,
                 d: to.size.height / from.size.height.max(1.),
-                tx: to.mid().x - from.mid().x, ty: to.mid().y - from.mid().y,
+                tx: to.mid().x - from.mid().x,
+                ty: to.mid().y - from.mid().y,
             });
-            let values = unsafe { [NSValue::valueWithCATransform3D(w.shadow.transform()),
-                NSValue::valueWithCATransform3D(transform)] };
-            let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform")));
+            let values = unsafe {
+                [
+                    NSValue::valueWithCATransform3D(w.shadow.transform()),
+                    NSValue::valueWithCATransform3D(transform),
+                ]
+            };
+            let animation =
+                CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform")));
             unsafe {
                 animation.setFromValue(Some(&values[0]));
                 animation.setToValue(Some(&values[1]));
             }
             animation.setDuration(remaining);
-            animation.setTimingFunction(Some(&objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(0.333333, 0., 0.666667, 1.)));
+            animation.setTimingFunction(Some(
+                &objc2_quartz_core::CAMediaTimingFunction::functionWithControlPoints(
+                    0.333333, 0., 0.666667, 1.,
+                ),
+            ));
             // Keep persistent scene coordinates intact; only the exit layer
             // moves. Caching the reconciled frame would shift the next opening.
             w.shadow.setTransform(transform);
@@ -2094,7 +2242,8 @@ impl OverviewSession {
             motion.start = now;
             motion.curve = MotionCurve::Smooth;
             d.policy_dirty = true;
-            d.apply_camera(d.applied.map_or(1., |(_, opacity)| opacity));
+            d.decoration_duration = self.fade_duration.min(0.12);
+            d.apply_camera(0.);
             d.focus_ring.setHidden(true);
         }
     }
@@ -2230,11 +2379,22 @@ impl OverviewSession {
         // Releases and repeated activation keys belong to the closing gesture;
         // they must not interrupt the exit or restart its handoff deadline.
         if matches!(self.phase, Phase::Exiting { .. })
-            && matches!(input, Input::Move(_) | Input::PointerDown(_) | Input::PointerDrag(_)
-                | Input::PointerUp(_) | Input::Click(_) | Input::Activate | Input::Dismiss
-                | Input::EndPan(_))
+            && matches!(
+                input,
+                Input::Move(_)
+                    | Input::PointerDown(_)
+                    | Input::PointerDrag(_)
+                    | Input::PointerUp(_)
+                    | Input::Click(_)
+                    | Input::Activate
+                    | Input::Dismiss
+                    | Input::EndPan(_)
+            )
         {
             return None;
+        }
+        for d in &mut self.displays {
+            d.sample(Instant::now());
         }
         let transaction = LayerTransaction::disabled();
         let _tx = if matches!(
@@ -2790,7 +2950,7 @@ impl OverviewSession {
                 d.motion.as_mut().unwrap().curve = MotionCurve::Enter;
                 d.apply_camera(d.applied.map_or(1., |(_, opacity)| opacity));
             }
-            self.phase = Phase::Entering(Instant::now());
+            self.phase = Phase::Entering;
         } else {
             self.activate(true);
         }
@@ -2880,6 +3040,7 @@ impl OverviewSession {
         if !self.displays.iter().any(|d| {
             d.capture_dirty.load(Ordering::Acquire)
                 || d.clock.as_ref().is_some_and(|clock| clock.has_update())
+                || d.motion.as_ref().is_some_and(|m| m.completed.load(Ordering::Acquire))
         }) {
             return;
         }
@@ -2899,8 +3060,9 @@ impl OverviewSession {
             });
             // Wallpaper capture must never delay the opening transition.
             if ready || now.duration_since(start) > Duration::from_secs(2) {
-                self.phase = Phase::Entering(now);
+                self.phase = Phase::Entering;
                 for d in &mut self.displays {
+                    d.decoration_duration = self.fade_duration;
                     d.animate(d.home, self.duration);
                     let motion = d.motion.as_mut().unwrap();
                     motion.start = now;
@@ -2910,16 +3072,7 @@ impl OverviewSession {
             }
         }
         let decorations = match self.phase {
-            Phase::Waiting(_) => 0.,
-            Phase::Entering(start) if self.fade_duration > 0. => {
-                (now.duration_since(start).as_secs_f64() / self.fade_duration).min(1.) as f32
-            }
-            Phase::Exiting { target_ready: false, .. } => 1.,
-            Phase::Exiting { start, .. } => {
-                1. - (now.duration_since(start).as_secs_f64()
-                    / self.fade_duration.min(0.12).max(0.001))
-                .min(1.) as f32
-            }
+            Phase::Waiting(_) | Phase::Exiting { target_ready: true, .. } => 0.,
             _ => 1.,
         };
         let drag_frame =
@@ -2958,10 +3111,15 @@ impl OverviewSession {
         let mut submitted = false;
         for d in &mut self.displays {
             let tick = d.clock.as_ref().and_then(|clock| clock.latest());
-            if tick.is_some() {
+            let completed = d.motion.as_ref().is_some_and(|m| m.completed.load(Ordering::Acquire));
+            if completed || tick.is_some() && d.motion.is_none() {
                 d.sample(now);
             }
-            if tick.is_some() || d.applied.is_none() {
+            if completed
+                || d.motion.as_ref().is_some_and(|m| !m.submitted)
+                || d.applied.is_none()
+                || tick.is_some() && d.motion.is_none()
+            {
                 submitted |= d.motion.as_ref().is_some_and(|motion| !motion.submitted);
                 d.apply_camera(decorations);
                 if matches!(self.phase, Phase::Exiting { .. }) {
@@ -2970,10 +3128,11 @@ impl OverviewSession {
             }
             if let Some(clock) = &d.clock {
                 clock.set_paused(
-                    d.motion.is_none()
-                        && !matches!(self.phase, Phase::Waiting(_) | Phase::Exiting { .. })
+                    (d.motion.as_ref().is_some_and(|m| m.submitted)
+                        || d.motion.is_none()
+                            && !matches!(self.phase, Phase::Waiting(_) | Phase::Exiting { .. })
+                            && d.camera_input.elapsed() > Duration::from_millis(100))
                         && self.pressed.is_none()
-                        && d.camera_input.elapsed() > Duration::from_millis(100)
                         && !self.drag.as_ref().is_some_and(|drag| {
                             drag.moved && contains(d.bounds, drag.point) && {
                                 let y = d.local(drag.point).y;
@@ -2986,7 +3145,11 @@ impl OverviewSession {
         // Commit motion before source policy changes or capture pumping can block.
         // A new animation must reach the custom CAContext before capture work.
         // Subsequent display ticks only commit decoration changes normally.
-        drop(if submitted { _tx.flush_on_commit() } else { _tx });
+        drop(if submitted {
+            _tx.flush_on_commit()
+        } else {
+            _tx
+        });
         let _tx = LayerTransaction::disabled();
         for d in &mut self.displays {
             // Existing IOSurfaces keep updating during motion. Stream resizing
@@ -3027,20 +3190,27 @@ impl OverviewSession {
                 .setPosition(CGPoint::new(drag.frame.origin.x, drag.frame.origin.y - 30.));
             drag.badge.setHidden(false);
         }
-        if matches!(self.phase, Phase::Entering(_))
-            && self.displays.iter().all(|d| d.motion.is_none())
+        if matches!(self.phase, Phase::Entering) && self.displays.iter().all(|d| d.motion.is_none())
         {
             self.phase = Phase::Overview;
         }
     }
 
-    pub(crate) fn completed_activation(&self) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
+    pub(crate) fn completed_activation(
+        &self,
+    ) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
         let exit = self.exit.as_ref()?;
-        Some((self.displays[self.active].info.display_uuid.clone(), exit.target.workspace, exit.target.window))
+        Some((
+            self.displays[self.active].info.display_uuid.clone(),
+            exit.target.workspace,
+            exit.target.window,
+        ))
     }
 
     pub(crate) fn handoff_ready(&mut self) -> bool {
-        let Phase::Exiting { start, .. } = self.phase else { return false; };
+        let Phase::Exiting { start, .. } = self.phase else {
+            return false;
+        };
         if let Some(reveal) = self.reveal {
             return reveal.elapsed().as_secs_f64() >= REVEAL_MOTION;
         }
@@ -3073,6 +3243,26 @@ impl OverviewSession {
             return false;
         }
         let d = &self.displays[self.active];
+        let ids: Vec<_> = d
+            .windows
+            .iter()
+            .filter(|w| {
+                Some(w.data.id) == window
+                    || self.exit.as_ref().is_some_and(|exit| {
+                        exit.outgoing.contains(&w.data.id)
+                            || exit.target.frames.iter().any(|(id, _)| *id == w.data.id)
+                    })
+            })
+            .filter_map(|w| w.data.info.sys_id)
+            .collect();
+        let native: std::collections::HashMap<_, _> = if ids.is_empty() {
+            Default::default()
+        } else {
+            crate::sys::window_server::get_windows(&ids).into_iter().map(|info| (info.id, info)).collect()
+        };
+        let mut ordered = std::collections::HashMap::new();
+        let mut is_ordered = |id| *ordered.entry(id).or_insert_with(||
+            crate::sys::window_server::window_is_ordered_in(id));
         if let Some(exit) = &self.exit {
             if exit.start.elapsed().as_secs_f64() < exit.duration {
                 return false;
@@ -3100,13 +3290,13 @@ impl OverviewSession {
                 let Some(sys_id) = w.data.info.sys_id else {
                     return false;
                 };
-                let Some(native) = crate::sys::window_server::get_window(sys_id) else {
+                let Some(native) = native.get(&sys_id) else {
                     continue;
                 };
                 if native.pid != id.pid {
                     continue;
                 }
-                if !crate::sys::window_server::window_is_ordered_in(sys_id)
+                if !is_ordered(sys_id)
                     || (native.frame.origin.x - frame.origin.x).abs() > 1.
                     || (native.frame.origin.y - frame.origin.y).abs() > 1.
                     || (native.frame.size.width - frame.size.width).abs() > 1.
@@ -3121,8 +3311,8 @@ impl OverviewSession {
                     .iter()
                     .find(|w| w.data.id == id)
                     .and_then(|w| w.data.info.sys_id)
-                    .filter(|&id| crate::sys::window_server::window_is_ordered_in(id))
-                    .and_then(crate::sys::window_server::get_window);
+                    .and_then(|id| native.get(&id))
+                    .filter(|info| is_ordered(info.id));
                 if let Some(native) = native.filter(|w| w.pid == id.pid) {
                     let width = native.frame.max().x.min(d.bounds.max().x)
                         - native.frame.min().x.max(d.bounds.min().x);
@@ -3141,10 +3331,10 @@ impl OverviewSession {
             let Some(sys_id) = w.data.info.sys_id else {
                 return false;
             };
-            let Some(native) = crate::sys::window_server::get_window(sys_id) else {
+            let Some(native) = native.get(&sys_id) else {
                 return false;
             };
-            if native.pid != id.pid || !crate::sys::window_server::window_is_ordered_in(sys_id) {
+            if native.pid != id.pid || !is_ordered(sys_id) {
                 return false;
             }
             let Some(ws) = d.workspaces.iter().find(|ws| ws.workspace_id == w.workspace) else {
@@ -3167,6 +3357,24 @@ impl OverviewSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compositor_completion_wakes_paused_presenter_once_and_ignores_cancellation() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let (wake, mut events) = crate::actor::channel();
+        let delegate = CameraCompletion::alloc().set_ivars((completed.clone(), Some(wake)));
+        let delegate: Retained<CameraCompletion> = unsafe { objc2::msg_send![super(delegate), init] };
+        let animation = CAAnimation::animation();
+        let _: () = unsafe { objc2::msg_send![&*delegate, animationDidStop: &*animation, finished: false] };
+        assert!(!completed.load(Ordering::Acquire));
+        assert!(events.try_recv().is_err());
+        for _ in 0..2 {
+            let _: () = unsafe { objc2::msg_send![&*delegate, animationDidStop: &*animation, finished: true] };
+        }
+        assert!(completed.load(Ordering::Acquire));
+        assert!(matches!(events.try_recv().unwrap().1, crate::actor::mission_control::Event::PumpPreviews));
+        assert!(events.try_recv().is_err());
+    }
+
     #[test]
     fn zoom_keeps_pointer_world_position_and_picking_consistent() {
         let mut c = Camera {
@@ -3197,7 +3405,8 @@ mod tests {
         };
         // The compositor transform must preserve the same zoom pivot at both cadences.
         for frame in 1..36 {
-            let camera = motion.sample(motion.start + Duration::from_secs_f64(frame as f64 / 120.)).0;
+            let camera =
+                motion.sample(motion.start + Duration::from_secs_f64(frame as f64 / 120.)).0;
             let transform = camera.transform();
             assert!((300. * transform.m11 + transform.m41 - 200.).abs() < 1e-9);
             assert!((250. * transform.m22 + transform.m42 - 100.).abs() < 1e-9);

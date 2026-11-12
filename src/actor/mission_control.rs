@@ -340,7 +340,10 @@ impl MissionControlActor {
                         self.close();
                         if let Some((display, workspace, window)) = activation {
                             self.reactor.send(reactor::Event::OverviewSelectWorkspace {
-                                display, workspace, window, transition: None,
+                                display,
+                                workspace,
+                                window,
+                                transition: None,
                             });
                         }
                     }
