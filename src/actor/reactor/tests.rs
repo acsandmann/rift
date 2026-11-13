@@ -11402,14 +11402,18 @@ fn overview_activation_resolves_scrolled_target_before_native_focus() {
             raise_rx.try_recv().is_err(),
             "preparation must not activate an app during the zoom"
         );
-        // Focus observations for the old viewport can arrive while AX is still
-        // applying the covered placements. They must not restore the old focus
-        // and schedule a second visible scroll after the overview exits.
+        // A genuine native focus change during preparation must be accepted.
+        // The final overview intent will still use an instant covered placement.
+        if !switch_workspace {
         reactor.handle_event(Event::WindowServerFocusChanged(WindowId::new(1, 1), space));
         assert_eq!(
             reactor.layout_manager.layout_engine.focused_window(),
-            Some(target)
+            Some(WindowId::new(1, 1))
         );
+        }
+        // Movement caused by the intervening native user action is legitimate.
+        // Inspect only the final overview handoff for an unwanted second scroll.
+        animation_rx.commands.try_iter().for_each(drop);
         // The overview host is gone before the final native focus is requested.
         reactor.handle_event(Event::OverviewSelectWorkspace {
             display: display.clone(),

@@ -58,6 +58,15 @@ struct ActiveSequence {
     started_at: Instant,
     timed_out: bool,
     focusing: bool,
+    focus_grace: bool,
+}
+
+impl ActiveSequence {
+    fn remaining_timeout(&self) -> Duration {
+        if self.timed_out { return Duration::MAX; }
+        let deadline = if self.focus_grace { Duration::from_secs(1) } else { TIMEOUT_DURATION };
+        deadline.saturating_sub(self.started_at.elapsed())
+    }
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -76,19 +85,10 @@ impl RaiseManager {
         raise_manager.input_tx = input_tx;
         let mut timeout_timer = Timer::manual();
 
-        let sequence_timeout = |sequence: &ActiveSequence| {
-            if !sequence.timed_out {
-                let elapsed = sequence.started_at.elapsed();
-                TIMEOUT_DURATION.saturating_sub(elapsed)
-            } else {
-                Duration::MAX
-            }
-        };
-
         loop {
             // Calculate next timeout timer if we have an active sequence.
             let timeout = if let Some(sequence) = &raise_manager.active_sequence {
-                sequence_timeout(sequence)
+                sequence.remaining_timeout()
             } else {
                 Duration::MAX
             };
@@ -105,7 +105,7 @@ impl RaiseManager {
                 _ = timeout_timer.next() => {
                     // Send timeout event for the active sequence
                     if let Some(sequence) = &mut raise_manager.active_sequence {
-                        if sequence_timeout(sequence) <= Duration::ZERO {
+                        if sequence.remaining_timeout() <= Duration::ZERO {
                             // Send timeout event to reactor; this will get
                             // relayed back to us. We send these events through
                             // the reactor so that we can record/replay them.
@@ -133,8 +133,11 @@ impl RaiseManager {
         }
         // A focus timeout releases the deadline, not the user's last intent.
         // A newer request supersedes it; otherwise a busy app may still execute it.
-        if matches!(&msg, Event::RaiseRequest(_) | Event::MouseRaiseRequest(..))
-            && self.active_sequence.as_ref().is_some_and(|s| s.timed_out && s.focusing)
+        let new_focus = match &msg {
+            Event::RaiseRequest(request) | Event::MouseRaiseRequest(request, _) => request.focus_window.is_some(),
+            _ => false,
+        };
+        if new_focus && self.active_sequence.as_ref().is_some_and(|s| s.focus_grace && s.focusing)
         {
             self.active_sequence.take().unwrap().raise_token.cancel();
         }
@@ -166,12 +169,16 @@ impl RaiseManager {
                 // Clear pending raises for the active sequence if it matches
                 if let Some(sequence) = &mut self.active_sequence {
                     if sequence.sequence_id == sequence_id {
-                        if sequence.focusing && self.queued_sequences.is_empty() {
+                        if sequence.focusing && !sequence.focus_grace
+                            && !self.queued_sequences.iter().any(|(request, _)| request.focus_window.is_some())
+                        {
                             // This is the final focus request. Geometry ahead of it
                             // on the app actor can take longer than 250 ms. Keep its
-                            // token live until completion or a newer focus intent.
+                            // token live for one additional bounded grace period.
                             debug!(sequence_id, "Final focus delayed; preserving latest intent");
-                            sequence.timed_out = true;
+                            sequence.focus_grace = true;
+                            sequence.started_at = Instant::now();
+                            sequence.timed_out = false;
                             return;
                         }
                         warn!(
@@ -285,6 +292,7 @@ impl RaiseManager {
                 started_at: Instant::now(),
                 timed_out: false,
                 focusing: false,
+                focus_grace: false,
             });
         }
     }
@@ -613,6 +621,34 @@ mod tests {
                         window_id: selected,
                         sequence_id: sequence,
                     });
+                }
+                assert!(manager.active_sequence.is_none());
+            }
+        });
+    }
+
+    #[test]
+    fn delayed_focus_has_finite_grace_and_survives_stacking_only_requests() {
+        Executor::run(async {
+            for stacking in [false, true] {
+                let mut manager = RaiseManager::new();
+                let (handles, mut rx) = create_test_app_handles();
+                let selected = WindowId::new(1, 3);
+                manager.handle_message(create_layout_response(vec![], Some((selected, None)), handles.clone(), Quiet::Yes));
+                let (_, Request::Raise(_, token, _, _)) = rx.try_recv().unwrap() else { panic!("focus request"); };
+                manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
+                if stacking {
+                    manager.handle_message(create_layout_response(vec![WindowId::new(1, 4)], None, handles, Quiet::Yes));
+                }
+                assert!(!token.is_cancelled(), "stacking must not supersede the selected focus");
+                let sequence = manager.active_sequence.as_mut().unwrap();
+                sequence.started_at = Instant::now() - Duration::from_secs(2);
+                assert_eq!(sequence.remaining_timeout(), Duration::ZERO, "the grace must rearm the existing deadline");
+                manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
+                assert!(token.is_cancelled(), "an unresponsive app must eventually release the global raise lock");
+                if stacking {
+                    assert_raise_request(&collect_requests(&mut rx)[0], WindowId::new(1, 4), 2, Quiet::Yes);
+                    manager.handle_message(Event::RaiseCompleted { window_id: WindowId::new(1, 4), sequence_id: 2 });
                 }
                 assert!(manager.active_sequence.is_none());
             }

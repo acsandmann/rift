@@ -127,8 +127,8 @@ define_class! {
     unsafe impl NSObjectProtocol for CameraCompletion {}
     unsafe impl CAAnimationDelegate for CameraCompletion {
         #[unsafe(method(animationDidStop:finished:))]
-        fn stopped(&self, _animation: &CAAnimation, finished: bool) {
-            if finished && !self.ivars().0.swap(true, Ordering::AcqRel) {
+        fn stopped(&self, _animation: &CAAnimation, _finished: bool) {
+            if !self.ivars().0.swap(true, Ordering::AcqRel) {
                 if let Some(wake) = &self.ivars().1 {
                     wake.send(crate::actor::mission_control::Event::PumpPreviews);
                 }
@@ -1151,7 +1151,10 @@ impl DisplayOverview {
                     }
                 })
                 .unwrap_or(camera);
-            if motion.completed.load(Ordering::Acquire) || (!motion.submitted && done) {
+            if motion.completed.load(Ordering::Acquire)
+                || (!motion.submitted && done)
+                || now.duration_since(motion.start).as_secs_f64() >= motion.duration + 0.25
+            {
                 self.camera = motion.to;
                 self.motion = None;
                 self.decoration_duration = 0.;
@@ -1564,6 +1567,13 @@ struct ExitScene {
     start: Instant,
     duration: f64,
 }
+impl ExitScene {
+    fn completed_selection(&self, phase: &Phase) -> Option<(crate::model::VirtualWorkspaceId, Option<WindowId>)> {
+        let Phase::Exiting { window, .. } = phase else { return None; };
+        Some((self.target.workspace, *window))
+    }
+}
+
 pub struct OverviewSession {
     displays: Vec<DisplayOverview>,
     active: usize,
@@ -3196,15 +3206,9 @@ impl OverviewSession {
         }
     }
 
-    pub(crate) fn completed_activation(
-        &self,
-    ) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
-        let exit = self.exit.as_ref()?;
-        Some((
-            self.displays[self.active].info.display_uuid.clone(),
-            exit.target.workspace,
-            exit.target.window,
-        ))
+    pub(crate) fn completed_activation(&self) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
+        let (workspace, window) = self.exit.as_ref()?.completed_selection(&self.phase)?;
+        Some((self.displays[self.active].info.display_uuid.clone(), workspace, window))
     }
 
     pub(crate) fn handoff_ready(&mut self) -> bool {
@@ -3358,17 +3362,26 @@ impl OverviewSession {
 mod tests {
     use super::*;
     #[test]
-    fn compositor_completion_wakes_paused_presenter_once_and_ignores_cancellation() {
+    fn rejected_preparation_selection_is_not_focused_at_handoff() {
+        let selected = WindowId::new(1, 3);
+        let stamp = Instant::now();
+        let workspace = crate::model::VirtualWorkspaceId::default();
+        let exit = ExitScene { target: OverviewTarget {
+            workspace, window: Some(selected), stamp, frames: vec![],
+        }, outgoing: vec![], start: stamp, duration: EXIT_MOTION };
+        let phase = Phase::Exiting { window: None, start: stamp, target_ready: true };
+        assert_eq!(exit.completed_selection(&phase), Some((workspace, None)));
+    }
+
+    #[test]
+    fn cancelled_compositor_animation_wakes_paused_presenter_once() {
         let completed = Arc::new(AtomicBool::new(false));
         let (wake, mut events) = crate::actor::channel();
         let delegate = CameraCompletion::alloc().set_ivars((completed.clone(), Some(wake)));
         let delegate: Retained<CameraCompletion> = unsafe { objc2::msg_send![super(delegate), init] };
         let animation = CAAnimation::animation();
-        let _: () = unsafe { objc2::msg_send![&*delegate, animationDidStop: &*animation, finished: false] };
-        assert!(!completed.load(Ordering::Acquire));
-        assert!(events.try_recv().is_err());
-        for _ in 0..2 {
-            let _: () = unsafe { objc2::msg_send![&*delegate, animationDidStop: &*animation, finished: true] };
+        for finished in [false, true, false] {
+            let _: () = unsafe { objc2::msg_send![&*delegate, animationDidStop: &*animation, finished: finished] };
         }
         assert!(completed.load(Ordering::Acquire));
         assert!(matches!(events.try_recv().unwrap().1, crate::actor::mission_control::Event::PumpPreviews));
