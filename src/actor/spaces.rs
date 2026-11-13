@@ -340,10 +340,18 @@ impl SpacesActor {
                 self.handle_space_inventory_changed();
             }
             Event::SpaceCreated(space) => {
+                if self.classify_space(space).is_none() {
+                    return;
+                }
                 self.state.destroyed_spaces.remove(&space);
                 self.handle_space_inventory_changed();
             }
             Event::SpaceDestroyed(space) => {
+                // A destroyed ID may no longer have a queryable type. Use the
+                // inventory classified while it was alive instead.
+                if !self.was_managed_space(space) {
+                    return;
+                }
                 self.state.destroyed_spaces.insert(space);
                 self.handle_space_inventory_changed();
             }
@@ -523,6 +531,20 @@ impl SpacesActor {
         screens: Vec<ScreenInfo>,
         inventory: HashMap<String, Vec<SpaceId>>,
     ) -> ForwardedSpaceState {
+        // Internal WindowServer Spaces must not participate in desktop identity,
+        // remapping, or presentation invalidation.
+        let inventory: HashMap<_, Vec<_>> = inventory
+            .into_iter()
+            .map(|(display, spaces)| {
+                let spaces = spaces
+                    .into_iter()
+                    .filter(|space| {
+                        Self::is_user_space(*space) || Self::is_fullscreen_space(*space)
+                    })
+                    .collect();
+                (display, spaces)
+            })
+            .collect();
         let previous_screens = self.state.screens.clone();
         // Positive presence only: inactive fullscreen enumeration may be incomplete.
         let fullscreen_spaces: HashSet<SpaceId> = screens
@@ -629,11 +651,20 @@ impl SpacesActor {
             .iter()
             .copied()
             .filter(|space| {
-                !inventory.values().any(|spaces| spaces.contains(space))
+                // WindowServer also reports transient Spaces used during app
+                // activation. Only forward destruction of a Space we previously
+                // managed; an unknown ID cannot invalidate desktop geometry.
+                self.was_managed_space(*space)
+                    && !inventory.values().any(|spaces| spaces.contains(space))
                     && !fullscreen_spaces.contains(space)
             })
             .collect();
-        self.state.destroyed_spaces.retain(|space| !destroyed_spaces.contains(space));
+        // Corroborated removals are forwarded once. Untracked transient IDs
+        // are discarded once they are absent from the accepted native sample.
+        self.state.destroyed_spaces.retain(|space| {
+            inventory.values().any(|spaces| spaces.contains(space))
+                || fullscreen_spaces.contains(space)
+        });
         let mut forwarded = ForwardedSpaceState {
             revision: self.state.revision,
             authoritative: true,
@@ -857,7 +888,7 @@ impl SpacesActor {
     fn is_fullscreen_space(space: SpaceId) -> bool {
         #[cfg(test)]
         {
-            space.get() >= 0x400000000
+            (0x400000000..0x800000000).contains(&space.get())
         }
         #[cfg(not(test))]
         {
@@ -868,12 +899,20 @@ impl SpacesActor {
     fn is_user_space(space: SpaceId) -> bool {
         #[cfg(test)]
         {
-            !Self::is_fullscreen_space(space)
+            space.get() < 0x400000000
         }
         #[cfg(not(test))]
         {
             window_server::space_is_user(space.get())
         }
+    }
+
+    fn was_managed_space(&self, space: SpaceId) -> bool {
+        self.state.last_forwarded.as_ref().is_some_and(|previous| {
+            previous.screens.iter().any(|screen| screen.space == Some(space))
+                || previous.display_space_ids.values().any(|spaces| spaces.contains(&space))
+                || previous.fullscreen_spaces.contains(&space)
+        })
     }
 
     fn classify_space(&self, space: SpaceId) -> Option<reactor::SpaceEventKind> {

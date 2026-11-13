@@ -1031,3 +1031,65 @@ fn native_space_destruction_is_forwarded_only_after_topology_corroborates_it() {
         "destruction deltas are consumed once"
     );
 }
+
+#[test]
+fn transient_app_switch_spaces_do_not_revoke_scrolling_geometry() {
+    use crate::actor::app::{AppThreadHandle, Request, WindowId};
+
+    // Test IDs model user, fullscreen, and other native Space types.
+    for transient in [SpaceId::new(4212), SpaceId::new(0x800000001)] {
+        let mut rig = Rig::new();
+        let native = sample(vec![screen(1, "display", 4)]);
+        rig.membership(4, &[7]);
+        let before = rig.tick(0, Some(native.clone())).unwrap();
+        let (mut producer, mut requests) = AppThreadHandle::channel();
+        producer.set_topology_authority(&rig.actor.topology_guard(), before.revision);
+        let frame = CGRect::new(CGPoint::new(425., 37.), CGSize::new(1100., 945.));
+        producer
+            .send(Request::set_window_frame(
+                WindowId::new(1, 7),
+                frame,
+                Default::default(),
+                false,
+            ))
+            .unwrap();
+        let queued = requests.try_recv().unwrap().1;
+
+        // Logged Cmd+Tab sequence: transient Space creation, unchanged desktop,
+        // then destruction while scrolling frames are still queued.
+        // Buffer the callback's native query so Rig supplies the accepted sample.
+        rig.actor.state.sleeping = true;
+        rig.event(Event::SpaceCreated(transient));
+        rig.actor.state.sleeping = false;
+        rig.tick(0, Some(native.clone())).unwrap();
+        rig.actor.state.sleeping = true;
+        rig.event(Event::SpaceDestroyed(transient));
+        rig.actor.state.sleeping = false;
+        let after = rig.tick(0, Some(native.clone())).unwrap();
+        assert!(
+            queued.authorized().is_some(),
+            "app switching revoked an in-flight frame"
+        );
+        assert!(
+            producer.can_write_frames(),
+            "the scrolling producer lost authority"
+        );
+        assert!(
+            after.destroyed_spaces.is_empty(),
+            "transient Space leaked into desktop topology"
+        );
+        assert_eq!(after.revision, before.revision);
+        assert!(rig.notifications().is_empty());
+        let next = rig.tick(0, Some(native.clone())).unwrap();
+        assert!(next.destroyed_spaces.is_empty());
+        assert!(rig.actor.state.destroyed_spaces.is_empty());
+        if transient.get() >= 0x800000000 {
+            let mut internal = native.clone();
+            internal.inventory.get_mut("display").unwrap().push(transient);
+            let observed = rig.tick(0, Some(internal)).unwrap();
+            assert_eq!(observed.display_space_ids, before.display_space_ids);
+            assert!(observed.fullscreen_spaces.is_empty());
+            assert_eq!(observed.revision, before.revision);
+        }
+    }
+}
