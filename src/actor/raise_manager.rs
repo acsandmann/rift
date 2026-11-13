@@ -137,15 +137,18 @@ impl RaiseManager {
         if self.active_sequence.as_ref().is_some_and(|s| s.raise_token.is_cancelled()) {
             self.active_sequence = None;
         }
-        // A focus timeout releases the deadline, not the user's last intent.
-        // A newer request supersedes it; otherwise a busy app may still execute it.
+        // Once stacking has completed, newer focus intent can cancel the
+        // activation wait immediately. Keep the grace for an unsuperseded focus.
         let new_focus = match &msg {
-            Event::RaiseRequest(request) | Event::MouseRaiseRequest(request, _) => {
-                request.focus_window.is_some()
+            Event::RaiseRequest(request) => request.focus_window.is_some(),
+            Event::MouseRaiseRequest(request, token) => {
+                !token.is_cancelled()
+                    && request.focus_window.is_some()
+                    && self.active_sequence.as_ref().is_some_and(|s| s.focus_grace)
             }
             _ => false,
         };
-        if new_focus && self.active_sequence.as_ref().is_some_and(|s| s.focus_grace && s.focusing) {
+        if new_focus && self.active_sequence.as_ref().is_some_and(|s| s.focusing) {
             self.active_sequence.take().unwrap().raise_token.cancel();
         }
         match msg {
@@ -581,6 +584,49 @@ mod tests {
             // Verify that the sequence was completed and removed
             assert!(raise_manager.active_sequence.is_none());
         });
+    }
+
+    #[test]
+    fn rapid_focus_supersedes_before_timeout_and_ignores_stale_events() {
+        let mut manager = RaiseManager::new();
+        let (handles, mut rx) = create_test_app_handles();
+        let mut previous: Option<(WindowId, CancellationToken, u64)> = None;
+        for index in [1, 2, 3, 1] {
+            let window = WindowId::new(1, index);
+            manager.handle_message(create_layout_response(
+                vec![],
+                Some((window, None)),
+                handles.clone(),
+                Quiet::No,
+            ));
+            if let Some((old_window, token, sequence_id)) = previous.take() {
+                assert!(
+                    token.is_cancelled(),
+                    "new focus must not wait for the old timeout"
+                );
+                manager.handle_message(Event::RaiseTimeout { sequence_id });
+                manager.handle_message(Event::RaiseCompleted {
+                    window_id: old_window,
+                    sequence_id,
+                });
+            }
+            let requests = collect_requests(&mut rx);
+            let [Request::Raise(windows, token, sequence_id, Quiet::No)] = &requests[..] else {
+                panic!("latest focus should be dispatched immediately");
+            };
+            assert_eq!(windows, &[window]);
+            assert!(!token.is_cancelled());
+            assert_eq!(
+                manager.active_sequence.as_ref().unwrap().sequence_id,
+                *sequence_id
+            );
+            previous = Some((window, token.clone(), *sequence_id));
+        }
+        let (window_id, token, sequence_id) = previous.unwrap();
+        manager.handle_message(Event::RaiseCompleted { window_id, sequence_id });
+        assert!(!token.is_cancelled());
+        assert!(manager.active_sequence.is_none());
+        assert!(manager.queued_sequences.is_empty());
     }
 
     #[test]
