@@ -63,8 +63,14 @@ struct ActiveSequence {
 
 impl ActiveSequence {
     fn remaining_timeout(&self) -> Duration {
-        if self.timed_out { return Duration::MAX; }
-        let deadline = if self.focus_grace { Duration::from_secs(1) } else { TIMEOUT_DURATION };
+        if self.timed_out {
+            return Duration::MAX;
+        }
+        let deadline = if self.focus_grace {
+            Duration::from_secs(1)
+        } else {
+            TIMEOUT_DURATION
+        };
         deadline.saturating_sub(self.started_at.elapsed())
     }
 }
@@ -134,11 +140,12 @@ impl RaiseManager {
         // A focus timeout releases the deadline, not the user's last intent.
         // A newer request supersedes it; otherwise a busy app may still execute it.
         let new_focus = match &msg {
-            Event::RaiseRequest(request) | Event::MouseRaiseRequest(request, _) => request.focus_window.is_some(),
+            Event::RaiseRequest(request) | Event::MouseRaiseRequest(request, _) => {
+                request.focus_window.is_some()
+            }
             _ => false,
         };
-        if new_focus && self.active_sequence.as_ref().is_some_and(|s| s.focus_grace && s.focusing)
-        {
+        if new_focus && self.active_sequence.as_ref().is_some_and(|s| s.focus_grace && s.focusing) {
             self.active_sequence.take().unwrap().raise_token.cancel();
         }
         match msg {
@@ -169,8 +176,12 @@ impl RaiseManager {
                 // Clear pending raises for the active sequence if it matches
                 if let Some(sequence) = &mut self.active_sequence {
                     if sequence.sequence_id == sequence_id {
-                        if sequence.focusing && !sequence.focus_grace
-                            && !self.queued_sequences.iter().any(|(request, _)| request.focus_window.is_some())
+                        if sequence.focusing
+                            && !sequence.focus_grace
+                            && !self
+                                .queued_sequences
+                                .iter()
+                                .any(|(request, _)| request.focus_window.is_some())
                         {
                             // This is the final focus request. Geometry ahead of it
                             // on the app actor can take longer than 250 ms. Keep its
@@ -634,21 +645,51 @@ mod tests {
                 let mut manager = RaiseManager::new();
                 let (handles, mut rx) = create_test_app_handles();
                 let selected = WindowId::new(1, 3);
-                manager.handle_message(create_layout_response(vec![], Some((selected, None)), handles.clone(), Quiet::Yes));
-                let (_, Request::Raise(_, token, _, _)) = rx.try_recv().unwrap() else { panic!("focus request"); };
+                manager.handle_message(create_layout_response(
+                    vec![],
+                    Some((selected, None)),
+                    handles.clone(),
+                    Quiet::Yes,
+                ));
+                let (_, Request::Raise(_, token, _, _)) = rx.try_recv().unwrap() else {
+                    panic!("focus request");
+                };
                 manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
                 if stacking {
-                    manager.handle_message(create_layout_response(vec![WindowId::new(1, 4)], None, handles, Quiet::Yes));
+                    manager.handle_message(create_layout_response(
+                        vec![WindowId::new(1, 4)],
+                        None,
+                        handles,
+                        Quiet::Yes,
+                    ));
                 }
-                assert!(!token.is_cancelled(), "stacking must not supersede the selected focus");
+                assert!(
+                    !token.is_cancelled(),
+                    "stacking must not supersede the selected focus"
+                );
                 let sequence = manager.active_sequence.as_mut().unwrap();
                 sequence.started_at = Instant::now() - Duration::from_secs(2);
-                assert_eq!(sequence.remaining_timeout(), Duration::ZERO, "the grace must rearm the existing deadline");
+                assert_eq!(
+                    sequence.remaining_timeout(),
+                    Duration::ZERO,
+                    "the grace must rearm the existing deadline"
+                );
                 manager.handle_message(Event::RaiseTimeout { sequence_id: 1 });
-                assert!(token.is_cancelled(), "an unresponsive app must eventually release the global raise lock");
+                assert!(
+                    token.is_cancelled(),
+                    "an unresponsive app must eventually release the global raise lock"
+                );
                 if stacking {
-                    assert_raise_request(&collect_requests(&mut rx)[0], WindowId::new(1, 4), 2, Quiet::Yes);
-                    manager.handle_message(Event::RaiseCompleted { window_id: WindowId::new(1, 4), sequence_id: 2 });
+                    assert_raise_request(
+                        &collect_requests(&mut rx)[0],
+                        WindowId::new(1, 4),
+                        2,
+                        Quiet::Yes,
+                    );
+                    manager.handle_message(Event::RaiseCompleted {
+                        window_id: WindowId::new(1, 4),
+                        sequence_id: 2,
+                    });
                 }
                 assert!(manager.active_sequence.is_none());
             }

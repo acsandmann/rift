@@ -2459,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn restated_space_snapshot_preserves_animation_but_new_revision_cancels_it() {
+    fn space_snapshot_preserves_animation_until_presentation_changes() {
         use super::super::testing::*;
         use crate::actor::reactor::Event;
 
@@ -2492,6 +2492,12 @@ mod tests {
             );
         }
         snapshot.revision += 1;
+        reactor.handle_event(Event::SpaceStateChanged(snapshot.clone()));
+        assert!(control.lock().frames.contains_key(&wid));
+        assert!(receiver.commands.try_iter().all(|message| !matches!(message, Message::Stop(_))));
+
+        snapshot.revision += 1;
+        snapshot.destroyed_spaces.insert(space);
         reactor.handle_event(Event::SpaceStateChanged(snapshot));
         assert!(!control.lock().frames.contains_key(&wid));
         assert!(receiver.commands.try_iter().any(|message| matches!(message, Message::Stop(_))));

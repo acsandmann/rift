@@ -66,11 +66,6 @@ If rift is part of your daily workflow, consider [sponsoring its development](ht
 Aerospace worked well for me, but I missed animations and the ability to use fullscreen on one display while working on the other. I also prefer leveraging private/undocumented APIs as they tend to be more reliable (due to the OS being built on them and all the public APIs) and performant.
 <sup><sup>for more on why rift exists and what rift strives to do, see the [manifesto](manifesto.md)</sup></sup>
 
-
-## credits
-Rift began as a fork (and is licensed as such) of <a href="https://github.com/glide-wm/glide">glide-wm</a> but has since diverged significantly. It uses private APIs reverse engineered by yabai and other projects. It is not affiliated with glide-wm or yabai.
-
-
 <!---------------------------------------------------------------------------->
 
 [config_link]: https://acsandmann.github.io/rift-docs/reference/configuration/

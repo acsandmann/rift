@@ -11405,11 +11405,11 @@ fn overview_activation_resolves_scrolled_target_before_native_focus() {
         // A genuine native focus change during preparation must be accepted.
         // The final overview intent will still use an instant covered placement.
         if !switch_workspace {
-        reactor.handle_event(Event::WindowServerFocusChanged(WindowId::new(1, 1), space));
-        assert_eq!(
-            reactor.layout_manager.layout_engine.focused_window(),
-            Some(WindowId::new(1, 1))
-        );
+            reactor.handle_event(Event::WindowServerFocusChanged(WindowId::new(1, 1), space));
+            assert_eq!(
+                reactor.layout_manager.layout_engine.focused_window(),
+                Some(WindowId::new(1, 1))
+            );
         }
         // Movement caused by the intervening native user action is legitimate.
         // Inspect only the final overview handoff for an unwanted second scroll.

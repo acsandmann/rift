@@ -1010,8 +1010,11 @@ impl DisplayOverview {
             ));
             let group = camera.frame(bounds);
             let visible = intersects(group, viewport) && group.max().y >= 44. * factor;
-            let hidden = !visible && self.motion.as_ref().is_none_or(|motion|
-                !intersects(motion.from.frame(bounds), viewport));
+            let hidden = !visible
+                && self
+                    .motion
+                    .as_ref()
+                    .is_none_or(|motion| !intersects(motion.from.frame(bounds), viewport));
             if region.label.isHidden() != hidden {
                 region.label.setHidden(hidden);
             }
@@ -1568,8 +1571,13 @@ struct ExitScene {
     duration: f64,
 }
 impl ExitScene {
-    fn completed_selection(&self, phase: &Phase) -> Option<(crate::model::VirtualWorkspaceId, Option<WindowId>)> {
-        let Phase::Exiting { window, .. } = phase else { return None; };
+    fn completed_selection(
+        &self,
+        phase: &Phase,
+    ) -> Option<(crate::model::VirtualWorkspaceId, Option<WindowId>)> {
+        let Phase::Exiting { window, .. } = phase else {
+            return None;
+        };
         Some((self.target.workspace, *window))
     }
 }
@@ -3206,9 +3214,15 @@ impl OverviewSession {
         }
     }
 
-    pub(crate) fn completed_activation(&self) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
+    pub(crate) fn completed_activation(
+        &self,
+    ) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
         let (workspace, window) = self.exit.as_ref()?.completed_selection(&self.phase)?;
-        Some((self.displays[self.active].info.display_uuid.clone(), workspace, window))
+        Some((
+            self.displays[self.active].info.display_uuid.clone(),
+            workspace,
+            window,
+        ))
     }
 
     pub(crate) fn handoff_ready(&mut self) -> bool {
@@ -3262,11 +3276,17 @@ impl OverviewSession {
         let native: std::collections::HashMap<_, _> = if ids.is_empty() {
             Default::default()
         } else {
-            crate::sys::window_server::get_windows(&ids).into_iter().map(|info| (info.id, info)).collect()
+            crate::sys::window_server::get_windows(&ids)
+                .into_iter()
+                .map(|info| (info.id, info))
+                .collect()
         };
         let mut ordered = std::collections::HashMap::new();
-        let mut is_ordered = |id| *ordered.entry(id).or_insert_with(||
-            crate::sys::window_server::window_is_ordered_in(id));
+        let mut is_ordered = |id| {
+            *ordered
+                .entry(id)
+                .or_insert_with(|| crate::sys::window_server::window_is_ordered_in(id))
+        };
         if let Some(exit) = &self.exit {
             if exit.start.elapsed().as_secs_f64() < exit.duration {
                 return false;
@@ -3366,10 +3386,22 @@ mod tests {
         let selected = WindowId::new(1, 3);
         let stamp = Instant::now();
         let workspace = crate::model::VirtualWorkspaceId::default();
-        let exit = ExitScene { target: OverviewTarget {
-            workspace, window: Some(selected), stamp, frames: vec![],
-        }, outgoing: vec![], start: stamp, duration: EXIT_MOTION };
-        let phase = Phase::Exiting { window: None, start: stamp, target_ready: true };
+        let exit = ExitScene {
+            target: OverviewTarget {
+                workspace,
+                window: Some(selected),
+                stamp,
+                frames: vec![],
+            },
+            outgoing: vec![],
+            start: stamp,
+            duration: EXIT_MOTION,
+        };
+        let phase = Phase::Exiting {
+            window: None,
+            start: stamp,
+            target_ready: true,
+        };
         assert_eq!(exit.completed_selection(&phase), Some((workspace, None)));
     }
 
@@ -3378,13 +3410,19 @@ mod tests {
         let completed = Arc::new(AtomicBool::new(false));
         let (wake, mut events) = crate::actor::channel();
         let delegate = CameraCompletion::alloc().set_ivars((completed.clone(), Some(wake)));
-        let delegate: Retained<CameraCompletion> = unsafe { objc2::msg_send![super(delegate), init] };
+        let delegate: Retained<CameraCompletion> =
+            unsafe { objc2::msg_send![super(delegate), init] };
         let animation = CAAnimation::animation();
         for finished in [false, true, false] {
-            let _: () = unsafe { objc2::msg_send![&*delegate, animationDidStop: &*animation, finished: finished] };
+            let _: () = unsafe {
+                objc2::msg_send![&*delegate, animationDidStop: &*animation, finished: finished]
+            };
         }
         assert!(completed.load(Ordering::Acquire));
-        assert!(matches!(events.try_recv().unwrap().1, crate::actor::mission_control::Event::PumpPreviews));
+        assert!(matches!(
+            events.try_recv().unwrap().1,
+            crate::actor::mission_control::Event::PumpPreviews
+        ));
         assert!(events.try_recv().is_err());
     }
 
