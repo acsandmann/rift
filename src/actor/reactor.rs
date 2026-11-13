@@ -6076,7 +6076,17 @@ impl Reactor {
     }
 
     fn prepare_refocus_before_removal(&mut self, event: &LayoutEvent) {
-        let focused = self.layout_manager.layout_engine.focused_window();
+        if !matches!(event, LayoutEvent::AppClosed(_) | LayoutEvent::WindowRemoved(_)) {
+            return;
+        }
+        let focused = self.layout_manager.layout_engine.focused_window().or_else(|| {
+            // AX suspension clears current focus before authoritative removal arrives.
+            // Use workspace history without visibility filtering: the departing window
+            // may already be ordered out or absent from the window store.
+            let space = self.workspace_command_space()?;
+            let workspaces = self.layout_manager.layout_engine.workspaces();
+            workspaces.last_focused_window(space, workspaces.active_workspace(space)?)
+        });
         let removed_focus = match event {
             LayoutEvent::AppClosed(pid) => focused.filter(|wid| wid.pid == *pid),
             LayoutEvent::WindowRemoved(wid) if focused == Some(*wid) => focused,
