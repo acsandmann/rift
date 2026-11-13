@@ -44,6 +44,18 @@ pub struct Update {
 }
 
 impl Update {
+    fn active_workspace_changed(&self, previous: &Self) -> bool {
+        self.active_space_is_activated != previous.active_space_is_activated
+            || self.displays.len() != previous.displays.len()
+            || self.displays.iter().zip(&previous.displays).any(|(display, old)| {
+                display.display_uuid != old.display_uuid
+                    || display.space != old.space
+                    || display.is_active_context != old.is_active_context
+                    || display.workspaces.iter().find(|w| w.is_active).map(|w| &w.id)
+                        != old.workspaces.iter().find(|w| w.is_active).map(|w| &w.id)
+            })
+    }
+
     pub fn context_workspaces(&self) -> &[Workspace] {
         self.displays
             .iter()
@@ -126,12 +138,12 @@ impl Menu {
     }
 
     pub async fn run(mut self) {
-        // Updates are latest-wins: only the newest one is applied once updates go quiet.
+        // Layout updates are latest-wins; workspace switches bypass the debounce.
         const DEBOUNCE: Duration = Duration::from_millis(150);
 
         let mut pending: Option<Update> = None;
         // Reusable main-run-loop timers; idle while disarmed, so they cost no thread or wakeup.
-        // The debounce stays exact: it already delays the visible workspace indicator.
+        // Workspace selection is applied immediately; geometry-only updates use this timer.
         let mut debounce = Timer::manual();
         // Nothing waits on a layout-folder rescan, so it may coalesce with other wakeups.
         let mut refresh_layouts = Timer::manual().with_tolerance(Duration::from_millis(50));
@@ -162,8 +174,14 @@ impl Menu {
                             let _enter = span.enter();
                             match event {
                                 Event::Update(update) => {
-                                    pending = Some(update);
-                                    debounce.set_next_fire(DEBOUNCE);
+                                    if self.last_update.as_ref().is_none_or(|last| update.active_workspace_changed(last)) {
+                                        // Discard older queued geometry so it cannot restore a stale selection.
+                                        pending = None;
+                                        self.handle_update(update);
+                                    } else {
+                                        pending = Some(update);
+                                        debounce.set_next_fire(DEBOUNCE);
+                                    }
                                 }
                                 Event::BindingModeChanged(mode) => {
                                     self.binding_mode = mode;
