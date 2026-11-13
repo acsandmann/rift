@@ -222,7 +222,7 @@ struct PresentedWindow {
 #[derive(Clone, Copy)]
 enum Sample<'a> {
     Transition {
-        progress: f64,
+        // progress: f64, // Previously used to switch size at the midpoint.
         eased: f64,
         set_size: bool,
     },
@@ -270,13 +270,15 @@ impl PresentedWindow {
 
     fn sample(&mut self, sample: Sample<'_>) -> Option<Frame> {
         let (frame, set_size, source, force) = match sample {
-            Sample::Transition { progress, eased, set_size } => {
-                let mut frame = interpolate_frame(self.from, self.to, eased);
-                frame.size = if progress >= 0.5 {
-                    self.to.size
-                } else {
-                    self.from.size
-                };
+            Sample::Transition { eased, set_size } => {
+                let frame = interpolate_frame(self.from, self.to, eased);
+                // frame.size = if progress >= 0.5 {
+                //     self.to.size
+                // } else {
+                //     self.from.size
+                // };
+                // Publish interpolated sizes too, rather than snapping halfway through.
+                let set_size = set_size || !frame.size.same_as(self.frame.size);
                 let frame = contain_transition_frame(self.from, self.to, frame);
                 (frame, set_size, FrameSource::Ordinary, set_size)
             }
@@ -1532,7 +1534,7 @@ impl Animation {
         stage_windows(
             &mut self.windows,
             Sample::Transition {
-                progress: t,
+                // progress: t,
                 eased: ease(t),
                 set_size: (previous < 0.5 && t >= 0.5) || t == 1.0,
             },
@@ -1563,11 +1565,8 @@ fn interpolate_frame(a: CGRect, b: CGRect, s: f64) -> CGRect {
     }
 }
 
-/// Size switches in one step while the origin eases, so a window growing
-/// toward a far edge (or shrinking away from one) can momentarily extend past
-/// both endpoints and off the screen. AX clamps that write and the following
-/// position-only frames jump back. Keeping each frame inside the union of the
-/// endpoints keeps it on screen whenever both endpoints are.
+/// Keep frame requests within the endpoints' union to avoid native offscreen clamping.
+// Previously size switched in one step while the origin eased, causing overshoot.
 fn contain_transition_frame(from: CGRect, to: CGRect, mut frame: CGRect) -> CGRect {
     let contain = |origin: f64, len: f64, a: f64, a_len: f64, b: f64, b_len: f64| {
         let max = (a + a_len).max(b + b_len) - len;
@@ -1593,11 +1592,14 @@ fn contain_transition_frame(from: CGRect, to: CGRect, mut frame: CGRect) -> CGRe
 }
 
 fn ease(t: f64) -> f64 {
-    if t < 0.5 {
-        (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
-    } else {
-        (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
-    }
+    // Smoothstep keeps velocity finite and continuous through the midpoint.
+    // The previous circular curve had an infinite slope there:
+    //     if t < 0.5 {
+    //         (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
+    //     } else {
+    //         (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
+    //     }
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn blend(a: f64, b: f64, s: f64) -> f64 { (1.0 - s) * a + s * b }
@@ -1745,6 +1747,70 @@ mod tests {
             }
             _ => panic!("expected coalesced frame, got {request:?}"),
         }
+    }
+
+    #[test]
+    fn fullscreen_resize_is_continuous_in_both_directions() {
+        let tiled = rect(-900.0, 200.0, 400.0, 500.0);
+        let fullscreen = rect(-1200.0, 0.0, 1200.0, 900.0);
+        for (from, to) in [(tiled, fullscreen), (fullscreen, tiled)] {
+            let (handle, mut rx) = AppThreadHandle::channel();
+            let wid = WindowId::new(1, 1);
+            let mut animation = animation(&handle, wid, from, to);
+            let mut frames = FrameBatch::default();
+            let mut previous = 0.0;
+            for t in [0.25, 0.49, 0.50, 0.51, 0.75, 1.0] {
+                animation.stage_frame(t, previous, &mut frames);
+                frames.flush();
+                let requests = collect_requests(&mut rx);
+                assert_eq!(requests.len(), 1);
+                assert_animation_frame(&requests[0], wid, get_frame(from, to, t));
+                previous = t;
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_fullscreen_resize_reverses_from_presented_size() {
+        let (handle, mut rx) = AppThreadHandle::channel();
+        let wid = WindowId::new(1, 1);
+        let tiled = rect(200.0, 100.0, 400.0, 500.0);
+        let fullscreen = rect(0.0, 0.0, 1200.0, 900.0);
+        let mut first = ActiveAnimation::start(animation(&handle, wid, tiled, fullscreen)).unwrap();
+        collect_requests(&mut rx);
+        let mut frames = FrameBatch::default();
+        first.send_frame(
+            first.started + first.animation.duration.mul_f64(0.4),
+            &mut frames,
+        );
+        frames.flush();
+        collect_requests(&mut rx);
+        let presented = first.animation.windows[0].frame;
+        assert!(presented.size.width > tiled.size.width);
+        assert!(presented.size.width < fullscreen.size.width);
+        let mut reversed = first.replace_with(animation(&handle, wid, fullscreen, tiled));
+        assert_eq!(reversed.animation.windows[0].from, presented);
+        reversed.send_frame(
+            reversed.started + reversed.animation.duration.mul_f64(0.25),
+            &mut frames,
+        );
+        frames.flush();
+        assert_animation_frame(
+            &collect_requests(&mut rx)[0],
+            wid,
+            get_frame(presented, tiled, 0.25),
+        );
+    }
+
+    #[test]
+    fn easing_has_no_midpoint_speed_spike() {
+        assert_eq!(ease(0.0), 0.0);
+        assert_eq!(ease(0.5), 0.5);
+        assert_eq!(ease(1.0), 1.0);
+        assert!(
+            ease(0.51) - ease(0.49) < 0.04,
+            "two percent of the duration must not jump a large part of the distance"
+        );
     }
 
     #[test]
