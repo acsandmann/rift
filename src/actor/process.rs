@@ -88,7 +88,15 @@ impl ProcessActor {
 
             let pid = match unsafe { pid_for_psn(&psn) } {
                 Some(pid) => pid,
-                None => return NO_ERR,
+                None => {
+                    // A terminated process's PSN no longer resolves to a pid by
+                    // the time the event arrives; look for the apps that ended.
+                    if ev.kind == K_EVENT_APP_TERMINATED {
+                        debug!("Carbon: App terminated (pid unknown)");
+                        wm_sender.send(WmEvent::AppsMayHaveTerminated);
+                    }
+                    return NO_ERR;
+                }
             };
 
             match ev.kind {
