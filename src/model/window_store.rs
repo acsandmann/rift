@@ -571,7 +571,7 @@ impl WindowStore {
             .filter_map(|wid| {
                 let record = self.record(wid)?;
                 if observed.contains(&wid)
-                    || (inactive.contains(&wid) && !record.ax_invalidated)
+                    || inactive.contains(&wid)
                     || record.state.as_ref()?.info.is_minimized
                     || self.native_fullscreen_record_for_window(wid).is_some()
                 {
