@@ -187,9 +187,10 @@ pub fn classify_window_frame_change(
     requested: bool,
     mouse_state: &mut Option<MouseState>,
     mission_control_active: bool,
+    query_mouse_state: fn() -> Option<MouseState>,
 ) -> FrameChangeDisposition {
     let Some(window) = state.windows.window(wid) else {
-        query_mouse_for_active_drag(drag, mouse_state);
+        query_mouse_for_active_drag(drag, mouse_state, query_mouse_state);
         return FrameChangeDisposition::Handled;
     };
     let server_id = window.info.sys_id;
@@ -205,11 +206,11 @@ pub fn classify_window_frame_change(
         && let Some(seen) = last_seen
     {
         if seen != transactions.get_last_sent_txid(server) {
-            query_mouse_for_active_drag(drag, mouse_state);
+            query_mouse_for_active_drag(drag, mouse_state, query_mouse_state);
             return FrameChangeDisposition::Handled;
         }
         if mouse_state.is_none() {
-            *mouse_state = crate::sys::event::get_mouse_state();
+            *mouse_state = query_mouse_state();
         }
         if *mouse_state == Some(MouseState::Down) {
             transactions.clear_target_for_window(server);
@@ -224,7 +225,7 @@ pub fn classify_window_frame_change(
         }
     }
     if requested {
-        query_mouse_for_active_drag(drag, mouse_state);
+        query_mouse_for_active_drag(drag, mouse_state, query_mouse_state);
         if let Some(window) = state.windows.window_mut(wid) {
             window.frame_monotonic = new_frame;
         }
@@ -235,18 +236,22 @@ pub fn classify_window_frame_change(
     }
 
     if old_frame.same_as(new_frame) {
-        query_mouse_for_active_drag(drag, mouse_state);
+        query_mouse_for_active_drag(drag, mouse_state, query_mouse_state);
         return FrameChangeDisposition::Handled;
     }
     if mouse_state.is_none() {
-        *mouse_state = crate::sys::event::get_mouse_state();
+        *mouse_state = query_mouse_state();
     }
     FrameChangeDisposition::NeedsGeometryAnalysis
 }
 
-fn query_mouse_for_active_drag(drag: &DragManager, mouse_state: &mut Option<MouseState>) {
+fn query_mouse_for_active_drag(
+    drag: &DragManager,
+    mouse_state: &mut Option<MouseState>,
+    query_mouse_state: fn() -> Option<MouseState>,
+) {
     if mouse_state.is_none() && drag.actor.is_active() {
-        *mouse_state = crate::sys::event::get_mouse_state();
+        *mouse_state = query_mouse_state();
     }
 }
 

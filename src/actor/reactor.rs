@@ -422,6 +422,8 @@ pub enum WindowInvalidationSource {
 pub struct Reactor {
     pub config: Config,
     pub one_space: bool,
+    query_mouse_state: fn() -> Option<MouseState>,
+    displays_have_separate_spaces: fn() -> bool,
     pub(crate) binding_mode: String,
     app_manager: managers::AppManager,
     layout_manager: managers::LayoutManager,
@@ -523,6 +525,8 @@ impl Reactor {
         let reactor = Reactor {
             config: config.clone(),
             one_space,
+            query_mouse_state: crate::sys::event::get_mouse_state,
+            displays_have_separate_spaces: crate::sys::screen::displays_have_separate_spaces,
             binding_mode: "default".into(),
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
@@ -1943,6 +1947,7 @@ impl Reactor {
                         requested.0,
                         &mut effective_mouse_state,
                         mission_control_active,
+                        self.query_mouse_state,
                     ),
                     window_workflow::FrameChangeDisposition::Handled
                 ) {
@@ -2479,7 +2484,7 @@ impl Reactor {
             }
             Event::ConfigUpdated(new_cfg) => {
                 if new_cfg.virtual_workspaces.mode == crate::common::config::WorkspaceMode::Global
-                    && !crate::sys::screen::displays_have_separate_spaces()
+                    && !(self.displays_have_separate_spaces)()
                 {
                     warn!(
                         "Global workspaces require separate native Spaces for displays; retaining current configuration"

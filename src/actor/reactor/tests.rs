@@ -1873,7 +1873,7 @@ fn matching_rift_frame_clears_pending_target() {
             accepted,
             Some(txid),
             Requested(true),
-            Some(MouseState::Up),
+            None,
         ))
         .unwrap();
     assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(accepted));
@@ -1884,12 +1884,13 @@ fn matching_rift_frame_clears_pending_target() {
     assert!(outcome.arrange.passes == 0 && !outcome.refresh_layout_mode);
 
     // A user drag beginning during the transaction clears it instead of accepting it blindly.
+    reactor.query_mouse_state = || Some(MouseState::Down);
     reactor.handle_event(Event::WindowFrameChanged(
         wid,
         accepted,
         Some(txid),
         Requested(true),
-        Some(MouseState::Down),
+        None,
     ));
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
 }
@@ -1969,8 +1970,23 @@ fn scrolling_display_transfer_ignores_intermediate_native_width() {
 
 #[test]
 fn native_frame_changes_only_resize_layout_during_user_drag() {
-    for mouse in [MouseState::Up, MouseState::Down] {
+    let cases: [(fn() -> Option<MouseState>, Option<MouseState>); 5] = [
+        (|| Some(MouseState::Up), None),
+        (|| Some(MouseState::Down), None),
+        (|| None, None),
+        (
+            || panic!("explicit mouse state must not poll"),
+            Some(MouseState::Up),
+        ),
+        (
+            || panic!("explicit mouse state must not poll"),
+            Some(MouseState::Down),
+        ),
+    ];
+    for (query, supplied) in cases {
+        let mouse = supplied.or_else(query);
         let (mut reactor, wid, _wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+        reactor.query_mouse_state = query;
         let resized = CGRect::new(
             frame.origin,
             CGSize::new(frame.size.width + 80.0, frame.size.height + 40.0),
@@ -1982,7 +1998,7 @@ fn native_frame_changes_only_resize_layout_during_user_drag() {
                 resized,
                 None,
                 Requested(false),
-                Some(mouse),
+                supplied,
             ))
             .unwrap();
 
@@ -1993,13 +2009,13 @@ fn native_frame_changes_only_resize_layout_during_user_drag() {
                 event, LayoutEvent::WindowResized { wid: window, new_frame, .. }
                     if *window == wid && *new_frame == resized
             )),
-            mouse == MouseState::Down
+            mouse == Some(MouseState::Down)
         );
         let before = reactor.layout_update_count;
         reactor.apply_event_outcome(outcome);
         assert_eq!(
             reactor.layout_update_count - before,
-            usize::from(mouse == MouseState::Up)
+            usize::from(mouse != Some(MouseState::Down))
         );
     }
 }
@@ -2461,6 +2477,24 @@ fn frame_echo_reading_mouse_up_does_not_end_a_modifier_drag() {
         Some(MouseState::Up),
     ));
     assert!(reactor.drag_manager.actor.is_active());
+
+    for mouse in [None, Some(MouseState::Down), Some(MouseState::Up)] {
+        reactor.query_mouse_state = match mouse {
+            None => || None,
+            Some(MouseState::Down) => || Some(MouseState::Down),
+            Some(MouseState::Up) => || Some(MouseState::Up),
+        };
+        let outcome = reactor
+            .dispatch_workflow(Event::WindowFrameChanged(
+                wid,
+                moved,
+                None,
+                Requested(true),
+                None,
+            ))
+            .unwrap();
+        assert_eq!(outcome.dispatch_mouse_up, mouse == Some(MouseState::Up));
+    }
 
     reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
     assert!(!reactor.drag_manager.actor.is_active());
@@ -12304,5 +12338,24 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         reactor.handle_event(Event::WindowDestroyed(wid));
         assert!(reactor.query_window_info(wid).is_none());
         assert!(!reactor.state.windows.contains_window(wid));
+    }
+}
+
+#[test]
+fn global_config_requires_separate_native_spaces() {
+    for separate in [false, true] {
+        let mut reactor = test_reactor();
+        reactor.displays_have_separate_spaces = if separate { || true } else { || false };
+        let mut config = reactor.config.clone();
+        config.virtual_workspaces.mode = crate::common::config::WorkspaceMode::Global;
+        reactor.dispatch_workflow(Event::ConfigUpdated(config)).unwrap();
+        assert_eq!(
+            reactor.config.virtual_workspaces.mode,
+            if separate {
+                crate::common::config::WorkspaceMode::Global
+            } else {
+                crate::common::config::WorkspaceMode::PerDisplay
+            }
+        );
     }
 }
