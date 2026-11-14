@@ -5911,6 +5911,7 @@ fn fullscreen_startup_fixture(
             floating: false,
             position: None,
             size: None,
+            respect_min_size: false,
             focus: false,
             manage: Some(true),
             app_name: None,
