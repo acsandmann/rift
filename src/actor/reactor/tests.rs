@@ -2660,6 +2660,41 @@ fn window_parked_past_a_neighbouring_display_keeps_its_workspace() {
 }
 
 #[test]
+fn window_parked_past_a_neighbouring_display_stays_when_either_shows_another_space() {
+    for display in [1, 2] {
+        let (mut reactor, wid, wsid, middle, right) = window_parked_between_displays();
+        let workspace = reactor.test_workspace_for_window(middle, wid);
+        report_window_on_space(&mut reactor, wsid, middle, right);
+
+        // A fullscreen app or a desktop swipe. The window stays on the right display's Space,
+        // which a snapshot only lists while that Space is the one on screen.
+        let other = SpaceId::new(9);
+        let mut screens = reactor.space_state.screens.clone();
+        let shown = screens[display].space.replace(other).unwrap();
+        crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![right.get()]));
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
+        let mut snapshot = forwarded_space_state(screens);
+        snapshot.membership_complete = true;
+        snapshot
+            .display_space_ids
+            .insert(format!("test-display-{display}"), vec![shown, other]);
+        if shown != right {
+            snapshot.active_window_spaces.insert(wsid, right);
+        }
+        reactor.handle_event(Event::SpaceStateChanged(snapshot));
+        crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+        crate::sys::window_server::set_window_spaces_override(wsid, None);
+
+        assert!(workspace.is_some());
+        assert_eq!(
+            reactor.test_workspace_for_window(middle, wid),
+            workspace,
+            "display {display} shows another Space"
+        );
+    }
+}
+
+#[test]
 fn window_evicted_from_the_display_it_is_parked_past_returns_to_it() {
     let (mut reactor, wid, wsid, middle, right) = window_parked_between_displays();
     let from = reactor.test_workspace_ids(right)[0];
