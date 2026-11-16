@@ -9,7 +9,13 @@
 	<key>CFBundleIdentifier</key>
 	<string>git.acsandmann.rift</string>
 	<key>CFBundleInfoDictionaryVersion</key>
-	<string>0.1.0</string>
+	<string>6.0</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>LSUIElement</key>
+	<true/>
 	<key>CFBundleName</key>
 	<string>rift</string>
 	<key>CFBundlePackageType</key>

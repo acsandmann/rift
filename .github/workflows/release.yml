@@ -26,6 +26,7 @@ env:
   CARGO_TERM_COLOR: always
   DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
   ASSET_BASENAME: rift-universal-macos
+  APP_ASSET_BASENAME: rift-app-universal-macos
   TAP_REPO: acsandmann/homebrew-tap
   TAP_FILE_PATH: Formula/rift.rb
   RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
@@ -140,6 +141,21 @@ jobs:
             done
           done
 
+      - name: Assemble app bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist/Rift.app/Contents/MacOS
+          cp dist/rift dist/Rift.app/Contents/MacOS/rift
+          sed "s/@VERSION@/${RELEASE_TAG#v}/g" assets/Info.plist > dist/Rift.app/Contents/Info.plist
+          plutil -lint dist/Rift.app/Contents/Info.plist
+          # Both slices must embed the exact same metadata as the enclosing bundle.
+          for arch in arm64 x86_64; do
+            otool -arch "$arch" -P dist/Rift.app/Contents/MacOS/rift | sed -n '/^<?xml/,$p' > "$RUNNER_TEMP/embedded.plist"
+            plutil -convert xml1 -o "$RUNNER_TEMP/bundle.plist" dist/Rift.app/Contents/Info.plist
+            plutil -convert xml1 "$RUNNER_TEMP/embedded.plist"
+            cmp "$RUNNER_TEMP/bundle.plist" "$RUNNER_TEMP/embedded.plist"
+          done
+
       - name: Import signing certificate
         uses: apple-actions/import-codesign-certs@v7
         with:
@@ -156,7 +172,7 @@ jobs:
             -k /Library/Keychains/System.keychain \
             "$RUNNER_TEMP/rift.crt"
 
-      - name: Sign release binaries
+      - name: Sign release binaries and bundle
         run: |
           set -euo pipefail
 
@@ -167,33 +183,55 @@ jobs:
           security find-identity -v -p codesigning \
             signing_temp.keychain | grep -F "$SIGNER"
 
+          # Separate copies need separate seals; sign independent outputs concurrently.
           codesign --force --timestamp=none \
             --sign "$SIGNER" \
             --identifier git.acsandmann.rift \
-            dist/rift
+            dist/rift &
+          legacy_pid=$!
+
+          codesign --force --timestamp=none \
+            --sign "$SIGNER" \
+            --identifier git.acsandmann.rift \
+            dist/Rift.app &
+          app_pid=$!
 
           codesign --force --timestamp=none \
             --sign "$SIGNER" \
             --identifier git.acsandmann.rift.cli \
-            dist/rift-cli
+            dist/rift-cli &
+          cli_pid=$!
 
-          codesign --verify --verbose=2 dist/rift
-          codesign --verify --verbose=2 dist/rift-cli
-          codesign -dr - dist/rift
+          wait "$legacy_pid"
+          wait "$app_pid"
+          wait "$cli_pid"
+          codesign --verify --strict --verbose=2 dist/rift
+          codesign --verify --strict --verbose=2 dist/Rift.app
+          codesign --verify --strict --verbose=2 dist/rift-cli
+          codesign -dr - dist/Rift.app
 
-
-      - name: Package tarball
+      - name: Package tarballs
         id: pkg
         run: |
           set -euxo pipefail
           VERSION="${RELEASE_TAG#v}"
-          ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
+          LEGACY_ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
+          ASSET="${APP_ASSET_BASENAME}-${VERSION}.tar.gz"
           test -s rift.default.toml
           cp rift.default.toml dist/rift.default.toml
-          tar -C dist -czf "$ASSET" rift rift-cli rift.default.toml
+          # Keep the old archive contract for Nix and other binary consumers.
+          tar -C dist -czf "$LEGACY_ASSET" rift rift-cli rift.default.toml &
+          legacy_pid=$!
+          tar -C dist -czf "$ASSET" Rift.app rift-cli rift.default.toml &
+          app_pid=$!
+          wait "$legacy_pid"
+          wait "$app_pid"
+          legacy_sha256=$(shasum -a 256 "$LEGACY_ASSET" | awk '{print $1}')
           sha256=$(shasum -a 256 "$ASSET" | awk '{print $1}')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+          echo "legacy_asset=${LEGACY_ASSET}" >> "$GITHUB_OUTPUT"
+          echo "legacy_sha256=${legacy_sha256}" >> "$GITHUB_OUTPUT"
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
 
       - name: Verify packaged binary versions
@@ -202,16 +240,18 @@ jobs:
         run: |
           set -euo pipefail
           test "$(dist/rift --version)" = "rift ${VERSION}"
+          test "$(dist/Rift.app/Contents/MacOS/rift --version)" = "rift ${VERSION}"
           test "$(dist/rift-cli --version)" = "rift-cli ${VERSION}"
           test -s dist/rift.default.toml
 
-      - name: Replace release asset
+      - name: Replace release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ASSET: ${{ steps.pkg.outputs.asset }}
+          LEGACY_ASSET: ${{ steps.pkg.outputs.legacy_asset }}
         run: |
           set -euo pipefail
-          gh release upload "$RELEASE_TAG" "$ASSET" --clobber --repo "$RELEASE_REPOSITORY"
+          gh release upload "$RELEASE_TAG" "$ASSET" "$LEGACY_ASSET" --clobber --repo "$RELEASE_REPOSITORY"
 
       - name: Checkout Homebrew tap
         uses: actions/checkout@v4

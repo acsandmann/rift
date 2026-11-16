@@ -35,7 +35,7 @@ use rift_wm::sys::skylight::{
 };
 use tokio::join;
 
-embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
+embed_plist::embed_info_plist!(concat!(env!("OUT_DIR"), "/Info.plist"));
 
 #[derive(Parser)]
 #[command(name = "rift", version = env!("RIFT_VERSION"))]

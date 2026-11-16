@@ -24,6 +24,15 @@ fn main() {
     println!("cargo:rerun-if-changed=crates");
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
 
+    let plist = std::fs::read_to_string("assets/Info.plist")
+        .unwrap()
+        .replace("@VERSION@", &version);
+    std::fs::write(
+        std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("Info.plist"),
+        plist,
+    )
+    .unwrap();
+
     let release_tag = format!("v{version}");
     let tagged = git(&["tag", "--points-at", "HEAD"])
         .is_some_and(|tags| tags.lines().any(|tag| tag == release_tag || tag == version));
