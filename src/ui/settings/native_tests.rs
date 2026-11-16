@@ -2142,12 +2142,31 @@ fn late_runtime_populates_picker(
         view.subviews().iter().find_map(|child| add_button(&child))
     }
     settings.router.navigate(Category::Rules);
-    let pages = settings.router.pages.borrow();
-    let add = add_button(pages[Category::Rules.index()].as_ref().unwrap().view.ns_view()).unwrap();
-    drop(pages);
+    let add = settings
+        .window
+        .toolbar()
+        .ns_toolbar()
+        .items()
+        .iter()
+        .filter_map(|item| item.view())
+        .find_map(|view| add_button(&view))
+        .expect("Add App Rule toolbar button");
     assert!(unsafe { add.sendAction_to(add.action(), add.target().as_deref()) });
     let window = settings.model().sheet.borrow().as_ref().unwrap().ns_window().retain();
-    let list = find::<NSTableView>(&window.contentView().unwrap()).unwrap();
+    let change =
+        named::<objc2_app_kit::NSButton>(&window.contentView().unwrap(), "Change…").unwrap();
+    assert!(unsafe { change.sendAction_to(change.action(), change.target().as_deref()) });
+    let picker = NSApplication::sharedApplication(settings.router.ui.mtm())
+        .windows()
+        .iter()
+        .filter(|candidate| {
+            candidate.windowNumber() != window.windowNumber()
+                && candidate.windowNumber() != settings.window.ns_window().windowNumber()
+        })
+        .filter_map(|candidate| candidate.contentView())
+        .find(|content| find::<NSTableView>(content).is_some())
+        .expect("application picker popover");
+    let list = find::<NSTableView>(&picker).unwrap();
     assert_eq!(list.numberOfRows(), 0);
     settings.refresh_applications(vec![rift_protocol::ApplicationData {
         pid: 1,
@@ -2161,23 +2180,32 @@ fn late_runtime_populates_picker(
         &objc2_foundation::NSIndexSet::indexSetWithIndex(0),
         false,
     );
-    fn bundle_input(view: &NSView) -> Option<Retained<objc2_app_kit::NSTextField>> {
-        if let Some(field) = view.downcast_ref::<objc2_app_kit::NSTextField>()
-            && field
-                .placeholderString()
-                .is_some_and(|value| value.to_string() == "com.apple.Safari")
-        {
-            return Some(field.retain());
-        }
-        view.subviews().iter().find_map(|child| bundle_input(&child))
-    }
-    let input = bundle_input(&window.contentView().unwrap()).unwrap();
-    assert_eq!(input.stringValue().to_string(), "dev.test.Late");
+    let draft = settings.model().sheet_model.borrow().as_ref().unwrap().clone();
+    assert_eq!(
+        draft
+            .source
+            .borrow()
+            .virtual_workspaces
+            .app_rules
+            .last()
+            .unwrap()
+            .app_id
+            .as_deref(),
+        Some("dev.test.Late")
+    );
     settings.refresh_applications(vec![]);
     assert_eq!(list.numberOfRows(), 0, "removed apps leave the picker");
     assert_eq!(
-        input.stringValue().to_string(),
-        "dev.test.Late",
+        draft
+            .source
+            .borrow()
+            .virtual_workspaces
+            .app_rules
+            .last()
+            .unwrap()
+            .app_id
+            .as_deref(),
+        Some("dev.test.Late"),
         "inventory refresh preserves the chosen matcher"
     );
     settings.model().close_sheet();

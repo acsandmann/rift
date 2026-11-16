@@ -343,7 +343,7 @@ impl VirtualWorkspaceSettings {
                 && rule.window_tags.is_none()
             {
                 issues.push(format!(
-                    "App rule {} has no app_id, app_name, title_regex, or title_substring specified",
+                    "App rule {} needs at least one matching condition (application, title, Accessibility role, or raw window tags)",
                     index
                 ));
             }
