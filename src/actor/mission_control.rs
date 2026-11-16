@@ -336,16 +336,9 @@ impl MissionControlActor {
                 if let Some(session) = self.session.as_mut() {
                     session.pump_previews();
                     if session.handoff_ready() {
-                        let activation = session.completed_activation();
+                        // Native layout, stacking and focus have already been
+                        // prepared and verified underneath the cover.
                         self.close();
-                        if let Some((display, workspace, window)) = activation {
-                            self.reactor.send(reactor::Event::OverviewSelectWorkspace {
-                                display,
-                                workspace,
-                                window,
-                                transition: None,
-                            });
-                        }
                     }
                 }
             }

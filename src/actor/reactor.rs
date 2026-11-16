@@ -2224,12 +2224,9 @@ impl Reactor {
                 {
                     outcome.display_switch_warp = Some(space);
                 }
-                if transition.is_some() {
-                    if let Some(window) = response.focus_window {
-                        outcome.layout_events.push(LayoutEvent::WindowFocused(space, window));
-                    }
-                    return Ok(outcome);
-                }
+                // Covered activation follows the same native focus path as an
+                // explicit pick. apply_event_outcome arranges the scrolling
+                // viewport and stack first, then dispatches this raise request.
                 if let Some(window) = window.filter(|&window| response.focus_window == Some(window))
                 {
                     // Explicit overview picks use the same focus path as the CLI.
@@ -2461,9 +2458,9 @@ impl Reactor {
                     self.overview_focus.filter(|(_, selected, _)| *selected == window_id)
                 {
                     self.overview_focus = None;
-                    let selected = window_server::key_focused_window(space)
-                        .filter(|window| self.state.windows.contains_window(*window))
-                        .unwrap_or(selected);
+                    // The native key-focus query can still report the outgoing
+                    // app at raise completion. Keep the explicit overview pick
+                    // authoritative; the cover separately verifies native focus.
                     self.stop_camera(space);
                     outcome.absorb(
                         EventOutcome::layout_changed(false)

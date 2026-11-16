@@ -33,8 +33,10 @@ const MIN_ZOOM: f64 = 0.08;
 const MAX_ZOOM: f64 = 2.0;
 const OVERVIEW_ZOOM: f64 = 0.34;
 const EXIT_MOTION: f64 = 0.28;
-const HANDOFF_TIMEOUT: f64 = 1.;
-const REVEAL_MOTION: f64 = 0.08;
+const HANDOFF_RECOVERY: f64 = 1.5;
+// Just a few refresh intervals: soften texture/chrome differences without a
+// prolonged double image. This starts only after native handoff verification.
+const REVEAL_MOTION: f64 = 0.04;
 const CAPTURE_PIXELS: usize = 96 * 1024 * 1024 / 4;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
@@ -118,6 +120,7 @@ impl Camera {
 enum MotionCurve {
     Enter,
     Smooth,
+    Retarget(f64),
 }
 
 define_class! {
@@ -154,6 +157,7 @@ impl Motion {
             // A direct initial response with a zero-velocity landing, without bounce.
             MotionCurve::Enter => 1. - (1. - t).powi(3),
             MotionCurve::Smooth => t * t * (3. - 2. * t),
+            MotionCurve::Retarget(slope) => t * (slope + t * (3. - 2. * slope + t * (slope - 2.))),
         };
         let mix = |a: f64, b: f64| a + (b - a) * t;
         let zoom = mix(self.from.zoom, self.to.zoom);
@@ -961,6 +965,7 @@ impl DisplayOverview {
                         match motion.curve {
                             MotionCurve::Enter => 1.,
                             MotionCurve::Smooth => 0.,
+                            MotionCurve::Retarget(slope) => (slope / 3.) as f32,
                         },
                         2. / 3.,
                         1.,
@@ -1044,6 +1049,7 @@ impl DisplayOverview {
                             match motion.curve {
                                 MotionCurve::Enter => 1.,
                                 MotionCurve::Smooth => 0.,
+                                MotionCurve::Retarget(slope) => (slope / 3.) as f32,
                             },
                             2. / 3.,
                             1.,
@@ -1126,7 +1132,40 @@ impl DisplayOverview {
     }
 
     fn animate(&mut self, to: Camera, duration: f64) {
-        self.sample(Instant::now());
+        let now = Instant::now();
+        let velocity = self.motion.as_ref().map(|motion| {
+            let t =
+                (now.duration_since(motion.start).as_secs_f64() / motion.duration).clamp(0., 1.);
+            let derivative = match motion.curve {
+                MotionCurve::Enter => 3. * (1. - t).powi(2),
+                MotionCurve::Smooth => 6. * t * (1. - t),
+                MotionCurve::Retarget(slope) => {
+                    slope + 2. * (3. - 2. * slope) * t + 3. * (slope - 2.) * t * t
+                }
+            } / motion.duration;
+            let a = motion.from.transform();
+            let b = motion.to.transform();
+            [
+                (b.m11 - a.m11) * derivative,
+                (b.m41 - a.m41) * derivative,
+                (b.m42 - a.m42) * derivative,
+            ]
+        });
+        self.sample(now);
+        let curve = velocity.map_or(MotionCurve::Enter, |velocity| {
+            let a = self.camera.transform();
+            let b = to.transform();
+            let delta = [b.m11 - a.m11, b.m41 - a.m41, b.m42 - a.m42];
+            let distance = delta.iter().map(|v| v * v).sum::<f64>();
+            let slope = if distance > 1e-9 {
+                velocity.iter().zip(delta).map(|(v, d)| v * d).sum::<f64>() * duration / distance
+            } else {
+                0.
+            };
+            // A scalar transform animation cannot preserve sideways velocity.
+            // Projection preserves forward speed; clamping prevents overshoot.
+            MotionCurve::Retarget(slope.clamp(0., 3.))
+        });
         self.pictures.removeAnimationForKey(&NSString::from_str("camera"));
         self.pictures.setTransform(self.camera.transform());
         self.motion = Some(Motion {
@@ -1134,7 +1173,7 @@ impl DisplayOverview {
             to,
             start: Instant::now(),
             duration: duration.max(0.001),
-            curve: MotionCurve::Enter,
+            curve,
             submitted: false,
             completed: Arc::new(AtomicBool::new(false)),
         });
@@ -1523,7 +1562,6 @@ fn start_display(
             .map_err(|error| tracing::warn!(?error, "Spatial capture unavailable"))
             .ok();
         }
-        d.update_sources_at(d.selection.window, true, d.home);
         d.capture_dirty.store(true, Ordering::Release);
     }
 
@@ -1570,17 +1608,6 @@ struct ExitScene {
     start: Instant,
     duration: f64,
 }
-impl ExitScene {
-    fn completed_selection(
-        &self,
-        phase: &Phase,
-    ) -> Option<(crate::model::VirtualWorkspaceId, Option<WindowId>)> {
-        let Phase::Exiting { window, .. } = phase else {
-            return None;
-        };
-        Some((self.target.workspace, *window))
-    }
-}
 
 pub struct OverviewSession {
     displays: Vec<DisplayOverview>,
@@ -1618,7 +1645,8 @@ impl OverviewSession {
         shared: bool,
         backgrounds: &mut DesktopBackgrounds,
     ) -> Option<Self> {
-        let _tx = LayerTransaction::disabled().flush_on_commit();
+        let construction_start = Instant::now();
+        let _tx = LayerTransaction::disabled();
         let mut displays = Vec::new();
         let mut active = 0;
         for d in reactor.query_displays() {
@@ -1645,7 +1673,11 @@ impl OverviewSession {
                 displays.push(view);
             }
         }
-        tracing::debug!(displays = displays.len(), "Spatial overview hosts created");
+        tracing::debug!(
+            displays = displays.len(),
+            construction_ms = construction_start.elapsed().as_secs_f64() * 1000.,
+            "Spatial overview hosts created"
+        );
         let d = displays.get(active)?;
         let ws = d.workspaces.iter().find(|w| w.is_active).unwrap_or(&d.workspaces[0]);
         let selection = Selection {
@@ -1701,6 +1733,13 @@ impl OverviewSession {
         }
         self.selection = self.displays[self.active].selection;
         self.change_selection(self.selection);
+        // Cached IOSurfaces are already presentable. Submit the warm opening
+        // before source inventory changes can initialize or resize captures.
+        drop(_tx);
+        self.pump_previews();
+        for d in &mut self.displays {
+            d.update_sources_at(d.selection.window, true, d.home);
+        }
         if self.displays.iter().all(|d| d.captures.is_none() || d.windows.is_empty()) {
             self.phase = Phase::Overview;
             for d in &mut self.displays {
@@ -1887,6 +1926,7 @@ impl OverviewSession {
             ) {
                 if let Some(wake) = &self.wake {
                     start_display(&mut d, self.previews, wake, None);
+                    d.update_sources_at(d.selection.window, true, d.home);
                 }
                 d.camera = d.home;
                 d.background.setOpacity(1.);
@@ -2101,16 +2141,11 @@ impl OverviewSession {
             start: now,
             target_ready: dismiss,
         };
-        // Activation first resolves the authoritative scrolling viewport. Keep
-        // the presented overview stable until its geometry reply arrives.
-        if dismiss {
-            self.animate_exit(target);
-        } else {
-            for d in &mut self.displays {
-                d.apply_camera(1.);
-                d.request_camera_frame();
-            }
-        }
+        // Existing layout geometry gives immediate feedback. The reactor still
+        // owns the destination and native reveal; its reply retargets from the
+        // actual presentation transform rather than restarting at overview.
+        self.animate_exit(target);
+        tracing::debug!(dismiss, "Overview close submitted");
         action
     }
 
@@ -2161,11 +2196,14 @@ impl OverviewSession {
             }
         }
         let now = Instant::now();
-        let remaining = EXIT_MOTION;
-        if let Phase::Exiting { start, .. } = &mut self.phase {
-            *start = now;
-        }
-        self.animate_exit(target);
+        let elapsed = prepared.stamp.elapsed().as_secs_f64();
+        let remaining = (EXIT_MOTION - elapsed).max(0.12);
+        tracing::debug!(
+            geometry_wait_ms = elapsed * 1000.,
+            remaining_ms = remaining * 1000.,
+            "Overview close geometry prepared"
+        );
+        self.animate_exit_for(target, remaining);
         let d = &mut self.displays[self.active];
         let local_workspace = d
             .workspaces
@@ -2245,20 +2283,26 @@ impl OverviewSession {
         });
     }
 
-    fn animate_exit(&mut self, target: Camera) {
+    fn animate_exit(&mut self, target: Camera) { self.animate_exit_for(target, EXIT_MOTION); }
+
+    fn animate_exit_for(&mut self, target: Camera, duration: f64) {
         let now = Instant::now();
         for (i, d) in self.displays.iter_mut().enumerate() {
-            d.animate(
-                if i == self.active {
-                    target
-                } else {
-                    d.desktop_camera()
-                },
-                EXIT_MOTION,
-            );
-            let motion = d.motion.as_mut().unwrap();
-            motion.start = now;
-            motion.curve = MotionCurve::Smooth;
+            let destination = if i == self.active {
+                target
+            } else {
+                d.desktop_camera()
+            };
+            // An unchanged authoritative destination should not stop and restart
+            // an already running close (especially on uninvolved displays).
+            if !d.motion.as_ref().is_some_and(|motion| motion.to == destination) {
+                d.animate(destination, duration);
+                let motion = d.motion.as_mut().unwrap();
+                motion.start = now;
+                if !matches!(motion.curve, MotionCurve::Retarget(_)) {
+                    motion.curve = MotionCurve::Smooth;
+                }
+            }
             d.policy_dirty = true;
             d.decoration_duration = self.fade_duration.min(0.12);
             d.apply_camera(0.);
@@ -3065,6 +3109,28 @@ impl OverviewSession {
         let _tx = LayerTransaction::disabled();
         let now = Instant::now();
         if let Phase::Waiting(start) = self.phase {
+            // Reading retained frames does not pump captures or initialize streams.
+            // Test readiness against this wake's content, not the previous tick.
+            for d in &mut self.displays {
+                if let Some(captures) = &mut d.captures {
+                    // Cold captures must import their completed samples before
+                    // readiness is evaluated. Warm sessions need no pump here.
+                    if !d.windows.iter().any(|w| w.preview.has_frame()) {
+                        if let Err(error) = captures.pump() {
+                            tracing::warn!(?error, "Spatial capture startup failed");
+                        }
+                    }
+                    for w in &mut d.windows {
+                        if let Some(frame) =
+                            captures.captured_frame(w.data.info.sys_id.unwrap().as_u32())
+                            && frame.process_id() == w.data.id.pid
+                            && w.set_frame(&frame)
+                        {
+                            w.shadow.setOpacity(1.);
+                        }
+                    }
+                }
+            }
             let ready = self.displays.iter().all(|d| {
                 d.windows.is_empty()
                     || d.captures.as_ref().is_none_or(|_| {
@@ -3078,6 +3144,11 @@ impl OverviewSession {
             });
             // Wallpaper capture must never delay the opening transition.
             if ready || now.duration_since(start) > Duration::from_secs(2) {
+                tracing::debug!(
+                    preview_wait_ms = start.elapsed().as_secs_f64() * 1000.,
+                    ready,
+                    "Overview opening submitted"
+                );
                 self.phase = Phase::Entering;
                 for d in &mut self.displays {
                     d.decoration_duration = self.fade_duration;
@@ -3130,7 +3201,7 @@ impl OverviewSession {
         for d in &mut self.displays {
             let tick = d.clock.as_ref().and_then(|clock| clock.latest());
             let completed = d.motion.as_ref().is_some_and(|m| m.completed.load(Ordering::Acquire));
-            if completed || tick.is_some() && d.motion.is_none() {
+            if completed || tick.is_some() {
                 d.sample(now);
             }
             if completed
@@ -3172,7 +3243,9 @@ impl OverviewSession {
         for d in &mut self.displays {
             // Existing IOSurfaces keep updating during motion. Stream resizing
             // and snapshot/live policy changes wait until the camera settles.
-            if !matches!(self.phase, Phase::Exiting { .. }) && d.motion.is_none() {
+            if !matches!(self.phase, Phase::Waiting(_) | Phase::Exiting { .. })
+                && d.motion.is_none()
+            {
                 d.update_sources(d.selection.window, false);
             }
             if !matches!(self.phase, Phase::Exiting { .. })
@@ -3214,42 +3287,70 @@ impl OverviewSession {
         }
     }
 
-    pub(crate) fn completed_activation(
-        &self,
-    ) -> Option<(String, crate::model::VirtualWorkspaceId, Option<WindowId>)> {
-        let (workspace, window) = self.exit.as_ref()?.completed_selection(&self.phase)?;
-        Some((
-            self.displays[self.active].info.display_uuid.clone(),
-            workspace,
-            window,
-        ))
-    }
-
     pub(crate) fn handoff_ready(&mut self) -> bool {
         let Phase::Exiting { start, .. } = self.phase else {
             return false;
         };
         if let Some(reveal) = self.reveal {
-            return reveal.elapsed().as_secs_f64() >= REVEAL_MOTION;
+            // Focus/placement can change during the short dissolve (for
+            // example, a late AX acknowledgement). Abort before removing the
+            // cover if the desktop no longer matches the verified destination.
+            if !self.native_handoff_ready() {
+                let _tx = LayerTransaction::disabled().flush_on_commit();
+                for d in &self.displays {
+                    d.root.removeAnimationForKey(&NSString::from_str("reveal"));
+                    d.root.setOpacity(1.);
+                }
+                self.reveal = None;
+            } else {
+                return reveal.elapsed().as_secs_f64() >= REVEAL_MOTION;
+            }
+        }
+        // Sample the elapsed-time fallback too: a lost CA completion callback
+        // must not leave a submitted motion blocking handoff indefinitely.
+        for d in &mut self.displays {
+            d.sample(Instant::now());
         }
         if self.displays.iter().any(|d| d.motion.is_some()) {
             return false;
         }
         // Preparation precedes AX focus and frame acknowledgements. Reveal only
-        // once native focus and placement agree; the timeout is failure recovery.
+        // once native focus and placement agree; failed closes recover below.
         if self.native_handoff_ready() {
-            // Matching geometry needs no crossfade: dissolving identical window
-            // images still ghosts text when their live content differs.
-            return true;
-        }
-        if start.elapsed().as_secs_f64() < HANDOFF_TIMEOUT {
+            // Geometry and key focus are now verified underneath the cover.
+            // A very short render-server dissolve softens stale preview pixels
+            // and native chrome differences without timing native placement.
+            if let Some(exit) = &self.exit {
+                tracing::debug!(
+                    reveal_delay_ms =
+                        (exit.start.elapsed().as_secs_f64() - exit.duration).max(0.) * 1000.,
+                    "Overview native handoff ready"
+                );
+            }
+            let _tx = LayerTransaction::disabled().flush_on_commit();
+            for d in &self.displays {
+                fade(&d.root, 0.);
+                // Use the existing display clock only for this short verified
+                // reveal tail. Automatic camera motion remains clock-paused.
+                if let Some(clock) = &d.clock {
+                    clock.set_paused(false);
+                }
+            }
+            self.reveal = Some(Instant::now());
             return false;
         }
-        let _tx = LayerTransaction::disabled().flush_on_commit();
-        for d in &self.displays {
-            fade(&d.root, 0.);
+        // A failed/rejected geometry reply must not trap input forever, and a
+        // timeout alone cannot justify revealing parked windows. Cancel the
+        // close and refresh from the reactor so another selection can succeed.
+        if start.elapsed().as_secs_f64() >= HANDOFF_RECOVERY {
+            tracing::warn!("Overview handoff did not converge; restoring interactive overview");
+            self.interrupt();
+            let _tx = LayerTransaction::disabled().flush_on_commit();
+            for d in &mut self.displays {
+                d.animate(d.home, self.duration);
+                d.apply_camera(1.);
+            }
         }
-        self.reveal = Some(Instant::now());
         false
     }
 
@@ -3362,8 +3463,14 @@ impl OverviewSession {
                 return false;
             }
             let Some(ws) = d.workspaces.iter().find(|ws| ws.workspace_id == w.workspace) else {
-                return true;
+                return false;
             };
+            // Ordered-in geometry does not prove this app is in front. Wait
+            // for native key focus too; never expose the previously focused app
+            // while an asynchronous AX raise is still in flight.
+            if crate::sys::window_server::key_focused_window(ws.space) != Some(id) {
+                return false;
+            }
             if ws.display_uuid.as_deref() != Some(&d.info.display_uuid) {
                 return intersects(native.frame, ws.display_frame);
             }
@@ -3381,30 +3488,6 @@ impl OverviewSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn rejected_preparation_selection_is_not_focused_at_handoff() {
-        let selected = WindowId::new(1, 3);
-        let stamp = Instant::now();
-        let workspace = crate::model::VirtualWorkspaceId::default();
-        let exit = ExitScene {
-            target: OverviewTarget {
-                workspace,
-                window: Some(selected),
-                stamp,
-                frames: vec![],
-            },
-            outgoing: vec![],
-            start: stamp,
-            duration: EXIT_MOTION,
-        };
-        let phase = Phase::Exiting {
-            window: None,
-            start: stamp,
-            target_ready: true,
-        };
-        assert_eq!(exit.completed_selection(&phase), Some((workspace, None)));
-    }
-
     #[test]
     fn cancelled_compositor_animation_wakes_paused_presenter_once() {
         let completed = Arc::new(AtomicBool::new(false));
@@ -3525,5 +3608,26 @@ mod tests {
         let (end, done) = reverse.sample(reverse.start + Duration::from_millis(300));
         assert!(done);
         assert_eq!(end, first.from);
+
+        // Retargets retain forward speed while landing monotonically, including
+        // the maximum admitted slope. This protects against a second ease-in
+        // pause and against a velocity-preserving curve overshooting its target.
+        for slope in [0., 0.5, 1.5, 3.] {
+            let retarget = Motion {
+                curve: MotionCurve::Retarget(slope),
+                completed: reverse.completed.clone(),
+                ..reverse
+            };
+            let mut previous = 0.;
+            for step in 0..=300 {
+                let camera = retarget.sample(retarget.start + Duration::from_millis(step)).0;
+                let progress = (camera.zoom - middle.zoom) / (first.from.zoom - middle.zoom);
+                assert!(progress >= previous - 1e-9 && progress <= 1. + 1e-9);
+                previous = progress;
+            }
+            let early = retarget.sample(retarget.start + Duration::from_micros(30)).0;
+            let speed = (early.zoom - middle.zoom) / (first.from.zoom - middle.zoom) / 0.0001;
+            assert!((speed - slope).abs() < 0.001);
+        }
     }
 }
