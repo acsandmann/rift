@@ -10263,7 +10263,9 @@ fn another_displays_space_changes_never_move_workspaces_around_a_fullscreen_disp
     ] {
         reactor.handle_event(event);
         apps.simulate_until_quiet(&mut reactor);
-        assert_eq!(model(&reactor), before);
+        let current = model(&reactor);
+        assert_eq!(&current.0[..before.0.len()], &before.0);
+        assert_eq!(current.1, before.1);
         assert!(reactor.state.windows.is_window_native_fullscreen_suspended(second));
         assert_eq!(apps.windows[&first].frame, parked);
     }
@@ -10273,7 +10275,9 @@ fn another_displays_space_changes_never_move_workspaces_around_a_fullscreen_disp
         (wsids[1], b),
     ]));
     apps.simulate_until_quiet(&mut reactor);
-    assert_eq!(model(&reactor), before);
+    let current = model(&reactor);
+    assert_eq!(&current.0[..before.0.len()], &before.0);
+    assert_eq!(current.1, before.1);
     assert!(reactor.state.windows.native_fullscreen_record_for_window(second).is_none());
     assert_eq!(
         reactor.layout_manager.layout_engine.workspaces()[ids[0]].space,
@@ -10854,14 +10858,14 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
         assert_ne!(workspaces[independent].name, workspaces[original].name);
         assert_eq!(
             workspaces.catalog().count(),
-            2,
-            "connecting must preserve identities"
+            3,
+            "connecting seeds the emptied display without replacing existing identities"
         );
     }
 }
 
 #[test]
-fn named_pin_reload_moves_immediately_without_growing_catalog() {
+fn named_pin_reload_moves_immediately_and_seeds_only_once() {
     for create_scratch in [false, true] {
         let mut settings = shared_settings();
         settings.default_workspace_count = 2;
@@ -10903,7 +10907,7 @@ fn named_pin_reload_moves_immediately_without_growing_catalog() {
                 reactor.layout_manager.layout_engine.workspaces()[ids[1]].space,
                 target
             );
-            // Exposing an emptied display must not allocate a workspace.
+            // Repeated exposure must keep the replacement workspace.
             reactor.handle_event(space_state_event_with(
                 vec![shared_left(), shared_right()],
                 vec![Some(a), Some(b)],
@@ -10912,7 +10916,7 @@ fn named_pin_reload_moves_immediately_without_growing_catalog() {
             if target == a {
                 if create_scratch {
                     let workspaces = reactor.layout_manager.layout_engine.workspaces_mut();
-                    assert_eq!(workspaces.active_workspace(b), None);
+                    assert!(workspaces.active_workspace(b).is_some());
                     workspaces.create_workspace(b, Some("scratch".into())).unwrap();
                 }
                 let snapshot = reactor
@@ -10930,7 +10934,7 @@ fn named_pin_reload_moves_immediately_without_growing_catalog() {
         }
         let catalog: Vec<_> = reactor.layout_manager.layout_engine.workspaces().catalog().collect();
         assert_eq!(&catalog[..ids.len()], &ids);
-        assert_eq!(catalog.len(), ids.len() + usize::from(create_scratch));
+        assert_eq!(catalog.len(), ids.len() + 1 + usize::from(create_scratch));
     }
 }
 
@@ -11096,7 +11100,7 @@ fn floating_display_transfer_round_trip_preserves_user_geometry() {
 fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
     let (a, b) = (SpaceId::new(1), SpaceId::new(2));
     let windows = [1, 2, 3].map(|idx| WindowId::new(1, idx));
-    // One workspace: none is empty. Two: an unrelated empty one exists.
+    // Connecting adds one workspace, regardless of the existing default count.
     for count in [1, 2] {
         let mut settings = shared_settings();
         settings.default_workspace_count = count;
@@ -11121,8 +11125,8 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
                 window_id: Some(1),
             }))
         };
-        // Repeated commands, pointer placement, and native membership all name b,
-        // which owns no workspace: nothing may change.
+        let target = reactor.layout_manager.layout_engine.workspaces().active_workspace(b).unwrap();
+        // A newly connected display immediately accepts commands and pointer placement.
         for _ in 0..2 {
             reactor.handle_event(move_first(1));
             apps.simulate_until_quiet(&mut reactor);
@@ -11137,7 +11141,7 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
         ));
         apps.simulate_until_quiet(&mut reactor);
         crate::sys::window_server::set_cursor_location_override(None);
-        assert_eq!(reactor.assigned_space_for_window_id(opened), Some(a));
+        assert_eq!(reactor.assigned_space_for_window_id(opened), Some(b));
         let wsids = windows.map(|w| reactor.test_window_server_id(w));
         reactor.handle_event(space_state_event_with(
             vec![shared_left(), shared_right()],
@@ -11147,28 +11151,17 @@ fn window_moves_never_relocate_workspaces_or_strand_layout_members() {
                 s.active_window_spaces.extend([(wsids[0], b), (wsids[1], a), (wsids[2], a)]);
             },
         ));
-        // The rejected observation must not even transiently drop a layout member.
-        assert!(has_window_in_layout(&mut reactor, a, shared_left(), windows[0]));
-        apps.simulate_until_quiet(&mut reactor);
-        assert_eq!(model(&reactor), before, "count {count}");
-        for window in windows {
-            assert!(has_window_in_layout(&mut reactor, a, shared_left(), window));
-            assert!(shared_left().contains(apps.windows[&window].frame.mid()));
-        }
-        // Once b owns a workspace, only the requested window moves there.
-        let target = reactor
-            .layout_manager
-            .layout_engine
-            .workspaces_mut()
-            .create_workspace(b, None)
-            .unwrap();
-        reactor.handle_event(move_first(1));
         apps.simulate_until_quiet(&mut reactor);
         let (owners, members) = model(&reactor);
-        assert_eq!(owners[..before.0.len()], before.0[..]);
+        assert_eq!(owners, before.0, "window moves preserve workspace ownership");
         assert_eq!(members, [Some(target), before.1[1], before.1[2]]);
-        assert!(shared_right().contains(apps.windows[&windows[0]].frame.mid()));
+        assert!(has_window_in_layout(&mut reactor, b, shared_right(), windows[0]));
         assert!(!has_window_in_layout(&mut reactor, a, shared_left(), windows[0]));
+        for window in &windows[1..] {
+            assert!(has_window_in_layout(&mut reactor, a, shared_left(), *window));
+            assert!(shared_left().contains(apps.windows[window].frame.mid()));
+        }
+        assert!(shared_right().contains(apps.windows[&windows[0]].frame.mid()));
     }
 }
 

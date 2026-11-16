@@ -532,6 +532,21 @@ impl WorkspaceStore {
             return false;
         };
         let source = workspace.space;
+        // An explicit move must leave its source usable without growing the catalog
+        // beyond the user creation limit. Check before mutating ownership or history.
+        if reason == WorkspaceTransferReason::Explicit
+            && source != target
+            && self.effective_mode() == WorkspaceMode::Global
+            && self.catalog().count() >= MAX_WORKSPACES
+            && self.workspaces_on(source).count() == 1
+        {
+            warn!(
+                ?source,
+                ?target,
+                "Workspace move refused: replacement would exceed workspace limit"
+            );
+            return false;
+        }
         if reason == WorkspaceTransferReason::Explicit
             && let Some(home) = workspace.home_space
             && let Some(activation) = self.active_workspace_per_space.get_mut(&home)
@@ -576,6 +591,9 @@ impl WorkspaceStore {
         }
         self.repair_activation(source);
         self.repair_activation(target);
+        if reason == WorkspaceTransferReason::Explicit {
+            self.seed_space(source);
+        }
         true
     }
 
@@ -709,7 +727,12 @@ impl WorkspaceStore {
         let scope_ids =
             |space| self.catalog().filter(move |id| namespace(self[*id].space) == namespace(space));
         for space in self.initialized_spaces() {
-            if scope_ids(space).count() > MAX_WORKSPACES {
+            // Automatic global seeds may exceed the creation limit so every live display
+            // remains usable. Reloading that catalog must remain valid; mode migrations
+            // still cannot merge independent catalogs beyond the limit.
+            if scope_ids(space).count() > MAX_WORKSPACES
+                && (mode_changed || config.mode != WorkspaceMode::Global)
+            {
                 return Err(format!("workspace scope exceeds {MAX_WORKSPACES} workspaces"));
             }
         }
@@ -874,8 +897,9 @@ impl WorkspaceStore {
         }
     }
 
-    /// Allocate the initial global target once, distributed over visible managed
-    /// desktops. Subsequent native desktop arrivals may remain empty.
+    /// Allocate the initial global target in contiguous blocks across visible managed
+    /// desktops. Later arrivals receive one workspace without redistributing the catalog.
+    /// Reconnection and physical display reordering never rebalance existing ownership.
     /// `rule_space` resolves a workspace rule's display to one of `spaces`.
     pub(crate) fn ensure_visible_spaces(
         &mut self,
@@ -914,6 +938,19 @@ impl WorkspaceStore {
             for &space in spaces {
                 self.ensure_space_initialized(space);
             }
+        }
+        for &space in spaces {
+            self.seed_space(space);
+        }
+    }
+
+    /// Only accepted visible topology and explicit moves seed an empty global desktop.
+    /// Internal restoration may temporarily have no owner and must preserve its history.
+    fn seed_space(&mut self, space: SpaceId) {
+        if self.effective_mode() == WorkspaceMode::Global && self.active_workspace(space).is_none()
+        {
+            let id = self.append_default_workspace(space);
+            self.set_active_workspace(space, id);
         }
     }
 
@@ -1762,7 +1799,7 @@ mod tests {
             store
                 .workspace_view(WorkspaceContext { space: a, visible: &[a, other] })
                 .count(),
-            2
+            3
         );
         store.ensure_visible_spaces(&[b], 1, |_| None);
         assert_eq!(store.workspace_ids(b), independent);
@@ -1771,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn global_empty_display_lifecycle_preserves_catalog() {
+    fn global_display_lifecycle_always_has_an_active_workspace() {
         let (a, b) = (SpaceId::new(901), SpaceId::new(902));
         let settings = VirtualWorkspaceSettings {
             mode: WorkspaceMode::Global,
@@ -1782,16 +1819,16 @@ mod tests {
         let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
         let original = store.create_workspace(a, None).unwrap();
         store.ensure_visible_spaces(&[a, b], 2, |_| None);
-        assert_eq!(store.catalog().count(), 1);
-        assert_eq!(store.active_workspace(b), None);
+        let seeded = store.active_workspace(b).expect("new displays need a workspace");
+        assert_ne!(seeded, original);
         assert!(store.transfer_workspace(original, b, None, WorkspaceTransferReason::Explicit));
-        assert_eq!(store.active_workspace(a), None);
-        assert_eq!(store.catalog().collect::<Vec<_>>(), [original]);
+        let replacement =
+            store.active_workspace(a).expect("moving the last workspace seeds its source");
+        assert_ne!(replacement, original);
         assert!(store.transfer_workspace(original, a, None, WorkspaceTransferReason::Explicit));
         let created = store.create_workspace(b, None).unwrap();
-        assert_eq!(store.catalog().collect::<Vec<_>>(), [original, created]);
-        assert_eq!(store.active_workspace(b), Some(created));
-        // Rediscovery on the empty display must retain a non-default assignment.
+        assert_eq!(store.active_workspace(b), Some(seeded));
+        // Rediscovery must retain a non-default assignment even on another display.
         store.transfer_workspace(created, a, None, WorkspaceTransferReason::Explicit);
         let mut windows = WindowStore::default();
         let window = WindowId::new(90, 1);
@@ -1801,6 +1838,23 @@ mod tests {
                 .workspace_id,
             created
         );
+        // Repeatedly moving the sole replacement must stop at the creation limit.
+        while store.catalog().count() < MAX_WORKSPACES {
+            let last = store.active_workspace(b).unwrap();
+            assert!(store.transfer_workspace(last, a, None, WorkspaceTransferReason::Explicit));
+        }
+        let owners: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
+        let last = store.active_workspace(b).unwrap();
+        assert!(!store.transfer_workspace(last, a, None, WorkspaceTransferReason::Explicit));
+        assert_eq!(
+            store.catalog().map(|id| (id, store[id].space)).collect::<Vec<_>>(),
+            owners
+        );
+        assert_eq!(store.active_workspace(b), Some(last));
+        // Moves that need no replacement remain available at the limit.
+        assert!(store.transfer_workspace(original, b, None, WorkspaceTransferReason::Explicit));
+        assert_eq!(store.catalog().count(), MAX_WORKSPACES);
+        assert!(store.active_workspace(a).is_some());
         store.validate_persisted_topology().unwrap();
     }
 
@@ -1858,27 +1912,67 @@ mod tests {
     }
 
     #[test]
-    fn shared_initial_count_is_global_and_later_desktops_stay_empty() {
+    fn shared_initial_count_is_global_and_later_desktops_are_seeded_once() {
         let (a, b, c) = (SpaceId::new(51), SpaceId::new(52), SpaceId::new(53));
-        for count in [1, 6] {
+        for (count, pin_all) in [
+            (1, false),
+            (6, false),
+            (MAX_WORKSPACES, false),
+            (MAX_WORKSPACES, true),
+        ] {
             let settings = VirtualWorkspaceSettings {
                 mode: WorkspaceMode::Global,
                 default_workspace_count: count,
+                workspace_names: vec![],
+                workspace_rules: if pin_all {
+                    (0..count)
+                        .map(|index| WorkspaceLayoutRule {
+                            workspace: WorkspaceSelector::Index(index),
+                            layout: None,
+                            display: Some(vec!["a".into()]),
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                },
                 ..Default::default()
             };
             let mut store = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
-            store.ensure_visible_spaces(&[a, b], 2, |_| None);
+            store.ensure_visible_spaces(&[a, b], 2, |_| pin_all.then_some(a));
             let catalog: Vec<_> = store.catalog().collect();
-            assert_eq!(catalog.len(), count.max(2));
+            assert_eq!(catalog.len(), count.max(2) + usize::from(pin_all));
             for (index, &id) in catalog.iter().enumerate() {
-                assert_eq!(store[id].space, if index < count.max(2) / 2 { a } else { b });
+                let boundary = if pin_all { count } else { count.max(2) / 2 };
+                assert_eq!(store[id].space, if index < boundary { a } else { b });
             }
             store.ensure_visible_spaces(&[a, b, c], 3, |_| None);
-            assert_eq!(store.workspace_ids(c).len(), 0);
+            assert_eq!(store.workspace_ids(c).len(), 1);
+            assert!(store.active_workspace(c).is_some());
             assert_eq!(store.catalog().take(catalog.len()).collect::<Vec<_>>(), catalog);
             store.ensure_visible_spaces(&[a, b, c], 3, |_| None);
-            assert_eq!(store.catalog().count(), catalog.len());
+            assert_eq!(store.catalog().count(), catalog.len() + 1);
+            let placement: Vec<_> = store.catalog().map(|id| (id, store[id].space)).collect();
+            let active = [a, b, c].map(|space| store.active_workspace(space));
+            // Display loss, return, and physical reordering must not run the initial
+            // allocator again. Departure fallback/restoration is owned by the Reactor.
+            for (visible, display_count) in [
+                (vec![a], 1),
+                (vec![a, b, c], 3),
+                (vec![c, b, a], 3),
+                (vec![a, b, c], 3),
+            ] {
+                store.ensure_visible_spaces(&visible, display_count, |_| pin_all.then_some(a));
+                assert_eq!(
+                    store.catalog().map(|id| (id, store[id].space)).collect::<Vec<_>>(),
+                    placement,
+                    "seeding must preserve catalog order and ownership"
+                );
+                assert_eq!([a, b, c].map(|space| store.active_workspace(space)), active);
+            }
             store.validate_persisted_topology().unwrap();
+            store
+                .plan_settings(&settings)
+                .expect("automatic seeds must allow configuration reload");
         }
     }
 
@@ -1887,6 +1981,7 @@ mod tests {
         // (displays, workspaces, 1-based pins (workspace, display)) -> owner per workspace.
         let cases: &[(usize, usize, &[(usize, usize)], &[usize])] = &[
             (2, 6, &[], &[0, 0, 0, 1, 1, 1]),
+            (2, 10, &[(3, 0), (8, 1)], &[0, 0, 0, 0, 0, 1, 1, 1, 1, 1]),
             (3, 9, &[], &[0, 0, 0, 1, 1, 1, 2, 2, 2]),
             (2, 6, &[(2, 1)], &[1, 1, 1, 0, 0, 0]),
             (3, 6, &[(1, 2)], &[2, 2, 0, 0, 1, 1]),

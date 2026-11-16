@@ -932,12 +932,16 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
     let report = restore_on(&mut engine, &mut store, &master, displays, c, source, &[c, b]);
     assert_eq!(report.unwrap().moved, []);
     assert_eq!(tree(&engine, on_new), [w1]);
-    let master = session(&shared, &[(a, "x", &[w1]), (b, "y", &[w3])]);
-    let (mut engine, mut store) = fresh(&shared, &[(a, "x"), (b, "y")]);
+    let shared_three = VirtualWorkspaceSettings {
+        default_workspace_count: 3,
+        ..shared.clone()
+    };
+    let master = session(&shared_three, &[(a, "x", &[w1]), (b, "y", &[w3])]);
+    let (mut engine, mut store) = fresh(&shared_three, &[(a, "x"), (b, "y")]);
     let (first, second) = (ws(&engine, a, 0), ws(&engine, b, 0));
     engine
         .workspaces
-        .transfer_workspace(second, a, None, WorkspaceTransferReason::Explicit);
+        .transfer_workspace(first, b, None, WorkspaceTransferReason::Explicit);
     open(&mut engine, &mut store, first, w1);
     open(&mut engine, &mut store, second, w3);
     let report = restore_on(&mut engine, &mut store, &master, displays, a, source, &[a, b]);
