@@ -2027,6 +2027,7 @@ impl LayoutEngine {
                             window_title: info.title.as_deref(),
                             ax_role: info.ax_role.as_deref(),
                             ax_subrole: info.ax_subrole.as_deref(),
+                            window_tags: None,
                         },
                         false,
                     ) else {
@@ -3466,9 +3467,15 @@ impl LayoutEngine {
         window_store: &mut WindowStore,
         window_id: WindowId,
         workspace_context: impl Into<crate::model::virtual_workspace::WorkspaceContext<'a>>,
-        context: WindowRuleContext<'_>,
+        mut context: WindowRuleContext<'_>,
         reapply_workspace_rule: bool,
     ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
+        if self.app_rules.uses_window_tags() {
+            context.window_tags = window_store
+                .window(window_id)
+                .and_then(|window| window.info.sys_id)
+                .and_then(crate::sys::window_server::window_tags);
+        }
         let workspace_context = workspace_context.into();
         let space = workspace_context.space;
         let observation =
@@ -4834,6 +4841,7 @@ mod tests {
             title_substring: None,
             ax_role: None,
             ax_subrole: None,
+            window_tags: None,
         }];
         let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
         let mut window_store = WindowStore::default();
@@ -4994,6 +5002,7 @@ mod tests {
             title_substring: None,
             ax_role: None,
             ax_subrole: None,
+            window_tags: None,
         }];
         let mut layout_settings = LayoutSettings::default();
         layout_settings.scrolling.min_column_width_ratio = 0.1;

@@ -184,6 +184,10 @@ pub struct AppWorkspaceRule {
     /// reported by the AX APIs for a window (exact string match).
     #[setting(custom)]
     pub ax_subrole: Option<String>,
+    /// Required SLS window tags; all bits must be present.
+    #[doc(hidden)]
+    #[setting(ignore)]
+    pub window_tags: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -314,11 +318,18 @@ impl VirtualWorkspaceSettings {
                 field(&rule.title_substring).map(str::to_lowercase),
                 field(&rule.ax_role).map(str::to_owned),
                 field(&rule.ax_subrole).map(str::to_owned),
+                rule.window_tags,
             );
             let first = *seen_matchers.entry(matcher).or_insert(index);
             if first != index {
                 issues.push(format!(
                     "App rule {index} matches the same windows as rule {first}, so it never applies"
+                ));
+            }
+
+            if rule.window_tags.is_some_and(|mask| mask == 0 || mask > i64::MAX as u64) {
+                issues.push(format!(
+                    "App rule {index} window_tags must be between 1 and 9223372036854775807"
                 ));
             }
 
@@ -329,6 +340,7 @@ impl VirtualWorkspaceSettings {
                 && rule.title_substring.is_none()
                 && rule.ax_role.is_none()
                 && rule.ax_subrole.is_none()
+                && rule.window_tags.is_none()
             {
                 issues.push(format!(
                     "App rule {} has no app_id, app_name, title_regex, or title_substring specified",

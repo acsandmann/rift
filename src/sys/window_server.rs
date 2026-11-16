@@ -414,6 +414,14 @@ pub fn mission_control_dock_overlay_visible() -> bool {
         })
 }
 
+/// Read tags without treating a failed query as an empty mask.
+pub fn window_tags(id: WindowServerId) -> Option<u64> {
+    let query = WindowIterator::new(&[id])?;
+    (query.count() == 1)
+        .then(|| query.advance().map(|window| window.tags()))
+        .flatten()
+}
+
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     let query = WindowIterator::new(&[id])?;
     if query.count() == 1 {

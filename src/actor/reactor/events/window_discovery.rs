@@ -195,6 +195,7 @@ pub(crate) fn assign_window<'a>(
                 window_title: Some(&title),
                 ax_role: role.as_deref(),
                 ax_subrole: subrole.as_deref(),
+                window_tags: None,
             },
             reapply,
         )

@@ -133,6 +133,7 @@ fn app_rule_geometry_validation_rejects_invalid_values() {
         title_substring: None,
         ax_role: None,
         ax_subrole: None,
+        window_tags: None,
     });
 
     let issues = settings.validate();

@@ -15,6 +15,7 @@ pub struct WindowRuleContext<'a> {
     pub window_title: Option<&'a str>,
     pub ax_role: Option<&'a str>,
     pub ax_subrole: Option<&'a str>,
+    pub window_tags: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -189,6 +190,7 @@ struct CompiledRule {
     title_substring: Option<String>,
     ax_role: Option<String>,
     ax_subrole: Option<String>,
+    window_tags: Option<u64>,
     specificity: usize,
     index: usize,
 }
@@ -215,6 +217,13 @@ impl AppRuleEngine {
             }
         }
         engine
+    }
+
+    pub fn uses_window_tags(&self) -> bool {
+        self.wildcard_rules
+            .iter()
+            .chain(self.rules_by_app_id.values().flatten())
+            .any(|rule| rule.window_tags.is_some())
     }
 
     pub fn evaluate(&self, context: WindowRuleContext<'_>) -> Option<AppRuleDecision> {
@@ -275,7 +284,11 @@ impl CompiledRule {
             title_substring,
             ax_role,
             ax_subrole,
+            window_tags,
         } = rule;
+        if window_tags == Some(0) {
+            return None;
+        }
         let app_id = nonempty(app_id).map(|value| value.to_ascii_lowercase());
         let app_name = nonempty(app_name).map(|value| value.to_lowercase());
         let title_substring = nonempty(title_substring).map(|value| value.to_lowercase());
@@ -298,6 +311,7 @@ impl CompiledRule {
             title_substring.is_some(),
             ax_role.is_some(),
             ax_subrole.is_some(),
+            window_tags.is_some(),
         ]
         .into_iter()
         .filter(|present| *present)
@@ -321,6 +335,7 @@ impl CompiledRule {
             title_substring,
             ax_role,
             ax_subrole,
+            window_tags,
             specificity,
             index,
         })
@@ -346,6 +361,9 @@ impl CompiledRule {
                 .is_none_or(|rule| title.is_some_and(|actual| actual.contains(rule)))
             && self.ax_role.as_deref().is_none_or(|rule| context.ax_role == Some(rule))
             && self.ax_subrole.as_deref().is_none_or(|rule| context.ax_subrole == Some(rule))
+            && self
+                .window_tags
+                .is_none_or(|mask| context.window_tags.is_some_and(|tags| tags & mask == mask))
     }
 }
 
@@ -361,6 +379,43 @@ mod tests {
             workspace: Some(WorkspaceSelector::Index(workspace)),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn tag_mask_requires_all_bits_and_known_tags() {
+        let engine = AppRuleEngine::new(&[AppWorkspaceRule {
+            window_tags: Some(130),
+            floating: true,
+            ..Default::default()
+        }]);
+        for (tags, matches) in [
+            (Some(130), true),
+            (Some(131), true),
+            (Some(2), false),
+            (Some(128), false),
+            (Some(0), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                engine
+                    .evaluate(WindowRuleContext {
+                        window_tags: tags,
+                        ..Default::default()
+                    })
+                    .is_some(),
+                matches
+            );
+        }
+        let encoded = toml::to_string(&AppWorkspaceRule {
+            window_tags: Some(130),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(encoded.contains("window_tags = 130"));
+        assert_eq!(
+            toml::from_str::<AppWorkspaceRule>(&encoded).unwrap().window_tags,
+            Some(130)
+        );
     }
 
     #[test]

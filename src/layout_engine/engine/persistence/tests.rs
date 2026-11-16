@@ -576,6 +576,7 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
             window_title: title.as_deref(),
             ax_role: None,
             ax_subrole: None,
+            window_tags: None,
         },
         false,
     );
