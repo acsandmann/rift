@@ -686,6 +686,7 @@ pub fn set_active_menu_bar_display_uuid(display_uuid: &str) -> bool {
 #[cfg(test)]
 thread_local! {
     pub(crate) static TEST_ACTIVE_DISPLAY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static TEST_SEPARATE_SPACES: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
@@ -709,6 +710,11 @@ pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
 }
 
 pub fn displays_have_separate_spaces() -> bool {
+    #[cfg(test)]
+    if let Some(separate) = TEST_SEPARATE_SPACES.with(|separate| separate.get()) {
+        return separate;
+    }
+
     unsafe { SLSGetSpaceManagementMode(main_connection()) == 1 }
 }
 
