@@ -399,6 +399,8 @@ impl From<&NSRunningApplication> for AppInfo {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WindowInfo {
+    #[serde(default)]
+    pub has_native_tabs: bool,
     pub is_standard: bool,
     #[serde(default)]
     pub is_root: bool,
@@ -434,7 +436,8 @@ impl NativeWindowIdentity {
             return Some(id);
         }
         let resolved = query();
-        // Zero still uses a process-local identity and may acquire a native ID later.
+        // Zero is not cached: the element is not registered without a native
+        // id, and a later lookup may still acquire one.
         self.0 = resolved.filter(|id| id.as_nonzero().is_some());
         resolved
     }
@@ -476,7 +479,7 @@ impl WindowInfo {
             .or_else(|| identity.resolve(|| WindowServerId::try_from(element).ok()));
         let is_resizable = element.can_resize().unwrap_or(true);
 
-        let (bundle_id, path) = if !is_standard {
+        let (bundle_id, path) = if ax_role.as_deref() != Some(AX_WINDOW_ROLE) {
             (None, None)
         } else if let Some(info) = server_info {
             bundle_info_for_pid(info.pid)
@@ -491,6 +494,7 @@ impl WindowInfo {
         let max_size = server_info.map(|info| info.max_frame).or_else(|| None);
         let is_root = id.map(|id| window_parent(id).is_none()).unwrap_or(true);
         let info = WindowInfo {
+            has_native_tabs: is_standard && element.has_native_tabs(),
             is_standard,
             is_root,
             is_minimized,
@@ -518,7 +522,7 @@ impl TryFrom<&AXUIElement> for WindowInfo {
     }
 }
 
-fn bundle_info_for_pid(pid: pid_t) -> (Option<String>, Option<PathBuf>) {
+pub(crate) fn bundle_info_for_pid(pid: pid_t) -> (Option<String>, Option<PathBuf>) {
     NSRunningApplication::with_process_id(pid)
         .map(|app| {
             let bundle_id = app.bundle_id().as_deref().map(|b| b.to_string());
@@ -577,4 +581,54 @@ mod native_identity_tests {
         );
         assert!(responses.next().is_none());
     }
+}
+
+/// Self-targeted AppKit windows have reliable local focus state even when
+/// process activation notifications lag. A sheet belongs to its parent target.
+pub(crate) fn is_own_window_focused(window: crate::actor::app::WindowId) -> bool {
+    if window.pid != std::process::id() as crate::actor::app::pid_t {
+        return false;
+    }
+    let Some(main_thread) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    let app = objc2_app_kit::NSApplication::sharedApplication(main_thread);
+    if !app.isActive() {
+        return false;
+    }
+    let Some(key) = app.keyWindow() else {
+        return false;
+    };
+    key.windowNumber() == window.idx.get() as isize
+        || key
+            .sheetParent()
+            .is_some_and(|parent| parent.windowNumber() == window.idx.get() as isize)
+}
+
+pub(crate) fn is_ax_transient(info: &WindowInfo) -> bool {
+    info.ax_role.as_deref().is_some_and(|role| role != "AXWindow")
+        || (matches!(
+            info.ax_subrole.as_deref(),
+            Some("AXDialog" | "AXSystemDialog" | "AXSheet")
+        ) && !is_ibkr_desktop_dialog(info))
+}
+
+pub(crate) fn is_ibkr_desktop_dialog(info: &WindowInfo) -> bool {
+    let max = info.max_size.unwrap_or(info.frame.size);
+    let min = info.min_size.unwrap_or(info.frame.size);
+    info.ax_role.as_deref() == Some("AXWindow")
+        && info.ax_subrole.as_deref() == Some("AXDialog")
+        && info
+            .bundle_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("com.install4j.") || id == "com.azul.zulu.java")
+        && info.path.as_ref().and_then(|p| p.to_str()).is_some_and(|p| {
+            p.as_bytes().windows(14).any(|s| s.eq_ignore_ascii_case(b"ibkr%20desktop"))
+                || p.as_bytes().windows(12).any(|s| s.eq_ignore_ascii_case(b"ibkr desktop"))
+        })
+        && (max.width >= 1200.0
+            || max.height >= 900.0
+            || min.width >= 1000.0
+            || info.frame.size.width >= 1200.0
+            || info.frame.size.height >= 900.0)
 }

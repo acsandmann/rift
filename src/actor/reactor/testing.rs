@@ -15,6 +15,10 @@ use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 impl Reactor {
     pub fn new_for_test(layout: LayoutEngine) -> Reactor {
+        // Simulated reactors must not query the live WindowServer session.
+        crate::sys::event::TEST_MOUSE_STATE
+            .with(|state| state.set(Some(crate::sys::event::MouseState::Up)));
+        crate::sys::screen::TEST_SEPARATE_SPACES.with(|separate| separate.set(Some(true)));
         let mut config = Config::default();
         config.settings.default_disable = false;
         config.settings.animate = false;
@@ -35,7 +39,7 @@ impl Reactor {
     ) -> Vec<crate::model::virtual_workspace::VirtualWorkspaceId> {
         self.layout_manager
             .layout_engine
-            .virtual_workspace_manager_mut()
+            .workspaces_mut()
             .list_workspaces(space)
             .iter()
             .map(|(id, _)| *id)
@@ -55,10 +59,11 @@ impl Reactor {
         space: crate::sys::screen::SpaceId,
         wid: WindowId,
     ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
-        self.layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_for_window(&self.state.windows, space, wid)
+        self.layout_manager.layout_engine.workspaces().workspace_for_window(
+            &self.state.windows,
+            space,
+            wid,
+        )
     }
 
     pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
@@ -72,6 +77,7 @@ impl Reactor {
     pub fn test_active_workspace_windows(&self, space: SpaceId) -> Vec<WindowId> {
         self.layout_manager
             .layout_engine
+            .workspaces()
             .windows_in_active_workspace(&self.state.windows, space)
     }
 
@@ -80,11 +86,11 @@ impl Reactor {
         space: SpaceId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> Vec<WindowId> {
-        self.layout_manager.layout_engine.virtual_workspace_manager().workspace_windows(
-            &self.state.windows,
-            space,
-            workspace,
-        )
+        if self.layout_manager.layout_engine.workspaces()[workspace].space == space {
+            self.state.windows.workspace_windows(workspace)
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn assign_test_window_to_workspace(
@@ -93,10 +99,12 @@ impl Reactor {
         wid: WindowId,
         workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
     ) -> bool {
-        self.layout_manager
-            .layout_engine
-            .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(&mut self.state.windows, space, wid, workspace)
+        self.layout_manager.layout_engine.workspaces_mut().assign_window_to_workspace(
+            &mut self.state.windows,
+            space,
+            wid,
+            workspace,
+        )
     }
 
     pub fn set_test_active_workspace(
@@ -106,7 +114,7 @@ impl Reactor {
     ) -> bool {
         self.layout_manager
             .layout_engine
-            .virtual_workspace_manager_mut()
+            .workspaces_mut()
             .set_active_workspace(space, workspace)
     }
 
@@ -145,7 +153,7 @@ impl Reactor {
             self.window_inventory_manager.next_request_id += 1;
             let token = crate::actor::app::WindowInventoryToken {
                 request_id: self.window_inventory_manager.next_request_id,
-                topology_revision: self.window_inventory_manager.topology_revision,
+                topology_revision: self.space_state.revision,
             };
             self.window_inventory_manager.in_flight.insert(pid, token);
             token
@@ -234,7 +242,9 @@ impl Reactor {
         is_manageable: bool,
     ) {
         self.state.windows.insert_window(wid, super::WindowState {
+            native_transient: false,
             info: WindowInfo {
+                has_native_tabs: false,
                 is_standard: true,
                 is_root: true,
                 is_minimized: false,
@@ -285,6 +295,8 @@ pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) 
         .zip(spaces.into_iter())
         .enumerate()
         .map(|(idx, (frame, space))| ScreenInfo {
+            is_builtin: false,
+            backing_scale: 1.0,
             id: crate::sys::screen::ScreenId::new(idx as u32),
             frame,
             space,
@@ -316,25 +328,39 @@ pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
     let command_space = screens.iter().find_map(|screen| screen.space);
     let active_spaces = screens.iter().filter_map(|screen| screen.space).collect();
     ForwardedSpaceState {
-        screens,
+        revision: next_test_topology_revision(),
+        authoritative: true,
+        // Synthetic screen fixtures do not enumerate the fake AX windows. Tests
+        // supplying authoritative native membership opt in explicitly.
+        membership_complete: false,
+        active_window_spaces: screens
+            .iter()
+            .filter_map(|s| s.space)
+            .flat_map(|space| {
+                crate::sys::window_server::space_window_list_for_connection(
+                    &[space.get()],
+                    0,
+                    false,
+                )
+                .into_iter()
+                .map(move |id| (WindowServerId::new(id), space))
+            })
+            .collect(),
+        screens: screens.clone(),
         fullscreen_spaces: Default::default(),
-        has_seen_display_set: false,
+        destroyed_spaces: Default::default(),
         active_spaces,
         menu_bar_space: command_space,
         command_space,
-        display_space_ids: Default::default(),
-        last_user_space_by_display: Default::default(),
+        display_space_ids: screens
+            .iter()
+            .filter_map(|screen| Some((screen.display_uuid.clone(), vec![screen.space?])))
+            .collect(),
         space_remaps: Vec::new(),
         display_set_changed: false,
-        topology_changed: false,
-        allow_space_remap: false,
         should_force_refresh_layout: false,
-        releases_lifecycle_refresh_quarantine: false,
         // Set on every coherent snapshot the spaces actor forwards.
-        releases_display_churn_refresh_quarantine: true,
         resized_spaces: Vec::new(),
-        topology_window_delta: None,
-        active_window_spaces: Default::default(),
     }
 }
 
@@ -345,6 +371,8 @@ pub fn fullscreen_startup_space_state(
     fullscreen_space: SpaceId,
 ) -> Event {
     let mut state = forwarded_space_state(vec![ScreenInfo {
+        is_builtin: false,
+        backing_scale: 1.0,
         id: crate::sys::screen::ScreenId::new(0),
         frame: screen,
         space: None,
@@ -352,13 +380,12 @@ pub fn fullscreen_startup_space_state(
         name: None,
     }]);
     state.fullscreen_spaces.insert(fullscreen_space);
-    state.has_seen_display_set = true;
+    state
+        .display_space_ids
+        .insert(state.screens[0].display_uuid.clone(), vec![user_space]);
     state.active_spaces.clear();
     state.menu_bar_space = None;
     state.command_space = None;
-    state
-        .last_user_space_by_display
-        .insert(state.screens[0].display_uuid.clone(), user_space);
     Event::SpaceStateChanged(state)
 }
 
@@ -404,6 +431,7 @@ pub fn make_window_info(
     bundle_id: Option<&str>,
 ) -> WindowInfo {
     WindowInfo {
+        has_native_tabs: false,
         is_standard: true,
         is_root: true,
         is_minimized: false,
@@ -556,6 +584,9 @@ impl Apps {
         let mut events = vec![];
         let mut got_visible_windows = false;
         for request in requests {
+            let Some((request, _)) = request.authorized() else {
+                continue;
+            };
             debug!(?request);
             match request {
                 Request::Terminate => break,
@@ -582,44 +613,16 @@ impl Apps {
                 Request::ApplicationGloballyActivated(pid) => {
                     events.push(Event::ApplicationActivated(pid, Quiet::No));
                 }
-                Request::SetWindowFrame(wid, frame, txid, _) => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    window.frame = frame;
-                    if !window.animating && !old_frame.same_as(frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
-                    }
-                }
-                Request::SetBatchWindowFrame(frames, txid, _) => {
+                Request::SetWindowFrames(frames, txid, mode, _, _) => {
                     for (wid, frame) in frames {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;
-                        window.frame = frame;
-                        if !window.animating && !old_frame.same_as(frame) {
-                            events.push(Event::WindowFrameChanged(
-                                wid,
-                                frame,
-                                Some(txid),
-                                Requested(true),
-                                None,
-                            ));
+                        if mode == crate::actor::app::FrameMode::Position {
+                            window.frame.origin = frame.origin;
+                        } else {
+                            window.frame = frame;
                         }
-                    }
-                }
-                Request::SetWorkspaceSwitchPositions(positions, txid, _) => {
-                    for (wid, position) in positions {
-                        let window = self.windows.entry(wid).or_default();
-                        window.last_seen_txid = txid;
-                        let old_frame = window.frame;
-                        window.frame.origin = position;
                         if !window.animating && !old_frame.same_as(window.frame) {
                             events.push(Event::WindowFrameChanged(
                                 wid,
@@ -631,42 +634,8 @@ impl Apps {
                         }
                     }
                 }
-                Request::SetWindowPos(wid, pos, txid, _) => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    window.frame.origin = pos;
-                    if !window.animating && !old_frame.same_as(window.frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            window.frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
-                    }
-                }
-                Request::AnimationFrame { wid, frame, set_size, txid } => {
-                    let window = self.windows.entry(wid).or_default();
-                    window.last_seen_txid = txid;
-                    let old_frame = window.frame;
-                    if set_size {
-                        window.frame = frame;
-                    } else {
-                        window.frame.origin = frame.origin;
-                    }
-                    if !window.animating && !old_frame.same_as(window.frame) {
-                        events.push(Event::WindowFrameChanged(
-                            wid,
-                            window.frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
-                    }
-                }
                 Request::InteractiveFramesPending(frames) => {
-                    frames.drain_with(|wid, frame, set_size, txid| {
+                    frames.drain_with(|wid, frame, set_size, txid, _, _, _| {
                         let window = self.windows.entry(wid).or_default();
                         window.last_seen_txid = txid;
                         let old_frame = window.frame;
@@ -686,10 +655,13 @@ impl Apps {
                         }
                     });
                 }
-                Request::BeginWindowAnimation(wid) => {
+                Request::BeginWindowAnimation(wid, _) => {
                     self.windows.entry(wid).or_default().animating = true;
                 }
-                Request::EndWindowAnimation(wid) => {
+                Request::CancelWindowAnimation(wid, _, _) => {
+                    self.windows.entry(wid).or_default().animating = false;
+                }
+                Request::EndWindowAnimation(wid, _) => {
                     let window = self.windows.entry(wid).or_default();
                     window.animating = false;
                     events.push(Event::WindowFrameChanged(
@@ -715,4 +687,14 @@ pub fn test_context_with_workspace_count(count: usize) -> (Apps, Reactor) {
     let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
     settings.default_workspace_count = count;
     (Apps::new(), test_reactor_with_workspace_settings(&settings))
+}
+
+// Fixtures represent observations produced upstream, including their revision.
+thread_local! { static TEST_TOPOLOGY_REVISION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+pub fn next_test_topology_revision() -> u64 {
+    TEST_TOPOLOGY_REVISION.with(|revision| {
+        let next = revision.get() + 1;
+        revision.set(next);
+        next
+    })
 }

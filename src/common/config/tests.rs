@@ -1,0 +1,1117 @@
+use std::path::PathBuf;
+
+use serde::Deserialize;
+
+use super::parse::migrate_legacy_resize_bindings;
+use super::*;
+use crate::actor::reactor;
+use crate::actor::wm_controller::WmCommand;
+use crate::common::collections::HashMap;
+use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+use crate::sys::hotkey::Modifiers;
+
+#[test]
+fn scrolling_display_widths_merge_and_validate() {
+    let settings: ScrollingLayoutSettings = toml::from_str(
+        r#"
+            column_width_ratio = 0.7
+            min_column_width_ratio = 0.3
+            max_column_width_ratio = 0.9
+            [per_display."display-a"]
+            column_width_ratio = 0.5
+            "#,
+    )
+    .unwrap();
+    assert_eq!(settings.preset_column_widths, vec![1.0 / 3.0, 0.5, 2.0 / 3.0]);
+    assert_eq!(settings.widths_for_display(Some("display-a")), (0.5, 0.3, 0.9));
+    assert_eq!(settings.widths_for_display(Some("other")), (0.7, 0.3, 0.9));
+    assert_eq!(settings.widths_for_display(None), (0.7, 0.3, 0.9));
+    assert!(settings.validate().is_empty());
+    assert!(settings.effective_for_display(Some("display-a")).per_display.is_empty());
+
+    let mut invalid = settings;
+    invalid.per_display.get_mut("display-a").unwrap().max_column_width_ratio = Some(0.4);
+    assert!(
+        invalid
+            .validate()
+            .iter()
+            .any(|issue| issue.contains("per_display[display-a].column_width_ratio"))
+    );
+}
+
+#[test]
+fn layout_insertion_point_supports_global_default_and_per_mode_override() {
+    let settings: LayoutSettings = toml::from_str(
+        r#"
+                window_insertion_point = "end_of_tree"
+
+                [traditional]
+                window_insertion_point = "next_to_selection"
+                equalize_nodes = true
+
+                [scrolling]
+                animate = false
+            "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        settings.window_insertion_point_for(LayoutMode::Traditional),
+        WindowInsertionPoint::NextToSelection
+    );
+    assert_eq!(
+        settings.window_insertion_point_for(LayoutMode::Bsp),
+        WindowInsertionPoint::EndOfTree
+    );
+    assert!(settings.traditional.equalize_nodes);
+    assert_eq!(settings.scrolling.animate, Some(false));
+}
+
+#[test]
+fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_alias() {
+    let defaults: VirtualWorkspaceSettings = toml::from_str("").unwrap();
+    assert!(!defaults.prevent_wrapping);
+
+    let settings: VirtualWorkspaceSettings =
+        toml::from_str("prevent_wrapping_around = true").unwrap();
+    assert!(settings.prevent_wrapping);
+}
+
+#[test]
+fn app_rules_parse_placement_size_and_focus() {
+    let settings: VirtualWorkspaceSettings = toml::from_str(
+        r#"
+                app_rules = [{
+                    app_id = "com.example.Tool",
+                    floating = true,
+                    position = { x = 0.4, y = 0.7 },
+                    size = { w = 640, h = 480 },
+                    focus = true
+                }]
+            "#,
+    )
+    .unwrap();
+
+    let rule = &settings.app_rules[0];
+    assert_eq!(rule.position, Some(AppRulePosition { x: 0.4, y: 0.7 }));
+    assert_eq!(rule.size, Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }));
+    assert!(rule.focus);
+    assert!(settings.validate().is_empty());
+
+    let height_only: VirtualWorkspaceSettings = toml::from_str(
+        r#"
+                app_rules = [{
+                    app_id = "com.example.Panel",
+                    size = { h = 320 }
+                }]
+            "#,
+    )
+    .unwrap();
+    assert_eq!(
+        height_only.app_rules[0].size,
+        Some(AppRuleSize { w: None, h: Some(320.0) })
+    );
+    assert!(height_only.validate().is_empty());
+}
+
+#[test]
+fn app_rule_geometry_validation_rejects_invalid_values() {
+    let mut settings = VirtualWorkspaceSettings::default();
+    settings.app_rules.push(AppWorkspaceRule {
+        app_id: Some("com.example.Tool".into()),
+        workspace: None,
+        floating: false,
+        position: Some(AppRulePosition { x: -0.1, y: 1.1 }),
+        size: Some(AppRuleSize {
+            w: Some(0.0),
+            h: Some(f64::NAN),
+        }),
+        focus: false,
+        manage: Some(true),
+        app_name: None,
+        title_regex: None,
+        title_substring: None,
+        ax_role: None,
+        ax_subrole: None,
+        window_tags: None,
+    });
+
+    let issues = settings.validate();
+    assert!(issues.iter().any(|issue| issue.contains("between 0 and 1")));
+    assert!(issues.iter().any(|issue| issue.contains("only applies")));
+    assert!(issues.iter().any(|issue| issue.contains("finite positive")));
+}
+
+#[test]
+fn app_rule_validation_reports_invalid_regex_and_ignored_effects() {
+    let mut settings = VirtualWorkspaceSettings::default();
+    settings.app_rules.push(AppWorkspaceRule {
+        app_id: Some("com.example.Tool".into()),
+        workspace: Some(WorkspaceSelector::Index(1)),
+        floating: true,
+        focus: true,
+        manage: Some(false),
+        title_regex: Some("[".into()),
+        ..Default::default()
+    });
+
+    let issues = settings.validate();
+    assert!(issues.iter().any(|issue| issue.contains("invalid title_regex")));
+    assert!(issues.iter().any(|issue| issue.contains("effects are ignored")));
+}
+
+#[test]
+fn horizontal_mouse_warp_config_parsing() {
+    let missing: Settings = toml::from_str("").unwrap();
+    assert_eq!(missing.horizontal_mouse_warp, None);
+    for (value, expected) in [
+        ("top-to-bottom", HorizontalMouseWarp::TopToBottom),
+        ("bottom-to-top", HorizontalMouseWarp::BottomToTop),
+    ] {
+        let settings: Settings =
+            toml::from_str(&format!("horizontal_mouse_warp = \"{value}\" ")).unwrap();
+        assert_eq!(settings.horizontal_mouse_warp, Some(expected));
+    }
+    assert!(toml::from_str::<Settings>("horizontal_mouse_warp = \"sideways\"").is_err());
+}
+
+#[test]
+fn resize_command_config_supports_legacy_and_oriented_forms() {
+    #[derive(Deserialize)]
+    struct TestConfig {
+        keys: HashMap<String, WmCommand>,
+    }
+
+    let mut document: toml::Value = toml::from_str(
+        r#"
+            [keys]
+            legacy = "resize_window_grow"
+            vertical = { resize_window_shrink = "vertical" }
+            smart = { resize_window_grow = "smart" }
+            sequence = ["resize_window_shrink", { resize_window_grow = "vertical" }]
+            "#,
+    )
+    .unwrap();
+    assert!(migrate_legacy_resize_bindings(&mut document));
+    let config: TestConfig = document.try_into().unwrap();
+
+    assert_eq!(
+        config.keys["legacy"],
+        WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
+            ResizeOrientation::Horizontal
+        )))
+    );
+    assert_eq!(
+        config.keys["vertical"],
+        WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowShrink(
+            ResizeOrientation::Vertical
+        )))
+    );
+    assert_eq!(
+        config.keys["smart"],
+        WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
+            ResizeOrientation::Smart
+        )))
+    );
+    assert_eq!(
+        config.keys["sequence"],
+        WmCommand::Sequence(vec![
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowShrink(
+                ResizeOrientation::Horizontal
+            ))),
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
+                ResizeOrientation::Vertical
+            ))),
+        ])
+    );
+}
+
+#[test]
+fn menu_bar_binding_mode_label_defaults_on_and_can_be_disabled() {
+    let settings: MenuBarSettings = toml::from_str("").unwrap();
+    assert!(settings.show_binding_mode);
+    assert!(MenuBarSettings::default().show_binding_mode);
+    let settings: MenuBarSettings = toml::from_str("show_binding_mode = false").unwrap();
+    assert!(!settings.show_binding_mode);
+    let roundtrip: MenuBarSettings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+    assert!(!roundtrip.show_binding_mode);
+}
+
+#[test]
+fn menu_bar_fullscreen_indicator_defaults_off_and_can_be_enabled() {
+    let settings: MenuBarSettings = toml::from_str("").unwrap();
+    assert!(!settings.show_fullscreen_indicator);
+    assert!(!MenuBarSettings::default().show_fullscreen_indicator);
+    let settings: MenuBarSettings = toml::from_str("show_fullscreen_indicator = true").unwrap();
+    assert!(settings.show_fullscreen_indicator);
+    let roundtrip: MenuBarSettings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+    assert!(roundtrip.show_fullscreen_indicator);
+}
+
+#[test]
+fn menu_bar_layout_folder_defaults_and_expands_home() {
+    let settings: MenuBarSettings = toml::from_str("").unwrap();
+
+    assert_eq!(settings.layout_folder, PathBuf::from("~/.config/rift/layouts"));
+    assert_eq!(
+        settings.resolved_layout_folder(),
+        dirs::home_dir().unwrap().join(".config/rift/layouts")
+    );
+}
+
+#[test]
+fn menu_bar_layout_folder_preserves_absolute_paths() {
+    let settings: MenuBarSettings =
+        toml::from_str("layout_folder = \"/tmp/rift-layouts\"").unwrap();
+
+    assert_eq!(
+        settings.resolved_layout_folder(),
+        PathBuf::from("/tmp/rift-layouts")
+    );
+}
+
+#[test]
+fn test_modifier_combinations_in_config() {
+    let toml = r#"
+            [settings]
+            animate = false
+
+            [modifier_combinations]
+            comb1 = "Alt + Shift"
+            leader = "Ctrl + Alt"
+
+            [keys]
+            "comb1 + C" = "toggle_space_activated"
+            "leader + Tab" = "next_workspace"
+            "Alt + H" = { move_focus = "left" }
+        "#;
+
+    let cfg = Config::parse(toml).unwrap();
+    // We expect keys to be parsed into hotkeys
+    assert!(!cfg.keys.is_empty());
+}
+
+#[test]
+fn mouse_settings_defaults_and_variants_parse() {
+    let defaults: DragDropSettings = toml::from_str("").unwrap();
+    assert_eq!(defaults, DragDropSettings::default());
+
+    let settings: DragDropSettings = toml::from_str(
+        r#"
+                enabled = false
+                modifier = "ctrl"
+                action1 = "none"
+                action2 = "move"
+                drop_action = "stack"
+                drop_zone_fraction = 0.45
+                preview = false
+            "#,
+    )
+    .unwrap();
+    assert_eq!(settings.modifier, MouseModifier::Keys(Modifiers::CONTROL));
+    assert_eq!(settings.action1, MouseAction::None);
+    assert_eq!(settings.action2, MouseAction::Move);
+    assert_eq!(settings.drop_action, MouseDropAction::Stack);
+
+    for (alias, expected) in [
+        ("command", MouseModifier::Keys(Modifiers::META)),
+        ("option", MouseModifier::Keys(Modifiers::ALT)),
+        ("control", MouseModifier::Keys(Modifiers::CONTROL)),
+    ] {
+        let parsed: DragDropSettings = toml::from_str(&format!("modifier = \"{alias}\"")).unwrap();
+        assert_eq!(parsed.modifier, expected);
+    }
+}
+
+#[test]
+fn legacy_window_snapping_is_removed_before_deserialization() {
+    let cfg = Config::parse(
+        r#"
+                [settings.window_snapping]
+                drag_swap_fraction = 0.3
+                [keys]
+            "#,
+    )
+    .unwrap();
+    assert_eq!(cfg.settings.drag_drop, DragDropSettings::default());
+}
+
+#[test]
+fn drag_drop_settings_take_precedence_over_legacy_window_snapping() {
+    let cfg = Config::parse(
+        r#"
+                [settings.window_snapping]
+                drag_swap_fraction = 0.3
+                [settings.drag_drop]
+                modifier = "alt"
+                drop_action = "stack"
+                [keys]
+            "#,
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.settings.drag_drop.modifier,
+        MouseModifier::Keys(Modifiers::ALT)
+    );
+    assert_eq!(cfg.settings.drag_drop.drop_action, MouseDropAction::Stack);
+}
+
+#[test]
+fn invalid_drop_zone_fraction_has_clear_validation_error() {
+    let mut cfg = Config::default();
+    cfg.settings.drag_drop.drop_zone_fraction = 0.09;
+    assert!(
+        cfg.validate()
+            .iter()
+            .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+    );
+    cfg.settings.drag_drop.drop_zone_fraction = 0.46;
+    assert!(
+        cfg.validate()
+            .iter()
+            .any(|issue| issue.contains("drag_drop.drop_zone_fraction"))
+    );
+}
+
+#[test]
+fn serde_round_trip_preserves_binding_mode_specs() {
+    let cfg = Config::default();
+    assert!(!cfg.binding_mode_specs[0].1.is_empty());
+
+    let json = serde_json::to_string(&cfg).unwrap();
+    let round_tripped: Config = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(round_tripped.binding_mode_specs, cfg.binding_mode_specs);
+}
+
+#[test]
+fn keys_only_config_still_has_only_the_default_binding_set() {
+    let config = Config::parse(
+        r#"
+                [settings]
+                [keys]
+                "A" = "reload_config"
+            "#,
+    )
+    .unwrap();
+    assert_eq!(config.binding_mode_specs.len(), 1);
+    assert_eq!(config.binding_mode_specs[0].0, "default");
+    assert!(config.binding_mode_specs[0].1.iter().any(|(spec, _)| spec == "A"));
+}
+
+#[test]
+fn custom_binding_modes_parse_and_expand_modifier_combinations() {
+    let config = Config::parse(
+        r#"
+                [settings]
+                [modifier_combinations]
+                nav = "Alt + Shift"
+                [keys]
+                "Alt + R" = { binding_mode = "resize" }
+                [binding_modes.resize]
+                "nav + N" = { binding_mode = "default" }
+            "#,
+    )
+    .unwrap();
+    assert_eq!(config.binding_mode_specs[0].0, "default");
+    assert_eq!(config.binding_mode_specs[1].0, "resize");
+    assert!(config.binding_mode_specs[1]
+            .1
+            .iter()
+            .any(|(spec, command)| spec == "Alt + Shift + N"
+                && matches!(command, WmCommand::Wm(crate::actor::wm_controller::WmCmd::BindingMode(target)) if target == "default")));
+}
+
+#[test]
+fn binding_mode_config_rejects_bad_targets_reserved_default_and_bad_hotkeys() {
+    let missing = r#"
+            [settings]
+            [keys]
+            "Alt + R" = { binding_mode = "does-not-exist" }
+            [binding_modes.resize]
+            "Escape" = { binding_mode = "default" }
+        "#;
+    assert!(Config::parse(&missing).unwrap_err().to_string().contains("does-not-exist"));
+
+    let reserved = r#"
+            [settings]
+            [keys]
+            [binding_modes.default]
+        "#;
+    assert!(Config::parse(&reserved).unwrap_err().to_string().contains("reserved"));
+
+    let malformed = r#"
+            [settings]
+            [keys]
+            "NotARealHotkey" = { binding_mode = "default" }
+        "#;
+    assert!(Config::parse(&malformed).unwrap_err().to_string().contains("hotkey"));
+}
+
+#[test]
+fn command_arrays_parse_save_and_follow_keymap_renames() {
+    use crate::actor::wm_controller::WmCmd;
+
+    let text = r#"
+            [settings]
+            [keys]
+            "Alt + 1" = [{ move_window_to_workspace = 0 }, { binding_mode = "move" }]
+            [binding_modes.move]
+            "1" = [{ move_window_to_workspace = 0 }, { binding_mode = "default" }]
+        "#;
+    let sequence = |mode: &str| {
+        WmCommand::Sequence(vec![
+            WmCommand::Wm(WmCmd::MoveWindowToWorkspace(WorkspaceSelector::Index(0))),
+            WmCommand::Wm(WmCmd::BindingMode(mode.into())),
+        ])
+    };
+    let config = Config::parse(text).unwrap();
+    assert_eq!(config.binding_mode_specs[0].1, [(
+        "Alt + 1".to_string(),
+        sequence("move")
+    )]);
+    assert_eq!(config.binding_mode_specs[1].1, [(
+        "1".to_string(),
+        sequence("default")
+    )]);
+
+    let missing = text.replace("\"default\" }]", "\"missing\" }]");
+    assert!(Config::parse(&missing).unwrap_err().to_string().contains("missing"));
+    for empty in ["[]", "[[]]"] {
+        let config = format!("[settings]\n[keys]\n\"A\" = {empty}");
+        assert!(Config::parse(&config).unwrap_err().to_string().contains("empty"));
+    }
+
+    let mut document = ConfigDocument::parse(text).unwrap();
+    document
+        .update(|source| source.rename_keymap("move", "go".into()).unwrap())
+        .unwrap();
+    let saved = document.to_string();
+    assert!(
+        saved
+            .contains(r#""Alt + 1" = [{ move_window_to_workspace = 0 }, { binding_mode = "go" }]"#),
+        "{saved}"
+    );
+    let source = document.source().unwrap();
+    assert_eq!(source.keys["Alt + 1"], sequence("go"));
+    assert_eq!(source.binding_modes["go"]["1"], sequence("default"));
+}
+
+#[test]
+fn config_validation_rejects_duplicate_binding_mode_names() {
+    let mut json = serde_json::to_value(Config::default()).unwrap();
+    json["binding_mode_specs"] = serde_json::json!([["default", []], ["default", []]]);
+    let config: Config = serde_json::from_value(json).unwrap();
+    assert!(config.validate().iter().any(|issue| issue.contains("unique")));
+}
+
+#[test]
+fn config_validation_rejects_empty_command_arrays() {
+    let mut json = serde_json::to_value(Config::default()).unwrap();
+    json["binding_mode_specs"] = serde_json::json!([["default", [["A", []]]]]);
+    let config: Config = serde_json::from_value(json).unwrap();
+    assert!(config.validate().iter().any(|issue| issue.contains("empty")));
+}
+
+#[test]
+fn overview_hotkey_release_setting_defaults_to_sticky_and_can_be_edited() {
+    let mut document =
+        ConfigDocument::parse("[keys]\n[settings.ui.mission_control]\nenabled = true\n").unwrap();
+    assert!(
+        !document
+            .runtime()
+            .unwrap()
+            .settings
+            .ui
+            .mission_control
+            .activate_on_hotkey_release
+    );
+    let runtime = document
+        .update(|source| source.settings.ui.mission_control.activate_on_hotkey_release = true)
+        .unwrap();
+    assert!(runtime.settings.ui.mission_control.activate_on_hotkey_release);
+    assert!(
+        ConfigDocument::parse(&document.to_string())
+            .unwrap()
+            .runtime()
+            .unwrap()
+            .settings
+            .ui
+            .mission_control
+            .activate_on_hotkey_release
+    );
+    let runtime = document
+        .update(|source| source.settings.ui.mission_control.activate_on_hotkey_release = false)
+        .unwrap();
+    assert!(!runtime.settings.ui.mission_control.activate_on_hotkey_release);
+}
+
+#[test]
+fn default_document_is_the_canonical_template() {
+    let document =
+        ConfigDocument::from_source(ConfigDocument::default().source().unwrap()).unwrap();
+    assert_eq!(document.to_string(), include_str!("../../../rift.default.toml"));
+}
+
+#[test]
+fn scalar_edit_preserves_all_other_source_bytes_and_rolls_back_invalid_edits() {
+    let original = include_str!("../../../rift.default.toml")
+        .replace(
+            "animation_duration = 0.3",
+            "animation_duration = 0.3 # my timing",
+        )
+        .replace("\n[keys]\n", "\n# custom key documentation\n[keys]\n");
+    let mut document = ConfigDocument::parse(&original).unwrap();
+    let runtime = document.update(|source| source.settings.animation_duration = 0.2).unwrap();
+    assert_eq!(runtime.settings.animation_duration, 0.2);
+    assert_eq!(
+        document.to_string(),
+        original.replace("animation_duration = 0.3", "animation_duration = 0.2")
+    );
+    let saved = document.to_string();
+    assert!(document.update(|source| source.settings.animation_duration = -1.0).is_err());
+    assert_eq!(document.to_string(), saved);
+}
+
+#[test]
+fn typed_collections_keep_source_aliases_and_inline_commands() {
+    let mut document = ConfigDocument::default();
+    document
+        .update(|source| {
+            source.virtual_workspaces.workspace_names = vec!["coding".into(), "mail".into()];
+            source.settings.layout.gaps.per_display.insert("display-a".into(), GapOverride {
+                inner: Some(InnerGaps { horizontal: 8.0, vertical: 8.0 }),
+                outer: None,
+            });
+            source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
+                app_id: Some("com.example.Tool".into()),
+                floating: true,
+                position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
+                ..Default::default()
+            });
+            source.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
+                workspace: WorkspaceSelector::Index(1),
+                layout: Some(LayoutMode::Scrolling),
+                display: None,
+            });
+            source.keys.insert("comb1 + Q".into(), source.keys["Alt + H"].clone());
+            source.binding_modes.insert(
+                "nav".into(),
+                std::collections::BTreeMap::from([("H".into(), source.keys["Alt + H"].clone())]),
+            );
+        })
+        .unwrap();
+    let text = document.to_string();
+    assert!(text.contains("workspace_names = [\n\t\"coding\",\n\t\"mail\"\n]"));
+    assert!(
+        text.contains("\"comb1 + Q\" = { move_focus = \"left\" }"),
+        "{text}"
+    );
+    assert!(text.contains("\"Alt + H\" = { move_focus = \"left\" }"));
+    assert!(text.find("[keys]").unwrap() < text.find("[binding_modes.nav]").unwrap());
+    assert!(
+        text.find("[settings.layout.gaps.per_display.display-a.inner]").unwrap()
+            < text.find("[settings.ui.mission_control]").unwrap()
+    );
+    let runtime = Config::parse(&text).unwrap();
+    assert_eq!(runtime.virtual_workspaces.app_rules.len(), 1);
+    assert_eq!(runtime.virtual_workspaces.workspace_rules.len(), 1);
+    assert!(runtime.binding_mode_specs[0].1.iter().any(|(key, _)| key == "Alt + Shift + Q"));
+    document
+        .update(|source| {
+            source.keys.remove("comb1 + Q");
+            source.binding_modes.remove("nav");
+            source.virtual_workspaces.app_rules.clear();
+        })
+        .unwrap();
+    assert!(!document.to_string().contains("\"comb1 + Q\" ="));
+}
+
+#[test]
+fn document_save_preserves_symlink_and_reloadable_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("nested/config.toml");
+    let mut document = ConfigDocument::default();
+    document.save(&target).unwrap();
+    let link = dir.path().join("config.toml");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    document.update(|source| source.settings.animate = true).unwrap();
+    document.save(&link).unwrap();
+    assert!(link.is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), document.to_string());
+    assert!(Config::read(&link).unwrap().settings.animate);
+}
+
+#[test]
+fn commented_optional_setting_uses_example_anchor_and_resets_to_omission() {
+    let mut document = ConfigDocument::default();
+    document.update(|source| source.settings.default_disable = false).unwrap();
+    let text = document.to_string();
+    assert!(text.contains("#default_disable = false\ndefault_disable = false\n"));
+    assert!(
+        text.find("default_disable = false\n").unwrap()
+            < text.find("focus_follows_mouse = true").unwrap()
+    );
+    document.update(|source| source.settings.default_disable = true).unwrap();
+    assert_eq!(document.to_string(), include_str!("../../../rift.default.toml"));
+}
+
+#[test]
+fn serde_without_binding_mode_specs_reconstructs_from_keys() {
+    let cfg = Config::default();
+    let mut json = serde_json::to_value(&cfg).unwrap();
+    json.as_object_mut().unwrap().remove("binding_mode_specs");
+
+    let round_tripped: Config = serde_json::from_value(json).unwrap();
+
+    assert_eq!(
+        round_tripped.binding_mode_specs[0].1.len(),
+        round_tripped.keys.len()
+    );
+    assert!(!round_tripped.binding_mode_specs[0].1.is_empty());
+}
+
+#[test]
+fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
+    let mut settings = VirtualWorkspaceSettings::default();
+    settings.workspace_names = vec!["one".into(), "two".into(), "three".into()];
+    settings.default_workspace = 2;
+    settings.workspace_rules = vec![
+        WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Name("three".into()),
+            layout: Some(LayoutMode::Stack),
+            display: None,
+        },
+        WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Index(0),
+            layout: Some(LayoutMode::Bsp),
+            display: None,
+        },
+    ];
+    settings.app_rules = vec![AppWorkspaceRule {
+        workspace: Some(WorkspaceSelector::Index(2)),
+        ..Default::default()
+    }];
+    settings.resize(2);
+    assert_eq!(settings.workspace_names, ["one", "two"]);
+    assert_eq!(settings.default_workspace, 1);
+    assert_eq!(settings.workspace_rules.len(), 1);
+    assert_eq!(
+        settings.workspace_rules[0].workspace,
+        WorkspaceSelector::Index(0)
+    );
+    assert_eq!(settings.app_rules[0].workspace, None);
+    settings.resize(MAX_WORKSPACES + 1);
+    assert_eq!(settings.workspace_names, ["one", "two"]);
+    assert!(!settings.validate().is_empty());
+}
+
+#[test]
+fn keymap_rename_and_delete_update_both_command_encodings_and_self_references() {
+    use rift_protocol::ReactorCommand;
+
+    use crate::actor::wm_controller::WmCmd;
+    let mut source = ConfigSource {
+        settings: Config::default().settings,
+        keys: Default::default(),
+        binding_modes: Default::default(),
+        virtual_workspaces: Default::default(),
+        modifier_combinations: Default::default(),
+    };
+    source.create_keymap("edit".into()).unwrap();
+    source.keys.insert("A".into(), WmCommand::Wm(WmCmd::BindingMode("edit".into())));
+    source.keymap_mut("edit").unwrap().insert(
+        "B".into(),
+        WmCommand::ReactorCommand(reactor::Command::Reactor(ReactorCommand::BindingMode(
+            "edit".into(),
+        ))),
+    );
+    source.rename_keymap("edit", "renamed".into()).unwrap();
+    assert!(source.keymap("edit").is_none());
+    assert!(
+        matches!(source.keys.get("A"), Some(WmCommand::Wm(WmCmd::BindingMode(name))) if name == "renamed")
+    );
+    assert!(
+        matches!(source.keymap("renamed").unwrap().get("B"), Some(WmCommand::ReactorCommand(reactor::Command::Reactor(ReactorCommand::BindingMode(name)))) if name == "renamed")
+    );
+    source.keys.insert("C".into(), source.keymap("renamed").unwrap()["B"].clone());
+    source.delete_keymap("renamed").unwrap();
+    assert!(source.keymap("renamed").is_none());
+    assert!(
+        matches!(source.keys.get("A"), Some(WmCommand::Wm(WmCmd::BindingMode(name))) if name == "default")
+    );
+    assert!(
+        matches!(source.keys.get("C"), Some(WmCommand::ReactorCommand(reactor::Command::Reactor(ReactorCommand::BindingMode(name)))) if name == "default")
+    );
+}
+
+#[test]
+fn stack_tabs_default_on_and_release_the_reservation_when_disabled() {
+    let mut tabs = Config::parse("[keys]\n[settings]").unwrap().settings.ui.stack_line;
+    assert!(tabs.enabled && tabs.validate().is_empty());
+    assert_eq!(tabs.reserve().total(), 28.0);
+    tabs.enabled = false;
+    assert_eq!(tabs.reserve().total(), 0.0);
+}
+
+/// The stack line section of main's `rift.default.toml`, verbatim.
+const MAIN_DEFAULT_STACK_LINE: &str = r#"
+[keys]
+
+[settings.ui.stack_line]
+# experimental stack line indicator (defaults to off)
+enabled = false
+# action on hover: "click" or "hover" (defaults to "hover" which is just a visual indicator)
+hover = "hover"
+# in a horizontal stack where the line will be (top/bottom)
+horiz_placement = "top"
+# in a vertical stack where the line will be (left/right)
+vert_placement = "left"
+# how thick the indicator will be (in px)
+thickness = 20.0
+# spacing between the stack line and window edges (in px)
+spacing = 1.0
+# RGBA components range from 0.0 to 1.0. Each color can be customized
+# selected_color = { r = 0.0, g = 0.5, b = 1.0, a = 1.0 }
+# unselected_color = { r = 0.8, g = 0.8, b = 0.8, a = 1.0 }
+# border_color = { r = 0.6, g = 0.6, b = 0.6, a = 1.0 }
+"#;
+
+#[test]
+fn main_stack_line_configs_keep_their_meaning() {
+    let uncommented = MAIN_DEFAULT_STACK_LINE
+        .replace("# selected", "selected")
+        .replace("# unselected", "unselected")
+        .replace("# border", "border");
+    let thin = uncommented.replace("20.0", "4").replace("false", "true");
+    for (text, enabled) in [
+        (MAIN_DEFAULT_STACK_LINE.into(), false),
+        (uncommented, false),
+        (thin, true),
+    ] {
+        let config = Config::parse(&text).unwrap();
+        assert!(config.validate().is_empty(), "{:?}", config.validate());
+        let tabs = &config.settings.ui.stack_line;
+        assert_eq!(
+            tabs.enabled, enabled,
+            "an explicit setting beats the new default"
+        );
+        assert!(!tabs.hover.selects_on_hover(), "\"hover\" only highlights");
+        assert_eq!((tabs.horiz_placement, tabs.vert_placement), Default::default());
+        // Removed colors are dropped; indicator thicknesses rise to the 20 point minimum.
+        assert_eq!((tabs.thickness, tabs.spacing), (20.0, 1.0));
+        assert_eq!(tabs.reserve().total(), if enabled { 21.0 } else { 0.0 });
+        let mut document = ConfigDocument::parse(&text).unwrap();
+        document.update(|source| source.settings.ui.stack_line.spacing = 2.0).unwrap();
+        assert_eq!(
+            Config::parse(&document.to_string()).unwrap().settings.ui.stack_line.spacing,
+            2.0
+        );
+    }
+    assert!(Config::parse(&MAIN_DEFAULT_STACK_LINE.replace("hover =", "hover_color =")).is_err());
+    let click: StackLineSettings = toml::from_str(r#"hover = "click""#).unwrap();
+    assert!(click.hover.selects_on_hover());
+}
+
+#[test]
+fn stack_tab_geometry_rejects_unusable_values() {
+    for text in [
+        "thickness = 19.5",
+        "thickness = nan",
+        "spacing = -1.0",
+        "spacing = inf",
+    ] {
+        let tabs: StackLineSettings = toml::from_str(text).unwrap();
+        assert_eq!(tabs.validate().len(), 1, "{text}");
+    }
+}
+
+#[test]
+fn workspace_mode_defaults_to_global_and_round_trips() {
+    assert_eq!(
+        toml::from_str::<VirtualWorkspaceSettings>("").unwrap().mode,
+        WorkspaceMode::Global
+    );
+    for (text, mode) in [
+        ("per_display", WorkspaceMode::PerDisplay),
+        ("global", WorkspaceMode::Global),
+    ] {
+        let settings =
+            toml::from_str::<VirtualWorkspaceSettings>(&format!("mode = '{text}'")).unwrap();
+        assert_eq!(settings.mode, mode);
+        assert_eq!(serde_json::to_value(&settings).unwrap()["mode"], text);
+    }
+    for text in [
+        "mode = 'shared'",
+        "mode = 'independent'",
+        "display_mode = 'shared'",
+    ] {
+        assert!(
+            toml::from_str::<VirtualWorkspaceSettings>(text).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn ordered_display_preferences_round_trip_and_validate() {
+    let mut document = ConfigDocument::default();
+    for display in [r#""builtin""#, r#"["builtin", "right"]"#] {
+        let rule: WorkspaceLayoutRule =
+            toml::from_str(&format!("workspace = 0\ndisplay = {display}")).unwrap();
+        let expected: toml::Table = toml::from_str(&format!("display = {display}")).unwrap();
+        assert_eq!(
+            toml::Value::try_from(&rule).unwrap()["display"],
+            expected["display"]
+        );
+        document
+            .update(|s| s.virtual_workspaces.workspace_rules = vec![rule.clone()])
+            .unwrap();
+        assert_eq!(document.runtime().unwrap().virtual_workspaces.workspace_rules, [
+            rule
+        ]);
+    }
+    for values in [vec![], vec![""], vec!["builtin", " "]] {
+        let error = document
+            .update(|s| {
+                s.virtual_workspaces.workspace_rules[0].display =
+                    Some(values.into_iter().map(String::from).collect());
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("Workspace rule 0 display preferences"));
+    }
+}
+
+#[test]
+fn workspace_names_reject_explicit_and_generated_collisions() {
+    for names in [vec!["Main", "Dev", "Main"], vec!["Workspace 3"], vec![
+        "",
+        "Workspace 1",
+    ]] {
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 3,
+            workspace_names: names.into_iter().map(String::from).collect(),
+            ..Default::default()
+        };
+        assert!(
+            settings
+                .validate()
+                .iter()
+                .any(|issue| issue.contains("Duplicate workspace name"))
+        );
+    }
+}
+
+#[test]
+fn app_rule_commas_stay_on_the_preceding_line() {
+    let mut base = ConfigDocument::default();
+    base.update(|source| {
+        for id in ["a", "b", "c"] {
+            source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
+                app_id: Some(format!("com.example.{id}")),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                ..Default::default()
+            });
+        }
+    })
+    .unwrap();
+    let mut document = ConfigDocument::parse(&base.to_string().replace("\n\t{", "\n  {")).unwrap();
+    let check = |document: &ConfigDocument, expected: usize| {
+        let text = document.to_string();
+        assert!(
+            !text.lines().any(|line| line.trim_start().starts_with(',')),
+            "{text}"
+        );
+        let start = text.rfind("\napp_rules = [").unwrap();
+        let end = start + text[start..].find("\n]").unwrap();
+        assert!(!text[start..end].contains("\n\n"), "{text}");
+        assert_eq!(
+            Config::parse(&text).unwrap().virtual_workspaces.app_rules.len(),
+            expected
+        );
+    };
+    document
+        .update(|source| {
+            source.virtual_workspaces.app_rules.push(AppWorkspaceRule {
+                app_id: Some("com.example.d".into()),
+                ..Default::default()
+            })
+        })
+        .unwrap();
+    check(&document, 4);
+    document
+        .update(|source| source.virtual_workspaces.app_rules[1].floating = true)
+        .unwrap();
+    check(&document, 4);
+    document
+        .update(|source| drop(source.virtual_workspaces.app_rules.remove(0)))
+        .unwrap();
+    check(&document, 3);
+    document
+        .update(|source| drop(source.virtual_workspaces.app_rules.pop()))
+        .unwrap();
+    check(&document, 2);
+}
+
+#[test]
+fn binding_edits_never_overwrite_overlapping_shortcuts() {
+    let mut source = ConfigDocument::default().source().unwrap();
+    let focus_left = source.keys["Alt + H"].clone();
+    let toggle = source.keys["Alt + Z"].clone();
+    // `comb1` expands to the same keys as an explicit binding.
+    let combination = source.modifier_combinations["comb1"].clone();
+    let (key, command) = source
+        .conflicting_binding("default", &format!("{combination} + H"), None)
+        .unwrap();
+    assert_eq!((key.as_str(), command), ("comb1 + H", &source.keys["comb1 + H"]));
+    // Left/right-specific modifiers overlap their family.
+    assert!(source.conflicting_binding("default", "AltLeft + H", None).is_some());
+    assert!(source.conflicting_binding("default", "Alt + H", Some("Alt + H")).is_none());
+
+    let before = source.keys.clone();
+    let taken = source.bind("default", None, "AltLeft + h".into(), toggle.clone());
+    assert!(taken.unwrap_err().contains("Alt + H"));
+    assert!(source.bind("default", None, "Alt + Nope".into(), toggle.clone()).is_err());
+    // A rebinding whose original changed elsewhere fails instead of clobbering it.
+    let stale = source.bind(
+        "default",
+        Some(("Alt + H", &toggle)),
+        "Alt + B".into(),
+        toggle.clone(),
+    );
+    assert!(stale.is_err());
+    assert_eq!(source.keys, before);
+
+    source
+        .bind(
+            "default",
+            Some(("Alt + H", &focus_left)),
+            "Alt + B".into(),
+            focus_left.clone(),
+        )
+        .unwrap();
+    assert!(!source.keys.contains_key("Alt + H"));
+    assert_eq!(source.keys["Alt + B"], focus_left);
+    // Keeping the key while changing parameters replaces the command in place.
+    source
+        .bind(
+            "default",
+            Some(("Alt + B", &focus_left)),
+            "Alt + B".into(),
+            toggle.clone(),
+        )
+        .unwrap();
+    assert_eq!(source.keys["Alt + B"], toggle);
+
+    // Edits through the document keep the rest of the file untouched.
+    let document = ConfigDocument::default();
+    let text = document.to_string();
+    let edited = document
+        .edited_from(document.source().unwrap(), |s| {
+            s.bind(
+                "default",
+                Some(("Alt + H", &focus_left)),
+                "Alt + B".into(),
+                focus_left.clone(),
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .unwrap()
+        .document
+        .to_string();
+    let removed: Vec<_> = text.lines().filter(|line| !edited.contains(line)).collect();
+    assert_eq!(removed, [r#""Alt + H" = { move_focus = "left" }"#]);
+}
+
+#[test]
+fn replacing_shortcuts_is_atomic_and_scoped_to_the_reviewed_mode() {
+    use std::collections::BTreeMap;
+    let document = ConfigDocument::default();
+    let defaults = document.source().unwrap();
+    let first = defaults.keys["Alt + H"].clone();
+    let second = defaults.keys["Alt + L"].clone();
+    let replacement = defaults.keys["Alt + Z"].clone();
+    let mut source = defaults.clone();
+    source.keys = BTreeMap::from([
+        ("AltLeft + H".into(), first.clone()),
+        ("AltRight + H".into(), second.clone()),
+        ("Ctrl + Q".into(), first.clone()),
+        ("Alt + K".into(), replacement.clone()),
+    ]);
+    source.binding_modes.insert(
+        "edit".into(),
+        BTreeMap::from([("Alt + H".into(), second.clone())]),
+    );
+    let reviewed = vec![
+        ("AltLeft + H".into(), first.clone()),
+        ("AltRight + H".into(), second.clone()),
+    ];
+    let before = source.clone();
+    // Neither a missing conflict nor a stale original may partially remove anything.
+    assert!(
+        source
+            .bind_replacing(
+                "default",
+                Some(("Alt + K", &replacement)),
+                "Alt + H".into(),
+                replacement.clone(),
+                &reviewed[..1]
+            )
+            .is_err()
+    );
+    assert!(source == before);
+    assert!(
+        source
+            .bind_replacing(
+                "default",
+                Some(("Alt + K", &first)),
+                "Alt + H".into(),
+                replacement.clone(),
+                &reviewed
+            )
+            .is_err()
+    );
+    assert!(source == before);
+    source.keys.insert("AltRight + H".into(), first.clone());
+    let changed = source.clone();
+    assert!(
+        source
+            .bind_replacing(
+                "default",
+                Some(("Alt + K", &replacement)),
+                "Alt + H".into(),
+                replacement.clone(),
+                &reviewed
+            )
+            .is_err()
+    );
+    assert!(source == changed);
+    source = before;
+    source
+        .bind_replacing(
+            "default",
+            Some(("Alt + K", &replacement)),
+            "Alt + H".into(),
+            replacement.clone(),
+            &reviewed,
+        )
+        .unwrap();
+    assert_eq!(
+        source.keys,
+        BTreeMap::from([
+            ("Alt + H".into(), replacement.clone()),
+            ("Ctrl + Q".into(), first)
+        ])
+    );
+    assert_eq!(source.binding_modes["edit"]["Alt + H"], second);
+    // The successful transaction survives the actual TOML document and parser boundary.
+    let edited = document
+        .edited(|current| {
+            *current = source.clone();
+            Ok(())
+        })
+        .unwrap();
+    let reopened = ConfigDocument::parse(&edited.document.to_string()).unwrap().source().unwrap();
+    assert_eq!(reopened.keys, source.keys);
+    assert_eq!(reopened.binding_modes, source.binding_modes);
+}

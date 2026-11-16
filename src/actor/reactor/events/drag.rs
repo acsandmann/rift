@@ -1,8 +1,8 @@
 use tracing::{trace, warn};
 
+use crate::actor::reactor::LayoutEvent;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
-use crate::actor::reactor::{LayoutEvent, WindowState};
 use crate::model::RiftState;
 use crate::sys::screen::SpaceId;
 
@@ -102,6 +102,7 @@ pub fn handle_mouse_up(
             action: target.intent.action,
         }) {
             needs_layout = true;
+            outcome.drop_haptic = drag.haptics_enabled;
         }
     }
 
@@ -110,16 +111,15 @@ pub fn handle_mouse_up(
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
         }
         if let Some(space) = payload.final_space
-            && state.windows.window(window).is_some_and(WindowState::is_admitted)
+            && state.windows.is_admitted(window)
         {
             if let Some(server_id) =
                 state.windows.window(window).and_then(|window| window.info.sys_id)
             {
-                state.windows.set_window_server_space(server_id, Some(space));
-                state.windows.mark_window_visible(server_id);
+                state.windows.observe_native_space(server_id, space, true);
             }
-            if let Some(workspace) = layout.layout_engine.active_workspace(space)
-                && !layout.layout_engine.virtual_workspace_manager_mut().assign_window_to_workspace(
+            if let Some(workspace) = layout.layout_engine.workspaces().active_workspace(space)
+                && !layout.layout_engine.workspaces_mut().assign_window_to_workspace(
                     &mut state.windows,
                     space,
                     window,
@@ -136,17 +136,17 @@ pub fn handle_mouse_up(
     if let Some(space) = payload.final_space
         && layout.layout_engine.is_window_floating(window)
     {
+        state.windows.clear_floating_display_geometry(window);
         if commit.source.origin_space != payload.final_space {
             layout.layout_engine.remove_floating_position(window);
         }
         if let Some(workspace) = layout
             .layout_engine
-            .virtual_workspace_manager()
+            .workspaces()
             .workspace_for_window(&state.windows, space, window)
-            .or_else(|| layout.layout_engine.active_workspace(space))
+            .or_else(|| layout.layout_engine.workspaces().active_workspace(space))
         {
             layout.layout_engine.store_floating_position(
-                space,
                 workspace,
                 window,
                 commit.source.last_frame,

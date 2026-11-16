@@ -52,7 +52,7 @@ cargo run -p rift-client --example listen -- workspace_changed
 
 Supported event names are `workspace_changed`, `windows_changed`,
 `window_title_changed`, `focused_window_changed`, `stacks_changed`, and
-`layout_changed`. Use `*` to listen for all events.
+`layout_changed`, `selection_changed`, `binding_mode_changed`, and `config_changed`. Use `*` to listen for all events.
 
 For a more complete example, see the [dimmer example](examples/dimmer.rs),
 which dims unfocused windows and updates them as Rift events arrive:
@@ -61,5 +61,63 @@ which dims unfocused windows and updates them as Rift events arrive:
 cargo run -p rift-client --example dimmer
 ```
 
+## Claim windows
+
+A `WindowManagementSession` lets a companion app take windows out of Rift's
+management (for example, a scratchpad). Rift stops tiling, placing, animating,
+and dragging a claimed window, and keeps its workspace, floating state, and
+layout slot for when it is released:
+
+```rust
+use rift_client::{RiftMachClient, WindowClaimFlags, WindowId};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = RiftMachClient::connect()?;
+    let mut session = client.window_management_session()?;
+    let window = WindowId { pid: 1234, idx: 56 };
+    session.claim_window_with_flags(window, WindowClaimFlags::SUPPRESS_FOCUS_FOLLOWS_MOUSE)?;
+    // ... manage the window ...
+    session.release_window(window)?;
+    Ok(())
+}
+```
+
+Claims end when they are released or when the session is dropped, including
+when the process exits. Claiming is idempotent and updates the flags of a
+claim the session already holds. `release_window` accepts the id that was
+claimed even if macOS later gives the window a new identity. If macOS reveals
+that two claimed ids are one window, the claim on its original identity
+survives, and requests from the session whose claim ended fail with "Window
+owned by another external manager". Claimed windows report
+`externally_managed: true` in window queries.
+`SUPPRESS_FOCUS_FOLLOWS_MOUSE` pauses focus follows mouse only while the
+claimed window is focused.
+
+The [owner example](examples/owner.rs) claims one window until it is stopped:
+
+```sh
+cargo run -p rift-client --example owner -- --window-id 1234:1
+```
+
 Set `RIFT_BS_NAME` to use a non-default Rift bootstrap service (for example,
 when running multiple instances).
+
+## Binding modes
+
+Use `client.get_binding_mode()` or `rift-cli query binding-mode` to read the
+active mode name (for example, `"default"`). Subscribe with
+`rift-cli subscribe mach binding_mode_changed` or
+`client.subscribe(EventKind::BindingModeChanged)` to receive changes:
+
+```json
+{"type":"binding_mode_changed","previous_mode":"default","mode":"resize"}
+```
+
+Changes include configuration reloads that reset the mode to `default`.
+Re-selecting the active mode or selecting an unknown mode emits no event.
+CLI command subscriptions receive `RIFT_BINDING_MODE`,
+`RIFT_PREVIOUS_BINDING_MODE`, and the usual `RIFT_EVENT_JSON` environment variables.
+Binding modes are global, so these events have no space or display context;
+`RiftEvent::space_id()` keeps its `u64` return type and returns `0` for global
+events. Use `RiftEvent::space_id_opt()` for explicit optional space context
+(`None` for global events).

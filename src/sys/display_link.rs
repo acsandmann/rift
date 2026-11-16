@@ -1,170 +1,217 @@
-use std::ffi::c_void;
-use std::ptr;
+//! Display cadence for a locked screen. AppKit objects stay on the main thread.
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
+use crossbeam_channel::Sender;
+use dispatchr::queue;
+use dispatchr::time::Time;
+use objc2::rc::Retained;
+use objc2::{AnyThread, DeclaredClass, MainThreadMarker, define_class, msg_send, sel};
+use objc2_app_kit::NSScreen;
+use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
+use objc2_quartz_core::{CADisplayLink, CAFrameRateRange};
 use parking_lot::Mutex;
 
-pub type CVReturn = i32;
-pub type CVOptionFlags = u32;
-#[allow(non_camel_case_types)]
-pub type CVDisplayLinkRef = *mut c_void;
+use super::dispatch::DispatchExt;
+use super::screen::{NSScreenExt, ScreenId};
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct CVTimeStamp {
-    pub version: u32,
-    pub video_time_scale: i32,
-    pub video_time: i64,
-    pub host_time: u64,
-    pub rate_scalar: f64,
-    pub video_refresh_period: u64,
-    pub smpte_time: u64,
-    pub flags: u64,
-    pub reserved: u64,
+thread_local! {
+    static LINKS: RefCell<HashMap<u64, Retained<CADisplayLink>>> = RefCell::new(HashMap::new());
+}
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One replaceable tick, never a queue. CA and Rust monotonic clocks are bridged
+/// on the presenter, so the main-thread callback only publishes native timing.
+#[derive(Clone, Copy, Debug)]
+pub struct DisplayTick {
+    pub timestamp: f64,
+    pub target_timestamp: f64,
 }
 
-// display_link has bindings in its own file because (1) it is CV not sls (2) i like it to be segmented away
-unsafe extern "C" {
-    fn CVDisplayLinkCreateWithActiveCGDisplays(link: *mut CVDisplayLinkRef) -> CVReturn;
-    fn CVDisplayLinkSetOutputCallback(
-        link: CVDisplayLinkRef,
-        callback: extern "C" fn(
-            CVDisplayLinkRef,
-            *const CVTimeStamp,
-            *const CVTimeStamp,
-            CVOptionFlags,
-            *mut CVOptionFlags,
-            *mut c_void,
-        ) -> CVReturn,
-        user_info: *mut c_void,
-    ) -> CVReturn;
-    fn CVDisplayLinkStart(link: CVDisplayLinkRef) -> CVReturn;
-    fn CVDisplayLinkStop(link: CVDisplayLinkRef) -> CVReturn;
-    fn CVDisplayLinkRelease(link: CVDisplayLinkRef);
-}
-
-struct CallbackData {
-    callback: Box<dyn FnMut() -> bool + Send>,
-    refresh_rate: Arc<Mutex<Option<f64>>>,
-}
-
-extern "C" fn display_link_callback(
-    link: CVDisplayLinkRef,
-    _now: *const CVTimeStamp,
-    output: *const CVTimeStamp,
-    _flags_in: CVOptionFlags,
-    _flags_out: *mut CVOptionFlags,
-    user_info: *mut c_void,
-) -> CVReturn {
-    if user_info.is_null() {
-        return 0;
+#[derive(Default)]
+struct LatestTick(Option<DisplayTick>);
+impl LatestTick {
+    fn publish(&mut self, timestamp: f64, target_timestamp: f64) {
+        self.0 = Some(DisplayTick { timestamp, target_timestamp });
     }
 
-    let data = unsafe { &mut *(user_info as *mut CallbackData) };
+    fn take(&mut self) -> Option<DisplayTick> { self.0.take() }
+}
 
-    if !output.is_null() {
-        let timestamp = unsafe { &*output };
-        if timestamp.video_refresh_period > 0 && timestamp.video_time_scale > 0 {
-            let refresh_rate =
-                timestamp.video_time_scale as f64 / timestamp.video_refresh_period as f64;
-            let mut rate = data.refresh_rate.lock();
-            *rate = Some(refresh_rate);
+struct State {
+    wake: Box<dyn Fn() + Send + Sync>,
+    pending: AtomicBool,
+    latest: Mutex<LatestTick>,
+    cancelled: AtomicBool,
+    paused: AtomicBool,
+}
+
+define_class! {
+    // NSObject has no subclassing requirements; the selector matches CADisplayLink's callback.
+    #[unsafe(super(NSObject))]
+    #[ivars = Arc<State>]
+    struct DisplayLinkTarget;
+
+    impl DisplayLinkTarget {
+        #[unsafe(method(tick:))]
+        fn tick(&self, link: &CADisplayLink) {
+            let state = self.ivars();
+            if state.cancelled.load(Ordering::Acquire) {
+                link.invalidate();
+                return;
+            }
+            let timestamp = link.timestamp();
+            let target_timestamp = link.targetTimestamp();
+            if state.paused.load(Ordering::Acquire) { return; }
+            state.latest.lock().publish(timestamp, target_timestamp);
+            if !state.pending.swap(true, Ordering::AcqRel) { (state.wake)(); }
         }
     }
-
-    let keep_running = (data.callback)();
-    if !keep_running {
-        unsafe { CVDisplayLinkStop(link) };
-    }
-    0
 }
 
+/// Sendable lifetime handle; the retained link and its run-loop operations never leave main.
 pub struct DisplayLink {
-    link: CVDisplayLinkRef,
-    cb_ptr: *mut CallbackData,
-    refresh_rate: Arc<Mutex<Option<f64>>>,
+    id: u64,
+    state: Arc<State>,
 }
 
 impl DisplayLink {
-    pub fn new<F>(callback: F) -> Result<Self, CVReturn>
-    where F: FnMut() -> bool + Send + 'static {
-        let mut link: CVDisplayLinkRef = ptr::null_mut();
-        let status = unsafe { CVDisplayLinkCreateWithActiveCGDisplays(&mut link) };
-        if status != 0 {
-            return Err(status);
+    pub fn for_display(display: u32, wake: Sender<()>) -> Self {
+        Self::create(
+            display,
+            move || {
+                let _ = wake.try_send(());
+            },
+            false,
+        )
+    }
+
+    pub fn for_display_callback(display: u32, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::create(display, wake, true)
+    }
+
+    fn create(display: u32, wake: impl Fn() + Send + Sync + 'static, high_refresh: bool) -> Self {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let state = Arc::new(State {
+            wake: Box::new(wake),
+            pending: AtomicBool::new(false),
+            latest: Mutex::default(),
+            cancelled: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+        });
+        queue::main().after_f_s(
+            Time::NOW,
+            (id, display, state.clone(), high_refresh),
+            |(id, display, state, high_refresh)| {
+                if state.cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                let mtm = MainThreadMarker::new().expect("main dispatch queue");
+                let Some(screen) = NSScreen::screens(mtm)
+                    .iter()
+                    .find(|screen| screen.get_number() == Ok(ScreenId::new(display)))
+                else {
+                    return;
+                };
+                // Older macOS releases keep the same sampler with a timer clock.
+                if !screen.respondsToSelector(sel!(displayLinkWithTarget:selector:)) {
+                    return;
+                }
+                let paused = state.paused.load(Ordering::Acquire);
+                let target = DisplayLinkTarget::alloc().set_ivars(state);
+                let target: Retained<DisplayLinkTarget> = unsafe { msg_send![super(target), init] };
+                // The target is retained by the link. It does not retain the link in return.
+                let link = unsafe { screen.displayLinkWithTarget_selector(&target, sel!(tick:)) };
+                if high_refresh {
+                    let fps = screen.maximumFramesPerSecond() as f32;
+                    link.setPreferredFrameRateRange(CAFrameRateRange::new(
+                        30_f32.min(fps),
+                        fps,
+                        fps,
+                    ));
+                }
+                link.setPaused(paused);
+                unsafe {
+                    link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
+                };
+                LINKS.with(|links| {
+                    links.borrow_mut().insert(id, link);
+                });
+            },
+        );
+        Self { id, state }
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        if self.state.paused.swap(paused, Ordering::AcqRel) == paused {
+            return;
         }
+        self.state.latest.lock().take();
+        self.state.pending.store(false, Ordering::Release);
+        let state = self.state.clone();
+        queue::main().after_f_s(Time::NOW, (self.id, state), |(id, state)| {
+            LINKS.with(|links| {
+                if let Some(link) = links.borrow().get(&id) {
+                    link.setPaused(state.paused.load(Ordering::Acquire));
+                }
+            });
+        });
+    }
 
-        let refresh_rate = Arc::new(Mutex::new(None));
-        let callback_data = CallbackData {
-            callback: Box::new(callback),
-            refresh_rate: refresh_rate.clone(),
-        };
-        let cb_ptr = Box::into_raw(Box::new(callback_data));
+    pub fn has_update(&self) -> bool { self.state.pending.load(Ordering::Acquire) }
 
-        let status = unsafe {
-            CVDisplayLinkSetOutputCallback(link, display_link_callback, cb_ptr as *mut c_void)
-        };
-        if status != 0 {
-            unsafe {
-                CVDisplayLinkRelease(link);
-                let _ = Box::from_raw(cb_ptr);
+    pub fn latest(&self) -> Option<(DisplayTick, Instant)> {
+        self.state.pending.store(false, Ordering::Release);
+        let tick = self.state.latest.lock().take()?;
+        let now = Instant::now();
+        let delta = tick.target_timestamp - objc2_quartz_core::CACurrentMediaTime();
+        let target = if delta.is_finite() && delta.abs() < 1.0 {
+            let duration = std::time::Duration::from_secs_f64(delta.abs());
+            if delta >= 0.0 {
+                now + duration
+            } else {
+                now - duration
             }
-            return Err(status);
-        }
-
-        Ok(DisplayLink { link, cb_ptr, refresh_rate })
-    }
-
-    pub fn start(&self) {
-        unsafe {
-            CVDisplayLinkStart(self.link);
-        }
-    }
-
-    pub fn stop(&self) {
-        unsafe {
-            CVDisplayLinkStop(self.link);
-        }
-    }
-
-    /// Get the display's refresh rate in Hz (frames per second).
-    /// Returns None if the refresh rate hasn't been determined yet.
-    /// You may need to start the DisplayLink briefly to get this information.
-    pub fn refresh_rate(&self) -> Option<f64> { *self.refresh_rate.lock() }
-
-    /// Get the display's refresh rate, starting the DisplayLink briefly if needed.
-    /// This is a convenience method that will start the DisplayLink for a short time
-    /// to determine the refresh rate, then stop it.
-    pub fn get_refresh_rate(&self) -> Option<f64> {
-        if let Some(rate) = self.refresh_rate() {
-            return Some(rate);
-        }
-
-        self.start();
-
-        std::thread::sleep(std::time::Duration::from_millis(20));
-
-        let rate = self.refresh_rate();
-        self.stop();
-
-        rate
+        } else {
+            now
+        };
+        Some((tick, target))
     }
 }
 
 impl Drop for DisplayLink {
     fn drop(&mut self) {
-        unsafe {
-            CVDisplayLinkStop(self.link);
-            CVDisplayLinkRelease(self.link);
-            drop(Box::from_raw(self.cb_ptr));
-        }
+        self.state.cancelled.store(true, Ordering::Release);
+        queue::main().after_f_s(Time::NOW, self.id, |id| {
+            LINKS.with(|links| {
+                if let Some(link) = links.borrow_mut().remove(&id) {
+                    link.invalidate();
+                }
+            });
+        });
     }
 }
 
-/// Get the display's refresh rate in Hz without creating a persistent DisplayLink.
-/// This is a convenience function for one-off refresh rate queries.
-/// Returns None if the refresh rate cannot be determined.
-pub fn get_display_refresh_rate() -> Option<f64> {
-    let link = DisplayLink::new(|| false).ok()?;
-    link.get_refresh_rate()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_replaces_stale_ticks_and_never_replays_a_sample() {
+        let mut ticks = LatestTick::default();
+        assert!(ticks.take().is_none());
+        for timestamp in [1.0, 2.0, 3.0] {
+            ticks.publish(timestamp, timestamp + 0.008);
+        }
+        let newest = ticks.take().unwrap();
+        assert_eq!(newest.timestamp, 3.0);
+        assert_eq!(newest.target_timestamp, 3.008);
+        assert!(ticks.take().is_none());
+        ticks.publish(4.0, 4.008);
+        assert_eq!(ticks.take().unwrap().timestamp, 4.0);
+        assert!(ticks.take().is_none());
+    }
 }

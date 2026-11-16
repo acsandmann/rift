@@ -8,7 +8,10 @@ use std::{future, mem};
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2::rc::{Allocated, Retained};
-use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, ClassType, DeclaredClass, Encode, Encoding, MainThreadMarker, define_class,
+    msg_send, sel,
+};
 use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
 use objc2_foundation::{
     NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
@@ -101,6 +104,8 @@ define_class! {
         #[unsafe(method(recvKeyboardLayoutChanged:))]
         fn recv_keyboard_layout_changed(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
+            let mtm = MainThreadMarker::new().expect("layout notifications run on the main thread");
+            crate::sys::hotkey::refresh_virtual_keymap(mtm);
             self.send_event(WmEvent::KeyboardLayoutChanged);
         }
     }
@@ -280,16 +285,16 @@ impl NotificationCenterInner {
         if user_info.is_null() {
             return;
         }
-        let handler_ptr = user_info as *mut NotificationCenterInner;
+        // The registered handler is alive during this callback. Only clone its
+        // immutable thread-safe sender; no native object or Cell crosses queues.
+        let tx = unsafe { &*user_info.cast::<NotificationCenterInner>() }
+            .ivars()
+            .spaces_tx
+            .clone();
         let parsed = DisplayReconfigFlags::from_bits_truncate(flags);
-        queue::main().after_f_s(
-            Time::NOW,
-            (handler_ptr, display_id, parsed),
-            |(handler_ptr, display_id, flags)| unsafe {
-                let handler = &*handler_ptr;
-                handler.send_space_event(spaces::Event::DisplayReconfigured { display_id, flags });
-            },
-        );
+        queue::main().after_f_s(Time::NOW, (tx, display_id, parsed), |(tx, display_id, flags)| {
+            tx.send(spaces::Event::DisplayReconfigured { display_id, flags });
+        });
     }
 }
 

@@ -6,9 +6,10 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 use anyhow::anyhow;
+use objc2::MainThreadMarker;
 use objc2_core_foundation::CFData;
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags};
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -42,6 +43,21 @@ impl Modifiers {
 
     pub fn has_generic_modifiers(&self) -> bool {
         MOD_FAMILIES.iter().any(|m| self.contains(m.generic))
+    }
+
+    /// Widens each left/right modifier to its whole family, so `AltRight` becomes `Alt`.
+    pub fn families(&self) -> Modifiers {
+        let bits = MOD_FAMILIES
+            .iter()
+            .filter(|m| self.intersects(m.generic))
+            .fold(0, |bits, m| bits | m.generic.0);
+
+        Modifiers(bits)
+    }
+
+    /// Number of modifier families present, counting left and right as one.
+    pub fn family_count(&self) -> usize {
+        MOD_FAMILIES.iter().filter(|m| self.intersects(m.generic)).count()
     }
 
     pub fn expand_to_specific(&self) -> Vec<Modifiers> {
@@ -784,6 +800,13 @@ pub struct Hotkey {
 
 impl Hotkey {
     pub fn new(modifiers: Modifiers, key_code: KeyCode) -> Self { Self { modifiers, key_code } }
+
+    /// Whether some keypress triggers both, such as `Alt + H` and `AltLeft + H`.
+    pub fn overlaps(&self, other: &Hotkey) -> bool {
+        let specific = self.modifiers.expand_to_specific();
+        self.key_code == other.key_code
+            && other.modifiers.expand_to_specific().iter().any(|m| specific.contains(m))
+    }
 }
 
 impl fmt::Display for Hotkey {
@@ -859,7 +882,9 @@ impl<'de> Deserialize<'de> for Hotkey {
     }
 }
 
+/// Serialized untagged so it reads back through the `Map` form below.
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(untagged)]
 pub enum HotkeySpec {
     Hotkey(Hotkey),
     ModifiersOnly { modifiers: Modifiers },
@@ -1201,9 +1226,7 @@ const VIRTUAL_KEYCODE_NUMS: &[u16] = &[
 ];
 
 #[cfg(target_os = "macos")]
-fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
-    static KEYMAP_GENERATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    let _guard = KEYMAP_GENERATION_LOCK.lock();
+fn generate_virtual_keymap(_mtm: MainThreadMarker) -> StdHashMap<String, KeyCode> {
     let mut keymap = StdHashMap::new();
 
     let keyboard = unsafe { TISCopyCurrentASCIICapableKeyboardLayoutInputSource() };
@@ -1275,8 +1298,25 @@ fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
     keymap
 }
 
+// Initialization is platform-neutral: parsing never acquires native layout state.
+static VIRTUAL_KEYMAP: LazyLock<RwLock<StdHashMap<String, KeyCode>>> =
+    LazyLock::new(|| RwLock::new(StdHashMap::new()));
+
+/// Acquire native layout state only on the main thread, then publish it to actors.
+pub fn refresh_virtual_keymap(mtm: MainThreadMarker) {
+    replace_virtual_keymap(generate_virtual_keymap(mtm));
+}
+
+fn replace_virtual_keymap(keymap: StdHashMap<String, KeyCode>) {
+    // A transient native failure must not erase the last working layout.
+    if !keymap.is_empty() {
+        *VIRTUAL_KEYMAP.write() = keymap;
+    }
+}
+
 pub fn keycode_from_char(ch: &str) -> Option<KeyCode> {
-    generate_virtual_keymap()
+    VIRTUAL_KEYMAP
+        .read()
         .get(&ch.to_lowercase())
         .copied()
         .or_else(|| fallback_keycode_from_char(ch))
@@ -1328,6 +1368,17 @@ fn fallback_keycode_from_char(ch: &str) -> Option<KeyCode> {
         '7' => Digit7,
         '8' => Digit8,
         '9' => Digit9,
+        '`' => Backquote,
+        '-' => Minus,
+        '=' => Equal,
+        '[' => BracketLeft,
+        ']' => BracketRight,
+        '\\' => Backslash,
+        ';' => Semicolon,
+        '\'' => Quote,
+        ',' => Comma,
+        '.' => Period,
+        '/' => Slash,
         _ => return None,
     };
     Some(code)
@@ -1385,6 +1436,18 @@ mod tests {
         assert_eq!(KeyCode::from_str("Numpad5").unwrap(), KeyCode::Numpad5);
         assert_eq!(KeyCode::from_str("CapsLock").unwrap(), KeyCode::CapsLock);
         assert_eq!(KeyCode::from_str("Delete").unwrap(), KeyCode::Delete);
+        for (name, key) in [
+            ("ArrowLeft", KeyCode::ArrowLeft),
+            ("F1", KeyCode::F1),
+            ("IntlYen", KeyCode::IntlYen),
+            ("Lang1", KeyCode::Lang1),
+            ("Comma", KeyCode::Comma),
+            ("Slash", KeyCode::Slash),
+            ("Equal", KeyCode::Equal),
+            ("Minus", KeyCode::Minus),
+        ] {
+            assert_eq!(KeyCode::from_str(name).unwrap(), key);
+        }
 
         let hotkey = Hotkey::from_str("Ctrl + Alt + Backspace").unwrap();
         assert_eq!(hotkey.key_code, KeyCode::Backspace);
@@ -1399,24 +1462,41 @@ mod tests {
         assert!(modifiers_from_str("Alt + T").is_err());
         assert!(modifiers_from_str("").is_err());
     }
+
     #[allow(unused)]
     use super::*;
 
     #[test]
-    fn test_virtual_keymap_generation() {
-        let keymap = generate_virtual_keymap();
-        assert!(!keymap.is_empty(), "Virtual keymap should not be empty");
-        assert!(keymap.len() >= 10, "Expected at least 10 mapped characters");
-    }
-
-    #[test]
-    fn test_keycode_from_char_basic() {
-        let keymap = generate_virtual_keymap();
-        if !keymap.is_empty() {
-            let first_char = keymap.keys().next().unwrap();
-            let result = keycode_from_char(first_char);
-            assert!(result.is_some(), "Should find keycode for mapped character");
+    fn cached_layout_remaps_worker_parsing_and_retains_last_good_map() {
+        // Use a character absent from other fixtures so parallel parser tests
+        // keep their fallback mappings. No test calls the native generator.
+        let original = VIRTUAL_KEYMAP.read().clone();
+        for key in [KeyCode::KeyH, KeyCode::KeyJ] {
+            replace_virtual_keymap(StdHashMap::from([("§".into(), key)]));
+            std::thread::spawn(move || {
+                let hotkey = Hotkey::from_str("Alt + §").unwrap();
+                assert_eq!(hotkey.key_code, key);
+                assert_eq!(hotkey.modifiers.expand_to_specific(), vec![
+                    Modifiers::ALT_LEFT,
+                    Modifiers::ALT_RIGHT,
+                    Modifiers::ALT,
+                ]);
+                let config = crate::common::config::Config::parse(
+                    "[settings]\n[keys]\n\"Alt + §\" = { move_focus = \"left\" }\n\"Ctrl + Shift + J\" = { move_focus = \"right\" }",
+                ).unwrap();
+                assert!(config.keys.iter().any(|(binding, _)| binding.key_code == key
+                    && binding.modifiers == Modifiers::ALT));
+                let variants = Hotkey::from_str("Ctrl + Shift + J").unwrap()
+                    .modifiers.expand_to_specific();
+                assert_eq!(variants.len(), 9);
+                assert!(variants.contains(&Modifiers(Modifiers::CONTROL_LEFT.0 | Modifiers::SHIFT_RIGHT.0)));
+            })
+            .join()
+            .unwrap();
         }
+        replace_virtual_keymap(StdHashMap::new());
+        assert_eq!(Hotkey::from_str("Alt + §").unwrap().key_code, KeyCode::KeyJ);
+        *VIRTUAL_KEYMAP.write() = original;
     }
 
     #[test]

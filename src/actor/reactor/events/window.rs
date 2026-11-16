@@ -23,6 +23,7 @@ pub struct WindowCreatedPayload {
 
 pub fn handle_window_created(
     state: &mut crate::model::RiftState,
+    layout: &mut crate::actor::reactor::managers::LayoutManager,
     transactions: &TransactionManager,
     payload: WindowCreatedPayload,
 ) -> anyhow::Result<EventOutcome> {
@@ -31,16 +32,17 @@ pub fn handle_window_created(
         window,
         window_server_info: ws_info,
     } = payload;
-    if let Some(wsid) = window.sys_id {
-        state.windows.track_window_server_id(wsid, wid);
-        state.windows.clear_window_server_observed(wsid);
+    if let Some(previous) = state.windows.reconcile_ax_identity(wid, window.sys_id) {
+        layout.layout_engine.transfer_persistent_window_identity(previous, wid);
     }
     if let Some(info) = ws_info {
         state.windows.clear_window_server_observed(info.id);
         state.windows.track_window_server_info(info);
     }
 
-    let window_state: WindowState = window.into();
+    let rule_override = state.windows.window(wid).and_then(|window| window.manage_override);
+    let mut window_state: WindowState = window.into();
+    window_state.manage_override = rule_override;
     if let Some(wsid) = window_state.info.sys_id {
         transactions.store_txid(
             wsid,
@@ -52,14 +54,15 @@ pub fn handle_window_created(
     state.windows.insert_window(wid, window_state);
     let _ = utils::refresh_heuristic(state, wid);
 
-    let outcome = EventOutcome::window_membership_changed(false, true);
-    Ok(
-        if state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission) {
-            outcome.with_created_window_finalization(wid)
-        } else {
-            outcome
-        },
-    )
+    // Excluded and claimed windows only need lifecycle notifications; app-rule admission
+    // arranges itself.
+    let outcome = EventOutcome::window_membership_changed(false, true)
+        .with_arrange_passes(state.windows.is_admitted(wid).into());
+    Ok(if state.windows.can_reconcile_admission(wid) {
+        outcome.with_created_window_finalization(wid)
+    } else {
+        outcome
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,69 +75,49 @@ pub fn handle_window_destroyed(
     transactions: &TransactionManager,
     drag: &mut DragManager,
     payload: WindowDestroyedPayload,
-) -> anyhow::Result<EventOutcome> {
+) -> EventOutcome {
     let wid = payload.window;
-    let window_server_id = match state.windows.record(wid) {
-        Some(record) => record.window_server_id(),
-        None => return Ok(EventOutcome::no_change()),
+    if state.windows.suspend_fullscreen_ax_identity(wid) {
+        return EventOutcome::no_change().with_layout_event(LayoutEvent::WindowSuspended(wid));
+    }
+    let Some(record) = state.windows.remove_window(wid) else {
+        return EventOutcome::no_change();
     };
-
-    if let Some(ws_id) = window_server_id {
-        transactions.remove_for_window(ws_id);
-        state.windows.remove_window_server_state(ws_id);
-    } else {
-        debug!(?wid, "Received WindowDestroyed for unknown window - ignoring");
-    }
-    state.windows.remove_window(wid);
-
-    let drag_changed = drag.actor.window_removed(wid);
-    drag.sync_preview();
-    if drag_changed && drag.externally_controlled_window == Some(wid) {
-        drag.externally_controlled_window = None;
-    }
-    Ok(EventOutcome::window_membership_changed(true, false)
-        .with_layout_event(LayoutEvent::WindowRemoved(wid)))
+    apply_window_retirement(transactions, drag, (wid, record.window_server_id()))
 }
 
-pub fn handle_window_minimized(
+pub(crate) fn apply_window_retirement(
+    transactions: &TransactionManager,
+    drag: &mut DragManager,
+    (wid, wsid): (WindowId, Option<crate::sys::window_server::WindowServerId>),
+) -> EventOutcome {
+    if let Some(wsid) = wsid {
+        transactions.remove_for_window(wsid);
+    }
+    drag.forget_window(wid);
+    EventOutcome::window_membership_changed(true, false)
+        .with_arrange_passes(0)
+        .with_layout_event(LayoutEvent::WindowRemoved(wid))
+}
+
+/// Application hiding and AX minimization share one suspension/return lifecycle.
+pub fn handle_window_visibility_changed(
     state: &mut crate::model::RiftState,
     wid: WindowId,
+    visible: bool,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
-    let server_id = if let Some(window) = state.windows.window_mut(wid) {
-        if window.info.is_minimized {
-            return Ok(crate::actor::reactor::events::EventOutcome::no_change());
+    if !visible {
+        if !state.windows.observe_minimized(wid) {
+            return Ok(EventOutcome::no_change());
         }
-        window.info.is_minimized = true;
-        window.info.sys_id
-    } else {
-        debug!(?wid, "Received WindowMinimized for unknown window - ignoring");
-        return Ok(crate::actor::reactor::events::EventOutcome::no_change());
-    };
-    if let Some(ws_id) = server_id {
-        state.windows.mark_window_hidden(ws_id);
+        return Ok(EventOutcome::window_membership_changed(false, false)
+            .with_arrange_passes(0)
+            .with_layout_event(LayoutEvent::WindowSuspended(wid)));
     }
-    state.windows.set_visibility(wid, WindowVisibility::Minimized);
-    let _ = utils::refresh_heuristic(state, wid);
-    Ok(
-        crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
-            .with_layout_event(LayoutEvent::WindowRemoved(wid)),
-    )
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct WindowDeminiaturizedPayload {
-    pub window: WindowId,
-    pub active_space: Option<SpaceId>,
-}
-
-pub fn handle_window_deminiaturized(
-    state: &mut crate::model::RiftState,
-    payload: WindowDeminiaturizedPayload,
-) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
-    let WindowDeminiaturizedPayload { window: wid, active_space } = payload;
+    let ax_returned = state.windows.validate_ax_identity(wid);
     match state.windows.window_mut(wid) {
         Some(window) => {
-            if !window.info.is_minimized {
+            if !window.info.is_minimized && !ax_returned {
                 return Ok(crate::actor::reactor::events::EventOutcome::no_change());
             }
             window.info.is_minimized = false;
@@ -148,15 +131,27 @@ pub fn handle_window_deminiaturized(
         }
     }
     let _ = utils::refresh_heuristic(state, wid);
-    state.windows.set_visibility(wid, WindowVisibility::Visible);
+    // Minimizing ordered the window out; restoring orders it back in. Without
+    // native visibility, inventory treats it as an AX-only fallback and skips
+    // it while other windows of the app are visible.
+    match state.windows.record(wid).and_then(|record| record.window_server_id()) {
+        Some(wsid) => {
+            state.windows.mark_window_visible(wsid);
+        }
+        None => state.windows.set_visibility(wid, WindowVisibility::Visible),
+    }
 
-    let mut outcome = crate::actor::reactor::events::EventOutcome::no_change();
-    if state.windows.window(wid).is_some_and(WindowState::is_admitted)
-        && let Some(space) = active_space
-    {
-        outcome =
-            crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
-                .with_layout_event(LayoutEvent::WindowAdded(space, wid));
+    // Minimized AX snapshots can have stale admission metadata. Refresh them
+    // even when the cached snapshot cannot currently be admitted.
+    let mut outcome = EventOutcome::no_change().with_window_inventory_request(wid.pid);
+    if !state.windows.is_claimed(wid) {
+        // Reconcile admission while retaining the existing workspace and layout slot.
+        // A claimed window returns on release.
+        // WindowAdded restores membership only; the restore transition owns
+        // the arrange pass, even if the following inventory is unchanged.
+        outcome = outcome
+            .with_created_window_finalization(wid)
+            .with_arrange_passes(state.windows.is_admitted(wid).into());
     }
     Ok(outcome)
 }
@@ -198,6 +193,7 @@ pub fn classify_window_frame_change(
         return FrameChangeDisposition::Handled;
     };
     let server_id = window.info.sys_id;
+    let old_frame = window.frame_monotonic;
 
     if mission_control_active {
         drag.reset();
@@ -238,6 +234,10 @@ pub fn classify_window_frame_change(
         return FrameChangeDisposition::Handled;
     }
 
+    if old_frame.same_as(new_frame) {
+        query_mouse_for_active_drag(drag, mouse_state);
+        return FrameChangeDisposition::Handled;
+    }
     if mouse_state.is_none() {
         *mouse_state = crate::sys::event::get_mouse_state();
     }
@@ -286,6 +286,18 @@ pub fn handle_window_frame_changed(
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
     }
+    // The external owner has geometry authority; keep only native facts current.
+    if state.windows.is_claimed(wid) {
+        if old_space != new_space
+            && let Some(server) = server_id
+        {
+            match new_space {
+                Some(space) => _ = state.windows.observe_native_space(server, space, true),
+                None => state.windows.set_window_server_space(server, None),
+            }
+        }
+        return Ok(EventOutcome::no_change());
+    }
     // An adjusted acknowledgement of our own frame write is not a new native drag.
     if matches!(
         drag.actor.kind(),
@@ -299,25 +311,29 @@ pub fn handle_window_frame_changed(
     }
     outcome = EventOutcome::layout_changed(false);
 
+    state.windows.clear_floating_display_geometry(wid);
     // External moves as well as resizes are authoritative for floating layouts.
     // Requested frame acknowledgements have already been filtered by the classifier.
     if let Some(space) = assigned_space.or(old_space)
         && Some(space) == new_space
-        && let Some(workspace) = layout
-            .layout_engine
-            .virtual_workspace_manager()
-            .workspace_for_window(&state.windows, space, wid)
-        && layout.layout_engine.virtual_workspace_manager().workspaces[workspace].layout_mode()
-            == crate::common::config::LayoutMode::Floating
+        && let Some(workspace) =
+            layout
+                .layout_engine
+                .workspaces()
+                .workspace_for_window(&state.windows, space, wid)
+        && layout.layout_engine.is_window_floating(wid)
     {
-        layout.layout_engine.store_floating_position(space, workspace, wid, new_frame);
+        layout.layout_engine.store_floating_position(workspace, wid, new_frame);
     }
 
-    let dragging = mouse_state == Some(MouseState::Down) || drag.actor.is_active();
+    let dragging = state.windows.is_admitted(wid)
+        && (mouse_state == Some(MouseState::Down) || drag.actor.is_active());
     if dragging {
         let tiled = !layout.layout_engine.is_window_floating(wid);
         let native_resize = !old_frame.size.same_as(new_frame.size);
         if !drag.actor.update_native(wid, new_frame, new_space) {
+            // The start of a user drag is intent, even when no workspace changes.
+            layout.layout_engine.forget_native_layout_for_window(&state.windows, wid);
             let session_id = drag.actor.await_native(wid);
             let scene = if tiled && !native_resize {
                 new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
@@ -365,31 +381,26 @@ pub fn handle_window_frame_changed(
             outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
             if let Some(space) = new_space {
                 if let Some(server) = server_id {
-                    state.windows.set_window_server_space(server, Some(space));
-                    state.windows.mark_window_visible(server);
+                    state.windows.observe_native_space(server, space, true);
                 }
                 if new_space_active
                     && state.windows.window(wid).is_some_and(WindowState::is_admitted)
                 {
-                    if let Some(workspace) = layout.layout_engine.active_workspace(space) {
-                        let _ = layout
-                            .layout_engine
-                            .virtual_workspace_manager_mut()
-                            .assign_window_to_workspace(&mut state.windows, space, wid, workspace);
+                    if let Some(workspace) =
+                        layout.layout_engine.workspaces().active_workspace(space)
+                    {
+                        let _ = layout.layout_engine.workspaces_mut().assign_window_to_workspace(
+                            &mut state.windows,
+                            space,
+                            wid,
+                            workspace,
+                        );
                     }
                     outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, wid));
                 }
             } else if let Some(server) = server_id {
                 state.windows.set_window_server_space(server, None);
             }
-        } else if !old_frame.size.same_as(new_frame.size) && old_space_active {
-            outcome.arrange.is_resize = true;
-            outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
-                wid,
-                old_frame,
-                new_frame,
-                screens: screens.into(),
-            });
         }
     }
 
@@ -436,6 +447,7 @@ pub struct MouseMovedPayload {
 pub fn handle_mouse_moved_over_window(
     apps: &crate::actor::reactor::managers::AppManager,
     payload: MouseMovedPayload,
+    mouse_token: &tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let Some(window) = payload.window else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
@@ -450,14 +462,16 @@ pub fn handle_mouse_moved_over_window(
         if let Some(app) = apps.apps.get(&window.pid) {
             app_handles.insert(window.pid, app.handle.clone());
         }
-        outcome = outcome.with_raise_request(crate::actor::raise_manager::Event::RaiseRequest(
-            crate::actor::raise_manager::RaiseRequest {
-                raise_windows: vec![vec![window]],
-                focus_window: Some((window, None)),
-                app_handles,
-                focus_quiet: Quiet::Yes,
-            },
-        ));
+        outcome =
+            outcome.with_raise_request(crate::actor::raise_manager::Event::MouseRaiseRequest(
+                crate::actor::raise_manager::RaiseRequest {
+                    raise_windows: vec![vec![window]],
+                    focus_window: Some((window, None)),
+                    app_handles,
+                    focus_quiet: Quiet::Yes,
+                },
+                mouse_token.clone(),
+            ));
     }
     if let Some(space) = payload.active_space {
         outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));

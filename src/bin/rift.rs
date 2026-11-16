@@ -35,7 +35,7 @@ use rift_wm::sys::skylight::{
 };
 use tokio::join;
 
-embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
+embed_plist::embed_info_plist!(concat!(env!("OUT_DIR"), "/Info.plist"));
 
 #[derive(Parser)]
 #[command(name = "rift", version = env!("RIFT_VERSION"))]
@@ -71,6 +71,14 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Internal: run only the Settings window, connected to the running daemon.
+    #[arg(long, hide = true)]
+    settings: bool,
+
+    /// Internal: recover offscreen windows after this daemon PID exits.
+    #[arg(long, hide = true)]
+    recover_windows: Option<i32>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -101,8 +109,20 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 }
 
 fn main() {
-    sigpipe::reset();
+    let entry = rift_wm::ui::settings::timing::start();
     let opt = Cli::parse();
+
+    if let Some(pid) = opt.recover_windows {
+        rift_wm::sys::window_recovery::run(pid).expect("window recovery failed");
+        return;
+    }
+    sigpipe::reset();
+
+    if opt.settings {
+        rift_wm::ui::settings::timing::finish(entry, "entry/argument parsing");
+        log::init_logging();
+        rift_wm::ui::settings::process::run(opt.config.unwrap_or_else(config_file));
+    }
 
     if let Some(Commands::Service { service }) = &opt.command {
         match handle_service_command(service) {
@@ -147,6 +167,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         std::process::exit(1);
     }
 
+    rift_wm::sys::hotkey::refresh_virtual_keymap(mtm);
+
     let config_path = opt.config.clone().unwrap_or_else(|| config_file());
     let mut config = if config_path.exists() {
         Config::read(&config_path).unwrap()
@@ -158,7 +180,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     if opt.validate {
         let path = restore_file();
-        match LayoutEngine::load(path.clone()) {
+        match LayoutEngine::validate_file(path.clone()) {
             Ok(_) => println!("Master file is valid: {}", path.display()),
             Err(error) => {
                 eprintln!("Could not load master file at {}: {error}", path.display());
@@ -168,7 +190,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         process::exit(0);
     }
 
-    execute_startup_commands(&config.settings.run_on_start);
+    let startup_commands = config.settings.run_on_start.clone();
 
     let (broadcast_tx, broadcast_rx) = rift_wm::actor::channel();
 
@@ -195,18 +217,21 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             Some(broadcast_tx.clone()),
         )
     };
-    layout.finish_loading(
+    if let Err(error) = layout.finish_loading(
         &config.virtual_workspaces,
         &config.settings.layout,
         Some(broadcast_tx.clone()),
-    );
+    ) {
+        eprintln!("Could not apply workspace settings to restored layout: {error}");
+        process::exit(1);
+    }
     let (input_tx, input_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
     let (wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let window_tx_store = WindowTxStore::new();
     let native_motion_active: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
-    let reactor = Reactor::spawn(
+    let (reactor, startup_ready) = Reactor::spawn(
         config.clone(),
         layout,
         reactor::Record::new(opt.record.as_deref()),
@@ -220,10 +245,14 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     );
     let events_tx = reactor.sender();
 
-    let config_tx =
-        ConfigActor::spawn_with_path(config.clone(), events_tx.clone(), config_path.clone());
+    let config_tx = ConfigActor::spawn_with_path(
+        config.clone(),
+        events_tx.clone(),
+        broadcast_tx.clone(),
+        config_path.clone(),
+    );
 
-    ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
+    ConfigWatcher::spawn(config_tx.clone(), config_path.clone());
 
     let server_state = match ipc::run_mach_server(reactor.clone(), config_tx.clone()) {
         Ok(state) => state,
@@ -232,6 +261,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             process::exit(1);
         }
     };
+
+    let _window_recovery =
+        rift_wm::sys::window_recovery::start().expect("could not start window recovery");
 
     let mach_bridge_rx = broadcast_rx;
 
@@ -255,7 +287,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         restore_file: restore_file(),
         config: config.clone(),
     };
-    let (mc_tx, mc_rx) = rift_wm::actor::channel();
+    let mc_channel =
+        rift_wm::actor::mission_control::channel_if_enabled(&config.settings.ui.mission_control);
+    let mc_tx = mc_channel.as_ref().map(|(tx, _)| tx.clone());
     let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
@@ -267,10 +301,13 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some(window_tx_store.clone()),
     );
 
-    let _ = events_tx.send(reactor::Event::RegisterWmSender(wm_controller_sender.clone()));
-
     let (spaces_actor, spaces_tx) =
         SpacesActor::new(events_tx.clone(), wm_controller_sender.clone());
+    events_tx.send(reactor::Event::RegisterSenders {
+        wm: wm_controller_sender.clone(),
+        spaces: spaces_tx.clone(),
+        topology_guard: spaces_actor.topology_guard(),
+    });
     let wn_actor = window_notify_actor::WindowNotify::new(
         events_tx.clone(),
         spaces_tx.clone(),
@@ -305,31 +342,35 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let process_actor = ProcessActor::new(wm_controller_sender.clone(), spaces_tx);
 
-    let stack_line_hit_rects = rift_wm::actor::stack_line::new_shared_hit_rects();
     let menu = Menu::new(
         config.clone(),
         menu_rx,
         events_tx.clone(),
         config_tx.clone(),
         mtm,
+        config_path.clone(),
     );
     let stack_line = StackLine::new(
         config.clone(),
         stack_line_rx,
+        stack_line_tx.clone(),
         mtm,
         events_tx.clone(),
         CoordinateConverter::default(),
-        stack_line_hit_rects.clone(),
     );
 
-    let mission_control = MissionControlActor::new(
-        config.clone(),
-        mc_rx,
-        mc_tx.clone(),
-        reactor.clone(),
-        mtm,
-        input_tx.clone(),
-    );
+    let mission_control = mc_channel.map(|(tx, rx)| {
+        MissionControlActor::new(
+            config.settings.ui.mission_control.clone(),
+            config.virtual_workspaces.mode == rift_wm::common::config::WorkspaceMode::Global,
+            rx,
+            tx,
+            reactor.clone(),
+            mtm,
+            input_tx.clone(),
+            stack_line_tx.clone(),
+        )
+    });
     let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
 
     if config.settings.default_disable {
@@ -348,16 +389,14 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     // Construct the unified HID tap on its dedicated input CFRunLoop thread.
     let input_config = config.clone();
     let input_wm_sender = wm_controller_sender.clone();
-    let input_mc_tx = mc_tx.clone();
+    let input_mc_tx = mc_tx;
     spawn_supervised("input", move || {
         Input::new(
             input_config,
             events_tx,
             input_rx,
             input_wm_sender,
-            stack_line_tx,
             input_mc_tx,
-            stack_line_hit_rects,
             native_motion_active,
         )
         .run()
@@ -365,6 +404,11 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     Executor::run_main(mtm, async move {
         join!(
+            async move {
+                if startup_ready.await.is_ok() {
+                    execute_startup_commands(&startup_commands);
+                }
+            },
             supervise("wm_controller", wm_controller.run()),
             supervise(
                 "notification_center",
@@ -375,7 +419,11 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             supervise("stack_line", stack_line.run()),
             supervise("window_notify", wn_actor.run()),
             supervise("mc_native", mission_control_native.run()),
-            supervise("mission_control", mission_control.run()),
+            async move {
+                if let Some(actor) = mission_control {
+                    actor.run().await;
+                }
+            },
             supervise("process_actor", process_actor.run()),
         );
     });

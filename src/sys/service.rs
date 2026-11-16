@@ -54,13 +54,36 @@ fn plist_path() -> io::Result<PathBuf> {
     Ok(home.join("Library").join("LaunchAgents").join(format!("{RIFT_PLIST}.plist")))
 }
 
+// Preserve Homebrew's opt symlink rather than canonicalizing into the Cellar.
+fn bundle_executable(path: PathBuf) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        for ancestor in real.ancestors() {
+            if ancestor.file_name().is_some_and(|name| name == "Cellar") {
+                if let Ok(relative) = real.strip_prefix(ancestor) {
+                    let mut parts = relative.components();
+                    if parts.next().is_some_and(|part| part.as_os_str() == "rift") {
+                        let stable = ancestor
+                            .parent()
+                            .unwrap()
+                            .join("opt/rift/Rift.app/Contents/MacOS/rift");
+                        if stable.is_file() {
+                            return stable;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    path
+}
+
 fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option<PathBuf>> {
     let mut current_dir: Option<PathBuf> = None;
     for dir in env::split_paths(path_env) {
         let candidate = dir.join("rift");
         if candidate.is_file() {
             if candidate.is_absolute() {
-                return Ok(Some(candidate));
+                return Ok(Some(bundle_executable(candidate)));
             }
 
             let base = match current_dir.as_ref() {
@@ -70,7 +93,7 @@ fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option
                     current_dir.as_ref().expect("just set")
                 }
             };
-            return Ok(Some(base.join(candidate)));
+            return Ok(Some(bundle_executable(base.join(candidate))));
         }
     }
     Ok(None)
@@ -91,7 +114,7 @@ fn find_rift_executable() -> io::Result<PathBuf> {
     })?;
     let sibling = exe_path.with_file_name("rift");
     if sibling.is_file() {
-        return Ok(sibling);
+        return Ok(bundle_executable(sibling));
     }
 
     Err(io::Error::new(
@@ -114,10 +137,18 @@ fn plist_contents() -> io::Result<String> {
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "non-UTF8 executable path"))?;
 
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    };
     let plist = format!(
-        r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
 <dict>
     <key>Label</key>
     <string>{name}</string>
@@ -155,9 +186,9 @@ fn plist_contents() -> io::Result<String> {
 </plist>
 "#,
         name = RIFT_PLIST,
-        exe = exe_str,
-        path_env = path_env,
-        user = user
+        exe = escape(exe_str),
+        path_env = escape(&path_env),
+        user = escape(&user)
     );
 
     Ok(plist)
@@ -201,14 +232,6 @@ fn run_launchctl(args: &[&str], suppress_output: bool) -> io::Result<i32> {
     }
 }
 
-fn spawn_launchctl(args: &[&str]) -> io::Result<()> {
-    let mut cmd = Command::new(LAUNCHCTL_PATH);
-    cmd.args(args);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let _child = cmd.spawn()?;
-    Ok(())
-}
-
 fn service_is_running() -> io::Result<bool> {
     let uid = getuid();
     let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
@@ -225,6 +248,11 @@ pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
 }
 
 fn ensure_plist_up_to_date(plist_path: &Path) -> io::Result<bool> {
+    // Nix/Home Manager own these symlinks and their service arguments. Never
+    // write through them into the store; let their manager update the job.
+    if fs::symlink_metadata(plist_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Ok(false);
+    }
     let desired = plist_contents()?;
     match fs::read_to_string(plist_path) {
         Ok(existing) if existing == desired => Ok(false),
@@ -294,49 +322,28 @@ pub fn service_start() -> io::Result<()> {
         false
     };
 
-    let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1);
-    if is_bootstrapped != 0 {
+    let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1) == 0;
+    if is_bootstrapped && plist_changed {
+        let code = run_launchctl(&["bootout", &service_target], false)?;
+        if code != 0 {
+            return Err(io::Error::other(format!("bootout failed (exit {code})")));
+        }
+    }
+    if !is_bootstrapped || plist_changed {
         let _ = run_launchctl(&["enable", &service_target], true);
-
-        let _ = spawn_launchctl(&["bootstrap", &domain_target, plist_path.to_str().unwrap()]);
-        let _ = std::thread::sleep(std::time::Duration::from_millis(150));
-        let code = run_launchctl(&["kickstart", &service_target], false)?;
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("kickstart after bootstrap failed (exit {})", code),
-            ))
+        let code = run_launchctl(
+            &["bootstrap", &domain_target, plist_path.to_str().unwrap()],
+            false,
+        )?;
+        if code != 0 {
+            return Err(io::Error::other(format!("bootstrap failed (exit {code})")));
         }
+    }
+    let code = run_launchctl(&["kickstart", &service_target], false)?;
+    if code == 0 {
+        Ok(())
     } else {
-        let code = run_launchctl(&["kickstart", &service_target], false)?;
-        if code == 0 {
-            return Ok(());
-        }
-
-        if plist_changed {
-            let _ = run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], true);
-            let _ = spawn_launchctl(&["bootstrap", &domain_target, plist_path.to_str().unwrap()]);
-            let _ = std::thread::sleep(std::time::Duration::from_millis(150));
-            let code2 = run_launchctl(&["kickstart", &service_target], false)?;
-            if code2 == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "kickstart failed (exit {}), reload+kickstart failed (exit {})",
-                        code, code2
-                    ),
-                ))
-            }
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("kickstart failed (exit {})", code),
-            ))
-        }
+        Err(io::Error::other(format!("kickstart failed (exit {code})")))
     }
 }
 
@@ -347,6 +354,18 @@ pub fn service_restart() -> io::Result<()> {
             io::ErrorKind::NotFound,
             format!("service file '{}' is not installed", plist_path.display()),
         ));
+    }
+
+    if ensure_plist_up_to_date(&plist_path)? {
+        // launchd caches ProgramArguments; kickstart alone does not reload them.
+        let target = format!("gui/{}/{}", getuid(), RIFT_PLIST);
+        if service_is_running()? {
+            let code = run_launchctl(&["bootout", &target], false)?;
+            if code != 0 {
+                return Err(io::Error::other(format!("bootout failed (exit {code})")));
+            }
+        }
+        return service_start();
     }
 
     let uid = getuid();
@@ -408,6 +427,20 @@ mod tests {
     use std::os::unix::fs as unix_fs;
 
     use super::*;
+
+    #[test]
+    fn service_refresh_preserves_externally_managed_plist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let managed = tmp.path().join("managed.plist");
+        let agent = tmp.path().join("agent.plist");
+        let contents = "externally managed service configuration";
+        fs::write(&managed, contents).unwrap();
+        unix_fs::symlink(&managed, &agent).unwrap();
+
+        assert!(!ensure_plist_up_to_date(&agent).unwrap());
+        assert_eq!(fs::read_to_string(&managed).unwrap(), contents);
+        assert!(fs::symlink_metadata(&agent).unwrap().file_type().is_symlink());
+    }
 
     #[test]
     fn find_rift_executable_prefers_stable_symlink_path() {

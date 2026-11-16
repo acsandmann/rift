@@ -3,12 +3,12 @@ mod floating;
 pub(crate) mod graph;
 pub mod systems;
 pub mod utils;
-mod workspaces;
+pub(crate) mod workspaces;
 
 pub(crate) use engine::WindowLayoutInfo;
 pub use engine::{
     EventResponse, LayoutCommand, LayoutEngine, LayoutEvent, LayoutEventOutcome, ResolvedWindow,
-    RestoreReport, RestoreRequest, RestoreScope, RestoreSource, RestoreWarning,
+    RestoreReport, RestoreRequest, RestoreScope, RestoreSource,
 };
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};
@@ -19,6 +19,7 @@ pub enum WindowDropAction {
     Stack,
     Insert(Direction),
     Move(Direction),
+    ConsumeOrExpel(Direction),
 }
 
 impl From<crate::common::config::MouseDropAction> for WindowDropAction {
@@ -28,6 +29,15 @@ impl From<crate::common::config::MouseDropAction> for WindowDropAction {
             crate::common::config::MouseDropAction::Stack => Self::Stack,
         }
     }
+}
+
+/// The user's destination and placement; source membership and classification are authoritative.
+#[derive(Debug, Clone)]
+pub struct WorkspaceDropRequest {
+    pub window: crate::actor::app::WindowId,
+    pub workspace: VirtualWorkspaceId,
+    pub target: Option<(crate::actor::app::WindowId, WindowDropAction)>,
+    pub frame: Option<objc2_core_foundation::CGRect>,
 }
 
 pub(crate) struct WindowDropRequest {
@@ -41,9 +51,8 @@ pub use systems::{
     BspLayoutSystem, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,
     ScrollingLayoutSystem, StackLayoutSystem, TraditionalLayoutSystem,
 };
-pub(crate) use workspaces::WorkspaceLayouts;
 
-pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStats, WorkspaceStore};
+pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStore};
 
 #[cfg(test)]
 mod drop_preview_tests;

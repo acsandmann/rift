@@ -1,78 +1,95 @@
-use std::collections::hash_map::Entry;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSCursor;
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use tracing::instrument;
 
 use crate::actor::app::WindowId;
 use crate::actor::reactor::{Command, ReactorCommand};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, reactor};
-use crate::common::collections::HashMap;
-use crate::common::config::{Config, HorizontalPlacement, StackLineHoverMode, VerticalPlacement};
-use crate::layout_engine::LayoutKind;
+use crate::common::collections::{HashMap, HashSet};
+use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
+use crate::layout_engine::LayoutCommand;
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
-use crate::ui::stack_line::{
-    GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig, point_hits_indicator_frame,
-};
-
-/// Shared indicator hit-rect state readable from the event tap callback.
-/// Uses Arc<ArcSwap<...>> for lock-free reads from the input thread.
-pub type SharedHitRects = Arc<ArcSwap<Vec<CGRect>>>;
-
-pub fn new_shared_hit_rects() -> SharedHitRects { Arc::new(ArcSwap::from_pointee(Vec::new())) }
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GroupInfo {
     pub node_id: NodeId,
     pub space_id: SpaceId,
-    pub container_kind: LayoutKind,
     pub frame: CGRect,
-    pub total_count: usize,
+    /// Horizontal stacks take a bar above or below; vertical stacks one beside them.
+    pub horizontal: bool,
     pub selected_index: usize,
-    pub window_ids: Vec<WindowId>,
+    pub tabs: Vec<TabInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabInfo {
+    pub window_id: WindowId,
+    pub title: String,
+    pub bundle_id: Option<String>,
+    pub window_server_id: Option<crate::sys::window_server::WindowServerId>,
+}
+
+impl GroupInfo {
+    /// The window the bar is ordered above: the selected window, or else another window
+    /// of the same stack. Never a window outside the stack.
+    fn anchor(&self) -> Option<crate::sys::window_server::WindowServerId> {
+        self.tabs
+            .get(self.selected_index)
+            .into_iter()
+            .chain(&self.tabs)
+            .find_map(|tab| tab.window_server_id)
+    }
+}
+
+type GroupId = (SpaceId, NodeId);
+
+struct NativeGroup {
+    bar: cgs::tabs::TabBar,
+    info: GroupInfo,
+    /// The windows the bar currently shows, so a click resolves against what was clicked.
+    shown: Rc<RefCell<Vec<WindowId>>>,
+    generation: u64,
+    fullscreen: bool,
+    ordered_anchor: Cell<Option<crate::sys::window_server::WindowServerId>>,
+    placed_frame: Cell<Option<CGRect>>,
 }
 
 #[derive(Debug)]
 pub enum Event {
+    OverviewBounds(Vec<CGRect>),
+    TabAction(GroupId, u64, WindowId, cgs::tabs::TabBarAction),
+    /// A tab was dragged onto `target`'s slot. The bar already shows the new order.
+    TabMoved(GroupId, u64, WindowId, WindowId),
+    TitleChanged(WindowId, String),
     GroupsUpdated {
         active_space_ids: Vec<SpaceId>,
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
         active_workspace_for_space_has_fullscreen: bool,
+        /// Native focus can raise the anchor without changing selection or geometry.
+        reorder: bool,
     },
     SpaceStateUpdated(CoordinateConverter, ForwardedSpaceState),
     ConfigUpdated(Config),
-    /// A click that the event tap already confirmed lands on a visible,
-    /// non-occluded stack-line indicator.
-    MouseDown(CGPoint),
-    /// Cursor moved; `hits_indicator` is `true` when the event tap's
-    /// hit-test (geometry + occlusion) determined the point is over an
-    /// indicator.
-    MouseMoved {
-        point: CGPoint,
-        hits_indicator: bool,
-    },
 }
 
 pub struct StackLine {
     config: Config,
     rx: Receiver,
-    #[allow(dead_code)]
     mtm: MainThreadMarker,
-    indicators: HashMap<NodeId, GroupIndicatorWindow>,
-    #[allow(dead_code)]
+    native_groups: HashMap<GroupId, NativeGroup>,
+    next_generation: u64,
+    icons: HashMap<i32, (String, Option<cgs::image::Image>)>,
+    live_groups: HashSet<GroupId>,
+    live_pids: HashSet<i32>,
+    tx: Sender,
     reactor_tx: reactor::Sender,
     coordinate_converter: CoordinateConverter,
-    group_sigs_by_space: HashMap<SpaceId, Vec<GroupSig>>,
-    cursor_over_indicator: bool,
-    hovered_segment: Option<(NodeId, usize)>,
-    shared_hit_rects: SharedHitRects,
+    overview_bounds: Vec<CGRect>,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -82,22 +99,24 @@ impl StackLine {
     pub fn new(
         config: Config,
         rx: Receiver,
+        tx: Sender,
         mtm: MainThreadMarker,
         reactor_tx: reactor::Sender,
         coordinate_converter: CoordinateConverter,
-        shared_hit_rects: SharedHitRects,
     ) -> Self {
         Self {
             config,
             rx,
+            tx,
+            native_groups: HashMap::default(),
+            next_generation: 0,
+            icons: HashMap::default(),
+            live_groups: HashSet::default(),
+            live_pids: HashSet::default(),
             mtm,
-            indicators: HashMap::default(),
             reactor_tx,
             coordinate_converter,
-            group_sigs_by_space: HashMap::default(),
-            cursor_over_indicator: false,
-            hovered_segment: None,
-            shared_hit_rects,
+            overview_bounds: Vec::new(),
         }
     }
 
@@ -114,58 +133,76 @@ impl StackLine {
 
     fn is_enabled(&self) -> bool { self.config.settings.ui.stack_line.enabled }
 
-    /// Publish the current indicator frames so the event tap can suppress
-    /// clicks that land on a visible, non-occluded indicator.
-    fn sync_shared_hit_rects(&self) {
-        let mut rects = Vec::new();
-        if self.is_enabled() {
-            for indicator in self.indicators.values().filter(|i| i.is_visible()) {
-                rects.push(indicator.frame());
-            }
-        }
-        self.shared_hit_rects.store(Arc::new(rects));
-    }
-
-    #[instrument(name = "stack_line::handle_event", skip(self))]
+    #[instrument(name = "stack_line::handle_event", skip_all)]
     fn handle_event(&mut self, event: Event) {
         if !self.is_enabled()
-            && !matches!(
-                event,
-                Event::ConfigUpdated(_)
-                    | Event::SpaceStateUpdated(..)
-                    | Event::MouseDown(_)
-                    | Event::MouseMoved { .. }
-            )
+            && !matches!(event, Event::ConfigUpdated(_) | Event::SpaceStateUpdated(..))
         {
             return;
         }
         match event {
+            Event::OverviewBounds(bounds) => {
+                if self.overview_bounds == bounds {
+                    return;
+                }
+                self.overview_bounds = bounds;
+                for group in self.native_groups.values() {
+                    self.place(group, false);
+                }
+            }
+            Event::TabAction(id, generation, window, action) => {
+                self.handle_tab_action(id, generation, window, action);
+            }
+            Event::TabMoved(id, generation, window, target) => {
+                self.handle_tab_moved(id, generation, window, target);
+            }
+            Event::TitleChanged(wid, title) => {
+                let nodes: Vec<_> = self
+                    .native_groups
+                    .iter_mut()
+                    .filter_map(|(&node, group)| {
+                        let tab = group.info.tabs.iter_mut().find(|t| t.window_id == wid)?;
+                        if tab.title == title {
+                            return None;
+                        }
+                        tab.title.clone_from(&title);
+                        Some(node)
+                    })
+                    .collect();
+                for node in nodes {
+                    self.refresh_native_tabs(node);
+                }
+            }
             Event::GroupsUpdated {
                 active_space_ids,
                 space_id,
                 groups,
                 active_workspace_for_space_has_fullscreen,
+                reorder,
             } => {
                 self.handle_groups_updated(
                     active_space_ids,
                     space_id,
                     groups,
                     active_workspace_for_space_has_fullscreen,
+                    reorder,
                 );
-                self.sync_shared_hit_rects();
             }
-            Event::SpaceStateUpdated(converter, _space_state) => {
-                self.handle_space_state_updated(converter);
+            Event::SpaceStateUpdated(converter, space_state) => {
+                if space_state.authoritative {
+                    self.native_groups.retain(|_, group| {
+                        space_state.active_spaces.contains(&group.info.space_id)
+                            && !space_state.fullscreen_spaces.contains(&group.info.space_id)
+                    });
+                    self.prune_icons();
+                    self.handle_space_state_updated(
+                        converter,
+                        space_state.should_force_refresh_layout || space_state.display_set_changed,
+                    );
+                }
             }
             Event::ConfigUpdated(config) => {
                 self.handle_config_updated(config);
-                self.sync_shared_hit_rects();
-            }
-            Event::MouseDown(point) => {
-                self.handle_mouse_down(point);
-            }
-            Event::MouseMoved { point, hits_indicator } => {
-                self.handle_mouse_moved(point, hits_indicator);
             }
         }
     }
@@ -176,357 +213,295 @@ impl StackLine {
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
         space_has_fullscreen: bool,
+        reorder: bool,
     ) {
-        let active: crate::common::collections::HashSet<SpaceId> =
-            active_space_ids.iter().copied().collect();
-
-        self.indicators.retain(|_node_id, indicator| match indicator.space_id() {
-            Some(indicator_space_id) if !active.contains(&indicator_space_id) => {
-                if let Err(err) = indicator.clear() {
-                    tracing::warn!(?err, "failed to clear stack line indicator for inactive space");
-                }
-                false
-            }
-            _ => true,
+        self.live_groups.clear();
+        self.live_groups.extend(groups.iter().map(|info| (info.space_id, info.node_id)));
+        self.native_groups.retain(|&id, _| {
+            active_space_ids.contains(&id.0) && (id.0 != space_id || self.live_groups.contains(&id))
         });
-        self.group_sigs_by_space.retain(|sid, _| active.contains(sid));
-
-        let sigs: Vec<GroupSig> = groups.iter().map(GroupSig::from_group_info).collect();
-
-        let groups_unchanged = match self.group_sigs_by_space.entry(space_id) {
-            Entry::Occupied(ref prev) => prev.get() == &sigs,
-            Entry::Vacant(_) => false,
-        };
-
-        if !groups_unchanged {
-            let _ = self.group_sigs_by_space.insert(space_id, sigs);
-
-            let group_nodes: std::collections::HashSet<NodeId> =
-                groups.iter().map(|g| g.node_id).collect();
-            self.indicators.retain(|&node_id, indicator| match indicator.space_id() {
-                Some(indicator_space_id) if indicator_space_id == space_id => {
-                    if group_nodes.contains(&node_id) {
-                        true
-                    } else {
-                        if let Err(err) = indicator.clear() {
-                            tracing::warn!(?err, "failed to clear stack line indicator");
-                        }
-                        false
-                    }
-                }
-                _ => true,
-            });
-
-            for group in groups {
-                self.update_or_create_indicator(group);
-            }
-        } else {
-            let _ = self.group_sigs_by_space.insert(space_id, sigs);
+        if !active_space_ids.contains(&space_id) {
+            self.prune_icons();
+            return;
         }
-
-        for indicator in self.indicators.values() {
-            if indicator.space_id() == Some(space_id) {
-                if let Err(err) = indicator.set_visibility(space_has_fullscreen) {
-                    tracing::warn!(?err, "failed to set stack line indicator visibility");
-                }
+        for info in groups {
+            if info.space_id != space_id {
+                continue;
             }
+            let id = (space_id, info.node_id);
+            self.update_native_group(info);
+            let group = self.native_groups.get_mut(&id).unwrap();
+            group.fullscreen = space_has_fullscreen;
+            self.place(&self.native_groups[&id], reorder);
         }
+        self.prune_icons();
     }
 
-    fn handle_space_state_updated(&mut self, converter: CoordinateConverter) {
+    fn prune_icons(&mut self) {
+        // One pass over tabs, rather than searching every group for each cached PID.
+        self.live_pids.clear();
+        self.live_pids.extend(
+            self.native_groups
+                .values()
+                .flat_map(|group| group.info.tabs.iter().map(|tab| tab.window_id.pid)),
+        );
+        self.icons.retain(|pid, _| self.live_pids.contains(pid));
+    }
+
+    fn handle_space_state_updated(&mut self, converter: CoordinateConverter, reorder: bool) {
         self.coordinate_converter = converter;
-        tracing::debug!("Updated coordinate converter for group indicators");
+        for group in self.native_groups.values() {
+            // AppKit can relocate panels when displays change. Recheck the native
+            // frame even if the converted layout frame happens to be unchanged.
+            group.placed_frame.set(None);
+            self.place(group, reorder);
+        }
     }
 
     fn handle_config_updated(&mut self, config: Config) {
-        let old_enabled = self.is_enabled();
         self.config = config;
-        self.hovered_segment = None;
-        let new_enabled = self.is_enabled();
+        if !self.is_enabled() {
+            self.native_groups.clear();
+            self.icons.clear();
+            self.live_groups.clear();
+            self.live_pids.clear();
+        }
+        for group in self.native_groups.values() {
+            self.place(group, false);
+        }
+    }
 
-        if old_enabled && !new_enabled {
-            for indicator in self.indicators.values() {
-                if let Err(err) = indicator.clear() {
-                    tracing::warn!(
-                        ?err,
-                        "failed to clear stack line indicator during config update"
-                    );
-                }
+    fn place(&self, group: &NativeGroup, reorder: bool) {
+        // Covered bars keep their model current but do no native presentation work.
+        if self.overview_bounds.iter().any(|b| {
+            b.min().x < group.info.frame.max().x
+                && b.max().x > group.info.frame.min().x
+                && b.min().y < group.info.frame.max().y
+                && b.max().y > group.info.frame.min().y
+        }) {
+            if group.bar.is_visible() {
+                group.bar.hide();
             }
-            self.indicators.clear();
-            self.group_sigs_by_space.clear();
-        } else if new_enabled {
-            let new_config = self.indicator_config();
-            for (node_id, indicator) in &self.indicators {
-                if let Some(group_data) = indicator.group_data() {
-                    if let Err(err) = indicator.update(new_config, group_data) {
-                        tracing::warn!(
-                            ?err,
-                            ?node_id,
-                            "failed to update stack line indicator with new config"
-                        );
+            group.ordered_anchor.set(None);
+            return;
+        }
+        if group.info.tabs.len() <= 1 {
+            group.bar.hide_animated();
+            group.ordered_anchor.set(None);
+            return;
+        }
+        let settings = &self.config.settings.ui.stack_line;
+        group.bar.set_select_on_hover(settings.hover.selects_on_hover());
+        let edge = match (
+            group.info.horizontal,
+            settings.horiz_placement,
+            settings.vert_placement,
+        ) {
+            (true, HorizontalPlacement::Top, _) => cgs::tabs::TabBarEdge::Top,
+            (true, HorizontalPlacement::Bottom, _) => cgs::tabs::TabBarEdge::Bottom,
+            (false, _, VerticalPlacement::Left) => cgs::tabs::TabBarEdge::Left,
+            (false, _, VerticalPlacement::Right) => cgs::tabs::TabBarEdge::Right,
+        };
+        group.bar.set_edge(edge);
+        let frame = self
+            .coordinate_converter
+            .convert_rect(settings.reserve().bar(group.info.frame, group.info.horizontal))
+            .filter(|frame| {
+                [group.info.frame, *frame].iter().all(|r| {
+                    r.origin.x.is_finite()
+                        && r.origin.y.is_finite()
+                        && r.size.width.is_finite()
+                        && r.size.height.is_finite()
+                        && r.size.width > 0.0
+                        && r.size.height > 0.0
+                })
+            });
+        let anchor = group.info.anchor();
+        if !self.is_enabled() || group.fullscreen || frame.is_none() || anchor.is_none() {
+            if group.bar.is_visible() {
+                group.bar.hide();
+            }
+            group.ordered_anchor.set(None);
+            return;
+        }
+        let frame = frame.unwrap();
+        if group.placed_frame.replace(Some(frame)) != Some(frame) {
+            group.bar.set_frame(frame);
+        }
+        if reorder || group.ordered_anchor.get() != anchor || !group.bar.is_visible() {
+            group.bar.show_above(anchor.unwrap().as_u32() as isize);
+            group.ordered_anchor.set(anchor);
+        }
+    }
+
+    fn handle_tab_action(
+        &self,
+        id: GroupId,
+        generation: u64,
+        window: WindowId,
+        action: cgs::tabs::TabBarAction,
+    ) {
+        let Some(group) = self.native_groups.get(&id) else {
+            return;
+        };
+        // A queued callback belongs to this panel lifetime, not a replacement which
+        // happens to reuse the same layout key (even with the same windows).
+        if generation != group.generation || !group.bar.is_visible() {
+            return;
+        }
+        let Some(command) = tab_command(&group.info.tabs, window, action) else {
+            return;
+        };
+        self.reactor_tx.send(reactor::Event::Command(Command::Reactor(command)));
+    }
+
+    fn handle_tab_moved(
+        &mut self,
+        id: GroupId,
+        generation: u64,
+        window: WindowId,
+        target: WindowId,
+    ) {
+        let Some(group) = self.native_groups.get_mut(&id) else {
+            return;
+        };
+        if generation != group.generation {
+            return;
+        }
+        let tabs = &mut group.info.tabs;
+        let (Some(from), Some(to)) = (
+            tabs.iter().position(|tab| tab.window_id == window),
+            tabs.iter().position(|tab| tab.window_id == target),
+        ) else {
+            return;
+        };
+        // Match what the bar shows until the layout confirms it, so the confirmation
+        // is a no-op rather than a second shuffle.
+        let tab = tabs.remove(from);
+        tabs.insert(to, tab);
+        group.info.selected_index = moved_index(group.info.selected_index, from, to);
+        self.reactor_tx.send(reactor::Event::Command(Command::Layout(
+            LayoutCommand::MoveStackTab {
+                window: window.into(),
+                target: target.into(),
+            },
+        )));
+    }
+
+    fn refresh_native_tabs(&mut self, node: GroupId) {
+        let Some(group) = self.native_groups.get(&node) else {
+            return;
+        };
+        let tabs = group.info.tabs.iter().map(|tab| {
+            let (name, icon) = self.icons.entry(tab.window_id.pid).or_insert_with(|| {
+                let app = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(tab.window_id.pid);
+                let name = app.as_ref().and_then(|a| a.localizedName()).map(|s| s.to_string()).unwrap_or_default();
+                let icon = app.and_then(|a| a.icon()).or_else(|| tab.bundle_id.as_deref().and_then(cgs::app::Application::icon_for_bundle));
+                (name, icon)
+            });
+            cgs::tabs::TabBarItem { title: if tab.title.is_empty() { name.clone() } else { tab.title.clone() }, icon: icon.clone() }
+        }).collect();
+        {
+            let mut shown = group.shown.borrow_mut();
+            shown.clear();
+            shown.extend(group.info.tabs.iter().map(|tab| tab.window_id));
+        }
+        group.bar.set_tabs(tabs, group.info.selected_index);
+    }
+
+    fn update_native_group(&mut self, info: GroupInfo) {
+        let node = (info.space_id, info.node_id);
+        if self.native_groups.get(&node).is_some_and(|g| g.info == info) {
+            return;
+        }
+        let mut tabs_changed = true;
+        let mut selection_changed = false;
+        if let Some(group) = self.native_groups.get_mut(&node) {
+            selection_changed = group.info.selected_index != info.selected_index;
+            tabs_changed = group.info.tabs.len() != info.tabs.len()
+                || group.info.tabs.iter().zip(&info.tabs).any(|(old, new)| {
+                    old.window_id != new.window_id
+                        || old.title != new.title
+                        || old.bundle_id != new.bundle_id
+                });
+            group.info = info;
+        } else {
+            let generation = self.next_generation;
+            self.next_generation =
+                self.next_generation.checked_add(1).expect("panel generation exhausted");
+            let ui = cgs::Ui::new(self.mtm);
+            let tx = self.tx.clone();
+            let shown = Rc::new(RefCell::new(Vec::new()));
+            let clicked = shown.clone();
+            let bar = cgs::tabs::TabBar::new(&ui).on_action(move |action| match action {
+                cgs::tabs::TabBarAction::Select(i) | cgs::tabs::TabBarAction::Close(i) => {
+                    if let Some(&window) = clicked.borrow().get(i) {
+                        tx.send(Event::TabAction(node, generation, window, action));
                     }
                 }
-            }
-        }
-
-        tracing::debug!("Updated stack line configuration");
-    }
-
-    fn handle_mouse_down(&mut self, screen_point: CGPoint) {
-        if !self.is_enabled() {
-            return;
-        }
-
-        // The event tap already verified that this click lands on a visible,
-        // non-occluded indicator. We only need to find the matching segment.
-        for (&node_id, indicator) in &self.indicators {
-            if !indicator.is_visible() {
-                continue;
-            }
-
-            let frame = indicator.frame();
-            if !point_hits_indicator_frame(screen_point, frame) {
-                continue;
-            }
-
-            let local_point =
-                CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
-            if let Some(segment_index) = indicator.check_click(local_point) {
-                tracing::debug!(
-                    ?node_id,
-                    segment_index,
-                    "Detected click on stack line indicator segment"
-                );
-                self.handle_indicator_activated(node_id, segment_index);
-                return;
-            }
-        }
-    }
-
-    // this is very hacky but we don't use nswindow so we have to roll this ourselves
-    fn handle_mouse_moved(&mut self, screen_point: CGPoint, hits_indicator: bool) {
-        let over_indicator = self.is_enabled() && hits_indicator;
-
-        if over_indicator != self.cursor_over_indicator {
-            self.cursor_over_indicator = over_indicator;
-            if over_indicator {
-                NSCursor::pointingHandCursor().set();
-                tracing::trace!("Set pointing hand cursor over indicator");
-            } else {
-                NSCursor::arrowCursor().set();
-                tracing::trace!("Reset to arrow cursor");
-            }
-        }
-
-        if self.config.settings.ui.stack_line.hover != StackLineHoverMode::Click {
-            self.hovered_segment = None;
-            return;
-        }
-
-        let hovered_segment = if over_indicator {
-            self.indicators.iter().find_map(|(&node_id, indicator)| {
-                if !indicator.is_visible() {
-                    return None;
+                cgs::tabs::TabBarAction::Move { from, to } => {
+                    let mut shown = clicked.borrow_mut();
+                    let Some(&target) = shown.get(to).filter(|_| from < shown.len()) else {
+                        return;
+                    };
+                    // Later clicks resolve against the order the bar now shows.
+                    let window = shown.remove(from);
+                    shown.insert(to, window);
+                    tx.send(Event::TabMoved(node, generation, window, target));
                 }
-                let frame = indicator.frame();
-                if !point_hits_indicator_frame(screen_point, frame) {
-                    return None;
-                }
-                let local_point =
-                    CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
-                indicator.check_click(local_point).map(|segment_index| (node_id, segment_index))
-            })
-        } else {
-            None
-        };
-
-        if hovered_segment == self.hovered_segment {
-            return;
+            });
+            self.native_groups.insert(node, NativeGroup {
+                bar,
+                info,
+                shown,
+                generation,
+                fullscreen: false,
+                ordered_anchor: Cell::new(None),
+                placed_frame: Cell::new(None),
+            });
         }
-        self.hovered_segment = hovered_segment;
-
-        if let Some((node_id, segment_index)) = hovered_segment {
-            tracing::debug!(
-                ?node_id,
-                segment_index,
-                "Hovered over stack line indicator segment"
-            );
-            self.handle_indicator_activated(node_id, segment_index);
+        if tabs_changed {
+            self.refresh_native_tabs(node);
+        } else if selection_changed {
+            let group = &self.native_groups[&node];
+            group.bar.set_selected_index(group.info.selected_index);
         }
-    }
-
-    fn handle_indicator_activated(&mut self, node_id: NodeId, segment_index: usize) {
-        if let Some(indicator) = self.indicators.get(&node_id) {
-            let window_ids = indicator.window_ids();
-            if let Some(window_id) = window_ids.get(segment_index) {
-                tracing::debug!(
-                    ?node_id,
-                    segment_index,
-                    ?window_id,
-                    "Group indicator activated - focusing window"
-                );
-                let _ = self.reactor_tx.send(reactor::Event::Command(Command::Reactor(
-                    ReactorCommand::FocusWindow {
-                        window_id: (*window_id).into(),
-                        window_server_id: None,
-                    },
-                )));
-            } else {
-                tracing::debug!(
-                    ?node_id,
-                    segment_index,
-                    "Group indicator activated with invalid segment index"
-                );
-            }
-        } else {
-            tracing::debug!(
-                ?node_id,
-                segment_index,
-                "Group indicator activated but not found in map"
-            );
-        }
-    }
-
-    fn update_or_create_indicator(&mut self, group: GroupInfo) {
-        let group_kind = match group.container_kind {
-            LayoutKind::HorizontalStack => GroupKind::Horizontal,
-            LayoutKind::VerticalStack => GroupKind::Vertical,
-            _ => {
-                tracing::warn!(?group.container_kind, "Unexpected container kind for group");
-                return;
-            }
-        };
-
-        let config = self.indicator_config();
-        let group_data = GroupDisplayData {
-            group_kind,
-            total_count: group.total_count,
-            selected_index: group.selected_index,
-            window_ids: group.window_ids,
-        };
-
-        let indicator_frame = Self::calculate_indicator_frame(
-            group.frame,
-            group_kind,
-            config.bar_thickness,
-            config.horizontal_placement,
-            config.vertical_placement,
-            config.spacing,
-        );
-
-        let node_id = group.node_id;
-
-        if let Some(indicator) = self.indicators.get_mut(&node_id) {
-            if let Err(err) = indicator.set_frame(indicator_frame) {
-                tracing::warn!(?err, "failed to set stack line indicator frame");
-            }
-            indicator.set_space_id(group.space_id);
-            if let Err(err) = indicator.update(config, group_data.clone()) {
-                tracing::warn!(?err, "failed to update stack line indicator");
-            }
-        } else {
-            match GroupIndicatorWindow::new(indicator_frame, config) {
-                Ok(indicator) => {
-                    indicator.set_space_id(group.space_id);
-                    let indicator =
-                        self.attach_indicator(node_id, indicator, config, group_data.clone());
-                    self.indicators.insert(node_id, indicator);
-                }
-                Err(err) => {
-                    tracing::warn!(?err, "failed to create stack line indicator window");
-                    return;
-                }
-            }
-        }
-
-        tracing::debug!(
-            ?group.frame,
-            ?indicator_frame,
-            "Positioned indicator"
-        );
-    }
-
-    fn attach_indicator(
-        &mut self,
-        node_id: NodeId,
-        indicator: GroupIndicatorWindow,
-        config: IndicatorConfig,
-        group_data: GroupDisplayData,
-    ) -> GroupIndicatorWindow {
-        let self_ptr: *mut StackLine = self as *mut _;
-        indicator.set_click_callback(Rc::new(move |segment_index| {
-            unsafe {
-                // safety: `self_ptr` remains valid while the actor lives.
-                let this: &mut StackLine = &mut *self_ptr;
-                this.handle_indicator_activated(node_id, segment_index);
-            }
-        }));
-
-        if let Err(err) = indicator.update(config, group_data.clone()) {
-            tracing::warn!(?err, "failed to initialize stack line indicator");
-        }
-
-        indicator
-    }
-
-    // TODO: We should just pass in the coordinates from the layout calculation.
-    fn calculate_indicator_frame(
-        group_frame: CGRect,
-        group_kind: GroupKind,
-        thickness: f64,
-        _horizontal_placement: HorizontalPlacement,
-        _vertical_placement: VerticalPlacement,
-        spacing: f64,
-    ) -> CGRect {
-        let min_size = thickness * 2.0;
-        let adjusted_width = group_frame.size.width.max(min_size);
-        let adjusted_height = group_frame.size.height.max(min_size);
-
-        match group_kind {
-            GroupKind::Horizontal => CGRect::new(
-                CGPoint::new(group_frame.origin.x, group_frame.origin.y - spacing),
-                CGSize::new(adjusted_width, thickness),
-            ),
-            GroupKind::Vertical => CGRect::new(
-                CGPoint::new(group_frame.origin.x - spacing, group_frame.origin.y),
-                CGSize::new(thickness, adjusted_height),
-            ),
-        }
-    }
-
-    fn indicator_config(&self) -> IndicatorConfig {
-        IndicatorConfig::from(&self.config.settings.ui.stack_line)
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct GroupSig {
-    node_id: NodeId,
-    kind: LayoutKind,
-    x_q2: i64,
-    y_q2: i64,
-    w_q2: i64,
-    h_q2: i64,
-    total: usize,
-    selected_index: usize,
-    window_ids: Vec<WindowId>,
+/// Targets the clicked window by identity, with its latest known WindowServer ID.
+fn tab_command(
+    tabs: &[TabInfo],
+    window: WindowId,
+    action: cgs::tabs::TabBarAction,
+) -> Option<ReactorCommand> {
+    let tab = tabs.iter().find(|tab| tab.window_id == window)?;
+    let command = match action {
+        cgs::tabs::TabBarAction::Select(_) => ReactorCommand::FocusWindow {
+            window_id: tab.window_id.into(),
+            window_server_id: tab.window_server_id.map(|id| id.as_u32()),
+        },
+        cgs::tabs::TabBarAction::Close(_) => {
+            let id = tab.window_server_id?;
+            ReactorCommand::CloseWindow {
+                window_server_id: Some(id.as_u32()),
+            }
+        }
+        cgs::tabs::TabBarAction::Move { .. } => return None,
+    };
+    Some(command)
 }
 
-impl GroupSig {
-    fn from_group_info(g: &GroupInfo) -> GroupSig {
-        let quant = |v: f64| -> i64 { (v * 2.0).round() as i64 };
-        GroupSig {
-            node_id: g.node_id,
-            kind: g.container_kind,
-            x_q2: quant(g.frame.origin.x),
-            y_q2: quant(g.frame.origin.y),
-            w_q2: quant(g.frame.size.width),
-            h_q2: quant(g.frame.size.height),
-            total: g.total_count,
-            selected_index: g.selected_index,
-            window_ids: g.window_ids.clone(),
-        }
+/// Where the tab at `index` ends up once the tab at `from` moves to `to`.
+fn moved_index(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < to && (from + 1..=to).contains(&index) {
+        index - 1
+    } else if to < from && (to..from).contains(&index) {
+        index + 1
+    } else {
+        index
     }
 }
 
@@ -535,42 +510,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_group_info_fields() {
-        assert_eq!(LayoutKind::VerticalStack.is_group(), true);
-        assert_eq!(LayoutKind::HorizontalStack.is_group(), true);
-        assert_eq!(LayoutKind::Horizontal.is_group(), false);
+    fn tab_actions_target_the_clicked_window_and_never_fall_back_to_frontmost_close() {
+        use std::num::NonZeroU32;
+
+        use crate::sys::window_server::WindowServerId;
+        let first = WindowId {
+            pid: 111,
+            idx: NonZeroU32::new(1).unwrap(),
+        };
+        let second = WindowId {
+            pid: 222,
+            idx: NonZeroU32::new(2).unwrap(),
+        };
+        let mut tabs = vec![
+            TabInfo {
+                window_id: first,
+                title: String::new(),
+                bundle_id: None,
+                window_server_id: Some(WindowServerId::new(10)),
+            },
+            TabInfo {
+                window_id: second,
+                title: String::new(),
+                bundle_id: None,
+                window_server_id: Some(WindowServerId::new(20)),
+            },
+        ];
+        assert!(matches!(
+            tab_command(&tabs, second, cgs::tabs::TabBarAction::Close(1)),
+            Some(ReactorCommand::CloseWindow { window_server_id: Some(20) })
+        ));
+        tabs.remove(0);
+        assert!(
+            matches!(tab_command(&tabs, second, cgs::tabs::TabBarAction::Select(0)), Some(ReactorCommand::FocusWindow { window_id, window_server_id: Some(20) }) if window_id == second.into())
+        );
+        tabs[0].window_server_id = None;
+        assert!(tab_command(&tabs, second, cgs::tabs::TabBarAction::Close(0)).is_none());
+        assert!(tab_command(&tabs, first, cgs::tabs::TabBarAction::Select(0)).is_none());
     }
 
     #[test]
-    fn test_calculate_indicator_frame() {
-        let group_frame = CGRect::new(CGPoint::new(100.0, 200.0), CGSize::new(400.0, 300.0));
-        let thickness = 6.0;
-        let spacing = 4.0;
-
-        let frame_horizontal = StackLine::calculate_indicator_frame(
-            group_frame,
-            GroupKind::Horizontal,
-            thickness,
-            HorizontalPlacement::Top,
-            VerticalPlacement::Right,
-            spacing,
+    fn bars_anchor_only_to_windows_of_their_own_stack() {
+        use crate::sys::window_server::WindowServerId;
+        let group = |selected_index, ids: [Option<u32>; 3]| GroupInfo {
+            node_id: NodeId::default(),
+            space_id: SpaceId::new(1),
+            frame: CGRect::default(),
+            horizontal: true,
+            selected_index,
+            tabs: (1..)
+                .zip(ids)
+                .map(|(idx, id)| TabInfo {
+                    window_id: WindowId::new(1, idx),
+                    title: String::new(),
+                    bundle_id: None,
+                    window_server_id: id.map(WindowServerId::new),
+                })
+                .collect(),
+        };
+        // The selected window first, then any other window of the same stack, else none.
+        assert_eq!(
+            group(1, [Some(10), Some(20), Some(30)]).anchor(),
+            Some(WindowServerId::new(20))
         );
-        assert_eq!(frame_horizontal.origin.x, 100.0);
-        assert_eq!(frame_horizontal.origin.y, 200.0 - spacing);
-        assert_eq!(frame_horizontal.size.width, 400.0);
-        assert_eq!(frame_horizontal.size.height, thickness);
-
-        let frame_vertical = StackLine::calculate_indicator_frame(
-            group_frame,
-            GroupKind::Vertical,
-            thickness,
-            HorizontalPlacement::Top,
-            VerticalPlacement::Left,
-            spacing,
+        assert_eq!(
+            group(1, [None, None, Some(30)]).anchor(),
+            Some(WindowServerId::new(30))
         );
-        assert_eq!(frame_vertical.origin.x, 100.0 - spacing);
-        assert_eq!(frame_vertical.origin.y, 200.0);
-        assert_eq!(frame_vertical.size.width, thickness);
-        assert_eq!(frame_vertical.size.height, 300.0);
+        assert_eq!(group(0, [None; 3]).anchor(), None);
     }
 }

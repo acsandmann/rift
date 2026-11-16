@@ -119,6 +119,9 @@ pub struct WindowData {
     pub title: String,
     pub frame: Rect,
     pub is_floating: bool,
+    /// Claimed by an external window manager and excluded from Rift's layout.
+    #[serde(default)]
+    pub externally_managed: bool,
     pub is_focused: bool,
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
@@ -137,6 +140,10 @@ pub struct WorkspaceData {
     pub name: String,
     pub layout_mode: String,
     pub is_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_uuid: Option<String>,
+    #[serde(default)]
+    pub is_focused: bool,
     pub window_count: usize,
     /// Workspace windows in logical column-major order when the layout has column semantics.
     /// Windows without a logical position follow in their existing stable order.
@@ -178,9 +185,10 @@ pub struct LayoutStateData {
 }
 
 /// The type of a node in Rift's normalized layout topology.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContainerNodeType {
+    #[default]
     Container,
     Window,
     /// An empty slot retained by a layout engine, such as an empty BSP root.
@@ -188,7 +196,7 @@ pub enum ContainerNodeType {
 }
 
 /// A platform-neutral view of one node in a tiled layout.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ContainerTreeNode {
     /// Stable identity for this node for as long as it exists in the workspace.
     pub node_id: u64,
@@ -220,9 +228,22 @@ pub struct DisplayData {
     pub name: Option<String>,
     pub screen_id: u32,
     pub frame: Rect,
+    #[serde(default = "unit_scale")]
+    pub backing_scale: f64,
     pub space: Option<u64>,
+    /// Whether macOS reports `space` as visible, independent of Rift management.
+    /// Older servers omit this field; it defaults to false (visibility unknown).
+    #[serde(default)]
+    pub is_visible_space: bool,
+    /// Whether the visible space is enabled for Rift management.
     pub is_active_space: bool,
+    /// The display targeted by commands without an explicit space id.
+    /// Can be true when management is disabled, so toggling can re-enable it.
     pub is_active_context: bool,
+    /// Visible space ids enabled for Rift management.
     pub active_space_ids: Vec<u64>,
+    /// Hidden space ids and visible space ids with Rift management disabled.
     pub inactive_space_ids: Vec<u64>,
 }
+
+fn unit_scale() -> f64 { 1.0 }

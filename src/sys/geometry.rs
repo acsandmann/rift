@@ -144,3 +144,33 @@ impl<'de> DeserializeAs<'de, ic::CGRect> for CGRectDef {
         CGRectDef::deserialize(deserializer)
     }
 }
+
+/// Project an intended floating frame into a display, keeping the title bar
+/// reachable even when application minimum dimensions exceed the viewport.
+pub(crate) fn frame_on_display(
+    mut frame: ic::CGRect,
+    source: Option<ic::CGRect>,
+    target: ic::CGRect,
+    minimum: ic::CGSize,
+) -> ic::CGRect {
+    frame.size.width = frame.size.width.min(target.size.width).max(minimum.width);
+    frame.size.height = frame.size.height.min(target.size.height).max(minimum.height);
+    if let Some(source) = source.filter(|s| s.size.width > 0. && s.size.height > 0.) {
+        frame.origin.x = target.origin.x
+            + (frame.origin.x - source.origin.x) * target.size.width / source.size.width;
+        frame.origin.y = target.origin.y
+            + (frame.origin.y - source.origin.y) * target.size.height / source.size.height;
+    } else {
+        frame.origin.x = target.mid().x - frame.size.width / 2.;
+        frame.origin.y = target.mid().y - frame.size.height / 2.;
+    }
+    frame.origin.x = frame.origin.x.clamp(
+        target.origin.x,
+        (target.max().x - frame.size.width).max(target.origin.x),
+    );
+    frame.origin.y = frame.origin.y.clamp(
+        target.origin.y,
+        (target.max().y - frame.size.height).max(target.origin.y),
+    );
+    frame
+}

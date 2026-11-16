@@ -54,7 +54,7 @@ impl Record {
     pub(super) fn start(&mut self, config: &Config, layout: &LayoutEngine) {
         let Some(file) = self.file() else { return };
         let config = ron::ser::to_string(&config).unwrap();
-        let layout = layout.serialize_to_string();
+        let layout = layout.serialize_to_string(&Default::default());
         write!(file, "{config}\n{layout}\n").unwrap();
     }
 

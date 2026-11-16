@@ -6,6 +6,7 @@ pub mod app;
 pub mod config;
 pub mod config_watcher;
 pub mod drag;
+pub mod gesture;
 pub mod input;
 pub mod menu_bar;
 pub mod mission_control;
@@ -35,6 +36,8 @@ impl<Event> Sender<Event> {
         // app is shutting down.
         _ = self.try_send(event)
     }
+
+    pub(crate) fn is_closed(&self) -> bool { self.0.is_closed() }
 
     pub fn try_send(&self, event: Event) -> Result<(), SendError<(Span, Event)>> {
         self.0.send((Span::current(), event))

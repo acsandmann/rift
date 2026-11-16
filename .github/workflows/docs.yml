@@ -9,7 +9,7 @@ on:
       - 'crates/rift-protocol/src/**'
       - 'rift.default.toml'
       - 'src/bin/rift-cli.rs'
-      - 'src/common/config.rs'
+      - 'src/common/config/**'
 
 permissions:
   contents: read

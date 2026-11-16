@@ -57,6 +57,8 @@ pub enum WmEvent {
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
+    OverviewChanged,
+    OverviewActivationTarget(reactor::OverviewTarget),
     ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
@@ -67,32 +69,82 @@ pub enum WmCommand {
     Wm(WmCmd),
     ConfiguredLayout(ConfiguredLayoutCommand),
     ReactorCommand(reactor::Command),
+    Sequence(Vec<WmCommand>),
+}
+
+impl WmCommand {
+    pub fn steps(&self) -> Box<dyn Iterator<Item = &WmCommand> + '_> {
+        match self {
+            WmCommand::Sequence(commands) => Box::new(commands.iter().flat_map(WmCommand::steps)),
+            command => Box::new(std::iter::once(command)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfiguredLayoutCommand {
     ToggleWindowFloating(rift_protocol::ToggleWindowFloatingOptions),
+    SwitchPresetColumnWidth,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, strum_macros::VariantNames)]
+#[derive(
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    strum_macros::VariantNames,
+    rift_config_derive::CommandCatalog,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WmCmd {
+    #[command(group = 2, label = "Toggle tiling", order = 40)]
     ToggleSpaceActivated,
+    #[command(
+        label = "Run command",
+        order = 45,
+        sample = "Self::Exec(ExecCmd::String(String::new()))"
+    )]
     Exec(ExecCmd),
+    #[command(order = 46)]
     ReloadConfig,
+    #[command(
+        label = "Switch to keymap",
+        order = 44,
+        sample = "Self::BindingMode(\"default\".into())"
+    )]
     BindingMode(String),
 
+    #[command(group = 2, order = 31)]
     NextWorkspace,
+    #[command(group = 2, label = "Previous workspace", order = 32)]
     PrevWorkspace,
+    #[command(
+        group = 2,
+        order = 29,
+        sample = "Self::SwitchToWorkspace(WorkspaceSelector::Index(0))"
+    )]
     SwitchToWorkspace(WorkspaceSelector),
+    #[command(
+        group = 2,
+        order = 30,
+        sample = "Self::MoveWindowToWorkspace(WorkspaceSelector::Index(0))"
+    )]
     MoveWindowToWorkspace(WorkspaceSelector),
+    #[command(group = 2, order = 34)]
     CreateWorkspace,
+    #[command(group = 2, label = "Last workspace", order = 33)]
     SwitchToLastWorkspace,
 
+    #[command(group = 5, label = "Show all workspaces", order = 41)]
     ShowMissionControlAll,
+    #[command(group = 5, label = "Show current workspace", order = 42)]
     ShowMissionControlCurrent,
+    #[command(group = 5, label = "Dismiss overview", order = 43)]
     DismissMissionControl,
+    #[command(group = 0, order = 11)]
     CloseWindow,
 }
 
@@ -211,7 +263,7 @@ impl WmController {
         events_tx: reactor::Sender,
         input_tx: input::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
-        mission_control_tx: crate::actor::mission_control::Sender,
+        mission_control_tx: Option<crate::actor::mission_control::Sender>,
         window_tx_store: Option<WindowTxStore>,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
@@ -225,7 +277,7 @@ impl WmController {
             events_tx,
             input_tx,
             stack_line_tx: Some(stack_line_tx),
-            mission_control_tx: Some(mission_control_tx),
+            mission_control_tx,
             window_tx_store,
             receiver,
             sender: sender.clone(),
@@ -249,19 +301,17 @@ impl WmController {
         use self::WmCommand::*;
         use self::WmEvent::*;
 
-        if matches!(
-            event,
-            Command(Wm(crate::actor::wm_controller::WmCmd::NextWorkspace))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::PrevWorkspace))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToWorkspace(_)))
-                | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToLastWorkspace))
-                | SpaceStateUpdated(..)
-        ) && let Some(tx) = &self.mission_control_tx
-        {
-            tx.send(mission_control::Event::RefreshCurrentWorkspace);
-        }
-
         match event {
+            OverviewActivationTarget(target) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::ActivationTarget(target));
+                }
+            }
+            OverviewChanged => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::RefreshCurrentWorkspace);
+                }
+            }
             SpaceStateUpdated(space_state, converter) => {
                 self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
                 _ = self
@@ -303,6 +353,7 @@ impl WmController {
             AppGloballyActivated(pid) => {
                 _ = self.input_tx.send(input::Request::EnforceHidden);
                 self.events_tx.send(Event::ApplicationGloballyActivated(pid));
+                self.retry_unattached_app(pid);
             }
             AppGloballyDeactivated(pid) => {
                 self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
@@ -320,6 +371,17 @@ impl WmController {
                 }
             }
             ConfigUpdated(new_cfg) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    tx.send(mission_control::Event::Configure(
+                        new_cfg.settings.ui.mission_control.clone(),
+                        new_cfg.virtual_workspaces.mode
+                            == crate::common::config::WorkspaceMode::Global,
+                    ));
+                }
+                if !new_cfg.settings.ui.mission_control.enabled {
+                    self.mission_control_tx.take();
+                    self.input_tx.send(input::Request::ReleaseMissionControl);
+                }
                 self.config.config = new_cfg;
 
                 _ = self.input_tx.send(input::Request::ConfigUpdated(self.config.config.clone()));
@@ -392,14 +454,10 @@ impl WmController {
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
             }
-            Command(Wm(ShowMissionControlAll)) => {
+            // Deprecated Current spelling forwards to the canonical Overview.
+            Command(Wm(ShowMissionControlAll | ShowMissionControlCurrent)) => {
                 if let Some(tx) = &self.mission_control_tx {
                     let _ = tx.try_send(mission_control::Event::ShowAll);
-                }
-            }
-            Command(Wm(ShowMissionControlCurrent)) => {
-                if let Some(tx) = &self.mission_control_tx {
-                    let _ = tx.try_send(mission_control::Event::ShowCurrent);
                 }
             }
             Command(Wm(DismissMissionControl)) => {
@@ -420,24 +478,55 @@ impl WmController {
                     layout::LayoutCommand::ToggleWindowFloatingWithOptions(options),
                 )));
             }
+            Command(ConfiguredLayout(ConfiguredLayoutCommand::SwitchPresetColumnWidth)) => {
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::SwitchPresetColumnWidth { backwards: false },
+                )));
+            }
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
+            }
+            Command(Sequence(commands)) => {
+                for command in commands {
+                    self.handle_event(Command(command));
+                }
             }
         }
     }
 
+    /// Attaching fails while an app refuses AX requests; retry when the user activates it.
+    fn retry_unattached_app(&mut self, pid: pid_t) {
+        if self.apps.0.contains_key(&pid) {
+            return;
+        }
+        let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
+            return;
+        };
+        self.new_app(pid, AppInfo::from(&*running_app), AppDiscoverySource::Process);
+    }
+
     fn new_app(&mut self, pid: pid_t, info: AppInfo, source: AppDiscoverySource) {
+        // Leave Rift's own UI to AppKit; managing it through AX causes focus feedback loops.
+        if pid == std::process::id() as pid_t {
+            return;
+        }
+
         let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
             debug!(?pid, "Failed to resolve NSRunningApplication for new app");
             return;
         };
 
         let policy = running_app.activationPolicy();
-        if policy == NSApplicationActivationPolicy::Prohibited {
+        // A process started outside LaunchServices reads Prohibited until it
+        // sets its policy, and may show a window before rift reads Regular. A
+        // window shows it is an app, so wait for the policy as for Accessory.
+        let prohibited = policy == NSApplicationActivationPolicy::Prohibited;
+        if prohibited && source != AppDiscoverySource::WindowServer {
+            debug!(?pid, bundle = ?info.bundle_id, "App is prohibited; not spawning");
             return;
         }
         if !should_spawn_app(policy, source) {
-            if policy != NSApplicationActivationPolicy::Accessory {
+            if policy != NSApplicationActivationPolicy::Accessory && !prohibited {
                 return;
             }
             sys::app::ensure_activation_policy_observer(pid, running_app.clone(), info.clone());

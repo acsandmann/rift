@@ -30,6 +30,8 @@ enum CliCommand {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Open Rift’s native Settings window
+    Settings,
     /// Query information from rift
     Query {
         #[command(subcommand)]
@@ -110,12 +112,16 @@ enum QueryCommands {
         #[arg(long)]
         workspace_id: Option<usize>,
     },
+    /// Get the active binding mode name
+    BindingMode,
     /// Get performance metrics
     Metrics,
 }
 
 #[derive(Subcommand)]
 enum ExecuteCommands {
+    /// Switch to a configured binding mode (use default to reset)
+    BindingMode { mode: String },
     /// Window management commands
     Window {
         #[command(subcommand)]
@@ -160,13 +166,13 @@ enum ExecuteCommands {
         #[command(flatten)]
         file: LayoutFileSelection,
     },
-    /// Restore a layout file to the current workspace or macOS Space
+    /// Restore a layout file to the current workspace, macOS Space, or every display
     ///
     /// Use --master instead of PATH to load Rift's master file.
     LoadLayout {
         #[command(flatten)]
         file: LayoutFileSelection,
-        /// Restore one workspace or all saved workspaces for the current macOS Space.
+        /// Restore one workspace, the current macOS Space, or the current Space of every display.
         #[arg(long, value_enum, default_value_t = CliRestoreScope::Workspace)]
         scope: CliRestoreScope,
     },
@@ -238,6 +244,7 @@ enum WindowCommands {
 enum CliRestoreScope {
     Workspace,
     Space,
+    Displays,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -325,6 +332,8 @@ enum LayoutCommands {
     ToggleStack,
     /// Global orientation toggle that works consistently across layout modes (and between splits/stacks)
     ToggleOrientation,
+    /// Even out split sizes along each axis (bsp and traditional layouts only)
+    Balance,
     /// Unjoin previously joined windows
     Unjoin,
     /// Toggle floating on the focused selection (tree focus)
@@ -343,6 +352,11 @@ enum LayoutCommands {
     ScrollStrip { delta: f64 },
     /// Snap the strip to the nearest column boundary (scrolling layout only)
     SnapStrip,
+    /// Switch to the next preset column width (scrolling layout only).
+    SwitchPresetColumnWidth {
+        #[arg(long)]
+        backwards: bool,
+    },
     /// Toggle centering of the selected column in scrolling layout.
     /// If invoked again on the same selection, centering is removed.
     CenterSelection,
@@ -499,12 +513,12 @@ enum DisplayCommands {
 enum SubscribeCommands {
     /// Subscribe to Mach IPC events
     Mach {
-        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, *)
+        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, config_changed, *)
         event: String,
     },
     /// Subscribe to events via CLI command execution
     Cli {
-        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, *)
+        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, config_changed, *)
         #[arg(long)]
         event: String,
         /// Command to execute when event occurs
@@ -600,6 +614,9 @@ fn main() {
 
 fn build_request(command: Commands) -> Result<RiftRequest, String> {
     match command {
+        Commands::Settings => Ok(RiftRequest::ExecuteCommand {
+            command: rift_protocol::RiftCommand::Reactor(reactor::ReactorCommand::OpenSettings),
+        }),
         Commands::Query { query } => build_query_request(query),
         Commands::Execute { command } => build_execute_request(command),
         Commands::Subscribe { subscribe } => build_subscribe_request(subscribe),
@@ -648,6 +665,7 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
             }
             None => Ok(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id }),
         },
+        QueryCommands::BindingMode => Ok(RiftRequest::GetBindingMode),
         QueryCommands::Metrics => Ok(RiftRequest::GetMetrics),
     }
 }
@@ -674,6 +692,9 @@ fn build_subscribe_request(sub: SubscribeCommands) -> Result<RiftRequest, String
 
 fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String> {
     let rift_command = match execute {
+        ExecuteCommands::BindingMode { mode } => CliCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::BindingMode(mode),
+        )),
         ExecuteCommands::Window { window_cmd } => map_window_command(window_cmd)?,
         ExecuteCommands::Workspace { workspace_cmd } => map_workspace_command(workspace_cmd)?,
         ExecuteCommands::Layout { layout_cmd } => map_layout_command(layout_cmd)?,
@@ -710,12 +731,13 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
                     layout::RestoreSource::SavedActiveSpace,
                 )
             };
-            layout::LayoutEngine::load(path.clone()).map_err(|error| {
+            layout::LayoutEngine::validate_file(path.clone()).map_err(|error| {
                 format!("could not load layout file at {}: {error}", path.display())
             })?;
             let scope = match scope {
                 CliRestoreScope::Workspace => layout::RestoreScope::Workspace,
                 CliRestoreScope::Space => layout::RestoreScope::Space,
+                CliRestoreScope::Displays => layout::RestoreScope::Displays,
             };
             CliCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::RestoreLayout { path, scope, source },
@@ -882,10 +904,12 @@ fn parse_event_kind(input: &str) -> Result<EventKind, String> {
         "focused_window_changed" => Ok(EventKind::FocusedWindowChanged),
         "stacks_changed" => Ok(EventKind::StacksChanged),
         "layout_changed" => Ok(EventKind::LayoutChanged),
+        "binding_mode_changed" => Ok(EventKind::BindingModeChanged),
+        "config_changed" => Ok(EventKind::ConfigChanged),
         "selection_changed" => Ok(EventKind::SelectionChanged),
         "*" => Ok(EventKind::All),
         other => Err(format!(
-            "Invalid event '{}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, or *",
+            "Invalid event '{}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, selection_changed, binding_mode_changed, config_changed, or *",
             other
         )),
     }
@@ -964,6 +988,7 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
         LayoutCommands::ToggleOrientation => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::ToggleOrientation,
         ))),
+        LayoutCommands::Balance => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Balance))),
         LayoutCommands::Unjoin => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows)))
         }
@@ -993,6 +1018,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
         LayoutCommands::SnapStrip => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::SnapStrip)))
         }
+        LayoutCommands::SwitchPresetColumnWidth { backwards } => Ok(CliCommand::Reactor(
+            reactor::Command::Layout(LC::SwitchPresetColumnWidth { backwards }),
+        )),
         LayoutCommands::CenterSelection => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::CenterSelection,
         ))),
@@ -1194,6 +1222,22 @@ fn run_mach_subscription(event: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binding_mode_query_and_subscription_parse() {
+        let cli = Cli::try_parse_from(["rift-cli", "query", "binding-mode"]).unwrap();
+        assert!(matches!(cli.command, Commands::Query {
+            query: QueryCommands::BindingMode
+        }));
+        assert_eq!(
+            build_query_request(QueryCommands::BindingMode).unwrap(),
+            RiftRequest::GetBindingMode
+        );
+        assert_eq!(
+            parse_event_kind("binding_mode_changed").unwrap(),
+            EventKind::BindingModeChanged
+        );
+    }
 
     #[test]
     fn execute_requests_use_typed_protocol_commands() {

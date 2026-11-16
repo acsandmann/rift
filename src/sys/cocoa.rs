@@ -3,12 +3,14 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::task::Wake;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2_app_kit::{NSApplication, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint};
+
+use super::run_loop::WakeLatch;
 
 /// Arbitrary tag used to distinguish Rift's wake event from events owned by
 /// other AppKit clients.
@@ -30,7 +32,7 @@ struct EventLoopStats {
 /// A thread-safe waker for the main Cocoa event pump.
 pub(super) struct EventLoopWaker {
     // True while a marker is being posted or is queued and unconsumed.
-    pending: AtomicBool,
+    pending: WakeLatch,
     app: NonNull<NSApplication>,
     #[cfg(debug_assertions)]
     stats: EventLoopStats,
@@ -42,14 +44,14 @@ unsafe impl Sync for EventLoopWaker {}
 impl EventLoopWaker {
     fn new(app: &NSApplication) -> Self {
         Self {
-            pending: AtomicBool::new(false),
+            pending: WakeLatch::default(),
             app: NonNull::from(app),
             #[cfg(debug_assertions)]
             stats: EventLoopStats::default(),
         }
     }
 
-    fn request_wake(&self) -> bool { !self.pending.swap(true, Ordering::AcqRel) }
+    fn request_wake(&self) -> bool { self.pending.request() }
 
     fn post_wake(&self) {
         #[cfg(debug_assertions)]
@@ -77,16 +79,11 @@ impl EventLoopWaker {
             RIFT_WAKE_EVENT_SUBTYPE,
             RIFT_WAKE_EVENT_DATA,
             0,
-        ).expect("unable to create Rift's Cocoa wake event")
+        )
+        .expect("unable to create Rift's Cocoa wake event")
     }
 
-    fn consume_wake(&self) {
-        // Work must be published before wake(). An AcqRel swap reads all
-        // coalesced producers' release swaps before the upcoming executor poll.
-        // A producer ordered after this reset sees false and posts a new marker.
-        // Thus its work is either visible to that poll or has another wake.
-        self.pending.swap(false, Ordering::AcqRel);
-    }
+    fn consume_wake(&self) { self.pending.consume(); }
 
     fn is_rift_wake(event: &NSEvent) -> bool {
         event.r#type() == NSEventType::ApplicationDefined
@@ -194,6 +191,8 @@ fn drain_events<E>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
 
     #[test]
@@ -250,7 +249,7 @@ mod tests {
     fn requests_coalesce_until_marker_consumption() {
         // These tests exercise only the atomic state, never posting through app.
         let waker = EventLoopWaker {
-            pending: AtomicBool::new(false),
+            pending: WakeLatch::default(),
             app: NonNull::dangling(),
             #[cfg(debug_assertions)]
             stats: EventLoopStats::default(),
@@ -266,7 +265,7 @@ mod tests {
     #[test]
     fn published_work_survives_a_coalesced_wake_before_consumption() {
         let waker = EventLoopWaker {
-            pending: AtomicBool::new(false),
+            pending: WakeLatch::default(),
             app: NonNull::dangling(),
             #[cfg(debug_assertions)]
             stats: EventLoopStats::default(),
@@ -297,17 +296,19 @@ mod tests {
     #[test]
     fn only_rift_tagged_application_events_are_consumed() {
         assert!(EventLoopWaker::is_rift_wake(&EventLoopWaker::make_wake_event()));
-        let other = NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
-            NSEventType::ApplicationDefined,
-            NSPoint::ZERO,
-            NSEventModifierFlags::empty(),
-            0.0,
-            0,
-            None,
-            RIFT_WAKE_EVENT_SUBTYPE,
-            0,
-            0,
-        ).unwrap();
+        let other =
+            NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::ApplicationDefined,
+                NSPoint::ZERO,
+                NSEventModifierFlags::empty(),
+                0.0,
+                0,
+                None,
+                RIFT_WAKE_EVENT_SUBTYPE,
+                0,
+                0,
+            )
+            .unwrap();
         assert!(!EventLoopWaker::is_rift_wake(&other));
     }
 }

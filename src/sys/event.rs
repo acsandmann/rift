@@ -2,8 +2,9 @@ use std::convert::TryFrom;
 
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGEvent, CGEventField, CGEventFlags,
-    CGEventSource, CGEventSourceStateID, CGMouseButton, kCGNullDirectDisplay,
+    CGAssociateMouseAndMouseCursorPosition, CGDisplayHideCursor, CGDisplayShowCursor, CGError,
+    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGMouseButton,
+    kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +42,17 @@ impl TryFrom<u8> for MouseState {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_MOUSE_STATE: std::cell::Cell<Option<MouseState>> = const { std::cell::Cell::new(None) };
+}
+
 pub fn get_mouse_state() -> Option<MouseState> {
+    #[cfg(test)]
+    if let Some(state) = TEST_MOUSE_STATE.with(|state| state.get()) {
+        return Some(state);
+    }
+
     let down =
         CGEventSource::button_state(CGEventSourceStateID::HIDSystemState, CGMouseButton::Left)
             || CGEventSource::button_state(
@@ -60,6 +71,10 @@ pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     unsafe { CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0) };
 
     let res = cg_ok(unsafe { CGWarpMouseCursorPosition(point) });
+    if res.is_ok() {
+        // Reassociation is best-effort: the cursor has already moved.
+        let _ = CGAssociateMouseAndMouseCursorPosition(true);
+    }
     unsafe { CFRelease(src) };
     res
 }

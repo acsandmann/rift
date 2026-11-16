@@ -6,19 +6,22 @@
 //! a stable native-space picture. The rules here are therefore intentionally
 //! conservative:
 //!
-//! - Sleep, display churn, and lock/login transitions buffer snapshots instead of
-//!   forwarding them immediately.
+//! - Sleep, display churn, and lock/login transitions retain the last accepted
+//!   snapshot until a fresh coherent sample settles.
 //! - Only user spaces are allowed to become the reactor's workspace/display
 //!   context. Fullscreen and system/login spaces are treated as transient native
 //!   state and nulled out before they can rewrite workspace mappings.
 //! - When the system finally stabilizes, this actor forwards a single coherent
-//!   snapshot plus any synthesized window enter/leave deltas needed to reconcile
-//!   the reactor with the post-churn WindowServer state.
+//!   snapshot with full window membership for the reactor to reconcile once.
 //!
 //! The core failure mode this prevents is treating unstable lock/wake/login
 //! snapshots as authoritative user-space state. That can cause Rift to
 //! initialize fresh default workspaces for transient spaces and later remap them
 //! onto the real desktop, which looks like "all windows reset to workspace 1".
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use dispatchr::queue;
 use dispatchr::time::Time;
@@ -29,25 +32,31 @@ use crate::actor;
 use crate::actor::{reactor, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
-#[cfg(not(test))]
-use crate::sys::screen::managed_display_space_ids;
 use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::DisplayReconfigFlags;
+use crate::sys::window_server;
 use crate::sys::window_server::WindowServerId;
-use crate::sys::{display_churn, window_server};
 
 const REFRESH_DEFAULT_DELAY_NS: i64 = 100_000_000;
 const REFRESH_SPACE_SWITCH_DELAY_NS: i64 = 50_000_000;
 const REFRESH_RETRY_DELAY_NS: i64 = 100_000_000;
-const REFRESH_MAX_RETRIES: u8 = 10;
+pub(crate) const REFRESH_MAX_RETRIES: u8 = 10;
+const REFRESH_RECOVERY_DELAY_NS: i64 = 1_000_000_000;
 
-// Rift still requires two identical topology samples plus a quiet WindowServer,
-// but it should converge on the same order of magnitude rather than waiting
-// multiple seconds before even attempting stabilization.
-const DISPLAY_CHURN_QUIET_NS: i64 = 100_000_000;
-const DISPLAY_STABILIZE_RETRY_NS: i64 = 100_000_000;
-const DISPLAY_STABILIZE_MAX_ATTEMPTS: u8 = 10;
+// Recovery needs two matching physical/Space samples and a quiet WindowServer.
 const DISPLAY_STABLE_REQUIRED_HITS: u8 = 2;
+
+/// Published before invalidation is queued. A reactor must not accept an older
+/// snapshot or mutate windows while this revision is ahead of its own.
+/// Each actor pair owns its record; tests and independent instances cannot interfere.
+#[derive(Debug, Clone, Default)]
+pub struct TopologyGuard(Arc<AtomicU64>);
+
+impl TopologyGuard {
+    pub fn invalidated_revision(&self) -> u64 { self.0.load(Ordering::Acquire) }
+
+    fn invalidate(&self, revision: u64) { self.0.store(revision, Ordering::Release); }
+}
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -62,20 +71,14 @@ pub enum Event {
         display_id: u32,
         flags: DisplayReconfigFlags,
     },
-    DisplayChurnBegin,
-    DisplayChurnEnd,
-    ScreenParametersChanged(Vec<ScreenInfo>, CoordinateConverter),
-    SpaceChanged(Vec<Option<SpaceId>>),
     SpaceInventoryChanged,
+    ReconcileWindowSpaces,
     SpaceCreated(SpaceId),
     SpaceDestroyed(SpaceId),
     WindowServerAppeared(WindowServerId, SpaceId),
     WindowServerDestroyed(WindowServerId, SpaceId),
     ProcessScreenRefresh {
-        attempt: u8,
-    },
-    CheckDisplayStabilization {
-        expected_epoch: u64,
+        revision: u64,
         attempt: u8,
     },
 }
@@ -89,41 +92,52 @@ pub struct QuarantineStats {
     pub destroyed_dropped: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DisplayTopologyFingerprint(Vec<(String, u64, u64, u64, u64, Option<u64>)>);
+/// One observation from the native boundary; settling never rereads half a sample.
+#[derive(Clone)]
+struct NativeSnapshot {
+    screens: Vec<ScreenInfo>,
+    converter: CoordinateConverter,
+    inventory: HashMap<String, Vec<SpaceId>>,
+    quiet: bool,
+}
 
 #[derive(Debug, Clone)]
 struct DisplayTopologyState {
-    fingerprint: DisplayTopologyFingerprint,
+    screens: Vec<ScreenInfo>,
+    inventory: HashMap<String, Vec<SpaceId>>,
     hits: u8,
 }
 
 /// Forwarded read-only space/display snapshot consumed by the reactor.
 #[derive(Debug, Default, Clone)]
 pub struct ForwardedSpaceState {
+    pub revision: u64,
+    pub authoritative: bool,
+    /// False when membership was carried forward from an inconclusive query.
+    pub membership_complete: bool,
     pub screens: Vec<ScreenInfo>,
     pub fullscreen_spaces: HashSet<SpaceId>,
-    pub has_seen_display_set: bool,
+    /// Positive native destruction deltas, forwarded only with accepted topology.
+    pub destroyed_spaces: HashSet<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
     pub menu_bar_space: Option<SpaceId>,
     pub command_space: Option<SpaceId>,
     pub display_space_ids: HashMap<String, Vec<SpaceId>>,
-    pub last_user_space_by_display: HashMap<String, SpaceId>,
     pub space_remaps: Vec<(SpaceId, SpaceId)>,
     pub display_set_changed: bool,
-    pub topology_changed: bool,
-    pub allow_space_remap: bool,
     pub should_force_refresh_layout: bool,
-    pub releases_lifecycle_refresh_quarantine: bool,
-    /// Releases the reactor's display-churn gate only after this authoritative
-    /// snapshot has been incorporated into its workspace model.
-    pub releases_display_churn_refresh_quarantine: bool,
     pub resized_spaces: Vec<(SpaceId, CGSize)>,
-    pub topology_window_delta: Option<TopologyWindowDelta>,
     pub active_window_spaces: HashMap<WindowServerId, SpaceId>,
 }
 
 impl ForwardedSpaceState {
+    pub(super) fn presentation_changed(&self, previous: &Self) -> bool {
+        !self.destroyed_spaces.is_empty()
+            || self.screens != previous.screens
+            || self.fullscreen_spaces != previous.fullscreen_spaces
+            || self.display_space_ids != previous.display_space_ids
+    }
+
     pub fn screen_by_space(&self, space: SpaceId) -> Option<&ScreenInfo> {
         self.screens.iter().find(|screen| screen.space == Some(space))
     }
@@ -135,57 +149,32 @@ impl ForwardedSpaceState {
     pub fn first_known_space(&self) -> Option<SpaceId> { self.iter_known_spaces().next() }
 }
 
-#[derive(Debug, Clone)]
-struct PendingScreenParameters {
-    screens: Vec<ScreenInfo>,
-    converter: CoordinateConverter,
-}
-
-#[derive(Debug, Clone)]
-pub struct TopologyWindowDelta {
-    pub epoch: u64,
-    pub flags: DisplayReconfigFlags,
-    pub appeared: Vec<(WindowServerId, SpaceId)>,
-    pub disappeared: Vec<(WindowServerId, SpaceId)>,
-}
-
-impl Default for TopologyWindowDelta {
-    fn default() -> Self {
-        Self {
-            epoch: 0,
-            flags: DisplayReconfigFlags::empty(),
-            appeared: Vec::new(),
-            disappeared: Vec::new(),
-        }
-    }
-}
-
 pub struct AuthorityState {
     pub sleeping: bool,
     pub session_inactive: bool,
     pub display_churn_active: bool,
     pub screens: Vec<ScreenInfo>,
-    pub has_seen_display_set: bool,
     pub last_sent_spaces: Option<Vec<Option<SpaceId>>>,
     pub quarantine_stats: QuarantineStats,
     screen_cache: Option<ScreenCache>,
-    last_converter: CoordinateConverter,
     refresh_pending: bool,
-    display_churn_epoch: u64,
     display_churn_flags: DisplayReconfigFlags,
     display_topology_state: Option<DisplayTopologyState>,
     last_user_space_by_display: HashMap<String, SpaceId>,
-    display_space_ids: HashMap<String, Vec<SpaceId>>,
+    // Last trustworthy user-Space catalog per display, retained while absent.
+    // Classify while IDs are live; querying a destroyed Space's type is unreliable.
+    // Forwarded snapshots carry only the current inventory.
+    last_known_display_space_ids: HashMap<String, Vec<SpaceId>>,
     active_display_uuid: Option<String>,
     awaiting_space_switch_confirmation: bool,
-    refresh_deferred_until_stable: bool,
-    release_reactor_quarantine_on_next_forward: bool,
-    pending_screen_parameters: Option<PendingScreenParameters>,
-    pending_spaces: Option<Vec<Option<SpaceId>>>,
+    recovering_membership: bool,
     visible_window_spaces: HashMap<WindowServerId, SpaceId>,
-    pre_churn_visible_window_spaces: HashMap<WindowServerId, SpaceId>,
-    pending_topology_window_delta: Option<TopologyWindowDelta>,
+    destroyed_spaces: HashSet<SpaceId>,
+    revision: u64,
+    last_forwarded: Option<ForwardedSpaceState>,
     timers_enabled: bool,
+    topology_guard: TopologyGuard,
+    churn_started: Option<Instant>,
 }
 
 impl Default for AuthorityState {
@@ -195,27 +184,24 @@ impl Default for AuthorityState {
             session_inactive: false,
             display_churn_active: false,
             screens: Vec::new(),
-            has_seen_display_set: false,
             last_sent_spaces: None,
             quarantine_stats: QuarantineStats::default(),
             screen_cache: None,
-            last_converter: CoordinateConverter::default(),
             refresh_pending: false,
-            display_churn_epoch: 0,
             display_churn_flags: DisplayReconfigFlags::empty(),
             display_topology_state: None,
             last_user_space_by_display: HashMap::default(),
-            display_space_ids: HashMap::default(),
+            last_known_display_space_ids: HashMap::default(),
             active_display_uuid: None,
             awaiting_space_switch_confirmation: false,
-            refresh_deferred_until_stable: false,
-            release_reactor_quarantine_on_next_forward: false,
-            pending_screen_parameters: None,
-            pending_spaces: None,
+            recovering_membership: false,
             visible_window_spaces: HashMap::default(),
-            pre_churn_visible_window_spaces: HashMap::default(),
-            pending_topology_window_delta: None,
+            destroyed_spaces: HashSet::default(),
+            revision: 0,
+            last_forwarded: None,
             timers_enabled: true,
+            topology_guard: TopologyGuard::default(),
+            churn_started: None,
         }
     }
 }
@@ -269,6 +255,8 @@ impl SpacesActor {
         Self::new_with_state(reactor_tx, wm_tx, state)
     }
 
+    pub fn topology_guard(&self) -> TopologyGuard { self.state.topology_guard.clone() }
+
     pub async fn run(mut self) {
         while let Some((span, event)) = self.receiver.recv().await {
             let _guard = span.enter();
@@ -280,8 +268,8 @@ impl SpacesActor {
         match event {
             Event::SystemWillSleep => {
                 self.state.sleeping = true;
-                self.state.release_reactor_quarantine_on_next_forward = false;
-                self.reactor_tx.send(reactor::Event::SystemWillSleep);
+                self.invalidate_topology();
+                self.state.recovering_membership = false;
                 if let Some(screen_cache) = self.state.screen_cache.as_mut() {
                     screen_cache.mark_sleeping(true);
                 }
@@ -293,15 +281,9 @@ impl SpacesActor {
                     screen_cache.mark_sleeping(false);
                     screen_cache.mark_dirty();
                 }
-                self.state.pending_screen_parameters = None;
-                self.state.pending_spaces = None;
-                if self.state.display_churn_active {
-                    let expected_epoch = self.state.display_churn_epoch;
-                    self.schedule_display_stabilization_check(expected_epoch);
-                }
-                // Wake is inherently unstable; discard anything buffered while the
-                // machine was asleep and wait for a fresh authoritative rescan.
-                self.state.release_reactor_quarantine_on_next_forward = true;
+
+                // Only a fresh stable sample can release the sleep quarantine.
+                self.state.recovering_membership = true;
                 self.schedule_screen_refresh();
             }
             Event::SessionDidResignActive => {
@@ -309,8 +291,8 @@ impl SpacesActor {
                     return;
                 }
                 self.state.session_inactive = true;
-                self.state.release_reactor_quarantine_on_next_forward = false;
-                self.reactor_tx.send(reactor::Event::SessionDidResignActive);
+                self.invalidate_topology();
+                self.state.recovering_membership = false;
             }
             Event::SessionDidBecomeActive => {
                 if !self.state.session_inactive {
@@ -321,17 +303,12 @@ impl SpacesActor {
                 if let Some(screen_cache) = self.state.screen_cache.as_mut() {
                     screen_cache.mark_dirty();
                 }
-                self.state.pending_screen_parameters = None;
-                self.state.pending_spaces = None;
-                if self.state.display_churn_active {
-                    let expected_epoch = self.state.display_churn_epoch;
-                    self.schedule_display_stabilization_check(expected_epoch);
-                }
+
                 // The login window can transiently replace every display's current
                 // space. Do not replay buffered lock-screen snapshots into Rift's
                 // workspace model; always resample after the user session becomes
                 // active again.
-                self.state.release_reactor_quarantine_on_next_forward = true;
+                self.state.recovering_membership = true;
                 self.schedule_screen_refresh();
             }
             Event::ActiveDisplayChanged => {
@@ -351,43 +328,31 @@ impl SpacesActor {
             Event::DisplayReconfigured { display_id, flags } => {
                 self.handle_display_reconfig_event(display_id, flags);
             }
-            Event::DisplayChurnBegin => {
-                self.state.display_churn_active = true;
-                self.reactor_tx.send(reactor::Event::DisplayChurnBegin);
-            }
-            Event::DisplayChurnEnd => {
-                self.state.display_churn_active = false;
-                self.flush_pending_if_stable();
-                self.schedule_screen_refresh();
-            }
-            Event::ScreenParametersChanged(screens, converter) => {
-                if self.should_buffer_topology_updates() {
-                    self.state.pending_screen_parameters =
-                        Some(PendingScreenParameters { screens, converter });
-                } else {
-                    self.forward_screen_parameters(screens, converter);
+            Event::ReconcileWindowSpaces => {
+                // A native move may be the first evidence of display churn. Refresh
+                // physical screens too, rather than waiting for its late callback.
+                if let Some(cache) = self.state.screen_cache.as_mut() {
+                    cache.mark_dirty();
                 }
-            }
-            Event::SpaceChanged(spaces) => {
-                if self.should_buffer_topology_updates() {
-                    self.state.pending_spaces = Some(spaces);
-                } else {
-                    self.forward_space_snapshot(spaces);
-                }
+                self.handle_space_inventory_changed();
             }
             Event::SpaceInventoryChanged => {
                 self.handle_space_inventory_changed();
             }
             Event::SpaceCreated(space) => {
-                if !self.should_buffer_topology_updates() && self.classify_space(space).is_some() {
-                    self.reactor_tx.send(reactor::Event::SpaceCreated(space));
+                if self.classify_space(space).is_none() {
+                    return;
                 }
+                self.state.destroyed_spaces.remove(&space);
                 self.handle_space_inventory_changed();
             }
             Event::SpaceDestroyed(space) => {
-                if !self.should_buffer_topology_updates() && self.classify_space(space).is_some() {
-                    self.reactor_tx.send(reactor::Event::SpaceDestroyed(space));
+                // A destroyed ID may no longer have a queryable type. Use the
+                // inventory classified while it was alive instead.
+                if !self.was_managed_space(space) {
+                    return;
                 }
+                self.state.destroyed_spaces.insert(space);
                 self.handle_space_inventory_changed();
             }
             Event::WindowServerAppeared(wsid, sid) => {
@@ -414,7 +379,7 @@ impl SpacesActor {
                             // WindowServer reports a confirmed move out of the origin
                             // space as a destroy. The selected Space may remain the
                             // same, so explicitly forward the refreshed membership.
-                            self.handle_space_inventory_changed();
+                            self.handle_event(Event::ReconcileWindowSpaces);
                             return;
                         }
                         self.reactor_tx
@@ -422,11 +387,15 @@ impl SpacesActor {
                     }
                 }
             }
-            Event::ProcessScreenRefresh { attempt } => {
-                self.process_screen_refresh(attempt, true);
-            }
-            Event::CheckDisplayStabilization { expected_epoch, attempt } => {
-                self.attempt_finish_display_churn(expected_epoch, attempt);
+            Event::ProcessScreenRefresh { revision, attempt } => {
+                if revision == self.state.revision {
+                    let snapshot = if self.lifecycle_quarantined() {
+                        None
+                    } else {
+                        self.collect_state()
+                    };
+                    self.process_screen_refresh(attempt, snapshot);
+                }
             }
         }
     }
@@ -466,7 +435,7 @@ impl SpacesActor {
             return;
         }
 
-        if !self.try_forward_authoritative_snapshot(true, true) {
+        if !self.try_forward_authoritative_snapshot(true, 0) {
             self.schedule_screen_refresh_after(0, 0);
         }
     }
@@ -477,14 +446,21 @@ impl SpacesActor {
     }
 
     fn handle_active_space_changed(&mut self) {
+        // Revoke queued geometry at the signal, before the native query settles.
+        // This is presentation invalidation, not physical display churn.
         self.state.awaiting_space_switch_confirmation = true;
+        if self.topology_is_authoritative() {
+            self.invalidate_topology();
+            self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, 0);
+            return;
+        }
 
         if self.should_buffer_topology_updates() {
             self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, 0);
             return;
         }
 
-        if !self.try_forward_authoritative_snapshot(false, true) {
+        if !self.try_forward_authoritative_snapshot(false, 0) {
             self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, 0);
         }
     }
@@ -497,86 +473,91 @@ impl SpacesActor {
 
         // Space create/destroy and membership changes can leave the visible-space vector
         // unchanged while still changing authoritative per-display space metadata.
-        if !self.try_forward_authoritative_snapshot(true, true) {
+        if !self.try_forward_authoritative_snapshot(true, 0) {
             self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, 0);
         }
     }
 
+    // Sleep and session inactivity end only on wake or unlock; churn clears itself.
+    fn lifecycle_quarantined(&self) -> bool { self.state.sleeping || self.state.session_inactive }
+
     fn should_buffer_topology_updates(&self) -> bool {
-        self.state.sleeping || self.state.session_inactive || self.state.display_churn_active
+        self.lifecycle_quarantined() || self.state.display_churn_active
     }
 
-    fn should_quarantine_window_space_event(&self) -> bool {
-        self.state.sleeping || self.state.session_inactive || self.state.display_churn_active
+    fn topology_is_authoritative(&self) -> bool {
+        !self.should_buffer_topology_updates()
+            && self
+                .state
+                .last_forwarded
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.revision == self.state.revision)
     }
 
-    fn collect_state(&mut self) -> Option<(Vec<ScreenInfo>, CoordinateConverter)> {
-        self.state
-            .screen_cache
-            .as_mut()
-            .and_then(|screen_cache| screen_cache.refresh())
-            .or_else(|| {
-                #[cfg(test)]
-                {
-                    Some((self.state.screens.clone(), self.state.last_converter))
-                }
-                #[cfg(not(test))]
-                {
-                    None
-                }
-            })
+    fn should_quarantine_window_space_event(&self) -> bool { !self.topology_is_authoritative() }
+
+    fn collect_state(&mut self) -> Option<NativeSnapshot> {
+        let resample_geometry =
+            self.state.display_churn_active || !self.topology_is_authoritative();
+        let cache = self.state.screen_cache.as_mut()?;
+        if resample_geometry {
+            cache.mark_dirty();
+        }
+        let (screens, converter) = cache.refresh()?;
+        Some(NativeSnapshot {
+            screens,
+            converter,
+            inventory: crate::sys::screen::managed_display_space_ids(),
+            quiet: window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US),
+        })
     }
 
-    fn forward_screen_parameters(
+    fn inventory_matches_screens(
+        screens: &[ScreenInfo],
+        inventory: &HashMap<String, Vec<SpaceId>>,
+    ) -> bool {
+        let mut owners = HashSet::default();
+        // Inventories are read independently from current spaces. An incomplete
+        // query is not evidence that a desktop was destroyed.
+        screens.iter().all(|screen| {
+            inventory
+                .get(&screen.display_uuid)
+                .is_some_and(|spaces| screen.space.is_none_or(|space| spaces.contains(&space)))
+        }) && inventory.values().flatten().all(|space| owners.insert(*space))
+    }
+
+    fn build_forwarded_state(
         &mut self,
         screens: Vec<ScreenInfo>,
-        converter: CoordinateConverter,
-    ) {
-        self.state.last_converter = converter;
-        let forwarded = self.build_forwarded_state(screens);
-        self.state.last_sent_spaces =
-            Some(forwarded.screens.iter().map(|screen| screen.space).collect());
-        self.state.awaiting_space_switch_confirmation = false;
-        self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
-            forwarded,
-            self.state.last_converter,
-        ));
-    }
-
-    fn forward_space_snapshot(&mut self, spaces: Vec<Option<SpaceId>>) {
-        if self.state.last_sent_spaces.as_ref() == Some(&spaces) {
-            return;
-        }
-        if spaces.len() != self.state.screens.len() {
-            if !self.try_forward_authoritative_snapshot(true, true) {
-                self.schedule_screen_refresh_after(0, 0);
-            }
-            return;
-        }
-        let mut screens = self.state.screens.clone();
-        for (screen, space) in screens.iter_mut().zip(spaces.iter().copied()) {
-            screen.space = space;
-        }
-        self.state.last_sent_spaces = Some(spaces.clone());
-        let forwarded = self.build_forwarded_state(screens);
-        self.state.awaiting_space_switch_confirmation = false;
-        self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
-            forwarded,
-            self.state.last_converter,
-        ));
-    }
-
-    fn build_forwarded_state(&mut self, screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
+        inventory: HashMap<String, Vec<SpaceId>>,
+    ) -> ForwardedSpaceState {
+        // Internal WindowServer Spaces must not participate in desktop identity,
+        // remapping, or presentation invalidation.
+        let inventory: HashMap<_, Vec<_>> = inventory
+            .into_iter()
+            .map(|(display, spaces)| {
+                let spaces = spaces
+                    .into_iter()
+                    .filter(|space| {
+                        Self::is_user_space(*space) || Self::is_fullscreen_space(*space)
+                    })
+                    .collect();
+                (display, spaces)
+            })
+            .collect();
         let previous_screens = self.state.screens.clone();
+        // Positive presence only: inactive fullscreen enumeration may be incomplete.
         let fullscreen_spaces: HashSet<SpaceId> = screens
             .iter()
             .filter_map(|screen| screen.space)
+            .chain(inventory.values().flatten().copied())
             .filter(|space| Self::is_fullscreen_space(*space))
             .collect();
         let mut screens = screens;
-        self.preserve_user_spaces_during_fullscreen_transition(&previous_screens, &mut screens);
-        self.null_fullscreen_spaces(&mut screens);
-        self.null_non_user_spaces(&mut screens);
+        // Only user desktops are presentation contexts; fullscreen shows none.
+        for screen in &mut screens {
+            screen.space = screen.space.filter(|space| Self::is_user_space(*space));
+        }
 
         let previous_displays: HashSet<String> =
             previous_screens.iter().map(|screen| screen.display_uuid.clone()).collect();
@@ -598,8 +579,7 @@ impl SpacesActor {
         });
         let topology_changed =
             display_set_changed || display_order_changed || display_geometry_changed;
-        let should_force_refresh_layout =
-            topology_changed && (self.state.has_seen_display_set || !previous_displays.is_empty());
+        let should_force_refresh_layout = topology_changed && !previous_screens.is_empty();
 
         let previous_sizes: HashMap<_, _> =
             previous_screens.iter().map(|screen| (screen.id, screen.frame.size)).collect();
@@ -624,17 +604,7 @@ impl SpacesActor {
             })
             .collect();
 
-        let has_duplicate_spaces = {
-            let mut unique_spaces: HashSet<SpaceId> = HashSet::default();
-            screens
-                .iter()
-                .filter_map(|screen| screen.space)
-                .any(|space| !unique_spaces.insert(space))
-        };
-        let allow_space_remap = should_force_refresh_layout
-            && !has_duplicate_spaces
-            && screens.iter().all(|screen| screen.space.is_some());
-        let space_remaps = self.compute_space_remaps(&screens, allow_space_remap);
+        let space_remaps = self.compute_space_remaps(&screens, &inventory);
         let menu_bar_space = self.resolve_menu_bar_space(&screens);
         #[cfg(not(test))]
         let active_display_uuid = crate::sys::screen::active_menu_bar_display_uuid();
@@ -651,190 +621,204 @@ impl SpacesActor {
                         .map(|screen| screen.display_uuid.clone())
                 })
             });
-        #[cfg(test)]
-        {
-            let mut display_space_ids: HashMap<String, Vec<SpaceId>> = HashMap::default();
-            for screen in &screens {
-                if let Some(space) = screen.space {
-                    display_space_ids.entry(screen.display_uuid.clone()).or_default().push(space);
-                }
-            }
-            self.state.display_space_ids = display_space_ids;
-        }
-        #[cfg(not(test))]
-        {
-            self.state.display_space_ids = managed_display_space_ids();
-        }
 
-        if !screens.is_empty() {
-            self.state.has_seen_display_set = true;
-        }
-        self.state.visible_window_spaces = self.visible_window_spaces_for_screens(&screens);
+        // Full native inventories distinguish identity loss from switching the
+        // current Space. This can be visible before a display callback arrives.
+        let should_force_refresh_layout = should_force_refresh_layout
+            || self.state.last_forwarded.as_ref().is_some_and(|previous| {
+                previous.display_space_ids.iter().any(|(display, spaces)| {
+                    spaces.iter().any(|space| {
+                        !inventory.get(display).is_some_and(|current| current.contains(space))
+                    })
+                })
+            });
+        // Fullscreen Spaces come and go with applications. They are not desktops a
+        // display owns, so their destruction is neither identity loss nor churn.
+        let inventory: HashMap<_, Vec<_>> = inventory
+            .into_iter()
+            .map(|(display, spaces)| {
+                let spaces = spaces.into_iter().filter(|space| !fullscreen_spaces.contains(space));
+                (display, spaces.collect())
+            })
+            .collect();
+        let (membership, membership_complete) = self.visible_window_spaces_for_screens(&screens);
+        self.state.visible_window_spaces = membership;
         self.state.screens = screens.clone();
-        let releases_lifecycle_refresh_quarantine =
-            std::mem::take(&mut self.state.release_reactor_quarantine_on_next_forward);
-        ForwardedSpaceState {
+        self.state.recovering_membership = false;
+        let destroyed_spaces: HashSet<_> = self
+            .state
+            .destroyed_spaces
+            .iter()
+            .copied()
+            .filter(|space| {
+                // WindowServer also reports transient Spaces used during app
+                // activation. Only forward destruction of a Space we previously
+                // managed; an unknown ID cannot invalidate desktop geometry.
+                self.was_managed_space(*space)
+                    && !inventory.values().any(|spaces| spaces.contains(space))
+                    && !fullscreen_spaces.contains(space)
+            })
+            .collect();
+        // Corroborated removals are forwarded once. Untracked transient IDs
+        // are discarded once they are absent from the accepted native sample.
+        self.state.destroyed_spaces.retain(|space| {
+            inventory.values().any(|spaces| spaces.contains(space))
+                || fullscreen_spaces.contains(space)
+        });
+        let mut forwarded = ForwardedSpaceState {
+            revision: self.state.revision,
+            authoritative: true,
+            membership_complete,
             screens,
             fullscreen_spaces,
-            has_seen_display_set: self.state.has_seen_display_set,
+            destroyed_spaces,
             active_spaces: self.state.screens.iter().filter_map(|screen| screen.space).collect(),
             menu_bar_space,
             command_space,
-            display_space_ids: self.state.display_space_ids.clone(),
-            last_user_space_by_display: self.state.last_user_space_by_display.clone(),
+            display_space_ids: inventory,
             space_remaps,
             display_set_changed,
-            topology_changed,
-            allow_space_remap,
             should_force_refresh_layout,
-            releases_lifecycle_refresh_quarantine,
-            // Every coherent authoritative snapshot is a valid acknowledgement for
-            // the reactor's display-churn gate, including ordinary refreshes after
-            // stabilization has already ended.
-            releases_display_churn_refresh_quarantine: true,
             resized_spaces,
-            topology_window_delta: self.state.pending_topology_window_delta.take(),
             active_window_spaces: self.state.visible_window_spaces.clone(),
-        }
-    }
-
-    fn preserve_user_spaces_during_fullscreen_transition(
-        &self,
-        previous_screens: &[ScreenInfo],
-        screens: &mut [ScreenInfo],
-    ) {
-        let previous_by_display: HashMap<&str, &ScreenInfo> = previous_screens
-            .iter()
-            .filter_map(|screen| screen.display_uuid_opt().map(|uuid| (uuid, screen)))
-            .collect();
-        let entering_fullscreen = screens.iter().any(|next| {
-            let Some(display_uuid) = next.display_uuid_opt() else {
-                return false;
-            };
-            let Some(new_space) = next.space else {
-                return false;
-            };
-            Self::is_fullscreen_space(new_space)
-                && previous_by_display
-                    .get(display_uuid)
-                    .and_then(|screen| screen.space)
-                    .is_some_and(|previous_space| !Self::is_fullscreen_space(previous_space))
-        });
-        if !entering_fullscreen {
-            return;
-        }
-
-        let previous_space_owner: HashMap<SpaceId, &str> = previous_screens
-            .iter()
-            .filter_map(|screen| {
-                let display_uuid = screen.display_uuid_opt()?;
-                let space = screen.space?;
-                (!Self::is_fullscreen_space(space)).then_some((space, display_uuid))
+        };
+        let presentation_changed = self
+            .state
+            .last_forwarded
+            .as_ref()
+            .is_none_or(|previous| forwarded.presentation_changed(previous));
+        if presentation_changed
+            || self.state.last_forwarded.as_ref().is_none_or(|previous| {
+                previous.active_window_spaces != forwarded.active_window_spaces
+                    || previous.membership_complete != forwarded.membership_complete
             })
-            .collect();
-
-        for next in screens.iter_mut() {
-            let Some(display_uuid) = next.display_uuid_opt() else {
-                continue;
-            };
-            let Some(previous) = previous_by_display.get(display_uuid).copied() else {
-                continue;
-            };
-            let Some(new_space) = next.space else {
-                continue;
-            };
-            if Self::is_fullscreen_space(new_space) {
-                continue;
+        {
+            self.state.revision = self.state.revision.wrapping_add(1);
+            forwarded.revision = self.state.revision;
+            if presentation_changed {
+                // Revoke queued frames only when their presentation is stale.
+                self.state.topology_guard.invalidate(self.state.revision);
             }
-            let Some(previous_space) = previous.space else {
-                continue;
-            };
-            if previous_space == new_space || Self::is_fullscreen_space(previous_space) {
-                continue;
-            }
-            let should_rewrite =
-                previous_space_owner.get(&new_space).is_some_and(|owner| *owner != display_uuid);
-            if !should_rewrite {
-                continue;
-            }
-
-            next.space = Some(previous_space);
         }
+        self.state.last_forwarded = Some(forwarded.clone());
+        forwarded
     }
 
-    fn null_fullscreen_spaces(&self, screens: &mut [ScreenInfo]) {
-        for screen in screens {
-            if screen.space.is_some_and(Self::is_fullscreen_space) {
-                screen.space = None;
-            }
-        }
+    fn invalidate_topology(&mut self) {
+        self.state.revision = self.state.revision.wrapping_add(1);
+        self.state.display_topology_state = None;
+        self.state.refresh_pending = false;
+        self.state.topology_guard.invalidate(self.state.revision);
+        self.reactor_tx.send(reactor::Event::TopologyInvalidated(self.state.revision));
     }
 
-    fn null_non_user_spaces(&self, screens: &mut [ScreenInfo]) {
-        for screen in screens {
-            if screen.space.is_some_and(|space| {
-                !Self::is_fullscreen_space(space) && !Self::is_user_space(space)
-            }) {
-                screen.space = None;
-            }
-        }
+    /// A user desktop listed by a connected display other than the one that owned
+    /// it in the last accepted inventory, and never this display's own. Displays
+    /// exchange desktops only with a physical reconfiguration (main display change);
+    /// otherwise this is transitional borrowing, e.g. beside a fullscreen display.
+    fn borrows_another_displays_desktop(
+        &self,
+        screens: &[ScreenInfo],
+        inventory: &HashMap<String, Vec<SpaceId>>,
+    ) -> bool {
+        let Some(accepted) = self.state.last_forwarded.as_ref() else {
+            return false;
+        };
+        inventory.iter().any(|(display, spaces)| {
+            let history = self.state.last_known_display_space_ids.get(display);
+            accepted.display_space_ids.iter().any(|(owner, owned)| {
+                owner != display
+                    && screens.iter().any(|screen| screen.display_uuid == *owner)
+                    && spaces.iter().any(|space| {
+                        owned.contains(space) && !history.is_some_and(|own| own.contains(space))
+                    })
+            })
+        })
+    }
+
+    fn space_replacements_are_ambiguous(&self, inventory: &HashMap<String, Vec<SpaceId>>) -> bool {
+        let history = &self.state.last_known_display_space_ids;
+        inventory.iter().any(|(display, current)| {
+            let Some(previous) = history.get(display) else {
+                return false;
+            };
+            let removed = previous
+                .iter()
+                .filter(|space| !inventory.values().any(|spaces| spaces.contains(space)))
+                .take(2)
+                .count();
+            let added = current
+                .iter()
+                .filter(|space| {
+                    !history.values().any(|spaces| spaces.contains(space))
+                        && Self::is_user_space(**space)
+                })
+                .take(2)
+                .count();
+            removed > 0 && added > 0 && (removed != 1 || added != 1)
+        })
     }
 
     fn compute_space_remaps(
         &mut self,
         screens: &[ScreenInfo],
-        allow_space_remap: bool,
+        inventory: &HashMap<String, Vec<SpaceId>>,
     ) -> Vec<(SpaceId, SpaceId)> {
+        let history = &self.state.last_known_display_space_ids;
+        let live: HashSet<_> = inventory.values().flatten().copied().collect();
+        let known: HashSet<_> = history.values().flatten().copied().collect();
         let mut remaps = Vec::new();
-        let mut seen_displays: HashSet<String> = HashSet::default();
-        let current_space_owners: HashMap<SpaceId, &str> = screens
-            .iter()
-            .filter_map(|screen| Some((screen.space?, screen.display_uuid_opt()?)))
-            .collect();
-        let historical_space_owners: HashMap<SpaceId, String> = self
-            .state
-            .last_user_space_by_display
-            .iter()
-            .map(|(display_uuid, &space)| (space, display_uuid.clone()))
-            .collect();
-
+        let mut accepted = Vec::new();
         for screen in screens {
-            let Some(space) = screen.space else {
+            let Some(display) = screen.display_uuid_opt() else {
                 continue;
             };
-            let Some(display_uuid) = screen.display_uuid_opt() else {
+            let Some(current) = inventory.get(display) else {
                 continue;
             };
-            if !seen_displays.insert(display_uuid.to_string()) {
+            // A partial return can temporarily show another display's desktop.
+            // Neither learn that ownership nor use it as replacement evidence.
+            if current.iter().any(|space| {
+                history.iter().any(|(owner, spaces)| owner != display && spaces.contains(space))
+            }) {
                 continue;
             }
-
-            // During sleep/wake macOS can briefly report the remaining display with
-            // the space belonging to a display that has not reappeared yet. Treat
-            // that as cross-display contamination: accepting it poisons history and
-            // the eventual stable snapshot remaps the built-in display's layout onto
-            // the external display (resetting virtual workspaces in the process).
-            let target_belongs_to_another_display =
-                historical_space_owners.get(&space).is_some_and(|owner| *owner != display_uuid);
-            if target_belongs_to_another_display {
-                continue;
-            }
-
-            if let Some(previous_space) =
-                self.state.last_user_space_by_display.get(display_uuid).copied()
-                && previous_space != space
-            {
-                let source_is_now_owned_by_another_display = current_space_owners
-                    .get(&previous_space)
-                    .is_some_and(|owner| *owner != display_uuid);
-                if allow_space_remap && !source_is_now_owned_by_another_display {
-                    remaps.push((previous_space, space));
+            if let Some(previous) = history.get(display) {
+                if previous.iter().any(|space| {
+                    inventory
+                        .iter()
+                        .any(|(owner, spaces)| owner != display && spaces.contains(space))
+                }) {
+                    continue;
+                }
+                let mut removed = previous.iter().copied().filter(|space| !live.contains(space));
+                let mut added = current
+                    .iter()
+                    .copied()
+                    .filter(|space| !known.contains(space) && Self::is_user_space(*space));
+                if let (Some(old), None, Some(new), None) =
+                    (removed.next(), removed.next(), added.next(), added.next())
+                {
+                    // A unique same-display inventory delta also identifies an inactive
+                    // replacement. Multiple vanished/new IDs have no trustworthy pairing.
+                    remaps.push((old, new));
                 }
             }
-
-            self.state.last_user_space_by_display.insert(display_uuid.to_string(), space);
+            accepted.push(display.to_owned());
+            if let Some(space) = screen.space {
+                self.state.last_user_space_by_display.insert(display.to_owned(), space);
+            }
         }
-
+        for display in accepted {
+            self.state.last_known_display_space_ids.insert(
+                display.clone(),
+                inventory[&display]
+                    .iter()
+                    .copied()
+                    .filter(|space| known.contains(space) || Self::is_user_space(*space))
+                    .collect(),
+            );
+        }
         remaps
     }
 
@@ -904,7 +888,7 @@ impl SpacesActor {
     fn is_fullscreen_space(space: SpaceId) -> bool {
         #[cfg(test)]
         {
-            space.get() >= 0x400000000
+            (0x400000000..0x800000000).contains(&space.get())
         }
         #[cfg(not(test))]
         {
@@ -915,13 +899,20 @@ impl SpacesActor {
     fn is_user_space(space: SpaceId) -> bool {
         #[cfg(test)]
         {
-            let _ = space;
-            true
+            space.get() < 0x400000000
         }
         #[cfg(not(test))]
         {
             window_server::space_is_user(space.get())
         }
+    }
+
+    fn was_managed_space(&self, space: SpaceId) -> bool {
+        self.state.last_forwarded.as_ref().is_some_and(|previous| {
+            previous.screens.iter().any(|screen| screen.space == Some(space))
+                || previous.display_space_ids.values().any(|spaces| spaces.contains(&space))
+                || previous.fullscreen_spaces.contains(&space)
+        })
     }
 
     fn classify_space(&self, space: SpaceId) -> Option<reactor::SpaceEventKind> {
@@ -935,7 +926,7 @@ impl SpacesActor {
     fn visible_window_spaces_for_screens(
         &self,
         screens: &[ScreenInfo],
-    ) -> HashMap<WindowServerId, SpaceId> {
+    ) -> (HashMap<WindowServerId, SpaceId>, bool) {
         let mut active_spaces = Vec::new();
         let mut active_space_set = HashSet::default();
         for space in screens.iter().filter_map(|screen| screen.space) {
@@ -945,44 +936,61 @@ impl SpacesActor {
         }
 
         if active_spaces.is_empty() {
-            return HashMap::default();
+            return (HashMap::default(), true);
         }
 
         // A global visible-window union is not space-aware and can lag one display
         // behind another. Query every active native space independently, including
         // in tests where the per-space query is overridden.
         let mut visible = HashMap::default();
+        let mut complete = true;
         for &space in &active_spaces {
-            for wsid in window_server::space_window_list_for_connection(&[space.get()], 0, false)
-                .into_iter()
-                .map(WindowServerId::new)
-            {
+            let Some(ids) =
+                window_server::try_space_window_list_for_connection(&[space.get()], 0, false)
+            else {
+                complete = false;
+                visible.extend(
+                    self.state
+                        .visible_window_spaces
+                        .iter()
+                        .filter_map(|(&id, &known)| (known == space).then_some((id, known))),
+                );
+                continue;
+            };
+            for wsid in ids.into_iter().map(WindowServerId::new) {
+                let conflicting_space = visible
+                    .get(&wsid)
+                    .filter(|&&previous| previous != space)
+                    .and_then(|_| window_server::window_space(wsid));
                 Self::record_visible_window_space(
                     &mut visible,
                     &self.state.visible_window_spaces,
                     &active_space_set,
                     wsid,
                     space,
-                    window_server::window_space(wsid),
+                    conflicting_space,
                 );
             }
         }
 
         // The first coherent snapshot after wake/unlock can race WindowServer and
-        // temporarily contain no windows. Preserve the last accepted membership
-        // only while releasing that lifecycle quarantine. Outside recovery, an
+        // temporarily contain no windows. Carry forward accepted membership
+        // on that first observation. Outside recovery, an
         // empty result is authoritative (and is required to reconcile windows
         // whose destroy notifications were quarantined during display churn).
-        if visible.is_empty() && self.state.release_reactor_quarantine_on_next_forward {
-            self.state
-                .visible_window_spaces
-                .iter()
-                .filter_map(|(&wsid, &space)| {
-                    active_space_set.contains(&space).then_some((wsid, space))
-                })
-                .collect()
+        if visible.is_empty() && self.state.recovering_membership {
+            (
+                self.state
+                    .visible_window_spaces
+                    .iter()
+                    .filter_map(|(&wsid, &space)| {
+                        active_space_set.contains(&space).then_some((wsid, space))
+                    })
+                    .collect(),
+                false,
+            )
         } else {
-            visible
+            (visible, complete)
         }
     }
 
@@ -1020,177 +1028,171 @@ impl SpacesActor {
         }
     }
 
-    fn synthesize_topology_window_delta(
-        &mut self,
-        epoch: u64,
-        flags: DisplayReconfigFlags,
-        screens: &[ScreenInfo],
-    ) {
-        let current = self.visible_window_spaces_for_screens(screens);
-        let previous = std::mem::take(&mut self.state.pre_churn_visible_window_spaces);
-
-        let mut appeared = Vec::new();
-        let mut disappeared = Vec::new();
-
-        for (&wsid, &space) in &current {
-            match previous.get(&wsid).copied() {
-                None => appeared.push((wsid, space)),
-                Some(previous_space) if previous_space != space => {
-                    disappeared.push((wsid, previous_space));
-                    appeared.push((wsid, space));
-                }
-                Some(_) => {}
-            }
-        }
-
-        for (&wsid, &space) in &previous {
-            if !current.contains_key(&wsid) {
-                disappeared.push((wsid, space));
-            }
-        }
-
-        self.state.pending_topology_window_delta = Some(TopologyWindowDelta {
-            epoch,
-            flags,
-            appeared,
-            disappeared,
-        });
-        self.state.visible_window_spaces = current;
-    }
-
-    fn flush_pending_if_stable(&mut self) {
-        if self.should_buffer_topology_updates() {
-            return;
-        }
-
-        let pending_screen_parameters = self.state.pending_screen_parameters.take();
-        let pending_spaces = self.state.pending_spaces.take();
-
-        match (pending_screen_parameters, pending_spaces) {
-            (Some(pending), Some(spaces)) if pending.screens.len() == spaces.len() => {
-                // These two callbacks describe one native snapshot. Merge them before
-                // forwarding so the reactor's churn gate cannot observe the topology
-                // with stale space IDs and release between two WM events.
-                let mut screens = pending.screens;
-                for (screen, space) in screens.iter_mut().zip(spaces) {
-                    screen.space = space;
-                }
-                self.forward_screen_parameters(screens, pending.converter);
-            }
-            (Some(_), Some(_)) => {
-                // A topology/space count mismatch is not coherent enough to commit.
-                // Resample once the native state is ready instead of forwarding either
-                // half of the buffered snapshot.
-                if !self.try_forward_authoritative_snapshot(true, true) {
-                    self.schedule_screen_refresh_after(0, 0);
-                }
-            }
-            (Some(pending), None) => {
-                self.forward_screen_parameters(pending.screens, pending.converter);
-            }
-            (None, Some(spaces)) => {
-                self.forward_space_snapshot(spaces);
-            }
-            (None, None) => {}
-        }
-    }
-
     fn screen_snapshot_is_valid_for_commit(screens: &[ScreenInfo]) -> bool {
         let mut seen_user_spaces: HashSet<SpaceId> = HashSet::default();
-        screens.iter().all(|screen| match screen.space {
-            Some(space) if !Self::is_fullscreen_space(space) => seen_user_spaces.insert(space),
-            _ => true,
-        })
-    }
-
-    fn screen_snapshot_is_ready_for_authoritative_commit(
-        screens: &[ScreenInfo],
-        require_complete_spaces: bool,
-    ) -> bool {
+        let mut seen_displays = HashSet::default();
         !screens.is_empty()
-            && (!require_complete_spaces || screens.iter().all(|screen| screen.space.is_some()))
-            && Self::screen_snapshot_is_valid_for_commit(screens)
+            && screens.iter().all(|screen| {
+                let frame = screen.frame;
+                screen.space.is_some()
+                    && screen.display_uuid_opt().is_some_and(|uuid| seen_displays.insert(uuid))
+                    && [
+                        frame.origin.x,
+                        frame.origin.y,
+                        frame.size.width,
+                        frame.size.height,
+                        screen.backing_scale,
+                    ]
+                    .iter()
+                    .all(|value| value.is_finite())
+                    && frame.size.width > 0.0
+                    && frame.size.height > 0.0
+                    && screen.backing_scale > 0.0
+                    && match screen.space {
+                        Some(space) if !Self::is_fullscreen_space(space) => {
+                            seen_user_spaces.insert(space)
+                        }
+                        _ => true,
+                    }
+            })
     }
 
-    fn process_screen_refresh(&mut self, attempt: u8, allow_retry: bool) {
-        if self.should_buffer_topology_updates() {
-            self.state.refresh_deferred_until_stable = true;
-            self.state.refresh_pending = false;
-            return;
-        }
-
-        let Some((screens, converter)) = self.collect_state() else {
-            if allow_retry && attempt < REFRESH_MAX_RETRIES {
-                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
-                return;
-            }
-            self.finish_screen_refresh_attempts();
-            return;
-        };
-
-        if !Self::screen_snapshot_is_ready_for_authoritative_commit(&screens, true) {
-            if allow_retry && attempt < REFRESH_MAX_RETRIES {
-                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
-                return;
-            }
-            self.finish_screen_refresh_attempts();
-            return;
-        }
-
-        let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
-        if self.state.awaiting_space_switch_confirmation
-            && self.state.last_sent_spaces.as_ref() == Some(&spaces)
-            && allow_retry
-            && attempt < REFRESH_MAX_RETRIES
-        {
-            self.schedule_screen_refresh_after(REFRESH_SPACE_SWITCH_DELAY_NS, attempt + 1);
-            return;
-        }
-
-        self.forward_screen_parameters(screens, converter);
-        self.state.awaiting_space_switch_confirmation = false;
+    fn process_screen_refresh(&mut self, attempt: u8, snapshot: Option<NativeSnapshot>) {
         self.state.refresh_pending = false;
-    }
-
-    fn finish_screen_refresh_attempts(&mut self) {
-        self.state.refresh_pending = false;
-
-        // Wake and unlock set this flag before the refresh starts, and it is
-        // consumed only by build_forwarded_state after a coherent snapshot is
-        // forwarded. Keep trying when the bounded retry sequence expires; if
-        // we stop here, the reactor's lifecycle quarantine can never be
-        // released because no later snapshot is guaranteed to arrive.
-        if self.state.release_reactor_quarantine_on_next_forward {
-            self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, 0);
+        if self.lifecycle_quarantined() {
+            return; // Wake/unlock schedules a fresh sample.
+        }
+        if self.reconcile_snapshot(true, attempt, snapshot) {
+            return;
+        }
+        if attempt < REFRESH_MAX_RETRIES {
+            self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
+        } else if !self.topology_is_authoritative() {
+            tracing::warn!(
+                revision = self.state.revision,
+                "Display snapshot still unavailable; retaining last layout and retrying in one second"
+            );
+            self.schedule_screen_refresh_after(REFRESH_RECOVERY_DELAY_NS, 0);
         }
     }
 
-    fn try_forward_authoritative_snapshot(
+    fn try_forward_authoritative_snapshot(&mut self, force: bool, attempt: u8) -> bool {
+        if self.state.refresh_pending || self.lifecycle_quarantined() {
+            return false;
+        }
+        let snapshot = self.collect_state();
+        self.reconcile_snapshot(force, attempt, snapshot)
+    }
+
+    fn reconcile_snapshot(
         &mut self,
         force: bool,
-        require_complete_spaces: bool,
+        attempt: u8,
+        snapshot: Option<NativeSnapshot>,
     ) -> bool {
-        if self.state.refresh_pending || self.state.display_churn_active {
-            return false;
-        }
-
-        let Some((screens, converter)) = self.collect_state() else {
+        let Some(NativeSnapshot {
+            screens,
+            converter,
+            mut inventory,
+            quiet,
+        }) = snapshot
+        else {
+            self.reject_native_snapshot();
             return false;
         };
-        if !Self::screen_snapshot_is_ready_for_authoritative_commit(
-            &screens,
-            require_complete_spaces,
-        ) {
+        // Native Space enumeration order carries no identity or geometry authority.
+        for spaces in inventory.values_mut() {
+            spaces.sort_unstable();
+        }
+        if !Self::screen_snapshot_is_valid_for_commit(&screens)
+            || !Self::inventory_matches_screens(&screens, &inventory)
+            || self.space_replacements_are_ambiguous(&inventory)
+        {
+            self.reject_native_snapshot();
             return false;
         }
-
-        let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
-        if !force && self.state.last_sent_spaces.as_ref() == Some(&spaces) {
+        // Detect churn even when native membership gets here before the display callback.
+        let physical_topology_changed = self.state.screens.len() != screens.len()
+            || screens.iter().any(|screen| {
+                !self.state.screens.iter().any(|old| {
+                    old.display_uuid == screen.display_uuid
+                        && old.frame == screen.frame
+                        && old.backing_scale == screen.backing_scale
+                        && old.id == screen.id
+                })
+            });
+        let identity_lost = self.state.last_forwarded.as_ref().is_some_and(|previous| {
+            previous
+                .display_space_ids
+                .values()
+                .flatten()
+                .any(|old| !inventory.values().any(|spaces| spaces.contains(old)))
+        });
+        let borrowed = self.borrows_another_displays_desktop(&screens, &inventory);
+        if !self.state.screens.is_empty()
+            && (physical_topology_changed || identity_lost || borrowed)
+            && !self.state.display_churn_active
+        {
+            self.begin_display_churn(DisplayReconfigFlags::empty());
+        }
+        // Without physical evidence, borrowing is accepted only if it outlasts the
+        // whole retry burst: a real move is not frozen, a transition never commits.
+        let required_hits = if borrowed
+            && !physical_topology_changed
+            && self.state.display_churn_flags.is_empty()
+        {
+            REFRESH_MAX_RETRIES
+        } else {
+            DISPLAY_STABLE_REQUIRED_HITS
+        };
+        let recovering = self.state.display_churn_active || self.state.recovering_membership;
+        if recovering && !self.observe_stable_topology(&screens, &inventory, quiet, required_hits) {
             return false;
         }
-
-        self.forward_screen_parameters(screens, converter);
+        let spaces: Vec<_> = screens.iter().map(|screen| screen.space).collect();
+        if (!force
+            || (self.state.awaiting_space_switch_confirmation && attempt < REFRESH_MAX_RETRIES))
+            && self.state.last_sent_spaces.as_ref() == Some(&spaces)
+        {
+            return false;
+        }
+        let forwarded = self.build_forwarded_state(screens, inventory);
+        self.state.last_sent_spaces =
+            Some(forwarded.screens.iter().map(|screen| screen.space).collect());
+        self.state.awaiting_space_switch_confirmation = false;
+        let membership_complete = forwarded.membership_complete;
+        self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(forwarded, converter));
+        if self.state.display_churn_active {
+            tracing::info!(revision = self.state.revision,
+                elapsed_ms = self.state.churn_started.take().map(|at| at.elapsed().as_millis()),
+                flags = ?self.state.display_churn_flags,
+                appeared_dropped = self.state.quarantine_stats.appeared_dropped,
+                destroyed_dropped = self.state.quarantine_stats.destroyed_dropped,
+                "Display reconciliation finished");
+            self.state.display_churn_active = false;
+            self.state.display_churn_flags = DisplayReconfigFlags::empty();
+        }
+        self.state.display_topology_state = None;
+        if !membership_complete {
+            let (delay, next) = if attempt < REFRESH_MAX_RETRIES {
+                (REFRESH_RETRY_DELAY_NS, attempt + 1)
+            } else {
+                (REFRESH_RECOVERY_DELAY_NS, 0)
+            };
+            self.schedule_screen_refresh_after(delay, next);
+        }
         true
+    }
+
+    fn reject_native_snapshot(&mut self) {
+        // Native queries can fail before the physical-display callback arrives.
+        // Retain the accepted model, but revoke writes until a complete sample settles.
+        // Repeated failures share one revision and the existing bounded retry batches.
+        if !self.state.display_churn_active {
+            self.begin_display_churn(DisplayReconfigFlags::empty());
+        } else {
+            self.state.display_topology_state = None;
+        }
     }
 
     fn schedule_screen_refresh(&mut self) {
@@ -1198,29 +1200,21 @@ impl SpacesActor {
     }
 
     fn schedule_screen_refresh_after(&mut self, delay_ns: i64, attempt: u8) {
+        if self.state.refresh_pending {
+            return;
+        }
+        self.state.refresh_pending = true;
         if !self.state.timers_enabled {
             return;
         }
-
-        if attempt == 0 && self.state.display_churn_active {
-            self.state.refresh_deferred_until_stable = true;
-            return;
-        }
-
-        if attempt == 0 {
-            if self.state.refresh_pending {
-                return;
-            }
-            self.state.refresh_pending = true;
-        } else if !self.state.refresh_pending {
-            self.state.refresh_pending = true;
-        }
-
         let sender = self.sender.clone();
+        let revision = self.state.revision;
         queue::main().after_f_s(
             Time::new_after(Time::NOW, delay_ns),
-            (sender, attempt),
-            |(sender, attempt)| sender.send(Event::ProcessScreenRefresh { attempt }),
+            (sender, revision, attempt),
+            |(sender, revision, attempt)| {
+                sender.send(Event::ProcessScreenRefresh { revision, attempt })
+            },
         );
     }
 
@@ -1228,11 +1222,11 @@ impl SpacesActor {
         if !Self::should_begin_display_churn(flags) {
             return;
         }
-        let expected_epoch = self.begin_display_churn(flags);
+        self.begin_display_churn(flags);
         if let Some(screen_cache) = self.state.screen_cache.as_mut() {
             screen_cache.mark_dirty();
         }
-        self.schedule_display_stabilization_check(expected_epoch);
+        self.schedule_screen_refresh();
     }
 
     fn should_begin_display_churn(flags: DisplayReconfigFlags) -> bool {
@@ -1256,150 +1250,49 @@ impl SpacesActor {
         )
     }
 
-    fn begin_display_churn(&mut self, flags: DisplayReconfigFlags) -> u64 {
+    fn begin_display_churn(&mut self, flags: DisplayReconfigFlags) {
         let was_active = self.state.display_churn_active;
         self.state.display_churn_active = true;
         self.state.display_churn_flags |= flags;
-        self.state.display_churn_epoch = self.state.display_churn_epoch.wrapping_add(1);
         self.state.display_topology_state = None;
         self.state.last_sent_spaces = None;
         if !was_active {
-            self.state.pre_churn_visible_window_spaces = self.state.visible_window_spaces.clone();
+            self.state.churn_started = Some(Instant::now());
+            tracing::info!(
+                revision = self.state.revision,
+                ?flags,
+                "Display reconciliation started"
+            );
         }
-        if !was_active {
-            let _ = display_churn::begin(flags);
-            self.reactor_tx.send(reactor::Event::DisplayChurnBegin);
-        } else {
-            let _ = display_churn::begin(flags);
-        }
-        self.state.display_churn_epoch
+        self.invalidate_topology();
     }
 
-    fn schedule_display_stabilization_check(&self, expected_epoch: u64) {
-        self.schedule_display_stabilization(expected_epoch, 0, DISPLAY_CHURN_QUIET_NS);
-    }
-
-    fn schedule_display_stabilization_retry(&self, expected_epoch: u64, attempt: u8) {
-        self.schedule_display_stabilization(expected_epoch, attempt, DISPLAY_STABILIZE_RETRY_NS);
-    }
-
-    fn schedule_display_stabilization(&self, expected_epoch: u64, attempt: u8, delay_ns: i64) {
-        if !self.state.timers_enabled {
-            return;
-        }
-
-        let sender = self.sender.clone();
-        queue::main().after_f_s(
-            Time::new_after(Time::NOW, delay_ns),
-            (sender, expected_epoch, attempt),
-            |(sender, expected_epoch, attempt)| {
-                sender.send(Event::CheckDisplayStabilization { expected_epoch, attempt })
-            },
-        );
-    }
-
-    fn retry_display_stabilization(&self, expected_epoch: u64, attempt: u8) -> bool {
-        if attempt < DISPLAY_STABILIZE_MAX_ATTEMPTS {
-            self.schedule_display_stabilization_retry(expected_epoch, attempt + 1);
-            return true;
-        }
-        false
-    }
-
-    fn attempt_finish_display_churn(&mut self, expected_epoch: u64, attempt: u8) {
-        if expected_epoch != self.state.display_churn_epoch || !self.state.display_churn_active {
-            return;
-        }
-
-        let Some((screens, converter)) = self.collect_state() else {
-            if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch, true);
-            }
-            return;
-        };
-
-        if screens.is_empty() {
-            if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch, true);
-            }
-            return;
-        }
-
-        let fingerprint = DisplayTopologyFingerprint(
-            screens
-                .iter()
-                .map(|d| {
-                    (
-                        d.display_uuid.clone(),
-                        d.frame.origin.x.to_bits(),
-                        d.frame.origin.y.to_bits(),
-                        d.frame.size.width.to_bits(),
-                        d.frame.size.height.to_bits(),
-                        d.space.map(|space| space.get()),
-                    )
-                })
-                .collect(),
-        );
-
+    fn observe_stable_topology(
+        &mut self,
+        screens: &[ScreenInfo],
+        inventory: &HashMap<String, Vec<SpaceId>>,
+        quiet: bool,
+        required_hits: u8,
+    ) -> bool {
+        // Compare the full sample, including inactive native desktops. Enumeration
+        // order alone is irrelevant; physical identity, scale and geometry are not.
+        let mut screens = screens.to_vec();
+        screens.sort_by(|a, b| a.display_uuid.cmp(&b.display_uuid));
         let hits = match self.state.display_topology_state.as_mut() {
-            Some(existing) if existing.fingerprint == fingerprint => {
+            Some(existing) if existing.screens == screens && existing.inventory == *inventory => {
                 existing.hits = existing.hits.saturating_add(1);
                 existing.hits
             }
             _ => {
-                self.state.display_topology_state =
-                    Some(DisplayTopologyState { fingerprint, hits: 1 });
-                self.schedule_display_stabilization_retry(expected_epoch, attempt + 1);
-                return;
+                self.state.display_topology_state = Some(DisplayTopologyState {
+                    screens,
+                    inventory: inventory.clone(),
+                    hits: 1,
+                });
+                1
             }
         };
-
-        if hits >= DISPLAY_STABLE_REQUIRED_HITS {
-            if !Self::screen_snapshot_is_ready_for_authoritative_commit(&screens, true) {
-                self.state.display_topology_state = None;
-                if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    self.finish_display_churn(expected_epoch, true);
-                }
-                return;
-            }
-            if !window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US) {
-                if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    self.finish_display_churn(expected_epoch, true);
-                }
-                return;
-            }
-            let flags = self.state.display_churn_flags;
-            self.synthesize_topology_window_delta(expected_epoch, flags, &screens);
-            self.state.pending_screen_parameters = None;
-            self.state.pending_spaces = None;
-            // Forward the stabilized snapshot directly; its authoritative state
-            // acknowledges the reactor's churn gate when it is incorporated.
-            self.forward_screen_parameters(screens, converter);
-            self.finish_display_churn(expected_epoch, false);
-            return;
-        }
-
-        if !self.retry_display_stabilization(expected_epoch, attempt) {
-            self.finish_display_churn(expected_epoch, true);
-        }
-    }
-
-    fn finish_display_churn(&mut self, expected_epoch: u64, schedule_refresh: bool) {
-        if expected_epoch != self.state.display_churn_epoch || !self.state.display_churn_active {
-            return;
-        }
-        self.state.display_churn_active = false;
-        self.state.display_churn_epoch = self.state.display_churn_epoch.wrapping_add(1);
-        self.state.display_churn_flags = DisplayReconfigFlags::empty();
-        self.state.display_topology_state = None;
-        let _ = display_churn::end();
-
-        if self.state.refresh_deferred_until_stable {
-            self.state.refresh_deferred_until_stable = false;
-        }
-        if schedule_refresh {
-            self.schedule_screen_refresh_after(0, 0);
-        }
+        hits >= required_hits && quiet
     }
 }
 
