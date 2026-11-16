@@ -90,6 +90,7 @@ use crate::model::RiftState;
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
+use crate::model::hidden_window_placement::{HiddenWindowPlacement, HideCorner};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::window_store::NativeFullscreenTransition;
@@ -1809,6 +1810,13 @@ impl Reactor {
                 if matches!(kind, SpaceEventKind::User)
                     && let Some(space) = resolved.filter(|space| *space != sid)
                     && self.defer_native_space_move(wsid, space)
+                {
+                    return Ok(EventOutcome::no_change());
+                }
+                // Parking past another display takes a window off its own Space natively only.
+                if resolved == Some(sid)
+                    && window_server::window_space(wsid)
+                        .is_some_and(|native| self.park_owner_space(wsid, native) == resolved)
                 {
                     return Ok(EventOutcome::no_change());
                 }
@@ -4779,6 +4787,24 @@ impl Reactor {
         self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic)
     }
 
+    /// The Space a hidden window belongs to when `native` is only where Rift parked it: between
+    /// two displays that is past a corner of another one. A window returning to the display it
+    /// was evicted from has really moved.
+    fn park_owner_space(&self, wsid: WindowServerId, native: SpaceId) -> Option<SpaceId> {
+        let wid = self.state.windows.tracked_window_id(wsid)?;
+        let owner =
+            self.hidden_assigned_space_for_window_id(wid).filter(|owner| *owner != native)?;
+        let engine = &self.layout_manager.layout_engine;
+        if engine.eviction_ordinal(&self.state.windows, wid, native).is_some() {
+            return None;
+        }
+        let frame = self.state.windows.window(wid)?.frame_monotonic;
+        let screen = self.space_state.screen_by_space(owner)?.frame;
+        let screens: Vec<_> = self.space_state.screens.iter().map(|screen| screen.frame).collect();
+        let spot = HiddenWindowPlacement::calculate(screen, frame, HideCorner::default(), &screens);
+        (self.best_space_for_frame(&spot) == Some(native)).then_some(owner)
+    }
+
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.layout_manager
             .layout_engine
@@ -4990,7 +5016,11 @@ impl Reactor {
             } else {
                 None
             };
-        let resolved = self.state.windows.resolve_native_space(wsid, observation, pending, live);
+        let resolved = self
+            .state
+            .windows
+            .resolve_native_space(wsid, observation, pending, live)
+            .map(|space| self.park_owner_space(wsid, space).unwrap_or(space));
         trace!(
             ?wsid,
             ?observation,

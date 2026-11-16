@@ -2585,6 +2585,92 @@ fn hidden_window_can_move_to_another_native_space_without_staying_pinned_to_old_
     assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
 }
 
+/// Three displays in a row. A window of the middle one sits on its hidden workspace, parked
+/// where macOS files it under the right display. Returns the middle and right Spaces.
+fn window_parked_between_displays() -> (Reactor, WindowId, WindowServerId, SpaceId, SpaceId) {
+    use crate::model::hidden_window_placement::HiddenWindowPlacement;
+    let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
+    settings.mode = crate::common::config::WorkspaceMode::PerDisplay;
+    settings.default_workspace_count = 2;
+    let mut reactor = test_reactor_with_workspace_settings(&settings);
+    let screens =
+        [0., 1000., 2000.].map(|x| CGRect::new(CGPoint::new(x, 0.), CGSize::new(1000., 800.)));
+    let [left, middle, right] = [1, 2, 3].map(SpaceId::new);
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(131);
+
+    reactor.handle_event(space_state_event(screens.to_vec(), vec![
+        Some(left),
+        Some(middle),
+        Some(right),
+    ]));
+    reactor.add_test_app(1);
+    let workspaces = reactor.test_workspace_ids(middle);
+    let _ = reactor.test_workspace_ids(right);
+    let frame = CGRect::new(CGPoint::new(1100., 100.), CGSize::new(400., 300.));
+    reactor.add_test_window(wid, wsid, Some(middle), frame);
+    assert!(reactor.set_test_active_workspace(middle, workspaces[1]));
+    assert!(reactor.assign_test_window_to_workspace(middle, wid, workspaces[0]));
+
+    assert!(reactor.update_layout_or_warn(false, true, None));
+    let target = reactor.transaction_manager.get_target_frame(wsid).unwrap();
+    // macOS keeps the top of a parked window above the bottom edge.
+    let parked = CGRect::new(CGPoint::new(target.origin.x, target.origin.y - 41.), target.size);
+    assert!(
+        screens
+            .iter()
+            .all(|screen| HiddenWindowPlacement::is_hidden(*screen, parked, &screens)),
+        "a parked window must not show on a neighbouring display: {parked:?}"
+    );
+    reactor.state.windows.window_mut(wid).unwrap().frame_monotonic = parked;
+    (reactor, wid, wsid, middle, right)
+}
+
+fn report_window_on_space(reactor: &mut Reactor, wsid: WindowServerId, from: SpaceId, to: SpaceId) {
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![to.get()]));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
+    window_server_destroyed(reactor, wsid, from, SpaceEventKind::User);
+    window_server_appeared(reactor, wsid, to, SpaceEventKind::User);
+    let mut snapshot = forwarded_space_state(reactor.space_state.screens.clone());
+    snapshot.membership_complete = true;
+    snapshot.active_window_spaces.insert(wsid, to);
+    reactor.handle_event(Event::SpaceStateChanged(snapshot));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+}
+
+#[test]
+fn window_parked_past_a_neighbouring_display_keeps_its_workspace() {
+    let (mut reactor, wid, wsid, middle, right) = window_parked_between_displays();
+    let workspace = reactor.test_workspace_for_window(middle, wid);
+
+    report_window_on_space(&mut reactor, wsid, middle, right);
+
+    assert!(workspace.is_some());
+    assert_eq!(reactor.test_workspace_for_window(middle, wid), workspace);
+
+    // Whichever order the two halves of that move arrive in, the window stays placeable.
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![right.get()]));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
+    window_server_appeared(&mut reactor, wsid, right, SpaceEventKind::User);
+    window_server_destroyed(&mut reactor, wsid, middle, SpaceEventKind::User);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+    assert!(reactor.state.windows.can_place_window(wid));
+}
+
+#[test]
+fn window_evicted_from_the_display_it_is_parked_past_returns_to_it() {
+    let (mut reactor, wid, wsid, middle, right) = window_parked_between_displays();
+    let from = reactor.test_workspace_ids(right)[0];
+    let engine = &mut reactor.layout_manager.layout_engine;
+    engine.note_eviction(&reactor.state.windows, wid, from);
+
+    report_window_on_space(&mut reactor, wsid, middle, right);
+
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(right));
+}
+
 #[test]
 fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_workspaces() {
     let (mut reactor, wid, wsid, space1, space2, _moved_frame) =

@@ -102,10 +102,12 @@ impl HiddenWindowPlacement {
         preferred_corner: HideCorner,
         other_screens: &[CGRect],
     ) -> CGRect {
-        let overlap = |candidate: &CGRect| {
-            other_screens
-                .iter()
-                .filter(|other| **other != screen)
+        let others = || other_screens.iter().filter(|other| **other != screen);
+        // A spot only reveals a pixel on the display it is parked past.
+        let overlap = |host: CGRect, candidate: &CGRect| {
+            std::iter::once(&screen)
+                .chain(others())
+                .filter(|other| **other != host)
                 .map(|other| Self::intersection_area(*candidate, *other))
                 .sum::<f64>()
         };
@@ -119,12 +121,19 @@ impl HiddenWindowPlacement {
                 CGSize::new(window.size.width, window.size.height.min(screen.size.height)),
             )
         });
+        // Between two displays every spot beside this one lies on a neighbour, while a
+        // corner of another display can still be free. This display's own spots win ties.
+        let borrowed = corners.into_iter().flat_map(|corner| {
+            others().map(move |other| (*other, Self::rect_for_corner(*other, window, corner)))
+        });
         bottom
             .into_iter()
             .chain(side)
+            .map(|candidate| (screen, candidate))
+            .chain(borrowed)
             // Score each candidate once; a comparator otherwise rescans all
             // displays for the current best candidate on every comparison.
-            .map(|candidate| (candidate, overlap(&candidate)))
+            .map(|(host, candidate)| (candidate, overlap(host, &candidate)))
             .min_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(candidate, _)| candidate)
             .unwrap_or(window)
@@ -210,5 +219,24 @@ mod tests {
             HiddenWindowPlacement::calculate(upper, window, HideCorner::BottomRight, &[lower]);
         assert_eq!(hidden, rect(2000.0, -1049.0, 1007.0, 1049.0));
         assert!(HiddenWindowPlacement::is_hidden(upper, hidden, &[lower]));
+    }
+
+    #[test]
+    fn borrows_a_free_corner_when_displays_flank_both_sides() {
+        let screens = [0.0, 1000.0, 2000.0].map(|x| rect(x, 0.0, 1000.0, 800.0));
+        let hidden = HiddenWindowPlacement::calculate(
+            screens[1],
+            rect(1100.0, 100.0, 400.0, 300.0),
+            HideCorner::BottomRight,
+            &screens,
+        );
+        assert_eq!(hidden, rect(2999.0, 799.0, 400.0, 300.0));
+        // macOS keeps the top of a parked window above the bottom edge.
+        let clamped = rect(hidden.origin.x, hidden.origin.y - 41.0, 400.0, 300.0);
+        assert!(
+            screens
+                .iter()
+                .all(|screen| HiddenWindowPlacement::is_hidden(*screen, clamped, &screens))
+        );
     }
 }
