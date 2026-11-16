@@ -1461,7 +1461,9 @@ fn keyboard_controls(
     );
     let field = options::<objc2_app_kit::NSTextField>(ui, "System window ID");
     assert_eq!(field.stringValue().to_string(), "123");
-    choose(&options::<NSPopUpButton>(ui, "Display"), 1);
+    // The Settings window also has a Display selector; use this command's popover.
+    let content = field.window().unwrap().contentView().unwrap();
+    choose(&named::<NSPopUpButton>(&content, "Display").unwrap(), 1);
     let edited = apply(pending);
     assert_eq!(
         edited.keys["Alt + D"],
