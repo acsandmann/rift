@@ -738,6 +738,7 @@ pub enum MouseAction {
     #[setting(label = "Move window")]
     Move,
     /// Resize a window from anywhere inside it by dragging the edges nearest to the press.
+    #[setting(label = "Resize window")]
     Resize,
 }
 
