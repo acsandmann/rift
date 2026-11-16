@@ -6374,6 +6374,7 @@ impl Reactor {
         &self,
         origin: CGPoint,
         direction: Direction,
+        excluded_origin: Option<CGPoint>,
     ) -> Option<&ScreenInfo> {
         fn interval_gap(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
             if a_max < b_min {
@@ -6390,7 +6391,8 @@ impl Reactor {
         for screen in &self.space_state.screens {
             let frame = screen.frame;
 
-            if frame.contains(origin) {
+            if frame.contains(origin) || excluded_origin.is_some_and(|point| frame.contains(point))
+            {
                 continue;
             }
 
@@ -6442,7 +6444,7 @@ impl Reactor {
         match selector {
             DisplaySelector::Direction(direction) => {
                 let origin = origin_override.or_else(|| self.current_screen_center())?;
-                self.screen_for_direction_from_point(origin, *direction)
+                self.screen_for_direction_from_point(origin, *direction, None)
             }
             DisplaySelector::Index(index) => self.screens_in_physical_order().get(*index).copied(),
             DisplaySelector::Uuid(uuid) => {
@@ -6498,7 +6500,10 @@ impl Reactor {
                     + 1.0,
             ),
         };
-        self.screen_for_direction_from_point(wrapped_origin, *direction)
+        // The source can be the outermost display on both edges when displays
+        // overlap along this axis (for example, vertically stacked displays).
+        // Wrapping must still choose another display.
+        self.screen_for_direction_from_point(wrapped_origin, *direction, Some(origin))
     }
 
     fn frame_on_display(

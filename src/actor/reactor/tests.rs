@@ -4926,38 +4926,51 @@ fn per_display_workspace_to_display_moves_contents_to_corresponding_ordinal() {
 
 #[test]
 fn moving_workspace_direction_wrap_is_opt_in() {
-    let (mut apps, mut reactor) = test_context();
-    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let middle = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    let right = CGRect::new(CGPoint::new(2000., 0.), CGSize::new(1000., 1000.));
-    let (left_space, middle_space, right_space) =
-        (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
-    reactor.handle_event(space_state_event(vec![right, left, middle], vec![
-        Some(right_space),
-        Some(left_space),
-        Some(middle_space),
-    ]));
+    let horizontal = [
+        CGRect::new(CGPoint::new(2000., 0.), CGSize::new(1000., 1000.)),
+        CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+        CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
+    ];
+    let vertical = [
+        CGRect::new(CGPoint::new(-212., -1049.), CGSize::new(1920., 1049.)),
+        CGRect::new(CGPoint::new(0., 34.), CGSize::new(1512., 948.)),
+    ];
+    for (frames, direction) in [
+        (horizontal.as_slice(), Direction::Right),
+        (vertical.as_slice(), Direction::Left),
+        (vertical.as_slice(), Direction::Right),
+    ] {
+        let (mut apps, mut reactor) = test_context();
+        let spaces: Vec<_> = (1..=frames.len()).map(|id| SpaceId::new(id as _)).collect();
+        reactor.handle_event(space_state_event(
+            frames.to_vec(),
+            spaces.iter().copied().map(Some).collect(),
+        ));
 
-    let mut window = make_window(1);
-    window.frame = CGRect::new(CGPoint::new(2100., 100.), CGSize::new(400., 400.));
-    apps.make_app_and_settle(&mut reactor, 1, vec![window]);
-    let moved = WindowId::new(1, 1);
+        let mut window = make_window(1);
+        window.frame = CGRect::new(
+            CGPoint::new(frames[0].origin.x + 100., frames[0].origin.y + 100.),
+            CGSize::new(400., 400.),
+        );
+        apps.make_app_and_settle(&mut reactor, 1, vec![window]);
+        let moved = WindowId::new(1, 1);
 
-    reactor.handle_event(Event::Command(Command::Reactor(
-        ReactorCommand::MoveWorkspaceToDisplay {
-            selector: DisplaySelector::Direction(Direction::Right),
-            wrap_around: false,
-        },
-    )));
-    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(right_space));
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWorkspaceToDisplay {
+                selector: DisplaySelector::Direction(direction),
+                wrap_around: false,
+            },
+        )));
+        assert_eq!(reactor.assigned_space_for_window_id(moved), Some(spaces[0]));
 
-    reactor.handle_event(Event::Command(Command::Reactor(
-        ReactorCommand::MoveWorkspaceToDisplay {
-            selector: DisplaySelector::Direction(Direction::Right),
-            wrap_around: true,
-        },
-    )));
-    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(left_space));
+        reactor.handle_event(Event::Command(Command::Reactor(
+            ReactorCommand::MoveWorkspaceToDisplay {
+                selector: DisplaySelector::Direction(direction),
+                wrap_around: true,
+            },
+        )));
+        assert_eq!(reactor.assigned_space_for_window_id(moved), Some(spaces[1]));
+    }
 }
 
 #[test]
