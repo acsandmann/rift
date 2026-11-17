@@ -439,16 +439,33 @@ impl Geometry {
                 .count()
         };
         for column in &state.columns {
-            let active_rows = column.windows().enumerate().filter(|(_, w)| !inactive.contains(*w));
-            let row_count = if inactive.is_empty() {
-                column.rows.len()
-            } else {
-                active_rows.clone().count()
-            };
-            if row_count == 0 {
+            let active_rows = column.rows.iter().filter(|row| !inactive.contains(&row.window));
+            let mut rows = Vec::with_capacity(column.rows.len());
+            let mut min: f64 = 1.0;
+            let mut fixed: f64 = 0.0;
+            let mut max = f64::INFINITY;
+            let mut flexible = false;
+            for row in active_rows.clone() {
+                let c = constraint(&row.window);
+                let fixed_width = c.fixed_for_axis(true);
+                min = min.max(c.min_width);
+                fixed = fixed.max(fixed_width.unwrap_or(0.0));
+                flexible |= fixed_width.is_none();
+                if c.max_width > 0.0 {
+                    max = max.min(c.max_width);
+                }
+                let fixed_height = c.fixed_for_axis(false);
+                rows.push(AxisConstraints {
+                    min: c.min_height,
+                    fixed: fixed_height,
+                    max: (c.max_height > 0.0).then_some(c.max_height),
+                    weight: (row.height - c.min_height).max(0.001),
+                    can_grow: fixed_height.is_none(),
+                });
+            }
+            if rows.is_empty() {
                 continue;
             }
-            // Expansion is derived geometry; keep the requested width for later.
             let base = if settings.expand_single_column && active_columns == 1 {
                 tiling.size.width
             } else {
@@ -460,19 +477,6 @@ impl Geometry {
                     inactive,
                 )
             };
-            let mut min: f64 = 1.0;
-            let mut fixed: f64 = 0.0;
-            let mut max = f64::INFINITY;
-            let mut flexible = false;
-            for (_, wid) in active_rows.clone() {
-                let c = constraint(wid);
-                min = min.max(c.min_width);
-                fixed = fixed.max(c.fixed_for_axis(true).unwrap_or(0.0));
-                flexible |= c.resizable_for_axis(true);
-                if c.max_width > 0.0 {
-                    max = max.min(c.max_width);
-                }
-            }
             let width = if flexible {
                 base.min(max).max(min).max(fixed)
             } else {
@@ -483,26 +487,12 @@ impl Geometry {
                 world_x: x,
                 width,
             });
-            let available = (tiling.size.height
-                - gaps.inner.vertical * row_count.saturating_sub(1) as f64)
-                .max(0.0);
-            let rows: Vec<_> = active_rows
-                .clone()
-                .map(|(row, wid)| {
-                    let c = constraint(wid);
-                    AxisConstraints {
-                        min: c.min_height,
-                        fixed: c.fixed_for_axis(false),
-                        max: (c.max_height > 0.0).then_some(c.max_height),
-                        weight: (column.rows[row].height - c.min_height).max(0.001),
-                        can_grow: c.resizable_for_axis(false),
-                    }
-                })
-                .collect();
-            let heights = solve_axis_lengths(&rows, available);
+            let available =
+                (tiling.size.height - gaps.inner.vertical * (rows.len() - 1) as f64).max(0.0);
+            let heights = solve_axis_lengths(rows, available);
             let mut y = tiling.origin.y;
-            for (geometry_row, (_, &wid)) in active_rows.enumerate() {
-                let height = heights[geometry_row];
+            for (row, height) in active_rows.zip(heights) {
+                let wid = row.window;
                 let mut size = CGSize::new(width, height);
                 let c = constraint(&wid);
                 size.width = c.fixed_for_axis(true).unwrap_or(width).max(c.min_width).min(width);
@@ -854,8 +844,8 @@ impl LayoutState {
         })
     }
 
-    fn all_windows(&self) -> Vec<WindowId> {
-        self.columns.iter().flat_map(|c| c.windows().copied()).collect()
+    fn windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.columns.iter().flat_map(|c| c.windows().copied())
     }
 
     fn activate(&mut self, wid: WindowId) -> bool {
@@ -1754,11 +1744,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
         match query {
-            WindowQuery::All => self.all_windows_in_layout(layout),
-            WindowQuery::Visible => self
-                .all_windows_in_layout(layout)
+            WindowQuery::All | WindowQuery::Visible => self
+                .layouts
+                .get(layout)
                 .into_iter()
-                .filter(|w| self.window_participates(*w))
+                .flat_map(LayoutState::windows)
+                .filter(|&window| {
+                    matches!(query, WindowQuery::All) || self.window_participates(window)
+                })
                 .collect(),
             WindowQuery::Selection => self.visible_windows_under_selection(layout),
             WindowQuery::Stack(_) => Vec::new(),
@@ -1783,24 +1776,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn update(&mut self, change: WindowChange<'_>) {
         match change {
-            WindowChange::Add(layout, window, _) => {
-                let wid = window;
-
-                self.insert(layout, wid);
-            }
+            WindowChange::Add(layout, window, _) => self.insert(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                let wid = window;
-
-                self.inactive.remove(&wid);
+                self.inactive.remove(&window);
                 for state in self.layouts.values_mut() {
-                    Self::remove_from_state(state, &self.settings, wid, &self.inactive);
+                    Self::remove_from_state(state, &self.settings, window, &self.inactive);
                 }
             }
             WindowChange::Replace(from, to) => {
                 if self.inactive.remove(&from) {
                     self.inactive.insert(to);
                 }
-                for state in self.layouts.values_mut() {
+                for state in self.layouts.values_mut().filter(|state| state.locate(from).is_some())
+                {
                     state.mutate(&self.settings, &self.inactive, |state| {
                         for column in &mut state.columns {
                             for window in column.rows.iter_mut().map(|row| &mut row.window) {
@@ -1821,7 +1809,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
             WindowChange::CloseApp(pid) => {
                 self.inactive.retain(|w| w.pid != pid);
                 for state in self.layouts.values_mut() {
-                    for wid in state.all_windows().into_iter().filter(|w| w.pid == pid) {
+                    let closing: Vec<_> = state.windows().filter(|w| w.pid == pid).collect();
+                    for wid in closing {
                         Self::remove_from_state(state, &self.settings, wid, &self.inactive);
                     }
                 }
@@ -2035,10 +2024,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
 }
 
 impl ScrollingLayoutSystem {
-    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.layouts.get(layout).map(LayoutState::all_windows).unwrap_or_default()
-    }
-
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
         self.layouts
             .get(layout)
@@ -3401,7 +3386,7 @@ pub(crate) mod tests {
             )
             .into_windows();
         assert_eq!(f.frame(2).origin.x, x);
-        assert_eq!(f.system.all_windows_in_layout(f.layout), vec![
+        assert_eq!(f.system.windows(f.layout, WindowQuery::All), vec![
             wid(2),
             wid(1),
             wid(3)
@@ -3428,7 +3413,7 @@ pub(crate) mod tests {
             } else {
                 vec![wid(1), wid(3), wid(2)]
             };
-            assert_eq!(f.system.all_windows_in_layout(f.layout), expected);
+            assert_eq!(f.system.windows(f.layout, WindowQuery::All), expected);
         }
     }
 

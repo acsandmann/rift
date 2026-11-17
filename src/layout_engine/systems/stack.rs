@@ -75,6 +75,18 @@ impl Stack {
 
     fn remove(&mut self, window: WindowId) { self.retain(|member| member.window != window); }
 
+    fn insert(&mut self, member: Member, after_selection: bool) {
+        let index = if after_selection {
+            self.members.iter().position(|m| Some(m.id) == self.active).map(|i| i + 1)
+        } else {
+            None
+        }
+        .unwrap_or(self.members.len());
+        self.active = Some(member.id);
+        self.root_selected = false;
+        self.members.insert(index, member);
+    }
+
     fn neighbor(&self, direction: Direction, inactive: &HashSet<WindowId>) -> Option<usize> {
         if self.root_selected || self.kind.orientation() != direction.orientation() {
             return None;
@@ -246,7 +258,7 @@ impl StackLayoutSystem {
             (&mut m.fullscreen, &mut m.within_gaps)
         };
         if super::toggle_fullscreen_mode(full, gaps, within) {
-            self.visible_windows_under_selection(layout)
+            self.visible_windows_in_layout(layout)
         } else {
             Vec::new()
         }
@@ -364,29 +376,17 @@ impl LayoutSystem for StackLayoutSystem {
         let horizontal = stack.kind == LayoutKind::HorizontalStack;
         let tiling = compute_tiling_area(screen, gaps);
         let rect = if stack.fullscreen { screen } else { tiling };
-        let axis = if horizontal {
-            rect.size.width
-        } else {
-            rect.size.height
-        };
         let required = constraints
             .get(&stack.members[active].window)
             .copied()
             .map(|c| {
-                let c = c.normalized();
-                c.fixed_for_axis(horizontal).unwrap_or(if c.is_resizable {
-                    0.0
-                } else {
-                    c.min_for_axis(horizontal)
-                })
+                let (min, fixed, _, _) = traditional_leaf_axis_constraints(c, horizontal);
+                fixed.unwrap_or(min)
             })
-            .unwrap_or(0.0)
-            .clamp(0.0, axis.max(0.0));
-        let offset = if count > 1 {
-            offset.min((axis - required).max(0.0) / (count - 1) as f64)
-        } else {
-            offset
-        };
+            .unwrap_or(0.0);
+        let offset = super::traditional::stack_offset_with_required_size(
+            rect, horizontal, count, offset, required,
+        );
         let geometry =
             super::traditional::stack_layout_result(rect, count, offset, horizontal, line);
         stack
@@ -464,8 +464,7 @@ impl LayoutSystem for StackLayoutSystem {
     fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
         match query {
             WindowQuery::All => self.all_windows_in_layout(layout),
-            WindowQuery::Visible => self.visible_windows_in_layout(layout),
-            WindowQuery::Selection => self.visible_windows_under_selection(layout),
+            WindowQuery::Visible | WindowQuery::Selection => self.visible_windows_in_layout(layout),
             WindowQuery::Stack(window) => {
                 if self.contains_window(layout, window) {
                     self.all_windows_in_layout(layout)
@@ -606,16 +605,12 @@ impl LayoutSystem for StackLayoutSystem {
             LayoutEdit::ReorderTab { window, target } => {
                 EditResult::from(self.move_stack_tab(layout, window, target))
             }
-            LayoutEdit::Drop { source, target, action } => EditResult::from({
-                let _action = action;
-
+            LayoutEdit::Drop { source, target, .. } => EditResult::from({
                 source != target
                     && self.swap_windows(layout, source, target)
                     && self.select_window(layout, source)
             }),
-            LayoutEdit::Group(GroupEdit::Stack(orientation)) => EditResult::Raise({
-                let _orientation = orientation;
-
+            LayoutEdit::Group(GroupEdit::Stack(_)) => EditResult::Raise({
                 self.toggle_orientation(layout);
                 self.visible_windows_in_layout(layout)
             }),
@@ -642,10 +637,6 @@ impl StackLayoutSystem {
             .collect()
     }
 
-    fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.visible_windows_in_layout(layout)
-    }
-
     fn move_focus(
         &mut self,
         layout: LayoutId,
@@ -661,25 +652,16 @@ impl StackLayoutSystem {
 
     fn add_window_after_selection(&mut self, layout: LayoutId, window: WindowId) {
         let id = self.node_id();
-        let s = &mut self.layouts[layout];
-        let index = if self.window_insertion_point == WindowInsertionPoint::NextToSelection {
-            s.members
-                .iter()
-                .position(|m| Some(m.id) == s.active)
-                .map(|i| i + 1)
-                .unwrap_or(s.members.len())
-        } else {
-            s.members.len()
-        };
-        s.members.insert(index, Member {
-            id,
-            window,
-            weight: 1.0,
-            fullscreen: false,
-            within_gaps: false,
-        });
-        s.active = Some(id);
-        s.root_selected = false;
+        self.layouts[layout].insert(
+            Member {
+                id,
+                window,
+                weight: 1.0,
+                fullscreen: false,
+                within_gaps: false,
+            },
+            self.window_insertion_point == WindowInsertionPoint::NextToSelection,
+        );
     }
 
     fn select_window(&mut self, layout: LayoutId, window: WindowId) -> bool {
@@ -710,18 +692,14 @@ impl StackLayoutSystem {
         let Some(m) = self.layouts[layout].members.iter_mut().find(|m| m.window == window) else {
             return;
         };
-        let tiling = compute_tiling_area(screen, gaps);
-        if new == screen {
-            m.fullscreen = true;
-            m.within_gaps = false;
-        } else if old == screen {
-            m.fullscreen = false;
-        } else if new == tiling {
-            m.within_gaps = true;
-            m.fullscreen = false;
-        } else if old == tiling {
-            m.within_gaps = false;
-        }
+        super::track_fullscreen_resize(
+            &mut m.fullscreen,
+            &mut m.within_gaps,
+            old,
+            new,
+            screen,
+            gaps,
+        );
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
@@ -778,16 +756,7 @@ impl StackLayoutSystem {
         };
         let m = self.layouts[from].members[i].clone();
         self.layouts[from].remove(m.window);
-        let s = &mut self.layouts[to];
-        let index = s
-            .members
-            .iter()
-            .position(|m| Some(m.id) == s.active)
-            .map(|i| i + 1)
-            .unwrap_or(s.members.len());
-        s.active = Some(m.id);
-        s.root_selected = false;
-        s.members.insert(index, m);
+        self.layouts[to].insert(m, true);
     }
 }
 

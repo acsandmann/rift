@@ -540,6 +540,17 @@ impl LayoutEngine {
         let Some(layout) = self.workspaces.active_layout(space, workspace_id) else {
             return Vec::new();
         };
+        self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line)
+    }
+
+    fn calculate_arrangement(
+        &self,
+        workspace_id: VirtualWorkspaceId,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+    ) -> Vec<(WindowId, CGRect)> {
         self.workspaces[workspace_id].layout_system.calculate_layout(
             layout,
             screen,
@@ -1033,223 +1044,106 @@ impl LayoutEngine {
             return EventResponse::default();
         };
 
+        let commit = |engine: &mut Self,
+                      window_store: &mut WindowStore,
+                      (space, ws, layout),
+                      window,
+                      raise_windows| {
+            let response = EventResponse {
+                changed: true,
+                focus_window: Some(window),
+                raise_windows,
+                ..Default::default()
+            };
+            engine.apply_focus_response(window_store, space, ws, layout, &response);
+            response
+        };
+        let current = (space, ws_id, layout);
+        let visible =
+            |engine: &Self,
+             windows: &WindowStore,
+             (space, ws, layout): (SpaceId, VirtualWorkspaceId, LayoutId)| {
+                engine.filter_active_workspace_windows(
+                    windows,
+                    space,
+                    engine.workspaces[ws].layout_system.windows(layout, WindowQuery::Visible),
+                )
+            };
+
         if is_floating {
-            let floating_windows = self.active_floating_windows_in_workspace(window_store, space);
-            debug!(
-                "Floating navigation: found {} floating windows: {:?}",
-                floating_windows.len(),
-                floating_windows
-            );
-
-            match direction {
-                Direction::Left | Direction::Right => {
-                    if floating_windows.len() > 1 {
-                        debug!(
-                            "Multiple floating windows found, looking for current window: {:?}",
-                            self.focused_window
-                        );
-
-                        if let Some(current_idx) =
-                            floating_windows.iter().position(|&w| Some(w) == self.focused_window)
-                        {
-                            debug!("Found current window at index {}", current_idx);
-                            let next_idx = match direction {
-                                Direction::Left => {
-                                    if current_idx == 0 {
-                                        floating_windows.len() - 1
-                                    } else {
-                                        current_idx - 1
-                                    }
-                                }
-                                Direction::Right => (current_idx + 1) % floating_windows.len(),
-                                _ => unreachable!(),
-                            };
-                            debug!(
-                                "Moving to index {}, window: {:?}",
-                                next_idx, floating_windows[next_idx]
-                            );
-                            let focus_window = Some(floating_windows[next_idx]);
-                            let response = EventResponse {
-                                changed: true,
-                                focus_window,
-                                raise_windows: vec![],
-
-                                ..EventResponse::default()
-                            };
-                            self.apply_focus_response(
-                                window_store,
-                                space,
-                                ws_id,
-                                layout,
-                                &response,
-                            );
-                            return response;
-                        } else {
-                            debug!("Could not find current window in floating windows list");
-                        }
-                    } else {
-                        debug!(
-                            "Not enough floating windows for horizontal navigation (len: {})",
-                            floating_windows.len()
-                        );
-                    }
-                }
-                Direction::Up | Direction::Down => {
-                    debug!("Vertical navigation - switching to tiled windows");
-                }
-            }
-
-            let tiled_windows = self.filter_active_workspace_windows(
-                window_store,
-                space,
-                self.workspaces[ws_id].layout_system.windows(layout, WindowQuery::Visible),
-            );
-            debug!("Trying tiled windows: {:?}", tiled_windows);
-            if !tiled_windows.is_empty() {
-                let response = EventResponse {
-                    changed: true,
-                    focus_window: tiled_windows.first().copied(),
-                    raise_windows: tiled_windows,
-
-                    ..EventResponse::default()
+            let windows = self.active_floating_windows_in_workspace(window_store, space);
+            if matches!(direction, Direction::Left | Direction::Right)
+                && windows.len() > 1
+                && let Some(index) = windows.iter().position(|&w| Some(w) == self.focused_window)
+            {
+                let step = if direction == Direction::Left {
+                    windows.len() - 1
+                } else {
+                    1
                 };
-                self.apply_focus_response(window_store, space, ws_id, layout, &response);
-                return response;
+                return commit(
+                    self,
+                    window_store,
+                    current,
+                    windows[(index + step) % windows.len()],
+                    Vec::new(),
+                );
             }
+            let tiled = visible(self, window_store, current);
+            return match tiled.first().copied() {
+                Some(window) => commit(self, window_store, current, window, tiled),
+                None => EventResponse::default(),
+            };
+        }
 
-            debug!("No windows to navigate to, returning default");
+        let system = &mut self.workspaces[ws_id].layout_system;
+        let previous = system.selected_window(layout);
+        let focus = system.focus(layout, Focus::Direction(direction));
+        if let Some(window) = self.filter_active_workspace_window(window_store, space, focus.window)
+        {
+            let raise = self.filter_active_workspace_windows(window_store, space, focus.raise);
+            return commit(self, window_store, current, window, raise);
+        }
+        if let Some(window) = previous {
+            self.workspaces[ws_id].layout_system.focus(layout, Focus::Select(window));
+        }
+        if matches!(direction, Direction::Left | Direction::Right)
+            && matches!(
+                self.workspaces[ws_id].layout_system,
+                LayoutSystemKind::Scrolling(_)
+            )
+        {
             return EventResponse::default();
         }
 
-        let previous_selection = self.workspaces[ws_id].layout_system.selected_window(layout);
-
-        let (focus_window_raw, raise_windows) = self.workspaces[ws_id]
-            .layout_system
-            .focus(layout, Focus::Direction(direction))
-            .into_move();
-        let focus_window =
-            self.filter_active_workspace_window(window_store, space, focus_window_raw);
-        let raise_windows =
-            self.filter_active_workspace_windows(window_store, space, raise_windows);
-        if focus_window.is_some() {
-            let response = EventResponse {
-                changed: true,
-                focus_window,
-                raise_windows,
-
-                ..EventResponse::default()
-            };
-            self.apply_focus_response(window_store, space, ws_id, layout, &response);
-            response
-        } else {
-            if let Some(prev_wid) = previous_selection {
-                let _ = self.workspaces[ws_id]
-                    .layout_system
-                    .focus(layout, Focus::Select(prev_wid))
-                    .handled;
-            }
-            // In scrolling layout, don't jump to adjacent displays at the
-            // boundary. Off-screen columns are intentionally hidden, so
-            // cross-display focus here would select a hidden window.
-            if matches!(direction, Direction::Left | Direction::Right)
-                && matches!(
-                    self.workspaces[ws_id].layout_system,
-                    LayoutSystemKind::Scrolling(_)
-                )
-            {
+        if let Some(destination) =
+            self.next_space_for_direction(space, direction, visible_spaces, visible_space_frames)
+        {
+            let Some((ws, layout)) = self.workspaces.active_layout_for_space(destination) else {
                 return EventResponse::default();
-            }
-            if let Some(new_space) = self.next_space_for_direction(
-                space,
-                direction,
-                visible_spaces,
-                visible_space_frames,
-            ) {
-                let Some((new_ws_id, new_layout)) =
-                    self.workspaces.active_layout_for_space(new_space)
-                else {
-                    debug!(
-                        "No active workspace/layout for adjacent space {:?}; skipping cross-space focus",
-                        new_space
-                    );
-                    return EventResponse::default();
-                };
-                let windows_in_new_space = self.filter_active_workspace_windows(
-                    window_store,
-                    new_space,
-                    self.workspaces[new_ws_id]
-                        .layout_system
-                        .windows(new_layout, WindowQuery::Visible),
-                );
-                if let Some(target_window) = self
-                    .filter_active_workspace_window(
-                        window_store,
-                        new_space,
-                        self.workspaces[new_ws_id]
-                            .layout_system
-                            .window_in_direction(new_layout, direction),
-                    )
-                    .or_else(|| windows_in_new_space.first().copied())
-                {
-                    let _ = self.workspaces[new_ws_id]
-                        .layout_system
-                        .focus(new_layout, Focus::Select(target_window))
-                        .handled;
-                    let response = EventResponse {
-                        changed: true,
-                        focus_window: Some(target_window),
-                        raise_windows: windows_in_new_space,
-
-                        ..EventResponse::default()
-                    };
-                    self.apply_focus_response(
-                        window_store,
-                        new_space,
-                        new_ws_id,
-                        new_layout,
-                        &response,
-                    );
-                    return response;
-                }
-            }
-
-            let floating_windows = self.active_floating_windows_in_workspace(window_store, space);
-
-            if let Some(&first_floating) = floating_windows.first() {
-                let focus_window = Some(first_floating);
-                let response = EventResponse {
-                    changed: true,
-                    focus_window,
-                    raise_windows: vec![],
-
-                    ..EventResponse::default()
-                };
-                self.apply_focus_response(window_store, space, ws_id, layout, &response);
-                return response;
-            }
-
-            let visible_windows = self.filter_active_workspace_windows(
-                window_store,
-                space,
-                self.workspaces[ws_id].layout_system.windows(layout, WindowQuery::Visible),
-            );
-
-            if let Some(fallback_focus) = self
-                .filter_active_workspace_window(window_store, space, previous_selection)
-                .or_else(|| visible_windows.first().copied())
+            };
+            let target = (destination, ws, layout);
+            let raise = visible(self, window_store, target);
+            let directional =
+                self.workspaces[ws].layout_system.window_in_direction(layout, direction);
+            if let Some(window) = self
+                .filter_active_workspace_window(window_store, destination, directional)
+                .or_else(|| raise.first().copied())
             {
-                let response = EventResponse {
-                    changed: true,
-                    focus_window: Some(fallback_focus),
-                    raise_windows: vec![],
-
-                    ..EventResponse::default()
-                };
-                self.apply_focus_response(window_store, space, ws_id, layout, &response);
-                return response;
+                self.workspaces[ws].layout_system.focus(layout, Focus::Select(window));
+                return commit(self, window_store, target, window, raise);
             }
+        }
 
-            EventResponse::default()
+        let fallback = self
+            .active_floating_windows_in_workspace(window_store, space)
+            .first()
+            .copied()
+            .or_else(|| self.filter_active_workspace_window(window_store, space, previous))
+            .or_else(|| visible(self, window_store, current).first().copied());
+        match fallback {
+            Some(window) => commit(self, window_store, current, window, Vec::new()),
+            None => EventResponse::default(),
         }
     }
 
@@ -2675,85 +2569,68 @@ impl LayoutEngine {
                     is_floating,
                 );
             }
-            LayoutCommand::Ascend => {
-                if is_floating {
+            LayoutCommand::Ascend | LayoutCommand::Descend => {
+                let focus = if matches!(command, LayoutCommand::Descend) {
+                    Focus::Descend
+                } else if is_floating {
                     return EventResponse::default();
-                }
-                let changed = self.workspaces[workspace_id]
-                    .layout_system
-                    .focus(layout, Focus::Ascend)
-                    .handled;
-                EventResponse { changed, ..Default::default() }
-            }
-            LayoutCommand::Descend => {
-                let changed = self.workspaces[workspace_id]
-                    .layout_system
-                    .focus(layout, Focus::Descend)
-                    .handled;
+                } else {
+                    Focus::Ascend
+                };
+                let changed =
+                    self.workspaces[workspace_id].layout_system.focus(layout, focus).handled;
                 EventResponse { changed, ..Default::default() }
             }
             LayoutCommand::MoveNode(direction) => {
-                let adjacent_space = self
+                let adjacent = self
                     .next_space_for_direction(
                         space,
                         direction,
                         visible_spaces,
                         visible_space_frames,
                     )
-                    .filter(|&space| self.workspaces.active_layout_for_space(space).is_some());
-                if !self.workspaces[workspace_id]
+                    .and_then(|space| {
+                        let (workspace, layout) = self.workspaces.active_layout_for_space(space)?;
+                        Some((space, workspace, layout))
+                    });
+                let changed = self.workspaces[workspace_id]
                     .layout_system
                     .edit(layout, LayoutEdit::Move {
                         direction,
-                        has_display_neighbor: adjacent_space.is_some(),
+                        has_display_neighbor: adjacent.is_some(),
                     })
-                    .changed()
-                {
-                    if let Some(new_space) = adjacent_space {
-                        let Some((new_ws_id, new_layout)) =
-                            self.workspaces.active_layout_for_space(new_space)
-                        else {
-                            debug!(
-                                "No active workspace/layout for adjacent space {:?}; skipping cross-space move",
-                                new_space
-                            );
-                            return EventResponse::default();
-                        };
-                        let mut windows = self.workspaces[workspace_id]
+                    .changed();
+                if !changed && let Some((space, target_workspace, target_layout)) = adjacent {
+                    let mut windows = self.workspaces[workspace_id]
+                        .layout_system
+                        .windows(layout, WindowQuery::Selection);
+                    let target_system = &self.workspaces[target_workspace].layout_system;
+                    // Preserve subtree order when the destination prepends members.
+                    if matches!(target_system, LayoutSystemKind::Traditional(_))
+                        && matches!(direction, Direction::Right | Direction::Down)
+                    {
+                        windows.reverse();
+                    }
+                    let preserve_width = matches!(target_system, LayoutSystemKind::Scrolling(_))
+                        && self.layout_settings.scrolling.preserve_window_sizes;
+                    for wid in windows {
+                        self.workspaces[workspace_id]
                             .layout_system
-                            .windows(layout, WindowQuery::Selection);
-                        // Prepending each member must preserve the selected subtree's order.
-                        if matches!(direction, Direction::Right | Direction::Down)
-                            && matches!(
-                                self.workspaces[new_ws_id].layout_system,
-                                LayoutSystemKind::Traditional(_)
-                            )
-                        {
-                            windows.reverse();
+                            .update(WindowChange::Remove(wid));
+                        if preserve_width {
+                            self.preserve_scrolling_window_width(window_store, wid);
                         }
-                        for wid in windows {
-                            self.workspaces[workspace_id]
-                                .layout_system
-                                .update(WindowChange::Remove(wid));
-                            if matches!(
-                                self.workspaces[new_ws_id].layout_system,
-                                LayoutSystemKind::Scrolling(_)
-                            ) && self.layout_settings.scrolling.preserve_window_sizes
-                            {
-                                self.preserve_scrolling_window_width(window_store, wid);
-                            }
-                            self.workspaces[new_ws_id].layout_system.update(WindowChange::Add(
-                                new_layout,
-                                wid,
-                                Some(direction),
-                            ));
-                            self.workspaces.assign_window_to_workspace(
-                                window_store,
-                                new_space,
-                                wid,
-                                new_ws_id,
-                            );
-                        }
+                        self.workspaces[target_workspace].layout_system.update(WindowChange::Add(
+                            target_layout,
+                            wid,
+                            Some(direction),
+                        ));
+                        self.workspaces.assign_window_to_workspace(
+                            window_store,
+                            space,
+                            wid,
+                            target_workspace,
+                        );
                     }
                 }
                 EventResponse::default()
@@ -2774,32 +2651,28 @@ impl LayoutEngine {
             | LayoutCommand::SetWorkspaceLayout { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => EventResponse::default(),
-            LayoutCommand::JoinWindow(direction) => {
-                self.workspaces[workspace_id]
-                    .layout_system
-                    .edit(layout, LayoutEdit::Group(GroupEdit::Join(direction)))
-                    .discard();
+            LayoutCommand::JoinWindow(_)
+            | LayoutCommand::ConsumeOrExpelWindow(_)
+            | LayoutCommand::UnjoinWindows
+            | LayoutCommand::Balance => {
+                let edit = match command {
+                    LayoutCommand::JoinWindow(direction) => {
+                        LayoutEdit::Group(GroupEdit::Join(direction))
+                    }
+                    LayoutCommand::ConsumeOrExpelWindow(direction) => {
+                        LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction))
+                    }
+                    LayoutCommand::UnjoinWindows => LayoutEdit::Group(GroupEdit::Unjoin),
+                    _ => LayoutEdit::Rebalance,
+                };
+                self.workspaces[workspace_id].layout_system.edit(layout, edit).discard();
                 EventResponse::default()
             }
-            LayoutCommand::ConsumeOrExpelWindow(direction) => {
-                self.workspaces[workspace_id]
-                    .layout_system
-                    .edit(layout, LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)))
-                    .discard();
-                EventResponse::default()
-            }
-            LayoutCommand::ToggleStack => {
-                let default_orientation: crate::common::config::StackDefaultOrientation =
-                    self.layout_settings.stack.default_orientation;
-                self.toggle_stack_for_workspace(workspace_id, layout, default_orientation)
-            }
-            LayoutCommand::UnjoinWindows => {
-                self.workspaces[workspace_id]
-                    .layout_system
-                    .edit(layout, LayoutEdit::Group(GroupEdit::Unjoin))
-                    .discard();
-                EventResponse::default()
-            }
+            LayoutCommand::ToggleStack => self.toggle_stack_for_workspace(
+                workspace_id,
+                layout,
+                self.layout_settings.stack.default_orientation,
+            ),
             LayoutCommand::ToggleOrientation => {
                 let default_orientation = self.layout_settings.stack.default_orientation;
                 Self::toggle_orientation_for_system(
@@ -2807,13 +2680,6 @@ impl LayoutEngine {
                     layout,
                     default_orientation,
                 )
-            }
-            LayoutCommand::Balance => {
-                self.workspaces[workspace_id]
-                    .layout_system
-                    .edit(layout, LayoutEdit::Rebalance)
-                    .discard();
-                EventResponse::default()
             }
             LayoutCommand::ResizeWindowGrow(_)
             | LayoutCommand::ResizeWindowShrink(_)
@@ -2917,7 +2783,7 @@ impl LayoutEngine {
             &self.window_layout_constraints,
             gaps,
         );
-        self.calculate_workspace_layout(space, workspace_id, screen, gaps, stack_line)
+        self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line)
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
@@ -2990,19 +2856,13 @@ impl LayoutEngine {
                     &self.window_layout_constraints,
                     gaps,
                 );
-                let tiled_positions =
-                    self.workspaces[active_workspace_id].layout_system.calculate_layout(
-                        layout,
-                        screen,
-                        self.layout_settings.stack.stack_offset,
-                        &self.window_layout_constraints,
-                        gaps,
-                        stack_line,
-                    );
-
-                for (wid, rect) in tiled_positions {
-                    positions.insert(wid, rect);
-                }
+                positions.extend(self.calculate_arrangement(
+                    active_workspace_id,
+                    layout,
+                    screen,
+                    gaps,
+                    stack_line,
+                ));
             }
 
             // Look up this workspace's frames directly. Scanning the entire
@@ -3036,26 +2896,22 @@ impl LayoutEngine {
                 );
             }
 
-            let fullscreen: Vec<(WindowId, FloatingFullscreenKind)> = positions
-                .keys()
-                .copied()
-                .filter_map(|w| self.floating.fullscreen_kind(w).map(|k| (w, k)))
-                .collect();
-            for (w, kind) in fullscreen {
-                let rect = match kind {
-                    FloatingFullscreenKind::Full => screen,
-                    FloatingFullscreenKind::WithinGaps => {
-                        let o = &gaps.outer;
-                        CGRect::new(
-                            CGPoint::new(screen.origin.x + o.left, screen.origin.y + o.top),
-                            CGSize::new(
-                                screen.size.width - o.left - o.right,
-                                screen.size.height - o.top - o.bottom,
-                            ),
-                        )
-                    }
-                };
-                positions.insert(w, rect);
+            for (wid, frame) in &mut positions {
+                if let Some(kind) = self.floating.fullscreen_kind(*wid) {
+                    *frame = match kind {
+                        FloatingFullscreenKind::Full => screen,
+                        FloatingFullscreenKind::WithinGaps => {
+                            let o = &gaps.outer;
+                            CGRect::new(
+                                CGPoint::new(screen.origin.x + o.left, screen.origin.y + o.top),
+                                CGSize::new(
+                                    screen.size.width - o.left - o.right,
+                                    screen.size.height - o.top - o.bottom,
+                                ),
+                            )
+                        }
+                    };
+                }
             }
         }
 
@@ -3239,31 +3095,21 @@ impl LayoutEngine {
                 follow,
                 window_id: maybe_id,
             } => {
-                let focused_window = if let Some(spec_u32) = maybe_id {
-                    match self
+                let window = match maybe_id {
+                    Some(index) => self
                         .workspaces
-                        .find_window_by_idx(window_store, space, *spec_u32)
+                        .find_window_by_idx(window_store, space, *index)
                         .or_else(|| {
                             window_store
                                 .iter_workspace_assignments()
-                                .find_map(|(wid, _)| (wid.idx.get() == *spec_u32).then_some(wid))
-                        }) {
-                        Some(w) => w,
-                        None => return EventResponse::default(),
-                    }
-                } else {
-                    match self.focused_window {
-                        Some(wid) => wid,
-                        None => return EventResponse::default(),
-                    }
+                                .find_map(|(wid, _)| (wid.idx.get() == *index).then_some(wid))
+                        }),
+                    None => self.focused_window,
                 };
-
-                let inferred_space = self.space_with_window(focused_window);
-                let op_space = if inferred_space == Some(space) {
-                    space
-                } else {
-                    inferred_space.unwrap_or(space)
+                let Some(focused_window) = window else {
+                    return EventResponse::default();
                 };
+                let op_space = self.space_with_window(focused_window).unwrap_or(space);
 
                 self.workspaces.ensure_space_initialized(op_space);
                 let Some(current_workspace_id) =
@@ -3272,7 +3118,12 @@ impl LayoutEngine {
                     return EventResponse::default();
                 };
                 let target_workspace_id = match workspace {
-                    WorkspaceSelector::Name(name) if name == "next" => {
+                    WorkspaceSelector::Name(name) if name == "next" || name == "prev" => {
+                        let direction = if name == "next" {
+                            Direction::Right
+                        } else {
+                            Direction::Left
+                        };
                         self.workspaces.step_workspace(
                             window_store,
                             WorkspaceContext {
@@ -3281,19 +3132,7 @@ impl LayoutEngine {
                             },
                             current_workspace_id,
                             None,
-                            Direction::Right,
-                        )
-                    }
-                    WorkspaceSelector::Name(name) if name == "prev" => {
-                        self.workspaces.step_workspace(
-                            window_store,
-                            WorkspaceContext {
-                                space: op_space,
-                                visible: context.visible,
-                            },
-                            current_workspace_id,
-                            None,
-                            Direction::Left,
+                            direction,
                         )
                     }
                     selector => {
@@ -3318,7 +3157,7 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
                 let is_floating = self.floating.is_floating(focused_window);
-                if target_space != op_space {
+                if *follow || target_space != op_space {
                     let mut response = if *follow {
                         self.activate_workspace(
                             window_store,
@@ -3329,22 +3168,15 @@ impl LayoutEngine {
                     } else {
                         EventResponse {
                             changed: true,
-                            ..EventResponse::default()
+                            ..Default::default()
                         }
                     };
-                    response.transferred_windows.push(focused_window);
-                    self.broadcast_windows_changed(window_store, op_space);
-                    self.broadcast_windows_changed(window_store, target_space);
+                    if target_space != op_space {
+                        response.transferred_windows.push(focused_window);
+                        self.broadcast_windows_changed(window_store, op_space);
+                        self.broadcast_windows_changed(window_store, target_space);
+                    }
                     return response;
-                }
-
-                if *follow {
-                    return self.activate_workspace(
-                        window_store,
-                        op_space,
-                        target_workspace_id,
-                        Some(focused_window),
-                    );
                 }
 
                 let active_workspace = self.workspaces.active_workspace(op_space);

@@ -8,8 +8,7 @@ use crate::common::collections::HashMap;
 use crate::common::config::{
     MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide, WindowInsertionPoint,
 };
-use crate::layout_engine::systems::{WindowLayoutConstraints, reconcile_app_membership};
-use crate::layout_engine::utils::compute_tiling_area;
+use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, TraditionalLayoutSystem,
 };
@@ -163,11 +162,12 @@ impl MasterStackLayoutSystem {
         )
     }
 
-    fn windows_in_layout_by_container(&self, layout: LayoutId) -> Vec<WindowId> {
+    fn region_windows(&self, layout: LayoutId) -> (Vec<WindowId>, usize) {
         let (_, master, stack) = self.region_roots(layout);
-        self.windows_in_container(master)
-            .chain(self.windows_in_container(stack))
-            .collect()
+        let mut windows: Vec<_> = self.windows_in_container(master).collect();
+        let master_count = windows.len();
+        windows.extend(self.windows_in_container(stack));
+        (windows, master_count)
     }
 
     fn windows_in_container(&self, container: NodeId) -> impl Iterator<Item = WindowId> + '_ {
@@ -528,23 +528,16 @@ impl LayoutSystem for MasterStackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let (_, master, stack) = self.region_roots(layout);
-        if !stack
-            .traverse_preorder(self.inner.map())
-            .any(|node| self.inner.window_at(node).is_some_and(|w| self.window_participates(w)))
-        {
-            return self.inner.calculate_layout_for_node(
-                master,
-                screen,
-                compute_tiling_area(screen, gaps),
-                stack_offset,
-                constraints,
-                gaps,
-                stack_line,
-            );
-        }
-        self.inner
-            .calculate_layout(layout, screen, stack_offset, constraints, gaps, stack_line)
+        let (root, master, stack) = self.region_roots(layout);
+        self.inner.project(
+            root,
+            Some((master, stack)),
+            screen,
+            stack_offset,
+            constraints,
+            gaps,
+            stack_line,
+        )
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
@@ -563,16 +556,11 @@ impl LayoutSystem for MasterStackLayoutSystem {
         match change {
             WindowChange::Add(layout, window, _) => self.add_window_after_selection(layout, window),
             WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
-                let wid = window;
-
-                let layouts = self.inner.layouts_for_window(wid);
-                self.inner.update(WindowChange::Remove(wid));
+                let layouts = self.inner.layouts_for_window(window);
+                self.inner.update(WindowChange::Remove(window));
                 for layout in layouts {
                     self.distribute_regions(layout);
                 }
-            }
-            WindowChange::Replace(from, to) => {
-                self.inner.update(WindowChange::Replace(from, to));
             }
             WindowChange::CloseApp(pid) => {
                 let layouts: Vec<_> = self
@@ -587,47 +575,12 @@ impl LayoutSystem for MasterStackLayoutSystem {
                 }
             }
             WindowChange::Reconcile(layout, pid, desired) => {
-                let (_root, master, stack) = self.region_roots(layout);
-                let root = self.inner.root(layout);
-                let current = root
-                    .traverse_postorder(self.inner.map())
-                    .filter_map(|node| self.inner.window_at(node))
-                    .filter(|wid| wid.pid == pid)
-                    .collect::<Vec<_>>();
-                let delta = reconcile_app_membership(pid, current, desired, |w| {
-                    self.window_participates(w)
-                });
-                for wid in delta.removals {
-                    if let Some(node) = self.inner.tree.data.window.node_for(layout, wid)
-                        && !self.inner.tree.data.layout.info[node].is_fullscreen
-                    {
-                        node.detach(&mut self.inner.tree).remove();
-                    }
-                }
-                for wid in delta.additions {
+                for wid in self.inner.reconcile_windows(layout, pid, desired) {
                     self.add_window_after_selection(layout, wid);
                 }
-                self.enforce_master_count(layout, master, stack, None);
+                self.distribute_regions(layout);
             }
-            WindowChange::Resize {
-                layout,
-                window,
-                old,
-                new,
-                screen,
-                gaps,
-            } => {
-                let wid = window;
-
-                self.inner.update(WindowChange::Resize {
-                    layout,
-                    window: wid,
-                    old,
-                    new,
-                    screen,
-                    gaps,
-                });
-            }
+            WindowChange::Replace(..) | WindowChange::Resize { .. } => self.inner.update(change),
         }
     }
 
@@ -685,22 +638,15 @@ impl LayoutSystem for MasterStackLayoutSystem {
                 EditResult::Changed
             }
 
-            LayoutEdit::Fullscreen { .. } => self.inner.edit(layout, edit),
-            LayoutEdit::Swap(a, b) => self.inner.edit(layout, LayoutEdit::Swap(a, b)),
-            LayoutEdit::ReorderTab { window, target } => {
-                self.inner.edit(layout, LayoutEdit::ReorderTab { window, target })
-            }
-            LayoutEdit::Drop { source, target, action } => {
-                EditResult::from(self.apply_target_drop(layout, source, target, action))
-            }
-
-            LayoutEdit::Resize { amount, orientation } => {
-                if self.windows(layout, WindowQuery::Visible).is_empty() {
-                    return EditResult::Unchanged;
-                }
-                self.inner.edit(layout, LayoutEdit::Resize { amount, orientation }).discard();
-                EditResult::Changed
-            }
+            LayoutEdit::Fullscreen { .. }
+            | LayoutEdit::Swap(..)
+            | LayoutEdit::ReorderTab { .. }
+            | LayoutEdit::Resize { .. } => self.inner.edit(layout, edit),
+            LayoutEdit::Drop { source, target, action } => EditResult::from(
+                self.window_participates(source)
+                    && self.window_participates(target)
+                    && self.inner.apply_explicit_window_drop(layout, source, target, action),
+            ),
 
             LayoutEdit::Split(_)
             | LayoutEdit::Group(_)
@@ -730,11 +676,10 @@ impl MasterStackLayoutSystem {
         let Some(focused_wid) = self.inner.selected_window(layout) else {
             return false;
         };
-        let windows = self.windows_in_layout_by_container(layout);
+        let (windows, master_count) = self.region_windows(layout);
         let Some(focused_idx) = windows.iter().position(|&window| window == focused_wid) else {
             return false;
         };
-        let master_count = self.settings.master_count;
         let in_master = focused_idx < master_count;
         let axis = if in_master {
             self.master_orientation()
@@ -749,7 +694,7 @@ impl MasterStackLayoutSystem {
         };
         let master_first = self.master_first();
         let parallel = direction.orientation() == axis;
-        let crossing = if towards_master && !in_master {
+        let crossing = if towards_master && !in_master && master_count > 0 {
             let border = if master_first {
                 master_count
             } else {
@@ -815,19 +760,6 @@ impl MasterStackLayoutSystem {
         }
         let _ = self.inner.focus(layout, Focus::Select(focused_wid)).handled;
         true
-    }
-
-    fn apply_target_drop(
-        &mut self,
-        layout: LayoutId,
-        source: WindowId,
-        target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
-    ) -> bool {
-        if !self.window_participates(source) || !self.window_participates(target) {
-            return false;
-        }
-        self.inner.apply_explicit_window_drop(layout, source, target, action)
     }
 }
 
@@ -944,7 +876,7 @@ mod tests {
     fn test_create_layout() {
         let mut system = MasterStackLayoutSystem::default();
         let layout = system.create_layout();
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert!(windows.is_empty());
     }
 
@@ -956,7 +888,7 @@ mod tests {
         system.add_window_after_selection(layout, w(2));
         system.add_window_after_selection(layout, w(3));
 
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         // By default master_count = 1, new_window_placement = Master
         // When w1 is added: master=[w1]
         // When w2 is added: master=[w2], stack=[w1]
@@ -983,7 +915,7 @@ mod tests {
                 assert!(system.focus(layout, Focus::Select(focused)).handled);
                 for _ in 0..2 {
                     system.promote_to_master(layout);
-                    assert_eq!(system.windows_in_layout_by_container(layout), expected);
+                    assert_eq!(system.region_windows(layout).0, expected);
                     assert_eq!(system.selected_window(layout), Some(focused));
                 }
             }
@@ -1096,11 +1028,7 @@ mod tests {
         system.add_window_after_selection(layout, w(2));
         system.add_window_after_selection(layout, w(3));
 
-        assert_eq!(system.windows_in_layout_by_container(layout), vec![
-            w(1),
-            w(2),
-            w(3)
-        ]);
+        assert_eq!(system.region_windows(layout).0, vec![w(1), w(2), w(3)]);
     }
 
     #[test]
@@ -1169,7 +1097,7 @@ mod tests {
 
         // Move towards master (Left) -> promotes w2 to master, pushes w3 to stack
         assert!(system.move_selection(layout, Direction::Left));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(2), w(3), w(1)]);
 
         // Select w2 (which is in master)
@@ -1177,7 +1105,7 @@ mod tests {
 
         // Move towards stack (Right) -> demotes w2 to stack, top stack window (w3) becomes master
         assert!(system.move_selection(layout, Direction::Right));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(2), w(1)]);
     }
 
@@ -1190,12 +1118,44 @@ mod tests {
         for window in [w(1), w(2), w(3)] {
             system.add_window_after_selection(layout, window);
         }
-        let before = system.windows_in_layout_by_container(layout);
+        let before = system.region_windows(layout).0;
         assert!(system.focus(layout, Focus::Select(before[0])).handled);
         assert!(system.move_selection(layout, Direction::Right));
-        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+        assert_eq!(system.region_windows(layout).0, vec![
             before[1], before[0], before[2]
         ]);
+    }
+
+    #[test]
+    fn keyboard_move_uses_the_region_created_by_a_stack_drop() {
+        use crate::layout_engine::WindowDropAction;
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        assert!(
+            system
+                .edit(layout, LayoutEdit::Drop {
+                    source: w(2),
+                    target: w(3),
+                    action: WindowDropAction::Stack,
+                })
+                .changed()
+        );
+        assert!(
+            system
+                .edit(layout, LayoutEdit::Move {
+                    direction: Direction::Up,
+                    has_display_neighbor: false,
+                })
+                .changed()
+        );
+        assert_eq!(system.windows(layout, WindowQuery::Stack(w(2))), vec![
+            w(2),
+            w(3)
+        ]);
+        assert_eq!(system.selected_window(layout), Some(w(2)));
     }
 
     #[test]
@@ -1212,31 +1172,21 @@ mod tests {
 
         // Move down (within stack) -> swaps w2 and w1
         assert!(system.move_selection(layout, Direction::Down));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(1), w(2)]);
 
         // Move up (within stack) -> swaps w1 and w2 back
         assert!(system.focus(layout, Focus::Select(w(2))).handled);
         assert!(system.move_selection(layout, Direction::Up));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(2), w(1)]);
         system.add_window_after_selection(layout, w(4));
         system.set_window_participation(w(2), false);
         assert!(system.focus(layout, Focus::Select(w(3))).handled);
         assert!(system.move_selection(layout, Direction::Down));
-        assert_eq!(system.windows_in_layout_by_container(layout), vec![
-            w(4),
-            w(1),
-            w(2),
-            w(3)
-        ]);
+        assert_eq!(system.region_windows(layout).0, vec![w(4), w(1), w(2), w(3)]);
         system.set_window_participation(w(2), true);
-        assert_eq!(system.windows_in_layout_by_container(layout), vec![
-            w(4),
-            w(1),
-            w(2),
-            w(3)
-        ]);
+        assert_eq!(system.region_windows(layout).0, vec![w(4), w(1), w(2), w(3)]);
     }
 
     #[test]
@@ -1253,34 +1203,34 @@ mod tests {
         system.add_window_after_selection(layout, w(3));
         system.add_window_after_selection(layout, w(4));
         // State: master=[w4, w3], stack=[w2, w1] (all horizontal)
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(4), w(3), w(2), w(1)]);
 
         // 1. Focus w4 (index 0 in master) and move Right.
         // It is NOT at the border (which is w3 at index 1), so it should swap w4 and w3 within master.
         assert!(system.focus(layout, Focus::Select(w(4))).handled);
         assert!(system.move_selection(layout, Direction::Right));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(4), w(2), w(1)]);
 
         // 2. Focus w4 (now at index 1 in master, which is the border) and move Right.
         // It IS at the border, so it should cross to stack, demoting w4 and swapping with w2 (index 2).
         assert!(system.move_selection(layout, Direction::Right));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(2), w(4), w(1)]);
 
         // 3. Focus w4 (now at index 2 in stack, which is the border of stack facing master) and move Left.
         // It IS at the border of stack (index == master_count), so it should promote back to master, swapping with w2 (index 1).
         assert!(system.focus(layout, Focus::Select(w(4))).handled);
         assert!(system.move_selection(layout, Direction::Left));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(4), w(2), w(1)]);
 
         // 4. Focus w1 (at index 3, the rightmost stack window) and move Left.
         // It is NOT at the border of stack facing master (border is w2 at index 2), so it should swap w1 and w2 within stack.
         assert!(system.focus(layout, Focus::Select(w(1))).handled);
         assert!(system.move_selection(layout, Direction::Left));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(4), w(1), w(2)]);
     }
 
@@ -1301,27 +1251,27 @@ mod tests {
 
         // Logical flat list: [M0, M1, S0, S1] -> [w4, w3, w1, w2] (since overflows append to stack)
         // Physical layout: w1 (leftmost stack) - w2 (rightmost stack) | w4 (leftmost master) - w3 (rightmost master)
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(4), w(3), w(1), w(2)]);
 
         // 1. Focus w3 (at index 1, the right-most Master window) and move Left.
         // It is NOT at the border facing stack (which is w4 at index 0), so it should swap w3 and w4 within Master.
         assert!(system.focus(layout, Focus::Select(w(3))).handled);
         assert!(system.move_selection(layout, Direction::Left));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(4), w(1), w(2)]);
 
         // 2. Focus w3 (now at index 0, which is the border facing stack) and move Left.
         // It IS at the border, so it should cross to stack, swapping with the right-most stack window w2 (index 3).
         assert!(system.move_selection(layout, Direction::Left));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(2), w(4), w(1), w(3)]);
 
         // 3. Focus w3 (now at index 3, the border of Stack facing Master) and move Right.
         // It IS at the border of Stack facing Master, so it should cross to Master, swapping with w2 (index 0).
         assert!(system.focus(layout, Focus::Select(w(3))).handled);
         assert!(system.move_selection(layout, Direction::Right));
-        let windows = system.windows_in_layout_by_container(layout);
+        let windows = system.region_windows(layout).0;
         assert_eq!(windows, vec![w(3), w(4), w(1), w(2)]);
     }
 

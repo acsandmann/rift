@@ -142,19 +142,14 @@ impl FloatingLayoutSystem {
         let source = self.frames.get(&focused)?;
         let origin = source.mid();
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
-        self.inner
-            .windows(layout, WindowQuery::Visible)
-            .into_iter()
-            .filter(|wid| *wid != focused)
-            .filter(|wid| {
-                !exclude.is_some_and(|parent| {
-                    self.inner.window_node(layout, *wid).is_some_and(|node| {
-                        node.ancestors(self.inner.map()).any(|ancestor| ancestor == parent)
-                    })
+        let mut best: Option<(WindowId, bool, f64)> = None;
+        self.inner.visit_visible_windows(self.inner.root(layout), &mut |node, wid| {
+            if wid != focused
+                && !exclude.is_some_and(|parent| {
+                    node.ancestors(self.inner.map()).any(|ancestor| ancestor == parent)
                 })
-            })
-            .filter_map(|wid| {
-                let frame = self.frames.get(&wid)?;
+                && let Some(frame) = self.frames.get(&wid)
+            {
                 let candidate = frame.mid();
                 let (across, overlaps) = if horizontal {
                     (
@@ -167,12 +162,20 @@ impl FloatingLayoutSystem {
                         source.origin.x < frame.max().x && frame.origin.x < source.max().x,
                     )
                 };
-                let along = (origin.x, origin.y)
-                    .distance_in_direction((candidate.x, candidate.y), direction)?;
-                (along > 0.0).then_some((wid, !overlaps, along * along + across * across))
-            })
-            .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)))
-            .map(|(wid, _, _)| wid)
+                if let Some(along) = (origin.x, origin.y)
+                    .distance_in_direction((candidate.x, candidate.y), direction)
+                    && along > 0.0
+                {
+                    let distance = along * along + across * across;
+                    if best.is_none_or(|(_, outside, previous)| {
+                        (!overlaps).cmp(&outside).then(distance.total_cmp(&previous)).is_lt()
+                    }) {
+                        best = Some((wid, !overlaps, distance));
+                    }
+                }
+            }
+        });
+        best.map(|(wid, _, _)| wid)
     }
 
     fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
@@ -495,49 +498,18 @@ impl LayoutSystem for FloatingLayoutSystem {
                     self.add_window_after_selection(layout, wid);
                 }
             }
-            WindowChange::Resize {
-                layout,
-                window,
-                old,
-                new,
-                screen,
-                gaps,
-            } => {
-                let _layout = layout;
-                let wid = window;
-                let _old_frame = old;
-                let new_frame = new;
-                let _screen = screen;
-                let _gaps = gaps;
-
-                self.store_frame(wid, new_frame);
-            }
+            WindowChange::Resize { window, new, .. } => self.store_frame(window, new),
         }
     }
 
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         match edit {
-            LayoutEdit::Move {
-                direction,
-                has_display_neighbor: _,
-            } => EditResult::from({
-                let _layout = layout;
-                let _direction = direction;
-
-                false
-            }),
-            LayoutEdit::Transfer(to) => {
-                let from_layout = layout;
-                let to_layout = to;
-
-                self.inner.edit(from_layout, LayoutEdit::Transfer(to_layout)).discard();
-                EditResult::Changed
-            }
-            LayoutEdit::Fullscreen { .. } => self.inner.edit(layout, edit),
-            LayoutEdit::Swap(a, b) => self.inner.edit(layout, LayoutEdit::Swap(a, b)),
-            LayoutEdit::ReorderTab { window, target } => {
-                self.inner.edit(layout, LayoutEdit::ReorderTab { window, target })
-            }
+            LayoutEdit::Move { .. } => EditResult::Unchanged,
+            LayoutEdit::Transfer(_)
+            | LayoutEdit::Fullscreen { .. }
+            | LayoutEdit::Swap(..)
+            | LayoutEdit::ReorderTab { .. }
+            | LayoutEdit::ToggleOrientation => self.inner.edit(layout, edit),
             LayoutEdit::Group(GroupEdit::Join(direction)) => {
                 self.join_selection_with_direction(layout, direction);
                 EditResult::Changed
@@ -552,8 +524,6 @@ impl LayoutSystem for FloatingLayoutSystem {
             }
             LayoutEdit::Group(GroupEdit::Stack(orientation)) => {
                 EditResult::Raise({
-                    let default_orientation = orientation;
-
                     let Some(focused) = self.inner.selected_window(layout) else {
                         return EditResult::Raise(Vec::new());
                     };
@@ -566,7 +536,7 @@ impl LayoutSystem for FloatingLayoutSystem {
                     self.align_members(&members, focused, save);
                     let _ = self
                         .inner
-                        .edit(layout, LayoutEdit::Group(GroupEdit::Stack(default_orientation)))
+                        .edit(layout, LayoutEdit::Group(GroupEdit::Stack(orientation)))
                         .into_windows();
                     self.inner.focus(layout, Focus::Select(focused)).handled;
                     self.inner.windows(layout, WindowQuery::Selection)
@@ -577,12 +547,6 @@ impl LayoutSystem for FloatingLayoutSystem {
             }
             LayoutEdit::Group(GroupEdit::Unjoin) => {
                 self.unjoin_selection(layout);
-                EditResult::Changed
-            }
-            LayoutEdit::ToggleOrientation => {
-                let _layout = layout;
-
-                self.inner.edit(_layout, LayoutEdit::ToggleOrientation).discard();
                 EditResult::Changed
             }
             _ => EditResult::Unsupported,

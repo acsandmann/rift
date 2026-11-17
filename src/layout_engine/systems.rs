@@ -110,29 +110,16 @@ pub(crate) fn reconcile_app_membership(
 
     let mut additions = Vec::new();
     let mut removals = Vec::new();
-    let (mut current_idx, mut desired_idx) = (0, 0);
-    while current_idx < current.len() || desired_idx < desired.len() {
-        match (current.get(current_idx), desired.get(desired_idx)) {
-            (Some(current), Some(desired)) if current == desired => {
-                current_idx += 1;
-                desired_idx += 1;
-            }
-            (Some(current), Some(desired)) if current < desired => {
-                removals.push(*current);
-                current_idx += 1;
-            }
-            (_, Some(desired)) => {
-                additions.push(*desired);
-                desired_idx += 1;
-            }
-            (Some(current), None) => {
-                removals.push(*current);
-                current_idx += 1;
-            }
-            (None, None) => break,
+    let mut desired = desired.into_iter().peekable();
+    for window in current {
+        while let Some(addition) = desired.next_if(|next| *next < window) {
+            additions.push(addition);
+        }
+        if desired.next_if_eq(&window).is_none() && participates(window) {
+            removals.push(window);
         }
     }
-    removals.retain(|window| participates(*window));
+    additions.extend(desired);
     AppMembershipDelta { additions, removals }
 }
 
@@ -280,6 +267,32 @@ fn toggle_fullscreen_mode(full: &mut bool, gaps: &mut bool, within_gaps: bool) -
         *other = false;
     }
     *target
+}
+
+/// Return whether a native resize entered or left a fullscreen frame.
+fn track_fullscreen_resize(
+    full: &mut bool,
+    within_gaps: &mut bool,
+    old: CGRect,
+    new: CGRect,
+    screen: CGRect,
+    gaps: &GapSettings,
+) -> bool {
+    if new == screen {
+        (*full, *within_gaps) = (true, false);
+    } else if old == screen {
+        *full = false;
+    } else {
+        let tiling = super::utils::compute_tiling_area(screen, gaps);
+        if new == tiling {
+            (*full, *within_gaps) = (false, true);
+        } else if old == tiling {
+            *within_gaps = false;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 #[enum_dispatch]

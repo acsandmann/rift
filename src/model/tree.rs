@@ -1,4 +1,4 @@
-use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::ops::{Index, IndexMut};
 
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
@@ -51,73 +51,6 @@ impl Index<NodeId> for NodeMap {
 
 impl IndexMut<NodeId> for NodeMap {
     fn index_mut(&mut self, index: NodeId) -> &mut Self::Output { &mut self.map[index] }
-}
-
-/// Represents ownership of a particular node in a tree.
-///
-/// Nodes must be removed manually, because removal requires a reference to the
-/// [`map`].  If a value of this type is dropped without
-/// [`OwnedNode::remove`] being called, it will panic in debug builds.
-///
-/// Every `OwnedNode` has a name which will be used in the panic message.
-#[must_use]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OwnedNode(Option<NodeId>, String);
-
-impl OwnedNode {
-    /// Creates a new root node.
-    pub fn new_root_in(map: &mut Tree<impl Observer>, name: &'static str) -> Self {
-        let node = map.mk_node();
-        Self::own(node.id, name)
-    }
-
-    /// Marks a non-root node as owned.
-    pub fn own(node: NodeId, name: &'static str) -> Self { OwnedNode(Some(node), name.to_owned()) }
-
-    // The enclosing forest is being dropped and will reclaim all its nodes.
-    pub(crate) fn release(mut self) { self.0.take(); }
-
-    pub fn id(&self) -> NodeId { self.0.expect("OwnedNode::id called on removed OwnedNode") }
-
-    #[track_caller]
-    pub fn remove(&mut self, tree: &mut Tree<impl Observer>) {
-        if let Some(id) = self.0.take() {
-            UnattachedNode { id, tree }.remove()
-        }
-    }
-
-    #[track_caller]
-    pub fn replace<'a, O>(&mut self, new: UnattachedNode<'a, O>) -> UnattachedNode<'a, O> {
-        let id = self.0.replace(new.id).expect("Can't replace removed node");
-        UnattachedNode { id, ..new }
-    }
-}
-
-impl Deref for OwnedNode {
-    type Target = NodeId;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().expect("OwnedNode deref on removed OwnedNode")
-    }
-}
-
-impl DerefMut for OwnedNode {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().expect("OwnedNode deref_mut on removed OwnedNode")
-    }
-}
-
-impl Drop for OwnedNode {
-    fn drop(&mut self) {
-        if cfg!(debug_assertions) {
-            if let Some(node) = self.0 {
-                panic!(
-                    "OwnedNode {name:?} dropped without OwnedNode::remove being called: {node:?}",
-                    name = self.1,
-                );
-            }
-        }
-    }
 }
 
 slotmap::new_key_type! {
@@ -193,20 +126,25 @@ impl NodeId {
     #[track_caller]
     pub fn deep_copy<'a, O: Observer>(self, tree: &'a mut Tree<O>) -> UnattachedNode<'a, O> {
         let new_root = tree.mk_node().id;
-        let mut stack = vec![(self, new_root)];
-        let preorder = self.traverse_preorder(&tree.map).skip(1).collect::<Vec<_>>();
-        for old in preorder {
-            while old.parent(&tree.map) != stack.last().map(|(oldp, _newp)| *oldp) {
+        let mut stack = vec![(self.first_child(&tree.map), new_root)];
+        while let Some((next, parent)) = stack.last_mut() {
+            if let Some(old) = *next {
+                *next = old.next_sibling(&tree.map);
+                let child = old.first_child(&tree.map);
+                let new = tree.mk_node().push_back(*parent);
+                if child.is_some() {
+                    stack.push((child, new));
+                }
+            } else {
                 stack.pop();
             }
-            let parent = stack
-                .last()
-                .map(|(_, newp)| *newp)
-                .expect("deep_copy: structural invariant violated");
-            let new = tree.mk_node().push_back(parent);
-            stack.push((old, new));
         }
         UnattachedNode { id: new_root, tree }
+    }
+
+    pub(crate) fn attach_root(self, tree: &mut Tree<impl Observer>, parent: NodeId) {
+        debug_assert!(self.parent(&tree.map).is_none());
+        UnattachedNode { id: self, tree }.push_back(parent);
     }
 
     /// Reorder siblings without changing membership, weights, or selection history.
@@ -259,28 +197,17 @@ impl NodeId {
     }
 }
 
-pub trait Observer
-where Self: Sized {
-    fn added_to_forest(&mut self, map: &NodeMap, node: NodeId);
-    fn added_to_parent(&mut self, map: &NodeMap, node: NodeId);
-    fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId);
-    fn removed_child(tree: &mut Tree<Self>, parent: NodeId);
-    fn removed_from_forest(&mut self, map: &NodeMap, node: NodeId);
-}
-
-impl Observer for () {
-    fn added_to_forest(&mut self, _forest: &NodeMap, _node: NodeId) {}
-
-    fn added_to_parent(&mut self, _forest: &NodeMap, _node: NodeId) {}
-
-    fn removing_from_parent(&mut self, _forest: &NodeMap, _node: NodeId) {}
-
+pub trait Observer: Sized {
+    fn added_to_forest(&mut self, _map: &NodeMap, _node: NodeId) {}
+    fn added_to_parent(&mut self, _map: &NodeMap, _node: NodeId) {}
+    fn removing_from_parent(&mut self, _map: &NodeMap, _node: NodeId) {}
     fn removed_child(_tree: &mut Tree<Self>, _parent: NodeId) {}
-
-    fn removed_from_forest(&mut self, _forest: &NodeMap, _node: NodeId) {}
+    fn removed_from_forest(&mut self, _map: &NodeMap, _node: NodeId) {}
 }
 
-#[must_use = "Unattached nodes should be inserted into the tree or created as a root with OwnedNode"]
+impl Observer for () {}
+
+#[must_use = "Unattached nodes should be inserted into the tree or retained as roots"]
 pub struct UnattachedNode<'a, O> {
     // Nothing prevents this from being public, just haven't needed it yet.
     id: NodeId,
@@ -288,13 +215,7 @@ pub struct UnattachedNode<'a, O> {
 }
 
 impl<'a, O: Observer> UnattachedNode<'a, O> {
-    pub(crate) fn make_root(self, name: &'static str) -> OwnedNode { OwnedNode::own(self.id, name) }
-}
-
-impl<'a, O: Observer> UnattachedNode<'a, O> {
-    /// Consumes this unattached node and returns its `NodeId` without
-    /// creating an `OwnedNode` root guard. The node remains in the forest
-    /// as a root until attached or explicitly removed.
+    /// Keep the node as a root in the forest.
     pub fn into_id(self) -> NodeId { self.id }
 
     #[track_caller]
@@ -310,14 +231,6 @@ impl<'a, O: Observer> UnattachedNode<'a, O> {
     #[track_caller]
     pub(crate) fn insert_after(self, sibling: NodeId) -> NodeId {
         self.attach_with(|this| this.id.link_after(sibling, &mut this.tree.map))
-    }
-
-    #[track_caller]
-    pub(crate) fn remove(self) {
-        debug_assert!(self.id.parent(&self.tree.map).is_none());
-        if let Some(node) = self.tree.map.map.remove(self.id) {
-            node.delete_recursive(self.tree, self.id);
-        }
     }
 
     fn attach_with(mut self, attach: impl FnOnce(&mut Self)) -> NodeId {
@@ -433,125 +346,58 @@ pub struct Node {
 }
 
 impl NodeId {
-    pub(crate) fn link_under_back(self, parent: NodeId, map: &mut NodeMap) {
-        if self == parent {
-            return;
-        }
-        if !map.contains(self) || !map.contains(parent) {
-            return;
-        }
-
-        let prev_child = {
-            let parent_node = map.map.get_mut(parent).expect("parent missing after contains check");
-            parent_node.first_child.get_or_insert(self);
-            parent_node.last_child.replace(self)
-        };
-
-        if let Some(self_node) = map.map.get_mut(self) {
-            self_node.parent = Some(parent);
-        } else {
-            return;
-        }
-
-        if let Some(prev) = prev_child {
-            self.hlink_after(prev, map);
+    fn link_under_back(self, parent: NodeId, map: &mut NodeMap) {
+        if self != parent && map.contains(parent) {
+            map.link_child(self, parent, parent.last_child(map), None);
         }
     }
 
     #[track_caller]
-    pub(crate) fn link_before(self, next: NodeId, map: &mut NodeMap) {
-        let parent = map.map.get(next).and_then(|n| n.parent);
-        let parent = parent.expect("cannot make a sibling of a root node or invalid sibling");
-        if let Some(self_node) = map.map.get_mut(self) {
-            self_node.parent = Some(parent);
-        } else {
-            return;
+    fn link_before(self, next: NodeId, map: &mut NodeMap) {
+        let parent = next
+            .parent(map)
+            .expect("cannot make a sibling of a root node or invalid sibling");
+        if self != next {
+            map.link_child(self, parent, next.prev_sibling(map), Some(next));
         }
-        if let Some(parent_node) = map.map.get_mut(parent) {
-            debug_assert!(parent_node.first_child.is_some());
-            if parent_node.first_child == Some(next) {
-                parent_node.first_child.replace(self);
-            }
-        }
-        self.hlink_before(next, map);
     }
 
     #[track_caller]
-    pub(crate) fn link_after(self, prev: NodeId, map: &mut NodeMap) {
-        let parent = map.map.get(prev).and_then(|n| n.parent);
-        let parent = parent.expect("cannot make a sibling of a root node or invalid sibling");
-        if let Some(self_node) = map.map.get_mut(self) {
-            self_node.parent = Some(parent);
-        } else {
-            return;
-        }
-        if let Some(parent_node) = map.map.get_mut(parent) {
-            debug_assert!(parent_node.last_child.is_some());
-            if parent_node.last_child == Some(prev) {
-                parent_node.last_child.replace(self);
-            }
-        }
-        self.hlink_after(prev, map);
-    }
-
-    pub(crate) fn hlink_after(self, prev: NodeId, map: &mut NodeMap) {
-        if self == prev {
-            return;
-        }
-        if map.map.get(self).is_none() || map.map.get(prev).is_none() {
-            return;
-        }
-
-        if let Some(self_node) = map.map.get_mut(self) {
-            debug_assert_eq!(self_node.prev_sibling, None);
-            self_node.prev_sibling.replace(prev);
-        } else {
-            return;
-        }
-
-        if let Some(prev_node) = map.map.get_mut(prev) {
-            let next = prev_node.next_sibling.replace(self);
-            if let Some(next) = next {
-                if let Some(next_node) = map.map.get_mut(next) {
-                    next_node.prev_sibling.replace(self);
-                }
-                if let Some(self_node) = map.map.get_mut(self) {
-                    self_node.next_sibling.replace(next);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn hlink_before(self, next: NodeId, map: &mut NodeMap) {
-        if self == next {
-            return;
-        }
-        if map.map.get(self).is_none() || map.map.get(next).is_none() {
-            return;
-        }
-
-        if let Some(self_node) = map.map.get_mut(self) {
-            debug_assert_eq!(self_node.next_sibling, None);
-            self_node.next_sibling.replace(next);
-        } else {
-            return;
-        }
-
-        if let Some(next_node) = map.map.get_mut(next) {
-            let prev = next_node.prev_sibling.replace(self);
-            if let Some(prev) = prev {
-                if let Some(prev_node) = map.map.get_mut(prev) {
-                    prev_node.next_sibling.replace(self);
-                }
-                if let Some(self_node) = map.map.get_mut(self) {
-                    self_node.prev_sibling.replace(prev);
-                }
-            }
+    fn link_after(self, prev: NodeId, map: &mut NodeMap) {
+        let parent = prev
+            .parent(map)
+            .expect("cannot make a sibling of a root node or invalid sibling");
+        if self != prev {
+            map.link_child(self, parent, Some(prev), prev.next_sibling(map));
         }
     }
 }
 
 impl NodeMap {
+    fn link_child(
+        &mut self,
+        id: NodeId,
+        parent: NodeId,
+        prev: Option<NodeId>,
+        next: Option<NodeId>,
+    ) {
+        let Some(node) = self.map.get_mut(id) else { return };
+        debug_assert!(node.prev_sibling.is_none() && node.next_sibling.is_none());
+        node.parent = Some(parent);
+        node.prev_sibling = prev;
+        node.next_sibling = next;
+        if let Some(prev) = prev {
+            self[prev].next_sibling = Some(id);
+        } else {
+            self[parent].first_child = Some(id);
+        }
+        if let Some(next) = next {
+            self[next].prev_sibling = Some(id);
+        } else {
+            self[parent].last_child = Some(id);
+        }
+    }
+
     #[track_caller]
     pub(crate) fn unlink(&mut self, id: NodeId) {
         if let Some((prev_sibling, next_sibling, parent)) =
@@ -728,25 +574,12 @@ mod tests {
     /// ```
     struct TestTree {
         tree: Tree<Events>,
-        root_node: OwnedNode,
         root: NodeId,
         child1: NodeId,
         child2: NodeId,
         child3: NodeId,
         gc1: NodeId,
-        other_root_node: OwnedNode,
         other_root: NodeId,
-    }
-
-    impl Drop for TestTree {
-        fn drop(&mut self) {
-            if !self.root_node.0.is_none() {
-                self.root_node.remove(&mut self.tree);
-            }
-            if !self.other_root_node.0.is_none() {
-                self.other_root_node.remove(&mut self.tree);
-            }
-        }
     }
 
     impl TestTree {
@@ -754,20 +587,18 @@ mod tests {
         fn new() -> Self {
             let mut tree = Tree::with_observer(Events(vec![]));
 
-            let root_node = OwnedNode::new_root_in(&mut tree, "tree");
-            let root = root_node.id();
+            let root = tree.mk_node().into_id();
             let child1 = tree.mk_node().push_back(root);
             let child2 = tree.mk_node().push_back(root);
             let child3 = tree.mk_node().push_back(root);
 
             let gc1 = tree.mk_node().push_back(child2);
-            let other_tree = OwnedNode::new_root_in(&mut tree, "other_tree");
-            let other_root = other_tree.id();
+            let other_root = tree.mk_node().into_id();
 
             let mut t = TestTree {
-                tree, root_node, root,
+                tree, root,
                 child1, child2, child3, gc1,
-                other_root_node: other_tree, other_root,
+                other_root,
             };
             t.clear_events();
             t
@@ -1026,10 +857,10 @@ mod tests {
 
         assert!(t.tree.map.map.contains_key(t.root));
         assert!(t.tree.map.map.contains_key(t.other_root));
-        t.root_node.remove(&mut t.tree);
+        t.root.remove_root(&mut t.tree);
         t.assert_events_are([RemovedFromForest(t.root)]);
         assert!(!t.tree.map.map.contains_key(t.root));
-        t.other_root_node.remove(&mut t.tree);
+        t.other_root.remove_root(&mut t.tree);
         t.assert_events_are([RemovedFromForest(t.other_root)]);
         assert!(!t.tree.map.map.contains_key(t.other_root));
     }

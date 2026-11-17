@@ -125,30 +125,25 @@ fn sanitize(v: f64) -> f64 { if v.is_finite() { v.max(0.0) } else { 0.0 } }
 /// - growable nodes preserve their final weighted proportions whenever their bounds allow it
 /// - zero-weight growable nodes share equally when no positive weights are present
 /// - if nothing can grow, remainder becomes blank space
-pub(crate) fn solve_axis_lengths(items: &[AxisConstraints], usable: f64) -> Vec<f64> {
+pub(crate) fn solve_axis_lengths(
+    mut items: impl AsMut<[AxisConstraints]>,
+    usable: f64,
+) -> Vec<f64> {
+    let items = items.as_mut();
     if items.is_empty() {
         return Vec::new();
     }
     let usable = sanitize(usable);
     let n = items.len();
-    let mut items: Vec<_> = items
-        .iter()
-        .map(|item| {
-            let min = sanitize(item.min);
-            let max = item.max.map(sanitize).filter(|&v| v > 0.0);
-            let fixed = item.fixed.map(|v| {
-                let v = sanitize(v).max(min);
-                max.map_or(v, |max| v.min(max))
-            });
-            AxisConstraints {
-                min,
-                max,
-                fixed,
-                weight: sanitize(item.weight),
-                ..*item
-            }
-        })
-        .collect();
+    for item in items.iter_mut() {
+        item.min = sanitize(item.min);
+        item.max = item.max.map(sanitize).filter(|&v| v > 0.0);
+        item.fixed = item.fixed.map(|v| {
+            let v = sanitize(v).max(item.min);
+            item.max.map_or(v, |max| v.min(max))
+        });
+        item.weight = sanitize(item.weight);
+    }
     let fixed_sum: f64 = items.iter().filter_map(|item| item.fixed).sum();
     if fixed_sum > usable {
         let scale = usable / fixed_sum;
@@ -241,7 +236,7 @@ mod tests {
     #[test]
     fn scales_non_fixed_minima_after_reserving_fixed_segments() {
         let solved = solve_axis_lengths(
-            &[
+            [
                 AxisConstraints {
                     min: 0.0,
                     fixed: Some(600.0),
@@ -276,7 +271,7 @@ mod tests {
     #[test]
     fn scales_overcommitted_fixed_segments_symmetrically() {
         let solved = solve_axis_lengths(
-            &[
+            [
                 AxisConstraints {
                     min: 0.0,
                     fixed: Some(900.0),
@@ -303,7 +298,7 @@ mod tests {
     #[test]
     fn max_caps_participate_in_growth_distribution() {
         let solved = solve_axis_lengths(
-            &[
+            [
                 AxisConstraints {
                     min: 0.0,
                     fixed: None,
@@ -330,7 +325,7 @@ mod tests {
     #[test]
     fn non_binding_minima_do_not_skew_equal_weight_segments() {
         let solved = solve_axis_lengths(
-            &[
+            [
                 AxisConstraints {
                     min: 0.0,
                     fixed: None,
