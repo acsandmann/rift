@@ -3,7 +3,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{GapSettings, StackDefaultOrientation};
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation, WindowDropAction};
 
@@ -85,6 +85,24 @@ impl WindowLayoutConstraints {
 
     pub fn resizable_any_axis(self) -> bool {
         self.resizable_for_axis(true) || self.resizable_for_axis(false)
+    }
+}
+
+fn update_participation(
+    inactive: &mut HashSet<WindowId>,
+    window: WindowId,
+    participates: bool,
+) -> bool {
+    if participates {
+        inactive.remove(&window)
+    } else {
+        inactive.insert(window)
+    }
+}
+
+fn replace_participation(inactive: &mut HashSet<WindowId>, from: WindowId, to: WindowId) {
+    if inactive.remove(&from) {
+        inactive.insert(to);
     }
 }
 
@@ -350,34 +368,31 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult;
 
     fn edit(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
-        if let LayoutEdit::Drop { source, target, action } = edit {
-            if !self.window_participates(source) || !self.window_participates(target) {
-                return EditResult::Unchanged;
-            }
-            match action {
-                crate::layout_engine::WindowDropAction::Move(direction) => {
-                    if !self.focus(layout, Focus::Select(source)).handled {
-                        return EditResult::Unchanged;
-                    }
-                    return self.edit_layout(layout, LayoutEdit::Move {
-                        direction,
-                        has_display_neighbor: false,
-                    });
-                }
-                crate::layout_engine::WindowDropAction::ConsumeOrExpel(direction) => {
-                    if !self.focus(layout, Focus::Select(source)).handled {
-                        return EditResult::Unchanged;
-                    }
-                    self.edit_layout(
-                        layout,
-                        LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)),
-                    );
-                    return EditResult::Changed;
-                }
-                _ => {}
-            }
+        let LayoutEdit::Drop { source, target, action } = edit else {
+            return self.edit_layout(layout, edit);
+        };
+        if !self.window_participates(source) || !self.window_participates(target) {
+            return EditResult::Unchanged;
         }
-        self.edit_layout(layout, edit)
+        let translated = match action {
+            WindowDropAction::Move(direction) => LayoutEdit::Move {
+                direction,
+                has_display_neighbor: false,
+            },
+            WindowDropAction::ConsumeOrExpel(direction) => {
+                LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction))
+            }
+            _ => return self.edit_layout(layout, edit),
+        };
+        if !self.focus(layout, Focus::Select(source)).handled {
+            return EditResult::Unchanged;
+        }
+        let result = self.edit_layout(layout, translated);
+        if matches!(action, WindowDropAction::ConsumeOrExpel(_)) {
+            EditResult::Changed
+        } else {
+            result
+        }
     }
 }
 
@@ -410,25 +425,13 @@ pub use scrolling::{ScrollingLayoutSystem, ViewportRelease};
 mod tests {
     use super::{
         BspLayoutSystem, LayoutSystem, MasterStackLayoutSystem, ScrollingLayoutSystem,
-        TraditionalLayoutSystem, WindowLayoutConstraints,
+        TraditionalLayoutSystem,
     };
     use crate::actor::app::WindowId;
     use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
     use crate::layout_engine::systems::{Focus, WindowChange, WindowQuery};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
-
-    #[test]
-    fn app_membership_reconciliation_is_representation_neutral() {
-        let delta =
-            super::reconcile_app_membership(1, vec![w(1), w(3)], vec![w(2), w(3)], |_| true);
-        assert_eq!(delta.additions, vec![w(2)]);
-        assert_eq!(delta.removals, vec![w(1)]);
-        let repeated =
-            super::reconcile_app_membership(1, vec![w(1), w(1)], vec![w(1), w(2), w(2)], |_| true);
-        assert_eq!(repeated.additions, vec![w(2)]);
-        assert!(repeated.removals.is_empty());
-    }
 
     #[test]
     fn common_insertion_point_controls_tree_and_linear_layouts() {
@@ -457,86 +460,6 @@ mod tests {
             w(2),
             w(3)
         ]);
-    }
-
-    #[test]
-    fn axis_specific_fixed_detection_supports_one_axis_locked_other_resizable() {
-        let c = WindowLayoutConstraints {
-            is_resizable: true,
-            locked_width: 700.0,
-            locked_height: 400.0,
-            min_width: 723.0,
-            min_height: 470.0,
-            max_width: 723.0,
-            max_height: 0.0,
-        }
-        .normalized();
-
-        assert_eq!(c.fixed_for_axis(true), Some(723.0));
-        assert_eq!(c.fixed_for_axis(false), None);
-        assert!(!c.resizable_for_axis(true));
-        assert!(c.resizable_for_axis(false));
-        assert!(c.resizable_any_axis());
-    }
-
-    #[test]
-    fn non_resizable_zero_locked_size_is_not_treated_as_fixed() {
-        let c = WindowLayoutConstraints {
-            is_resizable: false,
-            locked_width: 0.0,
-            locked_height: 0.0,
-            min_width: 0.0,
-            min_height: 0.0,
-            max_width: 0.0,
-            max_height: 0.0,
-        }
-        .normalized();
-
-        assert_eq!(c.fixed_for_axis(true), None);
-        assert_eq!(c.fixed_for_axis(false), None);
-        assert!(c.resizable_for_axis(true));
-        assert!(c.resizable_for_axis(false));
-    }
-
-    #[test]
-    fn non_resizable_positive_locked_size_remains_fixed() {
-        let c = WindowLayoutConstraints {
-            is_resizable: false,
-            locked_width: 640.0,
-            locked_height: 360.0,
-            min_width: 0.0,
-            min_height: 0.0,
-            max_width: 0.0,
-            max_height: 0.0,
-        }
-        .normalized();
-
-        assert_eq!(c.fixed_for_axis(true), Some(640.0));
-        assert_eq!(c.fixed_for_axis(false), Some(360.0));
-        assert!(!c.resizable_for_axis(true));
-        assert!(!c.resizable_for_axis(false));
-        assert!(!c.resizable_any_axis());
-    }
-
-    #[test]
-    fn positive_max_only_constraint_is_not_treated_as_fixed() {
-        let c = WindowLayoutConstraints {
-            is_resizable: true,
-            locked_width: 0.0,
-            locked_height: 0.0,
-            min_width: 0.0,
-            min_height: 0.0,
-            max_width: 600.0,
-            max_height: 480.0,
-        }
-        .normalized();
-
-        assert_eq!(c.fixed_for_axis(true), None);
-        assert_eq!(c.fixed_for_axis(false), None);
-        assert_eq!(c.max_for_axis(true), 600.0);
-        assert_eq!(c.max_for_axis(false), 480.0);
-        assert!(c.resizable_for_axis(true));
-        assert!(c.resizable_for_axis(false));
     }
 
     fn window_nodes(

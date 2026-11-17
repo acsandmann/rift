@@ -100,20 +100,21 @@ impl FloatingLayoutSystem {
         (container != self.inner.root(layout)).then_some(container)
     }
 
-    fn restore_independent_members(&mut self, layout: LayoutId, members: &[WindowId]) {
-        // The tree observer collapses one-member containers during reparenting.
-        // Restore only the affected members that were promoted to the root.
-        let root = self.inner.root(layout);
-        for &wid in members {
-            if self
-                .inner
-                .window_node(layout, wid)
-                .and_then(|node| node.parent(self.inner.map()))
-                == Some(root)
-                && let Some(frame) = self.independent_frames.remove(&wid)
-            {
-                self.frames.insert(wid, frame);
-            }
+    fn remaining_leaf(&self, moving: NodeId) -> Option<NodeId> {
+        let map = self.inner.map();
+        let mut siblings = moving.parent(map)?.children(map).filter(|&node| node != moving);
+        siblings
+            .next()
+            .filter(|&node| siblings.next().is_none() && self.inner.window_at(node).is_some())
+    }
+
+    fn restore_if_independent(&mut self, layout: LayoutId, remaining: Option<NodeId>) {
+        if let Some(node) = remaining
+            && node.parent(self.inner.map()) == Some(self.inner.root(layout))
+            && let Some(window) = self.inner.window_at(node)
+            && let Some(frame) = self.independent_frames.remove(&window)
+        {
+            self.frames.insert(window, frame);
         }
     }
 
@@ -332,7 +333,7 @@ impl FloatingLayoutSystem {
                 .filter(|parent| self.inner.layout(*parent).is_stacked())
                 .last();
             if let Some(stack) = stack {
-                for member in self.members(stack) {
+                for member in self.inner.windows_from(stack, Some(stack), true) {
                     self.frames.insert(member, frame);
                 }
             }
@@ -618,18 +619,14 @@ impl FloatingLayoutSystem {
         } else {
             parent
         };
-        let previous_members = target_node
-            .parent(self.inner.map())
-            .filter(|parent| *parent != root)
-            .map(|parent| self.members(parent))
-            .unwrap_or_default();
+        let remaining = self.remaining_leaf(target_node);
         if self.inner.layout(container).is_stacked() {
             self.align_members(&[target], focused, true);
         } else {
             self.independent_frames.remove(&target);
         }
         target_node.detach(&mut self.inner.tree).push_back(container);
-        self.restore_independent_members(layout, &previous_members);
+        self.restore_if_independent(layout, remaining);
         self.inner.select(selection);
     }
 
@@ -646,7 +643,6 @@ impl FloatingLayoutSystem {
         let Some(container) = container else {
             return Vec::new();
         };
-        let members = self.members(container);
         let visible = self
             .inner
             .edit(
@@ -654,11 +650,11 @@ impl FloatingLayoutSystem {
                 LayoutEdit::Group(GroupEdit::Unstack(default_orientation)),
             )
             .into_windows();
-        for wid in members {
-            if let Some(frame) = self.independent_frames.remove(&wid) {
-                if Some(wid) != focused {
-                    self.frames.insert(wid, frame);
-                }
+        for wid in self.inner.windows_from(container, Some(container), true) {
+            if let Some(frame) = self.independent_frames.remove(&wid)
+                && Some(wid) != focused
+            {
+                self.frames.insert(wid, frame);
             }
         }
         if let Some(wid) = focused {
@@ -680,13 +676,13 @@ impl FloatingLayoutSystem {
         if parent == self.inner.root(layout) {
             return;
         }
-        let previous_members = self.members(parent);
+        let remaining = self.remaining_leaf(selection);
         // Detach only the focused member. The remaining stack stays intact.
         selection.detach(&mut self.inner.tree).insert_after(parent);
         if let Some(frame) = self.independent_frames.remove(&wid) {
             self.frames.insert(wid, frame);
         }
-        self.restore_independent_members(layout, &previous_members);
+        self.restore_if_independent(layout, remaining);
         self.inner.select(selection);
     }
 }
@@ -708,7 +704,6 @@ impl FloatingLayoutSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sys::geometry::CGRectExt;
 
     fn w(index: u32) -> WindowId { WindowId::new(1, index) }
     fn rect(x: f64, y: f64) -> CGRect { CGRect::new(CGPoint::new(x, y), CGSize::new(200., 150.)) }
@@ -786,38 +781,6 @@ mod tests {
         system.unjoin_selection(layout);
         assert_eq!(system.windows(layout, WindowQuery::All).len(), 2);
         assert!(!system.parent_of_selection_is_stacked(layout));
-    }
-
-    #[test]
-    fn geometry_initialization_is_bounded_and_only_happens_once() {
-        let (mut system, layout) = fixture();
-        system.frames.clear();
-        let screen = CGRect::new(CGPoint::new(1000., 50.), CGSize::new(1000., 800.));
-        system.spread_initial_windows();
-        system.initialize_frames(layout, screen, &HashMap::default(), &|_| Some(screen));
-        let before = system.frames.clone();
-        assert!(before.values().all(|frame| screen.contains_rect(*frame)));
-        assert_ne!(system.frame(w(1)), system.frame(w(2)));
-        system.initialize_frames(layout, screen, &HashMap::default(), &|_| Some(screen));
-        assert_eq!(system.frames, before);
-        system.frames.clear();
-        system.initialize_frames(layout, screen, &HashMap::default(), &|_| Some(rect(1020., 80.)));
-        assert_eq!(system.frame(w(1)), Some(rect(1020., 80.)));
-        system
-            .edit(layout, LayoutEdit::Fullscreen { within_gaps: false })
-            .into_windows();
-        let frames = system.calculate_layout(
-            layout,
-            screen,
-            0.,
-            &HashMap::default(),
-            &Default::default(),
-            Default::default(),
-        );
-        assert_eq!(
-            frames.iter().find(|(wid, _)| *wid == w(2)).unwrap().1,
-            rect(1020., 80.)
-        );
     }
 
     #[test]

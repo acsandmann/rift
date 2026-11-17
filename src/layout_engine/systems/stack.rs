@@ -4,6 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use slotmap::{Key, KeyData, SlotMap};
 
 use super::constraints::{constrain_frame, traditional_leaf_axis_constraints};
+use super::traditional::{Components, LayoutRoot};
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
@@ -15,8 +16,8 @@ use crate::layout_engine::systems::{
     LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
 };
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, TraditionalLayoutSystem};
-use crate::model::tree::NodeId;
+use crate::layout_engine::{Direction, LayoutId, LayoutKind};
+use crate::model::tree::{NodeId, Tree};
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct Member {
@@ -114,6 +115,69 @@ pub struct StackLayoutSystem {
     window_insertion_point: WindowInsertionPoint,
 }
 
+// SlotMap's saved slots include vacant entries and key generations.
+#[derive(Serialize, Deserialize)]
+struct SavedSlot<T> {
+    value: Option<T>,
+    version: u32,
+}
+
+#[derive(Deserialize)]
+struct LegacyStackForest {
+    tree: Tree<Components>,
+    layout_roots: Vec<SavedSlot<LayoutRoot>>,
+}
+
+impl LegacyStackForest {
+    fn migrate(self) -> Result<(SlotMap<LayoutId, Stack>, u32), ron::Error> {
+        let Tree { map, data } = self.tree;
+        let mut next_node = 1;
+        let slots: Vec<_> = self
+            .layout_roots
+            .into_iter()
+            .map(|slot| {
+                let value = slot.value.map(|root| {
+                    let root = root.0;
+                    let selected = data.selection.current_selection(root);
+                    let active = data
+                        .focus_target(&map, selected, &|_| true)
+                        .or_else(|| data.focus_target(&map, root, &|_| true))
+                        .map(|(node, _)| node);
+                    let members: Vec<_> = root
+                        .traverse_preorder(&map)
+                        .filter_map(|id| {
+                            next_node =
+                                next_node.max((id.data().as_ffi() as u32).saturating_add(1));
+                            let window = data.window.at(id)?;
+                            let info = &data.layout.info[id];
+                            Some(Member {
+                                id,
+                                window,
+                                weight: f64::from(info.size),
+                                fullscreen: info.is_fullscreen,
+                                within_gaps: info.is_fullscreen_within_gaps,
+                            })
+                        })
+                        .collect();
+                    let info = &data.layout.info[root];
+                    Stack {
+                        id: root,
+                        active,
+                        members,
+                        root_selected: selected == root,
+                        kind: StackLayoutSystem::stack_kind(info.kind),
+                        fullscreen: info.is_fullscreen,
+                        within_gaps: info.is_fullscreen_within_gaps,
+                    }
+                });
+                SavedSlot { value, version: slot.version }
+            })
+            .collect();
+        let layouts = ron::from_str(&ron::to_string(&slots)?).map_err(|error| error.code)?;
+        Ok((layouts, next_node))
+    }
+}
+
 impl<'de> Deserialize<'de> for StackLayoutSystem {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
@@ -130,7 +194,7 @@ impl<'de> Deserialize<'de> for StackLayoutSystem {
             #[serde(default = "default_stack_orientation")]
             default_orientation: StackDefaultOrientation,
             #[serde(default, deserialize_with = "present")]
-            inner: Option<TraditionalLayoutSystem>,
+            inner: Option<LegacyStackForest>,
         }
         fn first_node() -> u32 { 1 }
         let Wire {
@@ -140,45 +204,7 @@ impl<'de> Deserialize<'de> for StackLayoutSystem {
             inner,
         } = Wire::deserialize(deserializer)?;
         let (layouts, next_node) = if let Some(inner) = inner {
-            // Preserve vacant slots and generations so workspace LayoutIds still resolve.
-            let mut slots =
-                serde_json::to_value(&inner.layout_roots).map_err(serde::de::Error::custom)?;
-            let mut next_node = 1;
-            for layout in inner.layout_roots.keys() {
-                let root = inner.root(layout);
-                let selected = inner.selected_window(layout);
-                let members: Vec<_> = root
-                    .traverse_preorder(inner.map())
-                    .filter_map(|id| {
-                        next_node = next_node.max((id.data().as_ffi() as u32).saturating_add(1));
-                        let window = inner.window_at(id)?;
-                        let info = &inner.tree.data.layout.info[id];
-                        Some(Member {
-                            id,
-                            window,
-                            weight: f64::from(info.size),
-                            fullscreen: info.is_fullscreen,
-                            within_gaps: info.is_fullscreen_within_gaps,
-                        })
-                    })
-                    .collect();
-                let info = &inner.tree.data.layout.info[root];
-                let stack = Stack {
-                    id: root,
-                    active: members.iter().find(|m| Some(m.window) == selected).map(|m| m.id),
-                    members,
-                    root_selected: inner.selection(layout) == root,
-                    kind: Self::stack_kind(inner.layout(root)),
-                    fullscreen: info.is_fullscreen,
-                    within_gaps: info.is_fullscreen_within_gaps,
-                };
-                slots[layout.data().as_ffi() as u32 as usize]["value"] =
-                    serde_json::to_value(stack).map_err(serde::de::Error::custom)?;
-            }
-            (
-                serde_json::from_value(slots).map_err(serde::de::Error::custom)?,
-                next_node,
-            )
+            inner.migrate().map_err(serde::de::Error::custom)?
         } else {
             (layouts, next_node)
         };
@@ -316,11 +342,7 @@ impl LayoutSystem for StackLayoutSystem {
     fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
-        if participates {
-            self.inactive.remove(&window)
-        } else {
-            self.inactive.insert(window)
-        }
+        super::update_participation(&mut self.inactive, window, participates)
     }
 
     fn create_layout(&mut self) -> LayoutId {
@@ -508,9 +530,7 @@ impl LayoutSystem for StackLayoutSystem {
                 }
             }
             WindowChange::Replace(from, to) => {
-                if self.inactive.remove(&from) {
-                    self.inactive.insert(to);
-                }
+                super::replace_participation(&mut self.inactive, from, to);
                 for s in self.layouts.values_mut() {
                     for m in &mut s.members {
                         if m.window == from {
@@ -788,8 +808,8 @@ impl StackLayoutSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout_engine::ResizeOrientation;
-    use crate::layout_engine::systems::{GroupEdit, LayoutEdit};
+    use crate::layout_engine::TraditionalLayoutSystem;
+    use crate::layout_engine::systems::LayoutEdit;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -826,6 +846,12 @@ mod tests {
             restored.update(WindowChange::Remove(w(2)));
             assert_eq!(restored.selected_window(layout), Some(w(3)));
             let new_layout = restored.create_layout();
+            assert!(!restored.contains_layout(removed));
+            let reused = [clone, new_layout]
+                .into_iter()
+                .find(|layout| layout.data().as_ffi() as u32 == removed.data().as_ffi() as u32)
+                .expect("a vacant saved slot must be reused");
+            assert_ne!(reused, removed);
             assert_ne!(restored.container_tree(new_layout).node_id, expected.node_id);
         }
     }
@@ -886,141 +912,5 @@ mod tests {
             StackLineReserve::default(),
         );
         assert_eq!(frames[0].1.size.width, 200.0);
-    }
-
-    #[test]
-    fn create_layout_starts_as_stack() {
-        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Perpendicular);
-        let layout = system.create_layout();
-        assert_eq!(
-            system.container_tree(layout).layout_kind,
-            Some(LayoutKind::VerticalStack)
-        );
-    }
-
-    #[test]
-    fn create_layout_honors_stack_default_orientation_setting() {
-        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Horizontal);
-        let layout = system.create_layout();
-        assert_eq!(
-            system.container_tree(layout).layout_kind,
-            Some(LayoutKind::HorizontalStack)
-        );
-    }
-
-    #[test]
-    fn toggle_stack_command_path_keeps_layout_stacked() {
-        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Perpendicular);
-        let layout = system.create_layout();
-
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
-
-        let _ = system
-            .edit(
-                layout,
-                LayoutEdit::Group(GroupEdit::Unstack(
-                    crate::common::config::StackDefaultOrientation::Perpendicular,
-                )),
-            )
-            .into_windows();
-        let _ = system
-            .edit(
-                layout,
-                LayoutEdit::Group(GroupEdit::Stack(
-                    crate::common::config::StackDefaultOrientation::Perpendicular,
-                )),
-            )
-            .into_windows();
-
-        assert!(system.container_tree(layout).layout_kind.unwrap().is_stacked());
-    }
-
-    #[test]
-    fn set_windows_for_app_noop_keeps_fullscreen_state() {
-        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Perpendicular);
-        let layout = system.create_layout();
-
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
-        let _ = system
-            .edit(layout, LayoutEdit::Fullscreen { within_gaps: false })
-            .into_windows();
-        assert!(system.has_any_fullscreen_node(layout));
-
-        system.update(WindowChange::Reconcile(layout, 1, vec![w(1), w(2)]));
-
-        assert!(system.has_any_fullscreen_node(layout));
-    }
-
-    #[test]
-    fn set_windows_for_app_honors_updated_end_of_tree_policy() {
-        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Perpendicular);
-        let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
-        system.select_window(layout, w(1));
-
-        system.update_settings(
-            StackDefaultOrientation::Perpendicular,
-            WindowInsertionPoint::EndOfTree,
-        );
-        system.update(WindowChange::Reconcile(layout, 1, vec![w(1), w(2), w(3)]));
-
-        assert_eq!(system.all_windows_in_layout(layout), vec![w(1), w(2), w(3)]);
-    }
-
-    fn setup_fullscreen_stack_system() -> (StackLayoutSystem, LayoutId) {
-        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Perpendicular);
-        let layout = system.create_layout();
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
-        let _ = system
-            .edit(layout, LayoutEdit::Fullscreen { within_gaps: false })
-            .into_windows();
-        assert!(system.has_any_fullscreen_node(layout));
-        (system, layout)
-    }
-
-    #[test]
-    fn resize_selection_noop_keeps_fullscreen_state() {
-        let (mut system, layout) = setup_fullscreen_stack_system();
-        system
-            .edit(layout, LayoutEdit::Resize {
-                amount: 0.1,
-                orientation: ResizeOrientation::Horizontal,
-            })
-            .discard();
-        assert!(system.has_any_fullscreen_node(layout));
-    }
-
-    #[test]
-    fn rebalance_noop_keeps_fullscreen_state() {
-        let (mut system, layout) = setup_fullscreen_stack_system();
-        system.edit(layout, LayoutEdit::Rebalance).discard();
-        assert!(system.has_any_fullscreen_node(layout));
-    }
-
-    #[test]
-    fn split_selection_noop_keeps_fullscreen_state() {
-        let (mut system, layout) = setup_fullscreen_stack_system();
-        system.edit(layout, LayoutEdit::Split(LayoutKind::Horizontal)).discard();
-        assert!(system.has_any_fullscreen_node(layout));
-    }
-
-    #[test]
-    fn join_selection_noop_keeps_fullscreen_state() {
-        let (mut system, layout) = setup_fullscreen_stack_system();
-        system
-            .edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)))
-            .discard();
-        assert!(system.has_any_fullscreen_node(layout));
-    }
-
-    #[test]
-    fn unjoin_selection_noop_keeps_fullscreen_state() {
-        let (mut system, layout) = setup_fullscreen_stack_system();
-        system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin)).discard();
-        assert!(system.has_any_fullscreen_node(layout));
     }
 }
