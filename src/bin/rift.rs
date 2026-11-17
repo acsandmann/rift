@@ -71,6 +71,16 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Replay the welcome animation and reopen the native Setup Assistant.
+    #[arg(long)]
+    setup: bool,
+    #[arg(long, hide = true)]
+    onboarding: bool,
+    #[arg(long, hide = true)]
+    setup_intro: bool,
+    #[arg(long, hide = true)]
+    permission_recovery: bool,
+
     /// Internal: run only the Settings window, connected to the running daemon.
     #[arg(long, hide = true)]
     settings: bool,
@@ -133,6 +143,38 @@ fn main() {
             Err(e) => {
                 eprintln!("{}", e);
                 process::exit(1);
+            }
+        }
+    }
+
+    let setup_path = opt.config.clone().unwrap_or_else(config_file);
+    if opt.onboarding {
+        rift_wm::ui::onboarding::run(opt.setup_intro, opt.permission_recovery);
+    }
+    let mut open_settings_after_setup = false;
+    if opt.setup {
+        match rift_wm::ui::onboarding::launch(&setup_path, true, false) {
+            Ok(Some(settings)) if rift_wm::sys::accessibility::ax_is_trusted() => {
+                if rift_client::RiftMachClient::connect().is_ok() {
+                    if settings {
+                        log::init_logging();
+                        rift_wm::ui::settings::process::run(setup_path);
+                    }
+                    return;
+                }
+                open_settings_after_setup = settings;
+            }
+            _ => return,
+        }
+    } else if !opt.validate {
+        let first = rift_wm::ui::onboarding::first_launch(&setup_path);
+        let recovery = !rift_wm::sys::accessibility::ax_is_trusted();
+        if first || recovery {
+            match rift_wm::ui::onboarding::launch(&setup_path, first, !first) {
+                Ok(Some(settings)) if rift_wm::sys::accessibility::ax_is_trusted() => {
+                    open_settings_after_setup = settings;
+                }
+                _ => return,
             }
         }
     }
@@ -261,6 +303,14 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             process::exit(1);
         }
     };
+
+    if open_settings_after_setup {
+        let _ = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--settings")
+            .arg("--config")
+            .arg(&config_path)
+            .spawn();
+    }
 
     let _window_recovery =
         rift_wm::sys::window_recovery::start().expect("could not start window recovery");

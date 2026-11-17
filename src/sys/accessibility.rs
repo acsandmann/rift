@@ -24,7 +24,7 @@ const AX_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const AX_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[inline]
-fn ax_is_trusted() -> bool {
+pub fn ax_is_trusted() -> bool {
     unsafe {
         autoreleasepool(|_| {
             let keys: [*mut AnyObject; 1] = [kAXTrustedCheckOptionPrompt as *mut AnyObject];
