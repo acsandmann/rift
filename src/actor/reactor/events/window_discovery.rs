@@ -43,6 +43,8 @@ fn sync_existing_window_state(
         // Preserve the observed frame and minimize transition until their handlers run.
         info.frame = existing.info.frame;
         info.is_minimized = was_minimized;
+        // Only registration reads titlebar buttons.
+        info.close_or_minimize_disabled = existing.info.close_or_minimize_disabled;
         existing.info = info;
     } else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());

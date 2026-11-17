@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::trace;
 
-use super::geometry::CGRectDef;
+use super::geometry::{CGRectDef, is_axis_locked};
 use super::window_server::{WindowServerId, WindowServerInfo, window_parent};
 use crate::sys::axuielement::{
     AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError,
@@ -408,6 +408,8 @@ pub struct WindowInfo {
     pub is_minimized: bool,
     #[serde(default)]
     pub is_resizable: bool,
+    #[serde(default)]
+    pub close_or_minimize_disabled: bool,
     pub title: String,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
@@ -499,6 +501,7 @@ impl WindowInfo {
             is_root,
             is_minimized,
             is_resizable,
+            close_or_minimize_disabled: false,
             min_size,
             max_size,
             title,
@@ -512,6 +515,31 @@ impl WindowInfo {
 
         Ok((info, server_info))
     }
+
+    pub(crate) fn floats_by_default(&self) -> bool {
+        let locked = |axis: fn(CGSize) -> f64| {
+            self.min_size
+                .zip(self.max_size)
+                .is_some_and(|(min, max)| is_axis_locked(axis(min), axis(max)))
+        };
+
+        self.is_standard
+            && (!self.is_resizable
+                || self.close_or_minimize_disabled
+                || locked(|size| size.width)
+                || locked(|size| size.height))
+    }
+}
+
+/// Zoom is never read, and a fullscreen window never counts, because fullscreen
+/// transitions toggle titlebar buttons.
+pub(crate) fn close_or_minimize_disabled(
+    button_enabled: impl Fn(&'static str) -> Result<bool, AxError>,
+    fullscreen: impl FnOnce() -> Result<bool, AxError>,
+) -> bool {
+    let disabled = |button| matches!(button_enabled(button), Ok(false));
+
+    (disabled("AXCloseButton") || disabled("AXMinimizeButton")) && !matches!(fullscreen(), Ok(true))
 }
 
 impl TryFrom<&AXUIElement> for WindowInfo {
@@ -580,6 +608,78 @@ mod native_identity_tests {
             Some(WindowServerId::new(42))
         );
         assert!(responses.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod titlebar_button_tests {
+    use objc2_application_services::AXError;
+
+    use super::*;
+
+    fn disabled(
+        buttons: &[(&str, Result<bool, AxError>)],
+        fullscreen: Result<bool, AxError>,
+    ) -> bool {
+        close_or_minimize_disabled(
+            |button| {
+                buttons
+                    .iter()
+                    .find(|(name, _)| *name == button)
+                    .map_or(Err(AxError::NotFound), |(_, enabled)| enabled.clone())
+            },
+            || fullscreen,
+        )
+    }
+
+    #[test]
+    fn disabled_close_or_minimize_button_counts() {
+        assert!(disabled(
+            &[("AXCloseButton", Ok(false)), ("AXMinimizeButton", Ok(true))],
+            Ok(false)
+        ));
+        assert!(disabled(
+            &[("AXCloseButton", Ok(true)), ("AXMinimizeButton", Ok(false))],
+            Ok(false)
+        ));
+    }
+
+    #[test]
+    fn enabled_missing_or_unreadable_buttons_do_not_count() {
+        assert!(!disabled(
+            &[("AXCloseButton", Ok(true)), ("AXMinimizeButton", Ok(true))],
+            Ok(false)
+        ));
+        assert!(!disabled(&[], Ok(false)));
+        assert!(!disabled(
+            &[
+                ("AXCloseButton", Err(AxError::Ax(AXError::Failure))),
+                ("AXMinimizeButton", Err(AxError::Ax(AXError::CannotComplete))),
+            ],
+            Ok(false)
+        ));
+    }
+
+    #[test]
+    fn disabled_zoom_and_fullscreen_buttons_do_not_count() {
+        assert!(!disabled(
+            &[
+                ("AXZoomButton", Ok(false)),
+                ("AXFullScreenButton", Ok(false))
+            ],
+            Ok(false)
+        ));
+    }
+
+    #[test]
+    fn fullscreen_window_has_no_disabled_button() {
+        let buttons = [("AXMinimizeButton", Ok(false))];
+
+        assert!(!disabled(&buttons, Ok(true)));
+        assert!(disabled(
+            &buttons,
+            Err(AxError::Ax(AXError::AttributeUnsupported))
+        ));
     }
 }
 

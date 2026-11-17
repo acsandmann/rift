@@ -28,7 +28,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 use crate::model::tx_store::WindowTxStore;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
-use crate::sys::app::{NSRunningApplicationExt, NativeWindowIdentity};
+use crate::sys::app::{NSRunningApplicationExt, NativeWindowIdentity, close_or_minimize_disabled};
 use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AXUIElement, Error as AxError};
 use crate::sys::enhanced_ui::EnhancedUi;
 use crate::sys::event;
@@ -2358,6 +2358,13 @@ impl State {
         if self.windows.contains_key(&wid) {
             trace!(?wid, "Window already registered; skipping duplicate");
             return None;
+        }
+
+        if info.is_standard && !info.floats_by_default() {
+            info.close_or_minimize_disabled = close_or_minimize_disabled(
+                |button| elem.button_enabled(button),
+                || elem.bool_attribute("AXFullScreen"),
+            );
         }
 
         // Some applications expose real WindowServer-backed windows through a

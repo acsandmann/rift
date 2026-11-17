@@ -1612,6 +1612,7 @@ impl LayoutEngine {
         if window_store.is_temporarily_unavailable(wid) {
             return false;
         }
+        window_store.mark_placed(wid);
 
         let active_space_before = window_store.workspace_for_window(wid).map_or_else(
             || self.space_with_window(wid),
@@ -2088,6 +2089,17 @@ impl LayoutEngine {
                     self.floating.remove_floating(wid);
                 }
                 let should_float = self.floating.is_floating(wid);
+                if should_float
+                    && effects.auto_floating
+                    && !effects.floating
+                    && let Some(window) = window_store.window(wid)
+                {
+                    self.floating_positions.store_if_absent(
+                        target_workspace,
+                        wid,
+                        window.frame_monotonic,
+                    );
+                }
                 let mut membership_changed = false;
                 if let Some(source) = source_workspace {
                     if source != target_workspace {
@@ -4907,6 +4919,7 @@ mod tests {
                         source_workspace: Some(target),
                         workspace_id: target,
                         floating: true,
+                        auto_floating: false,
                         position: None,
                         size: None,
                         focus: false,
@@ -6258,6 +6271,7 @@ mod tests {
                         source_workspace: None,
                         workspace_id: workspace,
                         floating: true,
+                        auto_floating: false,
                         position: None,
                         size: None,
                         focus: false,

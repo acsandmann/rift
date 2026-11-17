@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
+use crate::sys::geometry::is_axis_locked;
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
@@ -69,7 +70,7 @@ impl WindowLayoutConstraints {
         let max = self.max_for_axis(horizontal);
         // Axis-specific lock: when min/max collapse to the same positive value,
         // treat that axis as fixed even if the window is generally resizable.
-        if min > 0.0 && max > 0.0 && (min - max).abs() <= f64::EPSILON {
+        if is_axis_locked(min, max) {
             return Some(max);
         }
         if !self.is_resizable {
