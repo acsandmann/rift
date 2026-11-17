@@ -1579,12 +1579,16 @@ impl Reactor {
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
                 if quiet == Quiet::No && self.main_window_tracker.is_globally_frontmost(pid) {
-                    // Use only the app thread's resolved main window; pending
+                    // Prefer the app thread's resolved main window; pending
                     // AX admission can leave the previous main window cached.
+                    // Some apps leave AXMainWindow unset, so a sole admitted
+                    // window is the only target Rift can follow.
                     let activation_window = if self.state.windows.has_pending_window_for_pid(pid) {
                         None
                     } else {
-                        self.main_window_tracker.app_main_window(pid)
+                        self.main_window_tracker
+                            .app_main_window(pid)
+                            .or_else(|| self.sole_admitted_window(pid))
                     };
                     outcome.absorb(self.auto_switch_to_window_workspace(activation_window));
                     outcome.focused_window = activation_window;
@@ -5596,6 +5600,16 @@ impl Reactor {
                 }));
             }
         }
+    }
+
+    fn sole_admitted_window(&self, pid: pid_t) -> Option<WindowId> {
+        let mut windows = self
+            .state
+            .windows
+            .window_ids_for_pid(pid)
+            .filter(|wid| self.state.windows.is_admitted(*wid));
+        let window = windows.next()?;
+        windows.next().is_none().then_some(window)
     }
 
     fn auto_switch_to_window_workspace(&mut self, window: Option<WindowId>) -> EventOutcome {

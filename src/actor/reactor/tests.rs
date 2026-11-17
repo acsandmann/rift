@@ -4190,6 +4190,31 @@ fn late_activation_cannot_switch_after_another_app_became_frontmost() {
 }
 
 #[test]
+fn activation_follows_sole_admitted_window_without_ax_main_window() {
+    let (mut apps, mut reactor, space, main, _) = pending_activation_context();
+    reactor.handle_event(Event::ApplicationMainWindowChanged(main.pid, None, Quiet::No));
+    assert_eq!(
+        reactor
+            .state
+            .windows
+            .window_ids_for_pid(main.pid)
+            .filter(|wid| reactor.state.windows.is_admitted(*wid))
+            .count(),
+        1
+    );
+    assert!(!reactor.state.windows.has_pending_window_for_pid(main.pid));
+
+    reactor.handle_event(Event::ApplicationActivated(main.pid, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(0),
+        "a sole admitted window must drive activation when AXMainWindow is missing"
+    );
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(main));
+    apps.simulate_until_quiet(&mut reactor);
+}
+
+#[test]
 fn activation_follows_ax_restored_window_on_inactive_workspace() {
     for stale_metadata in [false, true] {
         let (mut apps, mut reactor, space, main, _) = pending_activation_context();
