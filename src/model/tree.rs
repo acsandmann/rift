@@ -74,6 +74,9 @@ impl OwnedNode {
     /// Marks a non-root node as owned.
     pub fn own(node: NodeId, name: &'static str) -> Self { OwnedNode(Some(node), name.to_owned()) }
 
+    // The enclosing forest is being dropped and will reclaim all its nodes.
+    pub(crate) fn release(mut self) { self.0.take(); }
+
     pub fn id(&self) -> NodeId { self.0.expect("OwnedNode::id called on removed OwnedNode") }
 
     #[track_caller]

@@ -1,7 +1,6 @@
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
-use tracing::warn;
 
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
@@ -645,7 +644,7 @@ impl TraditionalLayoutSystem {
 impl Drop for TraditionalLayoutSystem {
     fn drop(&mut self) {
         for (_, node) in self.layout_roots.drain() {
-            std::mem::forget(node);
+            node.release();
         }
     }
 }
@@ -1006,30 +1005,22 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 self.nest_in_container_internal(layout, selection, kind);
                 EditResult::Changed
             }
-            LayoutEdit::Fullscreen { within_gaps: false } => EditResult::Raise({
+            LayoutEdit::Fullscreen { within_gaps } => EditResult::Raise({
                 if !self.inactive.is_empty()
                     && self.find_best_focus_target(self.root(layout)).is_none()
                 {
                     return EditResult::Raise(Vec::new());
                 }
                 let node = self.selection(layout);
-                if self.tree.data.layout.toggle_fullscreen(node) {
+                let info = &mut self.tree.data.layout.info[node];
+                if super::toggle_fullscreen_mode(
+                    &mut info.is_fullscreen,
+                    &mut info.is_fullscreen_within_gaps,
+                    within_gaps,
+                ) {
                     self.visible_windows_under_internal(node)
                 } else {
-                    vec![]
-                }
-            }),
-            LayoutEdit::Fullscreen { within_gaps: true } => EditResult::Raise({
-                if !self.inactive.is_empty()
-                    && self.find_best_focus_target(self.root(layout)).is_none()
-                {
-                    return EditResult::Raise(Vec::new());
-                }
-                let node = self.selection(layout);
-                if self.tree.data.layout.toggle_fullscreen_within_gaps(node) {
-                    self.visible_windows_under_internal(node)
-                } else {
-                    vec![]
+                    Vec::new()
                 }
             }),
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
@@ -1077,51 +1068,38 @@ impl LayoutSystem for TraditionalLayoutSystem {
                     return EditResult::Unchanged;
                 }
                 let selection = self.selection(layout);
-                if let Some(_focused_window) = self.window_at(selection) {
-                    let candidates = selection
-                        .ancestors(self.map())
-                        .filter(|&node| {
-                            if let Some(parent) = node.parent(self.map()) {
-                                !self.layout(parent).is_group()
-                            } else {
-                                false
+                if self.window_at(selection).is_none() {
+                    return EditResult::Unchanged;
+                }
+                let changed = match orientation {
+                    ResizeOrientation::Horizontal => [Direction::Right, Direction::Left]
+                        .into_iter()
+                        .any(|direction| self.resize_internal(selection, amount, direction)),
+                    ResizeOrientation::Vertical => [Direction::Down, Direction::Up]
+                        .into_iter()
+                        .any(|direction| self.resize_internal(selection, amount, direction)),
+                    ResizeOrientation::Smart => {
+                        let mut node = selection;
+                        while let Some(parent) = node.parent(self.map()) {
+                            let kind = self.layout(parent);
+                            if !kind.is_group() {
+                                let directions = match kind.orientation() {
+                                    Orientation::Horizontal => [Direction::Right, Direction::Left],
+                                    Orientation::Vertical => [Direction::Down, Direction::Up],
+                                };
+                                if directions
+                                    .into_iter()
+                                    .any(|direction| self.resize_internal(node, amount, direction))
+                                {
+                                    return EditResult::Changed;
+                                }
                             }
-                        })
-                        .collect::<Vec<_>>();
-
-                    if orientation == ResizeOrientation::Smart {
-                        for &node in &candidates {
-                            let Some(parent) = node.parent(self.map()) else {
-                                continue;
-                            };
-                            let directions: &[Direction] = match self.layout(parent).orientation() {
-                                Orientation::Horizontal => &[Direction::Right, Direction::Left],
-                                Orientation::Vertical => &[Direction::Down, Direction::Up],
-                            };
-                            if directions
-                                .iter()
-                                .any(|&direction| self.resize_internal(node, amount, direction))
-                            {
-                                break;
-                            }
+                            node = parent;
                         }
-                    } else {
-                        let directions: &[Direction] = match orientation {
-                            ResizeOrientation::Horizontal => &[Direction::Right, Direction::Left],
-                            ResizeOrientation::Vertical => &[Direction::Down, Direction::Up],
-                            ResizeOrientation::Smart => unreachable!(),
-                        };
-                        for &direction in directions {
-                            if candidates
-                                .iter()
-                                .any(|&node| self.resize_internal(node, amount, direction))
-                            {
-                                break;
-                            }
-                        }
+                        false
                     }
                 };
-                EditResult::Changed
+                EditResult::from(changed)
             }
             LayoutEdit::Rebalance => {
                 let root = self.root(layout);
@@ -2245,94 +2223,35 @@ impl TraditionalLayoutSystem {
         screen: CGRect,
     ) {
         const RESIZE_DELTA_EPSILON: f64 = 1.0;
-        let mut check_or_resize = |resize: bool| {
-            let mut count = 0;
-            let mut first_direction: Option<Direction> = None;
-            let mut good = true;
-            let mut left_delta = old_frame.min().x - new_frame.min().x;
-            let mut right_delta = new_frame.max().x - old_frame.max().x;
-            let mut up_delta = old_frame.min().y - new_frame.min().y;
-            let mut down_delta = new_frame.max().y - old_frame.max().y;
-
-            if left_delta.abs() < RESIZE_DELTA_EPSILON {
-                left_delta = 0.0;
-            }
-            if right_delta.abs() < RESIZE_DELTA_EPSILON {
-                right_delta = 0.0;
-            }
-            if up_delta.abs() < RESIZE_DELTA_EPSILON {
-                up_delta = 0.0;
-            }
-            if down_delta.abs() < RESIZE_DELTA_EPSILON {
-                down_delta = 0.0;
-            }
-
-            let mut effective = Vec::new();
-
-            if left_delta != 0.0 || right_delta != 0.0 {
-                let (primary_dir, primary_delta, secondary_dir, secondary_delta) =
-                    if left_delta.abs() >= right_delta.abs() {
-                        (Direction::Left, left_delta, Direction::Right, right_delta)
-                    } else {
-                        (Direction::Right, right_delta, Direction::Left, left_delta)
-                    };
-                let chosen = if primary_delta != 0.0 && self.can_resize_towards(node, primary_dir) {
-                    Some((primary_dir, primary_delta))
-                } else if secondary_delta != 0.0 && self.can_resize_towards(node, secondary_dir) {
-                    Some((secondary_dir, secondary_delta))
-                } else {
-                    None
-                };
-                if let Some((direction, delta)) = chosen {
-                    effective.push((direction, delta, screen.size.width));
+        let choose_edge = |mut edges: [(Direction, f64); 2]| {
+            for (_, delta) in &mut edges {
+                if delta.abs() < RESIZE_DELTA_EPSILON {
+                    *delta = 0.0;
                 }
             }
-
-            if up_delta != 0.0 || down_delta != 0.0 {
-                let (primary_dir, primary_delta, secondary_dir, secondary_delta) =
-                    if up_delta.abs() >= down_delta.abs() {
-                        (Direction::Up, up_delta, Direction::Down, down_delta)
-                    } else {
-                        (Direction::Down, down_delta, Direction::Up, up_delta)
-                    };
-                let chosen = if primary_delta != 0.0 && self.can_resize_towards(node, primary_dir) {
-                    Some((primary_dir, primary_delta))
-                } else if secondary_delta != 0.0 && self.can_resize_towards(node, secondary_dir) {
-                    Some((secondary_dir, secondary_delta))
-                } else {
-                    None
-                };
-                if let Some((direction, delta)) = chosen {
-                    effective.push((direction, delta, screen.size.height));
-                }
+            if !(edges[0].1.abs() >= edges[1].1.abs()) {
+                edges.swap(0, 1);
             }
-
-            for (direction, delta, whole) in effective {
-                count += 1;
-                if count > 2 {
-                    good = false;
-                }
-                if let Some(first) = first_direction {
-                    if first.orientation() == direction.orientation() {
-                        good = false;
-                    }
-                } else {
-                    first_direction = Some(direction);
-                }
-                if resize {
-                    let ratio = f64::from(delta) / f64::from(whole);
-                    let _ = self.resize_internal(node, ratio, direction);
-                }
-            }
-            good
+            edges.into_iter().find(|&(direction, delta)| {
+                delta != 0.0 && self.can_resize_towards(node, direction)
+            })
         };
-        if !check_or_resize(false) {
-            warn!(
-                "Only resizing in 2 directions is supported, but was asked to resize from {old_frame:?} to {new_frame:?}"
-            );
-            return;
+        let horizontal = choose_edge([
+            (Direction::Left, old_frame.min().x - new_frame.min().x),
+            (Direction::Right, new_frame.max().x - old_frame.max().x),
+        ]);
+        let vertical = choose_edge([
+            (Direction::Up, old_frame.min().y - new_frame.min().y),
+            (Direction::Down, new_frame.max().y - old_frame.max().y),
+        ]);
+        for (edge, extent) in [
+            (horizontal, screen.size.width),
+            (vertical, screen.size.height),
+        ] {
+            if let Some((direction, delta)) = edge {
+                self.resize_internal(node, delta / extent, direction);
+            }
         }
-        check_or_resize(true);
     }
 
     fn nest_in_container_internal(
@@ -2695,7 +2614,7 @@ pub(crate) struct LayoutInfo {
     #[serde(default)]
     pub(crate) is_fullscreen: bool,
     #[serde(default)]
-    is_fullscreen_within_gaps: bool,
+    pub(super) is_fullscreen_within_gaps: bool,
 }
 
 impl Layout {
@@ -2797,22 +2716,6 @@ impl Layout {
         if within {
             self.info[node].is_fullscreen = false;
         }
-    }
-
-    fn toggle_fullscreen(&mut self, node: NodeId) -> bool {
-        self.info[node].is_fullscreen = !self.info[node].is_fullscreen;
-        if self.info[node].is_fullscreen {
-            self.info[node].is_fullscreen_within_gaps = false;
-        }
-        self.info[node].is_fullscreen
-    }
-
-    fn toggle_fullscreen_within_gaps(&mut self, node: NodeId) -> bool {
-        self.info[node].is_fullscreen_within_gaps = !self.info[node].is_fullscreen_within_gaps;
-        if self.info[node].is_fullscreen_within_gaps {
-            self.info[node].is_fullscreen = false;
-        }
-        self.info[node].is_fullscreen_within_gaps
     }
 
     fn is_effectively_fullscreen(&self, node: NodeId) -> bool {

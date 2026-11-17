@@ -533,12 +533,7 @@ impl LayoutSystem for FloatingLayoutSystem {
                 self.inner.edit(from_layout, LayoutEdit::Transfer(to_layout)).discard();
                 EditResult::Changed
             }
-            LayoutEdit::Fullscreen { within_gaps: false } => {
-                self.inner.edit(layout, LayoutEdit::Fullscreen { within_gaps: false })
-            }
-            LayoutEdit::Fullscreen { within_gaps: true } => {
-                self.inner.edit(layout, LayoutEdit::Fullscreen { within_gaps: true })
-            }
+            LayoutEdit::Fullscreen { .. } => self.inner.edit(layout, edit),
             LayoutEdit::Swap(a, b) => self.inner.edit(layout, LayoutEdit::Swap(a, b)),
             LayoutEdit::ReorderTab { window, target } => {
                 self.inner.edit(layout, LayoutEdit::ReorderTab { window, target })

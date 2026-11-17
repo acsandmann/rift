@@ -1907,11 +1907,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 self.move_selection_to_layout_after_selection(layout, to);
                 EditResult::Changed
             }
-            LayoutEdit::Fullscreen { within_gaps: false } => {
-                EditResult::Raise(self.toggle_fullscreen(layout, false))
-            }
-            LayoutEdit::Fullscreen { within_gaps: true } => {
-                EditResult::Raise(self.toggle_fullscreen(layout, true))
+            LayoutEdit::Fullscreen { within_gaps } => {
+                EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
             LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
             LayoutEdit::Drop { source, target, action } => {

@@ -127,76 +127,56 @@ impl<'de> Deserialize<'de> for StackLayoutSystem {
             default_orientation,
             inner,
         } = Wire::deserialize(deserializer)?;
-        let mut system = match inner {
-            None => Self {
-                layouts,
-                next_node,
-                default_orientation,
-                inactive: Default::default(),
-                window_insertion_point: Default::default(),
-            },
-            Some(mut inner) => {
-                // SlotMap's serialized slots carry the generations of saved LayoutIds.
-                // Rewrite only their values, retaining holes and generations verbatim.
-                let mut slots =
-                    serde_json::to_value(&inner.layout_roots).map_err(serde::de::Error::custom)?;
-                let mut next_node = 1;
-                for (layout, _) in &inner.layout_roots {
-                    let snapshot = inner.container_tree(layout);
-                    let mut members = Vec::new();
-                    fn read(
-                        node: &rift_protocol::ContainerTreeNode,
-                        out: &mut Vec<Member>,
-                        next: &mut u32,
-                    ) {
-                        *next = (*next).max((node.node_id as u32).saturating_add(1));
-                        if let Some(window) = node.window_id {
-                            out.push(Member {
-                                id: NodeId::from(KeyData::from_ffi(node.node_id)),
-                                window: WindowId::new(window.pid, window.idx),
-                                weight: node.weight.unwrap_or(1.0),
-                                fullscreen: node.is_fullscreen,
-                                within_gaps: node.is_fullscreen_within_gaps,
-                            });
-                        }
-                        for child in &node.children {
-                            read(child, out, next);
-                        }
-                    }
-                    read(&snapshot, &mut members, &mut next_node);
-                    let selected = inner.selected_window(layout);
-                    let active = members.iter().find(|m| Some(m.window) == selected).map(|m| m.id);
-                    let stack = Stack {
-                        id: NodeId::from(KeyData::from_ffi(snapshot.node_id)),
-                        members,
-                        active,
-                        root_selected: snapshot.is_selected,
-                        kind: Self::stack_kind(
-                            snapshot.layout_kind.unwrap_or(LayoutKind::VerticalStack),
-                        ),
-                        fullscreen: snapshot.is_fullscreen,
-                        within_gaps: snapshot.is_fullscreen_within_gaps,
-                    };
-                    slots[layout.data().as_ffi() as u32 as usize]["value"] =
-                        serde_json::to_value(stack).map_err(serde::de::Error::custom)?;
-                }
-                let layouts = serde_json::from_value(slots).map_err(serde::de::Error::custom)?;
-                let old: Vec<_> = inner.layout_roots.keys().collect();
-                for layout in old {
-                    inner.remove_layout(layout);
-                }
-                Self {
-                    layouts,
-                    next_node,
-                    default_orientation,
-                    inactive: Default::default(),
-                    window_insertion_point: Default::default(),
-                }
+        let (layouts, next_node) = if let Some(inner) = inner {
+            // Preserve vacant slots and generations so workspace LayoutIds still resolve.
+            let mut slots =
+                serde_json::to_value(&inner.layout_roots).map_err(serde::de::Error::custom)?;
+            let mut next_node = 1;
+            for layout in inner.layout_roots.keys() {
+                let root = inner.root(layout);
+                let selected = inner.selected_window(layout);
+                let members: Vec<_> = root
+                    .traverse_preorder(inner.map())
+                    .filter_map(|id| {
+                        next_node = next_node.max((id.data().as_ffi() as u32).saturating_add(1));
+                        let window = inner.window_at(id)?;
+                        let info = &inner.tree.data.layout.info[id];
+                        Some(Member {
+                            id,
+                            window,
+                            weight: f64::from(info.size),
+                            fullscreen: info.is_fullscreen,
+                            within_gaps: info.is_fullscreen_within_gaps,
+                        })
+                    })
+                    .collect();
+                let info = &inner.tree.data.layout.info[root];
+                let stack = Stack {
+                    id: root,
+                    active: members.iter().find(|m| Some(m.window) == selected).map(|m| m.id),
+                    members,
+                    root_selected: inner.selection(layout) == root,
+                    kind: Self::stack_kind(inner.layout(root)),
+                    fullscreen: info.is_fullscreen,
+                    within_gaps: info.is_fullscreen_within_gaps,
+                };
+                slots[layout.data().as_ffi() as u32 as usize]["value"] =
+                    serde_json::to_value(stack).map_err(serde::de::Error::custom)?;
             }
+            (
+                serde_json::from_value(slots).map_err(serde::de::Error::custom)?,
+                next_node,
+            )
+        } else {
+            (layouts, next_node)
         };
-        // Transient participation is re-established by the engine after restoration.
-        system.inactive.clear();
-        Ok(system)
+        Ok(Self {
+            layouts,
+            next_node,
+            default_orientation,
+            inactive: Default::default(),
+            window_insertion_point: Default::default(),
+        })
     }
 }
 
@@ -265,20 +245,7 @@ impl StackLayoutSystem {
             let m = &mut stack.members[index];
             (&mut m.fullscreen, &mut m.within_gaps)
         };
-        let enabled = if within {
-            *gaps = !*gaps;
-            if *gaps {
-                *full = false;
-            }
-            *gaps
-        } else {
-            *full = !*full;
-            if *full {
-                *gaps = false;
-            }
-            *full
-        };
-        if enabled {
+        if super::toggle_fullscreen_mode(full, gaps, within) {
             self.visible_windows_under_selection(layout)
         } else {
             Vec::new()
@@ -1101,24 +1068,5 @@ mod tests {
         let (mut system, layout) = setup_fullscreen_stack_system();
         system.edit(layout, LayoutEdit::Group(GroupEdit::Unjoin)).discard();
         assert!(system.has_any_fullscreen_node(layout));
-    }
-}
-
-#[cfg(test)]
-mod lifecycle_measurement {
-    use super::*;
-    #[test]
-    fn measure_stack_lifecycle() {
-        let started = std::time::Instant::now();
-        let mut system = StackLayoutSystem::default();
-        for _ in 0..200 {
-            let layout = system.create_layout();
-            for index in 1..=32 { system.update(WindowChange::Add(layout, WindowId::new(1,index), None)); }
-            let cloned = system.clone_layout(layout);
-            for index in (1..=32).rev() { system.update(WindowChange::Remove(WindowId::new(1,index))); }
-            system.remove_layout(layout);
-            system.remove_layout(cloned);
-        }
-        println!("STACK_LIFECYCLE_NS={}", started.elapsed().as_nanos());
     }
 }

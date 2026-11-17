@@ -268,6 +268,20 @@ impl EditResult {
     pub fn discard(self) {}
 }
 
+/// Toggle one fullscreen mode and clear the other when enabling it.
+fn toggle_fullscreen_mode(full: &mut bool, gaps: &mut bool, within_gaps: bool) -> bool {
+    let (target, other) = if within_gaps {
+        (gaps, full)
+    } else {
+        (full, gaps)
+    };
+    *target = !*target;
+    if *target {
+        *other = false;
+    }
+    *target
+}
+
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn window_participates(&self, _window: WindowId) -> bool { true }
