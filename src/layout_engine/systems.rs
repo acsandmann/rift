@@ -104,6 +104,8 @@ pub(crate) fn reconcile_app_membership(
     debug_assert!(desired.iter().all(|wid| wid.pid == pid));
     current.sort_unstable();
     desired.sort_unstable();
+    current.dedup();
+    desired.dedup();
 
     let mut additions = Vec::new();
     let mut removals = Vec::new();
@@ -396,39 +398,6 @@ macro_rules! delegate_traditional_layout_system {
             self.inner.has_any_fullscreen_node(layout)
         }
     };
-    () => {
-        delegate_traditional_layout_system!(@tree);
-        fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
-
-
-        fn move_focus(
-            &mut self,
-            layout: LayoutId,
-            direction: Direction,
-        ) -> (Option<WindowId>, Vec<WindowId>) {
-            self.inner.move_focus(layout, direction)
-        }
-        fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-            self.inner.window_in_direction(layout, direction)
-        }
-        fn replace_window(&mut self, from: WindowId, to: WindowId) {
-            self.inner.replace_window(from, to);
-        }
-
-        fn on_window_resized(
-            &mut self,
-            layout: LayoutId,
-            wid: WindowId,
-            old_frame: CGRect,
-            new_frame: CGRect,
-            screen: CGRect,
-            gaps: &crate::common::config::GapSettings,
-        ) {
-            self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
-        }
-
-
-    };
 }
 
 mod traditional;
@@ -458,6 +427,10 @@ mod tests {
             super::reconcile_app_membership(1, vec![w(1), w(3)], vec![w(2), w(3)], |_| true);
         assert_eq!(delta.additions, vec![w(2)]);
         assert_eq!(delta.removals, vec![w(1)]);
+        let repeated =
+            super::reconcile_app_membership(1, vec![w(1), w(1)], vec![w(1), w(2), w(2)], |_| true);
+        assert_eq!(repeated.additions, vec![w(2)]);
+        assert!(repeated.removals.is_empty());
     }
 
     #[test]

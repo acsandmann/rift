@@ -292,9 +292,12 @@ impl FloatingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         get_frame: &impl Fn(WindowId) -> Option<CGRect>,
     ) {
-        let windows = self.inner.all_windows_in_layout(layout);
-        let count = windows.len();
-        for (index, wid) in windows.into_iter().enumerate() {
+        let count = if self.spread_on_initialization {
+            self.inner.windows_with_nodes(layout).count()
+        } else {
+            0
+        };
+        for (index, (_, wid)) in self.inner.windows_with_nodes(layout).enumerate() {
             if self.frames.contains_key(&wid) {
                 continue;
             }
@@ -384,17 +387,19 @@ impl LayoutSystem for FloatingLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let windows = self.inner.all_windows_in_layout(layout);
-        let count = windows.len();
-        windows
-            .into_iter()
+        let count = if self.spread_on_initialization {
+            self.inner.windows_with_nodes(layout).count()
+        } else {
+            0
+        };
+        self.inner
+            .windows_with_nodes(layout)
             .enumerate()
-            .filter(|(_, wid)| self.inner.window_participates(*wid))
-            .map(|(index, wid)| {
+            .filter(|(_, (_, wid))| self.inner.window_participates(*wid))
+            .map(|(index, (node, wid))| {
                 let frame = self
                     .inner
-                    .window_node(layout, wid)
-                    .and_then(|node| self.inner.fullscreen_frame(node, screen, gaps))
+                    .fullscreen_frame(node, screen, gaps)
                     .or_else(|| self.frames.get(&wid).copied())
                     .unwrap_or_else(|| {
                         self.initial_frame(

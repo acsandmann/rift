@@ -193,6 +193,15 @@ impl TraditionalLayoutSystem {
         self.tree.data.window.node_for(layout, wid)
     }
 
+    pub(crate) fn windows_with_nodes(
+        &self,
+        layout: LayoutId,
+    ) -> impl Iterator<Item = (NodeId, WindowId)> + '_ {
+        self.root(layout)
+            .traverse_preorder(self.map())
+            .filter_map(|node| self.window_at(node).map(|window| (node, window)))
+    }
+
     pub(crate) fn contains_any_window(&self, wid: WindowId) -> bool {
         self.tree.data.window.window_nodes.contains_key(&wid)
     }
@@ -735,10 +744,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.root(layout)
-            .traverse_preorder(&self.tree.map)
-            .filter_map(|node| self.tree.data.window.at(node))
-            .collect()
+        self.windows_with_nodes(layout).map(|(_, window)| window).collect()
     }
 
     fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
@@ -1026,6 +1032,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         } else {
             from_sel.detach(&mut self.tree).insert_after(to_sel);
         }
+        self.tree.data.window.reassign_subtree(&self.tree.map, from_sel, to_layout);
         if is_selection {
             for node in from_sel.ancestors(&self.tree.map) {
                 if node == old_parent {
@@ -2426,7 +2433,7 @@ impl tree::Observer for Components {
     }
 
     fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {
-        if parent.parent(&tree.map).is_none() {
+        if parent.parent(&tree.map).is_none() || tree.data.layout.info[parent].fixed_container {
             return;
         }
         if parent.is_empty(&tree.map) {
@@ -2488,6 +2495,18 @@ impl WindowIndex {
             .or_default()
             .0
             .push(WindowNodeInfo { layout, node });
+    }
+
+    pub(crate) fn reassign_subtree(&mut self, map: &NodeMap, node: NodeId, layout: LayoutId) {
+        for node in node.traverse_preorder(map) {
+            if let Some(window) = self.at(node) {
+                for info in &mut self.window_nodes.get_mut(&window).unwrap().0 {
+                    if info.node == node {
+                        info.layout = layout;
+                    }
+                }
+            }
+        }
     }
 
     fn replace_window(&mut self, from: WindowId, to: WindowId) {
@@ -2553,7 +2572,7 @@ impl WindowIndex {
     }
 }
 
-struct StackLayoutResult {
+pub(super) struct StackLayoutResult {
     container_rect: CGRect,
     stack_offset: f64,
     is_horizontal: bool,
@@ -2593,7 +2612,7 @@ impl StackLayoutResult {
         }
     }
 
-    fn get_frame_for_index(&self, index: usize) -> CGRect {
+    pub(super) fn get_frame_for_index(&self, index: usize) -> CGRect {
         use objc2_core_foundation::{CGPoint, CGSize};
         let offset_amount = index as f64 * self.stack_offset;
         let (x_offset, y_offset) = if self.is_horizontal {
@@ -2630,6 +2649,8 @@ pub(crate) struct Layout {
 pub(crate) struct LayoutInfo {
     pub(crate) size: f32,
     pub(crate) total: f32,
+    #[serde(default)]
+    pub(crate) fixed_container: bool,
     kind: LayoutKind,
     last_ungrouped_kind: LayoutKind,
     #[serde(default)]
@@ -3126,7 +3147,7 @@ impl Components {
     }
 }
 
-fn stack_layout_result(
+pub(super) fn stack_layout_result(
     rect: CGRect,
     child_count: usize,
     stack_offset: f64,

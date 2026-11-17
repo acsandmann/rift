@@ -36,16 +36,25 @@ enum ColumnWidth {
     Fixed(f64),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+struct Row {
+    window: WindowId,
+    height: f64,
+}
+
+#[derive(Serialize, Clone, Debug)]
 struct Column {
     id: ColumnId,
-    windows: Vec<WindowId>,
+    rows: Vec<Row>,
     active_window: usize,
     width: ColumnWidth,
-    height_weights: Vec<f64>,
 }
 
 impl Column {
+    fn windows(&self) -> impl DoubleEndedIterator<Item = &WindowId> + ExactSizeIterator + Clone {
+        self.rows.iter().map(|row| &row.window)
+    }
+
     fn resolved_width(
         &self,
         view: f64,
@@ -58,8 +67,7 @@ impl Column {
             ColumnWidth::Fixed(width) => return width.max(1.0),
             ColumnWidth::Proportion(ratio) => ratio,
             ColumnWidth::Default => self
-                .windows
-                .iter()
+                .windows()
                 .find(|wid| !inactive.contains(*wid))
                 .and_then(|wid| constraints.get(wid))
                 .map(|c| c.locked_width)
@@ -69,7 +77,9 @@ impl Column {
         proportional_width(view, gap, clamp_ratio(ratio, settings))
     }
 
-    fn selected(&self) -> Option<WindowId> { self.windows.get(self.active_window).copied() }
+    fn selected(&self) -> Option<WindowId> {
+        self.rows.get(self.active_window).map(|row| row.window)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -406,7 +416,7 @@ impl Geometry {
     ) -> Self {
         let tiling = compute_tiling_area(screen, &gaps);
         let mut columns = Vec::with_capacity(state.columns.len());
-        let mut frames = Vec::with_capacity(state.columns.iter().map(|c| c.windows.len()).sum());
+        let mut frames = Vec::with_capacity(state.columns.iter().map(|c| c.rows.len()).sum());
         let constraint = |wid: &WindowId| {
             constraints
                 .get(wid)
@@ -424,14 +434,13 @@ impl Geometry {
             state
                 .columns
                 .iter()
-                .filter(|c| c.windows.iter().any(|w| !inactive.contains(w)))
+                .filter(|c| c.windows().any(|w| !inactive.contains(w)))
                 .count()
         };
         for column in &state.columns {
-            let active_rows =
-                column.windows.iter().enumerate().filter(|(_, w)| !inactive.contains(*w));
+            let active_rows = column.windows().enumerate().filter(|(_, w)| !inactive.contains(*w));
             let row_count = if inactive.is_empty() {
-                column.windows.len()
+                column.rows.len()
             } else {
                 active_rows.clone().count()
             };
@@ -484,9 +493,7 @@ impl Geometry {
                         min: c.min_height,
                         fixed: c.fixed_for_axis(false),
                         max: (c.max_height > 0.0).then_some(c.max_height),
-                        weight: (column.height_weights.get(row).copied().unwrap_or(1.0)
-                            - c.min_height)
-                            .max(0.001),
+                        weight: (column.rows[row].height - c.min_height).max(0.001),
                         can_grow: c.resizable_for_axis(false),
                     }
                 })
@@ -749,6 +756,7 @@ struct StoredColumn {
     #[serde(alias = "node_id")]
     id: u64,
     windows: Vec<WindowId>,
+    rows: Vec<Row>,
     active_window: usize,
     width: ColumnWidth,
     height_weights: Vec<f64>,
@@ -770,25 +778,36 @@ impl From<StoredLayoutState> for LayoutState {
         let columns = stored
             .columns
             .into_iter()
-            .filter(|c| !c.windows.is_empty())
-            .map(|mut c| {
+            .filter_map(|mut c| {
+                if c.rows.is_empty() {
+                    c.rows = c
+                        .windows
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, window)| Row {
+                            window,
+                            height: c.height_weights.get(i).copied().unwrap_or(1.0),
+                        })
+                        .collect();
+                }
+                if c.rows.is_empty() {
+                    return None;
+                }
                 if c.id == 0 {
                     c.id = next;
                     next += 2;
                 }
-                c.height_weights.resize(c.windows.len(), 1.0);
                 let width = if c.width_overridden || c.width_offset != 0.0 {
                     ColumnWidth::Proportion(base + c.width_offset)
                 } else {
                     c.width
                 };
-                Column {
+                Some(Column {
                     id: ColumnId(c.id),
-                    active_window: c.active_window.min(c.windows.len() - 1),
-                    windows: c.windows,
+                    active_window: c.active_window.min(c.rows.len() - 1),
+                    rows: c.rows,
                     width,
-                    height_weights: c.height_weights,
-                }
+                })
             })
             .collect::<Vec<_>>();
         let active_column = stored.active_column.min(columns.len().saturating_sub(1));
@@ -815,7 +834,7 @@ impl From<StoredLayoutState> for LayoutState {
 impl LayoutState {
     fn selected(&self, inactive: &HashSet<WindowId>) -> Option<WindowId> {
         let (col, row) = self.selected_location(inactive)?;
-        Some(self.columns[col].windows[row])
+        Some(self.columns[col].rows[row].window)
     }
 
     fn selected_location(&self, inactive: &HashSet<WindowId>) -> Option<(usize, usize)> {
@@ -823,19 +842,19 @@ impl LayoutState {
         let row = if column.selected().is_some_and(|w| !inactive.contains(&w)) {
             column.active_window
         } else {
-            column.windows.iter().position(|w| !inactive.contains(w))?
+            column.windows().position(|w| !inactive.contains(w))?
         };
         Some((self.active_column, row))
     }
 
     fn locate(&self, wid: WindowId) -> Option<(usize, usize)> {
         self.columns.iter().enumerate().find_map(|(col, column)| {
-            column.windows.iter().position(|&w| w == wid).map(|row| (col, row))
+            column.windows().position(|&w| w == wid).map(|row| (col, row))
         })
     }
 
     fn all_windows(&self) -> Vec<WindowId> {
-        self.columns.iter().flat_map(|c| c.windows.iter().copied()).collect()
+        self.columns.iter().flat_map(|c| c.windows().copied()).collect()
     }
 
     fn activate(&mut self, wid: WindowId) -> bool {
@@ -849,7 +868,7 @@ impl LayoutState {
 
     fn restore_fullscreen_view(&mut self) -> bool {
         let fullscreen = self.columns.get(self.active_column).is_some_and(|column| {
-            column.windows.iter().any(|wid| {
+            column.windows().any(|wid| {
                 self.fullscreen.contains(wid) || self.fullscreen_within_gaps.contains(wid)
             })
         });
@@ -873,10 +892,10 @@ impl LayoutState {
             let tiling = compute_tiling_area(screen, gaps);
             for column in &mut self.columns {
                 if matches!(column.width, ColumnWidth::Default)
-                    && column.windows.len() == 1
-                    && !inactive.contains(&column.windows[0])
+                    && column.rows.len() == 1
+                    && !inactive.contains(&column.rows[0].window)
                     && constraints
-                        .get(&column.windows[0])
+                        .get(&column.rows[0].window)
                         .map(|c| c.locked_width)
                         .is_some_and(|w| w.is_finite() && w > 0.0)
                 {
@@ -1029,10 +1048,9 @@ impl LayoutState {
         self.next_column_id += 2; // Even container IDs never collide with odd window IDs.
         self.columns.insert(index.min(self.columns.len()), Column {
             id,
-            windows: vec![wid],
+            rows: vec![Row { window: wid, height: weight }],
             active_window: 0,
             width,
-            height_weights: vec![weight],
         });
         self.activate(wid);
     }
@@ -1047,13 +1065,12 @@ impl LayoutState {
         let selected = self.selected(inactive);
         let column = &mut self.columns[col];
         let width = column.width;
-        column.windows.remove(row);
-        let weight = column.height_weights.remove(row);
+        let weight = column.rows.remove(row).height;
         if row < column.active_window {
             column.active_window -= 1;
         }
-        column.active_window = column.active_window.min(column.windows.len().saturating_sub(1));
-        if column.windows.is_empty() {
+        column.active_window = column.active_window.min(column.rows.len().saturating_sub(1));
+        if column.rows.is_empty() {
             self.columns.remove(col);
             if col < self.active_column {
                 self.active_column -= 1;
@@ -1085,8 +1102,7 @@ impl LayoutState {
                 if row <= column.active_window {
                     column.active_window += 1;
                 }
-                column.windows.insert(row, source);
-                column.height_weights.insert(row, weight);
+                column.rows.insert(row, Row { window: source, height: weight });
             }
             WindowDropAction::Insert(direction @ (Direction::Left | Direction::Right)) => {
                 self.new_column(
@@ -1189,7 +1205,7 @@ impl ScrollingLayoutSystem {
             return;
         };
         let active_removed = state.selected(inactive) == Some(wid);
-        let column_removed = state.columns[col].windows.len() == 1;
+        let column_removed = state.columns[col].rows.len() == 1;
         let restore = if active_removed && column_removed {
             state.transient_restore.take()
         } else {
@@ -1619,8 +1635,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     && let Some((col, row)) =
                         state.columns.iter().enumerate().find_map(|(col, column)| {
                             column
-                                .windows
-                                .iter()
+                                .windows()
                                 .position(|w| !self.inactive.contains(w))
                                 .map(|row| (col, row))
                         })
@@ -1661,10 +1676,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .iter()
             .enumerate()
             .map(|(index, col)| {
-                format!(
-                    "Column {index}: {:?} active={}\n",
-                    col.windows, col.active_window
-                )
+                format!("Column {index}: {:?} active={}\n", col.rows, col.active_window)
             })
             .collect()
     }
@@ -1676,15 +1688,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .iter()
             .map(|column| {
                 let windows = column
-                    .windows
-                    .iter()
+                    .windows()
                     .enumerate()
                     .map(|(index, &window)| rift_protocol::ContainerTreeNode {
                         node_id: (((window.pid as u32 as u64) << 32) | u64::from(window.idx.get()))
                             .rotate_left(1)
                             | 1,
                         node_type: rift_protocol::ContainerNodeType::Window,
-                        weight: Some(column.height_weights.get(index).copied().unwrap_or(1.0)),
+                        weight: Some(column.rows[index].height),
                         window_id: Some(window.into()),
                         is_selected: state.selected(&self.inactive) == Some(window),
                         is_fullscreen: state.fullscreen.contains(&window),
@@ -1759,7 +1770,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts
             .get(layout)
             .and_then(|s| s.columns.get(s.active_column))
-            .map(|c| c.windows.iter().copied().filter(|w| self.window_participates(*w)).collect())
+            .map(|c| c.windows().copied().filter(|w| self.window_participates(*w)).collect())
             .unwrap_or_default()
     }
 
@@ -1790,18 +1801,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
             column
                 .selected()
                 .filter(|w| !self.inactive.contains(w))
-                .or_else(|| column.windows.iter().copied().find(|w| !self.inactive.contains(w)))
+                .or_else(|| column.windows().copied().find(|w| !self.inactive.contains(w)))
         };
         match direction {
             Direction::Left => state.columns[..col].iter().rev().find_map(selected),
             Direction::Right => state.columns[col + 1..].iter().find_map(selected),
-            Direction::Up => state.columns[col].windows[..row]
+            Direction::Up => state.columns[col].rows[..row]
                 .iter()
+                .map(|row| &row.window)
                 .rev()
                 .copied()
                 .find(|w| !self.inactive.contains(w)),
-            Direction::Down => state.columns[col].windows[row + 1..]
+            Direction::Down => state.columns[col].rows[row + 1..]
                 .iter()
+                .map(|row| &row.window)
                 .copied()
                 .find(|w| !self.inactive.contains(w)),
         }
@@ -1818,7 +1831,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         for state in self.layouts.values_mut() {
             state.mutate(&self.settings, &self.inactive, |state| {
                 for column in &mut state.columns {
-                    for window in &mut column.windows {
+                    for window in column.rows.iter_mut().map(|row| &mut row.window) {
                         if *window == from {
                             *window = to;
                         }
@@ -1927,9 +1940,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 ));
             }
             let column = &mut state.columns[col];
-            if height_changed && column.windows.len() > 1 {
+            if height_changed && column.rows.len() > 1 {
                 let total = (tiling.size.height
-                    - gaps.inner.vertical * column.windows.len().saturating_sub(1) as f64)
+                    - gaps.inner.vertical * column.rows.len().saturating_sub(1) as f64)
                     .max(1.0);
                 set_height_share(
                     column,
@@ -1953,12 +1966,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         };
         state.mutate(&self.settings, &self.inactive, |state| {
             let selected = state.selected(&self.inactive);
-            let aw = state.columns[ac].height_weights[ar];
-            let bw = state.columns[bc].height_weights[br];
-            state.columns[ac].windows[ar] = b;
-            state.columns[bc].windows[br] = a;
-            state.columns[ac].height_weights[ar] = bw;
-            state.columns[bc].height_weights[br] = aw;
+            let a = state.columns[ac].rows[ar];
+            let b = state.columns[bc].rows[br];
+            state.columns[ac].rows[ar] = b;
+            state.columns[bc].rows[br] = a;
             if let Some(wid) = selected {
                 state.activate(wid);
             }
@@ -2005,7 +2016,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             let Some((col, row)) = state.selected_location(&self.inactive) else {
                 return false;
             };
-            if horizontal && state.columns[col].windows.len() > 1 {
+            if horizontal && state.columns[col].rows.len() > 1 {
                 let wid = state.selected(&self.inactive).unwrap();
                 let (width, weight) = state.detach(wid, &self.inactive).unwrap();
                 state.new_column(
@@ -2019,13 +2030,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
             let (index, len) = if horizontal {
                 (col, state.columns.len())
             } else {
-                (row, state.columns[col].windows.len())
+                (row, state.columns[col].rows.len())
             };
             let participates = |candidate: &usize| {
                 if horizontal {
-                    state.columns[*candidate].windows.iter().any(|w| !self.inactive.contains(w))
+                    state.columns[*candidate].windows().any(|w| !self.inactive.contains(w))
                 } else {
-                    !self.inactive.contains(&state.columns[col].windows[*candidate])
+                    !self.inactive.contains(&state.columns[col].rows[*candidate].window)
                 }
             };
             let target = match direction {
@@ -2040,8 +2051,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 state.active_column = target;
             } else {
                 let column = &mut state.columns[col];
-                column.windows.swap(row, target);
-                column.height_weights.swap(row, target);
+                column.rows.swap(row, target);
                 column.active_window = target;
             }
             true
@@ -2150,14 +2160,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
         } else {
             return Vec::new();
         };
-        let moved = state.columns[target].windows.clone();
+        let moved = state.columns[target].windows().copied().collect::<Vec<_>>();
         let selected = state.selected(&self.inactive).unwrap();
         state.transient_restore = None;
         state.mutate(&self.settings, &self.inactive, |state| {
             let mut neighbor = state.columns.remove(target);
             let column = &mut state.columns[col - usize::from(target < col)];
-            column.windows.append(&mut neighbor.windows);
-            column.height_weights.append(&mut neighbor.height_weights);
+            column.rows.append(&mut neighbor.rows);
             state.activate(selected);
         });
         moved
@@ -2174,7 +2183,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         };
         let selected = state.selected(&self.inactive).unwrap();
         let moved: Vec<_> =
-            state.columns[col].windows.iter().copied().filter(|w| *w != selected).collect();
+            state.columns[col].windows().copied().filter(|w| *w != selected).collect();
         state.transient_restore = None;
         state.mutate(&self.settings, &self.inactive, |state| {
             for (index, &wid) in moved.iter().enumerate() {
@@ -2190,7 +2199,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts
             .get(layout)
             .and_then(|s| s.columns.get(s.active_column))
-            .is_some_and(|c| c.windows.len() > 1)
+            .is_some_and(|c| c.rows.len() > 1)
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
@@ -2213,13 +2222,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return;
         };
         let vertical = orientation == ResizeOrientation::Vertical
-            || (orientation == ResizeOrientation::Smart && state.columns[col].windows.len() > 1);
+            || (orientation == ResizeOrientation::Smart && state.columns[col].rows.len() > 1);
         state.mutate(&self.settings, &self.inactive, |state| {
             let column = &mut state.columns[col];
             if vertical {
-                if column.windows.len() > 1 {
-                    let total: f64 = column.height_weights.iter().sum();
-                    let share = (column.height_weights[row] / total + amount).clamp(0.05, 0.95);
+                if column.rows.len() > 1 {
+                    let total: f64 = column.rows.iter().map(|row| row.height).sum();
+                    let share = (column.rows[row].height / total + amount).clamp(0.05, 0.95);
                     set_height_share(column, row, share, total.max(10_000.0));
                 }
             } else {
@@ -2246,19 +2255,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
 fn set_height_share(column: &mut Column, row: usize, share: f64, scale: f64) {
     let other: f64 = column
-        .height_weights
+        .rows
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != row)
-        .map(|(_, w)| w)
+        .map(|(_, r)| r.height)
         .sum();
-    for (index, weight) in column.height_weights.iter_mut().enumerate() {
-        *weight = if index == row {
+    let others = column.rows.len().saturating_sub(1).max(1) as f64;
+    for (index, r) in column.rows.iter_mut().enumerate() {
+        r.height = if index == row {
             share * scale
         } else if other > 0.0 {
-            (1.0 - share) * scale * *weight / other
+            (1.0 - share) * scale * r.height / other
         } else {
-            (1.0 - share) * scale / column.windows.len().saturating_sub(1).max(1) as f64
+            (1.0 - share) * scale / others
         };
     }
 }
@@ -2506,14 +2516,25 @@ pub(crate) mod tests {
         f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Vertical);
         f.gaps.inner.horizontal = 20.0;
         let before = f.frames();
-        let weights = f.system.layouts[f.layout].columns[0].height_weights.clone();
+        let weights = f.system.layouts[f.layout].columns[0]
+            .rows
+            .iter()
+            .map(|r| r.height)
+            .collect::<Vec<_>>();
         for _ in 0..3 {
             assert!(f.system.switch_preset_column_width(f.layout, false));
         }
         assert_eq!(f.frames(), before); // Same membership, row heights and gap-aware half width.
         assert_eq!(f.frame(1).size.width, 490.0);
         assert_eq!(f.selected(), Some(wid(2)));
-        assert_eq!(f.system.layouts[f.layout].columns[0].height_weights, weights);
+        assert_eq!(
+            f.system.layouts[f.layout].columns[0]
+                .rows
+                .iter()
+                .map(|r| r.height)
+                .collect::<Vec<_>>(),
+            weights
+        );
         for within_gaps in [false, true] {
             f.system.toggle_fullscreen(f.layout, within_gaps);
             assert!(f.system.switch_preset_column_width(f.layout, false));

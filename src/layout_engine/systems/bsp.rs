@@ -134,25 +134,20 @@ impl BspLayoutSystem {
         match self.kind.get(root) {
             Some(NodeKind::Leaf { .. }) => root,
             Some(NodeKind::Split { orientation, ratio }) => {
-                let children: Vec<_> = root.children(&self.tree.map).collect();
-                if children.is_empty() {
-                    return root;
-                }
-
                 let target_child = if *orientation == direction.orientation() {
                     match direction {
-                        Direction::Left | Direction::Up => children.last().copied(),
-                        Direction::Right | Direction::Down => children.first().copied(),
+                        Direction::Left | Direction::Up => root.last_child(&self.tree.map),
+                        Direction::Right | Direction::Down => root.first_child(&self.tree.map),
                     }
                 } else {
                     let ratio = f64::from(*ratio);
                     // Choose the adjacent side and express the anchor within that child.
                     if anchor <= ratio {
                         anchor /= ratio;
-                        children.first().copied()
+                        root.first_child(&self.tree.map)
                     } else {
                         anchor = (anchor - ratio) / (1.0 - ratio);
-                        children.last().copied()
+                        root.last_child(&self.tree.map)
                     }
                 };
 
@@ -170,19 +165,14 @@ impl BspLayoutSystem {
         match self.kind.get(node) {
             Some(NodeKind::Leaf { window: Some(_), .. }) => self.participating_window(node),
             Some(NodeKind::Leaf { .. }) => None,
-            Some(NodeKind::Split { .. }) => {
-                let mut children: Vec<_> = node.children(&self.tree.map).collect();
-                match direction {
-                    Direction::Left | Direction::Up => children.reverse(),
-                    Direction::Right | Direction::Down => {}
-                }
-                for child in children {
-                    if let Some(window) = self.window_in_direction_from(child, direction) {
-                        return Some(window);
-                    }
-                }
-                None
-            }
+            Some(NodeKind::Split { .. }) => match direction {
+                Direction::Left | Direction::Up => node
+                    .children_rev(&self.tree.map)
+                    .find_map(|child| self.window_in_direction_from(child, direction)),
+                Direction::Right | Direction::Down => node
+                    .children(&self.tree.map)
+                    .find_map(|child| self.window_in_direction_from(child, direction)),
+            },
             None => None,
         }
     }
@@ -880,6 +870,32 @@ mod tests {
     }
 
     #[test]
+    fn clone_preserves_arrangement_and_selection() {
+        let (mut system, original) = tiled(&[1, 2, 3, 4]);
+        system.select_window(original, w(1));
+        system.resize_selection_by(original, 0.2, ResizeOrientation::Horizontal);
+        system.resize_selection_by(original, -0.1, ResizeOrientation::Vertical);
+        let size = CGSize::new(1400.0, 900.0);
+        let frames = calculate_frames(&system, original, size, &Default::default());
+        let cloned = system.clone_layout(original);
+        assert_eq!(system.selected_window(cloned), Some(w(1)));
+        assert_eq!(
+            calculate_frames(&system, cloned, size, &Default::default()),
+            frames
+        );
+        system.toggle_fullscreen_within_gaps_of_selection(original);
+        let fullscreen_clone = system.clone_layout(original);
+        assert_eq!(
+            calculate_frames(&system, fullscreen_clone, size, &Default::default()),
+            calculate_frames(&system, original, size, &Default::default())
+        );
+        assert_eq!(
+            calculate_frames(&system, cloned, size, &Default::default()),
+            frames
+        );
+    }
+
+    #[test]
     fn cloned_stacks_replace_and_remove_all_members() {
         use crate::layout_engine::WindowDropAction::Stack;
 
@@ -1489,34 +1505,29 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
 
-    /// shallow
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let mut groups = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            for node in state.root.traverse_preorder(&self.tree.map) {
-                if let Some(NodeKind::Leaf { window: Some(window), .. }) = self.kind.get(node) {
-                    groups.push(self.stacks.get(&node).cloned().unwrap_or_else(|| vec![*window]));
-                }
+        let Some(state) = self.layouts.get(layout).copied() else {
+            return self.create_layout();
+        };
+        let root = state.root.deep_copy(&mut self.tree).into_id();
+        let cloned = self.layouts.insert(LayoutState { root });
+        for (src, dest) in std::iter::zip(
+            state.root.traverse_preorder(&self.tree.map),
+            root.traverse_preorder(&self.tree.map),
+        ) {
+            if let Some(kind) = self.kind.get(src).cloned() {
+                self.kind.insert(dest, kind);
             }
-        }
-        let new_layout = self.create_layout();
-        for group in groups {
-            let mut members = group.into_iter();
-            let Some(first) = members.next() else { continue };
-            self.add_window_after_selection(new_layout, first);
-            let mut target = first;
-            for window in members {
-                self.add_window_after_selection(new_layout, window);
-                let _ = self.apply_window_drop(
-                    new_layout,
-                    window,
-                    target,
-                    crate::layout_engine::WindowDropAction::Stack,
-                );
-                target = window;
+            if let Some(stack) = self.stacks.get(&src).cloned() {
+                self.stacks.insert(dest, stack);
             }
+            self.tree.data.selection.handle_event(&self.tree.map, TreeEvent::Copied {
+                src,
+                dest,
+                dest_layout: cloned,
+            });
         }
-        new_layout
+        cloned
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {

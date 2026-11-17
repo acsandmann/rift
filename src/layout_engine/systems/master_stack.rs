@@ -16,10 +16,77 @@ use crate::layout_engine::{
 use crate::model::tree::NodeId;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(from = "StoredMasterStack")]
 pub struct MasterStackLayoutSystem {
     inner: TraditionalLayoutSystem,
+    regions: slotmap::SecondaryMap<LayoutId, Regions>,
     #[serde(skip, default = "default_master_stack_settings")]
     pub(super) settings: MasterStackSettings,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+struct Regions {
+    master: NodeId,
+    stack: NodeId,
+}
+
+#[derive(Deserialize)]
+struct StoredMasterStack {
+    inner: TraditionalLayoutSystem,
+    #[serde(default)]
+    regions: slotmap::SecondaryMap<LayoutId, Regions>,
+}
+
+impl From<StoredMasterStack> for MasterStackLayoutSystem {
+    fn from(stored: StoredMasterStack) -> Self {
+        let mut system = Self {
+            inner: stored.inner,
+            regions: stored.regions,
+            settings: default_master_stack_settings(),
+        };
+        let layouts: Vec<_> = system.inner.layout_roots.keys().collect();
+        for layout in layouts {
+            let selected = system.inner.selected_window(layout);
+            let mut reparented = false;
+            if !system.regions.contains_key(layout) {
+                // Historical layouts may have lost an empty region through tree cleanup.
+                // Adopt their existing containers where possible; migrate only once.
+                let root = system.inner.root(layout);
+                let children: Vec<_> = root.children(system.inner.map()).collect();
+                if children.len() == 2
+                    && children.iter().all(|&n| system.inner.window_at(n).is_none())
+                {
+                    system.regions.insert(layout, Regions {
+                        master: children[0],
+                        stack: children[1],
+                    });
+                } else {
+                    reparented = true;
+                    let (master, stack) = system.create_containers(root);
+                    system.regions.insert(layout, Regions { master, stack });
+                    let mut count = 0;
+                    for child in children {
+                        let n = system.windows_in_container(child).len();
+                        let target = if count < system.settings.master_count {
+                            master
+                        } else {
+                            stack
+                        };
+                        child.detach(&mut system.inner.tree).push_back(target);
+                        count += n;
+                    }
+                    system.apply_master_ratio(root, master, stack);
+                }
+            }
+            let (_, master, stack) = system.region_roots(layout);
+            system.inner.tree.data.layout.info[master].fixed_container = true;
+            system.inner.tree.data.layout.info[stack].fixed_container = true;
+            if reparented && let Some(window) = selected {
+                system.inner.select_window(layout, window);
+            }
+        }
+        system
+    }
 }
 
 fn default_master_stack_settings() -> MasterStackSettings { MasterStackSettings::default() }
@@ -32,6 +99,7 @@ impl MasterStackLayoutSystem {
     pub fn new(settings: MasterStackSettings) -> Self {
         Self {
             inner: TraditionalLayoutSystem::default(),
+            regions: Default::default(),
             settings,
         }
     }
@@ -46,17 +114,28 @@ impl MasterStackLayoutSystem {
             self.settings = settings;
             return;
         }
-        let old_master_first = self.master_first();
+        let old_ratio = self.settings.master_ratio;
         self.settings = settings;
         let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
         for layout in layouts {
-            if let Some(windows) =
-                self.windows_in_layout_by_container_with_order(layout, old_master_first)
-            {
-                self.rebuild_layout_with_windows(layout, &windows);
-                continue;
+            let (root, master, stack) = self.region_roots(layout);
+            let first = if self.master_first() { master } else { stack };
+            if root.first_child(self.inner.map()) != Some(first) {
+                let master_size = self.inner.tree.data.layout.info[master].size;
+                let stack_size = self.inner.tree.data.layout.info[stack].size;
+                let other = if first == master { stack } else { master };
+                first.detach(&mut self.inner.tree).insert_before(other);
+                self.inner.tree.data.layout.info[master].size = master_size;
+                self.inner.tree.data.layout.info[stack].size = stack_size;
+                self.inner.tree.data.layout.info[root].total = master_size + stack_size;
             }
-            self.rebuild_layout(layout);
+            self.inner.set_layout(root, LayoutKind::from(self.root_orientation()));
+            self.inner.set_layout(master, LayoutKind::from(self.master_orientation()));
+            self.inner.set_layout(stack, LayoutKind::from(self.stack_orientation()));
+            if old_ratio != self.settings.master_ratio {
+                self.apply_master_ratio(root, master, stack);
+            }
+            self.enforce_master_count(layout, master, stack);
         }
     }
 
@@ -90,30 +169,10 @@ impl MasterStackLayoutSystem {
     }
 
     fn windows_in_layout_by_container(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.windows_in_layout_by_container_with_order(layout, self.master_first())
-            .unwrap_or_else(|| self.inner.all_windows_in_layout(layout))
-    }
-
-    fn windows_in_layout_by_container_with_order(
-        &self,
-        layout: LayoutId,
-        master_first: bool,
-    ) -> Option<Vec<WindowId>> {
-        let root = self.inner.root(layout);
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        if children.len() != 2
-            || children.iter().any(|&child| self.inner.window_at(child).is_some())
-        {
-            return None;
-        }
-        let (master, stack) = if master_first {
-            (children[0], children[1])
-        } else {
-            (children[1], children[0])
-        };
-        let mut ordered = self.windows_in_container(master);
-        ordered.extend(self.windows_in_container(stack));
-        Some(ordered)
+        let (_, master, stack) = self.region_roots(layout);
+        let mut windows = self.windows_in_container(master);
+        windows.extend(self.windows_in_container(stack));
+        windows
     }
 
     fn windows_in_container(&self, container: NodeId) -> Vec<WindowId> {
@@ -121,25 +180,6 @@ impl MasterStackLayoutSystem {
             .traverse_preorder(self.inner.map())
             .filter_map(|node| self.inner.window_at(node))
             .collect()
-    }
-
-    fn container_has_valid_members(&self, container: NodeId) -> bool {
-        container.children(self.inner.map()).all(|child| {
-            self.inner.window_at(child).is_some()
-                || (self.inner.layout(child).is_group()
-                    && child
-                        .traverse_preorder(self.inner.map())
-                        .skip(1)
-                        .any(|node| self.inner.window_at(node).is_some()))
-        })
-    }
-
-    fn has_valid_structure(&self, layout: LayoutId) -> bool {
-        let root = self.inner.root(layout);
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        children.len() == 2
-            && children.iter().all(|&child| self.inner.window_at(child).is_none())
-            && children.iter().all(|&child| self.container_has_valid_members(child))
     }
 
     fn focused_container(&self, layout: LayoutId, master: NodeId, stack: NodeId) -> Option<NodeId> {
@@ -161,7 +201,12 @@ impl MasterStackLayoutSystem {
         master: NodeId,
         stack: NodeId,
     ) -> NodeId {
-        if self.windows_in_container(master).len() < self.settings.master_count {
+        if master
+            .traverse_preorder(self.inner.map())
+            .filter(|&node| self.inner.window_at(node).is_some())
+            .count()
+            < self.settings.master_count
+        {
             return master;
         }
 
@@ -186,6 +231,8 @@ impl MasterStackLayoutSystem {
         self.inner.set_layout(root, LayoutKind::from(self.root_orientation()));
         let first = self.inner.tree.mk_node().push_back(root);
         let second = self.inner.tree.mk_node().push_back(root);
+        self.inner.tree.data.layout.info[first].fixed_container = true;
+        self.inner.tree.data.layout.info[second].fixed_container = true;
         let (master, stack) = if self.master_first() {
             (first, second)
         } else {
@@ -206,59 +253,9 @@ impl MasterStackLayoutSystem {
         self.inner.tree.data.layout.info[root].total = master_size + stack_size;
     }
 
-    fn ensure_structure(&mut self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
-        let root = self.inner.root(layout);
-        if !self.has_valid_structure(layout) {
-            self.rebuild_layout(layout);
-        }
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        if children.len() != 2 {
-            let (master, stack) = self.create_containers(root);
-            self.apply_master_ratio(root, master, stack);
-            return (root, master, stack);
-        }
-        let first = children[0];
-        let second = children[1];
-        self.inner.set_layout(root, LayoutKind::from(self.root_orientation()));
-        let (master, stack) = if self.master_first() {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        self.inner.set_layout(master, LayoutKind::from(self.master_orientation()));
-        self.inner.set_layout(stack, LayoutKind::from(self.stack_orientation()));
-        (root, master, stack)
-    }
-
-    fn rebuild_layout(&mut self, layout: LayoutId) {
-        let windows = self.windows_in_layout_by_container(layout);
-        self.rebuild_layout_with_windows(layout, &windows);
-    }
-
-    fn rebuild_layout_with_windows(&mut self, layout: LayoutId, windows: &[WindowId]) {
-        let selected = self.inner.selected_window(layout);
-        let root = self.inner.root(layout);
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        for child in children {
-            child.detach(&mut self.inner.tree).remove();
-        }
-        let (master, stack) = self.create_containers(root);
-        for (idx, wid) in windows.iter().enumerate() {
-            let target = if idx < self.settings.master_count {
-                master
-            } else {
-                stack
-            };
-            let node = self.inner.add_window_under(layout, target, *wid);
-            if Some(*wid) == selected {
-                self.inner.select(node);
-            }
-        }
-        self.apply_master_ratio(root, master, stack);
-        if let Some(wid) = selected {
-            let _ = self.inner.select_window(layout, wid);
-        }
-        self.enforce_master_count(layout, master, stack);
+    fn region_roots(&self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
+        let Regions { master, stack } = self.regions[layout];
+        (self.inner.root(layout), master, stack)
     }
 
     fn enforce_master_count(&mut self, layout: LayoutId, master: NodeId, stack: NodeId) {
@@ -454,17 +451,9 @@ impl MasterStackLayoutSystem {
         }
     }
 
-    fn normalize_layout(&mut self, layout: LayoutId) {
-        let (_root, master, stack) = self.ensure_structure(layout);
+    fn distribute_regions(&mut self, layout: LayoutId) {
+        let (_root, master, stack) = self.region_roots(layout);
         self.enforce_master_count(layout, master, stack);
-    }
-
-    fn normalize_layout_preserving_order(&mut self, layout: LayoutId, windows: &[WindowId]) {
-        if self.has_valid_structure(layout) {
-            self.normalize_layout(layout);
-        } else {
-            self.rebuild_layout_with_windows(layout, windows);
-        }
     }
 
     pub fn adjust_master_ratio(&mut self, _layout: LayoutId, delta: f64) {
@@ -475,8 +464,8 @@ impl MasterStackLayoutSystem {
         self.settings.master_ratio = next;
         let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
         for layout in layouts {
-            self.normalize_layout(layout);
-            let (root, master, stack) = self.ensure_structure(layout);
+            self.distribute_regions(layout);
+            let (root, master, stack) = self.region_roots(layout);
             self.apply_master_ratio(root, master, stack);
         }
     }
@@ -490,12 +479,12 @@ impl MasterStackLayoutSystem {
         self.settings.master_count = next;
         let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
         for layout in layouts {
-            self.normalize_layout(layout);
+            self.distribute_regions(layout);
         }
     }
 
     pub fn promote_to_master(&mut self, layout: LayoutId) {
-        let (_root, master, stack) = self.ensure_structure(layout);
+        let (_root, master, stack) = self.region_roots(layout);
         let Some(focused_wid) = self.inner.selected_window(layout) else {
             return;
         };
@@ -519,7 +508,7 @@ impl MasterStackLayoutSystem {
     }
 
     pub fn swap_master_stack(&mut self, layout: LayoutId) {
-        let (_root, master, stack) = self.ensure_structure(layout);
+        let (_root, master, stack) = self.region_roots(layout);
         let (Some(master_wid), Some(stack_wid)) = (
             self.focused_window_in_container(master),
             self.focused_window_in_container(stack),
@@ -550,57 +539,81 @@ impl MasterStackLayoutSystem {
 }
 
 impl LayoutSystem for MasterStackLayoutSystem {
-    delegate_traditional_layout_system!();
+    delegate_traditional_layout_system!(@tree);
+
+    fn remove_layout(&mut self, layout: LayoutId) {
+        self.regions.remove(layout);
+        self.inner.remove_layout(layout);
+    }
+
+    fn move_focus(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+    ) -> (Option<WindowId>, Vec<WindowId>) {
+        self.inner.move_focus(layout, direction)
+    }
+
+    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+        self.inner.window_in_direction(layout, direction)
+    }
+
+    fn replace_window(&mut self, from: WindowId, to: WindowId) {
+        self.inner.replace_window(from, to);
+    }
+
+    fn on_window_resized(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+        old: CGRect,
+        new: CGRect,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) {
+        self.inner.on_window_resized(layout, wid, old, new, screen, gaps);
+    }
 
     fn create_layout(&mut self) -> LayoutId {
         let layout = self.inner.create_layout();
         let root = self.inner.root(layout);
         let (master, stack) = self.create_containers(root);
         self.apply_master_ratio(root, master, stack);
+        self.regions.insert(layout, Regions { master, stack });
         layout
     }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
+        let (_, source_master, _) = self.region_roots(layout);
+        let master_first =
+            self.inner.root(layout).first_child(self.inner.map()) == Some(source_master);
         let cloned = self.inner.clone_layout(layout);
-        let (_root, master, stack) = self.ensure_structure(cloned);
-        self.enforce_master_count(cloned, master, stack);
+        let root = self.inner.root(cloned);
+        let first = root.first_child(self.inner.map()).unwrap();
+        let second = root.last_child(self.inner.map()).unwrap();
+        let (master, stack) = if master_first {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        self.regions.insert(cloned, Regions { master, stack });
         cloned
     }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
-        let root = self.inner.root(layout);
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        if children.len() != 2 {
-            return self.inner.draw_tree(layout);
-        }
-        if children.iter().any(|&child| self.inner.tree.data.window.at(child).is_some()) {
-            return self.inner.draw_tree(layout);
-        }
-        let (master, stack) = if self.master_first() {
-            (children[0], children[1])
-        } else {
-            (children[1], children[0])
-        };
-        let mut labels = HashMap::default();
-        labels.insert(master, "master");
-        labels.insert(stack, "stack");
-        self.inner.draw_tree_with_labels(layout, &labels)
+        let (_, master, stack) = self.region_roots(layout);
+        self.inner.draw_tree_with_labels(
+            layout,
+            &HashMap::from_iter([(master, "master"), (stack, "stack")]),
+        )
     }
 
     fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        let root = self.inner.root(layout);
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        let mut roles = HashMap::default();
-        if children.len() == 2 {
-            let (master, stack) = if self.master_first() {
-                (children[0], children[1])
-            } else {
-                (children[1], children[0])
-            };
-            roles.insert(master, "master");
-            roles.insert(stack, "stack");
-        }
-        self.inner.container_tree_with_roles(layout, &roles)
+        let (_, master, stack) = self.region_roots(layout);
+        self.inner.container_tree_with_roles(
+            layout,
+            &HashMap::from_iter([(master, "master"), (stack, "stack")]),
+        )
     }
 
     fn calculate_layout(
@@ -612,26 +625,20 @@ impl LayoutSystem for MasterStackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        let root = self.inner.root(layout);
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        if children.len() == 2 && children.iter().all(|&c| self.inner.window_at(c).is_none()) {
-            let (master, stack) = if self.master_first() {
-                (children[0], children[1])
-            } else {
-                (children[1], children[0])
-            };
-            if self.inner.visible_windows_in_subtree(stack).is_empty() {
-                let rect = compute_tiling_area(screen, gaps);
-                return self.inner.calculate_layout_for_node(
-                    master,
-                    screen,
-                    rect,
-                    stack_offset,
-                    constraints,
-                    gaps,
-                    stack_line,
-                );
-            }
+        let (_, master, stack) = self.region_roots(layout);
+        if !stack
+            .traverse_preorder(self.inner.map())
+            .any(|node| self.inner.window_at(node).is_some_and(|w| self.window_participates(w)))
+        {
+            return self.inner.calculate_layout_for_node(
+                master,
+                screen,
+                compute_tiling_area(screen, gaps),
+                stack_offset,
+                constraints,
+                gaps,
+                stack_line,
+            );
         }
         self.inner
             .calculate_layout(layout, screen, stack_offset, constraints, gaps, stack_line)
@@ -646,7 +653,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        let (_root, master, stack) = self.ensure_structure(layout);
+        let (_root, master, stack) = self.region_roots(layout);
         let target = self.target_container_for_new_window(layout, master, stack);
         let node = self.insert_window_in_container(layout, target, wid);
         self.inner.select(node);
@@ -654,16 +661,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn remove_window(&mut self, wid: WindowId) {
-        let layouts: Vec<_> = self
-            .inner
-            .layouts_for_window(wid)
-            .into_iter()
-            .map(|layout| (layout, self.windows_in_layout_by_container(layout)))
-            .collect();
+        let layouts = self.inner.layouts_for_window(wid);
         self.inner.remove_window(wid);
-        for (layout, mut windows) in layouts {
-            windows.retain(|&window| window != wid);
-            self.normalize_layout_preserving_order(layout, &windows);
+        for layout in layouts {
+            self.distribute_regions(layout);
         }
     }
 
@@ -676,12 +677,12 @@ impl LayoutSystem for MasterStackLayoutSystem {
             .collect();
         self.inner.remove_windows_for_app(pid);
         for layout in layouts {
-            self.normalize_layout(layout);
+            self.distribute_regions(layout);
         }
     }
 
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
-        let (_root, master, stack) = self.ensure_structure(layout);
+        let (_root, master, stack) = self.region_roots(layout);
         let root = self.inner.root(layout);
         let current = root
             .traverse_postorder(self.inner.map())
@@ -707,7 +708,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         if self.visible_windows_in_layout(layout).is_empty() {
             return false;
         }
-        let (_root, _master, _stack) = self.ensure_structure(layout);
+        let (_root, _master, _stack) = self.region_roots(layout);
         let Some(focused_wid) = self.inner.selected_window(layout) else {
             return false;
         };
@@ -805,7 +806,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
         if !self.window_participates(source) || !self.window_participates(target) {
             return false;
         }
-        let _ = self.ensure_structure(layout);
         self.inner.apply_explicit_window_drop(layout, source, target, action)
     }
 
@@ -814,19 +814,57 @@ impl LayoutSystem for MasterStackLayoutSystem {
         from_layout: LayoutId,
         to_layout: LayoutId,
     ) {
-        self.inner.move_selection_to_layout_after_selection(from_layout, to_layout);
-        let _ = self.ensure_structure(from_layout);
-        let _ = self.ensure_structure(to_layout);
+        if from_layout == to_layout {
+            return;
+        }
+        let (root, master, stack) = self.region_roots(from_layout);
+        let selected = self.inner.selection(from_layout);
+        if selected == root {
+            return;
+        }
+        let moving: Vec<_> = if selected == master || selected == stack {
+            selected.children(self.inner.map()).collect()
+        } else {
+            vec![selected]
+        };
+        let (target_root, target_master, target_stack) = self.region_roots(to_layout);
+        let target = self.inner.selection(to_layout);
+        let container = if target == target_root {
+            self.target_container_for_new_window(to_layout, target_master, target_stack)
+        } else if target == target_master || target == target_stack {
+            target
+        } else {
+            target.parent(self.inner.map()).unwrap()
+        };
+        let mut anchor =
+            (target != target_root && target != target_master && target != target_stack)
+                .then_some(target);
+        for node in moving {
+            if let Some(anchor) = anchor {
+                node.detach(&mut self.inner.tree).insert_after(anchor);
+            } else {
+                node.detach(&mut self.inner.tree).push_back(container);
+            }
+            self.inner
+                .tree
+                .data
+                .window
+                .reassign_subtree(&self.inner.tree.map, node, to_layout);
+            anchor = Some(node);
+            self.inner.select(node);
+        }
+        self.distribute_regions(from_layout);
+        self.distribute_regions(to_layout);
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
         let _ = kind;
-        self.normalize_layout(layout);
+        self.distribute_regions(layout);
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let _ = direction;
-        self.normalize_layout(layout);
+        self.distribute_regions(layout);
     }
 
     fn apply_stacking_to_parent_of_selection(
@@ -835,7 +873,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
         let _ = default_orientation;
-        self.normalize_layout(layout);
+        self.distribute_regions(layout);
         vec![]
     }
 
@@ -845,7 +883,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
         let _ = default_orientation;
-        self.normalize_layout(layout);
+        self.distribute_regions(layout);
         vec![]
     }
 
@@ -853,7 +891,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.parent_of_selection_is_stacked(layout)
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn unjoin_selection(&mut self, layout: LayoutId) { self.distribute_regions(layout); }
 
     fn resize_selection_by(
         &mut self,
@@ -864,13 +902,12 @@ impl LayoutSystem for MasterStackLayoutSystem {
         if self.visible_windows_in_layout(layout).is_empty() {
             return;
         }
-        let _ = self.ensure_structure(layout);
         self.inner.resize_selection_by(layout, amount, orientation);
     }
 
-    fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn rebalance(&mut self, layout: LayoutId) { self.distribute_regions(layout); }
 
-    fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.distribute_regions(layout); }
 }
 
 #[cfg(test)]
@@ -879,6 +916,72 @@ mod tests {
     use crate::common::config::{LayoutMode, LayoutSettings};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn region_identity_and_grouping_survive_removal_and_settings_reload() {
+        use crate::layout_engine::WindowDropAction;
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        for window in [w(1), w(2), w(3)] {
+            system.add_window_after_selection(layout, window);
+        }
+        assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
+        system.select_window(layout, w(1));
+        system.resize_selection_by(layout, 0.1, ResizeOrientation::Horizontal);
+        let before = system.container_tree(layout);
+        let master_weight = before.children[0].weight;
+        let master = before
+            .children
+            .iter()
+            .find(|node| node.role.as_deref() == Some("master"))
+            .unwrap()
+            .node_id;
+        let stack = before
+            .children
+            .iter()
+            .find(|node| node.role.as_deref() == Some("stack"))
+            .unwrap()
+            .node_id;
+        let group =
+            before.children.iter().find(|node| node.node_id == stack).unwrap().children[0].node_id;
+        let mut settings = system.settings.clone();
+        settings.master_side = MasterStackSide::Right;
+        system.update_settings(settings);
+        let after = system.container_tree(layout);
+        assert_eq!(after.children[0].node_id, stack);
+        assert_eq!(after.children[1].node_id, master);
+        assert_eq!(after.children[1].weight, master_weight);
+        assert_eq!(after.children[0].children[0].node_id, group);
+        system.remove_window(w(3));
+        system.remove_window(w(2));
+        let after = system.container_tree(layout);
+        assert_eq!(after.children[0].node_id, stack);
+        assert_eq!(after.children[1].node_id, master);
+        let serialized = ron::to_string(&system).unwrap();
+        let restored: MasterStackLayoutSystem = ron::from_str(&serialized).unwrap();
+        assert_eq!(restored.container_tree(layout), after);
+    }
+
+    #[test]
+    fn transferring_a_region_preserves_regions_and_updates_membership_indexes() {
+        let mut system = MasterStackLayoutSystem::default();
+        let from = system.create_layout();
+        let to = system.create_layout();
+        system.add_window_after_selection(from, w(1));
+        system.add_window_after_selection(from, w(2));
+        let before = system.container_tree(from);
+        assert!(system.ascend_selection(from));
+        system.move_selection_to_layout_after_selection(from, to);
+        assert!(system.contains_window(to, w(2)));
+        assert!(!system.contains_window(from, w(2)));
+        assert_eq!(
+            system.container_tree(from).children[1].node_id,
+            before.children[1].node_id
+        );
+        system.remove_window(w(2));
+        assert!(!system.contains_window(to, w(2)));
+        assert_eq!(system.all_windows_in_layout(from), vec![w(1)]);
+    }
 
     #[test]
     fn test_create_layout() {
@@ -950,7 +1053,7 @@ mod tests {
         system.add_window_after_selection(layout, w(1));
         system.add_window_after_selection(layout, w(2));
 
-        let (_root, master, stack) = system.ensure_structure(layout);
+        let (_root, master, stack) = system.region_roots(layout);
         assert_eq!(system.windows_in_container(master), vec![w(2)]);
         assert_eq!(system.windows_in_container(stack), vec![w(1)]);
     }
@@ -968,7 +1071,7 @@ mod tests {
         assert!(system.select_window(layout, w(1)));
         system.add_window_after_selection(layout, w(3));
 
-        let (_root, master, stack) = system.ensure_structure(layout);
+        let (_root, master, stack) = system.region_roots(layout);
         assert_eq!(system.windows_in_container(master), vec![w(1), w(3)]);
         assert_eq!(system.windows_in_container(stack), vec![w(2)]);
     }
@@ -984,7 +1087,7 @@ mod tests {
         system.add_window_after_selection(layout, w(1));
         system.add_window_after_selection(layout, w(2));
 
-        let (_root, master, stack) = system.ensure_structure(layout);
+        let (_root, master, stack) = system.region_roots(layout);
         assert_eq!(system.windows_in_container(master), vec![w(1)]);
         assert_eq!(system.windows_in_container(stack), vec![w(2)]);
     }
@@ -1002,7 +1105,7 @@ mod tests {
         assert!(system.select_window(layout, w(1)));
         system.add_window_after_selection(layout, w(3));
 
-        let (_root, master, stack) = system.ensure_structure(layout);
+        let (_root, master, stack) = system.region_roots(layout);
         assert_eq!(system.windows_in_container(master), vec![w(2)]);
         assert_eq!(system.windows_in_container(stack), vec![w(1), w(3)]);
     }
@@ -1031,7 +1134,7 @@ mod tests {
         let layout = system.create_layout();
         system.add_window_after_selection(layout, w(1));
         system.add_window_after_selection(layout, w(2));
-        let (_root, master, stack) = system.ensure_structure(layout);
+        let (_root, master, stack) = system.region_roots(layout);
         assert!(system.select_window(layout, w(1)));
         let before = system.inner.tree.data.layout.info[stack].size;
 
@@ -1050,13 +1153,13 @@ mod tests {
         system.add_window_after_selection(layout, w(2));
         assert!(system.select_window(layout, w(1)));
 
-        let (_, master, _) = system.ensure_structure(layout);
+        let (_, master, _) = system.region_roots(layout);
         let original = system.inner.tree.data.layout.info[master].size;
         system.resize_selection_by(layout, 0.05, ResizeOrientation::Horizontal);
         let resized = system.inner.tree.data.layout.info[master].size;
         assert_ne!(resized, original);
 
-        system.ensure_structure(layout);
+        system.region_roots(layout);
         assert_eq!(system.inner.tree.data.layout.info[master].size, resized);
         system.resize_selection_by(layout, 0.05, ResizeOrientation::Horizontal);
         assert_ne!(system.inner.tree.data.layout.info[master].size, resized);
@@ -1247,7 +1350,7 @@ mod tests {
             system.add_window_after_selection(layout, w(3));
             system.add_window_after_selection(layout, w(4));
 
-            let (_root, master, stack) = system.ensure_structure(layout);
+            let (_root, master, stack) = system.region_roots(layout);
             let master_before = system.windows_in_container(master);
             let stack_before = system.windows_in_container(stack);
             assert_eq!(master_before.len(), 2);
@@ -1256,7 +1359,7 @@ mod tests {
 
             system.remove_window(w(3));
 
-            let (_root, master, stack) = system.ensure_structure(layout);
+            let (_root, master, stack) = system.region_roots(layout);
             assert_eq!(system.windows_in_container(master), master_before);
             assert_eq!(
                 system.windows_in_container(stack),
