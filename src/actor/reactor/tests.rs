@@ -11957,6 +11957,42 @@ fn native_admission_veto_survives_manage_rule() {
 }
 
 #[test]
+fn manage_rule_admits_a_window_ax_reports_as_a_dialog() {
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    for (manage, admitted) in [(Some(true), true), (None, false)] {
+        let cfg = crate::common::config::VirtualWorkspaceSettings {
+            app_rules: vec![crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                manage,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut reactor = test_reactor_with_workspace_settings(&cfg);
+        let mut apps = Apps::new();
+        let mut info = make_window(1);
+        info.ax_role = Some("AXWindow".into());
+        info.ax_subrole = Some("AXDialog".into());
+        info.is_standard = false;
+        apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, vec![info]);
+        let wid = WindowId::new(1, 1);
+        assert_eq!(
+            reactor.state.windows.is_admitted(wid),
+            admitted,
+            "manage = {manage:?} must decide admission for an AX dialog window"
+        );
+        // The focus guard only blocks while the app is globally frontmost.
+        reactor.handle_event(Event::ApplicationGloballyActivated(1));
+        assert_eq!(
+            reactor.transient_blocks_mouse_focus(),
+            !admitted,
+            "manage = {manage:?} must decide whether the AX dialog blocks mouse focus"
+        );
+    }
+}
+
+#[test]
 fn only_current_actor_exit_clears_native_blockers() {
     let (_, mut reactor, space, main, info) = pending_activation_context();
     let active = reactor.app_manager.apps[&main.pid].handle.clone();

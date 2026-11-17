@@ -5390,10 +5390,19 @@ impl Reactor {
     }
 
     fn transient_blocks_mouse_focus(&self) -> bool {
-        self.transient_focus.windows.values().any(|t| {
+        self.transient_focus.windows.iter().any(|(id, t)| {
             t.visible
                 && self.main_window_tracker.is_globally_frontmost(t.pid)
                 && self.active_spaces.contains(&t.space)
+                // A rule-admitted AXDialog window is managed content. Its guard
+                // entry comes from the heuristic the rule overrode, so it must
+                // not disable focus-follows-mouse. Native transients always block.
+                && (t.native
+                    || self
+                        .state
+                        .windows
+                        .tracked_window_id(*id)
+                        .is_none_or(|wid| !self.state.windows.is_admitted(wid)))
         })
     }
 

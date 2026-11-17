@@ -121,9 +121,16 @@ impl WindowState {
     }
 
     pub(crate) fn is_admitted_with_override(&self, manage_override: Option<bool>) -> bool {
+        // A rule that explicitly manages a window outranks the AX role
+        // heuristics when the only transient marker is the `AXDialog` subrole,
+        // which some apps use for a real main window. Native transient
+        // attachments, minimized windows, and other AX chrome stay vetoed.
+        let overrides_dialog_veto = manage_override == Some(true)
+            && self.info.ax_role.as_deref() == Some("AXWindow")
+            && self.info.ax_subrole.as_deref() == Some("AXDialog");
         !self.native_transient
             && !self.info.is_minimized
-            && !crate::sys::app::is_ax_transient(&self.info)
+            && (overrides_dialog_veto || !crate::sys::app::is_ax_transient(&self.info))
             && manage_override.unwrap_or(self.is_manageable)
     }
 
