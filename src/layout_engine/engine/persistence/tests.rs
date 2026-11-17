@@ -4,6 +4,7 @@ use super::matcher::MatchScope;
 use super::*;
 use crate::actor::app::WindowInfo;
 use crate::common::config::{AppWorkspaceRule, LayoutMode, WorkspaceSelector};
+use crate::layout_engine::systems::{WindowChange, WindowQuery};
 use crate::layout_engine::{LayoutEvent, LayoutSystemKind};
 use crate::model::virtual_workspace::WorkspaceTransferReason;
 use crate::model::{AppRuleResult, VirtualWorkspace};
@@ -163,7 +164,7 @@ fn restore_on(
 fn tree(engine: &LayoutEngine, id: VirtualWorkspaceId) -> Vec<WindowId> {
     let entry = &engine.workspaces[id];
     (entry.layout_state.all_layouts())
-        .flat_map(|layout| entry.layout_system.all_windows_in_layout(layout))
+        .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
         .collect()
 }
 
@@ -343,12 +344,14 @@ fn persistence_preserves_layouts_through_every_lifecycle() {
         open(&mut engine, &mut store, first, window);
     }
     let layout = engine.workspaces[second].active_layout().unwrap();
-    engine.workspaces[second].layout_system.add_window_after_selection(layout, w1);
+    engine.workspaces[second]
+        .layout_system
+        .update(WindowChange::Add(layout, w1, None));
     let ghost = win(9, 9);
     let tiled_ghost = engine.workspaces[first].active_layout().unwrap();
     engine.workspaces[first]
         .layout_system
-        .add_window_after_selection(tiled_ghost, ghost);
+        .update(WindowChange::Add(tiled_ghost, ghost, None));
     engine.workspaces.set_last_focused_window(a, second, Some(ghost));
     let orphan = format!(
         r#"{}:{}"#,

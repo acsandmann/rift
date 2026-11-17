@@ -4,7 +4,9 @@ use super::*;
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
 use crate::common::config::GapSettings;
-use crate::layout_engine::systems::WindowLayoutConstraints;
+use crate::layout_engine::systems::{
+    Focus, LayoutEdit, WindowChange, WindowLayoutConstraints, WindowQuery,
+};
 
 const ACTIONS: [WindowDropAction; 6] = [
     WindowDropAction::Swap,
@@ -44,10 +46,17 @@ fn verify_actions(
     for action in ACTIONS {
         let mut preview_copy = baseline.preview_clone().unwrap();
         let mut committed = baseline.preview_clone().unwrap();
-        let preview_available = preview_copy.apply_window_drop(layout, source, target, action);
+        let preview_available =
+            preview_copy.edit(layout, LayoutEdit::Drop { source, target, action }).changed();
         assert_eq!(
             preview_available,
-            committed.apply_window_drop(layout, source, target, action),
+            committed
+                .edit(layout, LayoutEdit::Drop {
+                    source: source,
+                    target: target,
+                    action: action
+                })
+                .changed(),
             "availability differs for {action:?}"
         );
         if !preview_available {
@@ -65,7 +74,7 @@ fn verify_actions(
 fn populate(system: &mut LayoutSystemKind) -> LayoutId {
     let layout = system.create_layout();
     for window in [w(1), w(2), w(3), w(4)] {
-        system.add_window_after_selection(layout, window);
+        system.update(WindowChange::Add(layout, window, None));
     }
     layout
 }
@@ -88,17 +97,28 @@ fn previews_match_committed_frames_for_every_layout_and_action() {
 fn traditional_previews_preserve_group_and_nested_layouts() {
     let mut system = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
     let layout = populate(&mut system);
-    assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
+    assert!(
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: WindowDropAction::Stack
+            })
+            .changed()
+    );
     verify_actions(&system, layout, w(3), w(1));
 
     let mut nested = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
     let nested_layout = populate(&mut nested);
-    assert!(nested.apply_window_drop(
-        nested_layout,
-        w(4),
-        w(3),
-        WindowDropAction::Insert(Direction::Down),
-    ));
+    assert!(
+        nested
+            .edit(nested_layout, LayoutEdit::Drop {
+                source: w(4),
+                target: w(3),
+                action: WindowDropAction::Insert(Direction::Down)
+            })
+            .changed()
+    );
     verify_actions(&nested, nested_layout, w(4), w(3));
 }
 
@@ -107,21 +127,27 @@ fn traditional_target_relative_down_stays_in_the_target_container() {
     let mut system = LayoutSystemKind::Traditional(TraditionalLayoutSystem::default());
     let layout = system.create_layout();
     for window in [w(1), w(2), w(3)] {
-        system.add_window_after_selection(layout, window);
+        system.update(WindowChange::Add(layout, window, None));
     }
-    assert!(system.apply_window_drop(
-        layout,
-        w(3),
-        w(2),
-        WindowDropAction::Insert(Direction::Down),
-    ));
-    system.toggle_tile_orientation(layout);
-    assert!(system.apply_window_drop(
-        layout,
-        w(3),
-        w(2),
-        WindowDropAction::Insert(Direction::Down),
-    ));
+    assert!(
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: WindowDropAction::Insert(Direction::Down)
+            })
+            .changed()
+    );
+    system.edit(layout, LayoutEdit::ToggleOrientation).discard();
+    assert!(
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: WindowDropAction::Insert(Direction::Down)
+            })
+            .changed()
+    );
     assert_eq!(
         calculated_source(&system, layout, w(1)),
         CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(600.0, 800.0)),
@@ -149,10 +175,23 @@ fn move_drop_matches_keyboard_move_without_mutating_preview_source() {
         let before = format!("{system:?}");
         let mut preview = system.preview_clone().unwrap();
         let mut keyboard = system.preview_clone().unwrap();
-        let moved =
-            preview.apply_window_drop(layout, w(2), w(2), WindowDropAction::Move(Direction::Right));
-        assert!(keyboard.select_window(layout, w(2)));
-        assert_eq!(moved, keyboard.move_selection(layout, Direction::Right));
+        let moved = preview
+            .edit(layout, LayoutEdit::Drop {
+                source: w(2),
+                target: w(2),
+                action: WindowDropAction::Move(Direction::Right),
+            })
+            .changed();
+        assert!(keyboard.focus(layout, Focus::Select(w(2))).handled);
+        assert_eq!(
+            moved,
+            keyboard
+                .edit(layout, LayoutEdit::Move {
+                    direction: Direction::Right,
+                    has_display_neighbor: false
+                })
+                .changed()
+        );
         assert_eq!(format!("{preview:?}"), format!("{keyboard:?}"));
         assert_eq!(format!("{system:?}"), before);
     }
@@ -162,20 +201,42 @@ fn move_drop_matches_keyboard_move_without_mutating_preview_source() {
 fn bsp_previews_preserve_stacked_and_nested_layouts() {
     let mut system = LayoutSystemKind::Bsp(BspLayoutSystem::default());
     let layout = populate(&mut system);
-    assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
+    assert!(
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: WindowDropAction::Stack
+            })
+            .changed()
+    );
     verify_actions(&system, layout, w(3), w(1));
-    assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Swap));
-    assert_eq!(system.stack_members(layout, w(3)), vec![w(2), w(3)]);
+    assert!(
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: w(3),
+                target: w(2),
+                action: WindowDropAction::Swap
+            })
+            .changed()
+    );
+    assert_eq!(system.windows(layout, WindowQuery::Stack(w(3))), vec![
+        w(2),
+        w(3)
+    ]);
     let _ = calculated_source(&system, layout, w(3));
 
     let mut nested = LayoutSystemKind::Bsp(BspLayoutSystem::default());
     let nested_layout = populate(&mut nested);
-    assert!(nested.apply_window_drop(
-        nested_layout,
-        w(4),
-        w(3),
-        WindowDropAction::Insert(Direction::Down),
-    ));
+    assert!(
+        nested
+            .edit(nested_layout, LayoutEdit::Drop {
+                source: w(4),
+                target: w(3),
+                action: WindowDropAction::Insert(Direction::Down)
+            })
+            .changed()
+    );
     verify_actions(&nested, nested_layout, w(4), w(3));
 }
 
@@ -183,29 +244,48 @@ fn bsp_previews_preserve_stacked_and_nested_layouts() {
 fn stack_drop_actions_are_arbitrary_swaps() {
     let mut system = LayoutSystemKind::Stack(StackLayoutSystem::default());
     let layout = populate(&mut system);
-    let before = system.all_windows_in_layout(layout);
+    let before = system.windows(layout, WindowQuery::All);
     let source = before[0];
     let target = *before.last().unwrap();
-    assert!(system.select_window(layout, source));
-    assert!(system.apply_window_drop(layout, source, target, WindowDropAction::Stack));
+    assert!(system.focus(layout, Focus::Select(source)).handled);
+    assert!(
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: source,
+                target: target,
+                action: WindowDropAction::Stack
+            })
+            .changed()
+    );
     let mut expected = before;
     let last = expected.len() - 1;
     expected.swap(0, last);
-    assert_eq!(system.all_windows_in_layout(layout), expected);
+    assert_eq!(system.windows(layout, WindowQuery::All), expected);
     assert_eq!(system.selected_window(layout), Some(source));
 
     let source = expected[1];
     let target = expected[2];
-    assert!(system.apply_window_drop(
-        layout,
-        source,
-        target,
-        WindowDropAction::Insert(Direction::Left),
-    ));
+    assert!(
+        system
+            .edit(layout, LayoutEdit::Drop {
+                source: source,
+                target: target,
+                action: WindowDropAction::Insert(Direction::Left)
+            })
+            .changed()
+    );
     expected.swap(1, 2);
-    assert_eq!(system.all_windows_in_layout(layout), expected);
+    assert_eq!(system.windows(layout, WindowQuery::All), expected);
     assert_eq!(system.selected_window(layout), Some(source));
-    assert!(!system.apply_window_drop(layout, source, source, WindowDropAction::Swap));
+    assert!(
+        !system
+            .edit(layout, LayoutEdit::Drop {
+                source: source,
+                target: source,
+                action: WindowDropAction::Swap
+            })
+            .changed()
+    );
 }
 
 #[test]
@@ -215,36 +295,53 @@ fn drop_slot_identity_uses_topology_in_traditional_and_bsp() {
     let source_slot = traditional.window_slot(layout, w(2)).unwrap();
 
     let mut same = traditional.preview_clone().unwrap();
-    assert!(same.apply_window_drop(layout, w(2), w(1), WindowDropAction::Insert(Direction::Right)));
+    assert!(
+        same.edit(layout, LayoutEdit::Drop {
+            source: w(2),
+            target: w(1),
+            action: WindowDropAction::Insert(Direction::Right)
+        })
+        .changed()
+    );
     assert_eq!(same.window_slot(layout, w(2)), Some(source_slot.clone()));
 
     let mut reordered = traditional.preview_clone().unwrap();
-    assert!(reordered.apply_window_drop(
-        layout,
-        w(2),
-        w(1),
-        WindowDropAction::Insert(Direction::Left)
-    ));
+    assert!(
+        reordered
+            .edit(layout, LayoutEdit::Drop {
+                source: w(2),
+                target: w(1),
+                action: WindowDropAction::Insert(Direction::Left)
+            })
+            .changed()
+    );
     assert_ne!(reordered.window_slot(layout, w(2)), Some(source_slot));
 
     let mut bsp = LayoutSystemKind::Bsp(BspLayoutSystem::default());
     let layout = bsp.create_layout();
-    bsp.add_window_after_selection(layout, w(1));
-    bsp.add_window_after_selection(layout, w(2));
+    bsp.update(WindowChange::Add(layout, w(1), None));
+    bsp.update(WindowChange::Add(layout, w(2), None));
     let old_frame = calculated_source(&bsp, layout, w(2));
-    bsp.on_window_resized(
+    bsp.update(WindowChange::Resize {
         layout,
-        w(2),
-        old_frame,
-        CGRect::new(CGPoint::new(960.0, 0.0), CGSize::new(240.0, 800.0)),
-        screen(),
-        &GapSettings::default(),
-    );
+        window: w(2),
+        old: old_frame,
+        new: CGRect::new(CGPoint::new(960.0, 0.0), CGSize::new(240.0, 800.0)),
+        screen: screen(),
+        gaps: &GapSettings::default(),
+    });
     let resized_frame = calculated_source(&bsp, layout, w(2));
     assert!(resized_frame.size.width < old_frame.size.width / 2.0);
     let source_slot = bsp.window_slot(layout, w(2)).unwrap();
     let mut same = bsp.preview_clone().unwrap();
-    assert!(same.apply_window_drop(layout, w(2), w(1), WindowDropAction::Insert(Direction::Right)));
+    assert!(
+        same.edit(layout, LayoutEdit::Drop {
+            source: w(2),
+            target: w(1),
+            action: WindowDropAction::Insert(Direction::Right)
+        })
+        .changed()
+    );
     assert_eq!(same.window_slot(layout, w(2)), Some(source_slot));
     let new_frame = calculated_source(&same, layout, w(2));
     assert!(new_frame.size.width > resized_frame.size.width * 2.0);

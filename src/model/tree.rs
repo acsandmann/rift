@@ -206,6 +206,19 @@ impl NodeId {
         UnattachedNode { id: new_root, tree }
     }
 
+    /// Reorder siblings without changing membership, weights, or selection history.
+    pub(crate) fn reorder(self, anchor: NodeId, before: bool, map: &mut NodeMap) {
+        assert_ne!(self, anchor);
+        assert!(self.parent(map).is_some());
+        assert_eq!(self.parent(map), anchor.parent(map));
+        map.unlink(self);
+        if before {
+            self.link_before(anchor, map);
+        } else {
+            self.link_after(anchor, map);
+        }
+    }
+
     #[track_caller]
     pub fn next_sibling(self, map: &NodeMap) -> Option<NodeId> {
         map.map.get(self).and_then(|n| n.next_sibling)

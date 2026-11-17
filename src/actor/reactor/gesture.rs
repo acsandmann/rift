@@ -419,7 +419,14 @@ mod tests {
         else {
             panic!("scrolling layout");
         };
-        system.select_window(layout, crate::actor::app::WindowId::new(1, 1));
+        system
+            .focus(
+                layout,
+                crate::layout_engine::systems::Focus::Select(crate::actor::app::WindowId::new(
+                    1, 1,
+                )),
+            )
+            .handled;
         system.prepare_layout(
             layout,
             CGRect::new(CGPoint::ZERO, CGSize::new(1000.0, 1000.0)),

@@ -1,3 +1,4 @@
+use super::WindowLayoutConstraints;
 use crate::layout_engine::LayoutKind;
 
 type AxisSummary = (f64, Option<f64>, Option<f64>, bool);
@@ -62,6 +63,45 @@ pub(super) fn container_axis_constraints(
         axis.max.map(|v| v + extra),
         axis.can_grow,
     )
+}
+
+/// Fit a leaf into its assigned slot without changing the layout's sizing policy.
+pub(super) fn constrain_frame(
+    mut frame: objc2_core_foundation::CGRect,
+    axes: impl Fn(bool) -> AxisSummary,
+) -> objc2_core_foundation::CGRect {
+    for horizontal in [true, false] {
+        let (min, fixed, max, _) = axes(horizontal);
+        let size = if horizontal {
+            &mut frame.size.width
+        } else {
+            &mut frame.size.height
+        };
+        let desired = fixed.unwrap_or(*size).max(min);
+        *size = max.map_or(desired, |bound| desired.min(bound)).min(*size).max(0.0);
+    }
+    frame
+}
+
+pub(super) fn traditional_leaf_axis_constraints(
+    c: WindowLayoutConstraints,
+    horizontal: bool,
+) -> (f64, Option<f64>, Option<f64>, bool) {
+    let c = c.normalized();
+    let min = c.min_for_axis(horizontal);
+    let max = (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal));
+    if c.is_resizable {
+        if let Some(fixed) = c.fixed_for_axis(horizontal) {
+            return (min, Some(fixed), Some(fixed), false);
+        }
+        // Some apps report transient or overly conservative min/max bounds while still
+        // being user-resizable. In traditional tiling, honoring those bounds at split
+        // time causes visibly uneven insertion (e.g. 2:1 right after a 50/50 split).
+        return (0.0, None, max, true);
+    }
+    let fixed = c.fixed_for_axis(horizontal).filter(|v| *v > 0.0);
+    let can_grow = fixed.is_none();
+    (min, fixed, max.or(fixed), can_grow)
 }
 
 #[derive(Debug, Clone, Copy, Default)]

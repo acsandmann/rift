@@ -2,6 +2,7 @@ use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::hash_map::Entry;
 
 use super::*;
+use crate::layout_engine::systems::{WindowChange, WindowQuery};
 
 pub(super) const CURRENT_SCHEMA_VERSION: u32 = 5;
 
@@ -204,7 +205,7 @@ impl PersistedLayout {
         for workspace in self.workspaces.catalog().collect::<Vec<_>>() {
             let entry = &mut self.workspaces[workspace];
             let members: Vec<_> = (entry.layout_state.all_layouts())
-                .flat_map(|layout| entry.layout_system.all_windows_in_layout(layout))
+                .flat_map(|layout| entry.layout_system.windows(layout, WindowQuery::All))
                 .collect();
             for window in members {
                 let keep = match pending.entry(window) {
@@ -221,7 +222,7 @@ impl PersistedLayout {
                     }),
                 };
                 if !keep {
-                    entry.layout_system.remove_window(window);
+                    entry.layout_system.update(WindowChange::Remove(window));
                 }
             }
             if entry

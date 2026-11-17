@@ -9,6 +9,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{
@@ -1618,6 +1619,15 @@ impl ScrollingLayoutSystem {
 }
 
 impl LayoutSystem for ScrollingLayoutSystem {
+    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
+        self.layouts.get(layout).is_some_and(|state| {
+            state
+                .columns
+                .iter()
+                .any(|column| column.windows().any(|window| window.pid == pid))
+        })
+    }
+
     fn window_participates(&self, window: WindowId) -> bool { !self.inactive.contains(&window) }
 
     fn set_window_participation(&mut self, window: WindowId, participates: bool) -> bool {
@@ -1667,60 +1677,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn remove_layout(&mut self, layout: LayoutId) { self.layouts.remove(layout); }
 
-    fn draw_tree(&self, layout: LayoutId) -> String {
-        let Some(state) = self.layouts.get(layout) else {
-            return String::new();
-        };
-        state
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, col)| {
-                format!("Column {index}: {:?} active={}\n", col.rows, col.active_window)
-            })
-            .collect()
-    }
-
-    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        let state = self.layouts.get(layout).expect("unknown scrolling layout");
-        let children = state
-            .columns
-            .iter()
-            .map(|column| {
-                let windows = column
-                    .windows()
-                    .enumerate()
-                    .map(|(index, &window)| rift_protocol::ContainerTreeNode {
-                        node_id: (((window.pid as u32 as u64) << 32) | u64::from(window.idx.get()))
-                            .rotate_left(1)
-                            | 1,
-                        node_type: rift_protocol::ContainerNodeType::Window,
-                        weight: Some(column.rows[index].height),
-                        window_id: Some(window.into()),
-                        is_selected: state.selected(&self.inactive) == Some(window),
-                        is_fullscreen: state.fullscreen.contains(&window),
-                        is_fullscreen_within_gaps: state.fullscreen_within_gaps.contains(&window),
-                        ..Default::default()
-                    })
-                    .collect();
-                rift_protocol::ContainerTreeNode {
-                    node_id: column.id.0,
-                    layout_kind: Some(rift_protocol::LayoutKind::Vertical),
-                    role: Some("column".to_owned()),
-                    children: windows,
-                    ..Default::default()
-                }
-            })
-            .collect();
-
-        rift_protocol::ContainerTreeNode {
-            layout_kind: Some(rift_protocol::LayoutKind::Horizontal),
-            children,
-            ..Default::default()
-        }
-    }
-
-    /// Environmental changes are explicit mutations, never side effects of frame reads.
     fn prepare_layout(
         &mut self,
         layout: LayoutId,
@@ -1750,50 +1706,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts.get(layout)?.selected(&self.inactive)
     }
 
-    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.layouts.get(layout).map(LayoutState::all_windows).unwrap_or_default()
-    }
-
-    fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        let (col, row) = self.layouts.get(layout)?.locate(window)?;
-        Some(vec![col, row])
-    }
-
-    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.all_windows_in_layout(layout)
-            .into_iter()
-            .filter(|w| self.window_participates(*w))
-            .collect()
-    }
-
-    fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.layouts
-            .get(layout)
-            .and_then(|s| s.columns.get(s.active_column))
-            .map(|c| c.windows().copied().filter(|w| self.window_participates(*w)).collect())
-            .unwrap_or_default()
-    }
-
-    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
-        self.move_focus(layout, Direction::Up).0.is_some()
-    }
-
-    fn descend_selection(&mut self, layout: LayoutId) -> bool {
-        self.move_focus(layout, Direction::Down).0.is_some()
-    }
-
-    fn move_focus(
-        &mut self,
-        layout: LayoutId,
-        direction: Direction,
-    ) -> (Option<WindowId>, Vec<WindowId>) {
-        let Some(wid) = self.window_in_direction(layout, direction) else {
-            return (None, Vec::new());
-        };
-        self.select_window(layout, wid);
-        (Some(wid), self.visible_windows_under_selection(layout))
-    }
-
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let state = self.layouts.get(layout)?;
         let (col, row) = state.selected_location(&self.inactive)?;
@@ -1820,65 +1732,334 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
-    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        self.insert(layout, wid);
-    }
-
-    fn replace_window(&mut self, from: WindowId, to: WindowId) {
-        if self.inactive.remove(&from) {
-            self.inactive.insert(to);
-        }
-        for state in self.layouts.values_mut() {
-            state.mutate(&self.settings, &self.inactive, |state| {
-                for column in &mut state.columns {
-                    for window in column.rows.iter_mut().map(|row| &mut row.window) {
-                        if *window == from {
-                            *window = to;
-                        }
-                    }
-                }
-                if state.fullscreen.remove(&from) {
-                    state.fullscreen.insert(to);
-                }
-                if state.fullscreen_within_gaps.remove(&from) {
-                    state.fullscreen_within_gaps.insert(to);
-                }
-            });
-        }
-    }
-
-    fn remove_window(&mut self, wid: WindowId) {
-        self.inactive.remove(&wid);
-        for state in self.layouts.values_mut() {
-            Self::remove_from_state(state, &self.settings, wid, &self.inactive);
-        }
-    }
-
-    fn remove_windows_for_app(&mut self, pid: pid_t) {
-        self.inactive.retain(|w| w.pid != pid);
-        for state in self.layouts.values_mut() {
-            for wid in state.all_windows().into_iter().filter(|w| w.pid == pid) {
-                Self::remove_from_state(state, &self.settings, wid, &self.inactive);
-            }
-        }
-    }
-
-    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
-        let current = self.windows_for_app(layout, pid);
-        let delta =
-            reconcile_app_membership(pid, current, desired, |w| self.window_participates(w));
-        if let Some(state) = self.layouts.get_mut(layout) {
-            for wid in delta.removals {
-                Self::remove_from_state(state, &self.settings, wid, &self.inactive);
-            }
-        }
-        for wid in delta.additions {
-            self.insert(layout, wid);
-        }
-    }
-
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         self.layouts.get(layout).is_some_and(|state| state.locate(wid).is_some())
+    }
+
+    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+        self.layouts.get(layout).is_some_and(|s| {
+            s.fullscreen
+                .iter()
+                .chain(s.fullscreen_within_gaps.iter())
+                .any(|w| !self.inactive.contains(w))
+        })
+    }
+
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+        self.layouts
+            .get(layout)
+            .and_then(|s| s.columns.get(s.active_column))
+            .is_some_and(|c| c.rows.len() > 1)
+    }
+
+    fn windows(&self, layout: LayoutId, query: WindowQuery) -> Vec<WindowId> {
+        match query {
+            WindowQuery::All => self.all_windows_in_layout(layout),
+            WindowQuery::Visible => self
+                .all_windows_in_layout(layout)
+                .into_iter()
+                .filter(|w| self.window_participates(*w))
+                .collect(),
+            WindowQuery::Selection => self.visible_windows_under_selection(layout),
+            WindowQuery::Stack(_) => Vec::new(),
+            WindowQuery::App(pid) => self.windows_for_app(layout, pid),
+        }
+    }
+
+    fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
+        match focus {
+            Focus::Select(window) => FocusResult::selection(self.select_window(layout, window)),
+            Focus::Ascend => {
+                FocusResult::selection({ self.move_focus(layout, Direction::Up).0.is_some() })
+            }
+            Focus::Descend => {
+                FocusResult::selection({ self.move_focus(layout, Direction::Down).0.is_some() })
+            }
+            Focus::Direction(direction) => {
+                FocusResult::movement(self.move_focus(layout, direction))
+            }
+        }
+    }
+
+    fn update(&mut self, change: WindowChange<'_>) {
+        match change {
+            WindowChange::Add(layout, window, _) => {
+                let wid = window;
+
+                self.insert(layout, wid);
+            }
+            WindowChange::Remove(window) | WindowChange::RemoveAndRebalance(window) => {
+                let wid = window;
+
+                self.inactive.remove(&wid);
+                for state in self.layouts.values_mut() {
+                    Self::remove_from_state(state, &self.settings, wid, &self.inactive);
+                }
+            }
+            WindowChange::Replace(from, to) => {
+                if self.inactive.remove(&from) {
+                    self.inactive.insert(to);
+                }
+                for state in self.layouts.values_mut() {
+                    state.mutate(&self.settings, &self.inactive, |state| {
+                        for column in &mut state.columns {
+                            for window in column.rows.iter_mut().map(|row| &mut row.window) {
+                                if *window == from {
+                                    *window = to;
+                                }
+                            }
+                        }
+                        if state.fullscreen.remove(&from) {
+                            state.fullscreen.insert(to);
+                        }
+                        if state.fullscreen_within_gaps.remove(&from) {
+                            state.fullscreen_within_gaps.insert(to);
+                        }
+                    });
+                }
+            }
+            WindowChange::CloseApp(pid) => {
+                self.inactive.retain(|w| w.pid != pid);
+                for state in self.layouts.values_mut() {
+                    for wid in state.all_windows().into_iter().filter(|w| w.pid == pid) {
+                        Self::remove_from_state(state, &self.settings, wid, &self.inactive);
+                    }
+                }
+            }
+            WindowChange::Reconcile(layout, pid, desired) => {
+                let current = self.windows_for_app(layout, pid);
+                let delta = reconcile_app_membership(pid, current, desired, |w| {
+                    self.window_participates(w)
+                });
+                if let Some(state) = self.layouts.get_mut(layout) {
+                    for wid in delta.removals {
+                        Self::remove_from_state(state, &self.settings, wid, &self.inactive);
+                    }
+                }
+                for wid in delta.additions {
+                    self.insert(layout, wid);
+                }
+            }
+            WindowChange::Resize {
+                layout,
+                window,
+                old,
+                new,
+                screen,
+                gaps,
+            } => {
+                let wid = window;
+                let old_frame = old;
+                let new_frame = new;
+
+                if !self.window_participates(wid) {
+                    return;
+                }
+                let Some(state) = self.layouts.get_mut(layout) else {
+                    return;
+                };
+                let Some((col, row)) = state.locate(wid) else {
+                    return;
+                };
+                let width_changed = (new_frame.size.width - old_frame.size.width).abs() > 0.5;
+                let height_changed = (new_frame.size.height - old_frame.size.height).abs() > 0.5;
+                if !width_changed && !height_changed {
+                    return;
+                }
+                let tiling = compute_tiling_area(screen, gaps);
+                state.mutate(&self.settings, &self.inactive, |state| {
+                    // Display moves can resize only the height. Keep the requested width
+                    // (including preserved pixel widths) unless the width actually changed.
+                    if width_changed {
+                        state.columns[col].width = ColumnWidth::Proportion(clamp_ratio(
+                            width_ratio(
+                                tiling.size.width,
+                                gaps.inner.horizontal,
+                                new_frame.size.width,
+                            ),
+                            &self.settings,
+                        ));
+                    }
+                    let column = &mut state.columns[col];
+                    if height_changed && column.rows.len() > 1 {
+                        let total = (tiling.size.height
+                            - gaps.inner.vertical * column.rows.len().saturating_sub(1) as f64)
+                            .max(1.0);
+                        set_height_share(
+                            column,
+                            row,
+                            (new_frame.size.height / total).clamp(0.05, 0.95),
+                            total,
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
+        match edit {
+            LayoutEdit::Move {
+                direction,
+                has_display_neighbor: _,
+            } => EditResult::from(self.move_selection(layout, direction)),
+            LayoutEdit::Transfer(to) => {
+                self.move_selection_to_layout_after_selection(layout, to);
+                EditResult::Changed
+            }
+            LayoutEdit::Fullscreen { within_gaps: false } => {
+                EditResult::Raise(self.toggle_fullscreen(layout, false))
+            }
+            LayoutEdit::Fullscreen { within_gaps: true } => {
+                EditResult::Raise(self.toggle_fullscreen(layout, true))
+            }
+            LayoutEdit::Swap(a, b) => EditResult::from(self.swap_windows(layout, a, b)),
+            LayoutEdit::Drop { source, target, action } => {
+                EditResult::from(self.apply_target_drop(layout, source, target, action))
+            }
+            LayoutEdit::Group(GroupEdit::Join(direction)) => {
+                self.join_selection_with_direction(layout, direction);
+                EditResult::Changed
+            }
+            LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
+                if !matches!(direction, Direction::Left | Direction::Right) {
+                    return EditResult::Unchanged;
+                }
+                if self.parent_of_selection_is_stacked(layout) {
+                    self.move_selection(layout, direction);
+                } else {
+                    self.join_selection_with_direction(layout, direction);
+                };
+                EditResult::Changed
+            }
+            LayoutEdit::Group(GroupEdit::Stack(orientation)) => EditResult::Raise({
+                let _orientation = orientation;
+
+                let Some((state, col, _)) =
+                    Self::selected_mut(&mut self.layouts, layout, &self.inactive)
+                else {
+                    return EditResult::Raise(Vec::new());
+                };
+                let target = if col + 1 < state.columns.len() {
+                    col + 1
+                } else if col > 0 {
+                    col - 1
+                } else {
+                    return EditResult::Raise(Vec::new());
+                };
+                let moved = state.columns[target].windows().copied().collect::<Vec<_>>();
+                let selected = state.selected(&self.inactive).unwrap();
+                state.transient_restore = None;
+                state.mutate(&self.settings, &self.inactive, |state| {
+                    let mut neighbor = state.columns.remove(target);
+                    let column = &mut state.columns[col - usize::from(target < col)];
+                    column.rows.append(&mut neighbor.rows);
+                    state.activate(selected);
+                });
+                moved
+            }),
+            LayoutEdit::Group(GroupEdit::Unstack(orientation)) => EditResult::Raise({
+                let _orientation = orientation;
+
+                let Some((state, col, _)) =
+                    Self::selected_mut(&mut self.layouts, layout, &self.inactive)
+                else {
+                    return EditResult::Raise(Vec::new());
+                };
+                let selected = state.selected(&self.inactive).unwrap();
+                let moved: Vec<_> =
+                    state.columns[col].windows().copied().filter(|w| *w != selected).collect();
+                state.transient_restore = None;
+                state.mutate(&self.settings, &self.inactive, |state| {
+                    for (index, &wid) in moved.iter().enumerate() {
+                        let (width, weight) = state.detach(wid, &self.inactive).unwrap();
+                        state.new_column(col + 1 + index, wid, width, weight);
+                    }
+                    state.activate(selected);
+                });
+                moved
+            }),
+            LayoutEdit::Group(GroupEdit::Unjoin) => {
+                if self.parent_of_selection_is_stacked(layout) {
+                    self.move_selection(layout, Direction::Right);
+                };
+                EditResult::Changed
+            }
+            LayoutEdit::Resize { amount, orientation } => {
+                if !amount.is_finite() {
+                    return EditResult::Unchanged;
+                }
+                let Some((state, col, row)) =
+                    Self::selected_mut(&mut self.layouts, layout, &self.inactive)
+                else {
+                    return EditResult::Unchanged;
+                };
+                let vertical = orientation == ResizeOrientation::Vertical
+                    || (orientation == ResizeOrientation::Smart
+                        && state.columns[col].rows.len() > 1);
+                state.mutate(&self.settings, &self.inactive, |state| {
+                    let column = &mut state.columns[col];
+                    if vertical {
+                        if column.rows.len() > 1 {
+                            let total: f64 = column.rows.iter().map(|row| row.height).sum();
+                            let share =
+                                (column.rows[row].height / total + amount).clamp(0.05, 0.95);
+                            set_height_share(column, row, share, total.max(10_000.0));
+                        }
+                    } else {
+                        let ratio = state
+                            .geometry
+                            .as_ref()
+                            .and_then(|g| {
+                                g.column(column.id).map(|c| {
+                                    width_ratio(
+                                        g.tiling.size.width,
+                                        g.gaps.inner.horizontal,
+                                        c.width,
+                                    )
+                                })
+                            })
+                            .unwrap_or(match column.width {
+                                ColumnWidth::Proportion(r) => r,
+                                _ => self.settings.column_width_ratio,
+                            });
+                        column.width =
+                            ColumnWidth::Proportion(clamp_ratio(ratio + amount, &self.settings));
+                    }
+                });
+                if !vertical {
+                    state.reveal(&self.settings);
+                };
+                EditResult::Changed
+            }
+            _ => EditResult::Unsupported,
+        }
+    }
+}
+
+impl ScrollingLayoutSystem {
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.layouts.get(layout).map(LayoutState::all_windows).unwrap_or_default()
+    }
+
+    fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.layouts
+            .get(layout)
+            .and_then(|s| s.columns.get(s.active_column))
+            .map(|c| c.windows().copied().filter(|w| self.window_participates(*w)).collect())
+            .unwrap_or_default()
+    }
+
+    fn move_focus(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+    ) -> (Option<WindowId>, Vec<WindowId>) {
+        let Some(wid) = self.window_in_direction(layout, direction) else {
+            return (None, Vec::new());
+        };
+        self.select_window(layout, wid);
+        (Some(wid), self.visible_windows_under_selection(layout))
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
@@ -1904,54 +2085,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
         state.reveal(&self.settings);
         true
-    }
-
-    fn on_window_resized(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        old_frame: CGRect,
-        new_frame: CGRect,
-        screen: CGRect,
-        gaps: &GapSettings,
-    ) {
-        if !self.window_participates(wid) {
-            return;
-        }
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return;
-        };
-        let Some((col, row)) = state.locate(wid) else {
-            return;
-        };
-        let width_changed = (new_frame.size.width - old_frame.size.width).abs() > 0.5;
-        let height_changed = (new_frame.size.height - old_frame.size.height).abs() > 0.5;
-        if !width_changed && !height_changed {
-            return;
-        }
-        let tiling = compute_tiling_area(screen, gaps);
-        state.mutate(&self.settings, &self.inactive, |state| {
-            // Display moves can resize only the height. Keep the requested width
-            // (including preserved pixel widths) unless the width actually changed.
-            if width_changed {
-                state.columns[col].width = ColumnWidth::Proportion(clamp_ratio(
-                    width_ratio(tiling.size.width, gaps.inner.horizontal, new_frame.size.width),
-                    &self.settings,
-                ));
-            }
-            let column = &mut state.columns[col];
-            if height_changed && column.rows.len() > 1 {
-                let total = (tiling.size.height
-                    - gaps.inner.vertical * column.rows.len().saturating_sub(1) as f64)
-                    .max(1.0);
-                set_height_share(
-                    column,
-                    row,
-                    (new_frame.size.height / total).clamp(0.05, 0.95),
-                    total,
-                );
-            }
-        });
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
@@ -2103,23 +2236,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts[to].reveal(&self.settings);
     }
 
-    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        self.toggle_fullscreen(layout, false)
-    }
-
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        self.toggle_fullscreen(layout, true)
-    }
-
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        self.layouts.get(layout).is_some_and(|s| {
-            s.fullscreen
-                .iter()
-                .chain(s.fullscreen_within_gaps.iter())
-                .any(|w| !self.inactive.contains(w))
-        })
-    }
-
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         if !matches!(direction, Direction::Left | Direction::Right) {
             return;
@@ -2133,123 +2249,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.apply_target_drop(layout, source, target, WindowDropAction::Stack);
     }
 
-    fn consume_or_expel_selection(&mut self, layout: LayoutId, direction: Direction) {
-        if !matches!(direction, Direction::Left | Direction::Right) {
-            return;
-        }
-        if self.parent_of_selection_is_stacked(layout) {
-            self.move_selection(layout, direction);
-        } else {
-            self.join_selection_with_direction(layout, direction);
-        }
-    }
-
-    fn apply_stacking_to_parent_of_selection(
-        &mut self,
-        layout: LayoutId,
-        _orientation: crate::common::config::StackDefaultOrientation,
-    ) -> Vec<WindowId> {
-        let Some((state, col, _)) = Self::selected_mut(&mut self.layouts, layout, &self.inactive)
-        else {
-            return Vec::new();
-        };
-        let target = if col + 1 < state.columns.len() {
-            col + 1
-        } else if col > 0 {
-            col - 1
-        } else {
-            return Vec::new();
-        };
-        let moved = state.columns[target].windows().copied().collect::<Vec<_>>();
-        let selected = state.selected(&self.inactive).unwrap();
-        state.transient_restore = None;
-        state.mutate(&self.settings, &self.inactive, |state| {
-            let mut neighbor = state.columns.remove(target);
-            let column = &mut state.columns[col - usize::from(target < col)];
-            column.rows.append(&mut neighbor.rows);
-            state.activate(selected);
-        });
-        moved
-    }
-
-    fn unstack_parent_of_selection(
-        &mut self,
-        layout: LayoutId,
-        _orientation: crate::common::config::StackDefaultOrientation,
-    ) -> Vec<WindowId> {
-        let Some((state, col, _)) = Self::selected_mut(&mut self.layouts, layout, &self.inactive)
-        else {
-            return Vec::new();
-        };
-        let selected = state.selected(&self.inactive).unwrap();
-        let moved: Vec<_> =
-            state.columns[col].windows().copied().filter(|w| *w != selected).collect();
-        state.transient_restore = None;
-        state.mutate(&self.settings, &self.inactive, |state| {
-            for (index, &wid) in moved.iter().enumerate() {
-                let (width, weight) = state.detach(wid, &self.inactive).unwrap();
-                state.new_column(col + 1 + index, wid, width, weight);
-            }
-            state.activate(selected);
-        });
-        moved
-    }
-
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
         self.layouts
             .get(layout)
-            .and_then(|s| s.columns.get(s.active_column))
-            .is_some_and(|c| c.rows.len() > 1)
-    }
-
-    fn unjoin_selection(&mut self, layout: LayoutId) {
-        if self.parent_of_selection_is_stacked(layout) {
-            self.move_selection(layout, Direction::Right);
-        }
-    }
-
-    fn resize_selection_by(
-        &mut self,
-        layout: LayoutId,
-        amount: f64,
-        orientation: ResizeOrientation,
-    ) {
-        if !amount.is_finite() {
-            return;
-        }
-        let Some((state, col, row)) = Self::selected_mut(&mut self.layouts, layout, &self.inactive)
-        else {
-            return;
-        };
-        let vertical = orientation == ResizeOrientation::Vertical
-            || (orientation == ResizeOrientation::Smart && state.columns[col].rows.len() > 1);
-        state.mutate(&self.settings, &self.inactive, |state| {
-            let column = &mut state.columns[col];
-            if vertical {
-                if column.rows.len() > 1 {
-                    let total: f64 = column.rows.iter().map(|row| row.height).sum();
-                    let share = (column.rows[row].height / total + amount).clamp(0.05, 0.95);
-                    set_height_share(column, row, share, total.max(10_000.0));
-                }
-            } else {
-                let ratio = state
-                    .geometry
-                    .as_ref()
-                    .and_then(|g| {
-                        g.column(column.id).map(|c| {
-                            width_ratio(g.tiling.size.width, g.gaps.inner.horizontal, c.width)
-                        })
-                    })
-                    .unwrap_or(match column.width {
-                        ColumnWidth::Proportion(r) => r,
-                        _ => self.settings.column_width_ratio,
-                    });
-                column.width = ColumnWidth::Proportion(clamp_ratio(ratio + amount, &self.settings));
-            }
-        });
-        if !vertical {
-            state.reveal(&self.settings);
-        }
+            .map(|state| {
+                state
+                    .columns
+                    .iter()
+                    .flat_map(|column| column.windows())
+                    .filter(|window| window.pid == pid)
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -2270,6 +2282,66 @@ fn set_height_share(column: &mut Column, row: usize, share: f64, scale: f64) {
         } else {
             (1.0 - share) * scale / others
         };
+    }
+}
+
+impl ScrollingLayoutSystem {
+    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
+        let Some(state) = self.layouts.get(layout) else {
+            return String::new();
+        };
+        state
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, col)| {
+                format!("Column {index}: {:?} active={}\n", col.rows, col.active_window)
+            })
+            .collect()
+    }
+
+    pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        let state = self.layouts.get(layout).expect("unknown scrolling layout");
+        let children = state
+            .columns
+            .iter()
+            .map(|column| {
+                let windows = column
+                    .windows()
+                    .enumerate()
+                    .map(|(index, &window)| rift_protocol::ContainerTreeNode {
+                        node_id: (((window.pid as u32 as u64) << 32) | u64::from(window.idx.get()))
+                            .rotate_left(1)
+                            | 1,
+                        node_type: rift_protocol::ContainerNodeType::Window,
+                        weight: Some(column.rows[index].height),
+                        window_id: Some(window.into()),
+                        is_selected: state.selected(&self.inactive) == Some(window),
+                        is_fullscreen: state.fullscreen.contains(&window),
+                        is_fullscreen_within_gaps: state.fullscreen_within_gaps.contains(&window),
+                        ..Default::default()
+                    })
+                    .collect();
+                rift_protocol::ContainerTreeNode {
+                    node_id: column.id.0,
+                    layout_kind: Some(rift_protocol::LayoutKind::Vertical),
+                    role: Some("column".to_owned()),
+                    children: windows,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        rift_protocol::ContainerTreeNode {
+            layout_kind: Some(rift_protocol::LayoutKind::Horizontal),
+            children,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
+        let (col, row) = self.layouts.get(layout)?.locate(window)?;
+        Some(vec![col, row])
     }
 }
 #[cfg(test)]
@@ -2316,7 +2388,7 @@ pub(crate) mod tests {
             let mut system = ScrollingLayoutSystem::new(&settings);
             let layout = system.create_layout();
             for index in 1..=count {
-                system.add_window_after_selection(layout, wid(index));
+                system.update(WindowChange::Add(layout, wid(index), None));
             }
             if count > 0 {
                 system.select_window(layout, wid(1));
@@ -2363,7 +2435,15 @@ pub(crate) mod tests {
         }
 
         fn drop(&mut self, source: u32, target: u32, action: WindowDropAction) {
-            assert!(self.system.apply_window_drop(self.layout, wid(source), wid(target), action));
+            assert!(
+                self.system
+                    .edit(self.layout, LayoutEdit::Drop {
+                        source: wid(source),
+                        target: wid(target),
+                        action: action
+                    })
+                    .changed()
+            );
         }
     }
 
@@ -2372,7 +2452,12 @@ pub(crate) mod tests {
         let mut f = Fixture::new(3);
         f.drop(2, 1, WindowDropAction::Stack);
         f.select(1);
-        f.system.resize_selection_by(f.layout, 0.25, ResizeOrientation::Vertical);
+        f.system
+            .edit(f.layout, LayoutEdit::Resize {
+                amount: 0.25,
+                orientation: ResizeOrientation::Vertical,
+            })
+            .discard();
         let first = f.frame(1);
         let second = f.frame(2);
         let slot = f.system.window_slot(f.layout, wid(2));
@@ -2416,7 +2501,7 @@ pub(crate) mod tests {
         let mut f = Fixture::new(0);
         f.layout = f.system.create_layout();
         for index in 1..=4 {
-            f.system.add_window_after_selection(f.layout, wid(index));
+            f.system.update(WindowChange::Add(f.layout, wid(index), None));
         }
         let query = |f: &Fixture| {
             f.system.calculate_frames(f.layout, f.screen, &f.constraints, &f.gaps, false)
@@ -2491,7 +2576,12 @@ pub(crate) mod tests {
             max_width: 450.0,
             ..Default::default()
         });
-        f.system.resize_selection_by(f.layout, -0.08, ResizeOrientation::Horizontal);
+        f.system
+            .edit(f.layout, LayoutEdit::Resize {
+                amount: -0.08,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
         f.prepare();
         for ratio in [0.5, 2.0 / 3.0] {
             assert!(f.system.switch_preset_column_width(f.layout, false));
@@ -2513,7 +2603,12 @@ pub(crate) mod tests {
     fn preset_width_preserves_stack_selection_and_fullscreen_restore() {
         let mut f = Fixture::new(2);
         f.drop(2, 1, WindowDropAction::Stack);
-        f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Vertical);
+        f.system
+            .edit(f.layout, LayoutEdit::Resize {
+                amount: 0.1,
+                orientation: ResizeOrientation::Vertical,
+            })
+            .discard();
         f.gaps.inner.horizontal = 20.0;
         let before = f.frames();
         let weights = f.system.layouts[f.layout].columns[0]
@@ -2569,7 +2664,7 @@ pub(crate) mod tests {
         // A preset chosen while expanded survives the temporary geometry override.
         assert!(f.system.switch_preset_column_width(f.layout, false));
         assert_eq!(f.frame(1).size.width, 950.0);
-        f.system.add_window_after_selection(f.layout, wid(2));
+        f.system.update(WindowChange::Add(f.layout, wid(2), None));
         assert_eq!(f.frame(1).size.width, 317.0);
         assert_eq!(f.frame(2).size.width, 475.0);
 
@@ -2577,7 +2672,7 @@ pub(crate) mod tests {
         f.drop(2, 1, WindowDropAction::Stack);
         assert_eq!(f.frame(1).size, CGSize::new(950.0, 400.0));
         assert_eq!(f.frame(2).size, CGSize::new(950.0, 400.0));
-        f.system.remove_window(wid(2));
+        f.system.update(WindowChange::Remove(wid(2)));
         assert_eq!(f.frame(1).size, CGSize::new(950.0, 800.0));
 
         settings.expand_single_column = false;
@@ -2617,7 +2712,7 @@ pub(crate) mod tests {
     fn half_width_single_column_and_visible_focus_do_not_expand_or_shift() {
         let mut f = Fixture::new(1);
         assert_eq!(f.frame(1).size.width, 500.0);
-        f.system.add_window_after_selection(f.layout, wid(2));
+        f.system.update(WindowChange::Add(f.layout, wid(2), None));
         let before = f.frames();
         f.focus(Direction::Left);
         assert_eq!(f.frames(), before);
@@ -2644,7 +2739,12 @@ pub(crate) mod tests {
     fn unequal_and_clipped_columns_reveal_with_minimum_camera_motion() {
         let mut f = Fixture::new(3);
         f.select(2);
-        f.system.resize_selection_by(f.layout, -0.1, ResizeOrientation::Horizontal);
+        f.system
+            .edit(f.layout, LayoutEdit::Resize {
+                amount: -0.1,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
         let before = f.frames();
         f.select(1);
         f.select(2);
@@ -2672,9 +2772,9 @@ pub(crate) mod tests {
         assert_eq!(f.focus(Direction::Up), Some(wid(4)));
         assert_eq!(f.focus(Direction::Left), Some(wid(2)));
         assert_eq!(f.focus(Direction::Right), Some(wid(4)));
-        f.system.remove_window(wid(3));
+        f.system.update(WindowChange::Remove(wid(3)));
         assert_eq!(f.selected(), Some(wid(4)));
-        f.system.remove_window(wid(4));
+        f.system.update(WindowChange::Remove(wid(4)));
         assert_eq!(f.selected(), Some(wid(5)));
     }
 
@@ -2705,16 +2805,16 @@ pub(crate) mod tests {
         f.drop(4, 1, WindowDropAction::Insert(Direction::Left));
         assert_eq!(f.frame(3).origin.x, x);
         f.select(3);
-        f.system.on_window_resized(
-            f.layout,
-            wid(4),
-            CGRect::ZERO,
-            CGRect::new(CGPoint::ZERO, CGSize::new(700.0, 800.0)),
-            f.screen,
-            &f.gaps,
-        );
+        f.system.update(WindowChange::Resize {
+            layout: f.layout,
+            window: wid(4),
+            old: CGRect::ZERO,
+            new: CGRect::new(CGPoint::ZERO, CGSize::new(700.0, 800.0)),
+            screen: f.screen,
+            gaps: &f.gaps,
+        });
         assert_eq!(f.frame(3).origin.x, x);
-        f.system.remove_window(wid(4));
+        f.system.update(WindowChange::Remove(wid(4)));
         assert_eq!(f.frame(3).origin.x, x);
     }
 
@@ -2724,15 +2824,15 @@ pub(crate) mod tests {
         f.select(2);
         f.system.center_selected_column(f.layout);
         let before = f.frames();
-        f.system.add_window_after_selection(f.layout, wid(4));
+        f.system.update(WindowChange::Add(f.layout, wid(4), None));
         assert_eq!(f.selected(), Some(wid(4)));
-        f.system.remove_window(wid(4));
+        f.system.update(WindowChange::Remove(wid(4)));
         assert_eq!(f.selected(), Some(wid(2)));
         assert_eq!(f.frames(), before);
-        f.system.add_window_after_selection(f.layout, wid(5));
+        f.system.update(WindowChange::Add(f.layout, wid(5), None));
         f.select(3); // Intentional focus change cancels transient restoration.
         let before = f.frame(3);
-        f.system.remove_window(wid(5));
+        f.system.update(WindowChange::Remove(wid(5)));
         assert_eq!(f.selected(), Some(wid(3)));
         assert_eq!(f.frame(3), before);
     }
@@ -2742,19 +2842,36 @@ pub(crate) mod tests {
         for direction in [Direction::Left, Direction::Right] {
             let mut f = Fixture::new(2);
             f.select(1);
-            f.system.resize_selection_by(f.layout, -0.1, ResizeOrientation::Horizontal);
+            f.system
+                .edit(f.layout, LayoutEdit::Resize {
+                    amount: -0.1,
+                    orientation: ResizeOrientation::Horizontal,
+                })
+                .discard();
             let destination_id = f.system.container_tree(f.layout).children[0].node_id;
             f.select(2);
-            f.system.consume_or_expel_selection(f.layout, Direction::Left);
+            f.system
+                .edit(
+                    f.layout,
+                    LayoutEdit::Group(GroupEdit::ConsumeOrExpel(Direction::Left)),
+                )
+                .discard();
             assert_eq!(f.selected(), Some(wid(2)));
             assert_eq!(f.frame(2).size.width, 400.0);
             assert_eq!(
                 f.system.container_tree(f.layout).children[0].node_id,
                 destination_id
             );
-            f.system.resize_selection_by(f.layout, 0.2, ResizeOrientation::Vertical);
+            f.system
+                .edit(f.layout, LayoutEdit::Resize {
+                    amount: 0.2,
+                    orientation: ResizeOrientation::Vertical,
+                })
+                .discard();
             let offset = f.system.layouts[f.layout].viewport.start_offset();
-            f.system.consume_or_expel_selection(f.layout, direction);
+            f.system
+                .edit(f.layout, LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)))
+                .discard();
             assert_eq!(f.selected(), Some(wid(2)));
             assert_eq!(f.system.layouts[f.layout].viewport.start_offset(), offset);
             assert_eq!(f.frame(2).size.width, 400.0);
@@ -2789,10 +2906,10 @@ pub(crate) mod tests {
         let mut f = Fixture::new(2);
         let id = f.system.container_tree(f.layout).children[0].node_id;
         f.drop(2, 1, WindowDropAction::Stack);
-        f.system.remove_window(wid(1));
+        f.system.update(WindowChange::Remove(wid(1)));
         assert_eq!(f.system.container_tree(f.layout).children[0].node_id, id);
         assert_eq!(f.selected(), Some(wid(2)));
-        f.system.replace_window(wid(2), wid(3));
+        f.system.update(WindowChange::Replace(wid(2), wid(3)));
         assert_eq!(f.selected(), Some(wid(3)));
         assert_eq!(f.system.container_tree(f.layout).children[0].node_id, id);
     }
@@ -2803,7 +2920,12 @@ pub(crate) mod tests {
         f.select(2);
         f.system.center_selected_column(f.layout);
         let before = f.frames();
-        f.system.resize_selection_by(f.layout, 0.1, ResizeOrientation::Horizontal);
+        f.system
+            .edit(f.layout, LayoutEdit::Resize {
+                amount: 0.1,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
         assert_eq!(f.frame(1), before[0].1);
         assert_eq!(f.frame(2).origin.x, before[1].1.origin.x);
         assert_eq!(f.frame(2).size.width, 600.0);
@@ -2837,9 +2959,13 @@ pub(crate) mod tests {
             f.system.center_selected_column(f.layout);
             let before = f.frame(2);
             if within_gaps {
-                f.system.toggle_fullscreen_within_gaps_of_selection(f.layout);
+                f.system
+                    .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: true })
+                    .into_windows();
             } else {
-                f.system.toggle_fullscreen_of_selection(f.layout);
+                f.system
+                    .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: false })
+                    .into_windows();
             }
             assert_eq!(
                 f.frame(2),
@@ -2849,11 +2975,15 @@ pub(crate) mod tests {
                     f.screen
                 }
             );
-            f.system.remove_window(wid(1));
+            f.system.update(WindowChange::Remove(wid(1)));
             if within_gaps {
-                f.system.toggle_fullscreen_within_gaps_of_selection(f.layout);
+                f.system
+                    .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: true })
+                    .into_windows();
             } else {
-                f.system.toggle_fullscreen_of_selection(f.layout);
+                f.system
+                    .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: false })
+                    .into_windows();
             }
             assert_eq!(f.frame(2), before);
         }
@@ -2862,16 +2992,31 @@ pub(crate) mod tests {
         f.drop(2, 1, WindowDropAction::Stack);
         f.system.center_selected_column(f.layout);
         let x = f.frame(2).origin.x;
-        f.system.toggle_fullscreen_of_selection(f.layout);
+        f.system
+            .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .into_windows();
         f.select(1);
-        f.system.toggle_fullscreen_of_selection(f.layout);
-        f.system.remove_window(wid(2)); // Another fullscreen tile is still in the column.
-        f.system.toggle_fullscreen_of_selection(f.layout);
+        f.system
+            .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .into_windows();
+        f.system.update(WindowChange::Remove(wid(2))); // Another fullscreen tile is still in the column.
+        f.system
+            .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .into_windows();
         assert_eq!(f.frame(1).origin.x, x);
 
-        f.system.toggle_fullscreen_of_selection(f.layout);
-        f.system.resize_selection_by(f.layout, 0.3, ResizeOrientation::Horizontal);
-        f.system.toggle_fullscreen_of_selection(f.layout);
+        f.system
+            .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .into_windows();
+        f.system
+            .edit(f.layout, LayoutEdit::Resize {
+                amount: 0.3,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        f.system
+            .edit(f.layout, LayoutEdit::Fullscreen { within_gaps: false })
+            .into_windows();
         assert_eq!(f.frame(1).origin.x, 200.0); // Reconcile the saved view with the enlarged tile.
     }
 
@@ -2957,7 +3102,12 @@ pub(crate) mod tests {
         assert_eq!(f.frame(2).size.width, 600.0);
         f.select(1);
         for (delta, expected) in [(0.1, 500.0), (1.0, 700.0), (-1.0, 300.0)] {
-            f.system.resize_selection_by(f.layout, delta, ResizeOrientation::Horizontal);
+            f.system
+                .edit(f.layout, LayoutEdit::Resize {
+                    amount: delta,
+                    orientation: ResizeOrientation::Horizontal,
+                })
+                .discard();
             assert_eq!(f.frame(1).size.width, expected);
         }
     }
@@ -2967,12 +3117,21 @@ pub(crate) mod tests {
         for orientation in [ResizeOrientation::Vertical, ResizeOrientation::Smart] {
             let mut f = Fixture::new(2);
             f.drop(2, 1, WindowDropAction::Stack);
-            f.system.resize_selection_by(f.layout, 0.1, orientation);
+            f.system
+                .edit(f.layout, LayoutEdit::Resize { amount: 0.1, orientation })
+                .discard();
             assert_eq!(f.frame(2).size, CGSize::new(500.0, 480.0));
             assert_eq!(f.frame(1).size.height, 320.0);
             let new = CGRect::new(CGPoint::ZERO, CGSize::new(500.0, 600.0));
             let old = f.frame(2);
-            f.system.on_window_resized(f.layout, wid(2), old, new, f.screen, &f.gaps);
+            f.system.update(WindowChange::Resize {
+                layout: f.layout,
+                window: wid(2),
+                old,
+                new,
+                screen: f.screen,
+                gaps: &f.gaps,
+            });
             assert_eq!(f.frame(2).size.height, 600.0);
             assert_eq!(f.frame(1).size.height, 200.0);
         }
@@ -3004,7 +3163,7 @@ pub(crate) mod tests {
             }
             let mut system = ScrollingLayoutSystem::new(&settings);
             let layout = system.create_layout();
-            system.add_window_after_selection(layout, wid(1));
+            system.update(WindowChange::Add(layout, wid(1), None));
             system.prepare_layout(layout, f.screen, &f.constraints, &f.gaps);
             assert_eq!(
                 presented_frames(&system, layout).next().unwrap().1.origin.x,
@@ -3182,7 +3341,7 @@ pub(crate) mod tests {
         f.system.begin_viewport_gesture(f.layout, Instant::now());
         f.system.update_viewport_gesture(f.layout, 30.0, Duration::from_millis(10));
         let x = f.frame(3).origin.x;
-        f.system.remove_window(wid(1));
+        f.system.update(WindowChange::Remove(wid(1)));
         assert_eq!(f.frame(3).origin.x, x);
         assert_eq!(f.selected(), Some(wid(3)));
         f.system.update_viewport_gesture(f.layout, 20.0, Duration::from_millis(20));
@@ -3230,12 +3389,20 @@ pub(crate) mod tests {
         assert_eq!(f.system.window_slot(f.layout, wid(2)), Some(vec![1, 0]));
         let moved = f
             .system
-            .apply_stacking_to_parent_of_selection(f.layout, StackDefaultOrientation::Vertical);
+            .edit(
+                f.layout,
+                LayoutEdit::Group(GroupEdit::Stack(StackDefaultOrientation::Vertical)),
+            )
+            .into_windows();
         assert_eq!(moved, vec![wid(1), wid(3)]);
         assert_eq!(f.selected(), Some(wid(2)));
         let x = f.frame(2).origin.x;
         f.system
-            .unstack_parent_of_selection(f.layout, StackDefaultOrientation::Vertical);
+            .edit(
+                f.layout,
+                LayoutEdit::Group(GroupEdit::Unstack(StackDefaultOrientation::Vertical)),
+            )
+            .into_windows();
         assert_eq!(f.frame(2).origin.x, x);
         assert_eq!(f.system.all_windows_in_layout(f.layout), vec![
             wid(2),
@@ -3254,7 +3421,11 @@ pub(crate) mod tests {
             let mut settings = f.system.settings.clone();
             settings.base.window_insertion_point = Some(insertion);
             f.system.update_settings(&settings);
-            f.system.set_windows_for_app(f.layout, 1, vec![wid(1), wid(2), wid(3)]);
+            f.system.update(WindowChange::Reconcile(f.layout, 1, vec![
+                wid(1),
+                wid(2),
+                wid(3),
+            ]));
             let expected = if insertion == WindowInsertionPoint::EndOfTree {
                 vec![wid(1), wid(2), wid(3)]
             } else {
@@ -3312,7 +3483,7 @@ pub(crate) mod tests {
         assert_eq!(f.system.selected_window(destination), Some(wid(2)));
         assert_eq!(f.selected(), Some(wid(1)));
         assert!(!f.system.contains_window(f.layout, wid(2)));
-        f.system.add_window_after_selection(f.layout, wid(4));
+        f.system.update(WindowChange::Add(f.layout, wid(4), None));
         let ids: Vec<_> =
             f.system.container_tree(f.layout).children.iter().map(|c| c.node_id).collect();
         assert_ne!(ids[0], ids[1]);
@@ -3344,7 +3515,7 @@ pub(crate) mod tests {
             }
             assert_eq!(f.frames().len(), count as usize);
             for index in 1..=count {
-                f.system.remove_window(wid(index));
+                f.system.update(WindowChange::Remove(wid(index)));
             }
             assert_eq!(f.selected(), None);
             assert!(presented_frames(&f.system, f.layout).next().is_none());
@@ -3369,7 +3540,7 @@ pub(crate) mod tests {
             presented_frames(&system, layout).next().unwrap().1.size.width,
             600.0
         );
-        system.add_window_after_selection(layout, wid(3));
+        system.update(WindowChange::Add(layout, wid(3), None));
         assert_ne!(system.container_tree(layout).children[1].node_id, 42);
     }
     #[test]
@@ -3587,7 +3758,7 @@ pub(crate) mod tests {
         assert_eq!((snapshot.offset, snapshot.target), (0.0, 1000.0));
 
         // Removing an earlier column moves both positions by its width.
-        f.system.remove_window(wid(1));
+        f.system.update(WindowChange::Remove(wid(1)));
         let frames = f.frames();
         assert_eq!(
             frames.iter().find(|(id, _)| *id == wid(4)).unwrap().1.origin.x,
@@ -3753,15 +3924,15 @@ pub(crate) mod tests {
                 .end_viewport_gesture(f.layout, Duration::from_millis(210), true)
                 .unwrap();
             match edit {
-                0 => f.system.remove_window(wid(4)),
+                0 => f.system.update(WindowChange::Remove(wid(4))),
                 1 => {
                     f.gaps.outer.left = 30.0;
                     f.prepare();
                 }
-                3 => f.system.remove_window(
+                3 => f.system.update(WindowChange::Remove(
                     f.system.layouts[f.layout].selected(&f.system.inactive).unwrap(),
-                ),
-                4 => f.system.add_window_after_selection(f.layout, wid(5)),
+                )),
+                4 => f.system.update(WindowChange::Add(f.layout, wid(5), None)),
                 _ => {
                     f.layout = f.system.clone_layout(f.layout);
                 }

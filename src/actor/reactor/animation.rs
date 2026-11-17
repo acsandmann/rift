@@ -1873,9 +1873,15 @@ mod tests {
             ..Default::default()
         });
         let layout = system.create_layout();
-        system.add_window_after_selection(layout, hidden);
-        system.add_window_after_selection(layout, visible);
-        system.select_window(layout, hidden);
+        system.update(crate::layout_engine::systems::WindowChange::Add(
+            layout, hidden, None,
+        ));
+        system.update(crate::layout_engine::systems::WindowChange::Add(
+            layout, visible, None,
+        ));
+        system
+            .focus(layout, crate::layout_engine::systems::Focus::Select(hidden))
+            .handled;
         system.prepare_layout(
             layout,
             rect(0.0, 0.0, 1000.0, 800.0),
@@ -1937,7 +1943,9 @@ mod tests {
             (hidden, rect(0.0, 0.0, 1000.0, 800.0)),
             (visible, rect(1000.0, 0.0, 1000.0, 800.0)),
         ];
-        system.select_window(layout, visible);
+        system
+            .focus(layout, crate::layout_engine::systems::Focus::Select(visible))
+            .handled;
         let mut manager = AnimationManager::new();
         let camera = make_camera(&system, &native, &control);
         let state = camera.state.clone();
@@ -1963,7 +1971,9 @@ mod tests {
             (hidden, rect(-960.0, 0.0, 1000.0, 800.0)),
             (visible, rect(0.0, 0.0, 1000.0, 800.0)),
         ];
-        system.select_window(layout, visible);
+        system
+            .focus(layout, crate::layout_engine::systems::Focus::Select(visible))
+            .handled;
         manager.handle_message(Message::Camera(Box::new(make_camera(
             &system, &native, &control,
         ))));
@@ -1988,7 +1998,14 @@ mod tests {
         };
         for direction in [Direction::Left, Direction::Right] {
             let before: Vec<_> = old.windows.iter().map(|w| (w.wid, w.frame)).collect();
-            assert!(system.move_selection(layout, direction));
+            assert!(
+                system
+                    .edit(layout, crate::layout_engine::systems::LayoutEdit::Move {
+                        direction: direction,
+                        has_display_neighbor: false
+                    })
+                    .changed()
+            );
             let (_, targets) = system.presentation(layout).unwrap();
             let moved = targets.iter().find(|(wid, _, _)| *wid == visible).unwrap().1;
             let neighbor = targets.iter().find(|(wid, _, _)| *wid == hidden).unwrap().1;
@@ -2029,7 +2046,14 @@ mod tests {
         assert!(manager.motions.is_empty());
         let before: Vec<_> =
             control.frames.iter().map(|(wid, (_, frame))| (*wid, *frame)).collect();
-        assert!(system.move_selection(layout, Direction::Left));
+        assert!(
+            system
+                .edit(layout, crate::layout_engine::systems::LayoutEdit::Move {
+                    direction: Direction::Left,
+                    has_display_neighbor: false
+                })
+                .changed()
+        );
         let started = Instant::now();
         let mut next = make_camera(&system, &before, &control);
         next.replace(None);
@@ -2044,9 +2068,20 @@ mod tests {
         // Unequal widths: move the first of three columns past its neighbor.
         next.sample(Instant::now() + Duration::from_secs(2));
         system.commit_presented_viewport(layout, &next.state.lock().viewport);
-        system.resize_selection_by(layout, -0.4, ResizeOrientation::Horizontal);
-        system.add_window_after_selection(layout, WindowId::new(1, 3));
-        system.select_window(layout, visible);
+        system
+            .edit(layout, crate::layout_engine::systems::LayoutEdit::Resize {
+                amount: -0.4,
+                orientation: ResizeOrientation::Horizontal,
+            })
+            .discard();
+        system.update(crate::layout_engine::systems::WindowChange::Add(
+            layout,
+            WindowId::new(1, 3),
+            None,
+        ));
+        system
+            .focus(layout, crate::layout_engine::systems::Focus::Select(visible))
+            .handled;
         let before: Vec<_> =
             crate::layout_engine::systems::scrolling::tests::presented_frames(&system, layout)
                 .collect();
@@ -2055,7 +2090,14 @@ mod tests {
         old.sample(Instant::now() + Duration::from_secs(2));
         system.commit_presented_viewport(layout, &old.state.lock().viewport);
         let before: Vec<_> = old.windows.iter().map(|w| (w.wid, w.frame)).collect();
-        assert!(system.move_selection(layout, Direction::Right));
+        assert!(
+            system
+                .edit(layout, crate::layout_engine::systems::LayoutEdit::Move {
+                    direction: Direction::Right,
+                    has_display_neighbor: false
+                })
+                .changed()
+        );
         assert_eq!(system.window_slot(layout, visible), Some(vec![1, 0]));
         let started = Instant::now();
         let mut next = make_camera(&system, &before, &PresenterControl::default());
@@ -2077,7 +2119,9 @@ mod tests {
         // Removing a preceding column rebases an in-flight camera. Preserve
         // both its position in the new coordinates and its ongoing velocity.
         system.commit_presented_viewport(layout, &next.state.lock().viewport);
-        system.remove_window(WindowId::new(1, 3));
+        system.update(crate::layout_engine::systems::WindowChange::Remove(
+            WindowId::new(1, 3),
+        ));
         system.scroll_by_delta(layout, 0.1);
         let mut replacement = make_camera(&system, &before, &PresenterControl::default());
         assert!(!replacement.presentation.animated());
@@ -2111,7 +2155,9 @@ mod tests {
         };
         let mut system = ScrollingLayoutSystem::new(&Default::default());
         let layout = system.create_layout();
-        system.add_window_after_selection(layout, wid);
+        system.update(crate::layout_engine::systems::WindowChange::Add(
+            layout, wid, None,
+        ));
         system.prepare_layout(
             layout,
             rect(0.0, 0.0, 1000.0, 800.0),

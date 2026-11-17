@@ -1,4 +1,5 @@
 use super::*;
+use crate::layout_engine::systems::WindowChange;
 
 /// Which saved destinations a live window may adopt.
 #[derive(Clone, Copy)]
@@ -120,12 +121,14 @@ impl LayoutEngine {
         if let Some(previous) =
             window_store.workspace_for_window(live).filter(|id| *id != saved.workspace)
         {
-            self.workspaces[previous].layout_system.remove_window(live);
+            self.workspaces[previous].layout_system.update(WindowChange::Remove(live));
             self.floating_positions.remove_workspace_window(previous, live);
         }
         self.transfer_persistent_window_identity(old, live);
         if let Some(frame) = saved.frame {
-            self.workspaces[saved.workspace].layout_system.remove_window(live);
+            self.workspaces[saved.workspace]
+                .layout_system
+                .update(WindowChange::Remove(live));
             self.floating.add_floating(live);
             self.floating_positions.store(saved.workspace, live, frame);
         } else {
@@ -141,7 +144,7 @@ impl LayoutEngine {
     pub(super) fn discard_saved_window(&mut self, window: WindowId, saved: SavedWindow) {
         let workspace = &mut self.workspaces[saved.workspace];
         if saved.frame.is_none() {
-            workspace.layout_system.remove_window(window);
+            workspace.layout_system.update(WindowChange::Remove(window));
         }
         if workspace.last_focused() == Some(window) {
             workspace.set_last_focused(None);

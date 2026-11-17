@@ -6,7 +6,7 @@ use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
 use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
-use crate::layout_engine::systems::LayoutSystem;
+use crate::layout_engine::systems::{LayoutSystem, WindowChange};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
@@ -2899,7 +2899,7 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
     let layout = engine.workspaces().active_layout(user_space, active_workspace).unwrap();
     engine.workspaces_mut()[active_workspace]
         .layout_system
-        .add_window_after_selection(layout, duplicate_wid);
+        .update(WindowChange::Add(layout, duplicate_wid, None));
     assert!(has_window_in_layout(
         &mut reactor,
         user_space,
