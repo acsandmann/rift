@@ -43,6 +43,9 @@ pub struct AppRuleEffects {
     pub workspace_id: VirtualWorkspaceId,
     pub(crate) names_workspace: bool,
     pub floating: bool,
+    /// Initial float for a window that cannot be freely resized. Unlike `floating`,
+    /// it is never re-applied, so it cannot override a later user toggle.
+    pub auto_floating: bool,
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
     pub focus: bool,
@@ -51,7 +54,7 @@ pub struct AppRuleEffects {
 
 impl AppRuleEffects {
     pub(crate) fn should_float(self, was_floating: bool) -> bool {
-        self.floating || (!self.was_rule_floating && was_floating)
+        self.floating || self.auto_floating || (!self.was_rule_floating && was_floating)
     }
 
     pub(crate) fn floating_placement(

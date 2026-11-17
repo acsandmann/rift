@@ -47,6 +47,7 @@ mod tests {
             is_root: true,
             is_minimized: false,
             is_resizable: true,
+            close_or_minimize_disabled: false,
             title: "Window".into(),
             frame: CGRect::new(CGPoint::ZERO, CGSize::new(800.0, 600.0)),
             min_size: None,

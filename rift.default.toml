@@ -368,6 +368,8 @@ workspace_names = [
 #   - manage (boolean): optional explicit management override. Set to false to ignore the
 #     matching window completely, or true to override Rift/macOS manageability heuristics
 #     for a visible window. When omitted, normal heuristics apply. Minimized windows remain unmanaged.
+#     Windows that cannot be freely resized, or whose close or minimize button is disabled, float by
+#     default where the app opened them; `manage = true` keeps such a window tiled.
 #
 # Matching behavior (summary):
 #   1. All rules that match a window are evaluated.
@@ -418,6 +420,12 @@ workspace_names = [
 #   - Accessibility example: float dialog windows for a specific app:
 #       app_rules = [
 #         { app_id = "com.example.X", ax_subrole = "AXDialog", floating = true },
+#       ]
+#
+#   - Tile an app's windows even when they would float by default. Matching only standard
+#     windows leaves the app's dialogs and panels to the normal heuristics:
+#       app_rules = [
+#         { app_id = "com.example.X", ax_subrole = "AXStandardWindow", manage = true },
 #       ]
 #
 # By default there are no app rules; add or uncomment rules below as needed.

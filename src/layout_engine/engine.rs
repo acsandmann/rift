@@ -1553,7 +1553,7 @@ impl LayoutEngine {
 
     fn add_window_to_layout(
         &mut self,
-        window_store: &WindowStore,
+        window_store: &mut WindowStore,
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
@@ -1566,6 +1566,7 @@ impl LayoutEngine {
         else {
             return false;
         };
+        window_store.mark_placed(wid);
 
         let active_space_before = self.projected_space_in(assigned_workspace, wid);
         let mut inserted = false;
@@ -2026,6 +2027,17 @@ impl LayoutEngine {
                     self.floating.remove_floating(wid);
                 }
                 let should_float = self.floating.is_floating(wid);
+                if should_float
+                    && effects.auto_floating
+                    && !effects.floating
+                    && let Some(window) = window_store.window(wid)
+                {
+                    self.floating_positions.store_if_absent(
+                        target_workspace,
+                        wid,
+                        window.frame_monotonic,
+                    );
+                }
                 let relocated = source_workspace
                     .filter(|&source| source != target_workspace)
                     .is_some_and(|source| {
@@ -4419,6 +4431,8 @@ mod tests {
         state.info.is_resizable = false;
         let fixed_info = state.layout_info(fixed);
         window_store.insert_window(fixed, state);
+        // Already placed, so the float default leaves it tiled.
+        window_store.mark_placed(fixed);
         window_store.insert_window(other, live_window(CGSize::new(500.0, 500.0)));
         let _ = engine.handle_event(
             &mut window_store,

@@ -145,6 +145,10 @@ impl<'de> DeserializeAs<'de, ic::CGRect> for CGRectDef {
     }
 }
 
+pub(crate) fn is_axis_locked(min: f64, max: f64) -> bool {
+    min > 0.0 && max > 0.0 && (min - max).abs() <= f64::EPSILON
+}
+
 /// Project an intended floating frame into a display, keeping the title bar
 /// reachable even when application minimum dimensions exceed the viewport.
 pub(crate) fn frame_on_display(

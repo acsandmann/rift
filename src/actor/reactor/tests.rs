@@ -6087,6 +6087,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         is_root: true,
         is_minimized: false,
         is_resizable: true,
+        close_or_minimize_disabled: false,
         min_size: None,
         max_size: None,
         title: "NoServerId".to_string(),
@@ -13780,4 +13781,179 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         assert!(reactor.query_window_info(wid).is_none());
         assert!(!reactor.state.windows.contains_window(wid));
     }
+}
+
+fn constrained_window(idx: usize, min_size: CGSize, max_size: CGSize) -> WindowInfo {
+    WindowInfo {
+        min_size: Some(min_size),
+        max_size: Some(max_size),
+        ..make_window(idx)
+    }
+}
+
+fn width_locked_window(idx: usize) -> WindowInfo {
+    constrained_window(idx, CGSize::new(740., 470.), CGSize::new(740., 10_000.))
+}
+
+fn constrained_windows_context(
+    settings: crate::common::config::VirtualWorkspaceSettings,
+    windows: Vec<WindowInfo>,
+) -> (Apps, Reactor) {
+    let (mut apps, mut reactor) = (Apps::new(), test_reactor_with_workspace_settings(&settings));
+    reactor.config.virtual_workspaces = settings;
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+    ));
+    make_active_app(&mut apps, &mut reactor, 1, windows, Some(WindowId::new(1, 1)));
+
+    (apps, reactor)
+}
+
+#[test]
+fn width_locked_window_floats_when_first_assigned() {
+    let (_apps, reactor) = constrained_windows_context(Default::default(), vec![
+        width_locked_window(1),
+        constrained_window(2, CGSize::new(100., 100.), CGSize::new(10_000., 10_000.)),
+    ]);
+
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 1)));
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 2)));
+}
+
+#[test]
+fn height_locked_window_floats_when_first_assigned() {
+    let (_apps, reactor) =
+        constrained_windows_context(Default::default(), vec![constrained_window(
+            1,
+            CGSize::new(470., 740.),
+            CGSize::new(10_000., 740.),
+        )]);
+
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 1)));
+}
+
+#[test]
+fn window_without_settable_size_floats_when_first_assigned() {
+    let (_apps, reactor) = constrained_windows_context(Default::default(), vec![WindowInfo {
+        is_resizable: false,
+        ..make_window(1)
+    }]);
+
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 1)));
+}
+
+fn ibkr_dialog_is_tiled(window: WindowInfo) -> bool {
+    let wid = WindowId::new(1, 1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let (_apps, mut reactor) = constrained_windows_context(Default::default(), vec![WindowInfo {
+        is_standard: false,
+        frame: CGRect::new(CGPoint::ZERO, CGSize::new(1400., 900.)),
+        bundle_id: Some("com.install4j.runtime.123".into()),
+        path: Some("file:///Applications/IBKR%20Desktop.app".into()),
+        ax_role: Some("AXWindow".into()),
+        ax_subrole: Some("AXDialog".into()),
+        ..window
+    }]);
+
+    has_window_in_layout(&mut reactor, SpaceId::new(1), screen, wid)
+        && !reactor.layout_manager.layout_engine.is_window_floating(wid)
+}
+
+#[test]
+fn nonresizable_ibkr_dialog_is_tiled() {
+    assert!(ibkr_dialog_is_tiled(WindowInfo {
+        is_resizable: false,
+        ..make_window(1)
+    }));
+}
+
+#[test]
+fn ibkr_dialog_with_disabled_close_or_minimize_is_tiled() {
+    assert!(ibkr_dialog_is_tiled(WindowInfo {
+        close_or_minimize_disabled: true,
+        ..make_window(1)
+    }));
+}
+
+#[test]
+fn auto_floated_window_keeps_its_discovered_frame() {
+    let window = WindowId::new(1, 1);
+    let frame = CGRect::new(CGPoint::new(20., 40.), CGSize::new(740., 470.));
+    let (apps, reactor) = constrained_windows_context(Default::default(), vec![WindowInfo {
+        frame,
+        ..width_locked_window(1)
+    }]);
+
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
+    assert_eq!(apps.windows[&window].frame, frame);
+}
+
+#[test]
+fn user_tiled_window_stays_tiled_after_rediscovery_and_rule_reapplication() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        reapply_app_rules_on_title_change: true,
+        ..Default::default()
+    };
+    let (_apps, mut reactor) = constrained_windows_context(settings, vec![width_locked_window(1)]);
+    let window = WindowId::new(1, 1);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(window));
+
+    reactor.discover_test_windows(1, vec![(window, width_locked_window(1))], vec![window]);
+    reactor.handle_event(Event::WindowTitleChanged(window, "Renamed".into()));
+
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(window));
+}
+
+#[test]
+fn standard_window_manage_rule_tiles_width_locked_window() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".into()),
+            ax_subrole: Some("AXStandardWindow".into()),
+            manage: Some(true),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (_apps, reactor) = constrained_windows_context(settings, vec![WindowInfo {
+        ax_subrole: Some("AXStandardWindow".into()),
+        ..width_locked_window(1)
+    }]);
+
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 1)));
+}
+
+fn close_or_minimize_disabled_window(idx: usize) -> WindowInfo {
+    WindowInfo {
+        close_or_minimize_disabled: true,
+        ..make_window(idx)
+    }
+}
+
+#[test]
+fn window_with_disabled_close_or_minimize_floats_when_first_assigned() {
+    let (_apps, reactor) = constrained_windows_context(Default::default(), vec![
+        close_or_minimize_disabled_window(1),
+        make_window(2),
+    ]);
+
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 1)));
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 2)));
+}
+
+#[test]
+fn disabled_close_or_minimize_survives_refresh_before_first_placement() {
+    let window = WindowId::new(1, 1);
+    let (_apps, mut reactor) = constrained_windows_context(Default::default(), vec![WindowInfo {
+        is_minimized: true,
+        ..close_or_minimize_disabled_window(1)
+    }]);
+
+    reactor.discover_test_windows(1, vec![(window, make_window(1))], vec![window]);
+
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(window));
 }

@@ -125,6 +125,7 @@ impl LayoutEngine {
             self.floating_positions.remove_workspace_window(previous, live);
         }
         self.transfer_persistent_window_identity(old, live);
+        window_store.mark_placed(live);
         if let Some(frame) = saved.frame {
             self.workspaces[saved.workspace]
                 .layout_system

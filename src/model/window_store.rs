@@ -45,6 +45,7 @@ pub struct WindowRecord {
     ax_invalidated: bool,
     pending_transfer: Option<PendingWindowTransfer>,
     rule_floating: bool,
+    placed: bool,
     floating_display_geometry: Option<FloatingDisplayGeometry>,
     claim: Option<WindowClaim>,
 }
@@ -1351,16 +1352,18 @@ impl WindowStore {
             return;
         }
 
-        let (workspace, rule_floating, visibility, pending, geom) = match self.windows.get(&from) {
-            Some(record) => (
-                record.workspace,
-                record.rule_floating,
-                record.visibility,
-                record.pending_transfer,
-                record.floating_display_geometry,
-            ),
-            None => return,
-        };
+        let (workspace, rule_floating, placed, visibility, pending, geom) =
+            match self.windows.get(&from) {
+                Some(record) => (
+                    record.workspace,
+                    record.rule_floating,
+                    record.placed,
+                    record.visibility,
+                    record.pending_transfer,
+                    record.floating_display_geometry,
+                ),
+                None => return,
+            };
 
         let ax_invalidated = self.windows[&from].ax_invalidated;
 
@@ -1380,6 +1383,7 @@ impl WindowStore {
         }
         target.ax_invalidated |= ax_invalidated;
         target.rule_floating |= rule_floating;
+        target.placed |= placed;
         target.visibility = visibility;
         target.pending_transfer = pending;
         target.floating_display_geometry = geom;
@@ -1389,6 +1393,7 @@ impl WindowStore {
             source.workspace = None;
             source.ax_invalidated = false;
             source.rule_floating = false;
+            source.placed = false;
             source.pending_transfer = None;
             source.floating_display_geometry = None;
         }
@@ -1453,6 +1458,16 @@ impl WindowStore {
 
     pub fn rule_floating(&self, window_id: WindowId) -> bool {
         self.windows.get(&window_id).is_some_and(|record| record.rule_floating)
+    }
+
+    /// Initial-placement defaults apply only until a window first enters a layout.
+    pub fn mark_placed(&mut self, window_id: WindowId) {
+        self.windows.entry(window_id).or_default().placed = true;
+        self.prune_window_record(window_id);
+    }
+
+    pub fn is_placed(&self, window_id: WindowId) -> bool {
+        self.windows.get(&window_id).is_some_and(|record| record.placed)
     }
 
     pub(crate) fn retire_window(&mut self, window: WindowId) {
@@ -1905,6 +1920,7 @@ mod tests {
             is_root: true,
             is_minimized: false,
             is_resizable: true,
+            close_or_minimize_disabled: false,
             min_size: None,
             max_size: None,
             title: format!("{wid:?}"),
@@ -2096,6 +2112,19 @@ mod tests {
     }
 
     #[test]
+    fn transfer_persistent_metadata_moves_placement() {
+        let mut window_store = WindowStore::default();
+        let (from, to) = (WindowId::new(1, 1), WindowId::new(1, 2));
+        window_store.insert_window(from, admitted(from, WindowServerId::new(80)));
+        window_store.mark_placed(from);
+
+        window_store.transfer_persistent_window_metadata(from, to);
+
+        assert!(window_store.is_placed(to));
+        assert!(!window_store.is_placed(from));
+    }
+
+    #[test]
     fn transfer_persistent_metadata_rekeys_native_fullscreen_record() {
         let mut window_store = WindowStore::default();
         let space = SpaceId::new(10);
@@ -2198,6 +2227,7 @@ mod tests {
                 is_root: true,
                 is_minimized: false,
                 is_resizable: true,
+                close_or_minimize_disabled: false,
                 min_size: None,
                 max_size: None,
                 title: "Window".to_string(),

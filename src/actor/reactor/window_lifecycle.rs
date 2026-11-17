@@ -223,6 +223,8 @@ impl Reactor {
                     || window.info.min_size != info.min_size
                     || window.info.max_size != info.max_size;
                 info.frame = window.info.frame;
+                // Only registration reads titlebar buttons.
+                info.close_or_minimize_disabled = window.info.close_or_minimize_disabled;
                 window.info = info;
                 (false, restored, geometry_changed)
             } else {

@@ -1680,6 +1680,11 @@ impl WorkspaceStore {
             error!("Failed to apply window workspace assignment");
             return Err(WorkspaceError::AssignmentFailed);
         }
+        let auto_floating = rule_override != Some(true)
+            && !window_store.is_placed(window_id)
+            && window_store
+                .window(window_id)
+                .is_some_and(|window| window.info.floats_by_default());
         let was_rule_floating = window_store.replace_rule_floating(window_id, floating);
         // Focus is a placement side effect, not persistent state. Rediscovery may
         // reapply the same rule repeatedly, so only emit it for a real transition.
@@ -1689,6 +1694,7 @@ impl WorkspaceStore {
             names_workspace: workspace.is_some(),
             workspace_id,
             floating,
+            auto_floating,
             position,
             size,
             focus,

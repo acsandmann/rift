@@ -261,6 +261,11 @@ impl AXUIElement {
 
     pub fn fullscreen(&self) -> Result<bool> { self.bool_attribute("AXFullscreen") }
 
+    pub(crate) fn button_enabled(&self, button: &'static str) -> Result<bool> {
+        let value = self.copy_required_attribute(button)?;
+        AXUIElement::new(self.downcast::<RawAXUIElement>(value)?).bool_attribute("AXEnabled")
+    }
+
     pub fn title(&self) -> Result<String> {
         let value = self.copy_required_attribute("AXTitle")?;
         let string = self.downcast::<CFString>(value)?;
