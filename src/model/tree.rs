@@ -95,6 +95,30 @@ impl NodeId {
         PreorderTraversal::new(map, self)
     }
 
+    pub fn next_in_subtree(self, root: NodeId, map: &NodeMap) -> Option<NodeId> {
+        self.first_child(map).or_else(|| {
+            self.ancestors(map)
+                .take_while(|&node| node != root)
+                .find_map(|node| node.next_sibling(map))
+        })
+    }
+
+    pub fn prev_in_subtree(self, root: NodeId, map: &NodeMap) -> Option<NodeId> {
+        if self == root {
+            return None;
+        }
+        self.prev_sibling(map)
+            .map(|node| node.last_descendant(map))
+            .or_else(|| self.parent(map))
+    }
+
+    pub fn last_descendant(mut self, map: &NodeMap) -> NodeId {
+        while let Some(last) = self.last_child(map) {
+            self = last;
+        }
+        self
+    }
+
     /// Returns an iterator over all ancestors of the current node, including itself.
     #[track_caller]
     pub fn ancestors(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
@@ -104,6 +128,18 @@ impl NodeId {
             next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.parent));
             node
         })
+    }
+
+    pub fn common_ancestor(self, other: NodeId, map: &NodeMap) -> Option<NodeId> {
+        if self == other {
+            return Some(self);
+        }
+        let a = self.ancestors(map).count();
+        let b = other.ancestors(map).count();
+        self.ancestors(map)
+            .skip(a.saturating_sub(b))
+            .zip(other.ancestors(map).skip(b.saturating_sub(a)))
+            .find_map(|(left, right)| (left == right).then_some(left))
     }
 
     /// Returns an iterator over all ancestors of the current node, including itself.
@@ -539,20 +575,7 @@ impl<'a> Iterator for PreorderTraversal<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let node = self.cur?;
-        if let Some(child) = node.first_child(self.map) {
-            self.cur = Some(child);
-        } else {
-            self.cur = None;
-            for ancestor in node.ancestors(self.map) {
-                if ancestor == self.top {
-                    break;
-                }
-                if let Some(sibling) = ancestor.next_sibling(self.map) {
-                    self.cur = Some(sibling);
-                    break;
-                }
-            }
-        }
+        self.cur = node.next_in_subtree(self.top, self.map);
         Some(node)
     }
 }

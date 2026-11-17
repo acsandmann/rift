@@ -124,6 +124,19 @@ impl Viewport {
         }
     }
 
+    fn target(&self) -> f64 {
+        match self {
+            Self::Animation(spring) => spring.target,
+            _ => self.offset(),
+        }
+    }
+
+    fn finish(&mut self) {
+        if !matches!(self, Self::Gesture(_)) {
+            *self = Self::Static(self.target());
+        }
+    }
+
     fn set_target(&mut self, target: f64) {
         let from = self.start_offset();
         *self = if from == target {
@@ -288,19 +301,9 @@ impl ViewportPresentation {
 
     pub fn animated(&self) -> bool { matches!(self.viewport, Viewport::Animation(_)) }
 
-    pub fn finish(&mut self) {
-        if !self.gesturing() {
-            self.viewport = Viewport::Static(self.target());
-        }
-    }
+    pub fn finish(&mut self) { self.viewport.finish(); }
 
-    pub fn target(&self) -> f64 {
-        match &self.viewport {
-            Viewport::Animation(s) => s.target,
-            Viewport::Pending { target, .. } => *target,
-            _ => self.offset(),
-        }
-    }
+    pub fn target(&self) -> f64 { self.viewport.target() }
 
     pub fn retarget(&mut self, from: f64, velocity: f64, now: Instant) {
         let target = self.target();
@@ -823,6 +826,16 @@ impl From<StoredLayoutState> for LayoutState {
 }
 
 impl LayoutState {
+    fn fullscreen_frame(&self, geometry: &Geometry, window: WindowId) -> Option<CGRect> {
+        if self.fullscreen.contains(&window) {
+            Some(geometry.screen)
+        } else if self.fullscreen_within_gaps.contains(&window) {
+            Some(geometry.tiling)
+        } else {
+            None
+        }
+    }
+
     fn selected(&self, inactive: &HashSet<WindowId>) -> Option<WindowId> {
         let (col, row) = self.selected_location(inactive)?;
         Some(self.columns[col].rows[row].window)
@@ -1246,16 +1259,20 @@ impl ScrollingLayoutSystem {
         park: bool,
     ) -> impl Iterator<Item = (WindowId, CGRect)> + 'a {
         let offset = state.viewport.offset();
-        g.frames.iter().map(move |&(wid, mut frame)| {
-            frame = translate_frame(frame, offset, g.tiling, g.screen, park);
-            frame = frame.round();
-            if state.fullscreen.contains(&wid) {
-                frame = g.screen;
-            } else if state.fullscreen_within_gaps.contains(&wid) {
-                frame = g.tiling;
-            }
+        g.frames.iter().map(move |&(wid, frame)| {
+            let frame = state.fullscreen_frame(g, wid).unwrap_or_else(|| {
+                translate_frame(frame, offset, g.tiling, g.screen, park).round()
+            });
             (wid, frame)
         })
+    }
+
+    pub(crate) fn finish_viewport(&mut self, layout: LayoutId) {
+        if let Some(state) = self.layouts.get_mut(layout)
+            && state.geometry.is_some()
+        {
+            state.viewport.finish();
+        }
     }
 
     pub(crate) fn presentation(
@@ -1278,13 +1295,9 @@ impl ScrollingLayoutSystem {
             .frames
             .iter()
             .map(|&(wid, frame)| {
-                if state.fullscreen.contains(&wid) {
-                    (wid, g.screen, true)
-                } else if state.fullscreen_within_gaps.contains(&wid) {
-                    (wid, g.tiling, true)
-                } else {
-                    (wid, frame.round(), false)
-                }
+                state
+                    .fullscreen_frame(g, wid)
+                    .map_or_else(|| (wid, frame.round(), false), |frame| (wid, frame, true))
             })
             .collect();
         Some((camera, frames))
@@ -1755,7 +1768,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 .collect(),
             WindowQuery::Selection => self.visible_windows_under_selection(layout),
             WindowQuery::Stack(_) => Vec::new(),
-            WindowQuery::App(pid) => self.windows_for_app(layout, pid),
+            WindowQuery::App(pid) => self
+                .layouts
+                .get(layout)
+                .into_iter()
+                .flat_map(LayoutState::windows)
+                .filter(|window| window.pid == pid)
+                .collect(),
         }
     }
 
@@ -1816,7 +1835,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 }
             }
             WindowChange::Reconcile(layout, pid, desired) => {
-                let current = self.windows_for_app(layout, pid);
+                let current = self.windows(layout, WindowQuery::App(pid));
                 let delta = reconcile_app_membership(pid, current, desired, |w| {
                     self.window_participates(w)
                 });
@@ -2229,21 +2248,6 @@ impl ScrollingLayoutSystem {
             return;
         };
         self.apply_target_drop(layout, source, target, WindowDropAction::Stack);
-    }
-
-    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
-        self.layouts
-            .get(layout)
-            .map(|state| {
-                state
-                    .columns
-                    .iter()
-                    .flat_map(|column| column.windows())
-                    .filter(|window| window.pid == pid)
-                    .copied()
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 }
 

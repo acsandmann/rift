@@ -178,41 +178,6 @@ impl std::ops::Deref for LayoutEventOutcome {
     fn deref(&self) -> &Self::Target { &self.response }
 }
 
-fn apply_workspace_layout_settings(
-    ws: &mut crate::model::VirtualWorkspace,
-    settings: &LayoutSettings,
-    display: Option<&str>,
-) {
-    let mode = ws.layout_mode;
-    let insertion_point = settings.window_insertion_point_for(mode);
-    match &mut ws.layout_system {
-        LayoutSystemKind::Traditional(system) => {
-            system.set_window_insertion_point(insertion_point);
-            system.set_equalize_nodes(settings.traditional.equalize_nodes);
-        }
-        LayoutSystemKind::Floating(system) => {
-            system.set_window_insertion_point(insertion_point);
-        }
-        LayoutSystemKind::Bsp(system) => {
-            system.set_window_insertion_point(insertion_point);
-            system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
-        }
-        LayoutSystemKind::Stack(system) => {
-            system.update_settings(settings.stack.default_orientation, insertion_point);
-        }
-        LayoutSystemKind::MasterStack(system) => {
-            let mut mode_settings = settings.master_stack.clone();
-            mode_settings.base = settings.resolved_base_for(mode);
-            system.update_settings(mode_settings);
-        }
-        LayoutSystemKind::Scrolling(system) => {
-            let mut mode_settings = settings.scrolling.effective_for_display(display);
-            mode_settings.base = settings.resolved_base_for(mode);
-            system.update_settings(&mode_settings);
-        }
-    }
-}
-
 pub struct LayoutEngine {
     floating: FloatingManager,
     floating_positions: FloatingPositionStore,
@@ -737,7 +702,7 @@ impl LayoutEngine {
 
         for (_, ws) in self.workspaces.workspaces.iter_mut() {
             let display = self.space_display_map.get(&ws.space).and_then(Option::as_deref);
-            apply_workspace_layout_settings(ws, settings, display);
+            ws.apply_layout_settings(settings, display);
         }
     }
 
@@ -809,7 +774,10 @@ impl LayoutEngine {
         window_store: &WindowStore,
         space: SpaceId,
     ) -> Vec<WindowId> {
-        self.filter_active_workspace_windows(window_store, space, self.floating.active_flat(space))
+        self.floating
+            .active_windows(space)
+            .filter(|&window| self.is_active_workspace_window(window_store, space, window))
+            .collect()
     }
 
     fn preferred_focus_for_workspace(
@@ -968,15 +936,10 @@ impl LayoutEngine {
         &self,
         window_store: &WindowStore,
         space: SpaceId,
-        windows: Vec<WindowId>,
+        mut windows: Vec<WindowId>,
     ) -> Vec<WindowId> {
+        windows.retain(|&window| self.is_active_workspace_window(window_store, space, window));
         windows
-            .into_iter()
-            .filter(|wid| {
-                !window_store.is_temporarily_unavailable(*wid)
-                    && self.workspaces.is_window_in_active_workspace(window_store, space, *wid)
-            })
-            .collect()
     }
 
     fn filter_active_workspace_window(
@@ -985,10 +948,17 @@ impl LayoutEngine {
         space: SpaceId,
         window: Option<WindowId>,
     ) -> Option<WindowId> {
-        window.filter(|wid| {
-            !window_store.is_temporarily_unavailable(*wid)
-                && self.workspaces.is_window_in_active_workspace(window_store, space, *wid)
-        })
+        window.filter(|&window| self.is_active_workspace_window(window_store, space, window))
+    }
+
+    fn is_active_workspace_window(
+        &self,
+        window_store: &WindowStore,
+        space: SpaceId,
+        window: WindowId,
+    ) -> bool {
+        !window_store.is_temporarily_unavailable(window)
+            && self.workspaces.is_window_in_active_workspace(window_store, space, window)
     }
 
     pub fn resize_selection(
@@ -1436,7 +1406,7 @@ impl LayoutEngine {
             let projected = workspace
                 .active_layout()
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid))
-                || self.floating.active_flat(workspace.space).contains(&wid);
+                || self.floating.is_active(workspace.space, wid);
             let changed = workspace.layout_system.set_window_participation(wid, false) && projected;
             self.floating.remove_active_for_window(wid);
             if self.focused_window == Some(wid) {
@@ -1491,7 +1461,7 @@ impl LayoutEngine {
                 .active_layout()
                 .is_some_and(|layout| workspace.layout_system.contains_window(layout, wid));
             workspace.layout_system.update(WindowChange::Remove(wid));
-            return (projected || self.floating.active_flat(workspace.space).contains(&wid))
+            return (projected || self.floating.is_active(workspace.space, wid))
                 .then_some(workspace.space);
         }
         let active_space = self.space_with_window(wid);
@@ -1630,8 +1600,7 @@ impl LayoutEngine {
             && current
                 .active_layout()
                 .is_some_and(|layout| current.layout_system.contains_window(layout, window));
-        (visible || self.floating.active_flat(current.space).contains(&window))
-            .then_some(current.space)
+        (visible || self.floating.is_active(current.space, window)).then_some(current.space)
     }
 
     pub(crate) fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
@@ -2804,34 +2773,18 @@ impl LayoutEngine {
             all_screens.iter().copied().filter(|other| *other != screen).collect();
 
         let mut positions = HashMap::default();
-        let window_size = |wid| {
-            get_window_frame(wid)
-                .map(|f| f.size)
-                .unwrap_or_else(|| CGSize::new(500.0, 500.0))
-        };
-        let center_rect = |size: CGSize| {
-            let center = screen.mid();
-            let origin = CGPoint::new(center.x - size.width / 2.0, center.y - size.height / 2.0);
-            CGRect::new(origin, size)
-        };
-
-        let ensure_visible_floating = |engine: &mut Self,
-                                       positions: &mut HashMap<WindowId, CGRect>,
-                                       workspace_id,
-                                       wid,
-                                       candidate: Option<CGRect>,
-                                       store_if_absent| {
-            let existing = positions.get(&wid).copied();
-            let visible = candidate
-                .or(existing)
-                .filter(|rect| !HiddenWindowPlacement::is_hidden(screen, *rect, &other_screens));
-            let rect = visible.unwrap_or_else(|| center_rect(window_size(wid)));
-            positions.insert(wid, rect);
-            if store_if_absent {
-                engine.floating_positions.store_if_absent(workspace_id, wid, rect);
-            } else {
-                engine.floating_positions.store(workspace_id, wid, rect);
-            }
+        let center = screen.mid();
+        let floating_frame = |window, candidate: Option<CGRect>| {
+            candidate
+                .filter(|rect| !HiddenWindowPlacement::is_hidden(screen, *rect, &other_screens))
+                .unwrap_or_else(|| {
+                    let size = get_window_frame(window)
+                        .map_or(CGSize::new(500.0, 500.0), |frame| frame.size);
+                    CGRect::new(
+                        CGPoint::new(center.x - size.width / 2.0, center.y - size.height / 2.0),
+                        size,
+                    )
+                })
         };
 
         if let Some(active_workspace_id) = self.workspaces.active_workspace(space) {
@@ -2873,27 +2826,17 @@ impl LayoutEngine {
                     && let Some(stored_position) =
                         self.floating_positions.get(active_workspace_id, window_id)
                 {
-                    ensure_visible_floating(
-                        self,
-                        &mut positions,
-                        active_workspace_id,
-                        window_id,
-                        Some(stored_position),
-                        false,
-                    );
+                    let frame = floating_frame(window_id, Some(stored_position));
+                    positions.insert(window_id, frame);
+                    self.floating_positions.store(active_workspace_id, window_id, frame);
                 }
             }
 
             let floating_windows = self.active_floating_windows_in_workspace(window_store, space);
             for wid in floating_windows {
-                ensure_visible_floating(
-                    self,
-                    &mut positions,
-                    active_workspace_id,
-                    wid,
-                    None,
-                    false,
-                );
+                let frame = floating_frame(wid, positions.get(&wid).copied());
+                positions.insert(wid, frame);
+                self.floating_positions.store(active_workspace_id, wid, frame);
             }
 
             for (wid, frame) in &mut positions {
@@ -2924,24 +2867,16 @@ impl LayoutEngine {
                     self.workspaces().workspace_for_window(window_store, space, wid)
                 && self.floating_positions.get(workspace_id, wid).is_none()
             {
-                // Only initialize a missing restore frame. The temporary visible
-                // position is overwritten by parking below, so computing it for
-                // an already-saved window does no useful work on each switch.
-                ensure_visible_floating(
-                    self,
-                    &mut positions,
+                let candidate = original_frame.or_else(|| positions.get(&wid).copied());
+                self.floating_positions.store_if_absent(
                     workspace_id,
                     wid,
-                    original_frame,
-                    true,
+                    floating_frame(wid, candidate),
                 );
             }
 
-            let original_size =
-                original_frame.map(|f| f.size).unwrap_or_else(|| CGSize::new(500.0, 500.0));
-            let reference_frame = original_frame.unwrap_or_else(|| {
-                CGRect::new(CGPoint::new(screen.origin.x, screen.origin.y), original_size)
-            });
+            let reference_frame = original_frame
+                .unwrap_or_else(|| CGRect::new(screen.origin, CGSize::new(500.0, 500.0)));
             let hidden_rect = HiddenWindowPlacement::calculate(
                 screen,
                 reference_frame,
@@ -4760,7 +4695,7 @@ mod tests {
             let _ = engine.handle_event(&mut window_store, event);
             assert!(!window_store.is_temporarily_unavailable(window));
             assert!(engine.workspaces[target].layout_system.window_participates(window));
-            assert!(engine.floating.active_flat(space).contains(&window));
+            assert!(engine.floating.is_active(space, window));
             assert_eq!(window_store.workspace_for_window(window), Some(target));
             assert_eq!(engine.get_floating_position(target, window), Some(frame));
         }

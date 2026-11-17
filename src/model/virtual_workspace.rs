@@ -12,7 +12,7 @@ use crate::common::config::{
     WorkspaceMode, WorkspaceSelector,
 };
 use crate::common::log::trace_misc;
-use crate::layout_engine::systems::LayoutSystemKind;
+use crate::layout_engine::systems::{self, LayoutSystemKind};
 use crate::layout_engine::workspaces::WorkspaceLayoutState;
 use crate::layout_engine::{Direction, LayoutId, LayoutSystem};
 use crate::model::WindowStore;
@@ -218,44 +218,57 @@ impl VirtualWorkspace {
     pub fn layout_mode(&self) -> LayoutMode { self.layout_mode }
 
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
-        match mode {
-            LayoutMode::Traditional => LayoutSystemKind::Traditional(
-                crate::layout_engine::systems::TraditionalLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                    settings.traditional.equalize_nodes,
-                ),
-            ),
-            LayoutMode::Floating => LayoutSystemKind::Floating(
-                crate::layout_engine::systems::FloatingLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                ),
-            ),
-            LayoutMode::Bsp => {
-                let mut system = crate::layout_engine::systems::BspLayoutSystem::new(
-                    settings.window_insertion_point_for(mode),
-                );
-                system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
-                LayoutSystemKind::Bsp(system)
+        let mut system = match mode {
+            LayoutMode::Traditional => systems::TraditionalLayoutSystem::default().into(),
+            LayoutMode::Floating => systems::FloatingLayoutSystem::default().into(),
+            LayoutMode::Bsp => systems::BspLayoutSystem::default().into(),
+            LayoutMode::Stack => systems::StackLayoutSystem::default().into(),
+            LayoutMode::MasterStack => systems::MasterStackLayoutSystem::default().into(),
+            LayoutMode::Scrolling => systems::ScrollingLayoutSystem::default().into(),
+        };
+        Self::configure_layout_system(&mut system, mode, settings, None);
+        system
+    }
+
+    pub(crate) fn apply_layout_settings(
+        &mut self,
+        settings: &LayoutSettings,
+        display: Option<&str>,
+    ) {
+        Self::configure_layout_system(&mut self.layout_system, self.layout_mode, settings, display);
+    }
+
+    fn configure_layout_system(
+        system: &mut LayoutSystemKind,
+        mode: LayoutMode,
+        settings: &LayoutSettings,
+        display: Option<&str>,
+    ) {
+        let insertion_point = settings.window_insertion_point_for(mode);
+        match system {
+            LayoutSystemKind::Traditional(system) => {
+                system.set_window_insertion_point(insertion_point);
+                system.set_equalize_nodes(settings.traditional.equalize_nodes);
             }
-            LayoutMode::Stack => LayoutSystemKind::Stack(
-                crate::layout_engine::systems::StackLayoutSystem::new_with_insertion_point(
-                    settings.stack.default_orientation,
-                    settings.window_insertion_point_for(mode),
-                ),
-            ),
-            LayoutMode::MasterStack => {
+            LayoutSystemKind::Floating(system) => {
+                system.set_window_insertion_point(insertion_point);
+            }
+            LayoutSystemKind::Bsp(system) => {
+                system.set_window_insertion_point(insertion_point);
+                system.set_single_window_aspect_ratio(settings.bsp.single_window_aspect_ratio);
+            }
+            LayoutSystemKind::Stack(system) => {
+                system.update_settings(settings.stack.default_orientation, insertion_point);
+            }
+            LayoutSystemKind::MasterStack(system) => {
                 let mut mode_settings = settings.master_stack.clone();
                 mode_settings.base = settings.resolved_base_for(mode);
-                LayoutSystemKind::MasterStack(
-                    crate::layout_engine::systems::MasterStackLayoutSystem::new(mode_settings),
-                )
+                system.update_settings(mode_settings);
             }
-            LayoutMode::Scrolling => {
-                let mut mode_settings = settings.scrolling.clone();
+            LayoutSystemKind::Scrolling(system) => {
+                let mut mode_settings = settings.scrolling.effective_for_display(display);
                 mode_settings.base = settings.resolved_base_for(mode);
-                LayoutSystemKind::Scrolling(
-                    crate::layout_engine::systems::ScrollingLayoutSystem::new(&mode_settings),
-                )
+                system.update_settings(&mode_settings);
             }
         }
     }

@@ -484,23 +484,13 @@ impl LayoutSystem for StackLayoutSystem {
     fn focus(&mut self, layout: LayoutId, focus: Focus) -> FocusResult {
         match focus {
             Focus::Select(window) => FocusResult::selection(self.select_window(layout, window)),
-            Focus::Ascend => FocusResult::selection({
+            Focus::Ascend | Focus::Descend => FocusResult::selection({
                 if self.selected_window(layout).is_none() {
                     return FocusResult::selection(false);
                 }
-                let s = &mut self.layouts[layout];
-                let changed = !s.root_selected;
-                s.root_selected = true;
-                changed
-            }),
-            Focus::Descend => FocusResult::selection({
-                if self.selected_window(layout).is_none() {
-                    return FocusResult::selection(false);
-                }
-                let s = &mut self.layouts[layout];
-                let changed = s.root_selected;
-                s.root_selected = false;
-                changed
+                let select_root = matches!(focus, Focus::Ascend);
+                std::mem::replace(&mut self.layouts[layout].root_selected, select_root)
+                    != select_root
             }),
             Focus::Direction(direction) => {
                 FocusResult::movement(self.move_focus(layout, direction))
@@ -536,12 +526,7 @@ impl LayoutSystem for StackLayoutSystem {
                 }
             }
             WindowChange::Reconcile(layout, pid, desired) => {
-                let current = self.layouts[layout]
-                    .members
-                    .iter()
-                    .filter(|m| m.window.pid == pid)
-                    .map(|m| m.window)
-                    .collect();
+                let current = self.windows(layout, WindowQuery::App(pid));
                 let delta = reconcile_app_membership(pid, current, desired, |w| {
                     self.window_participates(w)
                 });

@@ -194,11 +194,7 @@ impl LayoutEngine {
             let display = display.and_then(Option::as_deref);
             let workspace = &mut self.workspaces[target];
             workspace.restore_contents(saved);
-            crate::layout_engine::engine::apply_workspace_layout_settings(
-                workspace,
-                layout_settings,
-                display,
-            );
+            workspace.apply_layout_settings(layout_settings, display);
         }
         if request.scope != RestoreScope::Workspace {
             for (space, active) in actives {

@@ -356,11 +356,8 @@ impl LayoutManager {
             if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
                 && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
                     &mut engine.workspaces_mut().workspaces[workspace].layout_system
-                && let Some((mut camera, _)) = system.presentation(layout)
             {
-                camera.finish();
-                system
-                    .commit_presented_viewport(layout, &camera.snapshot(std::time::Instant::now()));
+                system.finish_viewport(layout);
             }
         }
         let layout = Self::calculate_layout(reactor, space_scope);

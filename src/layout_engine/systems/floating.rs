@@ -124,9 +124,9 @@ impl FloatingLayoutSystem {
             && self.inner.layout(parent).is_stacked()
         {
             return self
-                .members(parent)
-                .into_iter()
-                .filter(|w| self.inner.window_participates(*w))
+                .inner
+                .windows_from(parent, Some(parent), true)
+                .filter(|&window| self.window_participates(window))
                 .collect();
         }
         self.inner.windows(layout, WindowQuery::Visible)
@@ -183,35 +183,32 @@ impl FloatingLayoutSystem {
         let node = self.inner.window_node(layout, focused)?;
         let parent = node.parent(self.inner.map())?;
         let kind = self.inner.layout(parent);
-        let cycles_stack = match direction {
-            Direction::Left | Direction::Right => kind == LayoutKind::HorizontalStack,
-            Direction::Up | Direction::Down => kind == LayoutKind::VerticalStack,
-        };
-        let members = self.inner.layout(parent).is_stacked().then(|| self.members(parent));
         let forward = matches!(direction, Direction::Right | Direction::Down);
-        let stack_target = members.as_ref().and_then(|members| {
-            let index = members.iter().position(|wid| *wid == focused)?;
+        let map = self.inner.map();
+        let stack_target = if kind.is_stacked() {
             let next = if forward {
-                index.checked_add(1)?
+                node.next_in_subtree(parent, map)
             } else {
-                index.checked_sub(1)?
+                node.prev_in_subtree(parent, map)
             };
-            members.get(next).copied()
-        });
-        // Walk hidden members before leaving along the stack axis, but let the
-        // end of a stack reach neighboring windows instead of trapping focus.
-        if cycles_stack && stack_target.is_some() {
+            self.inner.windows_from(parent, next, forward).next()
+        } else {
+            None
+        };
+        // Walk hidden members along the stack axis, then try physical neighbors.
+        if kind.orientation() == direction.orientation() && stack_target.is_some() {
             return stack_target;
         }
-        self.directional_window(layout, direction, None).or_else(|| {
-            stack_target.or_else(|| {
-                let members = members.as_ref()?;
-                if forward {
-                    members.first().copied()
-                } else {
-                    members.last().copied()
-                }
-            })
+        self.directional_window(layout, direction, None).or(stack_target).or_else(|| {
+            if !kind.is_stacked() {
+                return None;
+            }
+            let start = if forward {
+                parent
+            } else {
+                parent.last_descendant(map)
+            };
+            self.inner.windows_from(parent, Some(start), forward).next()
         })
     }
 

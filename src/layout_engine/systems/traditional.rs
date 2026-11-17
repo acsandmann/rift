@@ -159,7 +159,6 @@ impl TraditionalLayoutSystem {
 
     fn find_or_create_smart_common_parent(
         &mut self,
-        layout: LayoutId,
         node1: NodeId,
         node2: NodeId,
         direction: Direction,
@@ -181,7 +180,7 @@ impl TraditionalLayoutSystem {
             }
         }
 
-        self.find_or_create_common_parent_internal(layout, node1, node2)
+        self.find_or_create_common_parent_internal(node1, node2)
     }
 
     pub(crate) fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].0 }
@@ -228,6 +227,23 @@ impl TraditionalLayoutSystem {
         self.root(layout)
             .traverse_preorder(self.map())
             .filter_map(|node| self.window_at(node).map(|window| (node, window)))
+    }
+
+    pub(super) fn windows_from(
+        &self,
+        region: NodeId,
+        start: Option<NodeId>,
+        forward: bool,
+    ) -> impl Iterator<Item = WindowId> + '_ {
+        let map = self.map();
+        std::iter::successors(start, move |&node| {
+            if forward {
+                node.next_in_subtree(region, map)
+            } else {
+                node.prev_in_subtree(region, map)
+            }
+        })
+        .filter_map(|node| self.window_at(node))
     }
 
     pub(crate) fn contains_any_window(&self, wid: WindowId) -> bool {
@@ -501,13 +517,7 @@ impl TraditionalLayoutSystem {
         None
     }
 
-    fn perform_natural_join(
-        &mut self,
-        layout: LayoutId,
-        selection: NodeId,
-        target: NodeId,
-        direction: Direction,
-    ) {
+    fn perform_natural_join(&mut self, selection: NodeId, target: NodeId, direction: Direction) {
         let selection_parent = selection.parent(self.map());
         let target_parent = target.parent(self.map());
 
@@ -541,11 +551,13 @@ impl TraditionalLayoutSystem {
                 return;
             }
             if sp != tp && self.are_containers_mergeable(sp, tp, direction) {
-                self.merge_compatible_containers(layout, sp, tp, direction);
+                let parent = self.find_or_create_smart_common_parent(sp, tp, direction);
+                self.set_layout(parent, kind);
+                self.select(parent);
                 return;
             }
         }
-        let parent = self.find_or_create_smart_common_parent(layout, selection, target, direction);
+        let parent = self.find_or_create_smart_common_parent(selection, target, direction);
         if !self.layout(parent).is_stacked() {
             self.set_layout(parent, kind);
         }
@@ -565,20 +577,6 @@ impl TraditionalLayoutSystem {
             && layout2.orientation() == direction.orientation()
             && !layout1.is_group()
             && !layout2.is_group()
-    }
-
-    fn merge_compatible_containers(
-        &mut self,
-        layout: LayoutId,
-        container1: NodeId,
-        container2: NodeId,
-        direction: Direction,
-    ) {
-        let common_parent =
-            self.find_or_create_smart_common_parent(layout, container1, container2, direction);
-        let container_layout = LayoutKind::from(direction.orientation());
-        self.set_layout(common_parent, container_layout);
-        self.select(common_parent);
     }
 }
 
@@ -1178,7 +1176,7 @@ impl TraditionalLayoutSystem {
                 return;
             }
 
-            self.perform_natural_join(layout, selection, target, direction);
+            self.perform_natural_join(selection, target, direction);
             if self.tree.data.window.at(selection).is_some() {
                 self.select(selection);
             } else {
@@ -1301,20 +1299,17 @@ impl TraditionalLayoutSystem {
         ) else {
             return false;
         };
-        let target_path: Vec<_> = target.ancestors(map).collect();
-        // A tab is a child of the stack, which may hold a nested container rather than
-        // the window itself. The stack is the nearest container holding both.
-        let Some((moving, stack)) = source.ancestors_with_parent(map).find_map(|(node, parent)| {
-            parent.filter(|p| target_path.contains(p)).map(|p| (node, p))
-        }) else {
+        // A tab can hold a nested container. Find the two children directly under their stack.
+        let Some(stack) = source.common_ancestor(target, map) else {
             return false;
         };
-        let Some(&anchor) = target_path.iter().find(|node| node.parent(map) == Some(stack)) else {
-            return false;
-        };
-        if anchor == moving || !self.tree.data.layout.kind(stack).is_stacked() {
+        if !self.layout(stack).is_stacked() {
             return false;
         }
+        let tab = |node: NodeId| node.ancestors(map).find(|node| node.parent(map) == Some(stack));
+        let (Some(moving), Some(anchor)) = (tab(source), tab(target)) else {
+            return false;
+        };
         let forward = stack.children(map).position(|c| c == moving)
             < stack.children(map).position(|c| c == anchor);
         let detached = moving.detach(&mut self.tree);
@@ -2082,66 +2077,36 @@ impl TraditionalLayoutSystem {
         parent
     }
 
-    fn find_or_create_common_parent_internal(
-        &mut self,
-        _layout: LayoutId,
-        node1: NodeId,
-        node2: NodeId,
-    ) -> NodeId {
+    fn find_or_create_common_parent_internal(&mut self, node1: NodeId, node2: NodeId) -> NodeId {
         let map = self.map();
-
-        if node1 == node2 {
-            return node1;
+        let ancestor =
+            node1.common_ancestor(node2, map).expect("nodes must belong to the same tree");
+        if ancestor == node1 || ancestor == node2 {
+            return ancestor;
         }
 
-        if node1.ancestors(map).any(|ancestor| ancestor == node2) {
-            return node2;
-        }
+        if node1.parent(map) == Some(ancestor) && node2.parent(map) == Some(ancestor) {
+            let size1 = self.tree.data.layout.info[node1].size.max(0.0);
+            let size2 = self.tree.data.layout.info[node2].size.max(0.0);
+            let new_container = self.tree.mk_node().insert_before(node1);
+            node1.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
+                tree.data.layout.info[child].size = size1;
+            });
+            node2.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
+                tree.data.layout.info[child].size = size2;
+            });
 
-        if node2.ancestors(map).any(|ancestor| ancestor == node1) {
-            return node1;
-        }
-
-        let parent1 = node1.parent(self.map());
-        let parent2 = node2.parent(self.map());
-        if let (Some(p1), Some(p2)) = (parent1, parent2) {
-            if p1 == p2 {
-                let size1 = self.tree.data.layout.info[node1].size.max(0.0);
-                let size2 = self.tree.data.layout.info[node2].size.max(0.0);
-                let new_container = self.tree.mk_node().insert_before(node1);
-                node1.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
-                    tree.data.layout.info[child].size = size1;
-                });
-                node2.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
-                    tree.data.layout.info[child].size = size2;
-                });
-
-                // Detaching both children can leave `p1` with a single child, in which
-                // case the tree observer collapses `p1`: it hoists `new_container` into
-                // p1's slot (inheriting p1's size via assume_size_of) and removes `p1`
-                // from the forest. Touching `info[p1]` afterwards panics on a dead key.
-                // Keep the inherited outer weight when the old parent collapsed.
-                if self.tree.map.contains(p1) {
-                    self.tree.data.layout.info[new_container].size = size1 + size2;
-                }
-                return new_container;
+            // A collapsed parent already transferred its outer weight.
+            if self.tree.map.contains(ancestor) {
+                self.tree.data.layout.info[new_container].size = size1 + size2;
             }
+            return new_container;
         }
-        let ancestors1: Vec<_> = node1.ancestors(self.map()).collect();
-        let ancestors2: Vec<_> = node2.ancestors(self.map()).collect();
-        for &ancestor in &ancestors1 {
-            if ancestors2.contains(&ancestor) {
-                let container = {
-                    let node = self.tree.mk_node().push_back(ancestor);
-                    self.tree.data.layout.set_kind(node, LayoutKind::Horizontal);
-                    node
-                };
-                node1.detach(&mut self.tree).push_back(container);
-                node2.detach(&mut self.tree).push_back(container);
-                return container;
-            }
-        }
-        panic!("Nodes are not in the same tree, cannot find common parent");
+        let container = self.tree.mk_node().push_back(ancestor);
+        self.tree.data.layout.set_kind(container, LayoutKind::Horizontal);
+        node1.detach(&mut self.tree).push_back(container);
+        node2.detach(&mut self.tree).push_back(container);
+        container
     }
 }
 
@@ -5129,9 +5094,8 @@ mod tests {
             .expect("right node proportion missing");
 
         let gaps = crate::common::config::GapSettings::default();
-        let _ = system.calculate_layout_for_node(
-            root,
-            screen,
+        let _ = system.calculate_layout(
+            layout,
             screen,
             0.0,
             &HashMap::default(),

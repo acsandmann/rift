@@ -79,10 +79,7 @@ impl Reactor {
                         .get_mut(workspace)
                         && let LayoutSystemKind::Scrolling(system) = &mut ws.layout_system
                     {
-                        if let Some((mut p, _)) = system.presentation(layout) {
-                            p.finish();
-                            system.commit_presented_viewport(layout, &p.snapshot(Instant::now()));
-                        }
+                        system.finish_viewport(layout);
                     }
                     if visible {
                         self.apply_viewport_frames();

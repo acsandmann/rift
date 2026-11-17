@@ -162,14 +162,6 @@ impl MasterStackLayoutSystem {
         )
     }
 
-    fn region_windows(&self, layout: LayoutId) -> (Vec<WindowId>, usize) {
-        let (_, master, stack) = self.region_roots(layout);
-        let mut windows: Vec<_> = self.windows_in_container(master).collect();
-        let master_count = windows.len();
-        windows.extend(self.windows_in_container(stack));
-        (windows, master_count)
-    }
-
     fn windows_in_container(&self, container: NodeId) -> impl Iterator<Item = WindowId> + '_ {
         container
             .traverse_preorder(self.inner.map())
@@ -180,13 +172,7 @@ impl MasterStackLayoutSystem {
         let wid = self.inner.selected_window(layout)?;
         let node = self.inner.tree.data.window.node_for(layout, wid)?;
         let map = self.inner.map();
-        if node.ancestors(map).any(|ancestor| ancestor == master) {
-            Some(master)
-        } else if node.ancestors(map).any(|ancestor| ancestor == stack) {
-            Some(stack)
-        } else {
-            None
-        }
+        node.ancestors(map).find(|&ancestor| ancestor == master || ancestor == stack)
     }
 
     fn target_container_for_new_window(
@@ -262,16 +248,18 @@ impl MasterStackLayoutSystem {
         let count = current.abs_diff(desired);
         let source = if overflow { master } else { stack };
         let destination = if overflow { stack } else { master };
-        let mut moving: Vec<_> = self.windows_in_container(source).collect();
-        if overflow {
-            if desired > 0 {
-                moving.retain(|wid| Some(*wid) != keep_in_master);
-            }
-            moving.reverse();
-        } else if !self.master_first() {
-            moving.reverse();
-        }
-        moving.truncate(count);
+        let forward = !overflow && self.master_first();
+        let start = if forward {
+            source
+        } else {
+            source.last_descendant(self.inner.map())
+        };
+        let moving: Vec<_> = self
+            .inner
+            .windows_from(source, Some(start), forward)
+            .filter(|&window| !overflow || desired == 0 || Some(window) != keep_in_master)
+            .take(count)
+            .collect();
         let selected = self.inner.selected_window(layout);
         let front = overflow == self.master_first();
         for wid in moving {
@@ -672,93 +660,75 @@ impl MasterStackLayoutSystem {
         if self.windows(layout, WindowQuery::Visible).is_empty() {
             return false;
         }
-        let (_root, _master, _stack) = self.region_roots(layout);
-        let Some(focused_wid) = self.inner.selected_window(layout) else {
+        let Some(focused) = self.inner.selected_window(layout) else {
             return false;
         };
-        let (windows, master_count) = self.region_windows(layout);
-        let Some(focused_idx) = windows.iter().position(|&window| window == focused_wid) else {
+        let Some(node) = self.inner.window_node(layout, focused) else {
             return false;
         };
-        let in_master = focused_idx < master_count;
-        let axis = if in_master {
-            self.master_orientation()
+        let (_, master, stack) = self.region_roots(layout);
+        let map = self.inner.map();
+        let in_master = node.ancestors(map).any(|ancestor| ancestor == master);
+        let (region, other, axis) = if in_master {
+            (master, stack, self.master_orientation())
         } else {
-            self.stack_orientation()
+            (stack, master, self.stack_orientation())
         };
-        let (towards_master, towards_stack) = match self.settings.master_side {
-            MasterStackSide::Left => (direction == Direction::Left, direction == Direction::Right),
-            MasterStackSide::Right => (direction == Direction::Right, direction == Direction::Left),
-            MasterStackSide::Top => (direction == Direction::Up, direction == Direction::Down),
-            MasterStackSide::Bottom => (direction == Direction::Down, direction == Direction::Up),
-        };
+        let forward = matches!(direction, Direction::Right | Direction::Down);
         let master_first = self.master_first();
         let parallel = direction.orientation() == axis;
-        let crossing = if towards_master && !in_master && master_count > 0 {
-            let border = if master_first {
-                master_count
+        let toward_other = direction.orientation() == self.root_orientation()
+            && (forward == master_first) == in_master;
+        let start = if forward {
+            node.next_in_subtree(region, map)
+        } else {
+            node.prev_in_subtree(region, map)
+        };
+        let mut neighbors = self.inner.windows_from(region, start, forward).peekable();
+        let participates = |window| self.inner.window_participates(window);
+        let target = if toward_other && (!parallel || neighbors.peek().is_none()) {
+            // Match the region boundary even when its edge tab is suspended.
+            let edge = if forward {
+                other
             } else {
-                windows.len() - 1
+                other.last_descendant(map)
             };
-            (!parallel || focused_idx == border)
-                .then(|| if master_first { master_count - 1 } else { 0 })
-        } else if towards_stack && in_master {
-            let border = if master_first { master_count - 1 } else { 0 };
-            (!parallel || focused_idx == border).then(|| {
-                if windows.len() > master_count {
-                    if master_first {
-                        master_count
-                    } else {
-                        windows.len() - 1
-                    }
+            let mut destination = self.inner.windows_from(other, Some(edge), forward).peekable();
+            if destination.peek().is_some() {
+                if master_first {
+                    destination.find(|&window| participates(window))
                 } else {
-                    // The old reorder's first mismatch is the next master member.
-                    (focused_idx + 1).min(windows.len() - 1)
+                    destination.next().filter(|&window| participates(window))
                 }
-            })
+            } else if in_master {
+                // With no stack region, use the next master window if one exists.
+                let mut next = self
+                    .inner
+                    .windows_from(region, node.next_in_subtree(region, map), true)
+                    .peekable();
+                if next.peek().is_some() {
+                    next.find(|&window| participates(window))
+                } else {
+                    Some(focused)
+                }
+            } else if parallel {
+                neighbors.find(|&window| participates(window))
+            } else {
+                None
+            }
+        } else if parallel {
+            neighbors.find(|&window| participates(window))
         } else {
             None
         };
-        let target_idx = if let Some(crossing) = crossing {
-            crossing
-        } else if !parallel {
-            return false;
-        } else {
-            let neighbor = match direction {
-                Direction::Left | Direction::Up => (focused_idx
-                    > if in_master { 0 } else { master_count })
-                .then_some(focused_idx.saturating_sub(1)),
-                Direction::Right | Direction::Down => (focused_idx + 1
-                    < if in_master {
-                        master_count
-                    } else {
-                        windows.len()
-                    })
-                .then_some(focused_idx + 1),
-            };
-            let Some(neighbor) = neighbor else { return false };
-            neighbor
-        };
-        let target_in_master = target_idx < master_count;
-        let participates = |index: &usize| {
-            (*index < master_count) == target_in_master
-                && self.inner.window_participates(windows[*index])
-        };
-        let target_idx = if target_idx < focused_idx {
-            (0..=target_idx).rev().find(participates)
-        } else {
-            (target_idx..windows.len()).find(participates)
-        };
-        let Some(target_idx) = target_idx else { return false };
-        if target_idx != focused_idx
-            && !self
-                .inner
-                .edit(layout, LayoutEdit::Swap(focused_wid, windows[target_idx]))
-                .changed()
+        drop(neighbors);
+        let Some(target) = target else { return false };
+        if target != focused
+            && !self.inner.edit(layout, LayoutEdit::Swap(focused, target)).changed()
         {
             return false;
         }
-        let _ = self.inner.focus(layout, Focus::Select(focused_wid)).handled;
+        self.inner.focus(layout, Focus::Select(focused)).handled;
         true
     }
 }
@@ -789,6 +759,16 @@ mod tests {
     use super::*;
     use crate::common::config::{LayoutMode, LayoutSettings};
     use crate::layout_engine::ResizeOrientation;
+
+    impl MasterStackLayoutSystem {
+        fn region_windows(&self, layout: LayoutId) -> (Vec<WindowId>, usize) {
+            let (_, master, stack) = self.region_roots(layout);
+            let mut windows: Vec<_> = self.windows_in_container(master).collect();
+            let master_count = windows.len();
+            windows.extend(self.windows_in_container(stack));
+            (windows, master_count)
+        }
+    }
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
