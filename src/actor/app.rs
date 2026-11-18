@@ -635,6 +635,12 @@ pub enum Request {
     /// parameter for the last window only. Events for other windows will be
     /// marked `Quiet::Yes` automatically.
     Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
+    /// Raise a stack member under the current key window without activating its app.
+    RaiseStackWindow {
+        window: WindowId,
+        focused: WindowId,
+        space: crate::sys::screen::SpaceId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1715,6 +1721,13 @@ impl State {
                     Requested(true),
                     None,
                 ));
+            }
+            Request::RaiseStackWindow { window, focused, space } => {
+                if window.pid != focused.pid
+                    && window_server::key_focused_window(space) == Some(focused)
+                {
+                    self.window(window)?.elem.raise()?;
+                }
             }
             Request::Raise(wids, token, sequence_id, quiet) => {
                 self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet));

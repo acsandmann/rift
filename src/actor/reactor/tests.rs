@@ -8881,6 +8881,58 @@ fn topology_snapshot_preserves_workspace_placement_with_incomplete_delta() {
 }
 
 #[test]
+fn native_stack_focus_repairs_covered_edges_in_order_without_requesting_focus() {
+    let (mut apps, mut reactor) = test_context();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Stack,
+    });
+    let mut windows = [1, 2, 3, 4].map(|pid| WindowId::new(pid, 1));
+    for window in windows {
+        apps.make_app_and_settle(&mut reactor, window.pid, make_windows(1));
+    }
+    windows.sort_by_key(|window| {
+        let origin = reactor.state.windows.window(*window).unwrap().frame_monotonic.origin;
+        (origin.x as i32, origin.y as i32)
+    });
+    let [a, b, c, d] = windows;
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    let mut observe = |order: [WindowId; 4]| {
+        window_server::set_space_window_list_for_connection_override(Some(
+            order.map(|window| reactor.test_window_server_id(window).as_u32()).to_vec(),
+        ));
+        reactor.handle_event(Event::WindowServerFocusChanged(d, space));
+        window_server::set_space_window_list_for_connection_override(None);
+
+        apps.requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                Request::RaiseStackWindow { window, .. } => Some(window),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        observe([a, b, c, d]).is_empty(),
+        "key change arrived before reorder"
+    );
+    assert_eq!(observe([d, a, b, c]), [b]);
+    assert!(observe([d, a, b, c]).is_empty(), "B has not moved yet");
+    assert_eq!(observe([d, b, a, c]), [c]);
+    assert!(observe([d, c, b, a]).is_empty());
+    assert_eq!(reactor.layout_manager.layout_engine.focused_window(), Some(d));
+    assert!(
+        raise_rx.try_recv().is_err(),
+        "stack repair requested keyboard focus"
+    );
+}
+
+#[test]
 fn stack_tabs_follow_focus_without_arranging_windows() {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);

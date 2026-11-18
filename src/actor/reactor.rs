@@ -14,6 +14,7 @@ mod managers;
 mod native_tabs;
 mod query;
 mod replay;
+mod stack_repair;
 pub mod transaction_manager;
 mod transient_focus;
 mod utils;
@@ -433,6 +434,7 @@ pub struct Reactor {
     spaces_tx: Option<crate::actor::spaces::Sender>,
     topology_guard: crate::actor::spaces::TopologyGuard,
     main_window_tracker: MainWindowTracker,
+    pending_stack_raise: Option<WindowId>,
     pending_mouse_focus: Option<(WindowId, Instant)>,
     overview_focus: Option<(SpaceId, WindowId, Instant)>,
     mouse_inventory_hit: Option<WindowServerId>,
@@ -531,6 +533,7 @@ impl Reactor {
             last_screen_frames: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
+            pending_stack_raise: None,
             pending_mouse_focus: None,
             overview_focus: None,
             mouse_inventory_hit: None,
@@ -1641,6 +1644,18 @@ impl Reactor {
                         }
                     }
                 }
+                let focus_changed = previous_native_focus != Some(window);
+                if focus_changed {
+                    self.pending_stack_raise = None;
+                }
+
+                if (focus_changed || self.pending_stack_raise.is_some())
+                    && self.is_space_active(reported_space)
+                {
+                    self.pending_stack_raise =
+                        self.repair_stack_after_focus(reported_space, window);
+                }
+
                 if self.layout_manager.layout_engine.focused_window() == Some(window) {
                     LayoutManager::refresh_stack_tabs(self, reported_space);
                     if let Some(input_tx) = &self.communication_manager.input_tx {
