@@ -116,21 +116,98 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+#[derive(Clone, Copy)]
+enum BranchLimit {
+    All,
+    First,
+    FirstVisible,
+}
+
 impl NodeMap {
+    fn ordered_children(
+        &self,
+        node: NodeId,
+        preferred: Option<NodeId>,
+        reverse: bool,
+    ) -> impl Iterator<Item = NodeId> + '_ {
+        let edge = if reverse {
+            node.last_child(self)
+        } else {
+            node.first_child(self)
+        };
+        preferred.into_iter().chain(
+            std::iter::successors(edge, move |node| {
+                if reverse {
+                    node.prev_sibling(self)
+                } else {
+                    node.next_sibling(self)
+                }
+            })
+            .filter(move |&child| Some(child) != preferred),
+        )
+    }
+
+    pub(super) fn participating_child(
+        &self,
+        node: NodeId,
+        reverse: bool,
+        mut participates: impl FnMut(NodeId) -> bool,
+    ) -> Option<NodeId> {
+        self.ordered_children(node, self.local_selection(node), reverse)
+            .find(|&child| participates(child))
+    }
+
+    fn walk_windows<B>(
+        &self,
+        node: NodeId,
+        participates: &impl Fn(WindowId) -> bool,
+        order: &impl Fn(NodeId) -> (Option<NodeId>, bool, BranchLimit),
+        visit: &mut impl FnMut(NodeId, WindowId) -> ControlFlow<B>,
+    ) -> ControlFlow<B, bool> {
+        if let Some(window) = self.window(node) {
+            let active = participates(window);
+            if active {
+                visit(node, window)?;
+            }
+            return ControlFlow::Continue(active);
+        }
+        let (preferred, reverse, limit) = order(node);
+        let mut visited = false;
+        for child in self.ordered_children(node, preferred, reverse) {
+            visited |= self.walk_windows(child, participates, order, visit)?;
+            if matches!(limit, BranchLimit::First)
+                || (visited && matches!(limit, BranchLimit::FirstVisible))
+            {
+                break;
+            }
+        }
+        ControlFlow::Continue(visited)
+    }
+
+    fn find_window(
+        &self,
+        node: NodeId,
+        participates: &impl Fn(WindowId) -> bool,
+        order: &impl Fn(NodeId) -> (Option<NodeId>, bool),
+    ) -> Option<(NodeId, WindowId)> {
+        self.walk_windows(
+            node,
+            participates,
+            &|node| {
+                let (preferred, reverse) = order(node);
+                (preferred, reverse, BranchLimit::All)
+            },
+            &mut |node, window| ControlFlow::Break((node, window)),
+        )
+        .break_value()
+    }
+
     pub(super) fn focus_target(
         &self,
         node: NodeId,
         participates: &impl Fn(WindowId) -> bool,
     ) -> Option<(NodeId, WindowId)> {
-        if let Some(window) = self.window(node) {
-            return participates(window).then_some((node, window));
-        }
-        let selected = self.last_selection(node);
-        selected.and_then(|child| self.focus_target(child, participates)).or_else(|| {
-            node.children(self)
-                .filter(|&child| Some(child) != selected)
-                .find_map(|child| self.focus_target(child, participates))
-        })
+        self.find_window(node, participates, &|node| (self.last_selection(node), false))
     }
 
     pub(crate) fn assume_size_of(&mut self, new: NodeId, old: NodeId) {
@@ -388,35 +465,6 @@ impl GroupLayouts {
         out
     }
 
-    fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
-        if let Some(window) = self.window_at(node) {
-            return self.window_participates(window).then_some(window);
-        }
-        // Along the movement axis, enter at the near edge. Across a split,
-        // reuse its selected branch so a return trip retraces the focus path.
-        // Stacks always present their selected member.
-        let kind = self.tree.map.kind(node);
-        let selected = (kind.is_stacked() || kind.orientation() != direction.orientation())
-            .then(|| self.tree.map.local_selection(node))
-            .flatten();
-        if let Some(window) =
-            selected.and_then(|child| self.window_in_direction_from(child, direction))
-        {
-            return Some(window);
-        }
-        let alternative = |child: &NodeId| Some(*child) != selected;
-        match direction {
-            Direction::Left | Direction::Up => node
-                .children_rev(self.map())
-                .filter(alternative)
-                .find_map(|child| self.window_in_direction_from(child, direction)),
-            Direction::Right | Direction::Down => node
-                .children(self.map())
-                .filter(alternative)
-                .find_map(|child| self.window_in_direction_from(child, direction)),
-        }
-    }
-
     pub(super) fn select(&mut self, selection: NodeId) { self.tree.map.select(selection) }
 
     pub(super) fn traverse_internal(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
@@ -432,25 +480,16 @@ impl GroupLayouts {
 
     fn descend_into_target(&self, target: NodeId, direction: Direction, map: &NodeMap) -> NodeId {
         let active = self.participating_nodes(target);
-        let participates = |child: &NodeId| self.inactive.is_empty() || active.contains(child);
         let mut current = target;
-        loop {
-            let kind = self.tree.map.kind(current);
-            let selected = self.tree.map.local_selection(current).filter(participates);
-            let edge = || match direction {
-                Direction::Left | Direction::Up => current.children(map).find(participates),
-                Direction::Right | Direction::Down => current.children_rev(map).find(participates),
-            };
-            let next = if kind.is_stacked() {
-                selected.or_else(|| current.children(map).find(participates))
-            } else {
-                selected.or_else(edge)
-            };
-            match next {
-                Some(child) => current = child,
-                None => return current,
-            }
+        while let Some(child) = map.participating_child(
+            current,
+            !map.kind(current).is_stacked()
+                && matches!(direction, Direction::Right | Direction::Down),
+            |child| self.inactive.is_empty() || active.contains(&child),
+        ) {
+            current = child;
         }
+        current
     }
 
     fn visible_windows_under_internal(&self, node: NodeId) -> Vec<WindowId> {
@@ -473,29 +512,24 @@ impl GroupLayouts {
         node: NodeId,
         visit: &mut impl FnMut(NodeId, WindowId) -> ControlFlow<B>,
     ) -> ControlFlow<B, bool> {
-        if let Some(window) = self.window_at(node) {
-            let active = self.window_participates(window);
-            if active {
-                visit(node, window)?;
-            }
-            return ControlFlow::Continue(active);
-        }
-        let grouped = self.layout(node).is_group();
-        let selected = grouped.then(|| self.tree.map.local_selection(node)).flatten();
-        if let Some(selected) = selected {
-            let visited = self.visit_visible_windows(selected, visit)?;
-            if visited || self.inactive.is_empty() {
-                return ControlFlow::Continue(visited);
-            }
-        }
-        let mut visited = false;
-        for child in node.children(self.map()).filter(|&child| Some(child) != selected) {
-            visited |= self.visit_visible_windows(child, visit)?;
-            if grouped && (visited || self.inactive.is_empty()) {
-                break;
-            }
-        }
-        ControlFlow::Continue(visited)
+        let map = self.map();
+        let group_limit = if self.inactive.is_empty() {
+            BranchLimit::First
+        } else {
+            BranchLimit::FirstVisible
+        };
+        map.walk_windows(
+            node,
+            &|window| self.window_participates(window),
+            &|node| {
+                if map.kind(node).is_group() {
+                    (map.local_selection(node), false, group_limit)
+                } else {
+                    (None, false, BranchLimit::All)
+                }
+            },
+            visit,
+        )
     }
 
     pub(super) fn move_over(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
@@ -862,7 +896,25 @@ impl GroupLayouts {
         layout: LayoutId,
         direction: Direction,
     ) -> Option<WindowId> {
-        self.window_in_direction_from(self.root(layout), direction)
+        let map = self.map();
+        // Enter along the near edge. Across an axis, a split remembers the path used
+        // to leave it, while a stack prefers its presented child.
+        let reverse = matches!(direction, Direction::Left | Direction::Up);
+        map.find_window(
+            self.root(layout),
+            &|window| self.window_participates(window),
+            &|node| {
+                let kind = map.kind(node);
+                let preferred =
+                    if kind.is_stacked() || kind.orientation() != direction.orientation() {
+                        map.local_selection(node)
+                    } else {
+                        None
+                    };
+                (preferred, reverse)
+            },
+        )
+        .map(|(_, window)| window)
     }
 
     pub(super) fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
@@ -933,15 +985,25 @@ impl GroupLayouts {
         }
     }
 
-    pub(super) fn participating_nodes(&self, root: NodeId) -> HashSet<NodeId> {
+    pub(super) fn subtree_participates(
+        &self,
+        node: NodeId,
+        child_participates: impl FnMut(NodeId) -> bool,
+    ) -> bool {
+        if let Some(window) = self.window_at(node) {
+            self.window_participates(window)
+        } else {
+            node.children(self.map()).any(child_participates)
+        }
+    }
+
+    fn participating_nodes(&self, root: NodeId) -> HashSet<NodeId> {
         let mut active = HashSet::default();
         if self.inactive.is_empty() {
             return active;
         }
         for node in root.traverse_postorder(self.map()) {
-            if self.window_at(node).is_some_and(|w| !self.inactive.contains(&w))
-                || node.children(self.map()).any(|child| active.contains(&child))
-            {
+            if self.subtree_participates(node, |child| active.contains(&child)) {
                 active.insert(node);
             }
         }

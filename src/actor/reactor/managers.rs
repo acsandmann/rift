@@ -217,7 +217,11 @@ pub struct LayoutManager {
     pub layout_engine: LayoutEngine,
 }
 
-pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
+pub type LayoutResult = Vec<(
+    SpaceId,
+    Vec<(WindowId, CGRect)>,
+    Vec<crate::layout_engine::engine::GroupContainerInfo>,
+)>;
 
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 
@@ -329,7 +333,7 @@ impl LayoutManager {
         if reactor.refreshes_blocked() {
             return Ok(false);
         }
-        let layout_result = Self::calculate_layout(reactor, space_scope);
+        let layout_result = Self::calculate_layout(reactor, space_scope, true);
         Self::apply_layout(
             reactor,
             layout_result,
@@ -348,10 +352,10 @@ impl LayoutManager {
         if reactor.refreshes_blocked() {
             return Ok(false);
         }
-        let layout = Self::calculate_layout(reactor, space_scope);
+        let layout = Self::calculate_layout(reactor, space_scope, true);
         // Finish the logical scrolling viewport here, without queueing a second
         // animation behind the overview's own transition.
-        for &(space, _) in &layout {
+        for &(space, _, _) in &layout {
             let engine = &mut reactor.layout_manager.layout_engine;
             if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
                 && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
@@ -360,13 +364,14 @@ impl LayoutManager {
                 system.finish_viewport(layout);
             }
         }
-        let layout = Self::calculate_layout(reactor, space_scope);
+        let layout = Self::calculate_layout(reactor, space_scope, true);
         Self::apply_layout(reactor, layout, false, false, true, force_frames)
     }
 
     pub(super) fn calculate_layout(
         reactor: &mut Reactor,
         space_scope: Option<SpaceId>,
+        collect_groups: bool,
     ) -> LayoutResult {
         if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
@@ -397,16 +402,17 @@ impl LayoutManager {
                 .layout_manager
                 .layout_engine
                 .update_space_display(space, display_uuid_opt.clone());
-            let mut layout =
-                reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
-                    &reactor.state.windows,
-                    space,
-                    frame,
-                    &gaps,
-                    reactor.config.settings.ui.stack_line.reserve(),
-                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
-                    &all_screen_frames,
-                );
+            let mut groups = Vec::new();
+            let mut layout = reactor.layout_manager.layout_engine.calculate_layout_with_groups(
+                &reactor.state.windows,
+                space,
+                frame,
+                &gaps,
+                reactor.config.settings.ui.stack_line.reserve(),
+                |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
+                &all_screen_frames,
+                collect_groups.then_some(&mut groups),
+            );
             if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                 == LayoutMode::Scrolling
                 && let Some(bounds) = ScrollingDisplayBounds::for_screen(frame, &all_screen_frames)
@@ -425,7 +431,7 @@ impl LayoutManager {
                     &active_workspace_windows,
                 );
             }
-            layout_result.push((space, layout));
+            layout_result.push((space, layout, groups));
         }
 
         layout_result
@@ -445,8 +451,8 @@ impl LayoutManager {
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();
-        for (space, layout) in layout_result {
-            // Start native workspace moves before collecting stack tabs and building
+        for (space, layout, group_infos) in layout_result {
+            // Start native workspace moves before publishing stack tabs and building
             // IPC events. App actors can perform AX work while we publish the UI.
             let switch_dispatched = is_workspace_switch && !instant && !force_frames;
             if switch_dispatched {
@@ -454,27 +460,13 @@ impl LayoutManager {
                     AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
             }
             if let Some(screen) = reactor.space_state.screen_by_space(space) {
-                let screen_frame = screen.frame;
                 let display_uuid = screen.display_uuid_owned();
-                let gaps = reactor
-                    .config
-                    .settings
-                    .layout
-                    .gaps
-                    .effective_for_display(display_uuid.as_deref());
                 let stack_has_fullscreen = reactor
                     .layout_manager
                     .layout_engine
                     .active_workspace_for_space_has_fullscreen(space);
                 let active_workspace_for_space_has_fullscreen =
                     active_space == Some(space) && stack_has_fullscreen;
-                let group_infos = reactor.layout_manager.layout_engine.collect_group_containers(
-                    space,
-                    screen_frame,
-                    &gaps,
-                    reactor.config.settings.ui.stack_line.reserve(),
-                );
-
                 Self::publish_stack_tabs(reactor, space, &group_infos, stack_has_fullscreen, false);
 
                 if let Some(workspace_id) =

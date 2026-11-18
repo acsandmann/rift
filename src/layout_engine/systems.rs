@@ -771,34 +771,69 @@ impl LayoutSystemKind {
 }
 
 impl LayoutSystemKind {
+    pub(crate) fn project_groups(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+        emit_frames: bool,
+        groups: &mut Vec<crate::layout_engine::engine::GroupContainerInfo>,
+        selection_path_only: bool,
+    ) -> Option<Vec<(WindowId, CGRect)>> {
+        let (forest, root, regions) = match self {
+            Self::Traditional(system) => (&system.tiles, system.tiles.root(layout), None),
+            Self::MasterStack(system) => {
+                let (root, master, stack) = system.region_roots(layout);
+                (&system.tiles, root, Some((master, stack)))
+            }
+            _ => return None,
+        };
+        Some(tiles::project(
+            forest,
+            root,
+            |active| tiles::project_root(root, regions, active),
+            screen,
+            stack_offset,
+            constraints,
+            gaps,
+            stack_line,
+            emit_frames,
+            Some(tiles::GroupOutput { groups, selection_path_only }),
+        ))
+    }
+
     pub(crate) fn collect_group_containers(
         &self,
         layout_id: LayoutId,
         screen: CGRect,
         stack_offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
         stack_line: crate::common::config::StackLineReserve,
         selection_path_only: bool,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
+        let mut groups = Vec::new();
+        if self
+            .project_groups(
+                layout_id,
+                screen,
+                stack_offset,
+                constraints,
+                gaps,
+                stack_line,
+                false,
+                &mut groups,
+                selection_path_only,
+            )
+            .is_some()
+        {
+            return groups;
+        }
         match self {
-            LayoutSystemKind::Traditional(s) => tiles::collect_group_containers(
-                &s.tiles,
-                layout_id,
-                screen,
-                stack_offset,
-                gaps,
-                stack_line,
-                selection_path_only,
-            ),
             LayoutSystemKind::Stack(s) => s.collect_group_containers(
-                layout_id,
-                screen,
-                stack_offset,
-                gaps,
-                stack_line,
-                selection_path_only,
-            ),
-            LayoutSystemKind::MasterStack(s) => s.collect_group_containers(
                 layout_id,
                 screen,
                 stack_offset,

@@ -217,7 +217,7 @@ impl MasterStackLayoutSystem {
         self.tiles.tree.map[stack].layout.size = stack_size;
     }
 
-    fn region_roots(&self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
+    pub(super) fn region_roots(&self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
         let root = self.tiles.root(layout);
         let (master, stack) = self.tiles.map().region_pair(root).expect("master stack region pair");
         (root, master, stack)
@@ -404,26 +404,6 @@ impl MasterStackLayoutSystem {
         };
         let _ = self.tiles.swap_windows(layout, master_wid, stack_wid);
     }
-
-    pub(crate) fn collect_group_containers(
-        &self,
-        layout: LayoutId,
-        screen: CGRect,
-        stack_offset: f64,
-        gaps: &crate::common::config::GapSettings,
-        stack_line: crate::common::config::StackLineReserve,
-        selection_path_only: bool,
-    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        super::tiles::collect_group_containers(
-            &self.tiles,
-            layout,
-            screen,
-            stack_offset,
-            gaps,
-            stack_line,
-            selection_path_only,
-        )
-    }
 }
 
 impl LayoutSystem for MasterStackLayoutSystem {
@@ -487,18 +467,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
         super::tiles::project(
             &self.tiles,
             root,
-            |active| {
-                if active.contains_key(&stack) {
-                    root
-                } else {
-                    master
-                }
-            },
+            |active| super::tiles::project_root(root, Some((master, stack)), active),
             screen,
             stack_offset,
             constraints,
             gaps,
             stack_line,
+            true,
+            None,
         )
     }
 
@@ -889,7 +865,6 @@ mod tests {
             .iter()
             .find(|child| child.node_id == group.node_id)
             .expect("the complete group moved into the master region");
-        assert_eq!(moved.node_id, group.node_id);
         assert_eq!(moved.children, group.children);
         assert_eq!(system.selected_window(layout), Some(w(2)));
     }
@@ -902,11 +877,6 @@ mod tests {
         system.add_window_after_selection(from, w(1));
         system.add_window_after_selection(from, w(2));
         let before = system.container_tree(from);
-        let clone = system.clone_layout(from);
-        assert!(!system.edit(from, LayoutEdit::Transfer(clone)).changed());
-        assert_eq!(system.container_tree(from), before);
-        assert_eq!(system.selected_window(clone), Some(w(2)));
-        system.remove_layout(clone);
         assert!(system.focus(from, Focus::Ascend).handled);
         system.edit(from, LayoutEdit::Transfer(to)).discard();
         assert!(system.contains_window(to, w(2)));

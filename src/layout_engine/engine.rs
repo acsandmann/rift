@@ -749,6 +749,7 @@ impl LayoutEngine {
             layout_id,
             screen,
             stack_offset,
+            &self.window_layout_constraints.windows,
             gaps,
             stack_line,
             selection_path_only,
@@ -2838,6 +2839,32 @@ impl LayoutEngine {
     where
         F: Fn(WindowId) -> Option<CGRect>,
     {
+        self.calculate_layout_with_groups(
+            window_store,
+            space,
+            screen,
+            gaps,
+            stack_line,
+            get_window_frame,
+            all_screens,
+            None,
+        )
+    }
+
+    pub(crate) fn calculate_layout_with_groups<F>(
+        &mut self,
+        window_store: &WindowStore,
+        space: SpaceId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+        get_window_frame: F,
+        all_screens: &[CGRect],
+        groups: Option<&mut Vec<GroupContainerInfo>>,
+    ) -> Vec<(WindowId, CGRect)>
+    where
+        F: Fn(WindowId) -> Option<CGRect>,
+    {
         use crate::model::{HiddenWindowPlacement, HideCorner};
         let mut positions = HashMap::default();
         let center = screen.mid();
@@ -2866,13 +2893,36 @@ impl LayoutEngine {
                         })
                     });
                 }
-                positions.extend(self.prepare_and_project(
-                    active_workspace_id,
-                    layout,
-                    screen,
-                    gaps,
-                    stack_line,
-                ));
+                let system = &self.workspaces[active_workspace_id].layout_system;
+                let frames = groups.and_then(|groups| {
+                    let offset = self.layout_settings.stack.stack_offset;
+                    if let Some(frames) = system.project_groups(
+                        layout,
+                        screen,
+                        offset,
+                        constraints,
+                        gaps,
+                        stack_line,
+                        true,
+                        groups,
+                        false,
+                    ) {
+                        return Some(frames);
+                    }
+                    *groups = system.collect_group_containers(
+                        layout,
+                        screen,
+                        offset,
+                        constraints,
+                        gaps,
+                        stack_line,
+                        false,
+                    );
+                    None
+                });
+                positions.extend(frames.unwrap_or_else(|| {
+                    self.prepare_and_project(active_workspace_id, layout, screen, gaps, stack_line)
+                }));
             }
 
             // Look up this workspace's frames directly. Scanning the entire

@@ -108,7 +108,15 @@ impl NodeMap {
     }
 }
 
+pub(super) struct GroupOutput<'a> {
+    pub groups: &'a mut Vec<crate::layout_engine::engine::GroupContainerInfo>,
+    pub selection_path_only: bool,
+}
+
 struct Projection<'a> {
+    tiles: &'a GroupLayouts,
+    groups: Option<GroupOutput<'a>>,
+    emit_frames: bool,
     prepared: &'a ConstraintCache,
     map: &'a NodeMap,
     screen: CGRect,
@@ -119,20 +127,42 @@ struct Projection<'a> {
 }
 
 impl Projection<'_> {
-    fn apply(&self, node: NodeId, rect: CGRect, sizes: &mut Vec<(WindowId, CGRect)>) {
-        let Self {
-            prepared,
-            map,
-            screen,
-            stack_offset,
-            constraints,
-            gaps,
-            stack_line,
-        } = *self;
+    fn apply(
+        &mut self,
+        node: NodeId,
+        rect: CGRect,
+        sizes: &mut Vec<(WindowId, CGRect)>,
+        mut collect: bool,
+    ) {
+        let (prepared, map, screen, stack_offset, constraints, gaps, stack_line) = (
+            self.prepared,
+            self.map,
+            self.screen,
+            self.stack_offset,
+            self.constraints,
+            self.gaps,
+            self.stack_line,
+        );
+        if !self.emit_frames && !collect {
+            return;
+        }
         if !prepared.contains_key(&node) {
             return;
         }
         let info = &map[node].layout;
+        let selection_only =
+            collect && self.groups.as_ref().is_some_and(|output| output.selection_path_only);
+        if collect && map.is_effectively_fullscreen(node) {
+            if let Some(output) = &mut self.groups
+                && selection_only
+            {
+                output.groups.clear();
+            }
+            collect = false;
+            if !self.emit_frames {
+                return;
+            }
+        }
         let rect = if info.is_fullscreen {
             screen
         } else if info.is_fullscreen_within_gaps {
@@ -141,10 +171,9 @@ impl Projection<'_> {
             rect
         };
         if let Some(wid) = map.window(node) {
-            debug_assert!(
-                node.children(map).next().is_none(),
-                "non-leaf node with window id"
-            );
+            if !self.emit_frames {
+                return;
+            }
             let final_rect = constraints.get(&wid).copied().map_or(rect, |c| {
                 constrain_frame(rect, |horizontal| {
                     traditional_leaf_axis_constraints(c, horizontal)
@@ -163,10 +192,18 @@ impl Projection<'_> {
                 }
                 let is_horizontal = matches!(info.kind, HorizontalStack);
                 let focused_child = map
-                    .local_selection(node)
-                    .filter(|child| prepared.contains_key(child))
-                    .unwrap_or_else(|| children[0]);
+                    .participating_child(node, false, |child| prepared.contains_key(&child))
+                    .expect("stack has a participating child");
                 let focused_idx = children.iter().position(|&c| c == focused_child).unwrap_or(0);
+                if collect && let Some(output) = &mut self.groups {
+                    output.groups.push(self.tiles.stack_group_container_info(
+                        node,
+                        info.kind,
+                        rect,
+                        &children,
+                        focused_idx,
+                    ));
+                }
                 let (min, fixed, _, _) = prepared[&children[focused_idx]][is_horizontal as usize];
                 let layout = stack_layout_result(
                     rect,
@@ -182,63 +219,79 @@ impl Projection<'_> {
                     stack_line,
                 );
                 for (idx, child) in children.into_iter().enumerate() {
-                    self.apply(child, layout.get_frame_for_index(idx), sizes);
+                    self.apply(
+                        child,
+                        layout.get_frame_for_index(idx),
+                        sizes,
+                        collect && (!selection_only || child == focused_child),
+                    );
                 }
             }
-            Horizontal | Vertical => self.layout_axis(node, rect, sizes, info.kind == Horizontal),
+            Horizontal | Vertical => self.layout_axis(
+                node,
+                rect,
+                sizes,
+                info.kind == Horizontal,
+                collect && selection_only,
+                collect,
+            ),
         }
     }
 
     fn layout_axis(
-        &self,
+        &mut self,
         node: NodeId,
         rect: CGRect,
         sizes: &mut Vec<(WindowId, CGRect)>,
         horizontal: bool,
+        selection_only: bool,
+        collect: bool,
     ) {
-        let Self { prepared, map, gaps, .. } = *self;
+        let (prepared, map, gaps) = (self.prepared, self.map, self.gaps);
         let children: Vec<_> =
             node.children(map).filter(|child| prepared.contains_key(child)).collect();
         if children.is_empty() {
             return;
         }
-        let min_size = 0.05;
-        let mut needs_normalization = false;
-        let mut actual_total = 0.0;
-        for &child in &children {
-            let sz = map[child].layout.size;
-            actual_total += sz;
-            if !sz.is_finite() || sz < min_size - f32::EPSILON {
-                needs_normalization = true;
-            }
-        }
-        let normalize_sizes =
-            !actual_total.is_finite() || actual_total <= f32::EPSILON || needs_normalization;
+        let mut total = 0.0_f32;
+        let mut invalid = false;
         let (mut offset, usable_axis, inner_gap) =
             axis_span(rect, horizontal, gaps, children.len());
-        let axis_constraints: Vec<AxisConstraints> = children
+        let mut axis_constraints: Vec<AxisConstraints> = children
             .iter()
             .map(|&child| {
                 let (min, fixed, max, can_grow) = prepared[&child][horizontal as usize];
+                let weight = map[child].layout.size;
+                total += weight;
+                invalid |= !weight.is_finite() || weight < 0.05 - f32::EPSILON;
                 AxisConstraints {
                     min,
                     fixed,
                     max,
-                    weight: f64::from(if normalize_sizes {
-                        1.0
-                    } else {
-                        map[child].layout.size.max(0.0)
-                    }),
+                    weight: f64::from(weight),
                     can_grow,
                 }
             })
             .collect();
+        // Splitting and promotion can generate small positive weights. The fallback
+        // applies to the participating siblings, which can change without a tree edit.
+        if invalid || !total.is_finite() || total <= f32::EPSILON {
+            for axis in &mut axis_constraints {
+                axis.weight = 1.0;
+            }
+        }
         let seg_lens = solve_axis_lengths(axis_constraints, usable_axis);
+        let selected = if selection_only {
+            map.participating_child(node, false, |child| prepared.contains_key(&child))
+        } else {
+            None
+        };
         for (child, seg_len) in children.into_iter().zip(seg_lens) {
             self.apply(
                 child,
                 axis_slot(rect, horizontal, offset, seg_len).round(),
                 sizes,
+                collect && (!selection_only || selected == Some(child)),
             );
             offset += seg_len;
             offset += inner_gap;
@@ -352,121 +405,6 @@ pub(super) fn resize_window(
     ) {
         set_frame_from_resize(tiles, node, old, new, screen);
     }
-}
-
-fn child_frames_in_axis<'a>(
-    tiles: &'a GroupLayouts,
-    parent_rect: CGRect,
-    siblings: &'a [NodeId],
-    horizontal: bool,
-    gaps: &crate::common::config::GapSettings,
-) -> impl Iterator<Item = CGRect> + 'a {
-    let total: f32 = siblings.iter().map(|&child| tiles.tree.map[child].layout.size).sum();
-    let (offset, usable_axis, inner_gap) = axis_span(parent_rect, horizontal, gaps, siblings.len());
-
-    siblings.iter().scan(offset, move |offset, &child| {
-        let ratio = f64::from(tiles.tree.map[child].layout.size) / f64::from(total);
-        let seg_len = usable_axis * ratio;
-        let frame = axis_slot(parent_rect, horizontal, *offset, seg_len);
-        *offset += seg_len;
-        *offset += inner_gap;
-        Some(frame)
-    })
-}
-
-pub(super) fn collect_group_containers(
-    tiles: &GroupLayouts,
-    layout: LayoutId,
-    screen: CGRect,
-    stack_offset: f64,
-    gaps: &crate::common::config::GapSettings,
-    stack_line: crate::common::config::StackLineReserve,
-    selection_path_only: bool,
-) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-    use crate::layout_engine::LayoutKind::*;
-
-    let mut out = Vec::new();
-    let map = &tiles.tree.map;
-    let active = tiles.participating_nodes(tiles.root(layout));
-
-    let tiling_area = compute_tiling_area(screen, gaps);
-
-    let mut stack: Vec<(NodeId, CGRect)> = vec![(tiles.root(layout), tiling_area)];
-
-    while let Some((node, rect)) = stack.pop() {
-        if tiles.tree.map.is_effectively_fullscreen(node) {
-            if selection_path_only {
-                out.clear();
-                break;
-            }
-            continue;
-        }
-
-        let kind = tiles.tree.map.kind(node);
-        let children: Vec<_> = node
-            .children(map)
-            .filter(|c| tiles.inactive.is_empty() || active.contains(c))
-            .collect();
-
-        let selected = tiles
-            .tree
-            .map
-            .local_selection(node)
-            .filter(|c| tiles.inactive.is_empty() || active.contains(c))
-            .or_else(|| children.first().copied());
-
-        if matches!(kind, HorizontalStack | VerticalStack) {
-            if children.is_empty() {
-                continue;
-            }
-
-            let local_sel = selected.unwrap();
-            if selection_path_only && tiles.tree.map.is_effectively_fullscreen(local_sel) {
-                out.clear();
-                break;
-            }
-            let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
-
-            let is_horizontal = matches!(kind, HorizontalStack);
-            out.push(tiles.stack_group_container_info(node, kind, rect, &children, selected_index));
-
-            let layout_res =
-                stack_layout_result(rect, children.len(), stack_offset, is_horizontal, stack_line);
-
-            for (i, &child) in children.iter().enumerate().rev() {
-                if (selection_path_only && Some(child) != selected)
-                    || tiles.tree.map.is_effectively_fullscreen(child)
-                {
-                    continue;
-                }
-                let child_rect = layout_res.get_frame_for_index(i);
-                stack.push((child, child_rect));
-            }
-
-            continue;
-        }
-
-        // Calculate sibling frames once in forward order, preserving the exact
-        // accumulation used by selection-path geometry. Reverse only the work
-        // queue so the depth-first traversal still visits children in order.
-        let start = stack.len();
-        stack.extend(
-            children
-                .iter()
-                .copied()
-                .zip(child_frames_in_axis(
-                    tiles,
-                    rect,
-                    &children,
-                    kind == Horizontal,
-                    gaps,
-                ))
-                .filter(|(child, _)| !selection_path_only || Some(*child) == selected),
-        );
-        stack[start..].reverse();
-    }
-
-    out
 }
 
 pub(super) fn resize_selection(
@@ -694,6 +632,16 @@ pub(super) fn apply_explicit_window_drop(
     true
 }
 
+pub(super) fn project_root(
+    root: NodeId,
+    regions: Option<(NodeId, NodeId)>,
+    active: &ConstraintCache,
+) -> NodeId {
+    regions
+        .filter(|(_, stack)| !active.contains_key(stack))
+        .map_or(root, |(master, _)| master)
+}
+
 pub(super) fn project(
     tiles: &GroupLayouts,
     node: NodeId,
@@ -703,13 +651,14 @@ pub(super) fn project(
     constraints: &HashMap<WindowId, WindowLayoutConstraints>,
     gaps: &crate::common::config::GapSettings,
     stack_line: crate::common::config::StackLineReserve,
+    emit_frames: bool,
+    groups: Option<GroupOutput<'_>>,
 ) -> Vec<(WindowId, CGRect)> {
     let map = &tiles.tree.map;
+    let collect = groups.is_some() && !map.is_effectively_fullscreen(node);
     let mut prepared = ConstraintCache::default();
     for child in node.traverse_postorder(map) {
-        if map.window(child).is_some_and(|w| !tiles.inactive.contains(&w))
-            || child.children(map).any(|c| prepared.contains_key(&c))
-        {
+        if tiles.subtree_participates(child, |node| prepared.contains_key(&node)) {
             let axes = [false, true].map(|horizontal| {
                 tiles.tree.map.node_axis_constraints(
                     &prepared,
@@ -726,6 +675,9 @@ pub(super) fn project(
     }
     let mut sizes = Vec::new();
     Projection {
+        tiles,
+        groups,
+        emit_frames,
         prepared: &prepared,
         map,
         screen,
@@ -734,6 +686,11 @@ pub(super) fn project(
         gaps,
         stack_line,
     }
-    .apply(root(&prepared), compute_tiling_area(screen, gaps), &mut sizes);
+    .apply(
+        root(&prepared),
+        compute_tiling_area(screen, gaps),
+        &mut sizes,
+        collect,
+    );
     sizes
 }

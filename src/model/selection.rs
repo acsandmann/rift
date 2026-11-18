@@ -25,6 +25,13 @@ impl Selection {
         node
     }
 
+    pub(crate) fn selected_child(&self, node: NodeId) -> Option<NodeId> {
+        self.nodes
+            .get(node)
+            .filter(|info| !info.stop_here)
+            .map(|info| info.selected_child)
+    }
+
     pub fn last_selection(&self, node: NodeId) -> Option<NodeId> {
         self.nodes.get(node).map(|info| info.selected_child)
     }

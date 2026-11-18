@@ -248,6 +248,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
             constraints,
             gaps,
             stack_line,
+            true,
+            None,
         )
     }
 
