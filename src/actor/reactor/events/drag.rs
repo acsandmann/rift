@@ -94,7 +94,14 @@ pub fn handle_mouse_up(
 
     if commit.source.origin_space != payload.final_space {
         if commit.source.origin_space.is_some() {
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
+            // A plain removal clears the floating state, so the window would be tiled on the
+            // target display. Keep it floating, like a move without a drag does.
+            let removal = if layout.layout_engine.is_window_floating(window) {
+                LayoutEvent::WindowRemovedPreserveFloating(window)
+            } else {
+                LayoutEvent::WindowRemoved(window)
+            };
+            outcome = outcome.with_layout_event(removal);
         }
         if let Some(space) = payload.final_space
             && state.windows.is_admitted(window)

@@ -2320,6 +2320,69 @@ fn cross_display_drag_clears_source_floating_position() {
 }
 
 #[test]
+fn cross_display_drag_keeps_window_floating() {
+    let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let source_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .workspaces()
+        .active_workspace(space1)
+        .expect("source workspace");
+    let target_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .workspaces()
+        .active_workspace(space2)
+        .expect("target workspace");
+
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+
+    let moved_frame = CGRect::new(
+        CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
+        initial_frame.size,
+    );
+    reactor.drag_manager.actor.begin_native(
+        crate::actor::drag::DragSource {
+            window: wid,
+            origin_frame: initial_frame,
+            last_frame: moved_frame,
+            origin_space: Some(space1),
+            current_space: Some(space2),
+            tiled: false,
+        },
+        crate::actor::drag::DragScene::default(),
+    );
+
+    // Process the layout events of the drop too, not only the drag commit.
+    reactor.handle_event(Event::MouseUp(crate::actor::drag::MouseButton::Left));
+
+    assert!(
+        reactor.layout_manager.layout_engine.is_window_floating(wid),
+        "a floating window dragged to another display must stay floating"
+    );
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .get_floating_position(source_workspace, wid),
+        None
+    );
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .get_floating_position(target_workspace, wid),
+        Some(moved_frame),
+        "the window must stay where it was dropped"
+    );
+}
+
+#[test]
 fn floating_drag_never_latches_a_drop_and_stores_the_release_frame() {
     let (mut reactor, floating_wid, space1, _screen, floating_frame) =
         reactor_with_floating_window();
