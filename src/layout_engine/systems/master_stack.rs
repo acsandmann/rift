@@ -121,7 +121,7 @@ impl MasterStackLayoutSystem {
             let first = if self.master_first() { master } else { stack };
             if root.first_child(self.tiles.map()) != Some(first) {
                 let other = if first == master { stack } else { master };
-                first.reorder(other, true, &mut self.tiles.tree.map);
+                self.tiles.tree.move_node(first, Placement::Before(other));
             }
             self.tiles.set_layout(root, LayoutKind::from(self.root_orientation()));
             self.tiles.set_layout(master, LayoutKind::from(self.master_orientation()));
@@ -483,7 +483,13 @@ impl LayoutSystem for MasterStackLayoutSystem {
         let (root, master, stack) = self.region_roots(layout);
         self.tiles.project(
             root,
-            Some((master, stack)),
+            |active| {
+                if active.contains_key(&stack) {
+                    root
+                } else {
+                    master
+                }
+            },
             screen,
             stack_offset,
             constraints,

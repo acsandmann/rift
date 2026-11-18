@@ -51,72 +51,90 @@ impl Tree {
         node
     }
 
-    pub(crate) fn move_node(&mut self, node: NodeId, placement: Placement) -> NodeId {
-        self.move_node_with(node, placement, |_, _| {})
-    }
-
-    pub(crate) fn move_node_with(
-        &mut self,
-        node: NodeId,
-        placement: Placement,
-        adjust: impl FnOnce(NodeId, &mut Self),
-    ) -> NodeId {
+    pub(crate) fn move_node(&mut self, node: NodeId, placement: Placement) -> bool {
         let Some(parent) = placement.parent(&self.map) else {
-            return node;
+            return false;
         };
         if !self.map.contains(node)
             || matches!(placement, Placement::Before(anchor) | Placement::After(anchor) if anchor == node)
         {
-            return node;
+            return false;
         }
         let old_parent = node.parent(&self.map);
         let changed_parent = old_parent != Some(parent);
         if changed_parent && parent.ancestors(&self.map).any(|ancestor| ancestor == node) {
-            return node;
+            return false;
         }
-        if changed_parent && old_parent.is_some() {
-            self.prepare_detach(node);
+        if !changed_parent
+            && match placement {
+                Placement::Back(_) => node.next_sibling(&self.map).is_none(),
+                Placement::Before(anchor) => node.next_sibling(&self.map) == Some(anchor),
+                Placement::After(anchor) => node.prev_sibling(&self.map) == Some(anchor),
+            }
+        {
+            return false;
         }
-        self.map.unlink(node);
+        if let Some(old) = old_parent.filter(|_| changed_parent) {
+            self.detach(node, old);
+        } else {
+            self.map.unlink(node);
+        }
         placement.link(node, parent, &mut self.map);
         if changed_parent {
             self.map[node].layout.size = 1.0;
         }
-        adjust(node, self);
         if let Some(old) = old_parent.filter(|_| changed_parent) {
             self.prune_container(old);
         }
-        node
+        true
     }
 
     pub(crate) fn remove(&mut self, node: NodeId) {
         if let Some(parent) = node.parent(&self.map) {
-            self.prepare_detach(node);
-            self.map.unlink(node);
+            self.detach(node, parent);
             self.prune_container(parent);
         }
         self.delete_subtree(node);
     }
 
-    fn prepare_detach(&mut self, node: NodeId) {
+    fn detach(&mut self, node: NodeId, parent: NodeId) {
         self.map.detach_selection(node);
-        if self.map.window(node).is_some() {
-            self.map.normalize_after_removal(node);
+        self.map.unlink(node);
+        if self.map.window(node).is_none() {
+            return;
+        }
+
+        // Preserve the remaining siblings' proportions with a mean weight of one.
+        let (count, total) =
+            parent.children(&self.map).fold((0, 0.0_f32), |(count, total), child| {
+                (count + 1, total + self.map[child].layout.size.max(0.0))
+            });
+        let scale = (total.is_finite() && total > f32::EPSILON).then(|| count as f32 / total);
+        let mut child = parent.first_child(&self.map);
+        while let Some(node) = child {
+            self.map[node].layout.size =
+                scale.map_or(1.0, |scale| self.map[node].layout.size * scale);
+            child = node.next_sibling(&self.map);
         }
     }
 
-    fn prune_container(&mut self, parent: NodeId) {
-        if parent.parent(&self.map).is_none() || self.map[parent].layout.fixed_container {
-            return;
-        }
-        match parent.first_child(&self.map) {
-            None => self.remove(parent),
-            Some(child) if child.next_sibling(&self.map).is_none() => {
-                self.move_node_with(child, Placement::After(parent), |child, tree| {
-                    tree.map.assume_size_of(child, parent);
-                });
+    fn prune_container(&mut self, mut node: NodeId) {
+        while let Some(parent) = node.parent(&self.map) {
+            if self.map[node].layout.fixed_container {
+                break;
             }
-            _ => {}
+            if let Some(child) = node.first_child(&self.map) {
+                if child.next_sibling(&self.map).is_some() {
+                    break;
+                }
+                self.map.unlink(child);
+                Placement::After(node).link(child, parent, &mut self.map);
+                self.map[child].layout.size = self.map[node].layout.size;
+            }
+            self.map.detach_selection(node);
+            self.map.unlink(node);
+            self.map.map.remove(node);
+            node = parent;
         }
     }
 
@@ -298,24 +316,6 @@ impl NodeId {
             next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.parent));
             node.map(|n| (n, next))
         })
-    }
-
-    /// Reorder siblings without changing membership, weights, or selection history.
-    pub(crate) fn reorder(self, anchor: NodeId, before: bool, map: &mut NodeMap) {
-        if self == anchor {
-            return;
-        }
-        let placement = if before {
-            Placement::Before(anchor)
-        } else {
-            Placement::After(anchor)
-        };
-        if let Some(parent) =
-            placement.parent(map).filter(|&parent| self.parent(map) == Some(parent))
-        {
-            map.unlink(self);
-            placement.link(self, parent, map);
-        }
     }
 
     #[track_caller]

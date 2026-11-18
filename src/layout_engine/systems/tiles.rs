@@ -209,27 +209,6 @@ impl NodeMap {
         parent.children(self).map(|child| self[child].layout.size.max(0.0)).sum()
     }
 
-    // Leaf removal keeps sibling proportions while restoring their average weight to one.
-    pub(crate) fn normalize_after_removal(&mut self, node: NodeId) {
-        let parent = node.parent(self).unwrap();
-        let siblings = || parent.children(self).filter(|&child| child != node);
-        let (count, total) = siblings().fold((0, 0.0_f32), |(count, total), child| {
-            (count + 1, total + self[child].layout.size.max(0.0))
-        });
-        let mut current = parent.first_child(self);
-        while let Some(child) = current {
-            current = child.next_sibling(self);
-            if child == node {
-                continue;
-            }
-            self[child].layout.size = if total.is_finite() && total > f32::EPSILON {
-                self[child].layout.size * (count as f32 / total)
-            } else {
-                1.0
-            };
-        }
-    }
-
     pub(crate) fn assume_size_of(&mut self, new: NodeId, old: NodeId) {
         assert_eq!(new.parent(self), old.parent(self));
         self[new].layout.size = core::mem::replace(&mut self[old].layout.size, 0.0);
@@ -1412,8 +1391,7 @@ impl TileLayouts {
         } else {
             Placement::Before(anchor)
         };
-        self.tree.move_node(moving, place);
-        true
+        self.tree.move_node(moving, place)
     }
 
     pub(super) fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
@@ -1792,15 +1770,12 @@ impl TileLayouts {
             && !self.layout(parent).is_group()
             && self.layout(parent).orientation() == direction.orientation()
         {
-            if source_node.parent(self.map()) == Some(parent) {
-                source_node.reorder(target_anchor, before, &mut self.tree.map);
+            let placement = if before {
+                Placement::Before(target_anchor)
             } else {
-                if before {
-                    self.tree.move_node(source_node, Placement::Before(target_anchor));
-                } else {
-                    self.tree.move_node(source_node, Placement::After(target_anchor));
-                }
-            }
+                Placement::After(target_anchor)
+            };
+            self.tree.move_node(source_node, placement);
         } else {
             let kind = match direction.orientation() {
                 Orientation::Horizontal => LayoutKind::Horizontal,
@@ -1831,7 +1806,7 @@ impl TileLayouts {
     pub(super) fn project(
         &self,
         node: NodeId,
-        regions: Option<(NodeId, NodeId)>,
+        root: impl FnOnce(&ConstraintCache) -> NodeId,
         screen: CGRect,
         stack_offset: f64,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
@@ -1858,10 +1833,6 @@ impl TileLayouts {
                 prepared.insert(child, axes);
             }
         }
-        // An empty secondary region gives the primary region the whole screen slot.
-        let node = regions
-            .filter(|(_, secondary)| !prepared.contains_key(secondary))
-            .map_or(node, |(primary, _)| primary);
         let mut sizes = Vec::new();
         Projection {
             prepared: &prepared,
@@ -1872,7 +1843,7 @@ impl TileLayouts {
             gaps,
             stack_line,
         }
-        .apply(node, compute_tiling_area(screen, gaps), &mut sizes);
+        .apply(root(&prepared), compute_tiling_area(screen, gaps), &mut sizes);
         sizes
     }
 }

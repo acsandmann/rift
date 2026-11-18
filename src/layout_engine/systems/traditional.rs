@@ -246,9 +246,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
+        let root = self.tiles.root(layout);
         self.tiles.project(
-            self.tiles.root(layout),
-            None,
+            root,
+            |_| root,
             screen,
             stack_offset,
             constraints,
@@ -677,16 +678,12 @@ impl TraditionalLayoutSystem {
             (Destination::Ahead(target), Direction::Right | Direction::Down)
             | (Destination::Behind(target), Direction::Left | Direction::Up) => (target, false),
         };
-        if moving_node.parent(&self.tiles.tree.map) == target.parent(&self.tiles.tree.map) {
-            moving_node.reorder(target, before, &mut self.tiles.tree.map);
+        let placement = if before {
+            Placement::Before(target)
         } else {
-            if before {
-                self.tiles.tree.move_node(moving_node, Placement::Before(target));
-            } else {
-                self.tiles.tree.move_node(moving_node, Placement::After(target));
-            }
-        }
-        true
+            Placement::After(target)
+        };
+        self.tiles.tree.move_node(moving_node, placement)
     }
 
     fn find_or_create_common_parent_internal(&mut self, node1: NodeId, node2: NodeId) -> NodeId {
@@ -701,16 +698,11 @@ impl TraditionalLayoutSystem {
             let size1 = self.tiles.tree.map[node1].layout.size.max(0.0);
             let size2 = self.tiles.tree.map[node2].layout.size.max(0.0);
             let new_container = self.tiles.tree.insert(Placement::Before(node1));
-            self.tiles
-                .tree
-                .move_node_with(node1, Placement::Back(new_container), |child, tree| {
-                    tree.map[child].layout.size = size1;
-                });
-            self.tiles
-                .tree
-                .move_node_with(node2, Placement::Back(new_container), |child, tree| {
-                    tree.map[child].layout.size = size2;
-                });
+            let tree = &mut self.tiles.tree;
+            tree.move_node(node1, Placement::Back(new_container));
+            tree.move_node(node2, Placement::Back(new_container));
+            tree.map[node1].layout.size = size1;
+            tree.map[node2].layout.size = size2;
 
             // A collapsed parent already transferred its outer weight.
             if self.tiles.tree.map.contains(ancestor) {
