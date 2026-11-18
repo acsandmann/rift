@@ -427,27 +427,8 @@ impl Projection<'_> {
         }
         let normalize_sizes =
             !actual_total.is_finite() || actual_total <= f32::EPSILON || needs_normalization;
-        let inner_gap = if horizontal {
-            gaps.inner.horizontal
-        } else {
-            gaps.inner.vertical
-        };
-        let axis_len = if horizontal {
-            rect.size.width
-        } else {
-            rect.size.height
-        };
-        let total_gap = (children.len().saturating_sub(1)) as f64 * inner_gap;
-        let usable_axis = if inner_gap == 0.0 {
-            axis_len
-        } else {
-            (axis_len - total_gap).max(0.0)
-        };
-        let mut offset = if horizontal {
-            rect.origin.x
-        } else {
-            rect.origin.y
-        };
+        let (mut offset, usable_axis, inner_gap) =
+            axis_span(rect, horizontal, gaps, children.len());
         let axis_constraints: Vec<AxisConstraints> = children
             .iter()
             .map(|&child| {
@@ -476,6 +457,25 @@ impl Projection<'_> {
             offset += inner_gap;
         }
     }
+}
+
+fn axis_span(
+    rect: CGRect,
+    horizontal: bool,
+    gaps: &crate::common::config::GapSettings,
+    count: usize,
+) -> (f64, f64, f64) {
+    let (origin, length, gap) = if horizontal {
+        (rect.origin.x, rect.size.width, gaps.inner.horizontal)
+    } else {
+        (rect.origin.y, rect.size.height, gaps.inner.vertical)
+    };
+    let usable = if gap == 0.0 {
+        length
+    } else {
+        (length - count.saturating_sub(1) as f64 * gap).max(0.0)
+    };
+    (origin, usable, gap)
 }
 
 pub(super) fn stack_offset_with_required_size(
@@ -687,11 +687,17 @@ impl TileLayouts {
     }
 
     pub(super) fn transfer_selection(&mut self, layout: LayoutId, to: LayoutId) -> EditResult {
-        let from_layout = layout;
-        let to_layout = to;
-
-        let from_sel = self.selection(from_layout);
-        let to_sel = self.selection(to_layout);
+        if layout == to || !self.contains_layout(layout) || !self.contains_layout(to) {
+            return EditResult::Unchanged;
+        }
+        let from_sel = self.selection(layout);
+        let to_sel = self.selection(to);
+        if self
+            .windows_from(from_sel, Some(from_sel), true)
+            .any(|window| self.contains_window(to, window))
+        {
+            return EditResult::Unchanged;
+        }
 
         let map = &self.tree.map;
         let Some(old_parent) = from_sel.parent(map) else {
@@ -703,7 +709,7 @@ impl TileLayouts {
         } else {
             self.tree.move_node(from_sel, Placement::After(to_sel));
         }
-        self.tree.window.reassign_subtree(&self.tree.map, from_sel, to_layout);
+        self.tree.window.reassign_subtree(&self.tree.map, from_sel, to);
         if is_selection {
             let mut current = Some(from_sel);
             while let Some(node) = current.filter(|&node| node != old_parent) {
@@ -1145,27 +1151,8 @@ impl TileLayouts {
         gaps: &crate::common::config::GapSettings,
     ) -> impl Iterator<Item = CGRect> + 'a {
         let total: f32 = siblings.iter().map(|&child| self.tree.map[child].layout.size).sum();
-        let inner_gap = if horizontal {
-            gaps.inner.horizontal
-        } else {
-            gaps.inner.vertical
-        };
-        let axis_len = if horizontal {
-            parent_rect.size.width
-        } else {
-            parent_rect.size.height
-        };
-        let total_gap = siblings.len().saturating_sub(1) as f64 * inner_gap;
-        let usable_axis = if inner_gap == 0.0 {
-            axis_len
-        } else {
-            (axis_len - total_gap).max(0.0)
-        };
-        let offset = if horizontal {
-            parent_rect.origin.x
-        } else {
-            parent_rect.origin.y
-        };
+        let (offset, usable_axis, inner_gap) =
+            axis_span(parent_rect, horizontal, gaps, siblings.len());
 
         siblings.iter().scan(offset, move |offset, &child| {
             let ratio = f64::from(self.tree.map[child].layout.size) / f64::from(total);

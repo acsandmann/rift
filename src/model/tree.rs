@@ -21,22 +21,34 @@ pub(crate) enum Placement {
     After(NodeId),
 }
 
+impl Placement {
+    fn parent(self, map: &NodeMap) -> Option<NodeId> {
+        match self {
+            Self::Back(parent) => map.contains(parent).then_some(parent),
+            Self::Before(sibling) | Self::After(sibling) => sibling.parent(map),
+        }
+        .filter(|&parent| map.window(parent).is_none())
+    }
+
+    fn link(self, node: NodeId, parent: NodeId, map: &mut NodeMap) {
+        let (prev, next) = match self {
+            Self::Back(_) => (parent.last_child(map), None),
+            Self::Before(sibling) => (sibling.prev_sibling(map), Some(sibling)),
+            Self::After(sibling) => (Some(sibling), sibling.next_sibling(map)),
+        };
+        map.link_child(node, parent, prev, next);
+    }
+}
+
 impl Tree {
     pub(crate) fn create_root(&mut self) -> NodeId { self.map.map.insert(Node::default()) }
 
     pub(crate) fn insert(&mut self, placement: Placement) -> NodeId {
+        let parent = placement.parent(&self.map).expect("invalid tile insertion");
         let node = self.create_root();
         self.map[node].layout.size = 1.0;
-        self.link(node, placement);
+        placement.link(node, parent, &mut self.map);
         node
-    }
-
-    fn link(&mut self, node: NodeId, placement: Placement) {
-        match placement {
-            Placement::Back(parent) => node.link_under_back(parent, &mut self.map),
-            Placement::Before(sibling) => node.link_before(sibling, &mut self.map),
-            Placement::After(sibling) => node.link_after(sibling, &mut self.map),
-        }
     }
 
     pub(crate) fn move_node(&mut self, node: NodeId, placement: Placement) -> NodeId {
@@ -49,19 +61,24 @@ impl Tree {
         placement: Placement,
         adjust: impl FnOnce(NodeId, &mut Self),
     ) -> NodeId {
-        let parent = match placement {
-            Placement::Back(parent) => parent,
-            Placement::Before(sibling) | Placement::After(sibling) => {
-                sibling.parent(&self.map).expect("cannot make a sibling of a root")
-            }
+        let Some(parent) = placement.parent(&self.map) else {
+            return node;
         };
+        if !self.map.contains(node)
+            || matches!(placement, Placement::Before(anchor) | Placement::After(anchor) if anchor == node)
+        {
+            return node;
+        }
         let old_parent = node.parent(&self.map);
         let changed_parent = old_parent != Some(parent);
+        if changed_parent && parent.ancestors(&self.map).any(|ancestor| ancestor == node) {
+            return node;
+        }
         if changed_parent && old_parent.is_some() {
             self.prepare_detach(node);
         }
         self.map.unlink(node);
-        self.link(node, placement);
+        placement.link(node, parent, &mut self.map);
         if changed_parent {
             self.map[node].layout.size = 1.0;
         }
@@ -125,7 +142,7 @@ impl Tree {
             };
             *next = old.next_sibling(&self.map);
             let new = self.copy_tile(old, layout);
-            self.link(new, Placement::Back(*new_parent));
+            Placement::Back(*new_parent).link(new, *new_parent, &mut self.map);
             self.map.remap_child_selection(*original_parent, *new_parent, old, new);
             if let Some(child) = old.first_child(&self.map) {
                 stack.push((Some(child), old, new));
@@ -277,14 +294,19 @@ impl NodeId {
 
     /// Reorder siblings without changing membership, weights, or selection history.
     pub(crate) fn reorder(self, anchor: NodeId, before: bool, map: &mut NodeMap) {
-        assert_ne!(self, anchor);
-        assert!(self.parent(map).is_some());
-        assert_eq!(self.parent(map), anchor.parent(map));
-        map.unlink(self);
-        if before {
-            self.link_before(anchor, map);
+        if self == anchor {
+            return;
+        }
+        let placement = if before {
+            Placement::Before(anchor)
         } else {
-            self.link_after(anchor, map);
+            Placement::After(anchor)
+        };
+        if let Some(parent) =
+            placement.parent(map).filter(|&parent| self.parent(map) == Some(parent))
+        {
+            map.unlink(self);
+            placement.link(self, parent, map);
         }
     }
 
@@ -340,34 +362,6 @@ pub struct Node {
     pub(crate) selection: Option<SelectionInfo>,
     #[serde(default)]
     pub(crate) window: Option<WindowId>,
-}
-
-impl NodeId {
-    fn link_under_back(self, parent: NodeId, map: &mut NodeMap) {
-        if self != parent && map.contains(parent) {
-            map.link_child(self, parent, parent.last_child(map), None);
-        }
-    }
-
-    #[track_caller]
-    fn link_before(self, next: NodeId, map: &mut NodeMap) {
-        let parent = next
-            .parent(map)
-            .expect("cannot make a sibling of a root node or invalid sibling");
-        if self != next {
-            map.link_child(self, parent, next.prev_sibling(map), Some(next));
-        }
-    }
-
-    #[track_caller]
-    fn link_after(self, prev: NodeId, map: &mut NodeMap) {
-        let parent = prev
-            .parent(map)
-            .expect("cannot make a sibling of a root node or invalid sibling");
-        if self != prev {
-            map.link_child(self, parent, Some(prev), prev.next_sibling(map));
-        }
-    }
 }
 
 impl NodeMap {
@@ -863,6 +857,16 @@ mod tests {
         assert!(!t.tree.map.map.contains_key(t.root));
         t.tree.remove(t.other_root);
         assert!(!t.tree.map.map.contains_key(t.other_root));
+    }
+
+    #[test]
+    fn invalid_placements_preserve_the_original_links() {
+        let mut t = TestTree::new();
+        t.tree.move_node(t.child2, Placement::After(t.child2));
+        t.tree.move_node(t.child2, Placement::Back(t.gc1));
+        t.assert_children_are([t.child1, t.child2, t.child3], t.root);
+        t.assert_children_are([t.gc1], t.child2);
+        assert!(t.get_children(t.gc1).is_empty());
     }
 
     #[test]

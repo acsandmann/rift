@@ -299,27 +299,16 @@ impl MasterStackLayoutSystem {
         container: NodeId,
         wid: WindowId,
     ) -> NodeId {
-        debug_assert!(self.tiles.map().contains(container));
-        let first_child = container.children(self.tiles.map()).next();
-        let node = match self.settings.base.window_insertion_point {
+        let map = self.tiles.map();
+        let relative = match self.settings.base.window_insertion_point {
             Some(WindowInsertionPoint::NextToSelection) => {
                 let selection = self.tiles.selection(layout);
-                if selection.parent(self.tiles.map()) == Some(container) {
-                    self.tiles.tree.insert(Placement::After(selection))
-                } else {
-                    self.tiles.tree.insert(Placement::Back(container))
-                }
+                (selection.parent(map) == Some(container)).then_some(Placement::After(selection))
             }
-            Some(WindowInsertionPoint::EndOfTree) => {
-                self.tiles.tree.insert(Placement::Back(container))
-            }
-            // Preserve the pre-base-settings behavior for old snapshots and direct
-            // construction. Config-created systems always receive a resolved value.
-            None => match first_child {
-                Some(first_child) => self.tiles.tree.insert(Placement::Before(first_child)),
-                None => self.tiles.tree.insert(Placement::Back(container)),
-            },
+            Some(WindowInsertionPoint::EndOfTree) => None,
+            None => container.first_child(map).map(Placement::Before),
         };
+        let node = self.tiles.tree.insert(relative.unwrap_or(Placement::Back(container)));
         self.tiles.tree.window.set_window(&mut self.tiles.tree.map, layout, node, wid);
         node
     }

@@ -747,6 +747,17 @@ mod tests {
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
     #[test]
+    fn same_layout_transfer_preserves_the_selected_tile() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        system.update(WindowChange::Add(layout, w(1), None));
+        let before = system.container_tree(layout);
+        assert!(!system.edit(layout, LayoutEdit::Transfer(layout)).changed());
+        assert_eq!(system.container_tree(layout), before);
+        assert_eq!(system.selected_window(layout), Some(w(1)));
+    }
+
+    #[test]
     fn unjoin_preserves_nested_and_outer_resize_ratios() {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.tiles.create_layout();
