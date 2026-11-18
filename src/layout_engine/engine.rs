@@ -178,12 +178,59 @@ impl std::ops::Deref for LayoutEventOutcome {
     fn deref(&self) -> &Self::Target { &self.response }
 }
 
+#[derive(Default)]
+struct LayoutConstraints {
+    windows: HashMap<WindowId, WindowLayoutConstraints>,
+    revision: u64,
+}
+
+impl LayoutConstraints {
+    fn insert(&mut self, window: WindowId, constraints: WindowLayoutConstraints) {
+        if self.windows.insert(window, constraints) != Some(constraints) {
+            self.revision += 1;
+        }
+    }
+
+    fn remove(&mut self, window: &WindowId) -> Option<WindowLayoutConstraints> {
+        let removed = self.windows.remove(window);
+        self.revision += u64::from(removed.is_some());
+        removed
+    }
+
+    fn remove_app(&mut self, pid: pid_t) {
+        let count = self.windows.len();
+        self.windows.retain(|window, _| window.pid != pid);
+        self.revision += u64::from(self.windows.len() != count);
+    }
+
+    fn set_width(&mut self, window: WindowId, width: f64) {
+        if let Some(constraints) = self.windows.get_mut(&window)
+            && constraints.locked_width != width
+        {
+            constraints.locked_width = width;
+            self.revision += 1;
+        }
+    }
+
+    fn prepare(
+        &self,
+        system: &mut LayoutSystemKind,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) {
+        if let LayoutSystemKind::Scrolling(scrolling) = system {
+            scrolling.prepare(layout, screen, &self.windows, Some(self.revision), gaps);
+        }
+    }
+}
+
 pub struct LayoutEngine {
     floating: FloatingManager,
     floating_positions: FloatingPositionStore,
     app_rules: AppRuleEngine,
     focused_window: Option<WindowId>,
-    window_layout_constraints: HashMap<WindowId, WindowLayoutConstraints>,
+    window_layout_constraints: LayoutConstraints,
     workspaces: WorkspaceStore,
     layout_settings: LayoutSettings,
     broadcast_tx: Option<BroadcastSender>,
@@ -425,16 +472,9 @@ impl LayoutEngine {
             .edit(layout, LayoutEdit::Drop { source, target, action })
             .changed()
             .then_some(())?;
-        system.prepare_layout(layout, screen, &self.window_layout_constraints, &gaps);
-        let frame = system
-            .calculate_layout(
-                layout,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                &self.window_layout_constraints,
-                &gaps,
-                stack_line.reserve(),
-            )
+        self.window_layout_constraints.prepare(&mut system, layout, screen, &gaps);
+        let frame = self
+            .project_arrangement(&system, layout, screen, &gaps, stack_line.reserve())
             .into_iter()
             .find_map(|(window, frame)| (window == source).then_some(frame))?;
         Some(DropPreview {
@@ -516,11 +556,38 @@ impl LayoutEngine {
         gaps: &crate::common::config::GapSettings,
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        self.workspaces[workspace_id].layout_system.calculate_layout(
+        self.project_arrangement(
+            &self.workspaces[workspace_id].layout_system,
+            layout,
+            screen,
+            gaps,
+            stack_line,
+        )
+    }
+
+    fn project_arrangement(
+        &self,
+        system: &LayoutSystemKind,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+    ) -> Vec<(WindowId, CGRect)> {
+        if let LayoutSystemKind::Scrolling(scrolling) = system {
+            return scrolling.calculate_frames(
+                layout,
+                screen,
+                &self.window_layout_constraints.windows,
+                Some(self.window_layout_constraints.revision),
+                gaps,
+                true,
+            );
+        }
+        system.calculate_layout(
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
-            &self.window_layout_constraints,
+            &self.window_layout_constraints.windows,
             gaps,
             stack_line,
         )
@@ -1549,19 +1616,21 @@ impl LayoutEngine {
 
     fn preserve_scrolling_window_width(&mut self, window_store: &WindowStore, wid: WindowId) {
         if let Some(window) = window_store.window(wid) {
-            let constraints = self.window_layout_constraints.entry(wid).or_insert_with(|| {
-                WindowLayoutConstraints {
-                    is_resizable: window.info.is_resizable,
-                    locked_height: window.frame_monotonic.size.height,
-                    min_width: window.info.min_size.map_or(0.0, |size| size.width),
-                    min_height: window.info.min_size.map_or(0.0, |size| size.height),
-                    max_width: window.info.max_size.map_or(0.0, |size| size.width),
-                    max_height: window.info.max_size.map_or(0.0, |size| size.height),
-                    ..Default::default()
-                }
-                .normalized()
-            });
+            let mut constraints =
+                self.window_layout_constraints.windows.get(&wid).copied().unwrap_or_else(|| {
+                    WindowLayoutConstraints {
+                        is_resizable: window.info.is_resizable,
+                        locked_height: window.frame_monotonic.size.height,
+                        min_width: window.info.min_size.map_or(0.0, |size| size.width),
+                        min_height: window.info.min_size.map_or(0.0, |size| size.height),
+                        max_width: window.info.max_size.map_or(0.0, |size| size.width),
+                        max_height: window.info.max_size.map_or(0.0, |size| size.height),
+                        ..Default::default()
+                    }
+                    .normalized()
+                });
             constraints.locked_width = window.frame_monotonic.size.width;
+            self.window_layout_constraints.insert(wid, constraints);
         }
     }
 
@@ -1727,7 +1796,7 @@ impl LayoutEngine {
             floating_positions: FloatingPositionStore::default(),
             app_rules: AppRuleEngine::new(&virtual_workspace_config.app_rules),
             focused_window: None,
-            window_layout_constraints: HashMap::default(),
+            window_layout_constraints: LayoutConstraints::default(),
             workspaces,
             layout_settings: layout_settings.clone(),
             broadcast_tx,
@@ -1777,9 +1846,7 @@ impl LayoutEngine {
         screen_frame: CGRect,
         display_uuid: Option<&str>,
     ) {
-        if let Some(constraints) = self.window_layout_constraints.get_mut(&resize.window) {
-            constraints.locked_width = new_frame.size.width;
-        }
+        self.window_layout_constraints.set_width(resize.window, new_frame.size.width);
         let Some(layout) = self.workspaces.active_layout(resize.space, resize.workspace_id) else {
             return;
         };
@@ -2097,7 +2164,7 @@ impl LayoutEngine {
                 self.evicted.retain(|wid, _| wid.pid != pid);
                 self.prune_native_layouts();
                 self.floating.remove_all_for_pid(pid);
-                self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
+                self.window_layout_constraints.remove_app(pid);
                 self.forget_persisted_app(pid);
 
                 self.floating_positions.remove_app(pid);
@@ -2190,9 +2257,7 @@ impl LayoutEngine {
                 {
                     return EventResponse::default();
                 }
-                if let Some(constraints) = self.window_layout_constraints.get_mut(&wid) {
-                    constraints.locked_width = new_frame.size.width;
-                }
+                self.window_layout_constraints.set_width(wid, new_frame.size.width);
                 for (space, screen_frame, display_uuid) in screens.iter() {
                     let Some((ws_id, layout)) = self.workspaces.active_layout_for_space(*space)
                     else {
@@ -2736,6 +2801,23 @@ impl LayoutEngine {
         }
     }
 
+    fn prepare_and_project(
+        &mut self,
+        workspace: VirtualWorkspaceId,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        stack_line: crate::common::config::StackLineReserve,
+    ) -> Vec<(WindowId, CGRect)> {
+        self.window_layout_constraints.prepare(
+            &mut self.workspaces[workspace].layout_system,
+            layout,
+            screen,
+            gaps,
+        );
+        self.calculate_arrangement(workspace, layout, screen, gaps, stack_line)
+    }
+
     pub fn calculate_layout(
         &mut self,
         space: SpaceId,
@@ -2746,13 +2828,7 @@ impl LayoutEngine {
         let Some((workspace_id, layout)) = self.workspaces.active_layout_for_space(space) else {
             return Vec::new();
         };
-        self.workspaces[workspace_id].layout_system.prepare_layout(
-            layout,
-            screen,
-            &self.window_layout_constraints,
-            gaps,
-        );
-        self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line)
+        self.prepare_and_project(workspace_id, layout, screen, gaps, stack_line)
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
@@ -2769,14 +2845,11 @@ impl LayoutEngine {
         F: Fn(WindowId) -> Option<CGRect>,
     {
         use crate::model::{HiddenWindowPlacement, HideCorner};
-        let other_screens: Vec<_> =
-            all_screens.iter().copied().filter(|other| *other != screen).collect();
-
         let mut positions = HashMap::default();
         let center = screen.mid();
         let floating_frame = |window, candidate: Option<CGRect>| {
             candidate
-                .filter(|rect| !HiddenWindowPlacement::is_hidden(screen, *rect, &other_screens))
+                .filter(|rect| !HiddenWindowPlacement::is_hidden(screen, *rect, all_screens))
                 .unwrap_or_else(|| {
                     let size = get_window_frame(window)
                         .map_or(CGSize::new(500.0, 500.0), |frame| frame.size);
@@ -2789,27 +2862,17 @@ impl LayoutEngine {
 
         if let Some(active_workspace_id) = self.workspaces.active_workspace(space) {
             if let Some(layout) = self.workspaces.active_layout(space, active_workspace_id) {
-                let constraints = &self.window_layout_constraints;
+                let constraints = &self.window_layout_constraints.windows;
                 if let LayoutSystemKind::Floating(system) =
                     &mut self.workspaces[active_workspace_id].layout_system
                 {
                     system.initialize_frames(layout, screen, constraints, &|wid| {
                         get_window_frame(wid).filter(|frame| {
-                            !crate::model::hidden_window_placement::HiddenWindowPlacement::is_hidden(
-                                screen,
-                                *frame,
-                                all_screens,
-                            )
+                            !HiddenWindowPlacement::is_hidden(screen, *frame, all_screens)
                         })
                     });
                 }
-                self.workspaces[active_workspace_id].layout_system.prepare_layout(
-                    layout,
-                    screen,
-                    &self.window_layout_constraints,
-                    gaps,
-                );
-                positions.extend(self.calculate_arrangement(
+                positions.extend(self.prepare_and_project(
                     active_workspace_id,
                     layout,
                     screen,
@@ -2881,7 +2944,7 @@ impl LayoutEngine {
                 screen,
                 reference_frame,
                 HideCorner::BottomRight,
-                &other_screens,
+                all_screens,
             );
             positions.insert(wid, hidden_rect);
         }
@@ -2947,7 +3010,14 @@ impl LayoutEngine {
             self.workspaces.active_layout(space, workspace),
         ) {
             (LayoutSystemKind::Scrolling(system), Some(layout)) => system
-                .calculate_frames(layout, screen, &self.window_layout_constraints, gaps, false)
+                .calculate_frames(
+                    layout,
+                    screen,
+                    &self.window_layout_constraints.windows,
+                    Some(self.window_layout_constraints.revision),
+                    gaps,
+                    false,
+                )
                 .into_iter()
                 .collect(),
             _ => HashMap::default(),

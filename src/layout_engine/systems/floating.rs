@@ -2,7 +2,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_protocol::DirectionalDistance;
 use serde::{Deserialize, Serialize};
 
-use super::tiles::TileLayouts;
+use super::groups::GroupLayouts;
 use super::{
     EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, LayoutSystem, WindowChange,
     WindowLayoutConstraints, WindowQuery,
@@ -27,7 +27,7 @@ struct FloatingGeometry {
 #[serde(from = "StoredFloating")]
 pub struct FloatingLayoutSystem {
     #[serde(rename = "inner")]
-    groups: TileLayouts,
+    pub(super) groups: GroupLayouts,
     #[serde(skip)]
     insertion: WindowInsertionPoint,
     geometry: HashMap<WindowId, FloatingGeometry>,
@@ -38,7 +38,7 @@ pub struct FloatingLayoutSystem {
 #[derive(Deserialize)]
 struct StoredFloating {
     #[serde(rename = "inner")]
-    groups: TileLayouts,
+    groups: GroupLayouts,
     #[serde(default)]
     geometry: HashMap<WindowId, FloatingGeometry>,
     #[serde(default)]
@@ -76,7 +76,7 @@ impl Default for FloatingLayoutSystem {
 impl FloatingLayoutSystem {
     pub fn new(point: WindowInsertionPoint) -> Self {
         Self {
-            groups: TileLayouts::default(),
+            groups: GroupLayouts::default(),
             insertion: point,
             geometry: HashMap::default(),
             spread_on_initialization: false,
@@ -160,8 +160,7 @@ impl FloatingLayoutSystem {
     }
 
     pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(wid) = self.groups.selected_window(layout)
-            && let Some(node) = self.groups.window_node(layout, wid)
+        if let Some((node, _)) = self.groups.focused_leaf(layout)
             && let Some(parent) = node.parent(self.groups.map())
             && self.groups.layout(parent).is_stacked()
         {
@@ -177,14 +176,14 @@ impl FloatingLayoutSystem {
     fn directional_window(
         &self,
         layout: LayoutId,
+        focused: WindowId,
         direction: Direction,
         exclude: Option<NodeId>,
-    ) -> Option<WindowId> {
-        let focused = self.groups.selected_window(layout)?;
+    ) -> Option<(NodeId, WindowId)> {
         let source = self.frame(focused)?;
         let origin = source.mid();
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
-        let mut best: Option<(WindowId, bool, f64)> = None;
+        let mut best: Option<((NodeId, WindowId), bool, f64)> = None;
         let _ = self.groups.visit_visible_windows(self.groups.root(layout), &mut |node, wid| {
             if wid != focused
                 && !exclude.is_some_and(|parent| {
@@ -212,28 +211,23 @@ impl FloatingLayoutSystem {
                     if best.is_none_or(|(_, outside, previous)| {
                         (!overlaps).cmp(&outside).then(distance.total_cmp(&previous)).is_lt()
                     }) {
-                        best = Some((wid, !overlaps, distance));
+                        best = Some(((node, wid), !overlaps, distance));
                     }
                 }
             }
             std::ops::ControlFlow::<()>::Continue(())
         });
-        best.map(|(wid, _, _)| wid)
+        best.map(|(target, _, _)| target)
     }
 
     fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        let focused = self.groups.selected_window(layout)?;
-        let node = self.groups.window_node(layout, focused)?;
+        let (node, focused) = self.groups.focused_leaf(layout)?;
         let parent = node.parent(self.groups.map())?;
         let kind = self.groups.layout(parent);
         let forward = matches!(direction, Direction::Right | Direction::Down);
         let map = self.groups.map();
         let stack_target = if kind.is_stacked() {
-            let next = if forward {
-                node.next_in_subtree(parent, map)
-            } else {
-                node.prev_in_subtree(parent, map)
-            };
+            let next = node.step(parent, map, forward);
             self.groups.windows_from(parent, next, forward).next()
         } else {
             None
@@ -242,17 +236,20 @@ impl FloatingLayoutSystem {
         if kind.orientation() == direction.orientation() && stack_target.is_some() {
             return stack_target;
         }
-        self.directional_window(layout, direction, None).or(stack_target).or_else(|| {
-            if !kind.is_stacked() {
-                return None;
-            }
-            let start = if forward {
-                parent
-            } else {
-                parent.last_descendant(map)
-            };
-            self.groups.windows_from(parent, Some(start), forward).next()
-        })
+        self.directional_window(layout, focused, direction, None)
+            .map(|(_, window)| window)
+            .or(stack_target)
+            .or_else(|| {
+                if !kind.is_stacked() {
+                    return None;
+                }
+                let start = if forward {
+                    parent
+                } else {
+                    parent.last_descendant(map)
+                };
+                self.groups.windows_from(parent, Some(start), forward).next()
+            })
     }
 
     fn default_frame(screen: CGRect, limits: WindowLayoutConstraints) -> CGRect {
@@ -526,17 +523,14 @@ impl LayoutSystem for FloatingLayoutSystem {
                 if let Some(geometry) = geometry {
                     self.geometry.insert(to, geometry);
                 }
-                self.groups.update_existing(WindowChange::Replace(from, to));
+                self.groups.replace_window(from, to);
             }
             WindowChange::CloseApp(pid) => {
                 self.geometry.retain(|wid, _| wid.pid != pid);
-                self.groups.update_existing(WindowChange::CloseApp(pid))
+                self.groups.close_app(pid)
             }
             WindowChange::Reconcile(layout, pid, desired) => {
-                let current = self.groups.windows(layout, WindowQuery::App(pid));
-                let delta = super::reconcile_app_membership(pid, current, desired, |w| {
-                    self.window_participates(w)
-                });
+                let delta = self.groups.app_delta(layout, pid, desired);
                 for wid in delta.removals {
                     self.remove_window(wid);
                 }
@@ -632,24 +626,19 @@ impl FloatingLayoutSystem {
 
     fn remove_window(&mut self, wid: WindowId) {
         self.geometry.remove(&wid);
-        self.groups.update_existing(WindowChange::Remove(wid));
+        self.groups.remove_window(wid);
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some(focused) = self.groups.selected_window(layout) else {
-            return false;
-        };
-        let Some(selection) = self.groups.window_node(layout, focused) else {
+        let Some((selection, focused)) = self.groups.focused_leaf(layout) else {
             return false;
         };
         let root = self.groups.root(layout);
         let parent = selection.parent(self.groups.map()).unwrap_or(root);
         let exclude = (parent != root).then_some(parent);
-        let target = self.directional_window(layout, direction, exclude);
-        let Some(target) = target else {
-            return false;
-        };
-        let Some(target_node) = self.groups.window_node(layout, target) else {
+        let Some((target_node, target)) =
+            self.directional_window(layout, focused, direction, exclude)
+        else {
             return false;
         };
         let container = if parent == root {
@@ -703,10 +692,7 @@ impl FloatingLayoutSystem {
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) -> bool {
-        let Some(wid) = self.groups.selected_window(layout) else {
-            return false;
-        };
-        let Some(selection) = self.groups.window_node(layout, wid) else {
+        let Some((selection, wid)) = self.groups.focused_leaf(layout) else {
             return false;
         };
         let Some(parent) = selection.parent(self.groups.map()) else {
@@ -725,19 +711,6 @@ impl FloatingLayoutSystem {
     }
 }
 
-impl FloatingLayoutSystem {
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        self.groups.draw_tree(layout, None)
-    }
-
-    pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        self.groups.container_tree(layout)
-    }
-
-    pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        self.groups.window_slot(layout, window)
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use slotmap::{Key, KeyData, SlotMap};
 
 use super::constraints::{constrain_frame, traditional_leaf_axis_constraints};
-use super::tiles::LayoutRoot;
+use super::groups::LayoutRoot;
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
@@ -117,7 +117,7 @@ pub struct StackLayoutSystem {
 
 #[derive(Deserialize)]
 struct LegacyStackForest {
-    #[serde(deserialize_with = "super::tiles::deserialize_tile_tree")]
+    #[serde(deserialize_with = "super::groups::deserialize_tile_tree")]
     tree: Tree,
     layout_roots: Vec<super::SavedSlot<LayoutRoot>>,
 }
@@ -838,7 +838,7 @@ mod tests {
         }
         inner.focus(layout, Focus::Select(w(2))).handled;
         inner.edit(layout, LayoutEdit::Fullscreen { within_gaps: true }).into_windows();
-        let expected = inner.container_tree(layout);
+        let expected = inner.tiles.container_tree(layout);
         let legacy = Legacy {
             inner: &inner,
             default_orientation: StackDefaultOrientation::Horizontal,

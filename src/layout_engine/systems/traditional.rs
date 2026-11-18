@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
-use super::tiles::TileLayouts;
+use super::groups::GroupLayouts;
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
@@ -13,7 +13,7 @@ use crate::model::tree::{NodeId, Placement};
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(transparent)]
 pub struct TraditionalLayoutSystem {
-    pub(super) tiles: TileLayouts,
+    pub(super) tiles: GroupLayouts,
     #[serde(skip)]
     window_insertion_point: WindowInsertionPoint,
     #[serde(skip)]
@@ -27,7 +27,7 @@ impl Default for TraditionalLayoutSystem {
 impl TraditionalLayoutSystem {
     pub fn new(window_insertion_point: WindowInsertionPoint, equalize_nodes: bool) -> Self {
         Self {
-            tiles: TileLayouts::default(),
+            tiles: GroupLayouts::default(),
             window_insertion_point,
             equalize_nodes,
         }
@@ -45,23 +45,15 @@ impl TraditionalLayoutSystem {
         selection: NodeId,
         wid: WindowId,
     ) -> NodeId {
-        let parent = selection.parent(self.tiles.map());
-
-        if let Some(parent) = parent {
-            let parent_layout = self.tiles.layout(parent);
-            let sibling_count = parent.children(self.tiles.map()).count();
-
-            if sibling_count >= 4 && !parent_layout.is_group() {
-                let sub_container =
-                    self.tiles.nest_in_container_internal(layout, selection, parent_layout);
-                let node = self.tiles.tree.insert(Placement::Back(sub_container));
-                self.split_new_sibling_from_selection(selection, node);
-                self.tiles.tree.window.set_window(&mut self.tiles.tree.map, layout, node, wid);
-                return node;
+        let mut placement = Placement::After(selection);
+        if let Some(parent) = selection.parent(self.tiles.map()) {
+            let kind = self.tiles.layout(parent);
+            if !kind.is_group() && parent.children(self.tiles.map()).nth(3).is_some() {
+                placement =
+                    Placement::Back(self.tiles.nest_in_container_internal(layout, selection, kind));
             }
         }
-
-        let node = self.tiles.tree.insert(Placement::After(selection));
+        let node = self.tiles.tree.insert(placement);
         self.split_new_sibling_from_selection(selection, node);
         self.tiles.tree.window.set_window(&mut self.tiles.tree.map, layout, node, wid);
         node
@@ -247,7 +239,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
         stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
         let root = self.tiles.root(layout);
-        self.tiles.project(
+        super::tiles::project(
+            &self.tiles,
             root,
             |_| root,
             screen,
@@ -292,40 +285,60 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn update(&mut self, change: WindowChange<'_>) {
         match change {
-            WindowChange::Add(layout, window, Some(direction)) => {
-                let wid = window;
-
-                let mut root = self.tiles.root(layout);
-                if root.children(self.tiles.map()).next().is_some()
-                    && (self.tiles.layout(root).is_stacked()
-                        || self.tiles.layout(root).orientation() != direction.orientation())
-                {
-                    root = self.tiles.nest_in_container_internal(
-                        layout,
-                        root,
-                        LayoutKind::from(direction.orientation()),
-                    );
+            WindowChange::Add(layout, window, direction) => {
+                if self.tiles.contains_window(layout, window) {
+                    return;
                 }
-                self.tiles.tree.map.set_kind(root, LayoutKind::from(direction.orientation()));
-                let node = self.tiles.add_window_under(layout, root, wid);
-                if matches!(direction, Direction::Right | Direction::Down) {
-                    if let Some(first) =
-                        root.first_child(self.tiles.map()).filter(|&first| first != node)
-                    {
-                        self.tiles.tree.move_node(node, Placement::Before(first));
-                    }
+                let Some(direction) = direction else {
+                    self.add_window_after_selection(layout, window);
+                    return;
+                };
+                let mut root = self.tiles.root(layout);
+                let kind = LayoutKind::from(direction.orientation());
+                let current = self.tiles.layout(root);
+                if !root.is_empty(self.tiles.map())
+                    && (current.is_stacked() || current.orientation() != kind.orientation())
+                {
+                    root = self.tiles.nest_in_container_internal(layout, root, kind);
+                }
+                self.tiles.set_layout(root, kind);
+                let node = self.tiles.add_window_under(layout, root, window);
+                if matches!(direction, Direction::Right | Direction::Down)
+                    && let Some(first) = root.first_child(self.tiles.map())
+                {
+                    self.tiles.tree.move_node(node, Placement::Before(first));
                 }
                 self.tiles.select(node);
-            }
-            WindowChange::Add(layout, window, None) => {
-                self.add_window_after_selection(layout, window)
             }
             WindowChange::Reconcile(layout, pid, desired) => {
                 for wid in self.tiles.reconcile_windows(layout, pid, desired) {
                     self.add_window_after_selection(layout, wid);
                 }
             }
-            _ => self.tiles.update_existing(change),
+            WindowChange::Remove(window) => self.tiles.remove_window(window),
+            WindowChange::RemoveAndRebalance(window) => {
+                super::tiles::remove_and_rebalance(&mut self.tiles, window)
+            }
+            WindowChange::Replace(from, to) => self.tiles.replace_window(from, to),
+            WindowChange::CloseApp(pid) => self.tiles.close_app(pid),
+            WindowChange::Resize {
+                layout,
+                window,
+                old,
+                new,
+                screen,
+                gaps,
+            } => {
+                super::tiles::resize_window(
+                    &mut self.tiles,
+                    layout,
+                    window,
+                    old,
+                    new,
+                    screen,
+                    gaps,
+                );
+            }
         }
     }
 
@@ -349,11 +362,16 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 EditResult::from(self.tiles.move_stack_tab(layout, window, target))
             }
             LayoutEdit::Drop { source, target, action } => {
-                EditResult::from(self.apply_target_drop(layout, source, target, action))
+                EditResult::from(super::tiles::apply_explicit_window_drop(
+                    &mut self.tiles,
+                    layout,
+                    source,
+                    target,
+                    action,
+                ))
             }
             LayoutEdit::Group(GroupEdit::Join(direction)) => {
-                self.join_selection_with_direction(layout, direction);
-                EditResult::Changed
+                EditResult::from(self.join_selection_with_direction(layout, direction))
             }
             LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
                 let selection = self.tiles.selection(layout);
@@ -362,12 +380,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
                     .and_then(|parent| parent.parent(self.tiles.map()))
                     .is_some();
 
-                if is_joined {
-                    self.unjoin_selection(layout);
+                EditResult::from(if is_joined {
+                    self.unjoin_selection(layout)
                 } else {
-                    self.join_selection_with_direction(layout, direction);
-                };
-                EditResult::Changed
+                    self.join_selection_with_direction(layout, direction)
+                })
             }
             LayoutEdit::Group(GroupEdit::Stack(orientation)) => EditResult::Raise(
                 self.tiles.apply_stacking_to_parent_of_selection(layout, orientation),
@@ -375,17 +392,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
             LayoutEdit::Group(GroupEdit::Unstack(orientation)) => {
                 EditResult::Raise(self.tiles.unstack_parent_of_selection(layout, orientation))
             }
-            LayoutEdit::Group(GroupEdit::Unjoin) => {
-                self.unjoin_selection(layout);
-                EditResult::Changed
-            }
+            LayoutEdit::Group(GroupEdit::Unjoin) => EditResult::from(self.unjoin_selection(layout)),
             LayoutEdit::Resize { amount, orientation } => {
-                self.tiles.resize_selection(layout, amount, orientation)
+                super::tiles::resize_selection(&mut self.tiles, layout, amount, orientation)
             }
             LayoutEdit::Rebalance => {
                 let root = self.tiles.root(layout);
-                self.tiles.rebalance_node(root);
-                EditResult::Changed
+                EditResult::from(super::tiles::rebalance(&mut self.tiles.tree.map, root))
             }
             LayoutEdit::ToggleOrientation => self.tiles.toggle_orientation(layout),
         }
@@ -414,8 +427,7 @@ impl TraditionalLayoutSystem {
                 self.tiles.add_window_under(layout, selection, wid)
             }
         } else {
-            let node = self.smart_window_insertion(layout, selection, wid);
-            node
+            self.smart_window_insertion(layout, selection, wid)
         };
         self.tiles.select(node);
     }
@@ -434,95 +446,94 @@ impl TraditionalLayoutSystem {
         {
             return false;
         }
-        {
-            if !self.tiles.inactive.is_empty()
-                && self.tiles.find_best_focus_target(self.tiles.root(layout)).is_none()
-            {
-                return false;
-            }
-            let selection = self.tiles.selection(layout);
-            self.move_node(layout, selection, direction)
+        if !self.tiles.inactive.is_empty() && self.tiles.focused_leaf(layout).is_none() {
+            return false;
         }
+        self.move_node(layout, selection, direction)
     }
 
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
+    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
         if !self.tiles.inactive.is_empty()
             && self.tiles.find_best_focus_target(self.tiles.root(layout)).is_none()
         {
-            return;
+            return false;
         }
         let mut selection = self.tiles.selection(layout);
 
-        if let Some(target) = self.find_natural_join_target(selection, direction) {
-            let map = self.tiles.map();
+        let Some(target) = self.find_natural_join_target(selection, direction) else {
+            return false;
+        };
+        let map = self.tiles.map();
 
-            // If the selection is a leaf at the edge of a container that matches the direction,
-            // lift the selection to that container so we can merge whole groups.
-            if let Some(parent) = selection.parent(map) {
-                let parent_layout = self.tiles.layout(parent);
-                let is_edge = match direction {
-                    Direction::Right | Direction::Down => selection.next_sibling(map).is_none(),
-                    Direction::Left | Direction::Up => selection.prev_sibling(map).is_none(),
-                };
+        // If the selection is a leaf at the edge of a container that matches the direction,
+        // lift the selection to that container so we can merge whole groups.
+        if let Some(parent) = selection.parent(map) {
+            let parent_layout = self.tiles.layout(parent);
+            let is_edge = match direction {
+                Direction::Right | Direction::Down => selection.next_sibling(map).is_none(),
+                Direction::Left | Direction::Up => selection.prev_sibling(map).is_none(),
+            };
 
-                if parent_layout.orientation() == direction.orientation()
-                    && !parent_layout.is_group()
-                    && (is_edge || parent.children(map).count() == 2)
-                    && target.parent(map) != Some(parent)
-                    && !target.ancestors(map).any(|a| a == parent)
-                {
-                    selection = parent;
-                }
-            }
-
-            // If the selection is now a container that matches the join orientation,
-            // absorb the target into it to avoid creating an extra nesting layer.
-            let selection_layout = self.tiles.layout(selection);
-            let target_is_ancestor = target.ancestors(map).any(|a| a == selection);
-            let selection_is_ancestor = selection.ancestors(map).any(|a| a == target);
-            if self.tiles.window_at(selection).is_none()
-                && selection_layout.orientation() == direction.orientation()
-                && !selection_layout.is_group()
-                && !target_is_ancestor
-                && !selection_is_ancestor
-                && target.parent(map) != Some(selection)
+            if parent_layout.orientation() == direction.orientation()
+                && !parent_layout.is_group()
+                && (is_edge || parent.children(map).count() == 2)
+                && target.parent(map) != Some(parent)
+                && !target.ancestors(map).any(|a| a == parent)
             {
-                match direction {
-                    Direction::Right | Direction::Down => {
-                        self.tiles.tree.move_node(target, Placement::Back(selection));
-                    }
-                    Direction::Left | Direction::Up => {
-                        if let Some(first) = selection.first_child(map) {
-                            self.tiles.tree.move_node(target, Placement::Before(first));
-                        } else {
-                            self.tiles.tree.move_node(target, Placement::Back(selection));
-                        }
-                    }
-                }
-                self.tiles.select(selection);
-                return;
-            }
-
-            self.perform_natural_join(selection, target, direction);
-            if self.tiles.tree.map.window(selection).is_some() {
-                self.tiles.select(selection);
-            } else {
-                let _ = self.tiles.descend_selection(layout);
+                selection = parent;
             }
         }
+
+        // If the selection is now a container that matches the join orientation,
+        // absorb the target into it to avoid creating an extra nesting layer.
+        let selection_layout = self.tiles.layout(selection);
+        let target_is_ancestor = target.ancestors(map).any(|a| a == selection);
+        let selection_is_ancestor = selection.ancestors(map).any(|a| a == target);
+        if self.tiles.window_at(selection).is_none()
+            && selection_layout.orientation() == direction.orientation()
+            && !selection_layout.is_group()
+            && !target_is_ancestor
+            && !selection_is_ancestor
+            && target.parent(map) != Some(selection)
+        {
+            match direction {
+                Direction::Right | Direction::Down => {
+                    self.tiles.tree.move_node(target, Placement::Back(selection));
+                }
+                Direction::Left | Direction::Up => {
+                    if let Some(first) = selection.first_child(map) {
+                        self.tiles.tree.move_node(target, Placement::Before(first));
+                    } else {
+                        self.tiles.tree.move_node(target, Placement::Back(selection));
+                    }
+                }
+            }
+            self.tiles.select(selection);
+            return true;
+        }
+
+        self.perform_natural_join(selection, target, direction);
+        if self.tiles.tree.map.window(selection).is_some() {
+            self.tiles.select(selection);
+        } else {
+            let _ = self.tiles.descend_selection(layout);
+        }
+        true
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) {
+    fn unjoin_selection(&mut self, layout: LayoutId) -> bool {
         if !self.tiles.inactive.is_empty()
             && self.tiles.find_best_focus_target(self.tiles.root(layout)).is_none()
         {
-            return;
+            return false;
         }
         let map = &self.tiles.tree.map;
         let Some(parent) = self.tiles.selection(layout).parent(map) else {
-            return;
+            return false;
         };
-        let Some(grandparent) = parent.parent(map) else { return };
+        let Some(grandparent) = parent.parent(map) else {
+            return false;
+        };
 
         let local_selected_child = self.tiles.tree.map.local_selection(parent);
         let next_sibling = parent.next_sibling(map);
@@ -554,23 +565,9 @@ impl TraditionalLayoutSystem {
         {
             self.tiles.select(selected);
         }
+        true
     }
 
-    fn apply_target_drop(
-        &mut self,
-        layout: LayoutId,
-        source: WindowId,
-        target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
-    ) -> bool {
-        if !self.tiles.window_participates(source) || !self.tiles.window_participates(target) {
-            return false;
-        }
-        self.tiles.apply_explicit_window_drop(layout, source, target, action)
-    }
-}
-
-impl TraditionalLayoutSystem {
     fn split_new_sibling_from_selection(&mut self, selection: NodeId, new_sibling: NodeId) {
         let map = &self.tiles.tree.map;
         let Some(parent) = selection.parent(map) else {
@@ -718,19 +715,6 @@ impl TraditionalLayoutSystem {
     }
 }
 
-impl TraditionalLayoutSystem {
-    pub(crate) fn draw_tree(&self, layout: LayoutId) -> String {
-        self.tiles.draw_tree(layout, None)
-    }
-
-    pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
-        self.tiles.container_tree(layout)
-    }
-
-    pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        self.tiles.window_slot(layout, window)
-    }
-}
 #[cfg(test)]
 mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -745,9 +729,9 @@ mod tests {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
         system.update(WindowChange::Add(layout, w(1), None));
-        let before = system.container_tree(layout);
+        let before = system.tiles.container_tree(layout);
         assert!(!system.edit(layout, LayoutEdit::Transfer(layout)).changed());
-        assert_eq!(system.container_tree(layout), before);
+        assert_eq!(system.tiles.container_tree(layout), before);
         assert_eq!(system.selected_window(layout), Some(w(1)));
     }
 

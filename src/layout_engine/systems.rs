@@ -423,6 +423,7 @@ pub(super) fn node_slot(
     Some(path)
 }
 
+mod groups;
 mod tiles;
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
@@ -513,7 +514,7 @@ mod tests {
         let layout = traditional.create_layout();
         traditional.update(WindowChange::Add(layout, w(1), None));
         traditional.update(WindowChange::Add(layout, w(2), None));
-        let tree = traditional.container_tree(layout);
+        let tree = traditional.tiles.container_tree(layout);
         assert_eq!(tree.node_type, rift_protocol::ContainerNodeType::Container);
         assert_eq!(window_nodes(&tree).len(), 2);
         assert_eq!(
@@ -521,7 +522,7 @@ mod tests {
             1
         );
         traditional.focus(layout, Focus::Select(w(1))).handled;
-        assert_stable_unique_ids(&tree, &traditional.container_tree(layout));
+        assert_stable_unique_ids(&tree, &traditional.tiles.container_tree(layout));
 
         let mut bsp = BspLayoutSystem::default();
         let layout = bsp.create_layout();
@@ -737,34 +738,34 @@ mod participation_tests {
 impl LayoutSystemKind {
     pub fn draw_tree(&self, layout: LayoutId) -> String {
         match self {
-            Self::Traditional(system) => system.draw_tree(layout),
+            Self::Traditional(system) => system.tiles.draw_tree(layout, &[]),
             Self::Bsp(system) => system.draw_tree(layout),
             Self::Stack(system) => system.draw_tree(layout),
             Self::MasterStack(system) => system.draw_tree(layout),
             Self::Scrolling(system) => system.draw_tree(layout),
-            Self::Floating(system) => system.draw_tree(layout),
+            Self::Floating(system) => system.groups.draw_tree(layout, &[]),
         }
     }
 
     pub fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         match self {
-            Self::Traditional(system) => system.container_tree(layout),
+            Self::Traditional(system) => system.tiles.container_tree(layout),
             Self::Bsp(system) => system.container_tree(layout),
             Self::Stack(system) => system.container_tree(layout),
             Self::MasterStack(system) => system.container_tree(layout),
             Self::Scrolling(system) => system.container_tree(layout),
-            Self::Floating(system) => system.container_tree(layout),
+            Self::Floating(system) => system.groups.container_tree(layout),
         }
     }
 
     pub fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
         match self {
-            Self::Traditional(system) => system.window_slot(layout, window),
+            Self::Traditional(system) => system.tiles.window_slot(layout, window),
             Self::Bsp(system) => system.window_slot(layout, window),
             Self::Stack(system) => system.window_slot(layout, window),
-            Self::MasterStack(system) => system.window_slot(layout, window),
+            Self::MasterStack(system) => system.tiles.window_slot(layout, window),
             Self::Scrolling(system) => system.window_slot(layout, window),
-            Self::Floating(system) => system.window_slot(layout, window),
+            Self::Floating(system) => system.groups.window_slot(layout, window),
         }
     }
 }
@@ -780,7 +781,8 @@ impl LayoutSystemKind {
         selection_path_only: bool,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         match self {
-            LayoutSystemKind::Traditional(s) => s.tiles.collect_group_containers(
+            LayoutSystemKind::Traditional(s) => tiles::collect_group_containers(
+                &s.tiles,
                 layout_id,
                 screen,
                 stack_offset,

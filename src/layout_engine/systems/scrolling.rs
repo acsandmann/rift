@@ -263,6 +263,7 @@ struct Geometry {
     tiling: CGRect,
     gaps: GapSettings,
     constraints: HashMap<WindowId, WindowLayoutConstraints>,
+    constraint_revision: Option<u64>,
     columns: Vec<ColumnGeometry>,
     frames: Vec<(WindowId, CGRect)>,
     bounds: (f64, f64),
@@ -416,6 +417,7 @@ impl Geometry {
         inactive: &HashSet<WindowId>,
         screen: CGRect,
         constraints: HashMap<WindowId, WindowLayoutConstraints>,
+        constraint_revision: Option<u64>,
         gaps: GapSettings,
     ) -> Self {
         let tiling = compute_tiling_area(screen, &gaps);
@@ -519,6 +521,7 @@ impl Geometry {
             tiling,
             gaps,
             constraints,
+            constraint_revision,
             columns,
             frames,
             bounds: (0.0, 0.0),
@@ -537,13 +540,24 @@ impl Geometry {
         geometry
     }
 
-    fn matches(
+    fn same_projected_constraints(
         &self,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &GapSettings,
+        current: &HashMap<WindowId, WindowLayoutConstraints>,
     ) -> bool {
-        self.screen == screen && self.constraints == *constraints && self.gaps == *gaps
+        self.frames
+            .iter()
+            .all(|(window, _)| self.constraints.get(window) == current.get(window))
+    }
+
+    fn has_constraints(
+        &self,
+        current: &HashMap<WindowId, WindowLayoutConstraints>,
+        revision: Option<u64>,
+    ) -> bool {
+        match (self.constraint_revision, revision) {
+            (Some(saved), Some(current)) => saved == current,
+            _ => self.constraints == *current,
+        }
     }
 
     fn column(&self, id: ColumnId) -> Option<ColumnGeometry> {
@@ -994,9 +1008,22 @@ impl LayoutState {
         inactive: &HashSet<WindowId>,
         screen: CGRect,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        revision: Option<u64>,
         gaps: &GapSettings,
     ) {
-        if self.geometry.as_ref().is_some_and(|g| g.matches(screen, constraints, gaps)) {
+        let same_constraints =
+            self.geometry.as_ref().is_some_and(|g| g.has_constraints(constraints, revision));
+        if let Some(g) = self.geometry.as_mut()
+            && g.screen == screen
+            && g.gaps == *gaps
+            && (same_constraints
+                || (!settings.preserve_window_sizes && g.same_projected_constraints(constraints)))
+        {
+            if !same_constraints {
+                // Edits may introduce a member before the next engine projection.
+                g.constraints.clone_from(constraints);
+            }
+            g.constraint_revision = revision;
             return;
         }
         let bookmark = self.camera.restored_view.take().or_else(|| self.bookmark());
@@ -1022,12 +1049,17 @@ impl LayoutState {
                 }
             }
         }
+        let mut snapshot = self.geometry.take().map(|g| g.constraints).unwrap_or_default();
+        if !same_constraints {
+            snapshot.clone_from(constraints);
+        }
         self.geometry = Some(Geometry::build(
             self,
             settings,
             inactive,
             screen,
-            constraints.clone(),
+            snapshot,
+            revision,
             gaps.clone(),
         ));
         if let Some(bookmark) = bookmark
@@ -1143,6 +1175,7 @@ impl LayoutState {
                 inactive,
                 old.screen,
                 old.constraints,
+                old.constraint_revision,
                 old.gaps,
             ));
             let anchor = window
@@ -1281,18 +1314,45 @@ impl ScrollingLayoutSystem {
         }
     }
 
+    pub(crate) fn prepare(
+        &mut self,
+        layout: LayoutId,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        revision: Option<u64>,
+        gaps: &GapSettings,
+    ) {
+        if let Some(state) = self.layouts.get_mut(layout) {
+            state.prepare_geometry(
+                &self.settings,
+                &self.inactive,
+                screen,
+                constraints,
+                revision,
+                gaps,
+            );
+        }
+    }
+
     pub(crate) fn calculate_frames(
         &self,
         layout: LayoutId,
         screen: CGRect,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        revision: Option<u64>,
         gaps: &GapSettings,
         park: bool,
     ) -> Vec<(WindowId, CGRect)> {
         let Some(state) = self.layouts.get(layout) else {
             return Vec::new();
         };
-        if let Some(g) = state.geometry.as_ref().filter(|g| g.matches(screen, constraints, gaps)) {
+        if let Some(g) = &state.geometry
+            && g.screen == screen
+            && g.gaps == *gaps
+            && (g.has_constraints(constraints, revision)
+                || (!self.settings.preserve_window_sizes
+                    && g.same_projected_constraints(constraints)))
+        {
             return Self::translate_frames(state, g, park).collect();
         }
         let mut camera = state.camera.clone();
@@ -1302,7 +1362,14 @@ impl ScrollingLayoutSystem {
             camera,
             geometry: None,
         };
-        fallback.prepare_geometry(&self.settings, &self.inactive, screen, constraints, gaps);
+        fallback.prepare_geometry(
+            &self.settings,
+            &self.inactive,
+            screen,
+            constraints,
+            revision,
+            gaps,
+        );
         Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park).collect()
     }
 
@@ -1757,10 +1824,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &GapSettings,
     ) {
-        let Some(state) = self.layouts.get_mut(layout) else {
-            return;
-        };
-        state.prepare_geometry(&self.settings, &self.inactive, screen, constraints, gaps);
+        self.prepare(layout, screen, constraints, None, gaps);
     }
 
     fn calculate_layout(
@@ -1772,7 +1836,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         gaps: &GapSettings,
         _stack_line: crate::common::config::StackLineReserve,
     ) -> Vec<(WindowId, CGRect)> {
-        self.calculate_frames(layout, screen, constraints, gaps, true)
+        self.calculate_frames(layout, screen, constraints, None, gaps, true)
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -1991,19 +2055,17 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 EditResult::from(self.apply_target_drop(layout, source, target, action))
             }
             LayoutEdit::Group(GroupEdit::Join(direction)) => {
-                self.join_selection_with_direction(layout, direction);
-                EditResult::Changed
+                EditResult::from(self.join_selection_with_direction(layout, direction))
             }
             LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)) => {
                 if !matches!(direction, Direction::Left | Direction::Right) {
                     return EditResult::Unchanged;
                 }
-                if self.parent_of_selection_is_stacked(layout) {
-                    self.move_selection(layout, direction);
+                EditResult::from(if self.parent_of_selection_is_stacked(layout) {
+                    self.move_selection(layout, direction)
                 } else {
-                    self.join_selection_with_direction(layout, direction);
-                };
-                EditResult::Changed
+                    self.join_selection_with_direction(layout, direction)
+                })
             }
             LayoutEdit::Group(GroupEdit::Stack(orientation)) => EditResult::Raise({
                 let _orientation = orientation;
@@ -2057,12 +2119,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 });
                 moved
             }),
-            LayoutEdit::Group(GroupEdit::Unjoin) => {
-                if self.parent_of_selection_is_stacked(layout) {
-                    self.move_selection(layout, Direction::Right);
-                };
-                EditResult::Changed
-            }
+            LayoutEdit::Group(GroupEdit::Unjoin) => EditResult::from(
+                self.parent_of_selection_is_stacked(layout)
+                    && self.move_selection(layout, Direction::Right),
+            ),
             LayoutEdit::Resize { amount, orientation } => {
                 if !amount.is_finite() {
                     return EditResult::Unchanged;
@@ -2312,17 +2372,17 @@ impl ScrollingLayoutSystem {
         true
     }
 
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
+    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) -> bool {
         if !matches!(direction, Direction::Left | Direction::Right) {
-            return;
+            return false;
         }
         let Some(target) = self.window_in_direction(layout, direction) else {
-            return;
+            return false;
         };
         let Some(source) = self.selected_window(layout) else {
-            return;
+            return false;
         };
-        self.apply_target_drop(layout, source, target, WindowDropAction::Stack);
+        self.apply_target_drop(layout, source, target, WindowDropAction::Stack)
     }
 }
 
@@ -2364,27 +2424,31 @@ impl ScrollingLayoutSystem {
 
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         let state = self.layouts.get(layout).expect("unknown scrolling layout");
+        let selected = state.arrangement.selected(&self.inactive);
         let children = state
             .arrangement
             .columns
             .iter()
             .map(|column| {
                 let windows = column
-                    .windows()
-                    .enumerate()
-                    .map(|(index, &window)| rift_protocol::ContainerTreeNode {
-                        node_id: (((window.pid as u32 as u64) << 32) | u64::from(window.idx.get()))
+                    .rows
+                    .iter()
+                    .map(|&Row { window, height }| {
+                        let fullscreen = state.arrangement.fullscreen.get(&window);
+                        rift_protocol::ContainerTreeNode {
+                            node_id: (((window.pid as u32 as u64) << 32)
+                                | u64::from(window.idx.get()))
                             .rotate_left(1)
-                            | 1,
-                        node_type: rift_protocol::ContainerNodeType::Window,
-                        weight: Some(column.rows[index].height),
-                        window_id: Some(window.into()),
-                        is_selected: state.arrangement.selected(&self.inactive) == Some(window),
-                        is_fullscreen: state.arrangement.fullscreen.get(&window)
-                            == Some(&FullscreenMode::Screen),
-                        is_fullscreen_within_gaps: state.arrangement.fullscreen.get(&window)
-                            == Some(&FullscreenMode::WithinGaps),
-                        ..Default::default()
+                                | 1,
+                            node_type: rift_protocol::ContainerNodeType::Window,
+                            weight: Some(height),
+                            window_id: Some(window.into()),
+                            is_selected: selected == Some(window),
+                            is_fullscreen: fullscreen == Some(&FullscreenMode::Screen),
+                            is_fullscreen_within_gaps: fullscreen
+                                == Some(&FullscreenMode::WithinGaps),
+                            ..Default::default()
+                        }
                     })
                     .collect();
                 rift_protocol::ContainerTreeNode {
@@ -2479,6 +2543,7 @@ pub(crate) mod tests {
                 self.layout,
                 self.screen,
                 &self.constraints,
+                None,
                 &self.gaps,
                 false,
             )
@@ -2615,7 +2680,7 @@ pub(crate) mod tests {
         f.system.center_selected_column(clone);
         let old_x = f
             .system
-            .calculate_frames(clone, f.screen, &f.constraints, &f.gaps, false)
+            .calculate_frames(clone, f.screen, &f.constraints, None, &f.gaps, false)
             .into_iter()
             .find(|(w, _)| *w == wid(3))
             .unwrap()
@@ -2628,7 +2693,7 @@ pub(crate) mod tests {
         let wider = CGRect::new(CGPoint::ZERO, CGSize::new(1600.0, 800.0));
         resized_restore.prepare_layout(clone, wider, &f.constraints, &f.gaps);
         let new_x = resized_restore
-            .calculate_frames(clone, wider, &f.constraints, &f.gaps, false)
+            .calculate_frames(clone, wider, &f.constraints, None, &f.gaps, false)
             .into_iter()
             .find(|(w, _)| *w == wid(3))
             .unwrap()

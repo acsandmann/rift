@@ -1827,80 +1827,53 @@ impl BspLayoutSystem {
                 })
             });
 
-            match system.kind(node) {
-                Some(NodeKind::Split { orientation, .. }) => rift_protocol::ContainerTreeNode {
-                    node_id: node.data().as_ffi(),
-                    node_type: rift_protocol::ContainerNodeType::Container,
-                    frame: Default::default(),
-                    layout_kind: Some(rift_protocol::LayoutKind::from(*orientation)),
-                    weight,
-                    window_id: None,
-                    is_selected: node == selected,
-                    is_fullscreen: false,
-                    is_fullscreen_within_gaps: false,
-                    role: None,
-                    pending_split: None,
-                    children: system
-                        .child_iter(node)
-                        .map(|child| snapshot(system, child, selected))
-                        .collect(),
-                },
-                Some(NodeKind::Leaf {
-                    members: occupancy,
+            use rift_protocol::{ContainerNodeType, ContainerTreeNode, LayoutKind};
+            let mut result = ContainerTreeNode {
+                node_id: node.data().as_ffi(),
+                is_selected: node == selected,
+                weight,
+                ..Default::default()
+            };
+            match system.kind(node).expect("BSP layout contains a node without metadata") {
+                NodeKind::Split { orientation, children, .. } => {
+                    result.layout_kind = Some(LayoutKind::from(*orientation));
+                    result.children =
+                        children.iter().map(|&child| snapshot(system, child, selected)).collect();
+                }
+                NodeKind::Leaf {
+                    members,
                     fullscreen,
                     fullscreen_within_gaps,
                     preselected,
-                    ..
-                }) => {
-                    let window = occupancy.active();
-                    let members = system.stack(node);
-                    let stacked = members.is_some();
-                    rift_protocol::ContainerTreeNode {
-                        node_id: node.data().as_ffi(),
-                        node_type: if stacked {
-                            rift_protocol::ContainerNodeType::Container
-                        } else if window.is_some() {
-                            rift_protocol::ContainerNodeType::Window
-                        } else {
-                            rift_protocol::ContainerNodeType::Placeholder
-                        },
-                        frame: Default::default(),
-                        layout_kind: stacked.then_some(rift_protocol::LayoutKind::HorizontalStack),
-                        weight,
-                        window_id: if stacked {
-                            None
-                        } else {
-                            window.map(Into::into)
-                        },
-                        is_selected: node == selected,
-                        is_fullscreen: *fullscreen,
-                        is_fullscreen_within_gaps: *fullscreen_within_gaps,
-                        role: None,
-                        pending_split: preselected.map(Into::into),
-                        children: members.map_or_else(Vec::new, |members| {
-                            members
-                                .iter()
-                                .map(|member| rift_protocol::ContainerTreeNode {
-                                    node_id: (u64::from(member.pid as u32) << 32)
-                                        | u64::from(member.idx.get()),
-                                    node_type: rift_protocol::ContainerNodeType::Window,
-                                    frame: Default::default(),
-                                    layout_kind: None,
-                                    weight: None,
-                                    window_id: Some((*member).into()),
-                                    is_selected: node == selected && window == Some(*member),
-                                    is_fullscreen: *fullscreen,
-                                    is_fullscreen_within_gaps: *fullscreen_within_gaps,
-                                    role: None,
-                                    pending_split: None,
-                                    children: Vec::new(),
-                                })
-                                .collect()
-                        }),
+                } => {
+                    let window = members.active();
+                    result.is_fullscreen = *fullscreen;
+                    result.is_fullscreen_within_gaps = *fullscreen_within_gaps;
+                    result.pending_split = preselected.map(Into::into);
+                    if let LeafMembers::Stack { windows, .. } = members {
+                        result.layout_kind = Some(LayoutKind::HorizontalStack);
+                        result.children = windows
+                            .iter()
+                            .map(|&member| ContainerTreeNode {
+                                node_id: (u64::from(member.pid as u32) << 32)
+                                    | u64::from(member.idx.get()),
+                                node_type: ContainerNodeType::Window,
+                                window_id: Some(member.into()),
+                                is_selected: result.is_selected && window == Some(member),
+                                is_fullscreen: *fullscreen,
+                                is_fullscreen_within_gaps: *fullscreen_within_gaps,
+                                ..Default::default()
+                            })
+                            .collect();
+                    } else if let Some(window) = window {
+                        result.node_type = ContainerNodeType::Window;
+                        result.window_id = Some(window.into());
+                    } else {
+                        result.node_type = ContainerNodeType::Placeholder;
                     }
                 }
-                None => unreachable!("BSP layout contains a node without metadata"),
             }
+            result
         }
 
         let state = self.layouts.get(layout).expect("unknown BSP layout");

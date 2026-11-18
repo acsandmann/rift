@@ -45,6 +45,7 @@ impl Tree {
 
     pub(crate) fn insert(&mut self, placement: Placement) -> NodeId {
         let parent = placement.parent(&self.map).expect("invalid tile insertion");
+        assert!(!self.map[parent].is_region_pair());
         let node = self.create_root();
         self.map[node].layout.size = 1.0;
         placement.link(node, parent, &mut self.map);
@@ -62,7 +63,11 @@ impl Tree {
         }
         let old_parent = node.parent(&self.map);
         let changed_parent = old_parent != Some(parent);
-        if changed_parent && parent.ancestors(&self.map).any(|ancestor| ancestor == node) {
+        if self.map[parent].is_region_pair()
+            || old_parent.is_some_and(|old| self.map[old].is_region_pair())
+            || self.map[node].is_region_pair()
+            || (changed_parent && parent.ancestors(&self.map).any(|ancestor| ancestor == node))
+        {
             return false;
         }
         if !changed_parent
@@ -89,8 +94,19 @@ impl Tree {
         true
     }
 
+    pub(crate) fn transfer(&mut self, node: NodeId, placement: Placement, to: LayoutId) -> bool {
+        if !self.move_node(node, placement) {
+            return false;
+        }
+        self.window.reassign_subtree(&self.map, node, to);
+        true
+    }
+
     pub(crate) fn remove(&mut self, node: NodeId) {
         if let Some(parent) = node.parent(&self.map) {
+            if self.map[parent].is_region_pair() {
+                return;
+            }
             self.detach(node, parent);
             self.prune_container(parent);
         }
@@ -104,23 +120,18 @@ impl Tree {
             return;
         }
 
-        // Preserve the remaining siblings' proportions with a mean weight of one.
-        let (count, total) =
-            parent.children(&self.map).fold((0, 0.0_f32), |(count, total), child| {
-                (count + 1, total + self.map[child].layout.size.max(0.0))
-            });
-        let scale = (total.is_finite() && total > f32::EPSILON).then(|| count as f32 / total);
-        let mut child = parent.first_child(&self.map);
-        while let Some(node) = child {
-            self.map[node].layout.size =
-                scale.map_or(1.0, |scale| self.map[node].layout.size * scale);
-            child = node.next_sibling(&self.map);
+        if !self.map.normalize_weights(parent) {
+            let mut child = parent.first_child(&self.map);
+            while let Some(node) = child {
+                self.map[node].layout.size = 1.0;
+                child = node.next_sibling(&self.map);
+            }
         }
     }
 
     fn prune_container(&mut self, mut node: NodeId) {
         while let Some(parent) = node.parent(&self.map) {
-            if self.map[node].layout.fixed_container {
+            if self.map[parent].is_region_pair() {
                 break;
             }
             if let Some(child) = node.first_child(&self.map) {
@@ -166,6 +177,16 @@ impl Tree {
                 stack.push((Some(child), old, new));
             }
         }
+        if let Contents::RegionPair { primary_first, .. } = self.map[source].contents {
+            let first = root.first_child(&self.map).unwrap();
+            let last = root.last_child(&self.map).unwrap();
+            let (primary, secondary) = if primary_first {
+                (first, last)
+            } else {
+                (last, first)
+            };
+            self.map.set_region_pair(root, primary, secondary);
+        }
         root
     }
 
@@ -189,6 +210,83 @@ pub struct NodeMap {
 }
 
 impl NodeMap {
+    pub(crate) fn set_region_pair(&mut self, root: NodeId, primary: NodeId, secondary: NodeId) {
+        let Contents::Container(children) = self[root].contents else {
+            panic!("expected an arrangement container");
+        };
+        let (Some(first), Some(last)) = (children.first, children.last) else {
+            panic!("expected two region containers");
+        };
+        assert!(root.parent(self).is_none() && first.next_sibling(self) == Some(last));
+        assert!(first != last && self.window(first).is_none() && self.window(last).is_none());
+        assert!([first, last] == [primary, secondary] || [first, last] == [secondary, primary]);
+        self[root].contents = Contents::RegionPair {
+            regions: [first, last],
+            selection: children.selection,
+            primary_first: first == primary,
+        };
+    }
+
+    pub(crate) fn region_pair(&self, root: NodeId) -> Option<(NodeId, NodeId)> {
+        let Contents::RegionPair {
+            regions: [first, last],
+            primary_first,
+            ..
+        } = self.map.get(root)?.contents
+        else {
+            return None;
+        };
+        Some(if primary_first {
+            (first, last)
+        } else {
+            (last, first)
+        })
+    }
+
+    pub(crate) fn set_primary_region_first(&mut self, root: NodeId, first: bool) {
+        let Contents::RegionPair {
+            regions,
+            selection,
+            primary_first,
+        } = self[root].contents
+        else {
+            unreachable!("expected a region pair");
+        };
+        if primary_first != first {
+            let [left, right] = regions;
+            self[right].prev_sibling = None;
+            self[right].next_sibling = Some(left);
+            self[left].prev_sibling = Some(right);
+            self[left].next_sibling = None;
+            self[root].contents = Contents::RegionPair {
+                regions: [right, left],
+                selection,
+                primary_first: first,
+            };
+        }
+    }
+
+    pub(crate) fn children_total(&self, parent: NodeId) -> f32 {
+        parent.children(self).map(|child| self[child].layout.size.max(0.0)).sum()
+    }
+
+    /// Preserve sibling proportions with a mean weight of one.
+    pub(crate) fn normalize_weights(&mut self, parent: NodeId) -> bool {
+        let (count, total) = parent.children(self).fold((0, 0.0_f32), |(count, total), child| {
+            (count + 1, total + self[child].layout.size.max(0.0))
+        });
+        if !total.is_finite() || total <= f32::EPSILON {
+            return false;
+        }
+        let scale = count as f32 / total;
+        let mut child = parent.first_child(self);
+        while let Some(node) = child {
+            self[node].layout.size *= scale;
+            child = node.next_sibling(self);
+        }
+        true
+    }
+
     pub fn capacity(&self) -> usize { self.map.capacity() }
 
     pub fn reserve(&mut self, additional: usize) { self.map.reserve(additional) }
@@ -274,6 +372,14 @@ impl NodeId {
             .or_else(|| self.parent(map))
     }
 
+    pub(crate) fn step(self, root: NodeId, map: &NodeMap, forward: bool) -> Option<NodeId> {
+        if forward {
+            self.next_in_subtree(root, map)
+        } else {
+            self.prev_in_subtree(root, map)
+        }
+    }
+
     pub fn last_descendant(mut self, map: &NodeMap) -> NodeId {
         while let Some(last) = self.last_child(map) {
             self = last;
@@ -344,8 +450,6 @@ impl NodeId {
 #[serde(rename_all = "snake_case")]
 pub(crate) struct LayoutInfo {
     pub(crate) size: f32,
-    #[serde(default)]
-    pub(crate) fixed_container: bool,
     pub(crate) kind: LayoutKind,
     #[serde(default)]
     pub(crate) is_fullscreen: bool,
@@ -366,6 +470,11 @@ pub struct Node {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Contents {
     Container(Children),
+    RegionPair {
+        regions: [NodeId; 2],
+        selection: Option<SelectionInfo>,
+        primary_first: bool,
+    },
     Window(WindowId),
 }
 
@@ -394,30 +503,43 @@ struct StoredNode {
     selection: Option<SelectionInfo>,
     #[serde(default)]
     window: Option<WindowId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    master_first: Option<bool>,
 }
 
 impl From<StoredNode> for Node {
     fn from(stored: StoredNode) -> Self {
+        let contents = match (
+            stored.window,
+            stored.master_first,
+            stored.first_child,
+            stored.last_child,
+        ) {
+            (Some(window), _, _, _) => Contents::Window(window),
+            (None, Some(primary_first), Some(first), Some(last)) => Contents::RegionPair {
+                regions: [first, last],
+                selection: stored.selection,
+                primary_first,
+            },
+            _ => Contents::Container(Children {
+                first: stored.first_child,
+                last: stored.last_child,
+                selection: stored.selection,
+            }),
+        };
         Self {
             parent: stored.parent,
             prev_sibling: stored.prev_sibling,
             next_sibling: stored.next_sibling,
             layout: stored.layout,
-            contents: stored.window.map_or(
-                Contents::Container(Children {
-                    first: stored.first_child,
-                    last: stored.last_child,
-                    selection: stored.selection,
-                }),
-                Contents::Window,
-            ),
+            contents,
         }
     }
 }
 
 impl From<Node> for StoredNode {
     fn from(node: Node) -> Self {
-        let children = node.children().copied().unwrap_or_default();
+        let children = node.children().unwrap_or_default();
         Self {
             parent: node.parent,
             prev_sibling: node.prev_sibling,
@@ -427,14 +549,29 @@ impl From<Node> for StoredNode {
             layout: node.layout,
             selection: children.selection,
             window: node.window(),
+            master_first: match node.contents {
+                Contents::RegionPair { primary_first, .. } => Some(primary_first),
+                _ => None,
+            },
         }
     }
 }
 
 impl Node {
-    fn children(&self) -> Option<&Children> {
-        match &self.contents {
+    fn is_region_pair(&self) -> bool { matches!(self.contents, Contents::RegionPair { .. }) }
+
+    fn children(&self) -> Option<Children> {
+        match self.contents {
             Contents::Container(children) => Some(children),
+            Contents::RegionPair {
+                regions: [first, last],
+                selection,
+                ..
+            } => Some(Children {
+                first: Some(first),
+                last: Some(last),
+                selection,
+            }),
             Contents::Window(_) => None,
         }
     }
@@ -442,14 +579,14 @@ impl Node {
     fn children_mut(&mut self) -> &mut Children {
         match &mut self.contents {
             Contents::Container(children) => children,
-            Contents::Window(_) => unreachable!("window cannot own children"),
+            _ => unreachable!("only regular containers accept structural edits"),
         }
     }
 
     fn window(&self) -> Option<WindowId> {
         match self.contents {
             Contents::Window(window) => Some(window),
-            Contents::Container(_) => None,
+            _ => None,
         }
     }
 
@@ -459,7 +596,11 @@ impl Node {
     }
 
     pub(crate) fn selection_mut(&mut self) -> &mut Option<SelectionInfo> {
-        &mut self.children_mut().selection
+        match &mut self.contents {
+            Contents::Container(children) => &mut children.selection,
+            Contents::RegionPair { selection, .. } => selection,
+            Contents::Window(_) => unreachable!("window cannot select a child"),
+        }
     }
 }
 
@@ -489,7 +630,7 @@ impl NodeMap {
     }
 
     #[track_caller]
-    pub(crate) fn unlink(&mut self, id: NodeId) {
+    fn unlink(&mut self, id: NodeId) {
         let Some(node) = self.map.get_mut(id) else { return };
         let prev = node.prev_sibling.take();
         let next = node.next_sibling.take();
@@ -643,8 +784,6 @@ mod tests {
             let child3 = tree.insert(Placement::Back(root));
 
             let gc1 = tree.insert(Placement::Back(child2));
-            tree.map[child1].layout.fixed_container = true;
-            tree.map[child2].layout.fixed_container = true;
             let other_root = tree.create_root();
 
             TestTree {
@@ -869,15 +1008,15 @@ mod tests {
         t.assert_children_are([t.child2], t.child1);
 
         t.tree.move_node(t.child2, Placement::After(t.child1));
-        t.assert_children_are([t.child1, t.child2, t.child3], t.root);
-        t.assert_children_are([], t.child1);
+        t.assert_children_are([t.child2, t.child3], t.root);
+        assert!(!t.tree.map.contains(t.child1));
 
         t.tree.move_node(t.child3, Placement::Back(t.child2));
-        t.assert_children_are([t.child1, t.child2], t.root);
+        t.assert_children_are([t.child2], t.root);
         t.assert_children_are([t.gc1, t.child3], t.child2);
 
         t.tree.move_node(t.child3, Placement::After(t.child2));
-        t.assert_children_are([t.child1, t.child2, t.child3], t.root);
-        t.assert_children_are([t.gc1], t.child2);
+        t.assert_children_are([t.gc1, t.child3], t.root);
+        assert!(!t.tree.map.contains(t.child2));
     }
 }
