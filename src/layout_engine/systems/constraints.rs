@@ -104,6 +104,23 @@ pub(super) fn traditional_leaf_axis_constraints(
     (min, fixed, max.or(fixed), can_grow)
 }
 
+/// A child fills its parent's cross axis and occupies a segment on the split axis.
+pub(super) fn axis_slot(
+    mut rect: objc2_core_foundation::CGRect,
+    horizontal: bool,
+    origin: f64,
+    length: f64,
+) -> objc2_core_foundation::CGRect {
+    if horizontal {
+        rect.origin.x = origin;
+        rect.size.width = length;
+    } else {
+        rect.origin.y = origin;
+        rect.size.height = length;
+    }
+    rect
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct AxisConstraints {
     pub min: f64,

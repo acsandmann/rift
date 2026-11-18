@@ -4,11 +4,11 @@ use crate::model::tree::{NodeId, NodeMap};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Selection {
-    nodes: slotmap::SecondaryMap<NodeId, SelectionInfo>,
+    pub(crate) nodes: slotmap::SecondaryMap<NodeId, SelectionInfo>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct SelectionInfo {
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SelectionInfo {
     selected_child: NodeId,
     stop_here: bool,
 }
@@ -28,36 +28,44 @@ impl Selection {
     pub fn last_selection(&self, node: NodeId) -> Option<NodeId> {
         self.nodes.get(node).map(|info| info.selected_child)
     }
+}
 
-    pub fn local_selection(&self, map: &NodeMap, node: NodeId) -> Option<NodeId> {
-        let result = self.nodes.get(node);
-        if let Some(result) = result {
-            debug_assert_eq!(result.selected_child.parent(map), Some(node));
+impl NodeMap {
+    pub(crate) fn current_selection(&self, mut node: NodeId) -> NodeId {
+        while let Some(info) = self.selection_info(node).filter(|info| !info.stop_here) {
+            node = info.selected_child;
         }
-        result.filter(|info| !info.stop_here).map(|info| info.selected_child)
+        node
     }
 
-    pub fn select_locally(&mut self, map: &NodeMap, node: NodeId) -> bool {
-        if let Some(parent) = node.parent(map) {
-            self.nodes
-                .insert(parent, SelectionInfo {
-                    selected_child: node,
-                    stop_here: false,
-                })
-                .map(|info| info.selected_child != node)
-                .unwrap_or(true)
-        } else {
-            false
-        }
+    pub(crate) fn last_selection(&self, node: NodeId) -> Option<NodeId> {
+        self.selection_info(node).map(|info| info.selected_child)
     }
 
-    pub fn select(&mut self, map: &NodeMap, selection: NodeId) {
-        if let Some(info) = self.nodes.get_mut(selection) {
+    pub(crate) fn local_selection(&self, node: NodeId) -> Option<NodeId> {
+        self.selection_info(node)
+            .filter(|info| !info.stop_here)
+            .map(|info| info.selected_child)
+    }
+
+    pub(crate) fn select_locally(&mut self, node: NodeId) -> bool {
+        let Some(parent) = node.parent(self) else { return false };
+        self[parent]
+            .selection
+            .replace(SelectionInfo {
+                selected_child: node,
+                stop_here: false,
+            })
+            .is_none_or(|info| info.selected_child != node)
+    }
+
+    pub(crate) fn select(&mut self, selection: NodeId) {
+        if let Some(info) = self[selection].selection.as_mut() {
             info.stop_here = true;
         }
         let mut node = selection;
-        while let Some(parent) = node.parent(map) {
-            self.nodes.insert(parent, SelectionInfo {
+        while let Some(parent) = node.parent(self) {
+            self[parent].selection = Some(SelectionInfo {
                 selected_child: node,
                 stop_here: false,
             });
@@ -65,29 +73,27 @@ impl Selection {
         }
     }
 
-    pub fn copy_branch(&mut self, map: &NodeMap, source: NodeId, destination: NodeId) {
-        let Some(info) = self.nodes.get(source) else { return };
-        let selected_child = std::iter::zip(source.children(map), destination.children(map))
-            .find_map(|(old, new)| (old == info.selected_child).then_some(new))
-            .expect("copied branches must have matching children");
-        self.nodes.insert(destination, SelectionInfo {
-            selected_child,
-            stop_here: info.stop_here,
-        });
-    }
-
-    pub fn detach(&mut self, map: &NodeMap, node: NodeId) {
-        let parent = node.parent(map).unwrap();
-        if let Some(info) = self.nodes.get_mut(parent)
-            && info.selected_child == node
-        {
-            if let Some(next) = node.next_sibling(map).or(node.prev_sibling(map)) {
-                info.selected_child = next;
-            } else {
-                self.nodes.remove(parent);
-            }
+    pub(crate) fn remap_child_selection(
+        &mut self,
+        source: NodeId,
+        destination: NodeId,
+        old_child: NodeId,
+        new_child: NodeId,
+    ) {
+        if let Some(info) = self[source].selection.filter(|info| info.selected_child == old_child) {
+            self[destination].selection = Some(SelectionInfo {
+                selected_child: new_child,
+                ..info
+            });
         }
     }
 
-    pub fn remove(&mut self, node: NodeId) { self.nodes.remove(node); }
+    pub(crate) fn detach_selection(&mut self, node: NodeId) {
+        let parent = node.parent(self).unwrap();
+        if let Some(info) = self[parent].selection.filter(|info| info.selected_child == node) {
+            let replacement = node.next_sibling(self).or_else(|| node.prev_sibling(self));
+            self[parent].selection =
+                replacement.map(|selected_child| SelectionInfo { selected_child, ..info });
+        }
+    }
 }

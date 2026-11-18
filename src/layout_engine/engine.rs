@@ -3897,7 +3897,6 @@ mod tests {
 
     #[test]
     fn move_node_crosses_display_edge_and_enters_at_near_edge() {
-        use crate::layout_engine::LayoutKind;
         for direction in [
             Direction::Left,
             Direction::Right,
@@ -3930,13 +3929,18 @@ mod tests {
                     else {
                         panic!("expected traditional layout");
                     };
-                    let root = system.root(layout);
-                    let kind = if stacked {
-                        LayoutKind::VerticalStack
-                    } else {
-                        LayoutKind::from(direction.orientation())
-                    };
-                    system.set_layout(root, kind);
+                    if stacked {
+                        system
+                            .edit(
+                                layout,
+                                LayoutEdit::Group(GroupEdit::Stack(
+                                    crate::common::config::StackDefaultOrientation::Vertical,
+                                )),
+                            )
+                            .discard();
+                    } else if matches!(direction, Direction::Up | Direction::Down) {
+                        assert!(system.edit(layout, LayoutEdit::ToggleOrientation).changed());
+                    }
                     // Select the far side on the destination, so selection-based insertion is wrong.
                     let selected = if space == source {
                         moving

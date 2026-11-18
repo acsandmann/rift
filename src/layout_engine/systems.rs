@@ -7,6 +7,18 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{GapSettings, StackDefaultOrientation};
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation, WindowDropAction};
 
+#[derive(Serialize, Deserialize)]
+struct SavedSlot<T> {
+    value: Option<T>,
+    version: u32,
+}
+
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
 slotmap::new_key_type! { pub struct LayoutId; }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -411,6 +423,7 @@ pub(super) fn node_slot(
     Some(path)
 }
 
+mod tiles;
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
@@ -767,7 +780,7 @@ impl LayoutSystemKind {
         selection_path_only: bool,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
         match self {
-            LayoutSystemKind::Traditional(s) => s.collect_group_containers(
+            LayoutSystemKind::Traditional(s) => s.tiles.collect_group_containers(
                 layout_id,
                 screen,
                 stack_offset,

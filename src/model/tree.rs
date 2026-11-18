@@ -3,24 +3,144 @@ use std::ops::{Index, IndexMut};
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
-/// N-ary tree.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Tree<O> {
+use crate::actor::app::{WindowId, pid_t};
+use crate::layout_engine::{LayoutId, LayoutKind};
+use crate::model::selection::SelectionInfo;
+
+/// Owns ordered tiles and an index of windows in each saved arrangement.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Tree {
     pub map: NodeMap,
-    pub data: O,
+    pub(crate) window: WindowIndex,
 }
 
-impl Tree<()> {
-    pub fn new() -> Self { Self::with_observer(()) }
+#[derive(Clone, Copy)]
+pub(crate) enum Placement {
+    Back(NodeId),
+    Before(NodeId),
+    After(NodeId),
 }
 
-impl<O: Observer> Tree<O> {
-    pub fn with_observer(data: O) -> Self { Tree { map: NodeMap::new(), data } }
+impl Tree {
+    pub(crate) fn create_root(&mut self) -> NodeId { self.map.map.insert(Node::default()) }
 
-    pub fn mk_node(&mut self) -> UnattachedNode<'_, O> {
-        let id = self.map.map.insert(Node::default());
-        self.data.added_to_forest(&self.map, id);
-        UnattachedNode { id, tree: self }
+    pub(crate) fn insert(&mut self, placement: Placement) -> NodeId {
+        let node = self.create_root();
+        self.map[node].layout.size = 1.0;
+        self.link(node, placement);
+        node
+    }
+
+    fn link(&mut self, node: NodeId, placement: Placement) {
+        match placement {
+            Placement::Back(parent) => node.link_under_back(parent, &mut self.map),
+            Placement::Before(sibling) => node.link_before(sibling, &mut self.map),
+            Placement::After(sibling) => node.link_after(sibling, &mut self.map),
+        }
+    }
+
+    pub(crate) fn move_node(&mut self, node: NodeId, placement: Placement) -> NodeId {
+        self.move_node_with(node, placement, |_, _| {})
+    }
+
+    pub(crate) fn move_node_with(
+        &mut self,
+        node: NodeId,
+        placement: Placement,
+        adjust: impl FnOnce(NodeId, &mut Self),
+    ) -> NodeId {
+        let parent = match placement {
+            Placement::Back(parent) => parent,
+            Placement::Before(sibling) | Placement::After(sibling) => {
+                sibling.parent(&self.map).expect("cannot make a sibling of a root")
+            }
+        };
+        let old_parent = node.parent(&self.map);
+        let changed_parent = old_parent != Some(parent);
+        if changed_parent && old_parent.is_some() {
+            self.prepare_detach(node);
+        }
+        self.map.unlink(node);
+        self.link(node, placement);
+        if changed_parent {
+            self.map[node].layout.size = 1.0;
+        }
+        adjust(node, self);
+        if let Some(old) = old_parent.filter(|_| changed_parent) {
+            self.prune_container(old);
+        }
+        node
+    }
+
+    pub(crate) fn remove(&mut self, node: NodeId) {
+        if let Some(parent) = node.parent(&self.map) {
+            self.prepare_detach(node);
+            self.map.unlink(node);
+            self.prune_container(parent);
+        }
+        self.delete_subtree(node);
+    }
+
+    fn prepare_detach(&mut self, node: NodeId) {
+        self.map.detach_selection(node);
+        if self.map.window(node).is_some() {
+            self.map.normalize_after_removal(node);
+        }
+    }
+
+    fn prune_container(&mut self, parent: NodeId) {
+        if parent.parent(&self.map).is_none() || self.map[parent].layout.fixed_container {
+            return;
+        }
+        match parent.first_child(&self.map) {
+            None => self.remove(parent),
+            Some(child) if child.next_sibling(&self.map).is_none() => {
+                self.move_node_with(child, Placement::After(parent), |child, tree| {
+                    tree.map.assume_size_of(child, parent);
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn delete_subtree(&mut self, root: NodeId) {
+        let Some(node) = self.map.map.remove(root) else { return };
+        if let Some(window) = node.window {
+            self.window.remove_node(window, root);
+        }
+        let mut child = node.first_child;
+        while let Some(node) = child {
+            child = node.next_sibling(&self.map);
+            self.delete_subtree(node);
+        }
+    }
+
+    pub(crate) fn clone_branch(&mut self, source: NodeId, layout: LayoutId) -> NodeId {
+        let root = self.copy_tile(source, layout);
+        let mut stack = vec![(source.first_child(&self.map), source, root)];
+        while let Some((next, original_parent, new_parent)) = stack.last_mut() {
+            let Some(old) = *next else {
+                stack.pop();
+                continue;
+            };
+            *next = old.next_sibling(&self.map);
+            let new = self.copy_tile(old, layout);
+            self.link(new, Placement::Back(*new_parent));
+            self.map.remap_child_selection(*original_parent, *new_parent, old, new);
+            if let Some(child) = old.first_child(&self.map) {
+                stack.push((Some(child), old, new));
+            }
+        }
+        root
+    }
+
+    fn copy_tile(&mut self, source: NodeId, layout: LayoutId) -> NodeId {
+        let node = self.create_root();
+        self.map[node].layout = self.map[source].layout;
+        if let Some(window) = self.map.window(source) {
+            self.window.set_window(&mut self.map, layout, node, window);
+        }
+        node
     }
 }
 
@@ -28,17 +148,21 @@ impl<O: Observer> Tree<O> {
 ///
 /// Multiple trees can be contained within a map. This also makes it easier
 /// to move branches between trees.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NodeMap {
     map: SlotMap<NodeId, Node>,
 }
 
 impl NodeMap {
-    fn new() -> NodeMap { NodeMap { map: SlotMap::default() } }
-
     pub fn capacity(&self) -> usize { self.map.capacity() }
 
     pub fn reserve(&mut self, additional: usize) { self.map.reserve(additional) }
+
+    pub(crate) fn window(&self, node: NodeId) -> Option<WindowId> { self.map.get(node)?.window }
+
+    pub(crate) fn selection_info(&self, node: NodeId) -> Option<SelectionInfo> {
+        self.map.get(node)?.selection
+    }
 
     pub fn contains(&self, id: NodeId) -> bool { self.map.contains_key(id) }
 }
@@ -59,11 +183,6 @@ slotmap::new_key_type! {
 }
 
 impl NodeId {
-    #[track_caller]
-    pub fn detach<'a, O: Observer>(self, tree: &'a mut Tree<O>) -> DetachedNode<'a, O> {
-        DetachedNode { id: self, tree }
-    }
-
     #[track_caller]
     pub fn parent(self, map: &NodeMap) -> Option<NodeId> {
         map.map.get(self).and_then(|n| n.parent)
@@ -156,33 +275,6 @@ impl NodeId {
         })
     }
 
-    /// Creates a deep copy of the subtree rooted at this node.
-    ///
-    /// This method does not call observer events on the created nodes.
-    #[track_caller]
-    pub fn deep_copy<'a, O: Observer>(self, tree: &'a mut Tree<O>) -> UnattachedNode<'a, O> {
-        let new_root = tree.mk_node().id;
-        let mut stack = vec![(self.first_child(&tree.map), new_root)];
-        while let Some((next, parent)) = stack.last_mut() {
-            if let Some(old) = *next {
-                *next = old.next_sibling(&tree.map);
-                let child = old.first_child(&tree.map);
-                let new = tree.mk_node().push_back(*parent);
-                if child.is_some() {
-                    stack.push((child, new));
-                }
-            } else {
-                stack.pop();
-            }
-        }
-        UnattachedNode { id: new_root, tree }
-    }
-
-    pub(crate) fn attach_root(self, tree: &mut Tree<impl Observer>, parent: NodeId) {
-        debug_assert!(self.parent(&tree.map).is_none());
-        UnattachedNode { id: self, tree }.push_back(parent);
-    }
-
     /// Reorder siblings without changing membership, weights, or selection history.
     pub(crate) fn reorder(self, anchor: NodeId, before: bool, map: &mut NodeMap) {
         assert_ne!(self, anchor);
@@ -220,156 +312,19 @@ impl NodeId {
     pub fn is_empty(self, map: &NodeMap) -> bool {
         map.map.get(self).map(|n| n.first_child.is_none()).unwrap_or(true)
     }
-
-    #[track_caller]
-    pub fn remove_root<O: Observer>(self, tree: &mut Tree<O>) {
-        assert!(
-            self.parent(&tree.map).is_none(),
-            "remove_root called on non-root node"
-        );
-        if let Some(node) = tree.map.map.remove(self) {
-            node.delete_recursive(tree, self);
-        }
-    }
 }
 
-pub trait Observer: Sized {
-    fn added_to_forest(&mut self, _map: &NodeMap, _node: NodeId) {}
-    fn added_to_parent(&mut self, _map: &NodeMap, _node: NodeId) {}
-    fn removing_from_parent(&mut self, _map: &NodeMap, _node: NodeId) {}
-    fn removed_child(_tree: &mut Tree<Self>, _parent: NodeId) {}
-    fn removed_from_forest(&mut self, _map: &NodeMap, _node: NodeId) {}
-}
-
-impl Observer for () {}
-
-#[must_use = "Unattached nodes should be inserted into the tree or retained as roots"]
-pub struct UnattachedNode<'a, O> {
-    // Nothing prevents this from being public, just haven't needed it yet.
-    id: NodeId,
-    tree: &'a mut Tree<O>,
-}
-
-impl<'a, O: Observer> UnattachedNode<'a, O> {
-    /// Keep the node as a root in the forest.
-    pub fn into_id(self) -> NodeId { self.id }
-
-    #[track_caller]
-    pub(crate) fn push_back(self, parent: NodeId) -> NodeId {
-        self.attach_with(|this| this.id.link_under_back(parent, &mut this.tree.map))
-    }
-
-    #[track_caller]
-    pub(crate) fn insert_before(self, sibling: NodeId) -> NodeId {
-        self.attach_with(|this| this.id.link_before(sibling, &mut this.tree.map))
-    }
-
-    #[track_caller]
-    pub(crate) fn insert_after(self, sibling: NodeId) -> NodeId {
-        self.attach_with(|this| this.id.link_after(sibling, &mut this.tree.map))
-    }
-
-    fn attach_with(mut self, attach: impl FnOnce(&mut Self)) -> NodeId {
-        attach(&mut self);
-        self.tree.data.added_to_parent(&self.tree.map, self.id);
-        self.id
-    }
-}
-
-#[must_use = "Detached nodes should be reattached to the tree or removed"]
-pub struct DetachedNode<'a, O> {
-    id: NodeId,
-    tree: &'a mut Tree<O>,
-}
-
-impl<'a, O: Observer> DetachedNode<'a, O> {
-    #[track_caller]
-    pub(crate) fn push_back(self, parent: NodeId) -> ReattachedNode<'a, O> {
-        self.attach_with(parent, |this| {
-            this.id.link_under_back(parent, &mut this.tree.map)
-        })
-    }
-
-    #[track_caller]
-    pub(crate) fn insert_before(self, sibling: NodeId) -> ReattachedNode<'a, O> {
-        let new_parent = sibling
-            .parent(&self.tree.map)
-            .expect("cannot make a sibling of a root node or invalid sibling");
-        self.attach_with(new_parent, |this| {
-            this.id.link_before(sibling, &mut this.tree.map)
-        })
-    }
-
-    #[track_caller]
-    pub(crate) fn insert_after(self, sibling: NodeId) -> ReattachedNode<'a, O> {
-        let new_parent = sibling
-            .parent(&self.tree.map)
-            .expect("cannot make a sibling of a root node or invalid sibling");
-        self.attach_with(new_parent, |this| {
-            this.id.link_after(sibling, &mut this.tree.map)
-        })
-    }
-
-    #[track_caller]
-    pub(crate) fn remove(self) {
-        if let Some(parent) = self.id.parent(&self.tree.map) {
-            self.tree.data.removing_from_parent(&self.tree.map, self.id);
-            self.tree.map.unlink(self.id);
-            O::removed_child(self.tree, parent);
-            if let Some(node) = self.tree.map.map.remove(self.id) {
-                node.delete_recursive(self.tree, self.id);
-            }
-        }
-    }
-
-    fn attach_with(
-        mut self,
-        new_parent: NodeId,
-        attach: impl FnOnce(&mut Self),
-    ) -> ReattachedNode<'a, O> {
-        let old_parent = self.id.parent(&self.tree.map);
-        if old_parent.is_some() && old_parent != Some(new_parent) {
-            self.tree.data.removing_from_parent(&self.tree.map, self.id);
-        }
-        self.tree.map.unlink(self.id);
-        attach(&mut self);
-        if old_parent.is_some() && old_parent != Some(new_parent) {
-            self.tree.data.added_to_parent(&self.tree.map, self.id);
-        }
-        ReattachedNode {
-            detached: self,
-            old_parent,
-            new_parent,
-        }
-    }
-}
-
-pub struct ReattachedNode<'a, O: Observer> {
-    detached: DetachedNode<'a, O>,
-    old_parent: Option<NodeId>,
-    new_parent: NodeId,
-}
-
-impl<'a, O: Observer> ReattachedNode<'a, O> {
-    pub(crate) fn with(self, f: impl FnOnce(NodeId, &mut Tree<O>)) -> Self {
-        f(self.detached.id, self.detached.tree);
-        self
-    }
-
-    pub(crate) fn finish(self) -> NodeId {
-        self.detached.id
-        // self is dropped at the end of the scope.
-    }
-}
-
-impl<'a, O: Observer> Drop for ReattachedNode<'a, O> {
-    fn drop(&mut self) {
-        if let Some(old) = self.old_parent {
-            if old != self.new_parent {
-                O::removed_child(self.detached.tree, old);
-            }
-        }
-    }
+#[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct LayoutInfo {
+    pub(crate) size: f32,
+    #[serde(default)]
+    pub(crate) fixed_container: bool,
+    pub(crate) kind: LayoutKind,
+    #[serde(default)]
+    pub(crate) is_fullscreen: bool,
+    #[serde(default)]
+    pub(crate) is_fullscreen_within_gaps: bool,
 }
 
 #[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
@@ -379,6 +334,12 @@ pub struct Node {
     next_sibling: Option<NodeId>,
     first_child: Option<NodeId>,
     last_child: Option<NodeId>,
+    #[serde(default)]
+    pub(crate) layout: LayoutInfo,
+    #[serde(default)]
+    pub(crate) selection: Option<SelectionInfo>,
+    #[serde(default)]
+    pub(crate) window: Option<WindowId>,
 }
 
 impl NodeId {
@@ -465,21 +426,6 @@ impl NodeMap {
                 node.next_sibling = None;
                 node.parent = None;
             }
-        }
-    }
-}
-
-impl Node {
-    #[track_caller]
-    pub(crate) fn delete_recursive(&self, cx: &mut Tree<impl Observer>, id: NodeId) {
-        cx.data.removed_from_forest(&cx.map, id);
-        let mut iter = self.first_child;
-        while let Some(child) = iter {
-            let next = cx.map.map.get(child).and_then(|n| n.next_sibling);
-            if let Some(node) = cx.map.map.remove(child) {
-                node.delete_recursive(cx, child);
-            }
-            iter = next;
         }
     }
 }
@@ -580,6 +526,109 @@ impl<'a> Iterator for PreorderTraversal<'a> {
     }
 }
 
+#[derive(Clone, Default, Serialize, Deserialize, Debug)]
+pub(crate) struct WindowIndex {
+    pub(crate) window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub(crate) struct WindowNodeInfo {
+    pub(crate) layout: LayoutId,
+    pub(crate) node: NodeId,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub(crate) struct WindowNodeInfoVec(pub(crate) Vec<WindowNodeInfo>);
+
+impl WindowIndex {
+    pub(crate) fn layouts_for(&self, wid: WindowId) -> Vec<LayoutId> {
+        self.window_nodes
+            .get(&wid)
+            .map(|nodes| nodes.0.iter().map(|info| info.layout).collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
+        self.window_nodes.get(&wid).and_then(|nodes| {
+            nodes.0.iter().find(|info| info.layout == layout).map(|info| info.node)
+        })
+    }
+
+    pub(crate) fn set_window(
+        &mut self,
+        map: &mut NodeMap,
+        layout: LayoutId,
+        node: NodeId,
+        wid: WindowId,
+    ) {
+        let existing = map[node].window.replace(wid);
+        assert!(
+            existing.is_none(),
+            "Attempted to overwrite window for node {node:?} from {existing:?} to {wid:?}"
+        );
+        self.window_nodes
+            .entry(wid)
+            .or_default()
+            .0
+            .push(WindowNodeInfo { layout, node });
+    }
+
+    pub(crate) fn reassign_subtree(&mut self, map: &NodeMap, node: NodeId, layout: LayoutId) {
+        for node in node.traverse_preorder(map) {
+            if let Some(window) = map.window(node) {
+                for info in &mut self.window_nodes.get_mut(&window).unwrap().0 {
+                    if info.node == node {
+                        info.layout = layout;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn replace_window(&mut self, map: &mut NodeMap, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+        let nodes = self.window_nodes.remove(&from).unwrap_or_default();
+        if nodes.0.is_empty() {
+            return;
+        }
+        for info in &nodes.0 {
+            map[info.node].window = Some(to);
+        }
+        self.window_nodes.entry(to).or_default().0.extend(nodes.0);
+    }
+
+    pub(crate) fn take_nodes_for(&mut self, wid: WindowId) -> impl Iterator<Item = NodeId> + use<> {
+        self.window_nodes
+            .remove(&wid)
+            .unwrap_or_default()
+            .0
+            .into_iter()
+            .map(|info| info.node)
+    }
+
+    pub(crate) fn take_nodes_for_app(
+        &mut self,
+        pid: pid_t,
+    ) -> impl Iterator<Item = NodeId> + use<> {
+        use crate::common::collections::BTreeExt;
+        self.window_nodes
+            .remove_all_for_pid(pid)
+            .into_values()
+            .flat_map(|infos| infos.0.into_iter().map(|info| info.node))
+    }
+
+    pub(crate) fn remove_node(&mut self, wid: WindowId, node: NodeId) {
+        if let Some(nodes) = self.window_nodes.get_mut(&wid) {
+            nodes.0.retain(|info| info.node != node);
+            if nodes.0.is_empty() {
+                self.window_nodes.remove(&wid);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::iter;
@@ -596,7 +645,7 @@ mod tests {
     ///           gc1
     /// ```
     struct TestTree {
-        tree: Tree<Events>,
+        tree: Tree,
         root: NodeId,
         child1: NodeId,
         child2: NodeId,
@@ -608,23 +657,23 @@ mod tests {
     impl TestTree {
         #[rustfmt::skip]
         fn new() -> Self {
-            let mut tree = Tree::with_observer(Events(vec![]));
+            let mut tree = Tree::default();
 
-            let root = tree.mk_node().into_id();
-            let child1 = tree.mk_node().push_back(root);
-            let child2 = tree.mk_node().push_back(root);
-            let child3 = tree.mk_node().push_back(root);
+            let root = tree.create_root();
+            let child1 = tree.insert(Placement::Back(root));
+            let child2 = tree.insert(Placement::Back(root));
+            let child3 = tree.insert(Placement::Back(root));
 
-            let gc1 = tree.mk_node().push_back(child2);
-            let other_root = tree.mk_node().into_id();
+            let gc1 = tree.insert(Placement::Back(child2));
+            tree.map[child1].layout.fixed_container = true;
+            tree.map[child2].layout.fixed_container = true;
+            let other_root = tree.create_root();
 
-            let mut t = TestTree {
+            TestTree {
                 tree, root,
                 child1, child2, child3, gc1,
                 other_root,
-            };
-            t.clear_events();
-            t
+            }
         }
 
         fn get_children(&self, node: NodeId) -> Vec<NodeId> {
@@ -655,55 +704,6 @@ mod tests {
                     "child has incorrect parent"
                 );
             }
-        }
-
-        #[track_caller]
-        fn assert_events_are<const N: usize>(&mut self, events: [TreeEvent; N]) {
-            Self::assert_events_are_inner(&mut self.tree, &events);
-        }
-
-        #[track_caller]
-        fn assert_events_are_inner(tree: &mut Tree<Events>, events: &[TreeEvent]) {
-            let actual: Vec<_> = tree.data.0.drain(..).collect();
-            pretty_assertions::assert_eq!(events, actual);
-        }
-
-        fn clear_events(&mut self) { self.tree.data.0.clear(); }
-    }
-
-    #[derive(Clone, PartialEq, Debug)]
-    enum TreeEvent {
-        AddedToForest(NodeId),
-        AddedToParent(NodeId),
-        RemovingFromParent(NodeId, NodeId),
-        RemovedChild(NodeId),
-        RemovedFromForest(NodeId),
-    }
-    use TreeEvent::*;
-
-    struct Events(Vec<TreeEvent>);
-
-    impl Observer for Events {
-        fn added_to_forest(&mut self, _map: &NodeMap, node: NodeId) {
-            self.0.push(AddedToForest(node))
-        }
-
-        fn added_to_parent(&mut self, _map: &NodeMap, node: NodeId) {
-            self.0.push(AddedToParent(node))
-        }
-
-        fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId) {
-            let parent =
-                node.parent(map).expect("removing_from_parent called on node without parent");
-            self.0.push(RemovingFromParent(node, parent))
-        }
-
-        fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {
-            tree.data.0.push(RemovedChild(parent))
-        }
-
-        fn removed_from_forest(&mut self, _map: &NodeMap, node: NodeId) {
-            self.0.push(RemovedFromForest(node))
         }
     }
 
@@ -760,7 +760,7 @@ mod tests {
     fn deep_copy() {
         let mut t = TestTree::new();
         {
-            let copied_root = t.root.deep_copy(&mut t.tree).id;
+            let copied_root = t.tree.clone_branch(t.root, LayoutId::default());
             let orig_ids = t.root.traverse_preorder(&t.tree.map).collect::<Vec<_>>();
             let copied_ids = copied_root.traverse_preorder(&t.tree.map).collect::<Vec<_>>();
             assert_eq!(orig_ids.len(), copied_ids.len());
@@ -781,7 +781,7 @@ mod tests {
             }
         }
         {
-            let copied = t.child1.deep_copy(&mut t.tree).id;
+            let copied = t.tree.clone_branch(t.child1, LayoutId::default());
             assert_eq!(0, copied.children(&t.tree.map).count());
         }
     }
@@ -789,12 +789,9 @@ mod tests {
     #[test]
     fn push_back() {
         let mut t = TestTree::new();
-        let child4 = t.tree.mk_node().push_back(t.root);
-        t.assert_events_are([AddedToForest(child4), AddedToParent(child4)]);
-        let gc0 = t.tree.mk_node().push_back(t.child1);
-        t.assert_events_are([AddedToForest(gc0), AddedToParent(gc0)]);
-        let gc2 = t.tree.mk_node().push_back(t.child2);
-        t.assert_events_are([AddedToForest(gc2), AddedToParent(gc2)]);
+        let child4 = t.tree.insert(Placement::Back(t.root));
+        let gc0 = t.tree.insert(Placement::Back(t.child1));
+        let gc2 = t.tree.insert(Placement::Back(t.child2));
         t.assert_children_are([t.child1, t.child2, t.child3, child4], t.root);
         t.assert_children_are([gc0], t.child1);
         t.assert_children_are([t.gc1, gc2], t.child2);
@@ -806,11 +803,10 @@ mod tests {
     #[test]
     fn insert_before() {
         let mut t = TestTree::new();
-        let child0 = t.tree.mk_node().insert_before(t.child1);
-        t.assert_events_are([AddedToForest(child0), AddedToParent(child0)]);
-        let child1_5 = t.tree.mk_node().insert_before(t.child2);
-        let child2_5 = t.tree.mk_node().insert_before(t.child3);
-        let gc0 = t.tree.mk_node().insert_before(t.gc1);
+        let child0 = t.tree.insert(Placement::Before(t.child1));
+        let child1_5 = t.tree.insert(Placement::Before(t.child2));
+        let child2_5 = t.tree.insert(Placement::Before(t.child3));
+        let gc0 = t.tree.insert(Placement::Before(t.gc1));
         t.assert_children_are(
             [child0, t.child1, child1_5, t.child2, child2_5, t.child3],
             t.root,
@@ -827,11 +823,10 @@ mod tests {
     #[test]
     fn insert_after() {
         let mut t = TestTree::new();
-        let child1_5 = t.tree.mk_node().insert_after(t.child1);
-        t.assert_events_are([AddedToForest(child1_5), AddedToParent(child1_5)]);
-        let child2_5 = t.tree.mk_node().insert_after(t.child2);
-        let child4 = t.tree.mk_node().insert_after(t.child3);
-        let gc2 = t.tree.mk_node().insert_after(t.gc1);
+        let child1_5 = t.tree.insert(Placement::After(t.child1));
+        let child2_5 = t.tree.insert(Placement::After(t.child2));
+        let child4 = t.tree.insert(Placement::After(t.child3));
+        let gc2 = t.tree.insert(Placement::After(t.gc1));
         t.assert_children_are(
             [t.child1, child1_5, t.child2, child2_5, t.child3, child4],
             t.root,
@@ -849,42 +844,24 @@ mod tests {
     fn remove() {
         let mut t = TestTree::new();
 
-        t.child2.detach(&mut t.tree).remove();
+        t.tree.remove(t.child2);
         t.assert_children_are([t.child1, t.child3], t.root);
         assert!(!t.tree.map.map.contains_key(t.child2));
         assert!(!t.tree.map.map.contains_key(t.gc1));
-        t.assert_events_are([
-            RemovingFromParent(t.child2, t.root),
-            RemovedChild(t.root),
-            RemovedFromForest(t.child2),
-            RemovedFromForest(t.gc1),
-        ]);
 
-        t.child3.detach(&mut t.tree).remove();
+        t.tree.remove(t.child3);
         t.assert_children_are([t.child1], t.root);
         assert!(!t.tree.map.map.contains_key(t.child3));
-        t.assert_events_are([
-            RemovingFromParent(t.child3, t.root),
-            RemovedChild(t.root),
-            RemovedFromForest(t.child3),
-        ]);
 
-        t.child1.detach(&mut t.tree).remove();
+        t.tree.remove(t.child1);
         t.assert_children_are([], t.root);
         assert!(!t.tree.map.map.contains_key(t.child1));
-        t.assert_events_are([
-            RemovingFromParent(t.child1, t.root),
-            RemovedChild(t.root),
-            RemovedFromForest(t.child1),
-        ]);
 
         assert!(t.tree.map.map.contains_key(t.root));
         assert!(t.tree.map.map.contains_key(t.other_root));
-        t.root.remove_root(&mut t.tree);
-        t.assert_events_are([RemovedFromForest(t.root)]);
+        t.tree.remove(t.root);
         assert!(!t.tree.map.map.contains_key(t.root));
-        t.other_root.remove_root(&mut t.tree);
-        t.assert_events_are([RemovedFromForest(t.other_root)]);
+        t.tree.remove(t.other_root);
         assert!(!t.tree.map.map.contains_key(t.other_root));
     }
 
@@ -892,50 +869,27 @@ mod tests {
     fn detach_and_reattach() {
         let mut t = TestTree::new();
 
-        t.child1.detach(&mut t.tree).insert_after(t.child2);
+        t.tree.move_node(t.child1, Placement::After(t.child2));
         t.assert_children_are([t.child2, t.child1, t.child3], t.root);
         t.assert_children_are([t.gc1], t.child2);
-        t.assert_events_are([]);
 
-        t.child1.detach(&mut t.tree).insert_before(t.child2);
+        t.tree.move_node(t.child1, Placement::Before(t.child2));
         t.assert_children_are([t.child1, t.child2, t.child3], t.root);
-        t.assert_events_are([]);
 
-        t.child2.detach(&mut t.tree).push_back(t.child1).with(|_id, tree| {
-            TestTree::assert_events_are_inner(tree, &[
-                RemovingFromParent(t.child2, t.root),
-                AddedToParent(t.child2),
-            ]);
-        });
-        t.assert_events_are([RemovedChild(t.root)]);
+        t.tree.move_node(t.child2, Placement::Back(t.child1));
         t.assert_children_are([t.child1, t.child3], t.root);
         t.assert_children_are([t.child2], t.child1);
 
-        t.child2.detach(&mut t.tree).insert_after(t.child1);
+        t.tree.move_node(t.child2, Placement::After(t.child1));
         t.assert_children_are([t.child1, t.child2, t.child3], t.root);
         t.assert_children_are([], t.child1);
-        t.assert_events_are([
-            RemovingFromParent(t.child2, t.child1),
-            AddedToParent(t.child2),
-            RemovedChild(t.child1),
-        ]);
 
-        t.child3.detach(&mut t.tree).push_back(t.child2);
+        t.tree.move_node(t.child3, Placement::Back(t.child2));
         t.assert_children_are([t.child1, t.child2], t.root);
         t.assert_children_are([t.gc1, t.child3], t.child2);
-        t.assert_events_are([
-            RemovingFromParent(t.child3, t.root),
-            AddedToParent(t.child3),
-            RemovedChild(t.root),
-        ]);
 
-        t.child3.detach(&mut t.tree).insert_after(t.child2);
+        t.tree.move_node(t.child3, Placement::After(t.child2));
         t.assert_children_are([t.child1, t.child2, t.child3], t.root);
         t.assert_children_are([t.gc1], t.child2);
-        t.assert_events_are([
-            RemovingFromParent(t.child3, t.child2),
-            AddedToParent(t.child3),
-            RemovedChild(t.child2),
-        ]);
     }
 }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use slotmap::{Key, KeyData, SlotMap};
 
 use super::constraints::{constrain_frame, traditional_leaf_axis_constraints};
-use super::traditional::{Components, LayoutRoot};
+use super::tiles::LayoutRoot;
 use super::{EditResult, Focus, FocusResult, GroupEdit, LayoutEdit, WindowChange, WindowQuery};
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
@@ -115,22 +115,16 @@ pub struct StackLayoutSystem {
     window_insertion_point: WindowInsertionPoint,
 }
 
-// SlotMap's saved slots include vacant entries and key generations.
-#[derive(Serialize, Deserialize)]
-struct SavedSlot<T> {
-    value: Option<T>,
-    version: u32,
-}
-
 #[derive(Deserialize)]
 struct LegacyStackForest {
-    tree: Tree<Components>,
-    layout_roots: Vec<SavedSlot<LayoutRoot>>,
+    #[serde(deserialize_with = "super::tiles::deserialize_tile_tree")]
+    tree: Tree,
+    layout_roots: Vec<super::SavedSlot<LayoutRoot>>,
 }
 
 impl LegacyStackForest {
     fn migrate(self) -> Result<(SlotMap<LayoutId, Stack>, u32), ron::Error> {
-        let Tree { map, data } = self.tree;
+        let map = self.tree.map;
         let mut next_node = 1;
         let slots: Vec<_> = self
             .layout_roots
@@ -138,18 +132,18 @@ impl LegacyStackForest {
             .map(|slot| {
                 let value = slot.value.map(|root| {
                     let root = root.0;
-                    let selected = data.selection.current_selection(root);
-                    let active = data
-                        .focus_target(&map, selected, &|_| true)
-                        .or_else(|| data.focus_target(&map, root, &|_| true))
+                    let selected = map.current_selection(root);
+                    let active = map
+                        .focus_target(selected, &|_| true)
+                        .or_else(|| map.focus_target(root, &|_| true))
                         .map(|(node, _)| node);
                     let members: Vec<_> = root
                         .traverse_preorder(&map)
                         .filter_map(|id| {
                             next_node =
                                 next_node.max((id.data().as_ffi() as u32).saturating_add(1));
-                            let window = data.window.at(id)?;
-                            let info = &data.layout.info[id];
+                            let window = map.window(id)?;
+                            let info = &map[id].layout;
                             Some(Member {
                                 id,
                                 window,
@@ -159,7 +153,7 @@ impl LegacyStackForest {
                             })
                         })
                         .collect();
-                    let info = &data.layout.info[root];
+                    let info = &map[root].layout;
                     Stack {
                         id: root,
                         active,
@@ -170,7 +164,7 @@ impl LegacyStackForest {
                         within_gaps: info.is_fullscreen_within_gaps,
                     }
                 });
-                SavedSlot { value, version: slot.version }
+                super::SavedSlot { value, version: slot.version }
             })
             .collect();
         let layouts = ron::from_str(&ron::to_string(&slots)?).map_err(|error| error.code)?;
@@ -180,11 +174,6 @@ impl LegacyStackForest {
 
 impl<'de> Deserialize<'de> for StackLayoutSystem {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
-            d: D,
-        ) -> Result<Option<T>, D::Error> {
-            T::deserialize(d).map(Some)
-        }
         #[derive(Deserialize)]
         struct Wire {
             #[serde(default)]
@@ -193,7 +182,7 @@ impl<'de> Deserialize<'de> for StackLayoutSystem {
             next_node: u32,
             #[serde(default = "default_stack_orientation")]
             default_orientation: StackDefaultOrientation,
-            #[serde(default, deserialize_with = "present")]
+            #[serde(default, deserialize_with = "super::present")]
             inner: Option<LegacyStackForest>,
         }
         fn first_node() -> u32 { 1 }
@@ -406,11 +395,10 @@ impl LayoutSystem for StackLayoutSystem {
                 fixed.unwrap_or(min)
             })
             .unwrap_or(0.0);
-        let offset = super::traditional::stack_offset_with_required_size(
+        let offset = super::tiles::stack_offset_with_required_size(
             rect, horizontal, count, offset, required,
         );
-        let geometry =
-            super::traditional::stack_layout_result(rect, count, offset, horizontal, line);
+        let geometry = super::tiles::stack_layout_result(rect, count, offset, horizontal, line);
         stack
             .members
             .iter()
@@ -824,7 +812,7 @@ mod tests {
         let removed = inner.create_layout();
         let layout = inner.create_layout();
         inner.remove_layout(removed);
-        inner.set_layout(inner.root(layout), LayoutKind::HorizontalStack);
+        inner.tiles.set_layout(inner.tiles.root(layout), LayoutKind::HorizontalStack);
         for window in [w(1), w(2), w(3)] {
             inner.update(WindowChange::Add(layout, window, None));
         }

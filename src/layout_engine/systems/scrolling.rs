@@ -419,8 +419,9 @@ impl Geometry {
         gaps: GapSettings,
     ) -> Self {
         let tiling = compute_tiling_area(screen, &gaps);
-        let mut columns = Vec::with_capacity(state.columns.len());
-        let mut frames = Vec::with_capacity(state.columns.iter().map(|c| c.rows.len()).sum());
+        let mut columns = Vec::with_capacity(state.arrangement.columns.len());
+        let mut frames =
+            Vec::with_capacity(state.arrangement.columns.iter().map(|c| c.rows.len()).sum());
         let constraint = |wid: &WindowId| {
             constraints
                 .get(wid)
@@ -433,15 +434,16 @@ impl Geometry {
         };
         let mut x = 0.0;
         let active_columns = if inactive.is_empty() {
-            state.columns.len()
+            state.arrangement.columns.len()
         } else {
             state
+                .arrangement
                 .columns
                 .iter()
                 .filter(|c| c.windows().any(|w| !inactive.contains(w)))
                 .count()
         };
-        for column in &state.columns {
+        for column in &state.arrangement.columns {
             let active_rows = column.rows.iter().filter(|row| !inactive.contains(&row.window));
             let mut rows = Vec::with_capacity(column.rows.len());
             let mut min: f64 = 1.0;
@@ -672,25 +674,35 @@ impl MotionHistory {
     }
 }
 
-#[derive(Deserialize, Clone, Debug, Default)]
-#[serde(from = "StoredLayoutState")]
-struct LayoutState {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum FullscreenMode {
+    Screen,
+    WithinGaps,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Arrangement {
     columns: Vec<Column>,
     active_column: usize,
     next_column_id: u64,
-    #[serde(default)]
+    fullscreen: HashMap<WindowId, FullscreenMode>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct Camera {
     viewport: Viewport,
-    #[serde(skip)]
-    geometry: Option<Geometry>,
-    #[serde(skip)]
     motion: MotionHistory,
-    // Only semantic restoration survives operations; no pending render-time actions.
     transient_restore: Option<ViewBookmark>,
     fullscreen_restore: Option<ViewBookmark>,
-    #[serde(skip)]
     restored_view: Option<ViewBookmark>,
-    fullscreen: HashSet<WindowId>,
-    fullscreen_within_gaps: HashSet<WindowId>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(from = "StoredLayoutState")]
+struct LayoutState {
+    arrangement: Arrangement,
+    camera: Camera,
+    geometry: Option<Geometry>,
 }
 
 // Store the camera relative to its active column as well as its absolute
@@ -699,12 +711,15 @@ struct LayoutState {
 impl Serialize for LayoutState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut stored = serializer.serialize_struct("LayoutState", 9)?;
-        stored.serialize_field("columns", &self.columns)?;
-        stored.serialize_field("active_column", &self.active_column)?;
-        stored.serialize_field("next_column_id", &self.next_column_id)?;
-        let current = self.viewport.offset();
-        let offset = if matches!(self.viewport, Viewport::Gesture(_) | Viewport::Animation(_)) {
+        let mut stored = serializer.serialize_struct("LayoutState", 8)?;
+        stored.serialize_field("columns", &self.arrangement.columns)?;
+        stored.serialize_field("active_column", &self.arrangement.active_column)?;
+        stored.serialize_field("next_column_id", &self.arrangement.next_column_id)?;
+        let current = self.camera.viewport.offset();
+        let offset = if matches!(
+            self.camera.viewport,
+            Viewport::Gesture(_) | Viewport::Animation(_)
+        ) {
             self.geometry
                 .as_ref()
                 .map_or(current, |g| current.clamp(g.bounds.0, g.bounds.1))
@@ -712,15 +727,15 @@ impl Serialize for LayoutState {
             current
         };
         stored.serialize_field("viewport", &offset)?;
-        let anchor = self.bookmark().or_else(|| self.restored_view.clone()).map(|mut anchor| {
-            anchor.relative_offset += offset - current;
-            anchor
-        });
+        let anchor =
+            self.bookmark().or_else(|| self.camera.restored_view.clone()).map(|mut anchor| {
+                anchor.relative_offset += offset - current;
+                anchor
+            });
         stored.serialize_field("view_anchor", &anchor)?;
-        stored.serialize_field("transient_restore", &self.transient_restore)?;
-        stored.serialize_field("fullscreen_restore", &self.fullscreen_restore)?;
-        stored.serialize_field("fullscreen", &self.fullscreen)?;
-        stored.serialize_field("fullscreen_within_gaps", &self.fullscreen_within_gaps)?;
+        stored.serialize_field("transient_restore", &self.camera.transient_restore)?;
+        stored.serialize_field("fullscreen_restore", &self.camera.fullscreen_restore)?;
+        stored.serialize_field("fullscreen_modes", &self.arrangement.fullscreen)?;
         stored.end()
     }
 }
@@ -738,6 +753,7 @@ struct StoredLayoutState {
     view_anchor: Option<ViewBookmark>,
     transient_restore: Option<ViewBookmark>,
     fullscreen_restore: Option<ViewBookmark>,
+    fullscreen_modes: HashMap<WindowId, FullscreenMode>,
     fullscreen: HashSet<WindowId>,
     fullscreen_within_gaps: HashSet<WindowId>,
     selected: Option<WindowId>,
@@ -805,37 +821,38 @@ impl From<StoredLayoutState> for LayoutState {
             })
             .collect::<Vec<_>>();
         let active_column = stored.active_column.min(columns.len().saturating_sub(1));
+        let mut fullscreen = stored.fullscreen_modes;
+        fullscreen.extend(
+            stored
+                .fullscreen_within_gaps
+                .into_iter()
+                .map(|w| (w, FullscreenMode::WithinGaps)),
+        );
+        fullscreen.extend(stored.fullscreen.into_iter().map(|w| (w, FullscreenMode::Screen)));
         let mut state = Self {
-            columns,
-            active_column,
-            next_column_id: next,
-            viewport: stored.viewport,
+            arrangement: Arrangement {
+                columns,
+                active_column,
+                next_column_id: next,
+                fullscreen,
+            },
+            camera: Camera {
+                viewport: stored.viewport,
+                transient_restore: stored.transient_restore,
+                fullscreen_restore: stored.fullscreen_restore,
+                restored_view: stored.view_anchor,
+                ..Camera::default()
+            },
             geometry: None,
-            motion: MotionHistory::default(),
-            transient_restore: stored.transient_restore,
-            fullscreen_restore: stored.fullscreen_restore,
-            restored_view: stored.view_anchor,
-            fullscreen: stored.fullscreen,
-            fullscreen_within_gaps: stored.fullscreen_within_gaps,
         };
         if let Some(window) = stored.selected {
-            state.activate(window);
+            state.arrangement.activate(window);
         }
         state
     }
 }
 
-impl LayoutState {
-    fn fullscreen_frame(&self, geometry: &Geometry, window: WindowId) -> Option<CGRect> {
-        if self.fullscreen.contains(&window) {
-            Some(geometry.screen)
-        } else if self.fullscreen_within_gaps.contains(&window) {
-            Some(geometry.tiling)
-        } else {
-            None
-        }
-    }
-
+impl Arrangement {
     fn selected(&self, inactive: &HashSet<WindowId>) -> Option<WindowId> {
         let (col, row) = self.selected_location(inactive)?;
         Some(self.columns[col].rows[row].window)
@@ -868,182 +885,6 @@ impl LayoutState {
         self.active_column = col;
         self.columns[col].active_window = row;
         true
-    }
-
-    fn restore_fullscreen_view(&mut self) -> bool {
-        let fullscreen = self.columns.get(self.active_column).is_some_and(|column| {
-            column.windows().any(|wid| {
-                self.fullscreen.contains(wid) || self.fullscreen_within_gaps.contains(wid)
-            })
-        });
-        !fullscreen && self.fullscreen_restore.take().is_some_and(|bookmark| self.restore(bookmark))
-    }
-
-    fn prepare_geometry(
-        &mut self,
-        settings: &ScrollingLayoutSettings,
-        inactive: &HashSet<WindowId>,
-        screen: CGRect,
-        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
-        gaps: &GapSettings,
-    ) {
-        if self.geometry.as_ref().is_some_and(|g| g.matches(screen, constraints, gaps)) {
-            return;
-        }
-        let bookmark = self.restored_view.take().or_else(|| self.bookmark());
-        let initial = matches!(self.viewport, Viewport::Uninitialized);
-        if settings.preserve_window_sizes {
-            let tiling = compute_tiling_area(screen, gaps);
-            for column in &mut self.columns {
-                if matches!(column.width, ColumnWidth::Default)
-                    && column.rows.len() == 1
-                    && !inactive.contains(&column.rows[0].window)
-                    && constraints
-                        .get(&column.rows[0].window)
-                        .map(|c| c.locked_width)
-                        .is_some_and(|w| w.is_finite() && w > 0.0)
-                {
-                    column.width = ColumnWidth::Fixed(column.resolved_width(
-                        tiling.size.width,
-                        gaps.inner.horizontal,
-                        settings,
-                        constraints,
-                        inactive,
-                    ));
-                }
-            }
-        }
-        self.geometry = Some(Geometry::build(
-            self,
-            settings,
-            inactive,
-            screen,
-            constraints.clone(),
-            gaps.clone(),
-        ));
-        if let Some(bookmark) = bookmark
-            && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
-        {
-            let old = self.viewport.offset();
-            self.viewport.rebase(column.world_x + bookmark.relative_offset - old);
-        }
-        self.reconcile_camera_bounds();
-        if initial {
-            self.viewport = Viewport::Static(0.0);
-            if self.geometry.as_ref().unwrap().columns.len() == 1 {
-                let g = self.geometry.as_ref().unwrap();
-                self.viewport = Viewport::Static(g.anchor_offset(0, settings.alignment));
-            } else {
-                self.reveal(settings);
-            }
-            self.viewport = Viewport::Static(self.viewport.offset());
-        }
-    }
-
-    fn reconcile_camera_bounds(&mut self) {
-        if let (Viewport::Animation(spring), Some(g)) = (&mut self.viewport, &self.geometry) {
-            let target = spring.target.clamp(g.bounds.0, g.bounds.1);
-            if target != spring.target {
-                let now = Instant::now().max(spring.sampled);
-                let (_, velocity) = spring.position_velocity(now);
-                spring.from = spring.current;
-                spring.velocity = velocity;
-                spring.target = target;
-                spring.started = now;
-                spring.sampled = now;
-            }
-        }
-    }
-
-    fn bookmark(&self) -> Option<ViewBookmark> {
-        let id = self.columns.get(self.active_column)?.id;
-        let x = self.geometry.as_ref()?.column(id)?.world_x;
-        Some(ViewBookmark {
-            column: id,
-            relative_offset: self.viewport.offset() - x,
-        })
-    }
-
-    fn restore(&mut self, bookmark: ViewBookmark) -> bool {
-        let Some(index) = self.columns.iter().position(|c| c.id == bookmark.column) else {
-            return false;
-        };
-        self.active_column = index;
-        if let Some(g) = &self.geometry
-            && let Some(column) = g.column(bookmark.column)
-        {
-            let view = g.tiling.size.width;
-            self.viewport.set_target(fit_offset(
-                column.world_x + bookmark.relative_offset,
-                view,
-                column,
-            ));
-        }
-        true
-    }
-
-    fn reveal(&mut self, settings: &ScrollingLayoutSettings) {
-        let Some(g) = &self.geometry else {
-            return;
-        };
-        let Some(column) = self.columns.get(self.active_column).and_then(|c| g.column(c.id)) else {
-            return;
-        };
-        let offset = if settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored {
-            g.anchor_offset(
-                g.columns.iter().position(|c| c.id == column.id).unwrap(),
-                settings.alignment,
-            )
-        } else {
-            let target = match &self.viewport {
-                Viewport::Animation(s) => s.target,
-                _ => self.viewport.offset(),
-            };
-            fit_offset(target, g.tiling.size.width, column)
-        };
-        if matches!(&self.viewport, Viewport::Animation(s) if s.target == offset) {
-            return;
-        }
-        self.viewport.set_target(offset);
-    }
-
-    /// All topology/sizing edits use this transaction. With screen_x = world_x -
-    /// camera, the camera changes by NEW world_x - OLD world_x. Rebase the free
-    /// gesture as well, without losing its recent velocity samples.
-    fn mutate<R>(
-        &mut self,
-        settings: &ScrollingLayoutSettings,
-        inactive: &HashSet<WindowId>,
-        edit: impl FnOnce(&mut Self) -> R,
-    ) -> R {
-        let window = self.selected(inactive);
-        let id = self.columns.get(self.active_column).map(|c| c.id);
-        let old_x = id.and_then(|id| self.geometry.as_ref()?.column(id)).map(|c| c.world_x);
-        let result = edit(self);
-        if let Some(old) = self.geometry.take() {
-            self.geometry = Some(Geometry::build(
-                self,
-                settings,
-                inactive,
-                old.screen,
-                old.constraints,
-                old.gaps,
-            ));
-            let anchor = window
-                .and_then(|wid| self.locate(wid))
-                .map(|(col, _)| self.columns[col].id)
-                .or_else(|| id.filter(|id| self.columns.iter().any(|c| c.id == *id)));
-            if let (Some(old_x), Some(new)) =
-                (old_x, anchor.and_then(|id| self.geometry.as_ref()?.column(id)))
-            {
-                self.viewport.rebase(new.world_x - old_x);
-            }
-        }
-        self.reconcile_camera_bounds();
-        if self.columns.is_empty() {
-            self.viewport = Viewport::Static(0.0);
-        }
-        result
     }
 
     fn new_column(&mut self, index: usize, wid: WindowId, width: ColumnWidth, weight: f64) {
@@ -1123,6 +964,205 @@ impl LayoutState {
     }
 }
 
+impl LayoutState {
+    fn fullscreen_frame(&self, geometry: &Geometry, window: WindowId) -> Option<CGRect> {
+        Some(match self.arrangement.fullscreen.get(&window)? {
+            FullscreenMode::Screen => geometry.screen,
+            FullscreenMode::WithinGaps => geometry.tiling,
+        })
+    }
+
+    fn restore_fullscreen_view(&mut self) -> bool {
+        let fullscreen =
+            self.arrangement
+                .columns
+                .get(self.arrangement.active_column)
+                .is_some_and(|column| {
+                    column.windows().any(|wid| self.arrangement.fullscreen.contains_key(wid))
+                });
+        !fullscreen
+            && self
+                .camera
+                .fullscreen_restore
+                .take()
+                .is_some_and(|bookmark| self.restore(bookmark))
+    }
+
+    fn prepare_geometry(
+        &mut self,
+        settings: &ScrollingLayoutSettings,
+        inactive: &HashSet<WindowId>,
+        screen: CGRect,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
+        gaps: &GapSettings,
+    ) {
+        if self.geometry.as_ref().is_some_and(|g| g.matches(screen, constraints, gaps)) {
+            return;
+        }
+        let bookmark = self.camera.restored_view.take().or_else(|| self.bookmark());
+        let initial = matches!(self.camera.viewport, Viewport::Uninitialized);
+        if settings.preserve_window_sizes {
+            let tiling = compute_tiling_area(screen, gaps);
+            for column in &mut self.arrangement.columns {
+                if matches!(column.width, ColumnWidth::Default)
+                    && column.rows.len() == 1
+                    && !inactive.contains(&column.rows[0].window)
+                    && constraints
+                        .get(&column.rows[0].window)
+                        .map(|c| c.locked_width)
+                        .is_some_and(|w| w.is_finite() && w > 0.0)
+                {
+                    column.width = ColumnWidth::Fixed(column.resolved_width(
+                        tiling.size.width,
+                        gaps.inner.horizontal,
+                        settings,
+                        constraints,
+                        inactive,
+                    ));
+                }
+            }
+        }
+        self.geometry = Some(Geometry::build(
+            self,
+            settings,
+            inactive,
+            screen,
+            constraints.clone(),
+            gaps.clone(),
+        ));
+        if let Some(bookmark) = bookmark
+            && let Some(column) = self.geometry.as_ref().unwrap().column(bookmark.column)
+        {
+            let old = self.camera.viewport.offset();
+            self.camera.viewport.rebase(column.world_x + bookmark.relative_offset - old);
+        }
+        self.reconcile_camera_bounds();
+        if initial {
+            self.camera.viewport = Viewport::Static(0.0);
+            if self.geometry.as_ref().unwrap().columns.len() == 1 {
+                let g = self.geometry.as_ref().unwrap();
+                self.camera.viewport = Viewport::Static(g.anchor_offset(0, settings.alignment));
+            } else {
+                self.reveal(settings);
+            }
+            self.camera.viewport = Viewport::Static(self.camera.viewport.offset());
+        }
+    }
+
+    fn reconcile_camera_bounds(&mut self) {
+        if let (Viewport::Animation(spring), Some(g)) = (&mut self.camera.viewport, &self.geometry)
+        {
+            let target = spring.target.clamp(g.bounds.0, g.bounds.1);
+            if target != spring.target {
+                let now = Instant::now().max(spring.sampled);
+                let (_, velocity) = spring.position_velocity(now);
+                spring.from = spring.current;
+                spring.velocity = velocity;
+                spring.target = target;
+                spring.started = now;
+                spring.sampled = now;
+            }
+        }
+    }
+
+    fn bookmark(&self) -> Option<ViewBookmark> {
+        let id = self.arrangement.columns.get(self.arrangement.active_column)?.id;
+        let x = self.geometry.as_ref()?.column(id)?.world_x;
+        Some(ViewBookmark {
+            column: id,
+            relative_offset: self.camera.viewport.offset() - x,
+        })
+    }
+
+    fn restore(&mut self, bookmark: ViewBookmark) -> bool {
+        let Some(index) = self.arrangement.columns.iter().position(|c| c.id == bookmark.column)
+        else {
+            return false;
+        };
+        self.arrangement.active_column = index;
+        if let Some(g) = &self.geometry
+            && let Some(column) = g.column(bookmark.column)
+        {
+            let view = g.tiling.size.width;
+            self.camera.viewport.set_target(fit_offset(
+                column.world_x + bookmark.relative_offset,
+                view,
+                column,
+            ));
+        }
+        true
+    }
+
+    fn reveal(&mut self, settings: &ScrollingLayoutSettings) {
+        let Some(g) = &self.geometry else {
+            return;
+        };
+        let Some(column) = self
+            .arrangement
+            .columns
+            .get(self.arrangement.active_column)
+            .and_then(|c| g.column(c.id))
+        else {
+            return;
+        };
+        let offset = if settings.focus_navigation_style == ScrollingFocusNavigationStyle::Anchored {
+            g.anchor_offset(
+                g.columns.iter().position(|c| c.id == column.id).unwrap(),
+                settings.alignment,
+            )
+        } else {
+            let target = match &self.camera.viewport {
+                Viewport::Animation(s) => s.target,
+                _ => self.camera.viewport.offset(),
+            };
+            fit_offset(target, g.tiling.size.width, column)
+        };
+        if matches!(&self.camera.viewport, Viewport::Animation(s) if s.target == offset) {
+            return;
+        }
+        self.camera.viewport.set_target(offset);
+    }
+
+    /// All topology/sizing edits use this transaction. With screen_x = world_x -
+    /// camera, the camera changes by NEW world_x - OLD world_x. Rebase the free
+    /// gesture as well, without losing its recent velocity samples.
+    fn mutate<R>(
+        &mut self,
+        settings: &ScrollingLayoutSettings,
+        inactive: &HashSet<WindowId>,
+        edit: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let window = self.arrangement.selected(inactive);
+        let id = self.arrangement.columns.get(self.arrangement.active_column).map(|c| c.id);
+        let old_x = id.and_then(|id| self.geometry.as_ref()?.column(id)).map(|c| c.world_x);
+        let result = edit(self);
+        if let Some(old) = self.geometry.take() {
+            self.geometry = Some(Geometry::build(
+                self,
+                settings,
+                inactive,
+                old.screen,
+                old.constraints,
+                old.gaps,
+            ));
+            let anchor = window
+                .and_then(|wid| self.arrangement.locate(wid))
+                .map(|(col, _)| self.arrangement.columns[col].id)
+                .or_else(|| id.filter(|id| self.arrangement.columns.iter().any(|c| c.id == *id)));
+            if let (Some(old_x), Some(new)) =
+                (old_x, anchor.and_then(|id| self.geometry.as_ref()?.column(id)))
+            {
+                self.camera.viewport.rebase(new.world_x - old_x);
+            }
+        }
+        self.reconcile_camera_bounds();
+        if self.arrangement.columns.is_empty() {
+            self.camera.viewport = Viewport::Static(0.0);
+        }
+        result
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ScrollingLayoutSystem {
     #[serde(skip)]
@@ -1139,7 +1179,7 @@ impl ScrollingLayoutSystem {
         inactive: &HashSet<WindowId>,
     ) -> Option<(&'a mut LayoutState, usize, usize)> {
         let state = layouts.get_mut(layout)?;
-        let (column, row) = state.selected_location(inactive)?;
+        let (column, row) = state.arrangement.selected_location(inactive)?;
         Some((state, column, row))
     }
 
@@ -1150,8 +1190,12 @@ impl ScrollingLayoutSystem {
     }
 
     pub fn update_settings(&mut self, settings: &ScrollingLayoutSettings) {
-        self.settings = settings.clone();
-        self.settings.per_display.clear();
+        let mut settings = settings.clone();
+        settings.per_display.clear();
+        if self.settings == settings {
+            return;
+        }
+        self.settings = settings;
         for state in self.layouts.values_mut() {
             state.mutate(&self.settings, &self.inactive, |_| {});
         }
@@ -1181,7 +1225,7 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return;
         };
-        if state.locate(wid).is_some() {
+        if state.arrangement.locate(wid).is_some() {
             return;
         }
         let bookmark = state.bookmark();
@@ -1189,13 +1233,16 @@ impl ScrollingLayoutSystem {
             let index = if self.settings.base.window_insertion_point.unwrap_or_default()
                 == WindowInsertionPoint::EndOfTree
             {
-                state.columns.len()
+                state.arrangement.columns.len()
             } else {
-                state.selected_location(&self.inactive).map_or(0, |(col, _)| col + 1)
+                state
+                    .arrangement
+                    .selected_location(&self.inactive)
+                    .map_or(0, |(col, _)| col + 1)
             };
-            state.new_column(index, wid, ColumnWidth::Default, 1.0);
+            state.arrangement.new_column(index, wid, ColumnWidth::Default, 1.0);
         });
-        state.transient_restore = bookmark;
+        state.camera.transient_restore = bookmark;
         state.reveal(&self.settings);
     }
 
@@ -1205,20 +1252,19 @@ impl ScrollingLayoutSystem {
         wid: WindowId,
         inactive: &HashSet<WindowId>,
     ) {
-        let Some((col, _)) = state.locate(wid) else {
+        let Some((col, _)) = state.arrangement.locate(wid) else {
             return;
         };
-        let active_removed = state.selected(inactive) == Some(wid);
-        let column_removed = state.columns[col].rows.len() == 1;
+        let active_removed = state.arrangement.selected(inactive) == Some(wid);
+        let column_removed = state.arrangement.columns[col].rows.len() == 1;
         let restore = if active_removed && column_removed {
-            state.transient_restore.take()
+            state.camera.transient_restore.take()
         } else {
             None
         };
-        let was_fullscreen =
-            state.fullscreen.remove(&wid) | state.fullscreen_within_gaps.remove(&wid);
+        let was_fullscreen = state.arrangement.fullscreen.remove(&wid).is_some();
         state.mutate(settings, inactive, |state| {
-            state.detach(wid, inactive);
+            state.arrangement.detach(wid, inactive);
         });
         let restored = restore.is_some_and(|bookmark| state.restore(bookmark));
         let restored_fullscreen = was_fullscreen && state.restore_fullscreen_view();
@@ -1226,11 +1272,12 @@ impl ScrollingLayoutSystem {
             state.reveal(settings);
         }
         if state
+            .camera
             .transient_restore
             .as_ref()
-            .is_some_and(|b| !state.columns.iter().any(|c| c.id == b.column))
+            .is_some_and(|b| !state.arrangement.columns.iter().any(|c| c.id == b.column))
         {
-            state.transient_restore = None;
+            state.camera.transient_restore = None;
         }
     }
 
@@ -1248,7 +1295,13 @@ impl ScrollingLayoutSystem {
         if let Some(g) = state.geometry.as_ref().filter(|g| g.matches(screen, constraints, gaps)) {
             return Self::translate_frames(state, g, park).collect();
         }
-        let mut fallback = state.clone();
+        let mut camera = state.camera.clone();
+        camera.restored_view = camera.restored_view.or_else(|| state.bookmark());
+        let mut fallback = LayoutState {
+            arrangement: state.arrangement.clone(),
+            camera,
+            geometry: None,
+        };
         fallback.prepare_geometry(&self.settings, &self.inactive, screen, constraints, gaps);
         Self::translate_frames(&fallback, fallback.geometry.as_ref().unwrap(), park).collect()
     }
@@ -1258,7 +1311,7 @@ impl ScrollingLayoutSystem {
         g: &'a Geometry,
         park: bool,
     ) -> impl Iterator<Item = (WindowId, CGRect)> + 'a {
-        let offset = state.viewport.offset();
+        let offset = state.camera.viewport.offset();
         g.frames.iter().map(move |&(wid, frame)| {
             let frame = state.fullscreen_frame(g, wid).unwrap_or_else(|| {
                 translate_frame(frame, offset, g.tiling, g.screen, park).round()
@@ -1271,7 +1324,7 @@ impl ScrollingLayoutSystem {
         if let Some(state) = self.layouts.get_mut(layout)
             && state.geometry.is_some()
         {
-            state.viewport.finish();
+            state.camera.viewport.finish();
         }
     }
 
@@ -1281,10 +1334,10 @@ impl ScrollingLayoutSystem {
     ) -> Option<(ViewportPresentation, Vec<(WindowId, CGRect, bool)>)> {
         let state = self.layouts.get(layout)?;
         let g = state.geometry.as_ref()?;
-        let mut motion = state.motion.clone();
+        let mut motion = state.camera.motion.clone();
         motion.samples.reserve(64_usize.saturating_sub(motion.samples.len()));
         let camera = ViewportPresentation {
-            viewport: state.viewport.clone(),
+            viewport: state.camera.viewport.clone(),
             motion: Arc::new(Mutex::new(motion)),
             bounds: g.bounds,
             width: g.tiling.size.width,
@@ -1305,14 +1358,14 @@ impl ScrollingLayoutSystem {
 
     pub(crate) fn commit_presented_viewport(&mut self, layout: LayoutId, p: &PresentedViewport) {
         if let Some(state) = self.layouts.get_mut(layout) {
-            state.viewport = if p.gesturing {
+            state.camera.viewport = if p.gesturing {
                 Viewport::Gesture(p.offset)
             } else if p.offset != p.target {
                 Viewport::Animation(CameraSpring::new(p.offset, p.target, p.velocity, p.timestamp))
             } else {
                 Viewport::Static(p.offset)
             };
-            state.motion = p.motion.lock().clone();
+            state.camera.motion = p.motion.lock().clone();
         }
     }
 
@@ -1323,10 +1376,14 @@ impl ScrollingLayoutSystem {
         }
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
-        let column = state.columns.get(state.active_column).and_then(|c| g.column(c.id))?;
+        let column = state
+            .arrangement
+            .columns
+            .get(state.arrangement.active_column)
+            .and_then(|c| g.column(c.id))?;
         let step = column.width + g.gaps.inner.horizontal;
-        let raw = state.viewport.offset() + delta * step;
-        state.viewport.set_target(raw.clamp(g.bounds.0, g.bounds.1));
+        let raw = state.camera.viewport.offset() + delta * step;
+        state.camera.viewport.set_target(raw.clamp(g.bounds.0, g.bounds.1));
         if raw < g.bounds.0 {
             Some((Direction::Left, (g.bounds.0 - raw) / step))
         } else if raw > g.bounds.1 {
@@ -1339,9 +1396,10 @@ impl ScrollingLayoutSystem {
     pub fn viewport_gesture_available(&self, layout: LayoutId) -> bool {
         self.layouts.get(layout).is_some_and(|state| {
             state.geometry.is_some()
-                && state.selected(&self.inactive).is_some_and(|wid| {
-                    !state.fullscreen.contains(&wid) && !state.fullscreen_within_gaps.contains(&wid)
-                })
+                && state
+                    .arrangement
+                    .selected(&self.inactive)
+                    .is_some_and(|wid| !state.arrangement.fullscreen.contains_key(&wid))
         })
     }
 
@@ -1350,15 +1408,15 @@ impl ScrollingLayoutSystem {
             return false;
         }
         let state = &mut self.layouts[layout];
-        state.transient_restore = None;
-        if matches!(state.viewport, Viewport::Gesture(_)) {
+        state.camera.transient_restore = None;
+        if matches!(state.camera.viewport, Viewport::Gesture(_)) {
             return false;
         }
-        state.motion.overscroll = 0.0;
-        state.motion.samples.clear();
-        state.motion.samples.reserve(64);
-        state.viewport.sample(now, 1.0);
-        state.viewport = Viewport::Gesture(state.viewport.offset());
+        state.camera.motion.overscroll = 0.0;
+        state.camera.motion.samples.clear();
+        state.camera.motion.samples.reserve(64);
+        state.camera.viewport.sample(now, 1.0);
+        state.camera.viewport = Viewport::Gesture(state.camera.viewport.offset());
         true
     }
 
@@ -1373,11 +1431,11 @@ impl ScrollingLayoutSystem {
             return None;
         }
         let state = self.layouts.get_mut(layout)?;
-        let Viewport::Gesture(offset) = &mut state.viewport else {
+        let Viewport::Gesture(offset) = &mut state.camera.viewport else {
             return None;
         };
         let g = state.geometry.as_ref()?;
-        state.motion.update(offset, g.bounds, delta, timestamp)
+        state.camera.motion.update(offset, g.bounds, delta, timestamp)
     }
 
     /// Normalize only at the layout boundary, using cached working geometry.
@@ -1399,17 +1457,17 @@ impl ScrollingLayoutSystem {
         animate: bool,
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
-        let Viewport::Gesture(offset) = state.viewport else {
+        let Viewport::Gesture(offset) = state.camera.viewport else {
             return None;
         };
-        if !state.motion.push(0.0, timestamp) {
+        if !state.camera.motion.push(0.0, timestamp) {
             return None;
         }
-        let velocity = state.motion.velocity();
+        let velocity = state.camera.motion.velocity();
         let projected = offset - velocity / (1000.0 * 0.997_f64.ln());
         let release = self.settle(layout, projected, velocity, true)?;
         if animate {
-            self.layouts[layout].viewport = Viewport::Animation(CameraSpring::new(
+            self.layouts[layout].camera.viewport = Viewport::Animation(CameraSpring::new(
                 release.from_offset,
                 release.offset,
                 release.velocity,
@@ -1422,13 +1480,16 @@ impl ScrollingLayoutSystem {
     /// Settle where cancellation occurred, with no artificial fling or focus change.
     pub fn cancel_viewport_gesture(&mut self, layout: LayoutId) {
         if let Some(state) = self.layouts.get_mut(layout)
-            && matches!(state.viewport, Viewport::Gesture(_) | Viewport::Animation(_))
+            && matches!(
+                state.camera.viewport,
+                Viewport::Gesture(_) | Viewport::Animation(_)
+            )
         {
-            let offset = state.viewport.offset();
+            let offset = state.camera.viewport.offset();
             let offset =
                 state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1));
-            state.viewport = Viewport::Static(offset);
-            state.motion = MotionHistory::default();
+            state.camera.viewport = Viewport::Static(offset);
+            state.camera.motion = MotionHistory::default();
         }
     }
 
@@ -1438,7 +1499,7 @@ impl ScrollingLayoutSystem {
             .get(layout)
             .and_then(|state| {
                 let g = state.geometry.as_ref()?;
-                Some(state.motion.overscroll / g.tiling.size.width)
+                Some(state.camera.motion.overscroll / g.tiling.size.width)
             })
             .unwrap_or(0.0)
     }
@@ -1452,7 +1513,7 @@ impl ScrollingLayoutSystem {
     ) -> Option<ViewportRelease> {
         let state = self.layouts.get_mut(layout)?;
         let g = state.geometry.as_ref()?;
-        let from_offset = state.viewport.offset();
+        let from_offset = state.camera.viewport.offset();
         let niri = self.settings.focus_navigation_style == ScrollingFocusNavigationStyle::Niri;
         let snap = g.snaps.iter().min_by(|a, b| {
             (a.offset - projected)
@@ -1464,11 +1525,14 @@ impl ScrollingLayoutSystem {
                         a.offset.total_cmp(&b.offset)
                     } else {
                         (gesture_release
-                            && g.columns[a.column].id != state.columns[state.active_column].id)
+                            && g.columns[a.column].id
+                                != state.arrangement.columns[state.arrangement.active_column].id)
                             .cmp(
                                 &(gesture_release
                                     && g.columns[b.column].id
-                                        != state.columns[state.active_column].id),
+                                        != state.arrangement.columns
+                                            [state.arrangement.active_column]
+                                            .id),
                             )
                     }
                 })
@@ -1496,15 +1560,16 @@ impl ScrollingLayoutSystem {
             };
         }
         let offset = snap.offset;
-        let canonical_index = state.columns.iter().position(|c| c.id == g.columns[index].id)?;
-        if canonical_index != state.active_column {
-            state.fullscreen_restore = None;
+        let canonical_index =
+            state.arrangement.columns.iter().position(|c| c.id == g.columns[index].id)?;
+        if canonical_index != state.arrangement.active_column {
+            state.camera.fullscreen_restore = None;
         }
-        state.active_column = canonical_index;
-        state.transient_restore = None;
-        state.viewport.set_target(offset);
+        state.arrangement.active_column = canonical_index;
+        state.camera.transient_restore = None;
+        state.camera.viewport.set_target(offset);
         Some(ViewportRelease {
-            window: state.selected(&self.inactive)?,
+            window: state.arrangement.selected(&self.inactive)?,
             offset,
             from_offset,
             velocity,
@@ -1512,7 +1577,7 @@ impl ScrollingLayoutSystem {
     }
 
     pub fn snap_to_nearest_column(&mut self, layout: LayoutId) -> Option<WindowId> {
-        let offset = self.layouts.get(layout)?.viewport.offset();
+        let offset = self.layouts.get(layout)?.camera.viewport.offset();
         self.settle(layout, offset, 0.0, false).map(|release| release.window)
     }
 
@@ -1521,10 +1586,13 @@ impl ScrollingLayoutSystem {
             return;
         };
         if let Some(g) = &state.geometry
-            && let Some(column) =
-                state.columns.get(state.active_column).and_then(|c| g.column(c.id))
+            && let Some(column) = state
+                .arrangement
+                .columns
+                .get(state.arrangement.active_column)
+                .and_then(|c| g.column(c.id))
         {
-            state.viewport.set_target(centered_offset(g.tiling.size.width, column));
+            state.camera.viewport.set_target(centered_offset(g.tiling.size.width, column));
         }
     }
 
@@ -1543,7 +1611,7 @@ impl ScrollingLayoutSystem {
             return false;
         };
         // The requested proportion remembers the preset even when geometry is constrained.
-        let known = match state.columns[col].width {
+        let known = match state.arrangement.columns[col].width {
             ColumnWidth::Proportion(ratio) => {
                 presets.clone().position(|preset| (ratio - preset).abs() <= 1e-6)
             }
@@ -1557,7 +1625,7 @@ impl ScrollingLayoutSystem {
             let Some(g) = &state.geometry else {
                 return false;
             };
-            let Some(column) = g.column(state.columns[col].id) else {
+            let Some(column) = g.column(state.arrangement.columns[col].id) else {
                 return false;
             };
             let resolved = |ratio| {
@@ -1578,11 +1646,12 @@ impl ScrollingLayoutSystem {
                 presets.clone().find(|&r| column.width + 1.0 < resolved(r)).unwrap_or(first)
             }
         };
-        if matches!(state.columns[col].width, ColumnWidth::Proportion(r) if r == target) {
+        if matches!(state.arrangement.columns[col].width, ColumnWidth::Proportion(r) if r == target)
+        {
             return false;
         }
         state.mutate(&self.settings, &self.inactive, |state| {
-            state.columns[col].width = ColumnWidth::Proportion(target);
+            state.arrangement.columns[col].width = ColumnWidth::Proportion(target);
         });
         state.reveal(&self.settings);
         true
@@ -1592,29 +1661,29 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return Vec::new();
         };
-        let Some(wid) = state.selected(&self.inactive) else {
+        let Some(wid) = state.arrangement.selected(&self.inactive) else {
             return Vec::new();
         };
-        let fullscreen = state.fullscreen.remove(&wid);
-        let gaps = state.fullscreen_within_gaps.remove(&wid);
-        let was_same = if within_gaps { gaps } else { fullscreen };
-        if was_same {
+        let mode = if within_gaps {
+            FullscreenMode::WithinGaps
+        } else {
+            FullscreenMode::Screen
+        };
+        if state.arrangement.fullscreen.remove(&wid) == Some(mode) {
             state.restore_fullscreen_view();
         } else {
-            if state.fullscreen_restore.is_none() {
-                state.fullscreen_restore = state.bookmark();
+            if state.camera.fullscreen_restore.is_none() {
+                state.camera.fullscreen_restore = state.bookmark();
             }
-            if within_gaps {
-                state.fullscreen_within_gaps.insert(wid);
-            } else {
-                state.fullscreen.insert(wid);
-            }
-            if let Some(column) = state
-                .geometry
-                .as_ref()
-                .and_then(|g| state.columns.get(state.active_column).and_then(|c| g.column(c.id)))
-            {
-                state.viewport.set_target(column.world_x);
+            state.arrangement.fullscreen.insert(wid, mode);
+            if let Some(column) = state.geometry.as_ref().and_then(|g| {
+                state
+                    .arrangement
+                    .columns
+                    .get(state.arrangement.active_column)
+                    .and_then(|c| g.column(c.id))
+            }) {
+                state.camera.viewport.set_target(column.world_x);
             }
         }
         vec![wid]
@@ -1625,6 +1694,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.layouts.get(layout).is_some_and(|state| {
             state
+                .arrangement
                 .columns
                 .iter()
                 .any(|column| column.windows().any(|window| window.pid == pid))
@@ -1638,19 +1708,23 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if !changed {
             return false;
         }
-        for state in self.layouts.values_mut().filter(|state| state.locate(window).is_some()) {
+        for state in self
+            .layouts
+            .values_mut()
+            .filter(|state| state.arrangement.locate(window).is_some())
+        {
             state.mutate(&self.settings, &self.inactive, |state| {
-                if state.selected(&self.inactive).is_none()
+                if state.arrangement.selected(&self.inactive).is_none()
                     && let Some((col, row)) =
-                        state.columns.iter().enumerate().find_map(|(col, column)| {
+                        state.arrangement.columns.iter().enumerate().find_map(|(col, column)| {
                             column
                                 .windows()
                                 .position(|w| !self.inactive.contains(w))
                                 .map(|row| (col, row))
                         })
                 {
-                    state.active_column = col;
-                    state.columns[col].active_window = row;
+                    state.arrangement.active_column = col;
+                    state.arrangement.columns[col].active_window = row;
                 }
             });
         }
@@ -1663,11 +1737,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut state = self.layouts.get(layout).cloned().unwrap_or_default();
-        if let Viewport::Pending { target, .. } = state.viewport {
-            state.viewport = Viewport::Static(target);
-        } else if matches!(state.viewport, Viewport::Animation(_)) {
-            let offset = state.viewport.offset();
-            state.viewport = Viewport::Static(
+        if let Viewport::Pending { target, .. } = state.camera.viewport {
+            state.camera.viewport = Viewport::Static(target);
+        } else if matches!(state.camera.viewport, Viewport::Animation(_)) {
+            let offset = state.camera.viewport.offset();
+            state.camera.viewport = Viewport::Static(
                 state.geometry.as_ref().map_or(offset, |g| offset.clamp(g.bounds.0, g.bounds.1)),
             );
         }
@@ -1702,12 +1776,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.layouts.get(layout)?.selected(&self.inactive)
+        self.layouts.get(layout)?.arrangement.selected(&self.inactive)
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let state = self.layouts.get(layout)?;
-        let (col, row) = state.selected_location(&self.inactive)?;
+        let (col, row) = state.arrangement.selected_location(&self.inactive)?;
         let selected = |column: &Column| {
             column
                 .selected()
@@ -1715,15 +1789,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 .or_else(|| column.windows().copied().find(|w| !self.inactive.contains(w)))
         };
         match direction {
-            Direction::Left => state.columns[..col].iter().rev().find_map(selected),
-            Direction::Right => state.columns[col + 1..].iter().find_map(selected),
-            Direction::Up => state.columns[col].rows[..row]
+            Direction::Left => state.arrangement.columns[..col].iter().rev().find_map(selected),
+            Direction::Right => state.arrangement.columns[col + 1..].iter().find_map(selected),
+            Direction::Up => state.arrangement.columns[col].rows[..row]
                 .iter()
                 .map(|row| &row.window)
                 .rev()
                 .copied()
                 .find(|w| !self.inactive.contains(w)),
-            Direction::Down => state.columns[col].rows[row + 1..]
+            Direction::Down => state.arrangement.columns[col].rows[row + 1..]
                 .iter()
                 .map(|row| &row.window)
                 .copied()
@@ -1732,22 +1806,21 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        self.layouts.get(layout).is_some_and(|state| state.locate(wid).is_some())
+        self.layouts
+            .get(layout)
+            .is_some_and(|state| state.arrangement.locate(wid).is_some())
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        self.layouts.get(layout).is_some_and(|s| {
-            s.fullscreen
-                .iter()
-                .chain(s.fullscreen_within_gaps.iter())
-                .any(|w| !self.inactive.contains(w))
-        })
+        self.layouts
+            .get(layout)
+            .is_some_and(|s| s.arrangement.fullscreen.keys().any(|w| !self.inactive.contains(w)))
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
         self.layouts
             .get(layout)
-            .and_then(|s| s.columns.get(s.active_column))
+            .and_then(|s| s.arrangement.columns.get(s.arrangement.active_column))
             .is_some_and(|c| c.rows.len() > 1)
     }
 
@@ -1757,7 +1830,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 .layouts
                 .get(layout)
                 .into_iter()
-                .flat_map(LayoutState::windows)
+                .flat_map(|state| state.arrangement.windows())
                 .filter(|&window| {
                     matches!(query, WindowQuery::All) || self.window_participates(window)
                 })
@@ -1768,7 +1841,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 .layouts
                 .get(layout)
                 .into_iter()
-                .flat_map(LayoutState::windows)
+                .flat_map(|state| state.arrangement.windows())
                 .filter(|window| window.pid == pid)
                 .collect(),
         }
@@ -1800,21 +1873,21 @@ impl LayoutSystem for ScrollingLayoutSystem {
             }
             WindowChange::Replace(from, to) => {
                 super::replace_participation(&mut self.inactive, from, to);
-                for state in self.layouts.values_mut().filter(|state| state.locate(from).is_some())
+                for state in self
+                    .layouts
+                    .values_mut()
+                    .filter(|state| state.arrangement.locate(from).is_some())
                 {
                     state.mutate(&self.settings, &self.inactive, |state| {
-                        for column in &mut state.columns {
+                        for column in &mut state.arrangement.columns {
                             for window in column.rows.iter_mut().map(|row| &mut row.window) {
                                 if *window == from {
                                     *window = to;
                                 }
                             }
                         }
-                        if state.fullscreen.remove(&from) {
-                            state.fullscreen.insert(to);
-                        }
-                        if state.fullscreen_within_gaps.remove(&from) {
-                            state.fullscreen_within_gaps.insert(to);
+                        if let Some(mode) = state.arrangement.fullscreen.remove(&from) {
+                            state.arrangement.fullscreen.insert(to, mode);
                         }
                     });
                 }
@@ -1822,7 +1895,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
             WindowChange::CloseApp(pid) => {
                 self.inactive.retain(|w| w.pid != pid);
                 for state in self.layouts.values_mut() {
-                    let closing: Vec<_> = state.windows().filter(|w| w.pid == pid).collect();
+                    let closing: Vec<_> =
+                        state.arrangement.windows().filter(|w| w.pid == pid).collect();
                     for wid in closing {
                         Self::remove_from_state(state, &self.settings, wid, &self.inactive);
                     }
@@ -1860,7 +1934,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 let Some(state) = self.layouts.get_mut(layout) else {
                     return;
                 };
-                let Some((col, row)) = state.locate(wid) else {
+                let Some((col, row)) = state.arrangement.locate(wid) else {
                     return;
                 };
                 let width_changed = (new_frame.size.width - old_frame.size.width).abs() > 0.5;
@@ -1873,16 +1947,17 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     // Display moves can resize only the height. Keep the requested width
                     // (including preserved pixel widths) unless the width actually changed.
                     if width_changed {
-                        state.columns[col].width = ColumnWidth::Proportion(clamp_ratio(
-                            width_ratio(
-                                tiling.size.width,
-                                gaps.inner.horizontal,
-                                new_frame.size.width,
-                            ),
-                            &self.settings,
-                        ));
+                        state.arrangement.columns[col].width =
+                            ColumnWidth::Proportion(clamp_ratio(
+                                width_ratio(
+                                    tiling.size.width,
+                                    gaps.inner.horizontal,
+                                    new_frame.size.width,
+                                ),
+                                &self.settings,
+                            ));
                     }
-                    let column = &mut state.columns[col];
+                    let column = &mut state.arrangement.columns[col];
                     if height_changed && column.rows.len() > 1 {
                         let total = (tiling.size.height
                             - gaps.inner.vertical * column.rows.len().saturating_sub(1) as f64)
@@ -1939,21 +2014,22 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 else {
                     return EditResult::Raise(Vec::new());
                 };
-                let target = if col + 1 < state.columns.len() {
+                let target = if col + 1 < state.arrangement.columns.len() {
                     col + 1
                 } else if col > 0 {
                     col - 1
                 } else {
                     return EditResult::Raise(Vec::new());
                 };
-                let moved = state.columns[target].windows().copied().collect::<Vec<_>>();
-                let selected = state.selected(&self.inactive).unwrap();
-                state.transient_restore = None;
+                let moved =
+                    state.arrangement.columns[target].windows().copied().collect::<Vec<_>>();
+                let selected = state.arrangement.selected(&self.inactive).unwrap();
+                state.camera.transient_restore = None;
                 state.mutate(&self.settings, &self.inactive, |state| {
-                    let mut neighbor = state.columns.remove(target);
-                    let column = &mut state.columns[col - usize::from(target < col)];
+                    let mut neighbor = state.arrangement.columns.remove(target);
+                    let column = &mut state.arrangement.columns[col - usize::from(target < col)];
                     column.rows.append(&mut neighbor.rows);
-                    state.activate(selected);
+                    state.arrangement.activate(selected);
                 });
                 moved
             }),
@@ -1965,16 +2041,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 else {
                     return EditResult::Raise(Vec::new());
                 };
-                let selected = state.selected(&self.inactive).unwrap();
-                let moved: Vec<_> =
-                    state.columns[col].windows().copied().filter(|w| *w != selected).collect();
-                state.transient_restore = None;
+                let selected = state.arrangement.selected(&self.inactive).unwrap();
+                let moved: Vec<_> = state.arrangement.columns[col]
+                    .windows()
+                    .copied()
+                    .filter(|w| *w != selected)
+                    .collect();
+                state.camera.transient_restore = None;
                 state.mutate(&self.settings, &self.inactive, |state| {
                     for (index, &wid) in moved.iter().enumerate() {
-                        let (width, weight) = state.detach(wid, &self.inactive).unwrap();
-                        state.new_column(col + 1 + index, wid, width, weight);
+                        let (width, weight) =
+                            state.arrangement.detach(wid, &self.inactive).unwrap();
+                        state.arrangement.new_column(col + 1 + index, wid, width, weight);
                     }
-                    state.activate(selected);
+                    state.arrangement.activate(selected);
                 });
                 moved
             }),
@@ -1995,9 +2075,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 };
                 let vertical = orientation == ResizeOrientation::Vertical
                     || (orientation == ResizeOrientation::Smart
-                        && state.columns[col].rows.len() > 1);
+                        && state.arrangement.columns[col].rows.len() > 1);
                 state.mutate(&self.settings, &self.inactive, |state| {
-                    let column = &mut state.columns[col];
+                    let column = &mut state.arrangement.columns[col];
                     if vertical {
                         if column.rows.len() > 1 {
                             let total: f64 = column.rows.iter().map(|row| row.height).sum();
@@ -2040,7 +2120,7 @@ impl ScrollingLayoutSystem {
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
         self.layouts
             .get(layout)
-            .and_then(|s| s.columns.get(s.active_column))
+            .and_then(|s| s.arrangement.columns.get(s.arrangement.active_column))
             .map(|c| c.windows().copied().filter(|w| self.window_participates(*w)).collect())
             .unwrap_or_default()
     }
@@ -2064,19 +2144,17 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return false;
         };
-        if state.selected(&self.inactive) == Some(wid) {
+        if state.arrangement.selected(&self.inactive) == Some(wid) {
             return true;
         }
-        if !state.activate(wid) {
+        if !state.arrangement.activate(wid) {
             return false;
         }
-        state.transient_restore = None;
-        if state
-            .fullscreen_restore
-            .as_ref()
-            .is_some_and(|b| b.column != state.columns[state.active_column].id)
-        {
-            state.fullscreen_restore = None;
+        state.camera.transient_restore = None;
+        if state.camera.fullscreen_restore.as_ref().is_some_and(|b| {
+            b.column != state.arrangement.columns[state.arrangement.active_column].id
+        }) {
+            state.camera.fullscreen_restore = None;
         }
         state.reveal(&self.settings);
         true
@@ -2089,17 +2167,19 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return false;
         };
-        let (Some((ac, ar)), Some((bc, br))) = (state.locate(a), state.locate(b)) else {
+        let (Some((ac, ar)), Some((bc, br))) =
+            (state.arrangement.locate(a), state.arrangement.locate(b))
+        else {
             return false;
         };
         state.mutate(&self.settings, &self.inactive, |state| {
-            let selected = state.selected(&self.inactive);
-            let a = state.columns[ac].rows[ar];
-            let b = state.columns[bc].rows[br];
-            state.columns[ac].rows[ar] = b;
-            state.columns[bc].rows[br] = a;
+            let selected = state.arrangement.selected(&self.inactive);
+            let a = state.arrangement.columns[ac].rows[ar];
+            let b = state.arrangement.columns[bc].rows[br];
+            state.arrangement.columns[ac].rows[ar] = b;
+            state.arrangement.columns[bc].rows[br] = a;
             if let Some(wid) = selected {
-                state.activate(wid);
+                state.arrangement.activate(wid);
             }
         });
         true
@@ -2124,9 +2204,9 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return false;
         };
-        state.transient_restore = None;
+        state.camera.transient_restore = None;
         state.mutate(&self.settings, &self.inactive, |s| {
-            s.transfer(source, target, action, &self.inactive)
+            s.arrangement.transfer(source, target, action, &self.inactive)
         })
     }
 
@@ -2137,17 +2217,17 @@ impl ScrollingLayoutSystem {
         let Some(state) = self.layouts.get_mut(layout) else {
             return false;
         };
-        state.transient_restore = None;
+        state.camera.transient_restore = None;
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
-        let viewport = horizontal.then(|| state.viewport.clone());
+        let viewport = horizontal.then(|| state.camera.viewport.clone());
         let moved = state.mutate(&self.settings, &self.inactive, |state| {
-            let Some((col, row)) = state.selected_location(&self.inactive) else {
+            let Some((col, row)) = state.arrangement.selected_location(&self.inactive) else {
                 return false;
             };
-            if horizontal && state.columns[col].rows.len() > 1 {
-                let wid = state.selected(&self.inactive).unwrap();
-                let (width, weight) = state.detach(wid, &self.inactive).unwrap();
-                state.new_column(
+            if horizontal && state.arrangement.columns[col].rows.len() > 1 {
+                let wid = state.arrangement.selected(&self.inactive).unwrap();
+                let (width, weight) = state.arrangement.detach(wid, &self.inactive).unwrap();
+                state.arrangement.new_column(
                     col + usize::from(direction == Direction::Right),
                     wid,
                     width,
@@ -2156,15 +2236,17 @@ impl ScrollingLayoutSystem {
                 return true;
             }
             let (index, len) = if horizontal {
-                (col, state.columns.len())
+                (col, state.arrangement.columns.len())
             } else {
-                (row, state.columns[col].rows.len())
+                (row, state.arrangement.columns[col].rows.len())
             };
             let participates = |candidate: &usize| {
                 if horizontal {
-                    state.columns[*candidate].windows().any(|w| !self.inactive.contains(w))
+                    state.arrangement.columns[*candidate]
+                        .windows()
+                        .any(|w| !self.inactive.contains(w))
                 } else {
-                    !self.inactive.contains(&state.columns[col].rows[*candidate].window)
+                    !self.inactive.contains(&state.arrangement.columns[col].rows[*candidate].window)
                 }
             };
             let target = match direction {
@@ -2175,17 +2257,17 @@ impl ScrollingLayoutSystem {
                 return false;
             };
             if horizontal {
-                state.columns.swap(col, target);
-                state.active_column = target;
+                state.arrangement.columns.swap(col, target);
+                state.arrangement.active_column = target;
             } else {
-                let column = &mut state.columns[col];
+                let column = &mut state.arrangement.columns[col];
                 column.rows.swap(row, target);
                 column.active_window = target;
             }
             true
         });
         if let Some(viewport) = viewport {
-            state.viewport = viewport;
+            state.camera.viewport = viewport;
             state.reconcile_camera_bounds();
             if moved {
                 state.reveal(&self.settings);
@@ -2201,32 +2283,31 @@ impl ScrollingLayoutSystem {
         let Some(wid) = self.selected_window(from) else {
             return;
         };
-        let fullscreen = self.layouts[from].fullscreen.remove(&wid);
-        let within_gaps = self.layouts[from].fullscreen_within_gaps.remove(&wid);
-        self.layouts[from].transient_restore = None;
-        let fullscreen_restore = self.layouts[from].fullscreen_restore.clone();
+        let fullscreen = self.layouts[from].arrangement.fullscreen.remove(&wid);
+        self.layouts[from].camera.transient_restore = None;
+        let fullscreen_restore = self.layouts[from].camera.fullscreen_restore.clone();
         let (width, weight) = self.layouts[from]
-            .mutate(&self.settings, &self.inactive, |s| s.detach(wid, &self.inactive))
+            .mutate(&self.settings, &self.inactive, |s| {
+                s.arrangement.detach(wid, &self.inactive)
+            })
             .unwrap();
         if !self.layouts[from].restore_fullscreen_view() {
             self.layouts[from].reveal(&self.settings);
         }
         self.layouts[to].mutate(&self.settings, &self.inactive, |s| {
-            let index = s.selected_location(&self.inactive).map_or(0, |(col, _)| col + 1);
-            s.new_column(index, wid, width, weight);
-            if fullscreen {
-                s.fullscreen.insert(wid);
+            let index =
+                s.arrangement.selected_location(&self.inactive).map_or(0, |(col, _)| col + 1);
+            s.arrangement.new_column(index, wid, width, weight);
+            if let Some(mode) = fullscreen {
+                s.arrangement.fullscreen.insert(wid, mode);
             }
-            if within_gaps {
-                s.fullscreen_within_gaps.insert(wid);
-            }
-            s.fullscreen_restore =
-                fullscreen_restore.filter(|_| fullscreen || within_gaps).map(|bookmark| {
-                    ViewBookmark {
-                        column: s.columns[s.active_column].id,
+            s.camera.fullscreen_restore =
+                fullscreen_restore
+                    .filter(|_| fullscreen.is_some())
+                    .map(|bookmark| ViewBookmark {
+                        column: s.arrangement.columns[s.arrangement.active_column].id,
                         relative_offset: bookmark.relative_offset,
-                    }
-                });
+                    });
         });
         self.layouts[to].reveal(&self.settings);
     }
@@ -2271,6 +2352,7 @@ impl ScrollingLayoutSystem {
             return String::new();
         };
         state
+            .arrangement
             .columns
             .iter()
             .enumerate()
@@ -2283,6 +2365,7 @@ impl ScrollingLayoutSystem {
     pub(crate) fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         let state = self.layouts.get(layout).expect("unknown scrolling layout");
         let children = state
+            .arrangement
             .columns
             .iter()
             .map(|column| {
@@ -2296,9 +2379,11 @@ impl ScrollingLayoutSystem {
                         node_type: rift_protocol::ContainerNodeType::Window,
                         weight: Some(column.rows[index].height),
                         window_id: Some(window.into()),
-                        is_selected: state.selected(&self.inactive) == Some(window),
-                        is_fullscreen: state.fullscreen.contains(&window),
-                        is_fullscreen_within_gaps: state.fullscreen_within_gaps.contains(&window),
+                        is_selected: state.arrangement.selected(&self.inactive) == Some(window),
+                        is_fullscreen: state.arrangement.fullscreen.get(&window)
+                            == Some(&FullscreenMode::Screen),
+                        is_fullscreen_within_gaps: state.arrangement.fullscreen.get(&window)
+                            == Some(&FullscreenMode::WithinGaps),
                         ..Default::default()
                     })
                     .collect();
@@ -2320,7 +2405,7 @@ impl ScrollingLayoutSystem {
     }
 
     pub(crate) fn window_slot(&self, layout: LayoutId, window: WindowId) -> Option<Vec<usize>> {
-        let (col, row) = self.layouts.get(layout)?.locate(window)?;
+        let (col, row) = self.layouts.get(layout)?.arrangement.locate(window)?;
         Some(vec![col, row])
     }
 }
@@ -2453,12 +2538,12 @@ pub(crate) mod tests {
                     orientation: ResizeOrientation::Vertical,
                 })
                 .discard();
-            let offset = f.system.layouts[f.layout].viewport.start_offset();
+            let offset = f.system.layouts[f.layout].camera.viewport.start_offset();
             f.system
                 .edit(f.layout, LayoutEdit::Group(GroupEdit::ConsumeOrExpel(direction)))
                 .discard();
             assert_eq!(f.selected(), Some(wid(2)));
-            assert_eq!(f.system.layouts[f.layout].viewport.start_offset(), offset);
+            assert_eq!(f.system.layouts[f.layout].camera.viewport.start_offset(), offset);
             assert_eq!(f.frame(2).size.width, 400.0);
             let tree = f.system.container_tree(f.layout);
             let expelled = tree

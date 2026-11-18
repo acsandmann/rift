@@ -1,0 +1,42 @@
+(
+    layouts: [
+        (value: None, version: 0),
+        (value: Some((root: (idx: 1, version: 1))), version: 1),
+    ],
+    tree: (
+        map: (map: [
+            (value: None, version: 0),
+            (value: Some((
+                parent: None, prev_sibling: None, next_sibling: None,
+                first_child: Some((idx: 2, version: 1)), last_child: Some((idx: 3, version: 1)),
+            )), version: 1),
+            (value: Some((
+                parent: Some((idx: 1, version: 1)), prev_sibling: None,
+                next_sibling: Some((idx: 3, version: 1)), first_child: None, last_child: None,
+            )), version: 1),
+            (value: Some((
+                parent: Some((idx: 1, version: 1)), prev_sibling: Some((idx: 2, version: 1)),
+                next_sibling: None, first_child: None, last_child: None,
+            )), version: 1),
+            (value: None, version: 2),
+            (value: None, version: 2),
+        ]),
+        data: (selection: (nodes: [
+            (value: None, version: 0),
+            (value: Some((selected_child: (idx: 2, version: 1), stop_here: false)), version: 1),
+        ])),
+    ),
+    kind: [
+        (value: None, version: 0),
+        (value: Some(Split(orientation: horizontal, ratio: 0.5)), version: 1),
+        (value: Some(Leaf(
+            window: Some((pid: 1, idx: 2)), fullscreen: false, fullscreen_within_gaps: false,
+            preselected: None,
+        )), version: 1),
+        (value: Some(Leaf(
+            window: Some((pid: 1, idx: 3)), fullscreen: false, fullscreen_within_gaps: false,
+            preselected: None,
+        )), version: 1),
+    ],
+    stacks: {(idx: 2, version: 1): [(pid: 1, idx: 1), (pid: 1, idx: 2)]},
+)
