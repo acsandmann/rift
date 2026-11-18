@@ -275,7 +275,8 @@ enabled = true
 # match either side. A single modifier works while held, even with others; a combination must
 # be held exactly (Caps Lock is ignored).
 modifier = "fn"
-# Left-button and right-button actions: move.
+# Left-button and right-button actions: move | resize | none.
+# Resize drags the edges nearest to where the button was pressed.
 # With the modifier held, the action works from anywhere inside a managed window.
 action1 = "move"
 # Dropping in the center of another tiled window: swap | stack.

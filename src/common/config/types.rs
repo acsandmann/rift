@@ -737,6 +737,9 @@ pub enum MouseAction {
     #[default]
     #[setting(label = "Move window")]
     Move,
+    /// Resize a window from anywhere inside it by dragging the edges nearest to the press.
+    #[setting(label = "Resize window")]
+    Resize,
 }
 
 /// Action used when a tiled window is released in another tile's center zone.
