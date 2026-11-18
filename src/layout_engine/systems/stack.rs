@@ -12,9 +12,7 @@ use crate::common::config::{
     GapSettings, StackDefaultOrientation, StackLineReserve, WindowInsertionPoint,
     default_stack_orientation,
 };
-use crate::layout_engine::systems::{
-    LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
-};
+use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 use crate::model::tree::{NodeId, Tree};
@@ -482,12 +480,6 @@ impl LayoutSystem for StackLayoutSystem {
                     Vec::new()
                 }
             }
-            WindowQuery::App(pid) => self.layouts[layout]
-                .members
-                .iter()
-                .filter(|member| member.window.pid == pid)
-                .map(|member| member.window)
-                .collect(),
         }
     }
 
@@ -533,20 +525,6 @@ impl LayoutSystem for StackLayoutSystem {
                     stack.retain(|member| member.window.pid != pid);
                 }
             }
-            WindowChange::Reconcile(layout, pid, desired) => {
-                let current = self.windows(layout, WindowQuery::App(pid));
-                let delta = reconcile_app_membership(pid, current, desired, |w| {
-                    self.window_participates(w)
-                });
-                for w in delta.removals {
-                    if !self.layouts[layout].members.iter().any(|m| m.window == w && m.fullscreen) {
-                        self.layouts[layout].remove(w);
-                    }
-                }
-                for w in delta.additions {
-                    self.add_window_after_selection(layout, w);
-                }
-            }
             WindowChange::Resize {
                 layout,
                 window,
@@ -562,7 +540,7 @@ impl LayoutSystem for StackLayoutSystem {
         match edit {
             LayoutEdit::Move {
                 direction,
-                has_display_neighbor: _,
+                has_display_neighbor,
             } => EditResult::from({
                 let s = &mut self.layouts[layout];
                 if s.root_selected {
@@ -573,6 +551,8 @@ impl LayoutSystem for StackLayoutSystem {
                 };
                 let target = if let Some(target) = s.neighbor(direction, &self.inactive) {
                     target
+                } else if has_display_neighbor || s.kind.orientation() == direction.orientation() {
+                    return EditResult::Unchanged;
                 } else {
                     // Leaving the stack axis places the member at the corresponding outer
                     // edge and turns the whole stack onto that axis.
@@ -587,7 +567,7 @@ impl LayoutSystem for StackLayoutSystem {
                 s.members.insert(target, member);
                 true
             }),
-            LayoutEdit::Transfer(to) => EditResult::from(self.transfer_selection(layout, to)),
+
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
@@ -739,23 +719,6 @@ impl StackLayoutSystem {
         s.members.insert(j, m);
         true
     }
-
-    fn transfer_selection(&mut self, from: LayoutId, to: LayoutId) -> bool {
-        let Some(source) = self.layouts.get(from).filter(|s| !s.root_selected) else {
-            return false;
-        };
-        let Some(index) = source.active_index(&self.inactive) else {
-            return false;
-        };
-        let member = &source.members[index];
-        if !self.contains_layout(to) || self.contains_window(to, member.window) {
-            return false;
-        }
-        let member = member.clone();
-        self.layouts[from].remove(member.window);
-        self.layouts[to].insert(member, true);
-        true
-    }
 }
 
 impl StackLayoutSystem {
@@ -807,18 +770,27 @@ mod tests {
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
     #[test]
-    fn transferring_to_a_clone_leaves_both_stacks_intact() {
-        let mut system = StackLayoutSystem::default();
-        let source = system.create_layout();
-        system.update(WindowChange::Add(source, w(1), None));
-        let clone = system.clone_layout(source);
-
-        assert!(matches!(
-            system.edit_layout(source, LayoutEdit::Transfer(clone)),
-            EditResult::Unchanged
-        ));
-        assert_eq!(system.windows(source, WindowQuery::All), vec![w(1)]);
-        assert_eq!(system.windows(clone, WindowQuery::All), vec![w(1)]);
+    fn moving_past_the_stack_edge_leaves_the_move_to_the_engine() {
+        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Horizontal);
+        let layout = system.create_layout();
+        let first = WindowId::new(1, 1);
+        let last = WindowId::new(1, 2);
+        for window in [first, last] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        for (direction, has_display_neighbor) in [(Direction::Right, false), (Direction::Up, true)]
+        {
+            assert!(
+                !system
+                    .edit(layout, LayoutEdit::Move {
+                        direction,
+                        has_display_neighbor
+                    })
+                    .changed()
+            );
+        }
+        assert_eq!(system.windows(layout, WindowQuery::All), [first, last]);
+        assert_eq!(system.selected_window(layout), Some(last));
     }
 
     #[test]

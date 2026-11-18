@@ -53,6 +53,3 @@ pub use systems::{
 };
 
 pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStore};
-
-#[cfg(test)]
-mod drop_preview_tests;

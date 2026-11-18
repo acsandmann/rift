@@ -510,15 +510,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
                     self.distribute_regions(layout);
                 }
             }
-            WindowChange::Reconcile(layout, pid, desired) => {
-                let additions = self.tiles.reconcile_windows(layout, pid, desired);
-                if additions.is_empty() {
-                    self.distribute_regions(layout);
-                }
-                for wid in additions {
-                    self.add_window_after_selection(layout, wid);
-                }
-            }
             WindowChange::Replace(from, to) => self.tiles.replace_window(from, to),
             WindowChange::Resize {
                 layout,
@@ -547,68 +538,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
                 direction,
                 has_display_neighbor: _,
             } => EditResult::from(self.move_selection(layout, direction)),
-            LayoutEdit::Transfer(to) => {
-                if layout == to
-                    || !self.tiles.contains_layout(layout)
-                    || !self.tiles.contains_layout(to)
-                {
-                    return EditResult::Unchanged;
-                }
-                let (root, master, stack) = self.region_roots(layout);
-                let selected = self.tiles.selection(layout);
-                if selected == root {
-                    return EditResult::Unchanged;
-                }
-                if self
-                    .tiles
-                    .windows_from(selected, Some(selected), true)
-                    .any(|window| self.tiles.contains_window(to, window))
-                {
-                    return EditResult::Unchanged;
-                }
-                let (target_root, target_master, target_stack) = self.region_roots(to);
-                let target = self.tiles.selection(to);
-                let (container, mut anchor) = if target == target_root {
-                    (
-                        self.target_container_for_new_window(
-                            to,
-                            target_master,
-                            target_stack,
-                            self.count_windows(target_master),
-                        ),
-                        None,
-                    )
-                } else if target == target_master || target == target_stack {
-                    (target, None)
-                } else {
-                    (target.parent(self.tiles.map()).unwrap(), Some(target))
-                };
-                let source_is_region = selected == master || selected == stack;
-                let mut moving = if source_is_region {
-                    selected.first_child(self.tiles.map())
-                } else {
-                    Some(selected)
-                };
-                let mut moved = false;
-                while let Some(node) = moving {
-                    let placement = anchor.map_or(Placement::Back(container), Placement::After);
-                    if !self.tiles.tree.transfer(node, placement, to) {
-                        break;
-                    }
-                    moved = true;
-                    anchor = Some(node);
-                    self.tiles.select(node);
-                    moving = if source_is_region {
-                        selected.first_child(self.tiles.map())
-                    } else {
-                        None
-                    };
-                }
-                let source_changed = self.distribute_regions(layout);
-                let target_changed = self.distribute_regions(to);
-                EditResult::from(moved || source_changed || target_changed)
-            }
-
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.tiles.toggle_fullscreen(layout, within_gaps))
             }
@@ -667,13 +596,39 @@ impl MasterStackLayoutSystem {
         }
     }
 
+    pub(in crate::layout_engine) fn can_move_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        direction: Direction,
+    ) -> bool {
+        self.window_participates(window)
+            && self
+                .tiles
+                .window_node(layout, window)
+                .is_some_and(|node| self.move_target(layout, node, direction).is_some())
+    }
+
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        if self.tiles.first_visible_window(self.tiles.root(layout)).is_none() {
-            return false;
-        }
         let Some((node, focused)) = self.tiles.focused_leaf(layout) else {
             return false;
         };
+        let Some(target) = self.move_target(layout, node, direction) else {
+            return false;
+        };
+        if !self.tiles.swap_windows(layout, focused, target) {
+            return false;
+        }
+        self.tiles.focus(layout, Focus::Select(focused)).handled;
+        true
+    }
+
+    fn move_target(
+        &self,
+        layout: LayoutId,
+        node: NodeId,
+        direction: Direction,
+    ) -> Option<WindowId> {
         let (_, master, stack) = self.region_roots(layout);
         let map = self.tiles.map();
         let in_master = node.ancestors(map).any(|ancestor| ancestor == master);
@@ -690,7 +645,7 @@ impl MasterStackLayoutSystem {
         let start = node.step(region, map, forward);
         let mut neighbors = self.tiles.windows_from(region, start, forward).peekable();
         let participates = |window| self.tiles.window_participates(window);
-        let target = if toward_other && (!parallel || neighbors.peek().is_none()) {
+        if toward_other && (!parallel || neighbors.peek().is_none()) {
             // Match the region boundary even when its edge tab is suspended.
             let edge = if forward {
                 other
@@ -706,15 +661,9 @@ impl MasterStackLayoutSystem {
                 }
             } else if in_master {
                 // With no stack region, use the next master window if one exists.
-                let mut next = self
-                    .tiles
+                self.tiles
                     .windows_from(region, node.next_in_subtree(region, map), true)
-                    .peekable();
-                if next.peek().is_some() {
-                    next.find(|&window| participates(window))
-                } else {
-                    Some(focused)
-                }
+                    .find(|&window| participates(window))
             } else if parallel {
                 neighbors.find(|&window| participates(window))
             } else {
@@ -724,14 +673,7 @@ impl MasterStackLayoutSystem {
             neighbors.find(|&window| participates(window))
         } else {
             None
-        };
-        drop(neighbors);
-        let Some(target) = target else { return false };
-        if target != focused && !self.tiles.swap_windows(layout, focused, target) {
-            return false;
         }
-        self.tiles.focus(layout, Focus::Select(focused)).handled;
-        true
     }
 }
 
@@ -867,27 +809,6 @@ mod tests {
             .expect("the complete group moved into the master region");
         assert_eq!(moved.children, group.children);
         assert_eq!(system.selected_window(layout), Some(w(2)));
-    }
-
-    #[test]
-    fn transferring_a_region_preserves_regions_and_updates_membership_indexes() {
-        let mut system = MasterStackLayoutSystem::default();
-        let from = system.create_layout();
-        let to = system.create_layout();
-        system.add_window_after_selection(from, w(1));
-        system.add_window_after_selection(from, w(2));
-        let before = system.container_tree(from);
-        assert!(system.focus(from, Focus::Ascend).handled);
-        system.edit(from, LayoutEdit::Transfer(to)).discard();
-        assert!(system.contains_window(to, w(2)));
-        assert!(!system.contains_window(from, w(2)));
-        assert_eq!(
-            system.container_tree(from).children[1].node_id,
-            before.children[1].node_id
-        );
-        system.update(WindowChange::Remove(w(2)));
-        assert!(!system.contains_window(to, w(2)));
-        assert_eq!(system.windows(from, WindowQuery::All), vec![w(1)]);
     }
 
     #[test]

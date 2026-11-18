@@ -104,8 +104,7 @@ impl FloatingLayoutSystem {
             })
             .filter_map(|node| {
                 let children: Vec<_> = node.children(self.groups.map()).collect();
-                let selected =
-                    self.groups.local_selection(node).or_else(|| children.first().copied())?;
+                let selected = self.groups.visible_stack_child(node)?;
                 let index = children.iter().position(|child| *child == selected)?;
                 let (window, wid) = self.groups.first_visible_window(selected)?;
                 if self.groups.fullscreen_frame(window, screen, gaps).is_some() {
@@ -527,15 +526,6 @@ impl LayoutSystem for FloatingLayoutSystem {
                 self.geometry.retain(|wid, _| wid.pid != pid);
                 self.groups.close_app(pid)
             }
-            WindowChange::Reconcile(layout, pid, desired) => {
-                let delta = self.groups.app_delta(layout, pid, desired);
-                for wid in delta.removals {
-                    self.remove_window(wid);
-                }
-                for wid in delta.additions {
-                    self.add_window_after_selection(layout, wid);
-                }
-            }
             WindowChange::Resize { window, new, .. } => self.store_frame(window, new),
         }
     }
@@ -543,7 +533,7 @@ impl LayoutSystem for FloatingLayoutSystem {
     fn edit_layout(&mut self, layout: LayoutId, edit: LayoutEdit) -> EditResult {
         match edit {
             LayoutEdit::Move { .. } => EditResult::Unchanged,
-            LayoutEdit::Transfer(to) => self.groups.transfer_selection(layout, to),
+
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.groups.toggle_fullscreen(layout, within_gaps))
             }
@@ -602,6 +592,9 @@ impl FloatingLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
+        if self.groups.contains_window(layout, wid) {
+            return;
+        }
         // New windows remain independent until an explicit join command.
         let root = self.groups.root(layout);
         let anchor = (self.insertion == WindowInsertionPoint::NextToSelection)
@@ -644,8 +637,7 @@ impl FloatingLayoutSystem {
                 Direction::Left | Direction::Right => LayoutKind::Horizontal,
                 _ => LayoutKind::Vertical,
             };
-            self.groups.split_selection(layout, kind);
-            selection.parent(self.groups.map()).unwrap()
+            self.groups.nest_in_container_internal(layout, selection, kind)
         } else {
             parent
         };
@@ -737,6 +729,24 @@ mod tests {
     }
 
     #[test]
+    fn suspended_stack_selection_leaves_the_visible_tab_interactive() {
+        let (mut system, layout) = fixture();
+        system.join_selection_with_direction(layout, Direction::Right);
+        stack(&mut system, layout);
+        system.set_window_participation(w(1), false);
+        assert!(system.windows(layout, WindowQuery::Visible).contains(&w(2)));
+
+        let moved = rect(100., 80.);
+        system.store_frame(w(2), moved);
+        assert_eq!(system.frame(w(2)), Some(moved));
+        let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 800.));
+        let groups = system.collect_group_containers(layout, screen, &Default::default(), false);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].window_ids, [w(2)]);
+        assert_eq!(groups[0].frame, moved);
+    }
+
+    #[test]
     fn explicit_stacks_share_geometry_and_restore_only_their_members() {
         let (mut system, layout) = fixture();
         stack(&mut system, layout);
@@ -747,7 +757,7 @@ mod tests {
         system.join_selection_with_direction(layout, Direction::Right);
         assert_eq!(system.cycle_windows(layout), vec![w(1), w(2), w(3)]);
         system.add_window_after_selection(layout, w(5));
-        system.update(WindowChange::Reconcile(layout, 1, (1..=6).map(w).collect()));
+        system.update(WindowChange::Add(layout, w(6), None));
         assert_eq!(system.windows(layout, WindowQuery::Visible).len(), 4);
         system.focus(layout, Focus::Select(w(2))).handled;
         system.store_frame(w(2), rect(100., 80.));

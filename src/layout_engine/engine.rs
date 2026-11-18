@@ -402,6 +402,7 @@ impl LayoutEngine {
                 return false;
             }
         } else if let Some(tree) = prospective {
+            self.native_layouts.remove(&destination);
             self.workspaces[destination].layout_system = tree;
         }
         if self.focused_window == Some(drop.window) {
@@ -452,24 +453,22 @@ impl LayoutEngine {
         space: SpaceId,
         source: WindowId,
         target: WindowId,
-        target_frame: CGRect,
         action: crate::layout_engine::WindowDropAction,
         screen: CGRect,
         display_uuid: Option<&str>,
         stack_line: &crate::common::config::StackLineSettings,
     ) -> Option<DropPreview> {
-        if action == crate::layout_engine::WindowDropAction::Swap {
-            return (source != target).then_some(DropPreview {
-                frame: target_frame,
-                same_slot: false,
-            });
-        }
-        let Some((workspace, layout)) = self.workspaces.active_layout_for_space(space) else {
-            return None;
-        };
-        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
-        let mut system = self.workspaces[workspace].layout_system.preview_clone()?;
+        let (workspace, layout) = self.workspaces.active_layout_for_space(space)?;
+        let system = &self.workspaces[workspace].layout_system;
         let before = system.window_slot(layout, source)?;
+        if !system.window_participates(source)
+            || !system.window_participates(target)
+            || !system.contains_window(layout, target)
+        {
+            return None;
+        }
+        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
+        let mut system = system.preview_clone()?;
         system
             .edit(layout, LayoutEdit::Drop { source, target, action })
             .changed()
@@ -496,17 +495,18 @@ impl LayoutEngine {
             Direction::Up,
             Direction::Down,
         ];
-        directions.map(|direction| {
-            let Some(mut system) = baseline.preview_clone() else {
-                return false;
-            };
-            system.focus(layout, Focus::Select(source)).handled
-                && system
-                    .edit(layout, LayoutEdit::Move {
-                        direction,
-                        has_display_neighbor: false,
-                    })
-                    .changed()
+        directions.map(|direction| match baseline {
+            LayoutSystemKind::Traditional(system) => {
+                system.can_move_window(layout, source, direction)
+            }
+            LayoutSystemKind::Bsp(system) => system.can_move_window(layout, source, direction),
+            LayoutSystemKind::MasterStack(system) => {
+                system.can_move_window(layout, source, direction)
+            }
+            LayoutSystemKind::Scrolling(system) => {
+                system.can_move_window(layout, source, direction)
+            }
+            LayoutSystemKind::Stack(_) | LayoutSystemKind::Floating(_) => false,
         })
     }
 
@@ -2796,23 +2796,6 @@ impl LayoutEngine {
         }
     }
 
-    fn prepare_and_project(
-        &mut self,
-        workspace: VirtualWorkspaceId,
-        layout: LayoutId,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-        stack_line: crate::common::config::StackLineReserve,
-    ) -> Vec<(WindowId, CGRect)> {
-        self.window_layout_constraints.prepare(
-            &mut self.workspaces[workspace].layout_system,
-            layout,
-            screen,
-            gaps,
-        );
-        self.calculate_arrangement(workspace, layout, screen, gaps, stack_line)
-    }
-
     pub fn calculate_layout(
         &mut self,
         space: SpaceId,
@@ -2823,7 +2806,13 @@ impl LayoutEngine {
         let Some((workspace_id, layout)) = self.workspaces.active_layout_for_space(space) else {
             return Vec::new();
         };
-        self.prepare_and_project(workspace_id, layout, screen, gaps, stack_line)
+        self.window_layout_constraints.prepare(
+            &mut self.workspaces[workspace_id].layout_system,
+            layout,
+            screen,
+            gaps,
+        );
+        self.calculate_arrangement(workspace_id, layout, screen, gaps, stack_line)
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
@@ -2848,6 +2837,7 @@ impl LayoutEngine {
             get_window_frame,
             all_screens,
             None,
+            false,
         )
     }
 
@@ -2861,6 +2851,7 @@ impl LayoutEngine {
         get_window_frame: F,
         all_screens: &[CGRect],
         groups: Option<&mut Vec<GroupContainerInfo>>,
+        finish_scrolling: bool,
     ) -> Vec<(WindowId, CGRect)>
     where
         F: Fn(WindowId) -> Option<CGRect>,
@@ -2921,7 +2912,18 @@ impl LayoutEngine {
                     None
                 });
                 positions.extend(frames.unwrap_or_else(|| {
-                    self.prepare_and_project(active_workspace_id, layout, screen, gaps, stack_line)
+                    let system = &mut self.workspaces[active_workspace_id].layout_system;
+                    self.window_layout_constraints.prepare(system, layout, screen, gaps);
+                    if finish_scrolling && let LayoutSystemKind::Scrolling(scrolling) = system {
+                        scrolling.finish_viewport(layout);
+                    }
+                    self.calculate_arrangement(
+                        active_workspace_id,
+                        layout,
+                        screen,
+                        gaps,
+                        stack_line,
+                    )
                 }));
             }
 
@@ -4175,6 +4177,70 @@ mod tests {
             before,
             "partial discovery must not remove an assigned window or reset its split"
         );
+    }
+
+    #[test]
+    fn drag_preview_matches_committed_geometry_with_asymmetric_constraints() {
+        use crate::layout_engine::{WindowDropAction, WindowDropRequest};
+
+        for mode in [
+            LayoutMode::Traditional,
+            LayoutMode::Bsp,
+            LayoutMode::MasterStack,
+            LayoutMode::Scrolling,
+            LayoutMode::Stack,
+        ] {
+            for action in [
+                WindowDropAction::Swap,
+                WindowDropAction::Insert(Direction::Down),
+            ] {
+                let settings = LayoutSettings {
+                    mode,
+                    ..LayoutSettings::default()
+                };
+                let mut engine =
+                    LayoutEngine::new(&VirtualWorkspaceSettings::default(), &settings, None);
+                let mut store = WindowStore::default();
+                let space = SpaceId::new(96);
+                let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1200.0, 800.0));
+                let gaps = settings.gaps.effective_for_display(None);
+                let line = crate::common::config::StackLineSettings::default();
+                let source = WindowId::new(1, 1);
+                let target = WindowId::new(1, 2);
+                let _ =
+                    engine.handle_event(&mut store, LayoutEvent::SpaceExposed(space, screen.size));
+                for window in [source, target, WindowId::new(1, 3)] {
+                    let _ =
+                        engine.handle_event(&mut store, LayoutEvent::WindowAdded(space, window));
+                }
+                engine.window_layout_constraints.insert(source, WindowLayoutConstraints {
+                    is_resizable: true,
+                    max_width: 180.0,
+                    ..Default::default()
+                });
+                let before = engine.calculate_layout(space, screen, &gaps, line.reserve());
+                let preview = engine
+                    .drop_preview_frame(space, source, target, action, screen, None, &line)
+                    .unwrap_or_else(|| panic!("missing {mode:?} {action:?} preview"));
+
+                assert_eq!(
+                    engine.calculate_layout(space, screen, &gaps, line.reserve()),
+                    before
+                );
+                assert!(engine.apply_window_drop(WindowDropRequest {
+                    source,
+                    target,
+                    space,
+                    action
+                }));
+                let after = engine.calculate_layout(space, screen, &gaps, line.reserve());
+                assert_eq!(
+                    after.iter().find(|(window, _)| *window == source).unwrap().1,
+                    preview.frame,
+                    "{mode:?} {action:?}"
+                );
+            }
+        }
     }
 
     fn overview_fixture() -> (LayoutEngine, WindowStore, crate::actor::reactor::OverviewDrop) {

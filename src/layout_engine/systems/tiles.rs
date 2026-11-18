@@ -687,7 +687,11 @@ pub(super) fn project(
         stack_line,
     }
     .apply(
-        root(&prepared),
+        if map.is_effectively_fullscreen(node) {
+            node
+        } else {
+            root(&prepared)
+        },
         compute_tiling_area(screen, gaps),
         &mut sizes,
         collect,

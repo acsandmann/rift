@@ -195,52 +195,51 @@ pub(crate) fn solve_axis_lengths(
         }
     }
 
-    // Solve for final weighted lengths, clamping segments whose bounds intervene.
+    // Clamp one side at a time. A binding maximum raises the remaining
+    // shares, which can make a tentative minimum unnecessary, and vice versa.
     while !growable.is_empty() && remaining > f64::EPSILON {
+        let growable_count = growable.len();
         let total_weight: f64 = growable.iter().map(|&idx| items[idx].weight).sum();
-        let equal = total_weight <= f64::EPSILON;
-        let divisor = if equal {
-            growable.len() as f64
-        } else {
-            total_weight
+        let proposed = |item: AxisConstraints| {
+            if total_weight <= f64::EPSILON {
+                remaining / growable_count as f64
+            } else {
+                remaining * (item.weight / total_weight)
+            }
         };
-        let proposed =
-            |item: AxisConstraints| remaining * if equal { 1.0 } else { item.weight } / divisor;
+        let bounded = |item: AxisConstraints| {
+            proposed(item).clamp(item.min, item.max.unwrap_or(f64::INFINITY).max(item.min))
+        };
+        let total: f64 = growable.iter().map(|&idx| bounded(items[idx])).sum();
+        let tolerance = remaining * f64::EPSILON * growable_count as f64;
+        if (total - remaining).abs() <= tolerance {
+            for idx in growable {
+                lengths[idx] = bounded(items[idx]);
+            }
+            break;
+        }
 
         let before = growable.len();
-        let mut clamped_sum = 0.0;
+        let mut assigned = 0.0;
         growable.retain(|&idx| {
             let item = items[idx];
-            let length = proposed(item);
-            let bound = if length + f64::EPSILON < item.min {
-                Some(item.min)
+            let share = proposed(item);
+            let bound = bounded(item);
+            if (total > remaining && bound > share) || (total < remaining && bound < share) {
+                lengths[idx] = bound;
+                assigned += bound;
+                false
             } else {
-                item.max.map(|max| max.max(item.min)).filter(|&max| length > max + f64::EPSILON)
-            };
-            if let Some(bound) = bound {
-                lengths[idx] = bound.min(remaining);
-                clamped_sum += lengths[idx];
+                true
             }
-            bound.is_none()
         });
         if growable.len() == before {
             for idx in growable {
-                lengths[idx] = proposed(items[idx]);
+                lengths[idx] = bounded(items[idx]);
             }
-            remaining = 0.0;
             break;
         }
-        remaining = (remaining - clamped_sum).max(0.0);
-    }
-
-    if remaining <= f64::EPSILON {
-        let used: f64 = lengths.iter().sum();
-        let drift = usable - used;
-        if drift.abs() > f64::EPSILON {
-            if let Some(idx) = (0..n).rfind(|&idx| lengths[idx] > 0.0) {
-                lengths[idx] = (lengths[idx] + drift).max(0.0);
-            }
-        }
+        remaining = (remaining - assigned).max(0.0);
     }
 
     lengths
@@ -249,6 +248,30 @@ pub(crate) fn solve_axis_lengths(
 #[cfg(test)]
 mod tests {
     use super::{AxisConstraints, solve_axis_lengths};
+
+    #[test]
+    fn mixed_bounds_only_clamp_segments_that_need_it() {
+        let flexible = AxisConstraints {
+            min: 0.0,
+            fixed: None,
+            max: None,
+            weight: 1.0,
+            can_grow: true,
+        };
+        for (min, expected) in [(40.0, [45.0, 10.0, 45.0]), (60.0, [60.0, 10.0, 30.0])] {
+            assert_eq!(
+                solve_axis_lengths(
+                    [
+                        AxisConstraints { min, ..flexible },
+                        AxisConstraints { max: Some(10.0), ..flexible },
+                        flexible,
+                    ],
+                    100.0,
+                ),
+                expected,
+            );
+        }
+    }
 
     #[test]
     fn scales_non_fixed_minima_after_reserving_fixed_segments() {

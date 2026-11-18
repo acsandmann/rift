@@ -4,7 +4,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 
-use super::{EditResult, Focus, FocusResult, WindowQuery, reconcile_app_membership};
+use super::{EditResult, Focus, FocusResult, WindowQuery};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashSet;
 use crate::layout_engine::utils::compute_tiling_area;
@@ -100,12 +100,31 @@ pub(super) fn deserialize_tile_tree<'de, D: serde::Deserializer<'de>>(
         });
     };
     for (node, layout) in data.layout.info {
+        if !map.contains(node) {
+            return Err(serde::de::Error::custom(
+                "layout metadata references a missing node",
+            ));
+        }
         map[node].layout = layout;
     }
-    for (node, selection) in data.selection.nodes {
-        *map[node].selection_mut() = Some(selection);
+    for (node, selection) in &data.selection.nodes {
+        if !map.contains(node)
+            || map.window(node).is_some()
+            || data.selection.last_selection(node).and_then(|child| child.parent(&map))
+                != Some(node)
+        {
+            return Err(serde::de::Error::custom(
+                "layout selection references an invalid child",
+            ));
+        }
+        *map[node].selection_mut() = Some(*selection);
     }
     for (node, window) in data.window.windows {
+        if !map.contains(node) || node.first_child(&map).is_some() {
+            return Err(serde::de::Error::custom(
+                "layout window references an invalid leaf",
+            ));
+        }
         map[node].set_window(window);
     }
     Ok(Tree {
@@ -322,42 +341,6 @@ impl GroupLayouts {
         }
         let selection = self.selection(layout);
         self.nest_in_container_internal(layout, selection, kind);
-        EditResult::Changed
-    }
-
-    pub(super) fn transfer_selection(&mut self, layout: LayoutId, to: LayoutId) -> EditResult {
-        if layout == to || !self.contains_layout(layout) || !self.contains_layout(to) {
-            return EditResult::Unchanged;
-        }
-        let from_sel = self.selection(layout);
-        let to_sel = self.selection(to);
-        if self
-            .windows_from(from_sel, Some(from_sel), true)
-            .any(|window| self.contains_window(to, window))
-        {
-            return EditResult::Unchanged;
-        }
-
-        let map = &self.tree.map;
-        let Some(old_parent) = from_sel.parent(map) else {
-            return EditResult::Unchanged;
-        };
-        let is_selection = self.tree.map.local_selection(old_parent) == Some(from_sel);
-        let placement = if to_sel.parent(map).is_none() {
-            Placement::Back(to_sel)
-        } else {
-            Placement::After(to_sel)
-        };
-        if !self.tree.transfer(from_sel, placement, to) {
-            return EditResult::Unchanged;
-        }
-        if is_selection {
-            let mut current = Some(from_sel);
-            while let Some(node) = current.filter(|&node| node != old_parent) {
-                current = node.parent(&self.tree.map);
-                self.tree.map.select_locally(node);
-            }
-        };
         EditResult::Changed
     }
 
@@ -832,17 +815,6 @@ impl GroupLayouts {
             })
     }
 
-    pub(super) fn app_delta(
-        &self,
-        layout: LayoutId,
-        pid: pid_t,
-        desired: Vec<WindowId>,
-    ) -> super::AppMembershipDelta {
-        reconcile_app_membership(pid, self.app_members(layout, pid).collect(), desired, |window| {
-            self.window_participates(window)
-        })
-    }
-
     pub(super) fn window_participates(&self, window: WindowId) -> bool {
         !self.inactive.contains(&window)
     }
@@ -944,10 +916,6 @@ impl GroupLayouts {
                 self.visible_windows_under_internal(selection)
             }
             WindowQuery::Stack(window) => self.stack_members(layout, window),
-            WindowQuery::App(pid) => self
-                .windows_with_nodes(layout)
-                .filter_map(|(_, window)| (window.pid == pid).then_some(window))
-                .collect(),
         }
     }
 
@@ -1067,30 +1035,19 @@ impl GroupLayouts {
         self.tree.window.window_nodes.contains_key(&wid)
     }
 
-    pub(super) fn node_is_visible(&self, node: NodeId) -> bool {
-        node.ancestors_with_parent(self.map()).all(|(child, parent)| {
-            parent.is_none_or(|parent| {
-                !self.layout(parent).is_stacked()
-                    || self.tree.map.local_selection(parent) == Some(child)
-            })
-        })
+    pub(super) fn visible_stack_child(&self, node: NodeId) -> Option<NodeId> {
+        self.map()
+            .participating_child(node, false, |child| self.first_visible_window(child).is_some())
     }
 
-    pub(super) fn reconcile_windows(
-        &mut self,
-        layout: LayoutId,
-        pid: pid_t,
-        desired: Vec<WindowId>,
-    ) -> Vec<WindowId> {
-        let delta = self.app_delta(layout, pid, desired);
-        for window in delta.removals {
-            if let Some(node) = self.window_node(layout, window)
-                && !self.tree.map[node].layout.is_fullscreen
-            {
-                self.tree.remove(node);
-            }
-        }
-        delta.additions
+    pub(super) fn node_is_visible(&self, node: NodeId) -> bool {
+        self.window_at(node).is_some_and(|window| self.window_participates(window))
+            && node.ancestors_with_parent(self.map()).all(|(child, parent)| {
+                parent.is_none_or(|parent| {
+                    !self.layout(parent).is_stacked()
+                        || self.visible_stack_child(parent) == Some(child)
+                })
+            })
     }
 
     pub(super) fn fullscreen_frame(

@@ -17,9 +17,7 @@ use crate::common::config::{
     WindowInsertionPoint,
 };
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
-use crate::layout_engine::systems::{
-    LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
-};
+use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, ResizeOrientation, WindowDropAction};
 use crate::model::hidden_window_placement::HiddenWindowPlacement;
@@ -702,6 +700,12 @@ struct Arrangement {
     fullscreen: HashMap<WindowId, FullscreenMode>,
 }
 
+enum MoveDestination {
+    NewColumn(usize),
+    Column(usize),
+    Row(usize),
+}
+
 #[derive(Clone, Debug, Default)]
 struct Camera {
     viewport: Viewport,
@@ -885,6 +889,42 @@ impl Arrangement {
     fn locate(&self, wid: WindowId) -> Option<(usize, usize)> {
         self.columns.iter().enumerate().find_map(|(col, column)| {
             column.windows().position(|&w| w == wid).map(|row| (col, row))
+        })
+    }
+
+    fn move_destination(
+        &self,
+        (col, row): (usize, usize),
+        direction: Direction,
+        inactive: &HashSet<WindowId>,
+    ) -> Option<MoveDestination> {
+        let horizontal = matches!(direction, Direction::Left | Direction::Right);
+        let rows = &self.columns[col].rows;
+        if horizontal && rows.len() > 1 {
+            return Some(MoveDestination::NewColumn(
+                col + usize::from(direction == Direction::Right),
+            ));
+        }
+        let (index, len) = if horizontal {
+            (col, self.columns.len())
+        } else {
+            (row, rows.len())
+        };
+        let participates = |candidate: &usize| {
+            if horizontal {
+                self.columns[*candidate].windows().any(|w| !inactive.contains(w))
+            } else {
+                !inactive.contains(&rows[*candidate].window)
+            }
+        };
+        let target = match direction {
+            Direction::Left | Direction::Up => (0..index).rev().find(participates),
+            Direction::Right | Direction::Down => (index + 1..len).find(participates),
+        }?;
+        Some(if horizontal {
+            MoveDestination::Column(target)
+        } else {
+            MoveDestination::Row(target)
         })
     }
 
@@ -1901,13 +1941,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 .collect(),
             WindowQuery::Selection => self.visible_windows_under_selection(layout),
             WindowQuery::Stack(_) => Vec::new(),
-            WindowQuery::App(pid) => self
-                .layouts
-                .get(layout)
-                .into_iter()
-                .flat_map(|state| state.arrangement.windows())
-                .filter(|window| window.pid == pid)
-                .collect(),
         }
     }
 
@@ -1964,20 +1997,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     for wid in closing {
                         Self::remove_from_state(state, &self.settings, wid, &self.inactive);
                     }
-                }
-            }
-            WindowChange::Reconcile(layout, pid, desired) => {
-                let current = self.windows(layout, WindowQuery::App(pid));
-                let delta = reconcile_app_membership(pid, current, desired, |w| {
-                    self.window_participates(w)
-                });
-                if let Some(state) = self.layouts.get_mut(layout) {
-                    for wid in delta.removals {
-                        Self::remove_from_state(state, &self.settings, wid, &self.inactive);
-                    }
-                }
-                for wid in delta.additions {
-                    self.insert(layout, wid);
                 }
             }
             WindowChange::Resize {
@@ -2044,9 +2063,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 direction,
                 has_display_neighbor: _,
             } => EditResult::from(self.move_selection(layout, direction)),
-            LayoutEdit::Transfer(to) => {
-                EditResult::from(self.move_selection_to_layout_after_selection(layout, to))
-            }
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.toggle_fullscreen(layout, within_gaps))
             }
@@ -2269,106 +2285,59 @@ impl ScrollingLayoutSystem {
         })
     }
 
+    pub(in crate::layout_engine) fn can_move_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        direction: Direction,
+    ) -> bool {
+        self.window_participates(window)
+            && self.layouts.get(layout).is_some_and(|state| {
+                state.arrangement.locate(window).is_some_and(|slot| {
+                    state.arrangement.move_destination(slot, direction, &self.inactive).is_some()
+                })
+            })
+    }
+
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        if self.selected_window(layout).is_none() {
-            return false;
-        }
         let Some(state) = self.layouts.get_mut(layout) else {
             return false;
         };
+        let Some((col, row)) = state.arrangement.selected_location(&self.inactive) else {
+            return false;
+        };
+        let Some(destination) =
+            state.arrangement.move_destination((col, row), direction, &self.inactive)
+        else {
+            return false;
+        };
         state.camera.transient_restore = None;
-        let horizontal = matches!(direction, Direction::Left | Direction::Right);
-        let viewport = horizontal.then(|| state.camera.viewport.clone());
-        let moved = state.mutate(&self.settings, &self.inactive, |state| {
-            let Some((col, row)) = state.arrangement.selected_location(&self.inactive) else {
-                return false;
-            };
-            if horizontal && state.arrangement.columns[col].rows.len() > 1 {
-                let wid = state.arrangement.selected(&self.inactive).unwrap();
-                let (width, weight) = state.arrangement.detach(wid, &self.inactive).unwrap();
-                state.arrangement.new_column(
-                    col + usize::from(direction == Direction::Right),
-                    wid,
-                    width,
-                    weight,
-                );
-                return true;
-            }
-            let (index, len) = if horizontal {
-                (col, state.arrangement.columns.len())
-            } else {
-                (row, state.arrangement.columns[col].rows.len())
-            };
-            let participates = |candidate: &usize| {
-                if horizontal {
-                    state.arrangement.columns[*candidate]
-                        .windows()
-                        .any(|w| !self.inactive.contains(w))
-                } else {
-                    !self.inactive.contains(&state.arrangement.columns[col].rows[*candidate].window)
+        let viewport = (!matches!(destination, MoveDestination::Row(_)))
+            .then(|| state.camera.viewport.clone());
+        state.mutate(&self.settings, &self.inactive, |state| {
+            let arrangement = &mut state.arrangement;
+            match destination {
+                MoveDestination::NewColumn(target) => {
+                    let window = arrangement.columns[col].rows[row].window;
+                    let (width, weight) = arrangement.detach(window, &self.inactive).unwrap();
+                    arrangement.new_column(target, window, width, weight);
                 }
-            };
-            let target = match direction {
-                Direction::Left | Direction::Up => (0..index).rev().find(participates),
-                Direction::Right | Direction::Down => (index + 1..len).find(participates),
-            };
-            let Some(target) = target else {
-                return false;
-            };
-            if horizontal {
-                state.arrangement.columns.swap(col, target);
-                state.arrangement.active_column = target;
-            } else {
-                let column = &mut state.arrangement.columns[col];
-                column.rows.swap(row, target);
-                column.active_window = target;
+                MoveDestination::Column(target) => {
+                    arrangement.columns.swap(col, target);
+                    arrangement.active_column = target;
+                }
+                MoveDestination::Row(target) => {
+                    let column = &mut arrangement.columns[col];
+                    column.rows.swap(row, target);
+                    column.active_window = target;
+                }
             }
-            true
         });
         if let Some(viewport) = viewport {
             state.camera.viewport = viewport;
             state.reconcile_camera_bounds();
-            if moved {
-                state.reveal(&self.settings);
-            }
+            state.reveal(&self.settings);
         }
-        moved
-    }
-
-    fn move_selection_to_layout_after_selection(&mut self, from: LayoutId, to: LayoutId) -> bool {
-        let Some(wid) = self.selected_window(from) else {
-            return false;
-        };
-        if !self.contains_layout(to) || self.contains_window(to, wid) {
-            return false;
-        }
-        let fullscreen = self.layouts[from].arrangement.fullscreen.remove(&wid);
-        self.layouts[from].camera.transient_restore = None;
-        let fullscreen_restore = self.layouts[from].camera.fullscreen_restore.clone();
-        let (width, weight) = self.layouts[from]
-            .mutate(&self.settings, &self.inactive, |s| {
-                s.arrangement.detach(wid, &self.inactive)
-            })
-            .unwrap();
-        if !self.layouts[from].restore_fullscreen_view() {
-            self.layouts[from].reveal(&self.settings);
-        }
-        self.layouts[to].mutate(&self.settings, &self.inactive, |s| {
-            let index =
-                s.arrangement.selected_location(&self.inactive).map_or(0, |(col, _)| col + 1);
-            s.arrangement.new_column(index, wid, width, weight);
-            if let Some(mode) = fullscreen {
-                s.arrangement.fullscreen.insert(wid, mode);
-            }
-            s.camera.fullscreen_restore =
-                fullscreen_restore
-                    .filter(|_| fullscreen.is_some())
-                    .map(|bookmark| ViewBookmark {
-                        column: s.arrangement.columns[s.arrangement.active_column].id,
-                        relative_offset: bookmark.relative_offset,
-                    });
-        });
-        self.layouts[to].reveal(&self.settings);
         true
     }
 
@@ -2660,7 +2629,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn persistence_clone_and_cross_layout_transfer_preserve_column_state() {
+    fn persistence_and_clone_preserve_column_state() {
         let mut f = Fixture::new(3);
         f.drop(2, 1, WindowDropAction::Stack);
         f.select(2);
@@ -2702,17 +2671,6 @@ pub(crate) mod tests {
             .x;
         assert_eq!(new_x, old_x);
 
-        assert!(matches!(
-            f.system.edit_layout(f.layout, LayoutEdit::Transfer(clone)),
-            EditResult::Unchanged
-        ));
-        assert_eq!(f.selected(), Some(wid(2)));
-
-        let destination = f.system.create_layout();
-        assert!(f.system.move_selection_to_layout_after_selection(f.layout, destination));
-        assert_eq!(f.system.selected_window(destination), Some(wid(2)));
-        assert_eq!(f.selected(), Some(wid(1)));
-        assert!(!f.system.contains_window(f.layout, wid(2)));
         f.system.update(WindowChange::Add(f.layout, wid(4), None));
         let ids: Vec<_> =
             f.system.container_tree(f.layout).children.iter().map(|c| c.node_id).collect();

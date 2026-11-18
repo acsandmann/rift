@@ -10,9 +10,7 @@ use crate::layout_engine::systems::constraints::{
     AxisConstraints, ConstraintCache, axis_slot, constrain_frame, container_axis_constraints,
     solve_axis_lengths,
 };
-use crate::layout_engine::systems::{
-    LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
-};
+use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
@@ -1263,13 +1261,6 @@ impl LayoutSystem for BspLayoutSystem {
                 .and_then(|node| self.stack(node))
                 .unwrap_or_default()
                 .to_vec(),
-            WindowQuery::App(pid) => self
-                .layouts
-                .get(layout)
-                .into_iter()
-                .flat_map(|state| self.windows_under(state.root))
-                .filter(|window| window.pid == pid)
-                .collect(),
         }
     }
 
@@ -1356,30 +1347,6 @@ impl LayoutSystem for BspLayoutSystem {
                 windows.dedup();
                 for window in windows {
                     self.remove_window(window);
-                }
-            }
-            WindowChange::Reconcile(layout, pid, desired) => {
-                let current = self.windows(layout, WindowQuery::App(pid));
-                let delta = reconcile_app_membership(pid, current, desired, |w| {
-                    self.window_participates(w)
-                });
-                for wid in delta.removals {
-                    let Some(node) = self.node_for_window_in_layout(layout, wid) else {
-                        continue;
-                    };
-                    if let NodeKind::Leaf {
-                        fullscreen,
-                        fullscreen_within_gaps,
-                        ..
-                    } = self.kind(node)
-                        && (*fullscreen || *fullscreen_within_gaps)
-                    {
-                        continue;
-                    }
-                    self.remove_member(layout, node, wid);
-                }
-                for wid in delta.additions {
-                    self.add_window_after_selection(layout, wid);
                 }
             }
             WindowChange::Resize {
@@ -1479,17 +1446,6 @@ impl LayoutSystem for BspLayoutSystem {
                 direction,
                 has_display_neighbor: _,
             } => EditResult::from(self.move_selection(layout, direction)),
-            LayoutEdit::Transfer(to) => {
-                let Some(window) = self.selected_window(layout) else {
-                    return EditResult::Unchanged;
-                };
-                if layout == to || !self.contains_layout(to) || self.contains_window(to, window) {
-                    return EditResult::Unchanged;
-                }
-                while self.remove_window_internal(layout, window) {}
-                self.add_window_after_selection(to, window);
-                EditResult::Changed
-            }
             LayoutEdit::Split(kind) => {
                 if kind.is_stacked() {
                     return EditResult::Unsupported;
@@ -1584,6 +1540,18 @@ impl LayoutSystem for BspLayoutSystem {
 }
 
 impl BspLayoutSystem {
+    pub(in crate::layout_engine) fn can_move_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        direction: Direction,
+    ) -> bool {
+        self.window_participates(window)
+            && self
+                .node_for_window_in_layout(layout, window)
+                .is_some_and(|node| self.find_neighbor_leaf(node, direction).is_some())
+    }
+
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let Some(sel) = self.selection_of_layout(layout) else {
             return false;

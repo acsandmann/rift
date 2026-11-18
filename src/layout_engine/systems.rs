@@ -118,48 +118,12 @@ fn replace_participation(inactive: &mut HashSet<WindowId>, from: WindowId, to: W
     }
 }
 
-pub(crate) struct AppMembershipDelta {
-    pub additions: Vec<WindowId>,
-    pub removals: Vec<WindowId>,
-}
-
-/// Compute the identity changes needed to reconcile one application's layout membership.
-/// Representations remain responsible for insertion placement and protected-node removal rules.
-pub(crate) fn reconcile_app_membership(
-    pid: pid_t,
-    mut current: Vec<WindowId>,
-    mut desired: Vec<WindowId>,
-    participates: impl Fn(WindowId) -> bool,
-) -> AppMembershipDelta {
-    debug_assert!(current.iter().all(|wid| wid.pid == pid));
-    debug_assert!(desired.iter().all(|wid| wid.pid == pid));
-    current.sort_unstable();
-    desired.sort_unstable();
-    current.dedup();
-    desired.dedup();
-
-    let mut additions = Vec::new();
-    let mut removals = Vec::new();
-    let mut desired = desired.into_iter().peekable();
-    for window in current {
-        while let Some(addition) = desired.next_if(|next| *next < window) {
-            additions.push(addition);
-        }
-        if desired.next_if_eq(&window).is_none() && participates(window) {
-            removals.push(window);
-        }
-    }
-    additions.extend(desired);
-    AppMembershipDelta { additions, removals }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum WindowQuery {
     All,
     Visible,
     Selection,
     Stack(WindowId),
-    App(pid_t),
 }
 
 pub enum WindowChange<'a> {
@@ -168,7 +132,6 @@ pub enum WindowChange<'a> {
     RemoveAndRebalance(WindowId),
     Replace(WindowId, WindowId),
     CloseApp(pid_t),
-    Reconcile(LayoutId, pid_t, Vec<WindowId>),
     Resize {
         layout: LayoutId,
         window: WindowId,
@@ -229,7 +192,6 @@ pub enum LayoutEdit {
         direction: Direction,
         has_display_neighbor: bool,
     },
-    Transfer(LayoutId),
     Split(LayoutKind),
     Fullscreen {
         within_gaps: bool,
@@ -399,12 +361,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         if !self.focus(layout, Focus::Select(source)).handled {
             return EditResult::Unchanged;
         }
-        let result = self.edit_layout(layout, translated);
-        if matches!(action, WindowDropAction::ConsumeOrExpel(_)) {
-            EditResult::Changed
-        } else {
-            result
-        }
+        self.edit_layout(layout, translated)
     }
 }
 
@@ -699,9 +656,6 @@ mod participation_tests {
             system.update(WindowChange::Remove(windows[2]));
             let inserted = WindowId::new(1, 5);
             system.update(WindowChange::Add(layout, inserted, None));
-            system.update(WindowChange::Reconcile(layout, 1, vec![
-                windows[0], windows[3], inserted,
-            ]));
             assert!(
                 system.contains_window(layout, replacement),
                 "inventory must retain suspended members"

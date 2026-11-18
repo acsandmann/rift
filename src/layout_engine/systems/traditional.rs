@@ -312,11 +312,6 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 }
                 self.tiles.select(node);
             }
-            WindowChange::Reconcile(layout, pid, desired) => {
-                for wid in self.tiles.reconcile_windows(layout, pid, desired) {
-                    self.add_window_after_selection(layout, wid);
-                }
-            }
             WindowChange::Remove(window) => {
                 self.tiles.remove_window(window);
             }
@@ -356,7 +351,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 direction,
                 has_display_neighbor,
             )),
-            LayoutEdit::Transfer(to) => self.tiles.transfer_selection(layout, to),
+
             LayoutEdit::Split(kind) => self.tiles.split_selection(layout, kind),
             LayoutEdit::Fullscreen { within_gaps } => {
                 EditResult::Raise(self.tiles.toggle_fullscreen(layout, within_gaps))
@@ -602,13 +597,36 @@ impl TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
+    pub(in crate::layout_engine) fn can_move_window(
+        &self,
+        layout: LayoutId,
+        window: WindowId,
+        direction: Direction,
+    ) -> bool {
+        self.window_participates(window)
+            && self
+                .tiles
+                .window_node(layout, window)
+                .is_some_and(|node| self.move_destination(node, direction).is_some())
+    }
+
     fn move_node(&mut self, layout: LayoutId, moving_node: NodeId, direction: Direction) -> bool {
         let map = &self.tiles.tree.map;
         let Some(old_parent) = moving_node.parent(map) else {
             return false;
         };
         let is_selection = self.tiles.tree.map.local_selection(old_parent) == Some(moving_node);
-        let moved = self.move_node_inner(layout, moving_node, direction);
+        let Some((placement, wrap_root)) = self.move_destination(moving_node, direction) else {
+            return false;
+        };
+        if let Some(root) = wrap_root {
+            self.tiles.nest_in_container_internal(
+                layout,
+                root,
+                LayoutKind::from(direction.orientation()),
+            );
+        }
+        let moved = self.tiles.tree.move_node(moving_node, placement);
         if moved && is_selection {
             let mut current = Some(moving_node);
             while let Some(node) = current.filter(|&node| node != old_parent) {
@@ -619,19 +637,15 @@ impl TraditionalLayoutSystem {
         moved
     }
 
-    fn move_node_inner(
-        &mut self,
-        layout: LayoutId,
+    fn move_destination(
+        &self,
         moving_node: NodeId,
         direction: Direction,
-    ) -> bool {
-        enum Destination {
-            Ahead(NodeId),
-            Behind(NodeId),
-        }
-        let map = &self.tiles.tree.map;
-        let destination;
-        if let Some(sibling) = self.tiles.move_over(moving_node, direction) {
+    ) -> Option<(Placement, Option<NodeId>)> {
+        let map = self.tiles.map();
+        moving_node.parent(map)?;
+        let mut wrap_root = None;
+        let (target, behind) = if let Some(sibling) = self.tiles.move_over(moving_node, direction) {
             let mut node = sibling;
             let target = loop {
                 let Some(next) =
@@ -644,11 +658,7 @@ impl TraditionalLayoutSystem {
                 }
                 node = next;
             };
-            if target == sibling {
-                destination = Destination::Ahead(sibling);
-            } else {
-                destination = Destination::Behind(target);
-            }
+            (target, target != sibling)
         } else {
             let target_ancestor = moving_node
                 .ancestors_with_parent(&self.tiles.tree.map)
@@ -659,32 +669,26 @@ impl TraditionalLayoutSystem {
                         .unwrap_or(false)
                 });
             if let Some((target, _parent)) = target_ancestor {
-                destination = Destination::Ahead(target);
+                (target, false)
             } else {
                 let old_root = moving_node.ancestors(map).last().unwrap();
                 let root_kind = self.tiles.tree.map.kind(old_root);
                 // Leaving the edge of a root group splits the window out of it; at the edge
                 // of a same-oriented split there is nowhere further to go.
                 if root_kind.orientation() == direction.orientation() && !root_kind.is_group() {
-                    return false;
+                    return None;
                 }
-                let new_container_kind = LayoutKind::from(direction.orientation());
-                self.tiles.nest_in_container_internal(layout, old_root, new_container_kind);
-                destination = Destination::Ahead(old_root);
+                wrap_root = Some(old_root);
+                (old_root, false)
             }
-        }
-        let (target, before) = match (destination, direction) {
-            (Destination::Ahead(target), Direction::Left | Direction::Up)
-            | (Destination::Behind(target), Direction::Right | Direction::Down) => (target, true),
-            (Destination::Ahead(target), Direction::Right | Direction::Down)
-            | (Destination::Behind(target), Direction::Left | Direction::Up) => (target, false),
         };
+        let before = matches!(direction, Direction::Left | Direction::Up) != behind;
         let placement = if before {
             Placement::Before(target)
         } else {
             Placement::After(target)
         };
-        self.tiles.tree.move_node(moving_node, placement)
+        Some((placement, wrap_root))
     }
 
     fn find_or_create_common_parent_internal(&mut self, node1: NodeId, node2: NodeId) -> NodeId {
@@ -698,17 +702,17 @@ impl TraditionalLayoutSystem {
         if node1.parent(map) == Some(ancestor) && node2.parent(map) == Some(ancestor) {
             let size1 = self.tiles.tree.map[node1].layout.size.max(0.0);
             let size2 = self.tiles.tree.map[node2].layout.size.max(0.0);
-            let new_container = self.tiles.tree.insert(Placement::Before(node1));
             let tree = &mut self.tiles.tree;
+            let new_container = tree.insert(Placement::Before(node1));
+            // Put both shares into the replacement before the moves normalize
+            // the source siblings. All surviving weights then scale together.
+            tree.map[new_container].layout.size = size1 + size2;
+            tree.map[node1].layout.size = 0.0;
+            tree.map[node2].layout.size = 0.0;
             tree.move_node(node1, Placement::Back(new_container));
             tree.move_node(node2, Placement::Back(new_container));
             tree.map[node1].layout.size = size1;
             tree.map[node2].layout.size = size2;
-
-            // A collapsed parent already transferred its outer weight.
-            if self.tiles.tree.map.contains(ancestor) {
-                self.tiles.tree.map[new_container].layout.size = size1 + size2;
-            }
             return new_container;
         }
         let container = self.tiles.tree.insert(Placement::Back(ancestor));
@@ -729,14 +733,43 @@ mod tests {
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
     #[test]
-    fn same_layout_transfer_preserves_the_selected_tile() {
+    fn joining_resized_neighbors_preserves_the_unrelated_tiles_width() {
         let mut system = TraditionalLayoutSystem::default();
         let layout = system.create_layout();
-        system.update(WindowChange::Add(layout, w(1), None));
-        let before = system.tiles.container_tree(layout);
-        assert!(!system.edit(layout, LayoutEdit::Transfer(layout)).changed());
-        assert_eq!(system.tiles.container_tree(layout), before);
-        assert_eq!(system.selected_window(layout), Some(w(1)));
+        for window in [w(1), w(2), w(3)] {
+            system.update(WindowChange::Add(layout, window, None));
+        }
+        assert!(
+            system
+                .edit(layout, LayoutEdit::Resize {
+                    amount: 0.2,
+                    orientation: crate::layout_engine::ResizeOrientation::Horizontal,
+                })
+                .changed()
+        );
+        let frame = |system: &TraditionalLayoutSystem| {
+            system
+                .calculate_layout(
+                    layout,
+                    CGRect::new(CGPoint::ZERO, CGSize::new(1200., 800.)),
+                    0.0,
+                    &Default::default(),
+                    &Default::default(),
+                    Default::default(),
+                )
+                .into_iter()
+                .find(|(window, _)| *window == w(3))
+                .unwrap()
+                .1
+        };
+        let before = frame(&system);
+        assert!(system.focus(layout, Focus::Select(w(1))).handled);
+        assert!(
+            system
+                .edit(layout, LayoutEdit::Group(GroupEdit::Join(Direction::Right)))
+                .changed()
+        );
+        assert_eq!(frame(&system), before);
     }
 
     #[test]

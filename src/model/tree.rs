@@ -94,14 +94,6 @@ impl Tree {
         true
     }
 
-    pub(crate) fn transfer(&mut self, node: NodeId, placement: Placement, to: LayoutId) -> bool {
-        if !self.move_node(node, placement) {
-            return false;
-        }
-        self.window.reassign_subtree(&self.map, node, to);
-        true
-    }
-
     pub(crate) fn remove(&mut self, node: NodeId) {
         if let Some(parent) = node.parent(&self.map) {
             if self.map[parent].is_region_pair() {
@@ -688,18 +680,6 @@ impl WindowIndex {
             .or_default()
             .0
             .push(WindowNodeInfo { layout, node });
-    }
-
-    pub(crate) fn reassign_subtree(&mut self, map: &NodeMap, node: NodeId, layout: LayoutId) {
-        for node in node.traverse_preorder(map) {
-            if let Some(window) = map.window(node) {
-                for info in &mut self.window_nodes.get_mut(&window).unwrap().0 {
-                    if info.node == node {
-                        info.layout = layout;
-                    }
-                }
-            }
-        }
     }
 
     pub(crate) fn replace_window(&mut self, map: &mut NodeMap, from: WindowId, to: WindowId) {

@@ -4317,7 +4317,7 @@ impl Reactor {
         {
             // Move directly into the destination tile. A source-sized placement
             // followed immediately by a resize can lose one AX size component.
-            frame = LayoutManager::calculate_layout(self, Some(target), false)
+            frame = LayoutManager::calculate_layout(self, Some(target), false, false)
                 .into_iter()
                 .flat_map(|(_, layout, _)| layout)
                 .find_map(|(wid, frame)| (wid == window).then_some(frame))
@@ -4692,7 +4692,6 @@ impl Reactor {
                         intent.space,
                         source.window,
                         intent.window,
-                        intent.frame,
                         intent.action,
                         screen.frame,
                         screen.display_uuid_opt(),

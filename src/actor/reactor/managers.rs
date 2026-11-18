@@ -225,22 +225,6 @@ pub type LayoutResult = Vec<(
 
 pub(super) use crate::model::hidden_window_placement::ScrollingDisplayBounds;
 
-fn bound_scrolling_tiled_frames_to_screen(
-    reactor: &Reactor,
-    layout: &mut Vec<(WindowId, CGRect)>,
-    bounds: ScrollingDisplayBounds,
-    active_workspace_windows: &HashSet<WindowId>,
-) {
-    for (wid, frame) in layout.iter_mut() {
-        if !active_workspace_windows.contains(wid)
-            || reactor.layout_manager.layout_engine.is_window_floating(*wid)
-        {
-            continue;
-        }
-        *frame = bounds.apply(*frame);
-    }
-}
-
 impl LayoutManager {
     fn publish_stack_tabs(
         reactor: &Reactor,
@@ -333,7 +317,7 @@ impl LayoutManager {
         if reactor.refreshes_blocked() {
             return Ok(false);
         }
-        let layout_result = Self::calculate_layout(reactor, space_scope, true);
+        let layout_result = Self::calculate_layout(reactor, space_scope, true, false);
         Self::apply_layout(
             reactor,
             layout_result,
@@ -352,30 +336,22 @@ impl LayoutManager {
         if reactor.refreshes_blocked() {
             return Ok(false);
         }
-        let layout = Self::calculate_layout(reactor, space_scope, true);
-        // Finish the logical scrolling viewport here, without queueing a second
-        // animation behind the overview's own transition.
-        for &(space, _, _) in &layout {
-            let engine = &mut reactor.layout_manager.layout_engine;
-            if let Some((workspace, layout)) = engine.workspaces().active_layout_for_space(space)
-                && let crate::layout_engine::LayoutSystemKind::Scrolling(system) =
-                    &mut engine.workspaces_mut().workspaces[workspace].layout_system
-            {
-                system.finish_viewport(layout);
-            }
-        }
-        let layout = Self::calculate_layout(reactor, space_scope, true);
+        let layout = Self::calculate_layout(reactor, space_scope, true, true);
         Self::apply_layout(reactor, layout, false, false, true, force_frames)
     }
 
     pub(super) fn calculate_layout(
         reactor: &mut Reactor,
         space_scope: Option<SpaceId>,
-        collect_groups: bool,
+        publish_groups: bool,
+        finish_scrolling: bool,
     ) -> LayoutResult {
         if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
+        let collect_groups = publish_groups
+            && reactor.config.settings.ui.stack_line.enabled
+            && reactor.communication_manager.stack_line_tx.is_some();
         let all_screen_frames: Vec<CGRect> =
             reactor.space_state.screens.iter().map(|s| s.frame).collect();
         let mut layout_result = LayoutResult::new();
@@ -401,7 +377,7 @@ impl LayoutManager {
             reactor
                 .layout_manager
                 .layout_engine
-                .update_space_display(space, display_uuid_opt.clone());
+                .update_space_display(space, display_uuid_opt);
             let mut groups = Vec::new();
             let mut layout = reactor.layout_manager.layout_engine.calculate_layout_with_groups(
                 &reactor.state.windows,
@@ -412,24 +388,20 @@ impl LayoutManager {
                 |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                 &all_screen_frames,
                 collect_groups.then_some(&mut groups),
+                finish_scrolling,
             );
-            if reactor.layout_manager.layout_engine.active_layout_mode_at(space)
-                == LayoutMode::Scrolling
+            let engine = &reactor.layout_manager.layout_engine;
+            if engine.active_layout_mode_at(space) == LayoutMode::Scrolling
                 && let Some(bounds) = ScrollingDisplayBounds::for_screen(frame, &all_screen_frames)
+                && let Some(workspace) = engine.workspaces().active_workspace(space)
             {
-                let active_workspace_windows: HashSet<WindowId> = reactor
-                    .layout_manager
-                    .layout_engine
-                    .workspaces()
-                    .windows_in_active_workspace(&reactor.state.windows, space)
-                    .into_iter()
-                    .collect();
-                bound_scrolling_tiled_frames_to_screen(
-                    reactor,
-                    &mut layout,
-                    bounds,
-                    &active_workspace_windows,
-                );
+                for (window, frame) in &mut layout {
+                    if reactor.state.windows.workspace_for_window(*window) == Some(workspace)
+                        && !engine.is_window_floating(*window)
+                    {
+                        *frame = bounds.apply(*frame);
+                    }
+                }
             }
             layout_result.push((space, layout, groups));
         }

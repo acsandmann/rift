@@ -306,6 +306,14 @@ fn restores_legacy_slots_and_atomically_installs_workspace_contents() {
         &LEGACY_V2.replacen("(idx:3,version:1)", "(idx:999999,version:1)", 1),
         "invalid workspace layouts",
     );
+    assert_rejected(
+        &LEGACY_V2.replacen(
+            "selected_child:(idx:3,version:1)",
+            "selected_child:(idx:999999,version:1)",
+            1,
+        ),
+        "layout selection references an invalid child",
+    );
     let layout = good.find("layout:Some((idx:").unwrap();
     let version = layout + good[layout..].find("version:1").unwrap();
     let mut dangling = good.clone();
